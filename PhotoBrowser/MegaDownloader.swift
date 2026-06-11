@@ -242,10 +242,16 @@ enum MegaDownloader {
     // MARK: - Download + decrypt
 
     nonisolated private static func downloadFile(_ node: MegaNode, folderID: String, to dest: URL) async throws {
-        let result = try await apiRequest(folderID: folderID, payload: [["a": "g", "g": 1, "n": node.handle]])
+        // `ssl:1` asks MEGA for a TLS download URL; even so it often returns a plain
+        // http:// gfs URL, which iOS App Transport Security blocks. The same storage
+        // host serves the identical (still-encrypted) bytes over TLS, so force https.
+        let result = try await apiRequest(folderID: folderID,
+                                          payload: [["a": "g", "g": 1, "ssl": 1, "n": node.handle]])
         guard let first = result.first as? [String: Any] else { throw MegaError.badResponse }
         if let e = first["e"] as? Int { throw MegaError.api(e) }
-        guard let link = first["g"] as? String, let url = URL(string: link) else { throw MegaError.badResponse }
+        guard var link = first["g"] as? String else { throw MegaError.badResponse }
+        if link.hasPrefix("http://") { link = "https://" + link.dropFirst(7) }
+        guard let url = URL(string: link) else { throw MegaError.badResponse }
 
         let (encrypted, _) = try await URLSession.shared.download(from: url)
         defer { try? FileManager.default.removeItem(at: encrypted) }
