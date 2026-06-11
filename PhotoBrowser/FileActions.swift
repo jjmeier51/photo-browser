@@ -319,19 +319,33 @@ enum FileActions {
     /// Copies the picked Photos items into `folder`. Returns each new drive URL
     /// with its source asset identifier (so the origin can be tracked).
     static func importFromPhotos(_ results: [PHPickerResult], into folder: URL) async -> [(url: URL, assetID: String?)] {
+        // Import several at once: each item downloads from iCloud before it's copied,
+        // so a sequential loop is slow. Bounded concurrency overlaps the downloads.
+        let maxConcurrent = 5
         var imported: [(url: URL, assetID: String?)] = []
-        for result in results {
-            let provider = result.itemProvider
-            let typeID: String
-            if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
-                typeID = UTType.movie.identifier
-            } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
-                typeID = UTType.image.identifier
-            } else {
-                continue
+        var index = 0
+        await withTaskGroup(of: (url: URL, assetID: String?)?.self) { group in
+            func addNext() {
+                guard index < results.count else { return }
+                let result = results[index]; index += 1
+                group.addTask {
+                    let provider = result.itemProvider
+                    let typeID: String
+                    if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
+                        typeID = UTType.movie.identifier
+                    } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                        typeID = UTType.image.identifier
+                    } else {
+                        return nil
+                    }
+                    guard let dest = await copyRepresentation(provider, typeID: typeID, into: folder) else { return nil }
+                    return (url: dest, assetID: result.assetIdentifier)
+                }
             }
-            if let dest = await copyRepresentation(provider, typeID: typeID, into: folder) {
-                imported.append((url: dest, assetID: result.assetIdentifier))
+            for _ in 0..<min(maxConcurrent, results.count) { addNext() }
+            while let item = await group.next() {
+                if let item { imported.append(item) }
+                addNext()
             }
         }
         return imported
@@ -342,13 +356,17 @@ enum FileActions {
             // The temp file is only valid inside this completion, so copy now.
             provider.loadFileRepresentation(forTypeIdentifier: typeID) { tempURL, _ in
                 guard let tempURL else { cont.resume(returning: nil); return }
-                let dest = uniqueDestination(for: tempURL.lastPathComponent, in: folder)
-                do {
-                    try FileManager.default.copyItem(at: tempURL, to: dest)
-                    cont.resume(returning: dest)
-                } catch {
-                    cont.resume(returning: nil)
+                let fm = FileManager.default
+                let name = tempURL.lastPathComponent
+                func attempt(_ dest: URL) -> URL? {
+                    (try? fm.copyItem(at: tempURL, to: dest)) != nil ? dest : nil
                 }
+                if let dest = attempt(uniqueDestination(for: name, in: folder)) {
+                    cont.resume(returning: dest); return
+                }
+                // A concurrent import may have taken the same name first — retry unique.
+                let unique = folder.appendingPathComponent(String(UUID().uuidString.prefix(8)) + "-" + name)
+                cont.resume(returning: attempt(unique))
             }
         }
     }

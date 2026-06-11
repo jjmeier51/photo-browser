@@ -242,14 +242,28 @@ private struct AssetGridView: View {
             var saved = 0
             var cancelled = false
             var importedIDs: [String] = []
-            for asset in list {
-                if Task.isCancelled { cancelled = true; break }
-                if let dest = await PhotosThumbs.importAsset(asset, to: folder) {
-                    library.setOrigin(asset.localIdentifier, for: dest)
-                    importedIDs.append(asset.localIdentifier)
-                    saved += 1
+            // Import several at once — each asset downloads from iCloud before it's
+            // written to the drive, so overlapping them is much faster than a loop.
+            let maxConcurrent = 5
+            await withTaskGroup(of: (id: String, url: URL?).self) { group in
+                var i = 0
+                func addNext() {
+                    guard i < list.count, !Task.isCancelled else { return }
+                    let asset = list[i]; i += 1
+                    let id = asset.localIdentifier
+                    group.addTask { (id: id, url: await PhotosThumbs.importAsset(asset, to: folder)) }
                 }
-                importDone += 1
+                for _ in 0..<min(maxConcurrent, list.count) { addNext() }
+                while let result = await group.next() {
+                    if let dest = result.url {
+                        library.setOrigin(result.id, for: dest)
+                        importedIDs.append(result.id)
+                        saved += 1
+                    }
+                    importDone += 1
+                    if Task.isCancelled { cancelled = true; break }
+                    addNext()
+                }
             }
             library.contentDidChange()
 
@@ -453,13 +467,21 @@ enum PhotosThumbs {
         let preferred: [PHAssetResourceType] = [.photo, .video, .fullSizePhoto, .fullSizeVideo]
         let resource = preferred.compactMap { type in resources.first { $0.type == type } }.first ?? resources.first
         guard let resource else { return nil }
-        let dest = FileActions.uniqueDestination(for: resource.originalFilename, in: folder)
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
-        return await withCheckedContinuation { (cont: CheckedContinuation<URL?, Never>) in
-            PHAssetResourceManager.default().writeData(for: resource, toFile: dest, options: options) { error in
-                cont.resume(returning: error == nil ? dest : nil)
+        func write(to dest: URL) async -> Bool {
+            await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+                PHAssetResourceManager.default().writeData(for: resource, toFile: dest, options: options) { error in
+                    cont.resume(returning: error == nil)
+                }
             }
         }
+        let dest = FileActions.uniqueDestination(for: resource.originalFilename, in: folder)
+        if await write(to: dest) { return dest }
+        // Concurrent imports can pick the same name before either file exists; clear
+        // any partial write and retry once with a guaranteed-unique name.
+        try? FileManager.default.removeItem(at: dest)
+        let unique = folder.appendingPathComponent(String(UUID().uuidString.prefix(8)) + "-" + resource.originalFilename)
+        return await write(to: unique) ? unique : nil
     }
 }
