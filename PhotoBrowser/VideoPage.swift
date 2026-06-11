@@ -9,6 +9,7 @@ import CoreImage
 struct VideoPage: View {
     let url: URL
     var coverSource: CoverFrameSource? = nil
+    var infoShown: Bool = false
     let onDismiss: () -> Void
     let onInfo: () -> Void
     var onZoomChanged: (Bool) -> Void = { _ in }
@@ -20,7 +21,8 @@ struct VideoPage: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            ZoomableVideo(url: url, coverSource: coverSource, onDismiss: onDismiss, onInfo: onInfo,
+            ZoomableVideo(url: url, coverSource: coverSource, infoShown: infoShown,
+                          onDismiss: onDismiss, onInfo: onInfo,
                           onZoomChanged: onZoomChanged, onControlsHidden: onControlsHidden,
                           onPrev: onPrev, onNext: onNext)
                 .ignoresSafeArea()
@@ -41,6 +43,7 @@ struct VideoPage: View {
 private struct ZoomableVideo: UIViewControllerRepresentable {
     let url: URL
     var coverSource: CoverFrameSource? = nil
+    var infoShown: Bool = false
     let onDismiss: () -> Void
     let onInfo: () -> Void
     let onZoomChanged: (Bool) -> Void
@@ -59,6 +62,10 @@ private struct ZoomableVideo: UIViewControllerRepresentable {
         vc.onControlsVisibilityChanged = onControlsHidden
         vc.onPrev = onPrev
         vc.onNext = onNext
+        // Pause playback while the info panel is up: a playing video contends with
+        // the metadata read (a second AVAsset on the same file) and the main-queue
+        // time observer, which together can wedge the UI. Resume on dismiss.
+        vc.setOverlayPaused(infoShown)
         // This page owns the album-cover source while it's visible: grab the
         // current video frame on demand.
         coverSource?.staticImage = nil
@@ -97,6 +104,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
     private var statusObservation: NSKeyValueObservation?
     private var appeared = false
     private var scrubbing = false
+    private var overlayPaused = false
     private var controlsHidden = false
     private var hideWork: DispatchWorkItem?
     private var videoSize = CGSize(width: 16, height: 9)
@@ -453,10 +461,24 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
     }
 
     private func playIfNeeded() {
-        guard appeared, player.currentItem?.status == .readyToPlay else { return }
+        guard appeared, !overlayPaused, player.currentItem?.status == .readyToPlay else { return }
         player.play()
         playButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
         scheduleHide()
+    }
+
+    /// Pauses (and later resumes) playback while an overlay like the info panel is
+    /// shown, so the player doesn't fight the metadata read for media services.
+    func setOverlayPaused(_ paused: Bool) {
+        guard paused != overlayPaused else { return }
+        overlayPaused = paused
+        if paused {
+            player.pause()
+            playButton.setImage(UIImage(systemName: "play.fill"), for: .normal)
+            hideWork?.cancel()
+        } else if appeared {
+            playIfNeeded()
+        }
     }
 
     /// Loop: jump back to the start and keep playing when the video ends.

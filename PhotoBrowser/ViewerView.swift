@@ -43,6 +43,7 @@ struct ViewerView: View {
             if let item = current {
                 PageView(item: item,
                          coverSource: coverSource,
+                         infoShown: showInfo,
                          onDismiss: { dismiss() },
                          onInfo: { showInfo = true },
                          onZoomChanged: { isZoomed = $0 },
@@ -161,6 +162,7 @@ struct ViewerView: View {
 private struct PageView: View {
     let item: Entry
     let coverSource: CoverFrameSource
+    var infoShown: Bool = false
     let onDismiss: () -> Void
     let onInfo: () -> Void
     let onZoomChanged: (Bool) -> Void
@@ -171,7 +173,8 @@ private struct PageView: View {
 
     var body: some View {
         if item.kind == .video {
-            VideoPage(url: item.url, coverSource: coverSource, onDismiss: onDismiss, onInfo: onInfo,
+            VideoPage(url: item.url, coverSource: coverSource, infoShown: infoShown,
+                      onDismiss: onDismiss, onInfo: onInfo,
                       onZoomChanged: onZoomChanged, onControlsHidden: onControlsHidden,
                       onPrev: onPrev, onNext: onNext)
         } else {
