@@ -81,11 +81,11 @@ enum MegaDownloader {
         try? fm.createDirectory(at: destRoot, withIntermediateDirectories: true)
 
         let total = files.count
-        // Download several files at once — this is network-bound and MEGA's CDN is
-        // fine with parallel connections, so concurrency is the main speedup (a
-        // sequential download of a large folder is painfully slow). The API's `g`
-        // requests self-heal from rate-limit (-3) replies via apiRequest's retry.
-        let maxConcurrent = 5
+        // Download several files at once (each large file is itself split into
+        // parallel range chunks by downloadFile). Kept modest so files × chunks
+        // doesn't open too many connections. The `g` requests self-heal from
+        // rate-limit (-3) replies via apiRequest's retry.
+        let maxConcurrent = 4
         var imported = 0, failed = 0, completed = 0
         var firstFailure: String?
         await withTaskGroup(of: (ok: Bool, error: String?).self) { group in
@@ -259,6 +259,10 @@ enum MegaDownloader {
 
     // MARK: - Download + decrypt
 
+    private static let chunkThreshold: Int64 = 8 << 20   // chunk files larger than 8 MB
+    private static let chunkSize: Int64 = 4 << 20        // 4 MB per chunk (16-aligned)
+    private static let chunkConcurrency = 6              // parallel range requests per large file
+
     nonisolated private static func downloadFile(_ node: MegaNode, folderID: String, to dest: URL) async throws {
         // `ssl:1` asks MEGA for a TLS download URL; even so it often returns a plain
         // http:// gfs URL, which iOS App Transport Security blocks. The same storage
@@ -270,14 +274,85 @@ enum MegaDownloader {
         guard var link = first["g"] as? String else { throw MegaError.badResponse }
         if link.hasPrefix("http://") { link = "https://" + link.dropFirst(7) }
         guard let url = URL(string: link) else { throw MegaError.badResponse }
+        let size = (first["s"] as? Int).map(Int64.init) ?? node.size
 
-        let (encrypted, _) = try await URLSession.shared.download(from: url)
-        defer { try? FileManager.default.removeItem(at: encrypted) }
-
-        // CTR IV = 8-byte nonce followed by an 8-byte zero block counter.
+        // CTR IV base = 8-byte nonce followed by an 8-byte zero block counter.
         var iv = node.nonce
         while iv.count < 16 { iv.append(0) }
-        try MegaCrypto.decryptCTR(input: encrypted, output: dest, key: node.aesKey, iv: Array(iv.prefix(16)))
+        let baseIV = Array(iv.prefix(16))
+
+        // Big files: download in parallel byte-range chunks (CTR is seekable, so each
+        // chunk decrypts on its own) — this is what makes a single large video fast,
+        // like the MEGA app. Small files: one request, then stream-decrypt to disk.
+        if size > chunkThreshold {
+            try await downloadChunked(url: url, size: size, key: node.aesKey, baseIV: baseIV, to: dest)
+        } else {
+            let (encrypted, _) = try await URLSession.shared.download(from: url)
+            defer { try? FileManager.default.removeItem(at: encrypted) }
+            try MegaCrypto.decryptCTR(input: encrypted, output: dest, key: node.aesKey, iv: baseIV)
+        }
+    }
+
+    /// Downloads `url` in parallel 4 MB byte-range chunks, decrypting each with the
+    /// CTR counter advanced to its block offset, and writes them at the right place
+    /// in the output file. MEGA storage honors HTTP range requests, so this keeps
+    /// several connections busy at once instead of trickling through one.
+    nonisolated private static func downloadChunked(url: URL, size: Int64, key: [UInt8],
+                                                    baseIV: [UInt8], to dest: URL) async throws {
+        let writer = try ChunkFileWriter(url: dest, size: size)
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                var offset: Int64 = 0
+                var inFlight = 0
+                func addNext() {
+                    guard offset < size else { return }
+                    let start = offset
+                    let length = Int(min(chunkSize, size - start))
+                    offset += Int64(length)
+                    inFlight += 1
+                    group.addTask {
+                        let encrypted = try await fetchRange(url: url, start: start, length: length)
+                        let iv = counterIV(base: baseIV, blockOffset: start / 16)
+                        let decrypted = try MegaCrypto.decryptCTRData(encrypted, key: key, iv: iv)
+                        try await writer.write(decrypted, at: start)
+                    }
+                }
+                for _ in 0..<chunkConcurrency { addNext() }
+                while inFlight > 0 {
+                    try await group.next()
+                    inFlight -= 1
+                    addNext()
+                }
+            }
+        } catch {
+            await writer.close()
+            try? FileManager.default.removeItem(at: dest)   // don't leave a half-written file
+            throw error
+        }
+        await writer.close()
+    }
+
+    /// One byte range (`start`..<start+length) of `url` as raw, still-encrypted data.
+    nonisolated private static func fetchRange(url: URL, start: Int64, length: Int) async throws -> Data {
+        var req = URLRequest(url: url)
+        req.setValue("bytes=\(start)-\(start + Int64(length) - 1)", forHTTPHeaderField: "Range")
+        let (data, response) = try await URLSession.shared.data(for: req)
+        // If the server ignored Range (200 with the whole file instead of 206) the
+        // bytes won't line up — fail rather than write a corrupt file.
+        if let http = response as? HTTPURLResponse, http.statusCode == 200, data.count != length {
+            throw MegaError.badResponse
+        }
+        guard data.count == length else { throw MegaError.badResponse }
+        return data
+    }
+
+    /// `base` (nonce ‖ 0) with the trailing 8-byte big-endian block counter set to
+    /// `blockOffset` — the CTR IV for a chunk that starts at that 16-byte block.
+    nonisolated private static func counterIV(base: [UInt8], blockOffset: Int64) -> [UInt8] {
+        var iv = base
+        var counter = UInt64(blockOffset)
+        for j in 0..<8 { iv[15 - j] = UInt8(counter & 0xFF); counter >>= 8 }
+        return iv
     }
 
     // MARK: - Helpers
@@ -324,4 +399,29 @@ enum MegaDownloader {
         // Surface the real network / ATS / filesystem reason so we can diagnose it.
         return "\(error.localizedDescription)"
     }
+}
+
+/// Serializes out-of-order chunk writes into the output file (each chunk lands at
+/// its byte offset). An actor provides the synchronization; the file is truncated
+/// to its final size up front so chunks can be written in any order.
+private actor ChunkFileWriter {
+    private let handle: FileHandle
+
+    init(url: URL, size: Int64) throws {
+        let fm = FileManager.default
+        try? fm.removeItem(at: url)
+        guard fm.createFile(atPath: url.path, contents: nil),
+              let h = try? FileHandle(forWritingTo: url) else { throw MegaError.io }
+        try? h.truncate(atOffset: UInt64(max(0, size)))
+        handle = h
+    }
+
+    func write(_ data: Data, at offset: Int64) throws {
+        do {
+            try handle.seek(toOffset: UInt64(offset))
+            try handle.write(contentsOf: data)
+        } catch { throw MegaError.io }
+    }
+
+    func close() { try? handle.close() }
 }

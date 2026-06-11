@@ -115,4 +115,33 @@ enum MegaCrypto {
             try outHandle.write(contentsOf: Data(out.prefix(moved)))
         }
     }
+
+    /// One-shot AES-128-CTR decrypt of an in-memory buffer. Used for parallel range
+    /// chunks: `iv` already encodes the chunk's starting block counter, so each
+    /// chunk decrypts independently (CTR is seekable). The chunk's byte offset must
+    /// be 16-aligned for the counter in `iv` to line up.
+    nonisolated static func decryptCTRData(_ data: Data, key: [UInt8], iv: [UInt8]) throws -> Data {
+        guard key.count == 16, iv.count == 16 else { throw MegaError.crypto }
+        var cryptorRef: CCCryptorRef?
+        let create = key.withUnsafeBytes { keyPtr in
+            iv.withUnsafeBytes { ivPtr in
+                CCCryptorCreateWithMode(CCOperation(kCCEncrypt), CCMode(kCCModeCTR),
+                                        CCAlgorithm(kCCAlgorithmAES), CCPadding(ccNoPadding),
+                                        ivPtr.baseAddress, keyPtr.baseAddress, key.count,
+                                        nil, 0, 0, CCModeOptions(kCCModeOptionCTR_BE),
+                                        &cryptorRef)
+            }
+        }
+        guard create == Int32(kCCSuccess), let cryptor = cryptorRef else { throw MegaError.crypto }
+        defer { CCCryptorRelease(cryptor) }
+        var out = [UInt8](repeating: 0, count: data.count)
+        var moved = 0
+        let status = data.withUnsafeBytes { inPtr in
+            out.withUnsafeMutableBytes { outPtr in
+                CCCryptorUpdate(cryptor, inPtr.baseAddress, data.count, outPtr.baseAddress, outPtr.count, &moved)
+            }
+        }
+        guard status == Int32(kCCSuccess) else { throw MegaError.crypto }
+        return Data(out.prefix(moved))
+    }
 }
