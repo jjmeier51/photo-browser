@@ -31,7 +31,7 @@ enum MegaCrypto {
                             CCOptions(kCCOptionECBMode),
                             keyPtr.baseAddress, key.count, nil,
                             dataPtr.baseAddress, data.count,
-                            outPtr.baseAddress, out.count, &moved)
+                            outPtr.baseAddress, outPtr.count, &moved)
                 }
             }
         }
@@ -53,7 +53,7 @@ enum MegaCrypto {
                                 CCOptions(0),
                                 keyPtr.baseAddress, key.count, ivPtr.baseAddress,
                                 dataPtr.baseAddress, data.count,
-                                outPtr.baseAddress, out.count, &moved)
+                                outPtr.baseAddress, outPtr.count, &moved)
                     }
                 }
             }
@@ -106,7 +106,10 @@ enum MegaCrypto {
             var out = [UInt8](repeating: 0, count: chunk.count)   // CTR output == input length
             var moved = 0
             let status = chunk.withUnsafeBytes { inPtr in
-                CCCryptorUpdate(cryptor, inPtr.baseAddress, chunk.count, &out, out.count, &moved)
+                out.withUnsafeMutableBytes { outPtr in
+                    CCCryptorUpdate(cryptor, inPtr.baseAddress, chunk.count,
+                                    outPtr.baseAddress, outPtr.count, &moved)
+                }
             }
             guard status == Int32(kCCSuccess) else { throw MegaError.crypto }
             try outHandle.write(contentsOf: Data(out.prefix(moved)))
