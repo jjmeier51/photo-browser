@@ -2,7 +2,6 @@ import SwiftUI
 import UIKit
 import AVFoundation
 import ImageIO
-import CoreImage
 import UniformTypeIdentifiers
 
 /// Crop aspect-ratio options for the editor.

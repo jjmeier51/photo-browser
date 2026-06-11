@@ -76,6 +76,7 @@ struct FolderView: View {
     @State private var showPhotosPicker = false
     @State private var showPhotosLibrary = false
     @State private var photosLibraryMoves = false
+    @State private var showMegaImport = false
     @State private var importing = false
     @State private var editEntry: Entry?
     @State private var editProcessing = false
@@ -533,6 +534,9 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showPhotosLibrary) {
                 PhotosLibraryView(targetFolder: url, deleteOriginals: photosLibraryMoves)
             }
+            .fullScreenCover(isPresented: $showMegaImport) {
+                MegaImportView(targetFolder: url) { Task { await reload() } }
+            }
             .overlay(alignment: .bottom) { if selecting { selectionBar } }
             .overlay(alignment: .bottomLeading) {
                 if isRoot && !selecting {
@@ -827,6 +831,9 @@ struct FolderView: View {
                     }
                     Button { photosLibraryMoves = true; showPhotosLibrary = true } label: {
                         Label("Add from iOS Album…", systemImage: "photo.badge.arrow.down")
+                    }
+                    Button { showMegaImport = true } label: {
+                        Label("Add from MEGA…", systemImage: "arrow.down.circle")
                     }
                     Button { pickFolder(.relink) } label: {
                         Label("Re-link Favorites from a Drive…", systemImage: "link")
