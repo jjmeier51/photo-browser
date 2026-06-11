@@ -224,10 +224,12 @@ enum MetadataLoader {
 
     static func load(for entry: Entry) async -> MediaInfo {
         var info: MediaInfo
+        // Both image and video reads are time-boxed so a slow/corrupt file on an
+        // external drive can never hang the info panel — fall back to just the
+        // file's own attributes. (The image path used to be unbounded, which could
+        // still freeze the swipe-up panel on a huge/damaged photo.)
         switch entry.kind {
-        case .image: info = await loadImage(entry.url)
-        // Time-boxed so a slow/corrupt video on an external drive can never hang
-        // the info panel — fall back to just the file's own attributes.
+        case .image: info = await withTimeout(8) { await loadImage(entry.url) } ?? MediaInfo()
         case .video: info = await withTimeout(8) { await loadVideo(entry.url) } ?? MediaInfo()
         default:     info = MediaInfo()
         }
@@ -241,10 +243,22 @@ enum MetadataLoader {
         return info
     }
 
+    // MARK: - Time-boxed convenience wrappers for the info panel
+
+    /// `existingCaption`, bounded so a slow/corrupt file can't stall the panel.
+    static func timeBoxedCaption(for entry: Entry) async -> String? {
+        await withTimeout(6) { await existingCaption(for: entry) } ?? nil
+    }
+
+    /// `whereFrom` (a blocking `getxattr`), run off the main actor and bounded.
+    static func timeBoxedSource(url: URL) async -> String? {
+        await withTimeout(4) { await Task.detached { whereFrom(url: url) }.value } ?? nil
+    }
+
     /// Runs `op` off the main actor, returning nil if it doesn't finish within
     /// `seconds`. Keeps the swipe-up panel from ever stalling on slow I/O.
-    private static func withTimeout<T: Sendable>(_ seconds: Double,
-                                                 _ op: @escaping @Sendable () async -> T) async -> T? {
+    static func withTimeout<T: Sendable>(_ seconds: Double,
+                                         _ op: @escaping @Sendable () async -> T) async -> T? {
         await withTaskGroup(of: T?.self) { group in
             group.addTask { await op() }
             group.addTask {

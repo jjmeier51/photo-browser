@@ -172,6 +172,20 @@ enum FileActions {
         return moved
     }
 
+    /// Copies items into `folder`, never colliding (appends " 1", " 2", … on clash,
+    /// incl. copy-into-same-folder). Returns each successful (old, new) URL pair.
+    /// Copies are fresh files and intentionally carry no labels — the originals keep
+    /// theirs — so callers must NOT migrate metadata onto the copies.
+    @discardableResult
+    static func copy(_ urls: [URL], to folder: URL) -> [(from: URL, to: URL)] {
+        var copied: [(from: URL, to: URL)] = []
+        for url in urls {
+            let dest = uniqueDestination(for: url.lastPathComponent, in: folder)
+            if (try? FileManager.default.copyItem(at: url, to: dest)) != nil { copied.append((url, dest)) }
+        }
+        return copied
+    }
+
     struct SaveResult { var saved: Int; var failed: Int; var note: String? }
 
     struct TransferResult { var destFolder: URL?; var moved: Int; var failed: Int }

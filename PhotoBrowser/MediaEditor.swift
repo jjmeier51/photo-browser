@@ -3,6 +3,7 @@ import UIKit
 import AVFoundation
 import ImageIO
 import CoreImage
+import UniformTypeIdentifiers
 
 /// Crop aspect-ratio options for the editor.
 enum CropAspect: String, CaseIterable, Identifiable {
@@ -23,8 +24,11 @@ enum CropAspect: String, CaseIterable, Identifiable {
 }
 
 /// Crop + rotate editor for a photo or video. Pan/zoom the image behind a fixed
-/// crop window, choose an aspect ratio, and rotate in 90° steps; "Save" writes a
-/// new edited copy beside the original (the original is never modified).
+/// crop window, choose an aspect ratio, and rotate in 90° steps; "Save" writes the
+/// result back over the original file in place (no duplicate is created), carrying
+/// the original's EXIF/creation metadata along so capture date, location and Age
+/// survive. The save runs under a background-task window so it keeps going if the
+/// app is briefly backgrounded (iOS still can't finish it once the app is killed).
 struct MediaEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(Library.self) private var library
@@ -117,18 +121,21 @@ struct MediaEditorView: View {
         let url = entry.url
         let isImage = entry.kind == .image
         working = true; progress = 0
+        let bg = BackgroundTaskHolder()
+        bg.begin(name: "Save Edit")   // best-effort: keep saving if the app is backgrounded
         Task {
-            let dest: URL?
+            let ok: Bool
             if isImage {
-                dest = await Task.detached { MediaEditing.applyPhoto(url: url, quarters: q, crop: crop) }.value
+                ok = await Task.detached { MediaEditing.applyPhotoInPlace(url: url, quarters: q, crop: crop) }.value
             } else {
-                dest = await MediaEditing.exportVideo(url: url, quarters: q, crop: crop) { p in
+                ok = await MediaEditing.exportVideoInPlace(url: url, quarters: q, crop: crop) { p in
                     Task { @MainActor in progress = p }
                 }
             }
             working = false
-            if dest != nil {
-                library.contentDidChange()
+            bg.end()
+            if ok {
+                library.contentDidChange()   // reload folder → new mtime/size → fresh thumbnail
                 dismiss()
             } else {
                 errorNote = "The edit could not be saved."
@@ -320,35 +327,52 @@ enum MediaEditing {
         return ctx.makeImage() ?? image
     }
 
-    // MARK: - Photo
+    // MARK: - Photo (edit in place, preserving metadata)
 
-    static func applyPhoto(url: URL, quarters: Int, crop: CGRect) -> URL? {
-        guard let full = loadFullImage(url) else { return nil }
+    /// Rotates/crops the photo at `url` and writes the result back over the original
+    /// file (same name and container), preserving EXIF/GPS so capture date, location
+    /// and Age survive the edit. Returns true on success.
+    static func applyPhotoInPlace(url: URL, quarters: Int, crop: CGRect) -> Bool {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let full = loadFullCGImage(src) else { return false }
         let rotated = rotate(full, quarters: quarters)
         let w = CGFloat(rotated.width), h = CGFloat(rotated.height)
         var px = CGRect(x: crop.minX * w, y: crop.minY * h, width: crop.width * w, height: crop.height * h).integral
         px = px.intersection(CGRect(x: 0, y: 0, width: rotated.width, height: rotated.height))
-        guard !px.isEmpty, let cropped = rotated.cropping(to: px) else { return nil }
+        guard !px.isEmpty, let cropped = rotated.cropping(to: px) else { return false }
 
+        // Carry the original metadata, but reset orientation (the rotation is now
+        // baked into the pixels) and update the stored dimensions.
+        var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        props[kCGImagePropertyOrientation] = 1
+        props[kCGImagePropertyPixelWidth] = cropped.width
+        props[kCGImagePropertyPixelHeight] = cropped.height
+        if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+            tiff[kCGImagePropertyTIFFOrientation] = 1
+            props[kCGImagePropertyTIFFDictionary] = tiff
+        }
+
+        // Re-encode into the original's container so the file extension stays valid;
+        // fall back to JPEG if that type can't be written (e.g. HEIC on a simulator).
         let folder = url.deletingLastPathComponent()
-        let base = url.deletingPathExtension().lastPathComponent + " (edited)"
-        let ci = CIImage(cgImage: cropped)
-        let ctx = CIContext()
-        let cs = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
-        if let data = try? ctx.heifRepresentation(of: ci, format: .RGBA8, colorSpace: cs, options: [:]) {
-            let dest = FileActions.uniqueDestination(for: base + ".heic", in: folder)
-            if (try? data.write(to: dest)) != nil { return dest }
+        let tmp = folder.appendingPathComponent(".\(UUID().uuidString).edit")
+        func encode(_ type: CFString) -> Bool {
+            guard let dst = CGImageDestinationCreateWithURL(tmp as CFURL, type, 1, nil) else { return false }
+            CGImageDestinationAddImage(dst, cropped, props as CFDictionary)
+            return CGImageDestinationFinalize(dst)
         }
-        if let data = UIImage(cgImage: cropped).jpegData(compressionQuality: 0.95) {
-            let dest = FileActions.uniqueDestination(for: base + ".jpg", in: folder)
-            if (try? data.write(to: dest)) != nil { return dest }
+        let original = CGImageSourceGetType(src) ?? (UTType.jpeg.identifier as CFString)
+        if !encode(original) {
+            try? FileManager.default.removeItem(at: tmp)
+            guard encode(UTType.jpeg.identifier as CFString) else {
+                try? FileManager.default.removeItem(at: tmp); return false
+            }
         }
-        return nil
+        return replaceInPlace(original: url, temp: tmp)
     }
 
-    /// Full-resolution, upright CGImage for a photo URL.
-    private static func loadFullImage(_ url: URL) -> CGImage? {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+    /// Full-resolution, upright CGImage from an open image source.
+    private static func loadFullCGImage(_ src: CGImageSource) -> CGImage? {
         let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
         let w = props?[kCGImagePropertyPixelWidth] as? Int ?? 4096
         let h = props?[kCGImagePropertyPixelHeight] as? Int ?? 4096
@@ -361,17 +385,35 @@ enum MediaEditing {
         return CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary)
     }
 
-    // MARK: - Video
+    /// Atomically swaps `temp` in for `original`, keeping the original's name and
+    /// location. Falls back to remove-then-move if the volume rejects replace.
+    static func replaceInPlace(original: URL, temp: URL) -> Bool {
+        let fm = FileManager.default
+        if (try? fm.replaceItemAt(original, withItemAt: temp)) != nil { return true }
+        do {
+            if fm.fileExists(atPath: original.path) { try fm.removeItem(at: original) }
+            try fm.moveItem(at: temp, to: original)
+            return true
+        } catch {
+            try? fm.removeItem(at: temp)
+            return false
+        }
+    }
 
-    static func exportVideo(url: URL, quarters: Int, crop: CGRect,
-                            progress: @escaping @Sendable (Double) -> Void) async -> URL? {
+    // MARK: - Video (edit in place, preserving metadata)
+
+    /// Rotates/crops the video at `url` and writes the result back over the original
+    /// (same name), carrying over creation date/location metadata. Returns true on
+    /// success. Re-encodes via `AVAssetExportSession`, so it's inherently lossy.
+    static func exportVideoInPlace(url: URL, quarters: Int, crop: CGRect,
+                                   progress: @escaping @Sendable (Double) -> Void) async -> Bool {
         let asset = AVURLAsset(url: url)
-        guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return nil }
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return false }
         let natural = (try? await track.load(.naturalSize)) ?? .zero
         let pt = (try? await track.load(.preferredTransform)) ?? .identity
         let duration = (try? await asset.load(.duration)) ?? .zero
         let fps = (try? await track.load(.nominalFrameRate)).map { $0 > 0 ? $0 : 30 } ?? 30
-        guard natural.width > 0, natural.height > 0, duration.seconds > 0 else { return nil }
+        guard natural.width > 0, natural.height > 0, duration.seconds > 0 else { return false }
 
         // Oriented (display) size, then the rotated display size.
         let dispRect = CGRect(origin: .zero, size: natural).applying(pt)
@@ -405,13 +447,15 @@ enum MediaEditing {
         instruction.layerInstructions = [layer]
         videoComposition.instructions = [instruction]
 
+        // Export to a sibling temp file (same volume → atomic replace) in the
+        // QuickTime container, then swap it in for the original (which keeps its name).
         let folder = url.deletingLastPathComponent()
-        let base = url.deletingPathExtension().lastPathComponent + " (edited)"
-        let dest = FileActions.uniqueDestination(for: base + ".mov", in: folder)
-        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else { return nil }
+        let tmp = folder.appendingPathComponent(".\(UUID().uuidString).mov")
+        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else { return false }
         export.videoComposition = videoComposition
-        export.outputURL = dest
+        export.outputURL = tmp
         export.outputFileType = .mov
+        if let md = try? await asset.load(.metadata) { export.metadata = md }   // keep date/location
 
         let poll = Task {
             while !Task.isCancelled {
@@ -423,8 +467,9 @@ enum MediaEditing {
             export.exportAsynchronously { cont.resume() }
         }
         poll.cancel()
-        if export.status == .completed { progress(1); return dest }
-        return nil
+        guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return false }
+        progress(1)
+        return replaceInPlace(original: url, temp: tmp)
     }
 
     /// Rotates an already display-oriented frame clockwise by `quarters` × 90°,
