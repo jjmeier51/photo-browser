@@ -12,10 +12,13 @@ you view/zoom/scrub media, edit metadata, label items (Favorites / "To AI"),
 import from and export to the Photos library, and move whole folders between
 drives — all while keeping per-item labels and captions attached.
 
-There is no backend, no network service, and no third-party dependencies — it is
-pure Apple frameworks. A core design value is **offline, on-device, privacy-
-preserving** browsing: nothing is ever uploaded, and the app reads only the one
-folder the user explicitly grants access to.
+There are no third-party dependencies — it is pure Apple frameworks. A core
+design value is **offline, on-device, privacy-preserving** browsing: nothing is
+ever uploaded, and the app reads only the one folder the user explicitly grants
+access to. The **one** network exception is the opt-in "Add from MEGA" feature,
+which *downloads* (never uploads) the photos/videos from a user-pasted public
+MEGA folder link into a drive folder; outside that explicit action the app makes
+no network calls.
 
 > History note: the project grew over ~50 commits from a simple browser into a
 > Photos-like app. An earlier repo layout kept the app under an `ios-app/`
@@ -38,9 +41,12 @@ folder the user explicitly grants access to.
   `ZoomableImageView`, `VideoPage`)
 - **Info panel** (swipe-up) — date, device, dimensions, size, GPS →
   reverse-geocoded place, "Saved from" (xattrs), Age, inline caption edit.
-- **Editing** — crop/rotate, metadata editor (capture date + location, photos &
-  videos), album covers (from a photo or a video frame, with cropper), captions
-  (app overrides + pull-in of embedded IPTC/EXIF).
+- **Editing** — crop/rotate saved **in place** over the original (no duplicate),
+  preserving EXIF/creation metadata, under a best-effort background-task window;
+  bulk **rotate** (180°/left/right, mainly to fix upside-down videos) on a
+  multi-selection; metadata editor (capture date + location, photos & videos),
+  album covers (from a photo or a video frame, with cropper), captions (app
+  overrides + pull-in of embedded IPTC/EXIF). (`MediaEditor`)
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,
   "Add from iOS Album" (import then delete the iOS originals), save drive media
   to Photos, capture/export HDR-preserving video frames. (`PhotosLibraryView`,
@@ -49,6 +55,13 @@ folder the user explicitly grants access to.
   copies (4 concurrent), deletes originals, migrates Favorites/covers/captions
   to the new paths under a background-task window; "Re-link Favorites from a
   Drive…" re-attaches labels. (`DriveTransferView`, `FileActions`)
+- **Copy** — "Copy to Folder…" (single item via long-press, or bulk via the
+  selection bar's More menu) copies into a picked folder; copies are fresh files
+  and intentionally carry *no* labels (the originals keep theirs). (`FileActions.copy`)
+- **Add from MEGA** — "Add from MEGA…" downloads the media inside a public
+  `mega.nz/folder/…` link into a subfolder of the current folder, preserving
+  structure. Pure-Swift implementation of MEGA's encrypted client protocol (no
+  SDK). (`MegaImportView`, `MegaDownloader`, `MegaCrypto`)
 
 ## Build / run
 
@@ -72,8 +85,14 @@ folder the user explicitly grants access to.
   Info.plist file. Add new usage descriptions there. Both
   `NSPhotoLibraryUsageDescription` and `NSPhotoLibraryAddUsageDescription` are
   required — **PhotoKit APIs hard-crash without them**, so never remove these.
-- A bridging header exists (`PhotoBrowser-Bridging-Header.h`) but is currently
-  empty.
+- A bridging header (`PhotoBrowser-Bridging-Header.h`) imports
+  `<CommonCrypto/CommonCrypto.h>` — MEGA downloads need AES in ECB/CBC/CTR modes,
+  which CryptoKit doesn't expose. Add other C interop imports here if needed.
+- **The app group is a `PBXFileSystemSynchronizedRootGroup`** (Xcode 16,
+  `objectVersion = 77`): the whole `PhotoBrowser/` folder is auto-synchronized
+  into the target. **New `.swift` files are picked up automatically — you do NOT
+  edit `project.pbxproj` to add files** (there is no XcodeGen and no per-file
+  build entries to maintain).
 
 ## Architecture
 
@@ -156,10 +175,21 @@ Change-notification counters that views observe:
   main actor and **time-boxed** (`withTimeout`) so a slow/corrupt file on an
   external drive can't hang the UI.
 - `FileActions.swift` — all mutating filesystem operations and Photos-library
-  I/O: delete/duplicate/rename/move/createFolder, write metadata back into
-  files, import from / save to Photos, cross-drive transfer with progress, plus
-  video-frame export (SDR/HDR) and the `FilesExporter` / `QuickLookPreview`
+  I/O: delete/duplicate/rename/**move/copy**/createFolder, write metadata back
+  into files, import from / save to Photos, cross-drive transfer with progress,
+  plus video-frame export (SDR/HDR), the `BackgroundTaskHolder` (best-effort
+  background window), and the `FilesExporter` / `QuickLookPreview`
   `UIViewControllerRepresentable` wrappers.
+- `MediaEditor.swift` — the crop/rotate UI plus `MediaEditing`, which does the
+  pixel work and writes the result **in place** over the original
+  (`applyPhotoInPlace` / `exportVideoInPlace` → temp file → `replaceInPlace`),
+  carrying metadata across. Reused by the folder view's bulk-rotate.
+- `MegaDownloader.swift` / `MegaCrypto.swift` — pure-Swift MEGA folder-link
+  downloader. `MegaDownloader` speaks MEGA's client API (node tree, per-file
+  download URLs) and streams files to disk; `MegaCrypto` wraps CommonCrypto for
+  the AES ECB/CBC/CTR steps. Both are entirely `nonisolated` (network + crypto +
+  file I/O must stay off the main actor). The protocol is unofficial — treat it
+  as best-effort and keep failures non-fatal.
 - `CoverFrameSource.swift`, `MetadataEditorView.swift` — small supporting types.
 
 ## Conventions to follow
@@ -217,7 +247,20 @@ These were discovered the painful way; the current code already respects them.
    check `canStepForward`/`canStepBackward`.
 9. Metadata reads are **time-boxed** (`MetadataLoader.withTimeout`) so a slow or
    corrupt file on an external drive can never hang the info panel — keep new
-   per-file metadata work behind the same pattern.
+   per-file metadata work behind the same pattern. (The info panel loads its
+   three sources concurrently and each bounded — image, video, caption and
+   "saved from" are all behind a timeout.)
+10. **Edits replace the original in place** (write to a sibling temp file, then
+    `replaceItemAt`). Preserve metadata when re-encoding (carry over EXIF/GPS for
+    photos via `CGImageDestination` properties; set `export.metadata` for video)
+    or you'll silently strip capture date / location and break Age/year/place.
+    Don't manually evict thumbnails afterward — the cache key is
+    `SHA256(path|mtime|size)`, so an in-place edit naturally misses the old entry
+    and regenerates once the folder reloads (`changeToken`).
+11. **MEGA crypto needs raw AES modes (ECB/CBC/CTR)** that CryptoKit doesn't
+    provide — that's why CommonCrypto is bridged in. Keep all MEGA work
+    `nonisolated`/off-main (it's network + crypto + large file writes), and treat
+    the reverse-engineered protocol as best-effort: surface failures as notes.
 
 ## Git workflow
 
