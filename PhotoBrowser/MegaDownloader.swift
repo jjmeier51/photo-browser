@@ -82,6 +82,7 @@ enum MegaDownloader {
 
         let total = files.count
         var imported = 0, failed = 0
+        var firstFailure: String?
         for (i, item) in files.enumerated() {
             progress(MegaProgress(fraction: Double(i) / Double(total), done: imported,
                                   total: total, currentName: item.node.name))
@@ -93,11 +94,19 @@ enum MegaDownloader {
                 imported += 1
             } catch {
                 failed += 1
+                if firstFailure == nil { firstFailure = friendlyError(error) }
             }
         }
         progress(MegaProgress(fraction: 1, done: imported, total: total, currentName: ""))
 
-        let note = imported == 0 ? "Couldn’t download any files from that MEGA folder." : nil
+        let note: String?
+        if imported == 0 {
+            note = "Couldn’t download any files. " + (firstFailure ?? "Unknown error.")
+        } else if failed > 0 {
+            note = "\(failed) file(s) failed: \(firstFailure ?? "unknown error")."
+        } else {
+            note = nil
+        }
         return MegaImportResult(imported: imported, failed: failed,
                                 folderName: destRoot.lastPathComponent, note: note)
     }
@@ -277,14 +286,18 @@ enum MegaDownloader {
         if let mega = error as? MegaError {
             switch mega {
             case .badLink:     return "That MEGA link couldn’t be read."
-            case .badResponse: return "MEGA returned an unexpected response. The link may be invalid or expired."
-            case .crypto:      return "Couldn’t decrypt the MEGA folder — check the link’s key."
-            case .io:          return "Couldn’t write the downloaded files to the drive."
-            case .api(let n) where n == -9:  return "That MEGA folder no longer exists."
-            case .api(let n) where n == -16: return "That MEGA folder is blocked or unavailable."
+            case .badResponse: return "MEGA returned an unexpected response (the download URL was missing)."
+            case .crypto:      return "Couldn’t decrypt the file content."
+            case .io:          return "Couldn’t write the file to the drive."
+            case .api(let n) where n == -3:  return "MEGA is rate-limiting requests (code -3). Try again shortly."
+            case .api(let n) where n == -9:  return "A file no longer exists on MEGA (code -9)."
+            case .api(let n) where n == -11: return "MEGA denied access to the file (code -11)."
+            case .api(let n) where n == -16: return "The MEGA file is blocked or unavailable (code -16)."
+            case .api(let n) where n == -18: return "MEGA asked to retry (code -18)."
             case .api(let n):  return "MEGA reported an error (code \(n))."
             }
         }
-        return "Couldn’t reach MEGA. Check your connection and the link."
+        // Surface the real network / ATS / filesystem reason so we can diagnose it.
+        return "\(error.localizedDescription)"
     }
 }
