@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// "Add from MEGA": paste a public MEGA folder link, then download its photos and
 /// videos into the current drive folder (in a subfolder named after the MEGA
@@ -36,9 +37,7 @@ struct MegaImportView: View {
                     Section {
                         VStack(alignment: .leading, spacing: 8) {
                             ProgressView(value: progress.fraction)
-                            Text(progress.total > 0
-                                 ? "\(progress.done) of \(progress.total) — \(progress.currentName)"
-                                 : progress.currentName)
+                            Text(progressLine)
                                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                             Text("Keep the app open. It keeps going briefly if you switch away, but can’t finish once the app is closed.")
                                 .font(.caption2).foregroundStyle(.secondary)
@@ -60,6 +59,15 @@ struct MegaImportView: View {
             .navigationTitle("Add from MEGA")
             .navigationBarTitleDisplayMode(.inline)
             .interactiveDismissDisabled(running)
+            // Convenience: pre-fill from the clipboard so a freshly-copied MEGA link
+            // is ready to go without pasting by hand.
+            .onAppear {
+                if link.isEmpty,
+                   let pasted = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !pasted.isEmpty {
+                    link = pasted
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(result != nil ? "Done" : "Cancel") { dismiss() }.disabled(running)
@@ -70,6 +78,12 @@ struct MegaImportView: View {
                 }
             }
         }
+    }
+
+    private var progressLine: String {
+        guard progress.total > 0 else { return progress.currentName }
+        let base = "Downloading \(progress.done) of \(progress.total)"
+        return progress.currentName.isEmpty ? base + "…" : base + " — \(progress.currentName)"
     }
 
     private func summary(_ r: MegaImportResult) -> String {

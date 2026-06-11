@@ -81,20 +81,38 @@ enum MegaDownloader {
         try? fm.createDirectory(at: destRoot, withIntermediateDirectories: true)
 
         let total = files.count
-        var imported = 0, failed = 0
+        // Download several files at once — this is network-bound and MEGA's CDN is
+        // fine with parallel connections, so concurrency is the main speedup (a
+        // sequential download of a large folder is painfully slow). The API's `g`
+        // requests self-heal from rate-limit (-3) replies via apiRequest's retry.
+        let maxConcurrent = 5
+        var imported = 0, failed = 0, completed = 0
         var firstFailure: String?
-        for (i, item) in files.enumerated() {
-            progress(MegaProgress(fraction: Double(i) / Double(total), done: imported,
-                                  total: total, currentName: item.node.name))
-            let targetDir = destRoot.appendingPathComponent(item.relativeDir, isDirectory: true)
-            do {
-                try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
-                let dest = uniqueURL(for: sanitize(item.node.name), in: targetDir)
-                try await downloadFile(item.node, folderID: folderID, to: dest)
-                imported += 1
-            } catch {
-                failed += 1
-                if firstFailure == nil { firstFailure = friendlyError(error) }
+        await withTaskGroup(of: (ok: Bool, error: String?).self) { group in
+            var index = 0
+            func addNext() {
+                guard index < files.count else { return }
+                let item = files[index]; index += 1
+                group.addTask {
+                    do {
+                        let targetDir = destRoot.appendingPathComponent(item.relativeDir, isDirectory: true)
+                        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+                        let dest = uniqueURL(for: sanitize(item.node.name), in: targetDir)
+                        try await downloadFile(item.node, folderID: folderID, to: dest)
+                        return (true, nil)
+                    } catch {
+                        return (false, friendlyError(error))
+                    }
+                }
+            }
+            for _ in 0..<min(maxConcurrent, files.count) { addNext() }
+            while let result = await group.next() {
+                completed += 1
+                if result.ok { imported += 1 }
+                else { failed += 1; if firstFailure == nil { firstFailure = result.error } }
+                progress(MegaProgress(fraction: Double(completed) / Double(total),
+                                      done: imported, total: total, currentName: ""))
+                addNext()
             }
         }
         progress(MegaProgress(fraction: 1, done: imported, total: total, currentName: ""))
