@@ -264,8 +264,8 @@ These were discovered the painful way; the current code already respects them.
 
 ## Git workflow
 
-- Active development branch for AI work: `claude/claude-md-docs-ktm4y9`
-  (the task that created this file). In general, develop on a feature branch,
-  commit with clear messages, and push only when asked.
-- Do **not** open a pull request unless explicitly requested.
+- **Commit changes directly to `main`.** This is the repo owner's standing
+  preference: commit with clear messages and push straight to `main`. Don't
+  create feature branches or open pull requests for routine work unless the user
+  explicitly asks. After pushing, verify `main` actually contains the change.
 - `xcuserdata/` and other Xcode user files are gitignored.
