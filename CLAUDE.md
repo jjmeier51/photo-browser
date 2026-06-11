@@ -13,7 +13,42 @@ import from and export to the Photos library, and move whole folders between
 drives — all while keeping per-item labels and captions attached.
 
 There is no backend, no network service, and no third-party dependencies — it is
-pure Apple frameworks.
+pure Apple frameworks. A core design value is **offline, on-device, privacy-
+preserving** browsing: nothing is ever uploaded, and the app reads only the one
+folder the user explicitly grants access to.
+
+> History note: the project grew over ~50 commits from a simple browser into a
+> Photos-like app. An earlier repo layout kept the app under an `ios-app/`
+> subdirectory (built with XcodeGen, bundle id `com.example.photobrowser`) and
+> also contained an unrelated Python forum-crawler. **This repo is the cleaned-up
+> version** — the iOS app is at the root, built from a committed `.xcodeproj`
+> (no XcodeGen), bundle id `jayymei.PhotoBrowser`, and there is no Python code.
+> If you see references to `ios-app/` or `project.yml`, they are stale.
+
+### Feature surface (so you know where things live)
+- **Browsing** — pick a folder → recursively scans it; square thumbnails for
+  photos/videos; New Folder / rename / move; name search; sort by
+  name/date/size/age; filters for type, year (EXIF date), resolution/HDR, age;
+  an aggregated `LibraryView` plus Favorites / "To AI" modes. (`FolderView`)
+- **Viewer** — photo pinch + double-tap zoom; custom `AVPlayer` video page with
+  zoom, ms-precision scrubber, looping, HDR/res badge. Gestures: swipe L/R =
+  prev/next, down = exit, up = info. Video double-tap zones: left/right third =
+  ∓15s, center = zoom, lower-third halves = step one frame back/forward (via
+  `AVPlayerItem.step(byCount:)`). Slideshow mode. (`ViewerView`,
+  `ZoomableImageView`, `VideoPage`)
+- **Info panel** (swipe-up) — date, device, dimensions, size, GPS →
+  reverse-geocoded place, "Saved from" (xattrs), Age, inline caption edit.
+- **Editing** — crop/rotate, metadata editor (capture date + location, photos &
+  videos), album covers (from a photo or a video frame, with cropper), captions
+  (app overrides + pull-in of embedded IPTC/EXIF).
+- **PhotoKit** — browse iOS albums in-app, import into the drive folder,
+  "Add from iOS Album" (import then delete the iOS originals), save drive media
+  to Photos, capture/export HDR-preserving video frames. (`PhotosLibraryView`,
+  `FileActions`)
+- **Drive-to-drive transfer** — "Move Here from Another Drive…" recursively
+  copies (4 concurrent), deletes originals, migrates Favorites/covers/captions
+  to the new paths under a background-task window; "Re-link Favorites from a
+  Drive…" re-attaches labels. (`DriveTransferView`, `FileActions`)
 
 ## Build / run
 
@@ -34,7 +69,9 @@ pure Apple frameworks.
 - Bundle id `jayymei.PhotoBrowser`. Info.plist is generated
   (`GENERATE_INFOPLIST_FILE = YES`) — Info keys (e.g. Photos usage strings) live
   as `INFOPLIST_KEY_*` build settings in the pbxproj, **not** in a standalone
-  Info.plist file. Add new usage descriptions there.
+  Info.plist file. Add new usage descriptions there. Both
+  `NSPhotoLibraryUsageDescription` and `NSPhotoLibraryAddUsageDescription` are
+  required — **PhotoKit APIs hard-crash without them**, so never remove these.
 - A bridging header exists (`PhotoBrowser-Bridging-Header.h`) but is currently
   empty.
 
@@ -151,6 +188,36 @@ Change-notification counters that views observe:
   into user files. Be conservative with anything that deletes, overwrites, or
   exfiltrates user files; the existing destructive paths are gated behind
   confirmations.
+
+## Hard-won constraints (don't relearn these)
+
+These were discovered the painful way; the current code already respects them.
+
+1. **Default-MainActor isolation is ON.** Heavy I/O (AVFoundation, CoreLocation,
+   xattrs via `getxattr`, `CGImageSource`) **must** run `nonisolated` /
+   `Task.detached`, or it freezes the UI on a slow external drive. This is the
+   single biggest source of "the app froze" bugs.
+2. **One `.fileImporter` per view.** Multiple importers/`.confirmationDialog`s
+   conflict. Use a single importer driven by a purpose enum
+   (`ImportPurpose { open, transfer, relink }` in `FolderView`) and push
+   secondary flows into their own `.fullScreenCover(item:)` / `.sheet`.
+3. `.fileImporter(isPresented:)` needs a **plain `@State Bool`** — custom
+   `Binding`s don't fire it.
+4. **Presenting from a `Menu` button can be swallowed** — defer the present with
+   `DispatchQueue.main.asyncAfter` (or set the item in the next runloop tick).
+5. **Invalid GPS coordinates crash uncatchably** in `CLLocation`/`CLGeocoder`.
+   Always guard `CLLocationCoordinate2DIsValid` + finite + not `(0,0)` before
+   constructing a location or geocoding (see `MetadataLoader.reverseGeocode`).
+6. **Cross-volume moves are copy-then-delete**, under security-scoped resource
+   access — there is no atomic move across drives.
+7. **iOS background limits:** `beginBackgroundTask` lasts only minutes and
+   nothing runs once the app is terminated — long transfers can't fully
+   background. Don't promise durable background work.
+8. **Video frame stepping** uses `AVPlayerItem.step(byCount:)` — pause first and
+   check `canStepForward`/`canStepBackward`.
+9. Metadata reads are **time-boxed** (`MetadataLoader.withTimeout`) so a slow or
+   corrupt file on an external drive can never hang the info panel — keep new
+   per-file metadata work behind the same pattern.
 
 ## Git workflow
 
