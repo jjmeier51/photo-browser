@@ -1034,9 +1034,11 @@ struct FolderView: View {
     }
 
     private func createFolder() {
-        FileActions.createFolder(named: newFolderName, in: url)
+        let name = newFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
         newFolderName = ""
-        Task { await reload() }
+        guard FileActions.createFolder(named: name, in: url) else { return }
+        library.contentDidChange()                       // refresh this folder's listing
+        library.path.append(url.appendingPathComponent(name, isDirectory: true))   // open the new folder
     }
 
     private func performRename() {
