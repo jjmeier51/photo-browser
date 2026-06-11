@@ -2,3 +2,7 @@
 //  Use this file to import your target's public headers that you would like to expose to Swift.
 //
 
+// MEGA folder downloads need AES in ECB / CBC / CTR modes (for node keys,
+// attributes, and file content). CryptoKit only exposes AEAD ciphers, so we use
+// CommonCrypto's lower-level CCCryptor API instead. See MegaDownloader.swift.
+#import <CommonCrypto/CommonCrypto.h>

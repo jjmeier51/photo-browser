@@ -83,11 +83,16 @@ struct InfoPanel: View {
             }
         }
         .presentationDetents([.medium, .large])
+        // Load the three sources concurrently and each time-boxed, so one slow read
+        // (a huge photo, a damaged video, a stalled xattr on an external drive)
+        // can't delay the others or hang the panel.
         .task {
-            info = await MetadataLoader.load(for: entry)
-            fileCaption = await MetadataLoader.existingCaption(for: entry)
-            let url = entry.url
-            savedFrom = await Task.detached { MetadataLoader.whereFrom(url: url) }.value
+            async let infoTask = MetadataLoader.load(for: entry)
+            async let captionTask = MetadataLoader.timeBoxedCaption(for: entry)
+            async let sourceTask = MetadataLoader.timeBoxedSource(url: entry.url)
+            info = await infoTask
+            fileCaption = await captionTask
+            savedFrom = await sourceTask
         }
     }
 

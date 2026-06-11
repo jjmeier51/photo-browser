@@ -51,6 +51,7 @@ struct FolderView: View {
     @State private var renameTarget: Entry?
     @State private var renameDraft = ""
     @State private var showMovePicker = false
+    @State private var showCopyPicker = false
     @State private var exporting = false
     @State private var exportProgress: Double = 0
     @State private var searchResults: [Entry] = []
@@ -75,8 +76,11 @@ struct FolderView: View {
     @State private var showPhotosPicker = false
     @State private var showPhotosLibrary = false
     @State private var photosLibraryMoves = false
+    @State private var showMegaImport = false
     @State private var importing = false
     @State private var editEntry: Entry?
+    @State private var editProcessing = false
+    @State private var editProgress: Double = 0
     @State private var metadataTargets: [URL] = []
     @State private var showMetadataEditor = false
     @State private var transferItem: PreviewItem?
@@ -375,6 +379,9 @@ struct FolderView: View {
                 Button { startSingleMove(entry) } label: {
                     Label("Move", systemImage: "folder")
                 }
+                Button { startSingleCopy(entry) } label: {
+                    Label("Copy to Folder…", systemImage: "doc.on.doc")
+                }
             }
             if entry.kind == .video {
                 Button {
@@ -404,6 +411,11 @@ struct FolderView: View {
     private func startSingleMove(_ entry: Entry) {
         selection = [entry.url]
         showMovePicker = true
+    }
+
+    private func startSingleCopy(_ entry: Entry) {
+        selection = [entry.url]
+        showCopyPicker = true
     }
 
     private func playSlideshow() {
@@ -468,6 +480,9 @@ struct FolderView: View {
             .sheet(isPresented: $showMovePicker) {
                 FolderPicker(root: library.rootURL ?? url) { dest in performMove(to: dest) }
             }
+            .sheet(isPresented: $showCopyPicker) {
+                FolderPicker(root: library.rootURL ?? url, confirmTitle: "Copy Here") { dest in performCopy(to: dest) }
+            }
             .confirmationDialog("Delete \(selection.count) item(s)? This permanently removes them from the drive.",
                                 isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("Delete", role: .destructive) { performDelete() }
@@ -519,6 +534,9 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showPhotosLibrary) {
                 PhotosLibraryView(targetFolder: url, deleteOriginals: photosLibraryMoves)
             }
+            .fullScreenCover(isPresented: $showMegaImport) {
+                MegaImportView(targetFolder: url) { Task { await reload() } }
+            }
             .overlay(alignment: .bottom) { if selecting { selectionBar } }
             .overlay(alignment: .bottomLeading) {
                 if isRoot && !selecting {
@@ -532,6 +550,7 @@ struct FolderView: View {
                 }
             }
             .overlay { if exporting { exportingOverlay } }
+            .overlay { if editProcessing { editingOverlay } }
             .overlay { if importing { importingOverlay } }
             .overlay { emptyOverlay }
             .fullScreenCover(item: $transferItem) { item in
@@ -553,6 +572,18 @@ struct FolderView: View {
         library.migrateMetadata(fromRoot: oldRoot, toRoot: url, removeSource: true, verifyExists: true)
         if accessed { oldRoot.stopAccessingSecurityScopedResource() }
         resultMessage = "Re-linked Favorites, covers, and captions to this drive."
+    }
+
+    @ViewBuilder private var editingOverlay: some View {
+        VStack(spacing: 12) {
+            Text("Rotating…").font(.subheadline.weight(.medium))
+            ProgressView(value: editProgress).progressViewStyle(.linear).frame(width: 220)
+            Text("\(Int(editProgress * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            Text("You can leave the app — it keeps going briefly in the background.")
+                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+        .padding(24).frame(maxWidth: 280)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
 
     @ViewBuilder private var importingOverlay: some View {
@@ -801,6 +832,9 @@ struct FolderView: View {
                     Button { photosLibraryMoves = true; showPhotosLibrary = true } label: {
                         Label("Add from iOS Album…", systemImage: "photo.badge.arrow.down")
                     }
+                    Button { showMegaImport = true } label: {
+                        Label("Add from MEGA…", systemImage: "arrow.down.circle")
+                    }
                     Button { pickFolder(.relink) } label: {
                         Label("Re-link Favorites from a Drive…", systemImage: "link")
                     }
@@ -856,7 +890,13 @@ struct FolderView: View {
             Spacer()
             Menu {
                 Button { startBulkMetadataEdit() } label: { Label("Edit Metadata", systemImage: "calendar.badge.clock") }
+                Menu {
+                    Button { bulkRotate(2) } label: { Label("Rotate 180°", systemImage: "arrow.clockwise") }
+                    Button { bulkRotate(-1) } label: { Label("Rotate Left", systemImage: "rotate.left") }
+                    Button { bulkRotate(1) } label: { Label("Rotate Right", systemImage: "rotate.right") }
+                } label: { Label("Rotate", systemImage: "rotate.right") }
                 Button { duplicateEntries(selectedEntries()) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
+                Button { showCopyPicker = true } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
                 Divider()
                 Button { saveToPhotos() } label: { Label("Save to Photos", systemImage: "photo.on.rectangle") }
                 Button { exportToFiles() } label: { Label("Save to Files", systemImage: "folder") }
@@ -871,6 +911,39 @@ struct FolderView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(.ultraThinMaterial)
+    }
+
+    /// Rotates every selected photo/video in place (mainly a 180° turn to fix
+    /// upside-down videos). Re-encodes each file and re-keys nothing — paths are
+    /// unchanged. Runs under a background-task window so a brief backgrounding is OK.
+    private func bulkRotate(_ quarters: Int) {
+        let targets = selectedEntries().filter { $0.isViewable }
+        guard !targets.isEmpty else { resultMessage = "Select one or more photos or videos."; return }
+        selecting = false; selection.removeAll()
+        editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder()
+        bg.begin(name: "Rotate Media")
+        Task {
+            let full = CGRect(x: 0, y: 0, width: 1, height: 1)
+            var failed = 0
+            for (i, e) in targets.enumerated() {
+                let ok: Bool
+                if e.kind == .image {
+                    ok = await Task.detached { MediaEditing.applyPhotoInPlace(url: e.url, quarters: quarters, crop: full) }.value
+                } else {
+                    ok = await MediaEditing.exportVideoInPlace(url: e.url, quarters: quarters, crop: full) { _ in }
+                }
+                if !ok { failed += 1 }
+                editProgress = Double(i + 1) / Double(targets.count)
+            }
+            editProcessing = false
+            bg.end()
+            resultMessage = failed == 0
+                ? "Rotated \(targets.count) item(s)."
+                : "Rotated \(targets.count - failed) of \(targets.count); \(failed) couldn’t be saved."
+            library.contentDidChange()
+            await reload()
+        }
     }
 
     private func startBulkMetadataEdit() {
@@ -977,6 +1050,15 @@ struct FolderView: View {
         selection.removeAll(); selecting = false
         resultMessage = "Moved \(moved.count) item(s)."
         Task { await reload() }
+    }
+
+    private func performCopy(to dest: URL) {
+        let copied = FileActions.copy(selectedEntries().map(\.url), to: dest)
+        selection.removeAll(); selecting = false
+        resultMessage = "Copied \(copied.count) item(s)."
+        // Copies don't carry labels (the originals keep theirs), so no metadata
+        // migration. Only reload if the copies landed in the folder on screen.
+        if dest.standardizedFileURL == url.standardizedFileURL { Task { await reload() } }
     }
 
     private func exportFrames(_ entry: Entry, name: String) {
