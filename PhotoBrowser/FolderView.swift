@@ -254,9 +254,12 @@ struct FolderView: View {
             )
             // Smoothly animate the thumbnail-size change.
             .animation(.easeInOut(duration: 0.22), value: library.thumbSize)
-            // In Select mode: a normal swipe still scrolls; press-and-hold then drag
-            // multi-selects (auto-scrolling near the top/bottom edge), like Photos.
-            .highPriorityGesture(
+            // In Select mode: tap a cell to toggle it (handled by each cell's own
+            // tap gesture), and press-and-hold then drag to multi-select. This is a
+            // plain `.gesture` (not high-priority) so it sits *below* the cells' tap
+            // gesture — a high-priority long-press here would swallow the taps and
+            // make tap-to-select do nothing.
+            .gesture(
                 LongPressGesture(minimumDuration: 0.22)
                     .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("grid")))
                     .onChanged { value in
