@@ -290,12 +290,12 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
         let loc = g.location(in: view)
         let x = loc.x
         let w = view.bounds.width
-        // Lower third of the screen → single-frame nudge: left half steps back a
-        // frame, right half steps forward a frame (controls bar excepted — taps
-        // on it go to the slider/buttons).
+        // Lower-LEFT corner → step back a frame; lower-RIGHT corner → step forward.
+        // The lower-MIDDLE is intentionally excluded (it falls through to the zoom
+        // logic) so a double-tap near the center/scrubber doesn't nudge frames.
         if loc.y > view.bounds.height * 2 / 3 {
-            stepFrame(by: x < w / 2 ? -1 : 1)
-            return
+            if x < w / 3 { stepFrame(by: -1); return }
+            if x > w * 2 / 3 { stepFrame(by: 1); return }
         }
         // Left third → back 15s, right third → forward 15s, center column → zoom.
         if x < w / 3 { skip(by: -15); return }

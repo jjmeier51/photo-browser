@@ -36,8 +36,9 @@ no network calls.
 - **Viewer** — photo pinch + double-tap zoom; custom `AVPlayer` video page with
   zoom, ms-precision scrubber, looping, HDR/res badge. Gestures: swipe L/R =
   prev/next, down = exit, up = info. Video double-tap zones: left/right third =
-  ∓15s, center = zoom, lower-third halves = step one frame back/forward (via
-  `AVPlayerItem.step(byCount:)`). Slideshow mode. (`ViewerView`,
+  ∓15s, center = zoom, lower-third left/right corners = step one frame
+  back/forward (via `AVPlayerItem.step(byCount:)`; the lower-middle is excluded).
+  Slideshow mode. (`ViewerView`,
   `ZoomableImageView`, `VideoPage`)
 - **Info panel** (swipe-up) — date, device, dimensions, size, GPS →
   reverse-geocoded place, "Saved from" (xattrs), Age, inline caption edit.
