@@ -4,8 +4,10 @@ import AVKit
 
 extension PHAsset: Identifiable { public var id: String { localIdentifier } }
 
-/// One album/collection row in the Photos browser.
-struct AlbumEntry: Identifiable {
+/// One album/collection row in the Photos browser. PhotoKit model objects are
+/// immutable and thread-safe, so it's fine to build these off-main (`@unchecked`
+/// only because PHAssetCollection itself isn't marked Sendable).
+struct AlbumEntry: Identifiable, @unchecked Sendable {
     let id: String
     let title: String
     let collection: PHAssetCollection
@@ -72,20 +74,21 @@ struct PhotosLibraryView: View {
             ? await PHPhotoLibrary.requestAuthorization(for: .readWrite)
             : current
         guard status == .authorized || status == .limited else { loading = false; return }
-        albums = loadAlbums()
+        // Collection fetches and per-album asset counts are synchronous PhotoKit
+        // I/O — run them off the main actor so a big library can't stall the sheet.
+        albums = await Task.detached(priority: .userInitiated) { Self.loadAlbums() }.value
         loading = false
     }
 
-    /// Curated smart albums (in Photos-app order) followed by the user's albums.
-    private func loadAlbums() -> [AlbumEntry] {
-        var result: [AlbumEntry] = []
-        func append(_ collection: PHAssetCollection, _ title: String) {
+    /// Curated smart albums (in Photos-app order) followed by the user's albums A→Z.
+    nonisolated private static func loadAlbums() -> [AlbumEntry] {
+        func entry(_ collection: PHAssetCollection, _ title: String) -> AlbumEntry? {
             let count = PHAsset.fetchAssets(in: collection, options: nil).count
-            if count > 0 {
-                result.append(AlbumEntry(id: collection.localIdentifier, title: title,
-                                         collection: collection, count: count))
-            }
+            guard count > 0 else { return nil }
+            return AlbumEntry(id: collection.localIdentifier, title: title,
+                              collection: collection, count: count)
         }
+        var result: [AlbumEntry] = []
         let smarts: [(PHAssetCollectionSubtype, String)] = [
             (.smartAlbumUserLibrary, "Recents"),
             (.smartAlbumFavorites, "Favorites"),
@@ -103,11 +106,19 @@ struct PhotosLibraryView: View {
         ]
         for (subtype, title) in smarts {
             PHAssetCollection.fetchAssetCollections(with: .smartAlbum, subtype: subtype, options: nil)
-                .enumerateObjects { collection, _, _ in append(collection, title) }
+                .enumerateObjects { collection, _, _ in
+                    if let e = entry(collection, title) { result.append(e) }
+                }
         }
+        // PhotoKit returns user albums in its internal order; show them
+        // alphabetized (Finder-style, so "Trip 2" sorts before "Trip 10").
+        var userAlbums: [AlbumEntry] = []
         PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil)
-            .enumerateObjects { collection, _, _ in append(collection, collection.localizedTitle ?? "Album") }
-        return result
+            .enumerateObjects { collection, _, _ in
+                if let e = entry(collection, collection.localizedTitle ?? "Album") { userAlbums.append(e) }
+            }
+        userAlbums.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        return result + userAlbums
     }
 }
 
