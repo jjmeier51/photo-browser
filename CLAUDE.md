@@ -174,7 +174,10 @@ Change-notification counters that views observe:
   dimensions/HDR, RAW/48MP badges, embedded captions, reverse-geocoded place
   names, and "saved from" source via extended attributes. All reads are off the
   main actor and **time-boxed** (`withTimeout`) so a slow/corrupt file on an
-  external drive can't hang the UI.
+  external drive can't hang the UI. Capture dates, captions and media specs
+  (and video durations in `ThumbCell`) are **cached per file**, keyed by
+  `path|mtime|size` — the thumbnail-cache scheme, so in-place edits invalidate
+  naturally — meaning re-opening a folder doesn't re-read EXIF/AVAsset per item.
 - `FileActions.swift` — all mutating filesystem operations and Photos-library
   I/O: delete/duplicate/rename/**move/copy**/createFolder, write metadata back
   into files, import from / save to Photos, cross-drive transfer with progress,
@@ -227,7 +230,11 @@ These were discovered the painful way; the current code already respects them.
 1. **Default-MainActor isolation is ON.** Heavy I/O (AVFoundation, CoreLocation,
    xattrs via `getxattr`, `CGImageSource`) **must** run `nonisolated` /
    `Task.detached`, or it freezes the UI on a slow external drive. This is the
-   single biggest source of "the app froze" bugs.
+   single biggest source of "the app froze" bugs. Beware: it applies to
+   **unmarked classes too** — methods of a plain `final class` are MainActor-
+   bound, so even `Task.detached { await self.work() }` hops back to the main
+   thread (this silently put `Thumbnailer`'s disk I/O on main until the class
+   was marked `nonisolated`).
 2. **One `.fileImporter` per view.** Multiple importers/`.confirmationDialog`s
    conflict. Use a single importer driven by a purpose enum
    (`ImportPurpose { open, transfer, relink }` in `FolderView`) and push

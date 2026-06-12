@@ -5,7 +5,12 @@ import CryptoKit
 /// Generates thumbnails for photos, videos and PDFs via QuickLook, with a
 /// memory + disk cache and de-duplication of concurrent requests, so scrolling
 /// big folders stays fast and never does the same work twice.
-final class Thumbnailer: @unchecked Sendable {
+///
+/// `nonisolated` matters: under the project's default-MainActor isolation an
+/// unmarked class is MainActor-bound, which silently moved the disk-cache
+/// reads, JPEG decode/encode and cache writes back onto the main thread even
+/// inside a detached task. State is protected by `lock` instead.
+nonisolated final class Thumbnailer: @unchecked Sendable {
     static let shared = Thumbnailer()
 
     private let memory = NSCache<NSString, UIImage>()
@@ -17,7 +22,10 @@ final class Thumbnailer: @unchecked Sendable {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         diskDir = caches.appendingPathComponent("thumbs", isDirectory: true)
         try? FileManager.default.createDirectory(at: diskDir, withIntermediateDirectories: true)
+        // Bound by actual memory, not count — 1000 large-tile thumbnails could
+        // be gigabytes; NSCache only evicts cost-tracked entries proactively.
         memory.countLimit = 1000
+        memory.totalCostLimit = 256 * 1024 * 1024
     }
 
     func thumbnail(for entry: Entry, size: CGSize, scale: CGFloat) async -> UIImage? {
@@ -47,16 +55,24 @@ final class Thumbnailer: @unchecked Sendable {
     private func produce(key: String, url: URL, size: CGSize, scale: CGFloat) async -> UIImage? {
         let nsKey = key as NSString
         let diskURL = diskDir.appendingPathComponent(key).appendingPathExtension("jpg")
-        if let data = try? Data(contentsOf: diskURL), let img = UIImage(data: data) {
-            memory.setObject(img, forKey: nsKey)
+        if let data = try? Data(contentsOf: diskURL), let raw = UIImage(data: data) {
+            // Force the JPEG decode here, off-main — UIImage(data:) defers it to
+            // first render, which shows up as scroll hitches on the main thread.
+            let img = raw.preparingForDisplay() ?? raw
+            memory.setObject(img, forKey: nsKey, cost: cost(of: img))
             return img
         }
         guard let img = await generate(url: url, size: size, scale: scale) else { return nil }
-        memory.setObject(img, forKey: nsKey)
+        memory.setObject(img, forKey: nsKey, cost: cost(of: img))
         if let data = img.jpegData(compressionQuality: 0.8) {
             try? data.write(to: diskURL, options: .atomic)
         }
         return img
+    }
+
+    /// Approximate decoded size in bytes (RGBA), for the cache's cost limit.
+    private func cost(of image: UIImage) -> Int {
+        Int(image.size.width * image.scale * image.size.height * image.scale) * 4
     }
 
     private func generate(url: URL, size: CGSize, scale: CGFloat) async -> UIImage? {

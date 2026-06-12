@@ -15,9 +15,44 @@ struct MediaInfo: Sendable {
 
 enum MetadataLoader {
 
+    // MARK: - Per-file result cache
+
+    /// Capture dates, captions and media specs are re-requested every time a
+    /// folder is opened, and each miss is a full EXIF/AVAsset read — the
+    /// dominant cost of browsing on an external drive. Results are cached keyed
+    /// by path|mtime|size (the Thumbnailer's scheme), so an in-place edit
+    /// invalidates naturally. Negative results are cached too — "no embedded
+    /// caption / date" is the common case and just as expensive to discover.
+    private final class CachedValue<T> {
+        let value: T?
+        init(_ value: T?) { self.value = value }
+    }
+
+    private static let dateCache = makeCache(of: Date.self)
+    private static let captionCache = makeCache(of: String.self)
+    private static let specCache = makeCache(of: MediaSpec.self)
+
+    private static func makeCache<T>(of _: T.Type) -> NSCache<NSString, CachedValue<T>> {
+        let cache = NSCache<NSString, CachedValue<T>>()
+        cache.countLimit = 20_000
+        return cache
+    }
+
+    private static func cacheKey(for entry: Entry) -> NSString {
+        "\(entry.url.path)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)" as NSString
+    }
+
     // MARK: - Dimensions + HDR (for resolution/HDR filters)
 
     static func mediaSpec(for entry: Entry) async -> MediaSpec {
+        let key = cacheKey(for: entry)
+        if let cached = specCache.object(forKey: key) { return cached.value ?? MediaSpec() }
+        let spec = await readMediaSpec(for: entry)
+        specCache.setObject(CachedValue(spec), forKey: key)
+        return spec
+    }
+
+    private static func readMediaSpec(for entry: Entry) async -> MediaSpec {
         switch entry.kind {
         case .image:
             return await Task.detached(priority: .utility) { () -> MediaSpec in
@@ -74,6 +109,14 @@ enum MetadataLoader {
     // MARK: - Existing caption embedded in a file (pull-in)
 
     static func existingCaption(for entry: Entry) async -> String? {
+        let key = cacheKey(for: entry)
+        if let cached = captionCache.object(forKey: key) { return cached.value }
+        let caption = await readExistingCaption(for: entry)
+        captionCache.setObject(CachedValue(caption), forKey: key)
+        return caption
+    }
+
+    private static func readExistingCaption(for entry: Entry) async -> String? {
         switch entry.kind {
         case .image:
             return await Task.detached(priority: .utility) { () -> String? in
@@ -195,6 +238,14 @@ enum MetadataLoader {
     /// The real capture date from EXIF (photos) or creation metadata (videos);
     /// nil if the file carries none.
     static func captureDate(for entry: Entry) async -> Date? {
+        let key = cacheKey(for: entry)
+        if let cached = dateCache.object(forKey: key) { return cached.value }
+        let date = await readCaptureDate(for: entry)
+        dateCache.setObject(CachedValue(date), forKey: key)
+        return date
+    }
+
+    private static func readCaptureDate(for entry: Entry) async -> Date? {
         switch entry.kind {
         case .image:
             return await Task.detached(priority: .utility) { () -> Date? in

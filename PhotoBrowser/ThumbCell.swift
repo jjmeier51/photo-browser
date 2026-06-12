@@ -52,7 +52,7 @@ struct EntryCell: View {
             .clipShape(Rectangle())
             .contentShape(Rectangle())
             .task(id: entry.id) {
-                if entry.kind == .video { duration = await Self.loadDuration(entry.url) }
+                if entry.kind == .video { duration = await Self.loadDuration(entry) }
                 guard entry.kind == .image || entry.kind == .video || entry.kind == .pdf else { return }
                 image = await Thumbnailer.shared.thumbnail(
                     for: entry,
@@ -107,13 +107,26 @@ struct EntryCell: View {
         }
     }
 
-    private static func loadDuration(_ url: URL) async -> String? {
-        let asset = AVURLAsset(url: url)
+    /// Tiles recycle as the grid scrolls, so without a cache every pass over a
+    /// video re-opens its AVAsset just to re-read the duration — slow on an
+    /// external drive. Keyed by path|mtime|size so in-place edits invalidate.
+    private static let durationCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 20_000
+        return cache
+    }()
+
+    private static func loadDuration(_ entry: Entry) async -> String? {
+        let key = "\(entry.url.path)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)" as NSString
+        if let cached = durationCache.object(forKey: key) { return cached as String }
+        let asset = AVURLAsset(url: entry.url)
         guard let d = try? await asset.load(.duration) else { return nil }
         let s = d.seconds
         guard s.isFinite, s > 0 else { return nil }
         let t = Int(s.rounded())
-        return String(format: "%d:%02d", t / 60, t % 60)
+        let label = String(format: "%d:%02d", t / 60, t % 60)
+        durationCache.setObject(label as NSString, forKey: key)
+        return label
     }
 
     private var otherIcon: String {
