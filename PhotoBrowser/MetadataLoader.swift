@@ -161,6 +161,7 @@ enum MetadataLoader {
 
         if let date = info.date {
             let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")
             f.dateFormat = "yyyy:MM:dd HH:mm:ss"
             let s = f.string(from: date)
             exif[kCGImagePropertyExifDateTimeOriginal as String] = s
@@ -257,21 +258,41 @@ enum MetadataLoader {
             return await Task.detached(priority: .utility) { () -> Date? in
                 guard let src = CGImageSourceCreateWithURL(entry.url as CFURL, nil),
                       let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return nil }
-                let f = DateFormatter(); f.dateFormat = "yyyy:MM:dd HH:mm:ss"
-                if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any],
-                   let s = exif[kCGImagePropertyExifDateTimeOriginal] as? String, let d = f.date(from: s) {
-                    return d
-                }
-                if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any],
-                   let s = tiff[kCGImagePropertyTIFFDateTime] as? String {
-                    return f.date(from: s)
+                // Try the usual EXIF/TIFF capture-date fields in order. (A copied
+                // file's modification date is the copy time, so we must read the
+                // date embedded in the image, never fall back to the file's mtime.)
+                let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+                let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+                let candidates = [exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
+                                  exif?[kCGImagePropertyExifDateTimeDigitized] as? String,
+                                  tiff?[kCGImagePropertyTIFFDateTime] as? String]
+                for case let s? in candidates {
+                    if let d = parseExifDate(s) { return d }
                 }
                 return nil
             }.value
         case .video:
-            let asset = AVURLAsset(url: entry.url)
-            guard let item = try? await asset.load(.creationDate) else { return nil }
-            return try? await item.load(.dateValue)
+            return await Task.detached(priority: .utility) { () -> Date? in
+                let asset = AVURLAsset(url: entry.url)
+                // Common creation-date key (as a Date, or a parseable string).
+                if let item = try? await asset.load(.creationDate) {
+                    if let d = try? await item.load(.dateValue) { return d }
+                    if let s = try? await item.load(.stringValue), let d = parseISODate(s) { return d }
+                }
+                // Some videos only carry the date in QuickTime metadata.
+                if let qt = try? await asset.loadMetadata(for: .quickTimeMetadata) {
+                    for item in qt where (item.key as? String) == "com.apple.quicktime.creationdate" {
+                        if let s = try? await item.load(.stringValue), let d = parseISODate(s) { return d }
+                    }
+                }
+                // Or in the common metadata as a creation-date string.
+                if let meta = try? await asset.load(.metadata) {
+                    for item in meta where item.commonKey == .commonKeyCreationDate {
+                        if let s = try? await item.load(.stringValue), let d = parseISODate(s) { return d }
+                    }
+                }
+                return nil
+            }.value
         default:
             return nil
         }
@@ -349,9 +370,13 @@ enum MetadataLoader {
                 let dev = [make, model].compactMap { $0 }.joined(separator: " ")
                 info.device = dev.isEmpty ? nil : dev
             }
-            if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any],
-               let ds = exif[kCGImagePropertyExifDateTimeOriginal] as? String {
-                info.date = parseExifDate(ds)
+            let exifDict = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+            let tiffDict = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+            let dateCandidates = [exifDict?[kCGImagePropertyExifDateTimeOriginal] as? String,
+                                  exifDict?[kCGImagePropertyExifDateTimeDigitized] as? String,
+                                  tiffDict?[kCGImagePropertyTIFFDateTime] as? String]
+            for case let ds? in dateCandidates {
+                if let d = parseExifDate(ds) { info.date = d; break }
             }
             if let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any],
                let lat = gps[kCGImagePropertyGPSLatitude] as? Double,
@@ -444,6 +469,10 @@ enum MetadataLoader {
 
     private nonisolated static func parseExifDate(_ s: String) -> Date? {
         let f = DateFormatter()
+        // POSIX locale: EXIF dates are a fixed format, so parsing must not depend
+        // on the device's locale/calendar (a non-Gregorian locale otherwise fails
+        // the parse and the date silently falls back to the file's copy time).
+        f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy:MM:dd HH:mm:ss"
         return f.date(from: s)
     }
