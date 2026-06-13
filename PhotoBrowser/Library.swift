@@ -120,15 +120,22 @@ final class Library {
         return folderBirthdays.keys.contains { $0 == p || $0.hasPrefix(p + "/") || p.hasPrefix($0 + "/") }
     }
 
+    /// The nearest birthday on `file`'s folder or any ancestor folder.
+    ///
+    /// Walks the path as a **string** rather than calling
+    /// `URL.deletingLastPathComponent()` in a loop: for some URLs that call never
+    /// reaches a fixed point (it keeps prepending `../`), which spun this loop
+    /// forever on the main thread and got the app watchdog-killed while rendering
+    /// the info panel's "Age" row. Trimming the string strictly shrinks it each
+    /// step, so this always terminates.
     nonisolated static func birthdayForFile(_ file: URL, in birthdays: [String: Double]) -> Date? {
         guard !birthdays.isEmpty else { return nil }
-        var dir = file.deletingLastPathComponent()
-        while true {
-            if let ts = birthdays[dir.path] { return Date(timeIntervalSince1970: ts) }
-            let parent = dir.deletingLastPathComponent()
-            if parent.path == dir.path { return nil }
-            dir = parent
+        var path = file.path
+        while let slash = path.lastIndex(of: "/"), slash != path.startIndex {
+            path = String(path[..<slash])              // drop the last component → parent dir
+            if let ts = birthdays[path] { return Date(timeIntervalSince1970: ts) }
         }
+        return nil
     }
 
     /// Age in whole years between a birthday and a capture date (nil if negative).
