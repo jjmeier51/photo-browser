@@ -336,6 +336,16 @@ private struct DuplicateCompareView: View {
             if let c = i?.coordinate { return String(format: "%.4f, %.4f", c.latitude, c.longitude) }
             return "—"
         }
+        func caption(_ e: Entry) -> String {
+            let c = library.captions[e.url.path] ?? ""
+            return c.isEmpty ? "—" : c
+        }
+        func labelList(_ url: URL) -> String {
+            let names = (library.isFavorite(url) ? ["Favorite"] : [])
+                + (library.isAI(url) ? ["To AI"] : [])
+                + Library.taylorSwiftLabels.filter { library.hasLabel($0, url) }
+            return names.isEmpty ? "—" : names.joined(separator: ", ")
+        }
         return [
             CompareRow(label: "Name", left: l.name, right: r.name),
             CompareRow(label: "Size", left: l.size.sizeString, right: r.size.sizeString),
@@ -344,6 +354,8 @@ private struct DuplicateCompareView: View {
             CompareRow(label: "Date", left: date(leftInfo), right: date(rightInfo)),
             CompareRow(label: "Device", left: leftInfo?.device ?? "—", right: rightInfo?.device ?? "—"),
             CompareRow(label: "Location", left: place(leftInfo), right: place(rightInfo)),
+            CompareRow(label: "Caption", left: caption(l), right: caption(r)),
+            CompareRow(label: "Labels", left: labelList(l.url), right: labelList(r.url)),
         ]
     }
 

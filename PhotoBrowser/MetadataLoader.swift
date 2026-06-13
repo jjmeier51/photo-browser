@@ -13,13 +13,11 @@ struct MediaInfo: Sendable {
     var placeName: String?
 }
 
-/// Read-only metadata for photos/videos. The whole enum is `nonisolated` so
-/// none of this I/O (ImageIO, AVFoundation, CoreLocation, xattrs) is ever pulled
-/// onto the main actor by the project's default-MainActor isolation — the single
-/// biggest source of "the app froze" bugs on a slow external drive. (Several
-/// reads detach explicitly too; `nonisolated` closes the gaps, e.g. the video
-/// `mediaSpec` path that otherwise ran AVAsset loads on main.)
-nonisolated enum MetadataLoader {
+/// Read-only metadata for photos/videos. All heavy reads (ImageIO, AVFoundation,
+/// CoreLocation, xattrs) run inside `Task.detached` so the project's
+/// default-MainActor isolation can't pull them onto the main thread — the single
+/// biggest source of "the app froze" bugs on a slow external drive.
+enum MetadataLoader {
 
     // MARK: - Per-file result cache
 
@@ -76,19 +74,21 @@ nonisolated enum MetadataLoader {
                 return spec
             }.value
         case .video:
-            var spec = MediaSpec()
-            let asset = AVURLAsset(url: entry.url)
-            if let track = try? await asset.loadTracks(withMediaType: .video).first {
-                if let size = try? await track.load(.naturalSize) {
-                    let w = Int(abs(size.width)), h = Int(abs(size.height))
-                    spec.longSide = max(w, h)
-                    spec.pixels = w * h
+            return await Task.detached(priority: .utility) { () -> MediaSpec in
+                var spec = MediaSpec()
+                let asset = AVURLAsset(url: entry.url)
+                if let track = try? await asset.loadTracks(withMediaType: .video).first {
+                    if let size = try? await track.load(.naturalSize) {
+                        let w = Int(abs(size.width)), h = Int(abs(size.height))
+                        spec.longSide = max(w, h)
+                        spec.pixels = w * h
+                    }
+                    if let chars = try? await track.load(.mediaCharacteristics), chars.contains(.containsHDRVideo) {
+                        spec.isHDR = true
+                    }
                 }
-                if let chars = try? await track.load(.mediaCharacteristics), chars.contains(.containsHDRVideo) {
-                    spec.isHDR = true
-                }
-            }
-            return spec
+                return spec
+            }.value
         default:
             return MediaSpec()
         }

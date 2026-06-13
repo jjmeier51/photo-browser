@@ -105,16 +105,19 @@ struct InfoPanel: View {
         // Load the three sources concurrently and each time-boxed, so one slow read
         // (a huge photo, a damaged video, a stalled xattr on an external drive)
         // can't delay the others or hang the panel.
-        .task {
-            async let infoTask = MetadataLoader.load(for: entry)
+        .task(id: entry.id) {
+            // Core metadata first, then paint it before anything riskier runs.
+            let loaded = await MetadataLoader.load(for: entry)
+            info = loaded
+            await Task.yield()
+            // Caption + "saved from" are independent and time-boxed.
             async let captionTask = MetadataLoader.timeBoxedCaption(for: entry)
             async let sourceTask = MetadataLoader.timeBoxedSource(url: entry.url)
-            let loaded = await infoTask
-            info = loaded
             fileCaption = await captionTask
             savedFrom = await sourceTask
-            // Geocode last and independently — a slow/offline lookup must never
-            // hold up (or crash) the core metadata above.
+            // Reverse-geocoding is the one read documented to crash uncatchably on
+            // bad GPS data and it needs the network — so it runs dead last, after
+            // every other field is already on screen.
             if let coord = loaded.coordinate {
                 placeName = await MetadataLoader.placeName(for: coord)
             }
