@@ -10,7 +10,7 @@ final class Library {
     var rootURL: URL?
     var rootName = ""
     var path: [URL] = []
-    var sort: SortKey = .nameAsc
+    var sort: SortKey = .smart
     var favorites: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.favorites") ?? [])
     var aiLabels: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.ai") ?? [])
     /// Custom labels offered inside the "Taylor Swift" folder, keyed labelName →
@@ -248,10 +248,37 @@ final class Library {
 
     /// The fixed set of labels offered inside the "Taylor Swift" folder.
     static let taylorSwiftLabels = ["The Eras Tour", "Lover Bodysuit", "Grammys",
-                                    "Midnights Bodysuit", "Reputation Bodysuit"]
+                                    "Midnights Bodysuit", "Reputation Bodysuit",
+                                    "Movie", "AI", "The Life of a Showgirl", "Beach"]
 
     private func persistCustomLabels() {
         UserDefaults.standard.set(customLabels.mapValues(Array.init), forKey: "photoBrowser.customLabels")
+    }
+
+    /// Every path carrying at least one custom label (union across all labels).
+    func allLabeledPaths() -> Set<String> {
+        customLabels.values.reduce(into: Set<String>()) { $0.formUnion($1) }
+    }
+
+    /// All photos/videos under `folder` (recursively) that carry *no* custom
+    /// label yet — backs the "No Label" filter. Walks the tree off the main actor.
+    nonisolated func unlabeledMedia(under folder: URL, labeled: Set<String>, sort: SortKey) async -> [Entry] {
+        await Task.detached(priority: .userInitiated) {
+            let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
+            guard let walker = FileManager.default.enumerator(
+                at: folder, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles]) else { return [] }
+            var result: [Entry] = []
+            for case let url as URL in walker {
+                let rv = try? url.resourceValues(forKeys: keys)
+                if rv?.isDirectory == true { continue }
+                let kind = classify(url: url, isDirectory: false)
+                guard kind == .image || kind == .video, !labeled.contains(url.path) else { continue }
+                result.append(Entry(url: url, name: url.lastPathComponent, kind: kind,
+                                    size: Int64(rv?.fileSize ?? 0),
+                                    modified: rv?.contentModificationDate ?? .distantPast))
+            }
+            return Self.sortEntries(result, by: sort)
+        }.value
     }
 
     /// Every custom label currently attached to `url`.
@@ -644,6 +671,14 @@ final class Library {
                 a.kind.sortRank != b.kind.sortRank ? a.kind.sortRank < b.kind.sortRank : nameAsc(a, b)
             }
         }
+        if sort == .smart {
+            // The default: folders alphabetical, then photos/videos newest-first.
+            return entries.sorted { a, b in
+                if a.isFolder != b.isFolder { return a.isFolder }
+                if a.isFolder { return nameAsc(a, b) }
+                return a.modified != b.modified ? a.modified > b.modified : nameAsc(a, b)
+            }
+        }
         return entries.sorted { a, b in
             if a.isFolder != b.isFolder { return a.isFolder }   // folders always first
             switch sort {
@@ -653,7 +688,7 @@ final class Library {
             case .dateAsc:  return a.modified < b.modified
             case .sizeDesc: return a.size > b.size
             case .sizeAsc:  return a.size < b.size
-            case .kind, .ageAsc, .ageDesc: return nameAsc(a, b)   // age applied in the view
+            case .smart, .kind, .ageAsc, .ageDesc: return nameAsc(a, b)   // handled above / in the view
             }
         }
     }

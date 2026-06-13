@@ -104,6 +104,7 @@ extension Int64 {
 }
 
 enum SortKey: String, CaseIterable, Identifiable {
+    case smart    = "Default"
     case nameAsc  = "Name A–Z"
     case nameDesc = "Name Z–A"
     case dateDesc = "Newest first"

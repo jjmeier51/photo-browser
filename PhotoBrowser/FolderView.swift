@@ -63,6 +63,7 @@ struct FolderView: View {
     @State private var aiEntries: [Entry] = []
     @State private var labelKind: LabelKind = .all
     @State private var tsLabelFilter: Set<String> = []
+    @State private var tsNoLabel = false
     @State private var tsLabelEntries: [Entry] = []
     @State private var showDuplicates = false
     @State private var videoRes: VideoRes = .all
@@ -104,7 +105,7 @@ struct FolderView: View {
     /// The bespoke labeling/filtering only appears inside the "Taylor Swift"
     /// folder (or any folder nested under it).
     private var inTaylorSwift: Bool { url.pathComponents.contains("Taylor Swift") }
-    private var tsLabelMode: Bool { !tsLabelFilter.isEmpty }
+    private var tsLabelMode: Bool { !tsLabelFilter.isEmpty || tsNoLabel }
     private var availableAges: [Int] { Array(Set(agedList.map { $0.age })).sorted() }
 
     /// Real capture year (EXIF/creation) when known, else the file's modified year.
@@ -653,12 +654,16 @@ struct FolderView: View {
                 aiEntries = await library.labeledEntries(under: root, paths: library.aiLabels, sort: library.sort)
             }
         }
-        // Taylor Swift label filter: gather items (recursively under this folder)
-        // that carry every selected label.
-        .task(id: "tslabels-\(tsLabelFilter.sorted().joined(separator: "|"))-\(library.labelsVersion)-\(library.sort.rawValue)") {
-            tsLabelEntries = tsLabelMode
-                ? await library.labeledEntries(under: url, paths: library.pathsMatchingAll(tsLabelFilter), sort: library.sort)
-                : []
+        // Taylor Swift label filter: either items carrying every selected label,
+        // or (No Label) every photo/video under this folder with no label yet.
+        .task(id: "tslabels-\(tsLabelFilter.sorted().joined(separator: "|"))-\(tsNoLabel)-\(library.labelsVersion)-\(library.sort.rawValue)") {
+            if tsNoLabel {
+                tsLabelEntries = await library.unlabeledMedia(under: url, labeled: library.allLabeledPaths(), sort: library.sort)
+            } else if !tsLabelFilter.isEmpty {
+                tsLabelEntries = await library.labeledEntries(under: url, paths: library.pathsMatchingAll(tsLabelFilter), sort: library.sort)
+            } else {
+                tsLabelEntries = []
+            }
         }
         // Load dimensions/HDR only when the resolution filter is on, and only once.
         .task(id: "specs-\(advancedActive)-\(entries.count)-\(url.path)") {
@@ -712,7 +717,8 @@ struct FolderView: View {
                 } else if loaded {
                     Image(systemName: "photo.on.rectangle.angled")
                         .font(.largeTitle).foregroundStyle(.secondary)
-                    Text(tsLabelMode ? "No items match these labels"
+                    Text(tsNoLabel ? "Everything here is labeled"
+                         : tsLabelMode ? "No items match these labels"
                          : showFavoritesOnly ? "No favorites here yet"
                          : showAIOnly ? "Nothing marked To AI yet"
                          : advancedActive ? "No matches for this filter"
@@ -732,7 +738,7 @@ struct FolderView: View {
             HStack(spacing: 10) {
                 Button {
                     showFavoritesOnly.toggle()
-                    if showFavoritesOnly { showAIOnly = false; tsLabelFilter.removeAll() }
+                    if showFavoritesOnly { showAIOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false }
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: showFavoritesOnly ? "heart.fill" : "heart")
@@ -745,7 +751,7 @@ struct FolderView: View {
 
                 Button {
                     showAIOnly.toggle()
-                    if showAIOnly { showFavoritesOnly = false; tsLabelFilter.removeAll() }
+                    if showAIOnly { showFavoritesOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false }
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "sparkles")
@@ -758,17 +764,19 @@ struct FolderView: View {
 
                 if inTaylorSwift {
                     Menu {
+                        Button { toggleTSNoLabel() } label: { check("No Label", tsNoLabel) }
+                        Divider()
                         ForEach(Library.taylorSwiftLabels, id: \.self) { name in
                             Button { toggleTSLabelFilter(name) } label: { check(name, tsLabelFilter.contains(name)) }
                         }
                         if tsLabelMode {
                             Divider()
-                            Button(role: .destructive) { tsLabelFilter.removeAll() } label: {
-                                Label("Clear Labels", systemImage: "xmark.circle")
+                            Button(role: .destructive) { tsLabelFilter.removeAll(); tsNoLabel = false } label: {
+                                Label("Clear", systemImage: "xmark.circle")
                             }
                         }
                     } label: {
-                        chip(tsLabelFilter.isEmpty ? "Labels" : "Labels (\(tsLabelFilter.count))")
+                        chip(tsNoLabel ? "No Label" : tsLabelFilter.isEmpty ? "Labels" : "Labels (\(tsLabelFilter.count))")
                             .foregroundStyle(tsLabelMode ? Color.accentColor : Color.primary)
                     }
                 }
@@ -1028,7 +1036,13 @@ struct FolderView: View {
     /// Toggles a Taylor Swift label in the filter (and leaves the other modes).
     private func toggleTSLabelFilter(_ name: String) {
         if tsLabelFilter.contains(name) { tsLabelFilter.remove(name) }
-        else { tsLabelFilter.insert(name); showFavoritesOnly = false; showAIOnly = false }
+        else { tsLabelFilter.insert(name); tsNoLabel = false; showFavoritesOnly = false; showAIOnly = false }
+    }
+
+    /// Toggles the "No Label" filter (unlabeled photos/videos), clearing the others.
+    private func toggleTSNoLabel() {
+        tsNoLabel.toggle()
+        if tsNoLabel { tsLabelFilter.removeAll(); showFavoritesOnly = false; showAIOnly = false }
     }
 
     /// Adds a Taylor Swift label to every selected item (or removes it if all
