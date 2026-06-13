@@ -46,6 +46,53 @@ enum MetadataLoader {
         "\(entry.url.path)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)" as NSString
     }
 
+    // MARK: - Persistent capture-date cache
+
+    /// Capture dates are the sort key for the whole app, so reading EXIF/AVAsset
+    /// for every file on every launch (the in-memory cache is lost on relaunch)
+    /// makes browsing a big folder on a slow external drive crawl. This store
+    /// persists `path|mtime|size → capture timestamp` to disk so a file's date is
+    /// read at most once, ever. `0` records a known "no embedded date" so those
+    /// files aren't re-read either. The key includes mtime+size, so an in-place
+    /// edit re-reads naturally.
+    private final class DateStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var map: [String: Double]
+        private var dirty = false
+        private let fileURL: URL
+
+        init() {
+            let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            fileURL = dir.appendingPathComponent("captureDates.json")
+            map = (try? Data(contentsOf: fileURL)).flatMap { try? JSONDecoder().decode([String: Double].self, from: $0) } ?? [:]
+        }
+
+        /// `.some(date?)` when the key is known (date or known-absent), `nil` when unseen.
+        func lookup(_ key: String) -> Date?? {
+            lock.lock(); defer { lock.unlock() }
+            guard let ts = map[key] else { return nil }
+            return .some(ts == 0 ? nil : Date(timeIntervalSince1970: ts))
+        }
+
+        func store(_ key: String, _ date: Date?) {
+            lock.lock(); map[key] = date?.timeIntervalSince1970 ?? 0; dirty = true; lock.unlock()
+        }
+
+        /// Writes the map to disk if anything changed (off the caller's hot path).
+        func flush() {
+            lock.lock()
+            guard dirty else { lock.unlock(); return }
+            let snapshot = map; dirty = false
+            lock.unlock()
+            if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: fileURL, options: .atomic) }
+        }
+    }
+
+    private static let dateStore = DateStore()
+
+    /// Persists any newly-read capture dates. Call after a batch of reads.
+    static func flushDateStore() { dateStore.flush() }
+
     // MARK: - Dimensions + HDR (for resolution/HDR filters)
 
     static func mediaSpec(for entry: Entry) async -> MediaSpec {
@@ -247,8 +294,14 @@ enum MetadataLoader {
     static func captureDate(for entry: Entry) async -> Date? {
         let key = cacheKey(for: entry)
         if let cached = dateCache.object(forKey: key) { return cached.value }
+        // Disk cache: a file's date is read at most once across launches.
+        if let known = dateStore.lookup(key as String) {
+            dateCache.setObject(CachedValue(known), forKey: key)
+            return known
+        }
         let date = await readCaptureDate(for: entry)
         dateCache.setObject(CachedValue(date), forKey: key)
+        dateStore.store(key as String, date)
         return date
     }
 

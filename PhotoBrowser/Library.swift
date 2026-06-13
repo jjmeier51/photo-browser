@@ -192,6 +192,7 @@ final class Library {
                     addNext()
                 }
             }
+            MetadataLoader.flushDateStore()    // persist any newly-read dates
             let order = Self.sortEntries(media.filter { ageByURL[$0.url] != nil }, by: sort)
             return order.map { (entry: $0, age: ageByURL[$0.url] ?? 0) }
         }.value
@@ -569,6 +570,7 @@ final class Library {
                 addNext()
             }
         }
+        MetadataLoader.flushDateStore()    // persist any newly-read dates
         return result
     }
 
