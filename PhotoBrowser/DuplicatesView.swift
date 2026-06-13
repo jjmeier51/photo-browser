@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreLocation
 
 /// Finds likely-duplicate photos/videos in a single folder and lets the user
 /// compare and prune them.
