@@ -13,7 +13,13 @@ struct MediaInfo: Sendable {
     var placeName: String?
 }
 
-enum MetadataLoader {
+/// Read-only metadata for photos/videos. The whole enum is `nonisolated` so
+/// none of this I/O (ImageIO, AVFoundation, CoreLocation, xattrs) is ever pulled
+/// onto the main actor by the project's default-MainActor isolation — the single
+/// biggest source of "the app froze" bugs on a slow external drive. (Several
+/// reads detach explicitly too; `nonisolated` closes the gaps, e.g. the video
+/// `mediaSpec` path that otherwise ran AVAsset loads on main.)
+nonisolated enum MetadataLoader {
 
     // MARK: - Per-file result cache
 
@@ -280,18 +286,22 @@ enum MetadataLoader {
         // file's own attributes. (The image path used to be unbounded, which could
         // still freeze the swipe-up panel on a huge/damaged photo.)
         switch entry.kind {
-        case .image: info = await withTimeout(8) { await loadImage(entry.url) } ?? MediaInfo()
-        case .video: info = await withTimeout(8) { await loadVideo(entry.url) } ?? MediaInfo()
+        case .image: info = await withTimeout(6) { await loadImage(entry.url) } ?? MediaInfo()
+        case .video: info = await withTimeout(6) { await loadVideo(entry.url) } ?? MediaInfo()
         default:     info = MediaInfo()
         }
         if info.date == nil { info.date = entry.modified }
         if let coord = info.coordinate, !CLLocationCoordinate2DIsValid(coord) {
-            info.coordinate = nil          // drop malformed GPS so the panel can't crash on it
-        }
-        if let coord = info.coordinate {
-            info.placeName = await withTimeout(5) { await reverseGeocode(coord) } ?? nil
+            info.coordinate = nil          // drop malformed GPS so nothing geocodes it
         }
         return info
+    }
+
+    /// Reverse-geocoded place name for a coordinate, bounded and crash-guarded.
+    /// Deliberately kept *out* of `load` so the core info shows immediately and a
+    /// slow/offline network lookup can never delay (or endanger) the panel.
+    static func placeName(for coordinate: CLLocationCoordinate2D) async -> String? {
+        await withTimeout(4) { await reverseGeocode(coordinate) } ?? nil
     }
 
     // MARK: - Time-boxed convenience wrappers for the info panel

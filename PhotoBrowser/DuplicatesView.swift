@@ -151,36 +151,54 @@ private struct DuplicateThumb: View {
 }
 
 /// Side-by-side comparison of two items in a duplicate group, with a
-/// same/different metadata breakdown, inline metadata editing, and delete.
+/// same/different metadata breakdown, full per-file editing (rename, EXIF date &
+/// location, caption, Favorite / To AI / Taylor Swift labels), and delete.
 private struct DuplicateCompareView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
     let group: DuplicateGroup
     var onDelete: (URL) -> Void
 
+    /// A mutable copy of the group's items so a rename (which changes a URL) is
+    /// reflected immediately in the previews, comparison, and later edits.
+    @State private var items: [Entry]
     @State private var leftIndex = 0
     @State private var rightIndex = 1
     @State private var leftInfo: MediaInfo?
     @State private var rightInfo: MediaInfo?
     @State private var editURL: URLBox?
+    @State private var renameTarget: Entry?
+    @State private var renameDraft = ""
+    @State private var captionTarget: URLBox?
+    @State private var captionDraft = ""
     @State private var confirmDelete: Entry?
     /// Bumped after an edit to force the metadata to reload.
     @State private var reloadToken = 0
 
-    private var entries: [Entry] { group.entries }
+    init(group: DuplicateGroup, onDelete: @escaping (URL) -> Void) {
+        self.group = group
+        self.onDelete = onDelete
+        _items = State(initialValue: group.entries)
+    }
+
+    private var entries: [Entry] { items }
 
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
-                if entries.count > 2 { pairPicker }
+                // Guarded so the one transient frame after deleting down to a
+                // single item (just before this view pops) can't index out of range.
+                if entries.count >= 2 {
+                    if entries.count > 2 { pairPicker }
 
-                HStack(alignment: .top, spacing: 12) {
-                    column(index: leftIndex)
-                    column(index: rightIndex)
+                    HStack(alignment: .top, spacing: 12) {
+                        column(index: leftIndex)
+                        column(index: rightIndex)
+                    }
+
+                    legend
+                    comparison
                 }
-
-                legend
-                comparison
             }
             .padding()
         }
@@ -189,6 +207,18 @@ private struct DuplicateCompareView: View {
         .sheet(item: $editURL, onDismiss: { reloadToken += 1 }) { wrapper in
             MetadataEditorView(urls: [wrapper.url])
         }
+        .alert("Rename File", isPresented: Binding(get: { renameTarget != nil },
+                                                   set: { if !$0 { renameTarget = nil } })) {
+            TextField("Name", text: $renameDraft)
+            Button("Rename") { performRename() }
+            Button("Cancel", role: .cancel) { renameTarget = nil }
+        }
+        .alert("Caption", isPresented: Binding(get: { captionTarget != nil },
+                                               set: { if !$0 { captionTarget = nil } })) {
+            TextField("Caption", text: $captionDraft)
+            Button("Save") { if let t = captionTarget { library.setCaption(captionDraft, for: t.url) }; captionTarget = nil }
+            Button("Cancel", role: .cancel) { captionTarget = nil }
+        }
         .confirmationDialog("Delete this file? This permanently removes it from the drive.",
                             isPresented: Binding(get: { confirmDelete != nil },
                                                  set: { if !$0 { confirmDelete = nil } }),
@@ -196,8 +226,12 @@ private struct DuplicateCompareView: View {
             Button("Delete", role: .destructive) { if let e = confirmDelete { delete(e) } }
             Button("Cancel", role: .cancel) { confirmDelete = nil }
         }
-        .task(id: "left-\(leftIndex)-\(reloadToken)") { leftInfo = await MetadataLoader.load(for: entries[leftIndex]) }
-        .task(id: "right-\(rightIndex)-\(reloadToken)") { rightInfo = await MetadataLoader.load(for: entries[rightIndex]) }
+        .task(id: "left-\(entries[safe: leftIndex]?.url.path ?? "")-\(reloadToken)") {
+            if let e = entries[safe: leftIndex] { leftInfo = await MetadataLoader.load(for: e) }
+        }
+        .task(id: "right-\(entries[safe: rightIndex]?.url.path ?? "")-\(reloadToken)") {
+            if let e = entries[safe: rightIndex] { rightInfo = await MetadataLoader.load(for: e) }
+        }
     }
 
     // MARK: - Pieces
@@ -221,15 +255,44 @@ private struct DuplicateCompareView: View {
         return VStack(spacing: 8) {
             DuplicateThumb(entry: entry, side: 150)
             Text(entry.name).font(.caption).lineLimit(2).multilineTextAlignment(.center)
-            HStack(spacing: 10) {
+            Menu {
+                Button { renameTarget = entry; renameDraft = entry.name } label: {
+                    Label("Rename…", systemImage: "character.cursor.ibeam")
+                }
                 Button { editURL = URLBox(url: entry.url) } label: {
-                    Label("Edit", systemImage: "pencil").labelStyle(.iconOnly)
+                    Label("Edit Date & Location…", systemImage: "calendar.badge.clock")
                 }
+                Button { captionTarget = URLBox(url: entry.url); captionDraft = library.captions[entry.url.path] ?? "" } label: {
+                    Label("Caption…", systemImage: "text.bubble")
+                }
+                Divider()
+                Button { library.toggleFavorite(entry.url) } label: {
+                    Label(library.isFavorite(entry.url) ? "Unfavorite" : "Favorite",
+                          systemImage: library.isFavorite(entry.url) ? "heart.slash" : "heart")
+                }
+                Button { library.toggleAI(entry.url) } label: {
+                    Label(library.isAI(entry.url) ? "Remove To AI" : "To AI", systemImage: "sparkles")
+                }
+                if entry.url.pathComponents.contains("Taylor Swift") {
+                    Menu {
+                        ForEach(Library.taylorSwiftLabels, id: \.self) { name in
+                            Button { library.toggleLabel(name, on: entry.url) } label: {
+                                if library.hasLabel(name, entry.url) { Label(name, systemImage: "checkmark") }
+                                else { Text(name) }
+                            }
+                        }
+                    } label: { Label("Taylor Swift Labels", systemImage: "tag") }
+                }
+                Divider()
                 Button(role: .destructive) { confirmDelete = entry } label: {
-                    Label("Delete", systemImage: "trash").labelStyle(.iconOnly)
+                    Label("Delete", systemImage: "trash")
                 }
+            } label: {
+                Label("Edit", systemImage: "slider.horizontal.3")
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 14).padding(.vertical, 6)
+                    .background(.thinMaterial, in: Capsule())
             }
-            .font(.title3)
         }
         .frame(maxWidth: .infinity)
     }
@@ -284,6 +347,21 @@ private struct DuplicateCompareView: View {
         ]
     }
 
+    /// Renames the file in place, re-keying its labels/caption, and updates the
+    /// local copy so the rest of the screen tracks the new URL.
+    private func performRename() {
+        defer { renameTarget = nil }
+        guard let target = renameTarget,
+              let idx = items.firstIndex(where: { $0.url == target.url }),
+              let newURL = FileActions.rename(target.url, to: renameDraft) else { return }
+        library.itemMoved(from: target.url, to: newURL)
+        let old = items[idx]
+        items[idx] = Entry(url: newURL, name: newURL.lastPathComponent,
+                           kind: old.kind, size: old.size, modified: old.modified)
+        library.contentDidChange()
+        reloadToken += 1
+    }
+
     private func delete(_ entry: Entry) {
         FileActions.delete([entry])
         library.clearOrigins([entry.url])
@@ -291,7 +369,20 @@ private struct DuplicateCompareView: View {
         library.contentDidChange()
         confirmDelete = nil
         onDelete(entry.url)
-        dismiss()
+        if let idx = items.firstIndex(where: { $0.url == entry.url }) { items.remove(at: idx) }
+        guard items.count >= 2 else { dismiss(); return }   // no longer a duplicate
+        leftIndex = min(leftIndex, items.count - 1)
+        rightIndex = min(rightIndex, items.count - 1)
+        if leftIndex == rightIndex { rightIndex = leftIndex == 0 ? 1 : 0 }
+        reloadToken += 1
+    }
+}
+
+private extension Array {
+    /// Bounds-checked subscript — returns nil instead of trapping, so a `.task`
+    /// id can reference an index that may have just shrunk after a delete.
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 

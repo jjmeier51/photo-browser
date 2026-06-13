@@ -8,6 +8,7 @@ struct InfoPanel: View {
     @State private var info: MediaInfo?
     @State private var fileCaption: String?
     @State private var savedFrom: String?
+    @State private var placeName: String?
     @State private var showCaptionEditor = false
     @State private var captionDraft = ""
 
@@ -47,7 +48,7 @@ struct InfoPanel: View {
                         row("Dimensions", dimensions)
                     }
                     row("Size", ByteCountFormatter.string(fromByteCount: entry.size, countStyle: .file))
-                    if let place = info?.placeName {
+                    if let place = placeName {
                         row("Location", place)
                     } else if let c = info?.coordinate {
                         row("Location", String(format: "%.5f, %.5f", c.latitude, c.longitude))
@@ -108,9 +109,15 @@ struct InfoPanel: View {
             async let infoTask = MetadataLoader.load(for: entry)
             async let captionTask = MetadataLoader.timeBoxedCaption(for: entry)
             async let sourceTask = MetadataLoader.timeBoxedSource(url: entry.url)
-            info = await infoTask
+            let loaded = await infoTask
+            info = loaded
             fileCaption = await captionTask
             savedFrom = await sourceTask
+            // Geocode last and independently — a slow/offline lookup must never
+            // hold up (or crash) the core metadata above.
+            if let coord = loaded.coordinate {
+                placeName = await MetadataLoader.placeName(for: coord)
+            }
         }
     }
 

@@ -77,9 +77,9 @@ struct EntryCell: View {
                     Text(entry.name)
                         .font(.caption2).lineLimit(1)
                         .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.8), radius: 2)
                         .padding(.horizontal, 4).padding(.vertical, 2)
                         .frame(maxWidth: .infinity)
-                        .background(.black.opacity(0.45))
                 }
             } else {
                 VStack(spacing: 6) {
