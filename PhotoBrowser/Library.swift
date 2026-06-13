@@ -13,6 +13,13 @@ final class Library {
     var sort: SortKey = .nameAsc
     var favorites: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.favorites") ?? [])
     var aiLabels: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.ai") ?? [])
+    /// Custom labels offered inside the "Taylor Swift" folder, keyed labelName →
+    /// set of file paths (an item may carry several). Persisted as a dict of
+    /// arrays since `UserDefaults` can't store `Set`.
+    var customLabels: [String: Set<String>] = {
+        let raw = UserDefaults.standard.dictionary(forKey: "photoBrowser.customLabels") as? [String: [String]] ?? [:]
+        return raw.mapValues(Set.init)
+    }()
     /// Bumps on any label change (toggle or move) so views re-query even when the
     /// label count is unchanged (e.g. a move rewrites a path without adding one).
     var labelsVersion = 0
@@ -230,6 +237,54 @@ final class Library {
         labelsVersion += 1
     }
 
+    // MARK: - Taylor Swift custom labels
+
+    /// The fixed set of labels offered inside the "Taylor Swift" folder.
+    static let taylorSwiftLabels = ["The Eras Tour", "Lover Bodysuit", "Grammys",
+                                    "Midnights Bodysuit", "Reputation Bodysuit"]
+
+    private func persistCustomLabels() {
+        UserDefaults.standard.set(customLabels.mapValues(Array.init), forKey: "photoBrowser.customLabels")
+    }
+
+    /// Every custom label currently attached to `url`.
+    func labels(for url: URL) -> Set<String> {
+        var names: Set<String> = []
+        for (name, paths) in customLabels where paths.contains(url.path) { names.insert(name) }
+        return names
+    }
+
+    func hasLabel(_ name: String, _ url: URL) -> Bool { customLabels[name]?.contains(url.path) ?? false }
+
+    func toggleLabel(_ name: String, on url: URL) { setLabel(name, on: url, !hasLabel(name, url)) }
+
+    func setLabel(_ name: String, on url: URL, _ on: Bool) {
+        var paths = customLabels[name] ?? []
+        if on { paths.insert(url.path) } else { paths.remove(url.path) }
+        customLabels[name] = paths
+        persistCustomLabels()
+        labelsVersion += 1
+    }
+
+    /// Paths carrying *every* one of `names` (AND semantics); empty `names` → empty.
+    func pathsMatchingAll(_ names: Set<String>) -> Set<String> {
+        guard !names.isEmpty else { return [] }
+        var result: Set<String>?
+        for name in names {
+            let paths = customLabels[name] ?? []
+            result = result.map { $0.intersection(paths) } ?? paths
+        }
+        return result ?? []
+    }
+
+    /// Drops the given items from every custom label (used after deletion).
+    func clearLabels(_ urls: [URL]) {
+        let paths = Set(urls.map(\.path))
+        for name in Array(customLabels.keys) { customLabels[name]?.subtract(paths) }
+        persistCustomLabels()
+        labelsVersion += 1
+    }
+
     /// Keeps Favorite / To AI labels and captions attached to an item after it's
     /// moved or renamed within the app. Rewrites the stored path (and, when a
     /// folder moves, every label/caption for items underneath it).
@@ -237,6 +292,7 @@ final class Library {
         let old = oldURL.path, new = newURL.path
         favorites = remapPaths(favorites, old: old, new: new)
         aiLabels  = remapPaths(aiLabels,  old: old, new: new)
+        customLabels = customLabels.mapValues { remapPaths($0, old: old, new: new) }
 
         captions = remapDict(captions, old: old, new: new)
         folderCovers = remapDict(folderCovers, old: old, new: new)
@@ -247,6 +303,7 @@ final class Library {
         UserDefaults.standard.set(captions, forKey: "photoBrowser.captions")
         UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
         UserDefaults.standard.set(photoOrigins, forKey: "photoBrowser.photoOrigins")
+        persistCustomLabels()
         labelsVersion += 1
     }
 
@@ -286,6 +343,7 @@ final class Library {
         }
         favorites = migrateSet(favorites, map: mapped, removeSource: removeSource)
         aiLabels  = migrateSet(aiLabels,  map: mapped, removeSource: removeSource)
+        customLabels = customLabels.mapValues { migrateSet($0, map: mapped, removeSource: removeSource) }
         captions     = migrateDict(captions, map: mapped, removeSource: removeSource)
         photoOrigins = migrateDict(photoOrigins, map: mapped, removeSource: removeSource)
 
@@ -319,6 +377,7 @@ final class Library {
         UserDefaults.standard.set(captions, forKey: "photoBrowser.captions")
         UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
         UserDefaults.standard.set(photoOrigins, forKey: "photoBrowser.photoOrigins")
+        persistCustomLabels()
         labelsVersion += 1
         changeToken += 1
     }

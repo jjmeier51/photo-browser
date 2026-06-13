@@ -17,6 +17,8 @@ struct InfoPanel: View {
         return fileCaption ?? ""
     }
 
+    private var inTaylorSwift: Bool { entry.url.pathComponents.contains("Taylor Swift") }
+
     var body: some View {
         NavigationStack {
             List {
@@ -56,6 +58,22 @@ struct InfoPanel: View {
                     let labels = [library.isFavorite(entry.url) ? "Favorite" : nil,
                                   library.isAI(entry.url) ? "To AI" : nil].compactMap { $0 }
                     row("Labels", labels.isEmpty ? "None" : labels.joined(separator: ", "))
+                }
+
+                if inTaylorSwift {
+                    Section("Taylor Swift Labels") {
+                        ForEach(Library.taylorSwiftLabels, id: \.self) { name in
+                            Button { library.toggleLabel(name, on: entry.url) } label: {
+                                HStack {
+                                    Text(name).foregroundStyle(.primary)
+                                    Spacer()
+                                    if library.hasLabel(name, entry.url) {
+                                        Image(systemName: "checkmark").foregroundStyle(.tint)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             .navigationTitle("Info")

@@ -62,6 +62,9 @@ struct FolderView: View {
     @State private var showAIOnly = false
     @State private var aiEntries: [Entry] = []
     @State private var labelKind: LabelKind = .all
+    @State private var tsLabelFilter: Set<String> = []
+    @State private var tsLabelEntries: [Entry] = []
+    @State private var showDuplicates = false
     @State private var videoRes: VideoRes = .all
     @State private var imageRes: ImageRes = .all
     @State private var hdrOnly = false
@@ -98,6 +101,10 @@ struct FolderView: View {
 
     private var advancedActive: Bool { videoRes != .all || imageRes != .all || hdrOnly }
     private var labelMode: Bool { showFavoritesOnly || showAIOnly }
+    /// The bespoke labeling/filtering only appears inside the "Taylor Swift"
+    /// folder (or any folder nested under it).
+    private var inTaylorSwift: Bool { url.pathComponents.contains("Taylor Swift") }
+    private var tsLabelMode: Bool { !tsLabelFilter.isEmpty }
     private var availableAges: [Int] { Array(Set(agedList.map { $0.age })).sorted() }
 
     /// Real capture year (EXIF/creation) when known, else the file's modified year.
@@ -145,6 +152,13 @@ struct FolderView: View {
 
     private var filteredRaw: [Entry] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+
+        // Taylor Swift label mode: items carrying every selected label (AND),
+        // gathered recursively under this folder.
+        if tsLabelMode {
+            let base = applyType(tsLabelEntries)
+            return q.isEmpty ? base : base.filter { matches($0, q) }
+        }
 
         // Favorites / To AI mode: labeled items + folder/photo/video sub-filter.
         if labelMode {
@@ -540,6 +554,9 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showMegaImport) {
                 MegaImportView(targetFolder: url) { Task { await reload() } }
             }
+            .fullScreenCover(isPresented: $showDuplicates) {
+                DuplicatesView(folder: url)
+            }
             .overlay(alignment: .bottom) { if selecting { selectionBar } }
             .overlay(alignment: .bottomLeading) {
                 if isRoot && !selecting {
@@ -636,6 +653,13 @@ struct FolderView: View {
                 aiEntries = await library.labeledEntries(under: root, paths: library.aiLabels, sort: library.sort)
             }
         }
+        // Taylor Swift label filter: gather items (recursively under this folder)
+        // that carry every selected label.
+        .task(id: "tslabels-\(tsLabelFilter.sorted().joined(separator: "|"))-\(library.labelsVersion)-\(library.sort.rawValue)") {
+            tsLabelEntries = tsLabelMode
+                ? await library.labeledEntries(under: url, paths: library.pathsMatchingAll(tsLabelFilter), sort: library.sort)
+                : []
+        }
         // Load dimensions/HDR only when the resolution filter is on, and only once.
         .task(id: "specs-\(advancedActive)-\(entries.count)-\(url.path)") {
             if advancedActive, fileSpecs.isEmpty {
@@ -688,7 +712,8 @@ struct FolderView: View {
                 } else if loaded {
                     Image(systemName: "photo.on.rectangle.angled")
                         .font(.largeTitle).foregroundStyle(.secondary)
-                    Text(showFavoritesOnly ? "No favorites here yet"
+                    Text(tsLabelMode ? "No items match these labels"
+                         : showFavoritesOnly ? "No favorites here yet"
                          : showAIOnly ? "Nothing marked To AI yet"
                          : advancedActive ? "No matches for this filter"
                          : "This folder is empty")
@@ -707,7 +732,7 @@ struct FolderView: View {
             HStack(spacing: 10) {
                 Button {
                     showFavoritesOnly.toggle()
-                    if showFavoritesOnly { showAIOnly = false }
+                    if showFavoritesOnly { showAIOnly = false; tsLabelFilter.removeAll() }
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: showFavoritesOnly ? "heart.fill" : "heart")
@@ -720,7 +745,7 @@ struct FolderView: View {
 
                 Button {
                     showAIOnly.toggle()
-                    if showAIOnly { showFavoritesOnly = false }
+                    if showAIOnly { showFavoritesOnly = false; tsLabelFilter.removeAll() }
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "sparkles")
@@ -729,6 +754,23 @@ struct FolderView: View {
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     .background(.thinMaterial, in: Capsule())
                     .foregroundStyle(showAIOnly ? Color.yellow : Color.primary)
+                }
+
+                if inTaylorSwift {
+                    Menu {
+                        ForEach(Library.taylorSwiftLabels, id: \.self) { name in
+                            Button { toggleTSLabelFilter(name) } label: { check(name, tsLabelFilter.contains(name)) }
+                        }
+                        if tsLabelMode {
+                            Divider()
+                            Button(role: .destructive) { tsLabelFilter.removeAll() } label: {
+                                Label("Clear Labels", systemImage: "xmark.circle")
+                            }
+                        }
+                    } label: {
+                        chip(tsLabelFilter.isEmpty ? "Labels" : "Labels (\(tsLabelFilter.count))")
+                            .foregroundStyle(tsLabelMode ? Color.accentColor : Color.primary)
+                    }
                 }
 
                 if labelMode {
@@ -827,6 +869,7 @@ struct FolderView: View {
                     Button { playSlideshow() } label: { Label("Play Slideshow", systemImage: "play.rectangle") }
                         .disabled(mediaItems.isEmpty)
                     Button { showNewFolder = true } label: { Label("New Folder", systemImage: "folder.badge.plus") }
+                    Button { showDuplicates = true } label: { Label("Find Duplicates", systemImage: "doc.on.doc") }
                     Button { photosLibraryMoves = false; showPhotosLibrary = true } label: { Label("Photos Library", systemImage: "photo.stack") }
                     Divider()
                     Button { pickFolder(.transfer) } label: {
@@ -893,6 +936,15 @@ struct FolderView: View {
             Spacer()
             Menu {
                 Button { startBulkMetadataEdit() } label: { Label("Edit Metadata", systemImage: "calendar.badge.clock") }
+                if inTaylorSwift {
+                    Menu {
+                        ForEach(Library.taylorSwiftLabels, id: \.self) { name in
+                            Button { bulkToggleTSLabel(name) } label: {
+                                check(name, !selection.isEmpty && selectedEntries().allSatisfy { library.hasLabel(name, $0.url) })
+                            }
+                        }
+                    } label: { Label("Taylor Swift Label", systemImage: "tag") }
+                }
                 Menu {
                     Button { bulkRotate(2) } label: { Label("Rotate 180°", systemImage: "arrow.clockwise") }
                     Button { bulkRotate(-1) } label: { Label("Rotate Left", systemImage: "rotate.left") }
@@ -970,6 +1022,22 @@ struct FolderView: View {
         let sel = selectedEntries()
         let allOn = sel.allSatisfy { library.isAI($0.url) }
         for e in sel where library.isAI(e.url) == allOn { library.toggleAI(e.url) }
+        selecting = false; selection.removeAll()
+    }
+
+    /// Toggles a Taylor Swift label in the filter (and leaves the other modes).
+    private func toggleTSLabelFilter(_ name: String) {
+        if tsLabelFilter.contains(name) { tsLabelFilter.remove(name) }
+        else { tsLabelFilter.insert(name); showFavoritesOnly = false; showAIOnly = false }
+    }
+
+    /// Adds a Taylor Swift label to every selected item (or removes it if all
+    /// already carry it) — the same all-or-nothing rule as Favorite / To AI.
+    private func bulkToggleTSLabel(_ name: String) {
+        let sel = selectedEntries()
+        guard !sel.isEmpty else { return }
+        let allOn = sel.allSatisfy { library.hasLabel(name, $0.url) }
+        for e in sel { library.setLabel(name, on: e.url, !allOn) }
         selecting = false; selection.removeAll()
     }
 
