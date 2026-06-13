@@ -232,6 +232,7 @@ enum FileActions {
                     do {
                         if move { try fm.moveItem(at: file, to: target) }
                         else { try fm.copyItem(at: file, to: target) }
+                        await preserveCaptureDate(target)   // keep capture date, not the copy time
                         return (true, file.lastPathComponent)
                     } catch { return (false, file.lastPathComponent) }
                 }
@@ -339,6 +340,7 @@ enum FileActions {
                         return nil
                     }
                     guard let dest = await copyRepresentation(provider, typeID: typeID, into: folder) else { return nil }
+                    await preserveCaptureDate(dest)
                     return (url: dest, assetID: result.assetIdentifier)
                 }
             }
@@ -349,6 +351,18 @@ enum FileActions {
             }
         }
         return imported
+    }
+
+    /// Sets a media file's modification date to its embedded capture date, so a
+    /// freshly imported/copied file sorts by when it was *taken*, not when it was
+    /// added to the drive (the import writes the file "now"). No-op for non-media
+    /// or files with no readable capture date — those keep their existing date.
+    nonisolated static func preserveCaptureDate(_ url: URL) async {
+        let kind = classify(url: url, isDirectory: false)
+        guard kind == .image || kind == .video else { return }
+        let entry = Entry(url: url, name: url.lastPathComponent, kind: kind, size: 0, modified: Date())
+        guard let captured = await MetadataLoader.captureDate(for: entry) else { return }
+        try? FileManager.default.setAttributes([.modificationDate: captured], ofItemAtPath: url.path)
     }
 
     private static func copyRepresentation(_ provider: NSItemProvider, typeID: String, into folder: URL) async -> URL? {

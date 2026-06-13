@@ -1100,6 +1100,31 @@ struct FolderView: View {
         async let caps = library.fileCaptions(for: list)
         captureDates = await dates
         fileCaptions = await caps
+        // The date-based sorts order by the *file's* modified date, which for an
+        // imported/copied item is the time it was added. Now that the real capture
+        // dates are in, re-order by those so "newest" reflects when media was taken
+        // (down to the time, not just the day).
+        if library.sort == .smart || library.sort == .dateDesc || library.sort == .dateAsc {
+            entries = sortedByCaptureDate(entries)
+        }
+    }
+
+    /// Re-orders a date-sorted listing by true capture date+time (folders first,
+    /// then media by `captureDates`, falling back to the file's modified date).
+    private func sortedByCaptureDate(_ list: [Entry]) -> [Entry] {
+        let ascending = (library.sort == .dateAsc)
+        let smart = (library.sort == .smart)
+        func key(_ e: Entry) -> Date { captureDates[e.url] ?? e.modified }
+        return list.sorted { a, b in
+            if a.isFolder != b.isFolder { return a.isFolder }
+            if a.isFolder {
+                return smart ? a.name.localizedStandardCompare(b.name) == .orderedAscending
+                             : (ascending ? a.modified < b.modified : a.modified > b.modified)
+            }
+            let ka = key(a), kb = key(b)
+            if ka != kb { return ascending ? ka < kb : ka > kb }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
     }
 
     // MARK: - Caption / folder / move actions

@@ -487,12 +487,20 @@ enum PhotosThumbs {
                 }
             }
         }
+        // Stamp the file with the asset's capture date so it sorts by when it was
+        // taken, not when it was imported (writeData sets the file's date to "now").
+        func finish(_ dest: URL) -> URL {
+            if let captured = asset.creationDate {
+                try? FileManager.default.setAttributes([.modificationDate: captured], ofItemAtPath: dest.path)
+            }
+            return dest
+        }
         let dest = FileActions.uniqueDestination(for: resource.originalFilename, in: folder)
-        if await write(to: dest) { return dest }
+        if await write(to: dest) { return finish(dest) }
         // Concurrent imports can pick the same name before either file exists; clear
         // any partial write and retry once with a guaranteed-unique name.
         try? FileManager.default.removeItem(at: dest)
         let unique = folder.appendingPathComponent(String(UUID().uuidString.prefix(8)) + "-" + resource.originalFilename)
-        return await write(to: unique) ? unique : nil
+        return await write(to: unique) ? finish(unique) : nil
     }
 }
