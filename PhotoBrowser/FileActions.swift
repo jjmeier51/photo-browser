@@ -365,6 +365,51 @@ enum FileActions {
         try? FileManager.default.setAttributes([.modificationDate: captured], ofItemAtPath: url.path)
     }
 
+    /// Repairs items whose modified date was changed to the import time: walks
+    /// `folder` (recursively) and resets each photo/video's modified date to its
+    /// *embedded* capture date (EXIF / QuickTime), which the import never touched.
+    /// Only rewrites when the dates actually differ; files with no embedded date
+    /// are left as-is. Returns (fixed, scanned).
+    nonisolated static func restoreCaptureDates(
+        in folder: URL, progress: @escaping @Sendable (Int, Int) -> Void) async -> (fixed: Int, scanned: Int) {
+        let fm = FileManager.default
+        var files: [URL] = []
+        if let walker = fm.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey],
+                                      options: [.skipsHiddenFiles]) {
+            for case let url as URL in walker {
+                let kind = classify(url: url, isDirectory: false)
+                if kind == .image || kind == .video { files.append(url) }
+            }
+        }
+        let total = files.count
+        guard total > 0 else { return (0, 0) }
+
+        var fixed = 0, done = 0, index = 0
+        await withTaskGroup(of: Bool.self) { group in
+            func addNext() {
+                guard index < total else { return }
+                let url = files[index]; index += 1
+                group.addTask {
+                    let kind = classify(url: url, isDirectory: false)
+                    let entry = Entry(url: url, name: url.lastPathComponent, kind: kind, size: 0, modified: Date())
+                    guard let captured = await MetadataLoader.captureDate(for: entry) else { return false }
+                    let current = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                    if let current, abs(current.timeIntervalSince(captured)) < 1 { return false }   // already correct
+                    try? FileManager.default.setAttributes([.modificationDate: captured], ofItemAtPath: url.path)
+                    return true
+                }
+            }
+            for _ in 0..<min(6, total) { addNext() }
+            while let changed = await group.next() {
+                if changed { fixed += 1 }
+                done += 1
+                progress(done, total)
+                addNext()
+            }
+        }
+        return (fixed, total)
+    }
+
     private static func copyRepresentation(_ provider: NSItemProvider, typeID: String, into folder: URL) async -> URL? {
         await withCheckedContinuation { (cont: CheckedContinuation<URL?, Never>) in
             // The temp file is only valid inside this completion, so copy now.

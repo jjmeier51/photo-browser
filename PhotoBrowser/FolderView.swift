@@ -66,6 +66,9 @@ struct FolderView: View {
     @State private var tsNoLabel = false
     @State private var tsLabelEntries: [Entry] = []
     @State private var showDuplicates = false
+    @State private var confirmFixDates = false
+    @State private var fixingDates = false
+    @State private var fixProgress: Double = 0
     @State private var videoRes: VideoRes = .all
     @State private var imageRes: ImageRes = .all
     @State private var hdrOnly = false
@@ -522,6 +525,12 @@ struct FolderView: View {
                 Button("Create") { createFolder() }
                 Button("Cancel", role: .cancel) { newFolderName = "" }
             }
+            .alert("Restore Capture Dates", isPresented: $confirmFixDates) {
+                Button("Restore") { runRestoreDates() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Resets each photo and video in this folder (and its subfolders) to its original capture date, fixing items whose date was changed when added. Items with no embedded date are left unchanged.")
+            }
             .alert("Export All Frames", isPresented: $showExportPrompt) {
                 TextField("Folder name", text: $exportName)
                 Button("Export") { if let t = exportTarget { exportFrames(t, name: exportName) } }
@@ -573,6 +582,7 @@ struct FolderView: View {
             .overlay { if exporting { exportingOverlay } }
             .overlay { if editProcessing { editingOverlay } }
             .overlay { if importing { importingOverlay } }
+            .overlay { if fixingDates { fixingOverlay } }
             .overlay { emptyOverlay }
             .fullScreenCover(item: $transferItem) { item in
                 DriveTransferView(source: item.url, destination: url)
@@ -614,6 +624,36 @@ struct FolderView: View {
         }
         .padding(24)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    @ViewBuilder private var fixingOverlay: some View {
+        VStack(spacing: 12) {
+            Text("Restoring dates…").font(.subheadline.weight(.medium))
+            ProgressView(value: fixProgress).progressViewStyle(.linear).frame(width: 220)
+            Text("\(Int(fixProgress * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+        }
+        .padding(24).frame(maxWidth: 280)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// Resets each photo/video under this folder to its embedded capture date,
+    /// repairing items whose modified date was changed to the import time.
+    private func runRestoreDates() {
+        fixingDates = true; fixProgress = 0
+        let bg = BackgroundTaskHolder()
+        bg.begin(name: "Restore Capture Dates")
+        Task {
+            let (fixed, total) = await FileActions.restoreCaptureDates(in: url) { done, tot in
+                Task { @MainActor in fixProgress = tot > 0 ? Double(done) / Double(tot) : 1 }
+            }
+            fixingDates = false
+            bg.end()
+            resultMessage = total == 0
+                ? "No photos or videos here."
+                : "Restored \(fixed) of \(total) item(s) to their capture date."
+            library.contentDidChange()
+            await reload()
+        }
     }
 
     private func handlePhotosImport(_ results: [PHPickerResult]) {
@@ -878,6 +918,7 @@ struct FolderView: View {
                         .disabled(mediaItems.isEmpty)
                     Button { showNewFolder = true } label: { Label("New Folder", systemImage: "folder.badge.plus") }
                     Button { showDuplicates = true } label: { Label("Find Duplicates", systemImage: "doc.on.doc") }
+                    Button { confirmFixDates = true } label: { Label("Restore Capture Dates", systemImage: "clock.arrow.circlepath") }
                     Button { photosLibraryMoves = false; showPhotosLibrary = true } label: { Label("Photos Library", systemImage: "photo.stack") }
                     Divider()
                     Button { pickFolder(.transfer) } label: {
