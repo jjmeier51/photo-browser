@@ -283,16 +283,19 @@ private struct DuplicateCompareView: View {
                         }
                     } label: { Label("Taylor Swift Labels", systemImage: "tag") }
                 }
-                Divider()
-                Button(role: .destructive) { confirmDelete = entry } label: {
-                    Label("Delete", systemImage: "trash")
-                }
             } label: {
                 Label("Edit", systemImage: "slider.horizontal.3")
                     .font(.subheadline.weight(.medium))
                     .padding(.horizontal, 14).padding(.vertical, 6)
                     .background(.thinMaterial, in: Capsule())
             }
+            Button(role: .destructive) { confirmDelete = entry } label: {
+                Label("Delete", systemImage: "trash")
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 14).padding(.vertical, 6)
+                    .background(.thinMaterial, in: Capsule())
+            }
+            .tint(.red)
         }
         .frame(maxWidth: .infinity)
     }
