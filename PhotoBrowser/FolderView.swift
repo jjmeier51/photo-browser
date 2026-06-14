@@ -46,6 +46,9 @@ struct FolderView: View {
     /// Years present under each subfolder — fills in while a year filter is active
     /// so folders with nothing from that year can be hidden.
     @State private var folderYears: [URL: Set<Int>] = [:]
+    /// Image URLs that have a same-basename sibling video (Live Photo pairs), for
+    /// the LIVE badge. Computed once per listing — no per-cell filesystem checks.
+    @State private var liveImageURLs: Set<URL> = []
     @State private var fileCaptions: [URL: String] = [:]
     @State private var showCaptionEditor = false
     @State private var captionDraft = ""
@@ -91,6 +94,7 @@ struct FolderView: View {
     @State private var editEntry: Entry?
     @State private var editProcessing = false
     @State private var editProgress: Double = 0
+    @State private var makingLive = false
     @State private var metadataTargets: [URL] = []
     @State private var showMetadataEditor = false
     @State private var transferItem: PreviewItem?
@@ -305,6 +309,7 @@ struct FolderView: View {
     private func cell(for entry: Entry) -> some View {
         EntryCell(entry: entry, selecting: selecting, selected: selection.contains(entry.url),
                   favorited: library.isFavorite(entry.url), aiLabeled: library.isAI(entry.url),
+                  isLive: liveImageURLs.contains(entry.url),
                   coverURL: entry.isFolder ? library.coverURL(for: entry.url) : nil)
             .background {
                 if selecting {
@@ -589,6 +594,7 @@ struct FolderView: View {
             }
             .overlay { if exporting { exportingOverlay } }
             .overlay { if editProcessing { editingOverlay } }
+            .overlay { if makingLive { makingLiveOverlay } }
             .overlay { if importing { importingOverlay } }
             .overlay { if fixingDates { fixingOverlay } }
             .overlay { emptyOverlay }
@@ -611,6 +617,15 @@ struct FolderView: View {
         library.migrateMetadata(fromRoot: oldRoot, toRoot: url, removeSource: true, verifyExists: true)
         if accessed { oldRoot.stopAccessingSecurityScopedResource() }
         resultMessage = "Re-linked Favorites, covers, and captions to this drive."
+    }
+
+    @ViewBuilder private var makingLiveOverlay: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("Making Live Photo…").font(.subheadline.weight(.medium))
+        }
+        .padding(24).frame(maxWidth: 280)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
 
     @ViewBuilder private var editingOverlay: some View {
@@ -1024,6 +1039,9 @@ struct FolderView: View {
                 } label: { Label("Rotate", systemImage: "rotate.right") }
                 Button { duplicateEntries(selectedEntries()) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
                 Button { showCopyPicker = true } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
+                if let pair = selectedLivePhotoPair {
+                    Button { makeLivePhoto(pair) } label: { Label("Make Live Photo", systemImage: "livephoto") }
+                }
                 Divider()
                 Button { saveToPhotos() } label: { Label("Save to Photos", systemImage: "photo.on.rectangle") }
                 Button { exportToFiles() } label: { Label("Save to Files", systemImage: "folder") }
@@ -1155,6 +1173,7 @@ struct FolderView: View {
         captureDates = [:]; fileCaptions = [:]; fileSpecs = [:]; folderYears = [:]
         let list = await library.listing(of: url, sort: library.sort)
         entries = list
+        liveImageURLs = Self.detectLivePairs(in: list)
         loaded = true
         // Capture dates + captions only (cheap). Media specs — which open every
         // video with AVAsset — load lazily, only when the resolution/HDR filter
@@ -1267,6 +1286,50 @@ struct FolderView: View {
     }
 
     private func selectedEntries() -> [Entry] { filtered.filter { selection.contains($0.url) } }
+
+    /// Image URLs in `entries` that have a same-basename sibling video.
+    private static func detectLivePairs(in entries: [Entry]) -> Set<URL> {
+        let videoBases = Set(entries.filter { $0.kind == .video }
+            .map { $0.url.deletingPathExtension().lastPathComponent.lowercased() })
+        guard !videoBases.isEmpty else { return [] }
+        return Set(entries.filter {
+            $0.kind == .image &&
+            videoBases.contains($0.url.deletingPathExtension().lastPathComponent.lowercased())
+        }.map(\.url))
+    }
+
+    /// Exactly one selected photo + one selected video — the input for Make Live Photo.
+    private var selectedLivePhotoPair: (image: URL, video: URL)? {
+        let sel = selectedEntries()
+        guard sel.count == 2,
+              let image = sel.first(where: { $0.kind == .image }),
+              let video = sel.first(where: { $0.kind == .video }) else { return nil }
+        return (image.url, video.url)
+    }
+
+    /// Pairs a photo + video into a Live Photo (shared asset id written into both),
+    /// renaming the video to share the photo's base name so the pair is recognised.
+    private func makeLivePhoto(_ pair: (image: URL, video: URL)) {
+        selecting = false; selection.removeAll()
+        makingLive = true
+        let bg = BackgroundTaskHolder()
+        bg.begin(name: "Make Live Photo")
+        Task {
+            let result = await FileActions.makeLivePhoto(image: pair.image, video: pair.video)
+            makingLive = false
+            bg.end()
+            if result.ok {
+                if let newVideo = result.newVideo, newVideo != pair.video {
+                    library.itemMoved(from: pair.video, to: newVideo)   // labels follow the rename
+                }
+                library.contentDidChange()
+                resultMessage = "Live Photo created. Touch and hold the photo to play it."
+            } else {
+                resultMessage = "Couldn’t make a Live Photo from those two items."
+            }
+            await reload()
+        }
+    }
 
     private func performDelete() {
         let targets = selectedEntries()

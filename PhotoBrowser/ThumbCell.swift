@@ -10,6 +10,7 @@ struct EntryCell: View {
     var selected: Bool = false
     var favorited: Bool = false
     var aiLabeled: Bool = false
+    var isLive: Bool = false
     var coverURL: URL? = nil
 
     @State private var image: UIImage?
@@ -31,6 +32,16 @@ struct EntryCell: View {
                 if entry.kind == .video, let duration {
                     Text(duration)
                         .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(.black.opacity(0.5), in: Capsule())
+                        .padding(4)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if isLive {
+                    Label("LIVE", systemImage: "livephoto")
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 4).padding(.vertical, 1)
                         .background(.black.opacity(0.5), in: Capsule())

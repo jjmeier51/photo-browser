@@ -1,6 +1,7 @@
 import SwiftUI
 import ImageIO
 import UIKit
+import PhotosUI
 
 /// Shows a photo with pinch + double-tap zoom. Loads a fast embedded-thumbnail
 /// preview first, then the full image. Swipes (handled in UIKit, reliable over
@@ -17,15 +18,24 @@ struct ZoomableImageView: View {
 
     @State private var displayImage: UIImage?
     @State private var badge: String?
+    @State private var livePhoto: PHLivePhoto?
+    @State private var livePlaying = false
 
     var body: some View {
-        Group {
+        ZStack {
             if let displayImage {
                 ZoomScrollView(image: displayImage, onZoomChanged: onZoomChanged,
                                onDismiss: onDismiss, onInfo: onInfo, onToggleChrome: onToggleChrome,
-                               onPrev: onPrev, onNext: onNext)
+                               onPrev: onPrev, onNext: onNext,
+                               onLivePress: { pressing in if livePhoto != nil { livePlaying = pressing } })
             } else {
                 Color.clear
+            }
+            // The motion plays only while held; the still shows (and zooms) otherwise.
+            if let livePhoto {
+                LivePhotoView(livePhoto: livePhoto, playing: livePlaying)
+                    .allowsHitTesting(false)
+                    .opacity(livePlaying ? 1 : 0)
             }
         }
         .ignoresSafeArea()                 // fill the whole screen, like the video page
@@ -52,6 +62,35 @@ struct ZoomableImageView: View {
                 coverSource?.staticImage = full
             }
         }
+        // If this still has a motion sibling, load it as a Live Photo for tap-and-hold.
+        .task(id: url) {
+            livePhoto = nil; livePlaying = false
+            guard let video = await Self.findLivePair(for: url) else { return }
+            livePhoto = await Self.loadLivePhoto(image: url, video: video)
+        }
+    }
+
+    private static func findLivePair(for url: URL) async -> URL? {
+        await Task.detached(priority: .utility) { livePhotoVideoURL(for: url) }.value
+    }
+
+    /// Builds a `PHLivePhoto` from the still + motion file URLs (nil if they aren't
+    /// a valid Live Photo pair — e.g. the identifiers don't match).
+    private static func loadLivePhoto(image: URL, video: URL) async -> PHLivePhoto? {
+        final class Once: @unchecked Sendable { let lock = NSLock(); var done = false }
+        let once = Once()
+        return await withCheckedContinuation { (cont: CheckedContinuation<PHLivePhoto?, Never>) in
+            PHLivePhoto.request(withResourceFileURLs: [image, video], placeholderImage: nil,
+                                targetSize: .zero, contentMode: .aspectFit) { live, info in
+                let cancelled = (info[PHLivePhotoInfoCancelledKey] as? Bool) ?? false
+                let failed = info[PHLivePhotoInfoErrorKey] != nil
+                // The handler may fire more than once; resume on the first usable
+                // result (a live photo, even if degraded) or a terminal failure.
+                guard live != nil || cancelled || failed else { return }
+                once.lock.lock(); defer { once.lock.unlock() }
+                if !once.done { once.done = true; cont.resume(returning: live) }
+            }
+        }
     }
 
     /// `fullQuality == false` allows ImageIO to use the file's embedded thumbnail
@@ -70,6 +109,30 @@ struct ZoomableImageView: View {
             guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
             return UIImage(cgImage: cg)
         }.value
+    }
+}
+
+/// Wraps `PHLivePhotoView`; plays/stops as `playing` toggles (driven by a
+/// long-press on the still). Aspect-fit so it lines up with the fitted photo.
+private struct LivePhotoView: UIViewRepresentable {
+    let livePhoto: PHLivePhoto
+    var playing: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator { var wasPlaying = false }
+
+    func makeUIView(context: Context) -> PHLivePhotoView {
+        let v = PHLivePhotoView()
+        v.contentMode = .scaleAspectFit
+        v.isUserInteractionEnabled = false
+        return v
+    }
+
+    func updateUIView(_ v: PHLivePhotoView, context: Context) {
+        if v.livePhoto !== livePhoto { v.livePhoto = livePhoto }
+        guard playing != context.coordinator.wasPlaying else { return }
+        context.coordinator.wasPlaying = playing
+        if playing { v.startPlayback(with: .full) } else { v.stopPlayback() }
     }
 }
 
@@ -133,10 +196,11 @@ private struct ZoomScrollView: UIViewRepresentable {
     var onToggleChrome: () -> Void
     var onPrev: () -> Void
     var onNext: () -> Void
+    var onLivePress: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onZoomChanged: onZoomChanged, onDismiss: onDismiss, onInfo: onInfo,
-                    onToggleChrome: onToggleChrome, onPrev: onPrev, onNext: onNext)
+                    onToggleChrome: onToggleChrome, onPrev: onPrev, onNext: onNext, onLivePress: onLivePress)
     }
 
     func makeUIView(context: Context) -> CenteringScrollView {
@@ -176,6 +240,11 @@ private struct ZoomScrollView: UIViewRepresentable {
             scroll.addGestureRecognizer(g)
         }
 
+        // Touch-and-hold plays the Live Photo motion (no-op for non-live stills).
+        let longPress = UILongPressGestureRecognizer(target: context.coordinator,
+                                                     action: #selector(Coordinator.handleLongPress(_:)))
+        scroll.addGestureRecognizer(longPress)
+
         return scroll
     }
 
@@ -185,6 +254,7 @@ private struct ZoomScrollView: UIViewRepresentable {
         context.coordinator.onToggleChrome = onToggleChrome
         context.coordinator.onPrev = onPrev
         context.coordinator.onNext = onNext
+        context.coordinator.onLivePress = onLivePress
         if uiView.imageView.image !== image {
             uiView.setImage(image)
         }
@@ -198,18 +268,29 @@ private struct ZoomScrollView: UIViewRepresentable {
         var onToggleChrome: () -> Void
         var onPrev: () -> Void
         var onNext: () -> Void
+        var onLivePress: (Bool) -> Void
 
         init(onZoomChanged: ((Bool) -> Void)?, onDismiss: @escaping () -> Void, onInfo: @escaping () -> Void,
-             onToggleChrome: @escaping () -> Void, onPrev: @escaping () -> Void, onNext: @escaping () -> Void) {
+             onToggleChrome: @escaping () -> Void, onPrev: @escaping () -> Void, onNext: @escaping () -> Void,
+             onLivePress: @escaping (Bool) -> Void) {
             self.onZoomChanged = onZoomChanged
             self.onDismiss = onDismiss
             self.onInfo = onInfo
             self.onToggleChrome = onToggleChrome
             self.onPrev = onPrev
             self.onNext = onNext
+            self.onLivePress = onLivePress
         }
 
         @objc func handleSingleTap() { onToggleChrome() }
+
+        @objc func handleLongPress(_ g: UILongPressGestureRecognizer) {
+            switch g.state {
+            case .began: onLivePress(true)
+            case .ended, .cancelled, .failed: onLivePress(false)
+            default: break
+            }
+        }
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
             (scrollView as? CenteringScrollView)?.imageView

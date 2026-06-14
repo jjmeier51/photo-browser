@@ -127,3 +127,21 @@ func classify(url: URL, isDirectory: Bool) -> FileKind {
     if type.conforms(to: .pdf) { return .pdf }
     return .other
 }
+
+/// Video extensions that can serve as a Live Photo's motion part.
+let livePhotoVideoExtensions = ["mov", "MOV", "mp4", "MP4", "m4v", "M4V"]
+
+/// The sibling motion video for a still image — same base name, a video
+/// extension, in the same folder — or nil. The cheap basis for Live Photo
+/// pairing (whether the pair is a *valid* Live Photo is confirmed at play time).
+func livePhotoVideoURL(for imageURL: URL) -> URL? {
+    guard classify(url: imageURL, isDirectory: false) == .image else { return nil }
+    let dir = imageURL.deletingLastPathComponent()
+    let base = imageURL.deletingPathExtension().lastPathComponent
+    let fm = FileManager.default
+    for ext in livePhotoVideoExtensions {
+        let candidate = dir.appendingPathComponent("\(base).\(ext)")
+        if fm.fileExists(atPath: candidate.path) { return candidate }
+    }
+    return nil
+}

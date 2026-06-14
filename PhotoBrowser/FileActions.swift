@@ -487,6 +487,143 @@ enum FileActions {
         return PHAsset.fetchAssets(withLocalIdentifiers: [localId], options: nil).firstObject?.creationDate
     }
 
+    // MARK: - Live Photo creation
+
+    struct LivePhotoResult: Sendable { var ok: Bool; var newVideo: URL? }
+
+    /// Pairs a still photo + a video into a Live Photo: writes a shared asset
+    /// identifier into the photo's Apple maker note, and writes the motion part as a
+    /// QuickTime `.mov` (named to match the photo) carrying the matching
+    /// `content.identifier` and a "still-image-time" timed-metadata track, so
+    /// `PHLivePhoto` recognises the pair. All off-main. The timed-metadata track can
+    /// only be fully verified on-device — failures are non-destructive.
+    nonisolated static func makeLivePhoto(image: URL, video: URL) async -> LivePhotoResult {
+        let id = UUID().uuidString
+        guard writeAssetIdentifier(id, intoImage: image) else { return LivePhotoResult(ok: false, newVideo: nil) }
+        // The motion part is a QuickTime .mov named to match the photo (so the pair
+        // is detected) — unless a different file already holds that name.
+        let desired = video.deletingLastPathComponent()
+            .appendingPathComponent("\(image.deletingPathExtension().lastPathComponent).mov")
+        let final = (desired == video || !FileManager.default.fileExists(atPath: desired.path)) ? desired : video
+        guard await writeLivePhotoVideo(id, source: video, to: final) else { return LivePhotoResult(ok: false, newVideo: nil) }
+        if final.standardizedFileURL != video.standardizedFileURL {
+            try? FileManager.default.removeItem(at: video)   // original replaced by the identified .mov
+        }
+        return LivePhotoResult(ok: true, newVideo: final)
+    }
+
+    /// Embeds the asset identifier in the still's Apple maker note (key "17"), in place.
+    private nonisolated static func writeAssetIdentifier(_ id: String, intoImage url: URL) -> Bool {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let type = CGImageSourceGetType(src) else { return false }
+        var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        var maker = (props[kCGImagePropertyMakerAppleDictionary] as? [String: Any]) ?? [:]
+        maker["17"] = id
+        props[kCGImagePropertyMakerAppleDictionary] = maker
+        let tmp = url.deletingLastPathComponent().appendingPathComponent(".live-\(UUID().uuidString).tmp")
+        guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL, type, 1, nil) else { return false }
+        CGImageDestinationAddImageFromSource(dest, src, 0, props as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { try? FileManager.default.removeItem(at: tmp); return false }
+        return replaceItem(tmp, onto: url)
+    }
+
+    /// Rebuilds the video (sample passthrough) adding the content identifier and a
+    /// still-image-time metadata track, writing the result to `final`.
+    private nonisolated static func writeLivePhotoVideo(_ id: String, source url: URL, to final: URL) async -> Bool {
+        let asset = AVURLAsset(url: url)
+        guard let reader = try? AVAssetReader(asset: asset),
+              let vTrack = try? await asset.loadTracks(withMediaType: .video).first else { return false }
+        let tmp = url.deletingLastPathComponent().appendingPathComponent(".live-\(UUID().uuidString).mov")
+        guard let writer = try? AVAssetWriter(outputURL: tmp, fileType: .mov) else { return false }
+
+        // Top-level content identifier (ties the video to the still).
+        let idItem = AVMutableMetadataItem()
+        idItem.identifier = .quickTimeMetadataContentIdentifier
+        idItem.dataType = "com.apple.metadata.datatype.UTF-8"
+        idItem.value = id as NSString
+        writer.metadata = [idItem]
+
+        // Passthrough video (and audio, if any).
+        var pumps: [(AVAssetReaderTrackOutput, AVAssetWriterInput)] = []
+        let vOut = AVAssetReaderTrackOutput(track: vTrack, outputSettings: nil); vOut.alwaysCopiesSampleData = false
+        let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: nil); vIn.expectsMediaDataInRealTime = false
+        if let t = try? await vTrack.load(.preferredTransform) { vIn.transform = t }
+        guard reader.canAdd(vOut), writer.canAdd(vIn) else { return false }
+        reader.add(vOut); writer.add(vIn); pumps.append((vOut, vIn))
+        if let aTrack = try? await asset.loadTracks(withMediaType: .audio).first {
+            let aOut = AVAssetReaderTrackOutput(track: aTrack, outputSettings: nil); aOut.alwaysCopiesSampleData = false
+            let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: nil); aIn.expectsMediaDataInRealTime = false
+            if reader.canAdd(aOut), writer.canAdd(aIn) { reader.add(aOut); writer.add(aIn); pumps.append((aOut, aIn)) }
+        }
+
+        // Still-image-time metadata track (SInt8 value 0 spanning the clip).
+        let spec: [String: Any] = [
+            kCMMetadataFormatDescriptionMetadataSpecificationKey_Identifier as String: "mdta/com.apple.quicktime.still-image-time",
+            kCMMetadataFormatDescriptionMetadataSpecificationKey_DataType as String: "com.apple.metadata.datatype.int8"
+        ]
+        var fmt: CMFormatDescription?
+        CMMetadataFormatDescriptionCreateWithMetadataSpecifications(
+            allocator: kCFAllocatorDefault, metadataType: kCMMetadataFormatType_Boxed,
+            metadataSpecifications: [spec] as CFArray, formatDescriptionOut: &fmt)
+        let metaIn = AVAssetWriterInput(mediaType: .metadata, outputSettings: nil, sourceFormatHint: fmt)
+        let metaAdaptor = AVAssetWriterInputMetadataAdaptor(assetWriterInput: metaIn)
+        if writer.canAdd(metaIn) { writer.add(metaIn) }
+
+        guard reader.startReading(), writer.startWriting() else { try? FileManager.default.removeItem(at: tmp); return false }
+        writer.startSession(atSourceTime: .zero)
+
+        let duration = (try? await asset.load(.duration)) ?? CMTime(value: 1, timescale: 30)
+        let still = AVMutableMetadataItem()
+        still.identifier = AVMetadataItem.identifier(forKey: "com.apple.quicktime.still-image-time", keySpace: .quickTimeMetadata)
+        still.dataType = "com.apple.metadata.datatype.int8"
+        still.value = 0 as NSNumber
+        metaAdaptor.append(AVTimedMetadataGroup(items: [still], timeRange: CMTimeRange(start: .zero, duration: duration)))
+        metaIn.markAsFinished()
+
+        await withTaskGroup(of: Void.self) { tg in
+            for (out, input) in pumps { tg.addTask { await drain(out, into: input) } }
+        }
+        guard reader.status != .failed else { try? FileManager.default.removeItem(at: tmp); return false }
+        await writer.finishWriting()
+        guard writer.status == .completed else { try? FileManager.default.removeItem(at: tmp); return false }
+        let fm = FileManager.default
+        do {
+            if fm.fileExists(atPath: final.path) { try fm.removeItem(at: final) }   // overwrite source/target
+            try fm.moveItem(at: tmp, to: final)
+            return true
+        } catch { try? fm.removeItem(at: tmp); return false }
+    }
+
+    /// Drains one reader output into one writer input, resuming exactly once.
+    private nonisolated static func drain(_ output: AVAssetReaderTrackOutput, into input: AVAssetWriterInput) async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            let once = ResumeOnce(cont)
+            input.requestMediaDataWhenReady(on: DispatchQueue(label: "live.drain")) {
+                while input.isReadyForMoreMediaData {
+                    guard let sb = output.copyNextSampleBuffer() else { input.markAsFinished(); once.fire(); return }
+                    if !input.append(sb) { input.markAsFinished(); once.fire(); return }
+                }
+            }
+        }
+    }
+
+    private final class ResumeOnce: @unchecked Sendable {
+        private let lock = NSLock(); private var done = false
+        private let cont: CheckedContinuation<Void, Never>
+        init(_ c: CheckedContinuation<Void, Never>) { cont = c }
+        func fire() { lock.lock(); defer { lock.unlock() }; if !done { done = true; cont.resume() } }
+    }
+
+    private nonisolated static func replaceItem(_ tmp: URL, onto dest: URL) -> Bool {
+        let fm = FileManager.default
+        if (try? fm.replaceItemAt(dest, withItemAt: tmp)) != nil { return true }
+        do {
+            if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
+            try fm.moveItem(at: tmp, to: dest)
+            return true
+        } catch { try? fm.removeItem(at: tmp); return false }
+    }
+
     private static func copyRepresentation(_ provider: NSItemProvider, typeID: String, into folder: URL) async -> URL? {
         await withCheckedContinuation { (cont: CheckedContinuation<URL?, Never>) in
             // The temp file is only valid inside this completion, so copy now.
