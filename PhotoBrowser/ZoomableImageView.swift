@@ -1,7 +1,7 @@
 import SwiftUI
 import ImageIO
 import UIKit
-import PhotosUI
+import AVFoundation
 
 /// Shows a photo with pinch + double-tap zoom. Loads a fast embedded-thumbnail
 /// preview first, then the full image. Swipes (handled in UIKit, reliable over
@@ -18,7 +18,7 @@ struct ZoomableImageView: View {
 
     @State private var displayImage: UIImage?
     @State private var badge: String?
-    @State private var livePhoto: PHLivePhoto?
+    @State private var livePairURL: URL?
     @State private var livePlaying = false
 
     var body: some View {
@@ -27,13 +27,13 @@ struct ZoomableImageView: View {
                 ZoomScrollView(image: displayImage, onZoomChanged: onZoomChanged,
                                onDismiss: onDismiss, onInfo: onInfo, onToggleChrome: onToggleChrome,
                                onPrev: onPrev, onNext: onNext,
-                               onLivePress: { pressing in if livePhoto != nil { livePlaying = pressing } })
+                               onLivePress: { pressing in if livePairURL != nil { livePlaying = pressing } })
             } else {
                 Color.clear
             }
-            // The motion plays only while held; the still shows (and zooms) otherwise.
-            if let livePhoto {
-                LivePhotoView(livePhoto: livePhoto, playing: livePlaying)
+            // Live Photo: the motion video plays while held; the still shows otherwise.
+            if let livePairURL {
+                LiveMotionView(url: livePairURL, playing: livePlaying)
                     .allowsHitTesting(false)
                     .opacity(livePlaying ? 1 : 0)
             }
@@ -62,35 +62,15 @@ struct ZoomableImageView: View {
                 coverSource?.staticImage = full
             }
         }
-        // If this still has a motion sibling, load it as a Live Photo for tap-and-hold.
+        // If this still has a motion sibling, enable touch-and-hold to play it.
         .task(id: url) {
-            livePhoto = nil; livePlaying = false
-            guard let video = await Self.findLivePair(for: url) else { return }
-            livePhoto = await Self.loadLivePhoto(image: url, video: video)
+            livePlaying = false
+            livePairURL = await Self.findLivePair(for: url)
         }
     }
 
     private static func findLivePair(for url: URL) async -> URL? {
         await Task.detached(priority: .utility) { livePhotoVideoURL(for: url) }.value
-    }
-
-    /// Builds a `PHLivePhoto` from the still + motion file URLs (nil if they aren't
-    /// a valid Live Photo pair — e.g. the identifiers don't match).
-    private static func loadLivePhoto(image: URL, video: URL) async -> PHLivePhoto? {
-        final class Once: @unchecked Sendable { let lock = NSLock(); var done = false }
-        let once = Once()
-        return await withCheckedContinuation { (cont: CheckedContinuation<PHLivePhoto?, Never>) in
-            PHLivePhoto.request(withResourceFileURLs: [image, video], placeholderImage: nil,
-                                targetSize: .zero, contentMode: .aspectFit) { live, info in
-                let cancelled = (info[PHLivePhotoInfoCancelledKey] as? Bool) ?? false
-                let failed = info[PHLivePhotoInfoErrorKey] != nil
-                // The handler may fire more than once; resume on the first usable
-                // result (a live photo, even if degraded) or a terminal failure.
-                guard live != nil || cancelled || failed else { return }
-                once.lock.lock(); defer { once.lock.unlock() }
-                if !once.done { once.done = true; cont.resume(returning: live) }
-            }
-        }
     }
 
     /// `fullQuality == false` allows ImageIO to use the file's embedded thumbnail
@@ -112,27 +92,46 @@ struct ZoomableImageView: View {
     }
 }
 
-/// Wraps `PHLivePhotoView`; plays/stops as `playing` toggles (driven by a
-/// long-press on the still). Aspect-fit so it lines up with the fitted photo.
-private struct LivePhotoView: UIViewRepresentable {
-    let livePhoto: PHLivePhoto
+/// Plays the Live Photo's motion video (looping while held) as a long-press
+/// overlay. Uses AVPlayer directly so playback works regardless of whether the
+/// pair's Live Photo metadata is perfectly formed. Aspect-fit to match the still.
+private struct LiveMotionView: UIViewRepresentable {
+    let url: URL
     var playing: Bool
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
-    final class Coordinator { var wasPlaying = false }
-
-    func makeUIView(context: Context) -> PHLivePhotoView {
-        let v = PHLivePhotoView()
-        v.contentMode = .scaleAspectFit
-        v.isUserInteractionEnabled = false
+    func makeUIView(context: Context) -> PlayerView {
+        let v = PlayerView()
+        v.load(url)
         return v
     }
 
-    func updateUIView(_ v: PHLivePhotoView, context: Context) {
-        if v.livePhoto !== livePhoto { v.livePhoto = livePhoto }
-        guard playing != context.coordinator.wasPlaying else { return }
-        context.coordinator.wasPlaying = playing
-        if playing { v.startPlayback(with: .full) } else { v.stopPlayback() }
+    func updateUIView(_ v: PlayerView, context: Context) {
+        if v.url != url { v.load(url) }
+        v.setPlaying(playing)
+    }
+
+    static func dismantleUIView(_ v: PlayerView, coordinator: ()) { v.setPlaying(false) }
+
+    final class PlayerView: UIView {
+        override class var layerClass: AnyClass { AVPlayerLayer.self }
+        private(set) var url: URL?
+        private var player: AVQueuePlayer?
+        private var looper: AVPlayerLooper?
+        private var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+
+        func load(_ url: URL) {
+            self.url = url
+            let p = AVQueuePlayer()
+            looper = AVPlayerLooper(player: p, templateItem: AVPlayerItem(url: url))   // loop while held
+            playerLayer.player = p
+            playerLayer.videoGravity = .resizeAspect
+            player = p
+        }
+
+        func setPlaying(_ playing: Bool) {
+            guard let player else { return }
+            if playing { player.seek(to: .zero); player.play() } else { player.pause() }
+        }
     }
 }
 

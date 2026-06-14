@@ -512,8 +512,11 @@ enum FileActions {
         return LivePhotoResult(ok: true, newVideo: final)
     }
 
-    /// Embeds the asset identifier in the still's Apple maker note (key "17"), in place.
+    /// Embeds the asset identifier in the still's Apple maker note (key "17"), in
+    /// place. All existing image metadata (EXIF/GPS/orientation) is copied across,
+    /// and the file's original creation/modification dates are restored afterwards.
     private nonisolated static func writeAssetIdentifier(_ id: String, intoImage url: URL) -> Bool {
+        let originalDates = try? FileManager.default.attributesOfItem(atPath: url.path)
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
               let type = CGImageSourceGetType(src) else { return false }
         var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
@@ -524,7 +527,19 @@ enum FileActions {
         guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL, type, 1, nil) else { return false }
         CGImageDestinationAddImageFromSource(dest, src, 0, props as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { try? FileManager.default.removeItem(at: tmp); return false }
-        return replaceItem(tmp, onto: url)
+        guard replaceItem(tmp, onto: url) else { return false }
+        restoreFileDates(originalDates, to: url)
+        return true
+    }
+
+    /// Restores creation/modification dates captured from a file's attributes, so an
+    /// in-place rewrite doesn't stamp the file with "now".
+    private nonisolated static func restoreFileDates(_ attrs: [FileAttributeKey: Any]?, to url: URL) {
+        guard let attrs else { return }
+        var keep: [FileAttributeKey: Any] = [:]
+        if let c = attrs[.creationDate] { keep[.creationDate] = c }
+        if let m = attrs[.modificationDate] { keep[.modificationDate] = m }
+        if !keep.isEmpty { try? FileManager.default.setAttributes(keep, ofItemAtPath: url.path) }
     }
 
     /// Rebuilds the video (sample passthrough) adding the content identifier and a
@@ -533,15 +548,19 @@ enum FileActions {
         let asset = AVURLAsset(url: url)
         guard let reader = try? AVAssetReader(asset: asset),
               let vTrack = try? await asset.loadTracks(withMediaType: .video).first else { return false }
+        let originalDates = try? FileManager.default.attributesOfItem(atPath: url.path)
         let tmp = url.deletingLastPathComponent().appendingPathComponent(".live-\(UUID().uuidString).mov")
         guard let writer = try? AVAssetWriter(outputURL: tmp, fileType: .mov) else { return false }
 
-        // Top-level content identifier (ties the video to the still).
+        // Content identifier (ties the video to the still), preserving the source's
+        // existing metadata — chiefly the creation date — so it isn't stamped today.
         let idItem = AVMutableMetadataItem()
         idItem.identifier = .quickTimeMetadataContentIdentifier
         idItem.dataType = "com.apple.metadata.datatype.UTF-8"
         idItem.value = id as NSString
-        writer.metadata = [idItem]
+        let sourceMeta = ((try? await asset.load(.metadata)) ?? [])
+            .filter { $0.identifier != .quickTimeMetadataContentIdentifier }
+        writer.metadata = sourceMeta + [idItem]
 
         // Passthrough video (and audio, if any).
         var pumps: [(AVAssetReaderTrackOutput, AVAssetWriterInput)] = []
@@ -590,6 +609,7 @@ enum FileActions {
         do {
             if fm.fileExists(atPath: final.path) { try fm.removeItem(at: final) }   // overwrite source/target
             try fm.moveItem(at: tmp, to: final)
+            restoreFileDates(originalDates, to: final)   // keep the original capture date, not today
             return true
         } catch { try? fm.removeItem(at: tmp); return false }
     }
