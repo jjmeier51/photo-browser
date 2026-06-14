@@ -26,7 +26,7 @@ final class Library {
     /// Bumps when files are added/edited from outside the folder view (e.g. the
     /// editor saving a cropped copy) so the current folder reloads.
     var changeToken = 0
-    func contentDidChange() { changeToken += 1 }
+    func contentDidChange() { changeToken += 1; folderYearsCache.removeAll() }
 
     /// Grid thumbnail minimum size (points); pinch-to-zoom adjusts it ±30%.
     var thumbSize: Double = (UserDefaults.standard.object(forKey: "photoBrowser.thumbSize") as? Double) ?? 110
@@ -594,6 +594,46 @@ final class Library {
             }
         }
         return result
+    }
+
+    // MARK: - Folder year index (for hiding folders under a year filter)
+
+    /// Years present anywhere under a folder (capture date, else file modified).
+    /// Cached per folder path and cleared on `contentDidChange`; computed lazily
+    /// off the main thread, reusing the per-file capture-date cache.
+    @ObservationIgnored private var folderYearsCache: [String: Set<Int>] = [:]
+
+    func folderYears(of folder: URL) async -> Set<Int> {
+        if let cached = folderYearsCache[folder.path] { return cached }
+        let (media, modified) = await Self.walkMedia(of: folder)
+        let dates = await captureDates(for: media)
+        let cal = Calendar.current
+        var years = Set<Int>()
+        for (i, e) in media.enumerated() {
+            years.insert(cal.component(.year, from: dates[e.url] ?? modified[i]))
+        }
+        folderYearsCache[folder.path] = years
+        return years
+    }
+
+    /// Every media file under `folder` (recursively) with its file modified date.
+    private nonisolated static func walkMedia(of folder: URL) async -> (media: [Entry], modified: [Date]) {
+        await Task.detached(priority: .utility) { () -> ([Entry], [Date]) in
+            var media: [Entry] = []
+            var modified: [Date] = []
+            let keys: Set<URLResourceKey> = [.isDirectoryKey, .contentModificationDateKey]
+            guard let walker = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: Array(keys),
+                                                              options: [.skipsHiddenFiles]) else { return ([], []) }
+            for case let url as URL in walker {
+                let rv = try? url.resourceValues(forKeys: keys)
+                if rv?.isDirectory == true { continue }
+                let kind = classify(url: url, isDirectory: false)
+                guard kind == .image || kind == .video else { continue }
+                media.append(Entry(url: url, name: url.lastPathComponent, kind: kind, size: 0, modified: .distantPast))
+                modified.append(rv?.contentModificationDate ?? .distantPast)
+            }
+            return (media, modified)
+        }.value
     }
 
     // MARK: - Folder statistics (Get Info)

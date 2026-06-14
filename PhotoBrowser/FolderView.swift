@@ -43,6 +43,9 @@ struct FolderView: View {
     @State private var showFavoritesOnly = false
     @State private var favoriteEntries: [Entry] = []
     @State private var captureDates: [URL: Date] = [:]
+    /// Years present under each subfolder — fills in while a year filter is active
+    /// so folders with nothing from that year can be hidden.
+    @State private var folderYears: [URL: Set<Int>] = [:]
     @State private var fileCaptions: [URL: String] = [:]
     @State private var showCaptionEditor = false
     @State private var captionDraft = ""
@@ -190,7 +193,12 @@ struct FolderView: View {
 
         var list = entries
         if let yearFilter {
-            list = list.filter { $0.isFolder || year(of: $0) == yearFilter }
+            // Files must match the year; folders are hidden once we know they hold
+            // nothing from that year (shown until their years are computed).
+            list = list.filter { entry in
+                entry.isFolder ? (folderYears[entry.url]?.contains(yearFilter) ?? true)
+                               : year(of: entry) == yearFilter
+            }
         }
         list = applyType(list)
         if advancedActive { list = list.filter { passesAdvanced($0) } }
@@ -729,6 +737,15 @@ struct FolderView: View {
                 if ageFilter != nil { ageFilter = nil }
             }
         }
+        // While a year filter is active, learn which years each subfolder holds so
+        // folders with nothing from that year drop out (computed lazily, cached).
+        .task(id: "folderyears-\(yearFilter ?? -1)-\(entries.count)-\(library.changeToken)-\(url.path)") {
+            guard yearFilter != nil else { return }
+            for folder in entries where folder.isFolder && folderYears[folder.url] == nil {
+                if Task.isCancelled { return }
+                folderYears[folder.url] = await library.folderYears(of: folder.url)
+            }
+        }
     }
 
     @ViewBuilder private var exportingOverlay: some View {
@@ -1135,7 +1152,7 @@ struct FolderView: View {
 
     private func reload() async {
         loaded = false
-        captureDates = [:]; fileCaptions = [:]; fileSpecs = [:]
+        captureDates = [:]; fileCaptions = [:]; fileSpecs = [:]; folderYears = [:]
         let list = await library.listing(of: url, sort: library.sort)
         entries = list
         loaded = true
