@@ -160,16 +160,41 @@ enum FileActions {
         return (try? FileManager.default.moveItem(at: url, to: dest)) != nil ? dest : nil
     }
 
-    /// Moves items into `folder`; returns each successful (old, new) URL pair so
-    /// labels and captions can be migrated to the new locations.
+    struct MoveOutcome { var moved: [(from: URL, to: URL)] = []; var skipped: [(name: String, reason: String)] = [] }
+
+    /// Moves items into `folder`. Returns each successful (old, new) pair (so
+    /// labels/captions can be migrated) plus the items that were skipped and why.
+    /// A same-name file at the destination is skipped (not overwritten/renamed);
+    /// a plain `moveItem` failure (e.g. crossing a file-provider/volume boundary,
+    /// the documented reason in-folder moves silently failed) falls back to
+    /// copy-then-delete so the file actually moves.
     @discardableResult
-    static func move(_ urls: [URL], to folder: URL) -> [(from: URL, to: URL)] {
-        var moved: [(from: URL, to: URL)] = []
-        for url in urls where url.deletingLastPathComponent().standardizedFileURL != folder.standardizedFileURL {
-            let dest = folder.appendingPathComponent(url.lastPathComponent)
-            if (try? FileManager.default.moveItem(at: url, to: dest)) != nil { moved.append((url, dest)) }
+    static func move(_ urls: [URL], to folder: URL) -> MoveOutcome {
+        let fm = FileManager.default
+        var outcome = MoveOutcome()
+        for url in urls {
+            let name = url.lastPathComponent
+            if url.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
+                outcome.skipped.append((name, "already in this folder")); continue
+            }
+            let dest = folder.appendingPathComponent(name)
+            if fm.fileExists(atPath: dest.path) {
+                outcome.skipped.append((name, "name already exists")); continue
+            }
+            do {
+                try fm.moveItem(at: url, to: dest)
+                outcome.moved.append((url, dest))
+            } catch {
+                // Cross-volume moves aren't atomic; copy-then-delete instead.
+                if (try? fm.copyItem(at: url, to: dest)) != nil {
+                    try? fm.removeItem(at: url)
+                    outcome.moved.append((url, dest))
+                } else {
+                    outcome.skipped.append((name, "couldn't move"))
+                }
+            }
         }
-        return moved
+        return outcome
     }
 
     /// Copies items into `folder`, never colliding (appends " 1", " 2", … on clash,
@@ -508,12 +533,38 @@ enum FileActions {
         return data
     }
 
-    /// Encodes a captured frame and saves it to Photos.
+    /// The "Screenshots" folder beside `fileURL`, created on first use (nil on failure).
+    static func screenshotsFolder(beside fileURL: URL) -> URL? {
+        let dir = fileURL.deletingLastPathComponent().appendingPathComponent("Screenshots", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            guard (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil else { return nil }
+        }
+        return dir
+    }
+
+    /// Encodes a captured frame and writes it into `folder` as a timestamped HEIC
+    /// (PNG only on encode fallback). Returns the new file URL, or nil on failure.
     static func saveFrame(_ pixelBuffer: CVPixelBuffer,
                           transform: CGAffineTransform = .identity,
-                          properties: [String: Any] = [:]) async -> Bool {
-        guard let data = encodeFrame(pixelBuffer, transform: transform, properties: properties) else { return false }
-        return await savePhotoData(data)
+                          properties: [String: Any] = [:],
+                          in folder: URL) -> URL? {
+        guard let data = encodeFrame(pixelBuffer, transform: transform, properties: properties) else { return nil }
+        return writeScreenshot(data, in: folder)
+    }
+
+    /// CGImage variant — used by the SDR generator fallback.
+    static func saveFrame(cgImage: CGImage, properties: [String: Any] = [:], in folder: URL) -> URL? {
+        guard let data = encodeCGImage(cgImage, properties: properties) else { return nil }
+        return writeScreenshot(data, in: folder)
+    }
+
+    private static func writeScreenshot(_ data: Data, in folder: URL) -> URL? {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        let ext = data.starts(with: [0x89, 0x50, 0x4E, 0x47] as [UInt8]) ? "png" : "heic"   // PNG magic → png
+        let dest = uniqueDestination(for: "Screenshot \(f.string(from: Date())).\(ext)", in: folder)
+        return (try? data.write(to: dest)) != nil ? dest : nil
     }
 
     /// Upper bound on exported frames per second of video.
@@ -523,12 +574,45 @@ enum FileActions {
     /// larger stride so it never exceeds `exportFramesPerSecond`.
     static let minExportStride = 6
 
+    // MARK: - Export-progress persistence (resume after a crash/suspension)
+
+    /// Saved state for an in-progress frame export. Frames are named by index, so
+    /// a re-run just continues from `nextIndex` (and skips any frame already on
+    /// disk) — robust across crashes and the background-task time limit.
+    struct ExportProgress: Codable, Sendable { var folder: String; var total: Int; var nextIndex: Int }
+
+    private static let exportProgressKey = "photoBrowser.exportProgress"
+    private static let exportProgressLock = NSLock()
+
+    static func exportProgress(forVideoKey key: String) -> ExportProgress? {
+        guard let data = UserDefaults.standard.data(forKey: exportProgressKey),
+              let map = try? JSONDecoder().decode([String: ExportProgress].self, from: data) else { return nil }
+        return map[key]
+    }
+
+    private static func setExportProgress(_ progress: ExportProgress?, forVideoKey key: String) {
+        exportProgressLock.lock(); defer { exportProgressLock.unlock() }
+        var map: [String: ExportProgress] = [:]
+        if let data = UserDefaults.standard.data(forKey: exportProgressKey),
+           let decoded = try? JSONDecoder().decode([String: ExportProgress].self, from: data) { map = decoded }
+        if let progress { map[key] = progress } else { map.removeValue(forKey: key) }
+        if let data = try? JSONEncoder().encode(map) { UserDefaults.standard.set(data, forKey: exportProgressKey) }
+    }
+
+    /// Stable per-video key (path|mtime|size) — matches MetadataLoader's scheme.
+    static func videoExportKey(for url: URL) -> String {
+        let rv = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let mtime = Int((rv?.contentModificationDate ?? .distantPast).timeIntervalSince1970)
+        return "\(url.path)|\(mtime)|\(rv?.fileSize ?? 0)"
+    }
+
     /// Exports frames of a video — evenly sampled to `exportFramesPerSecond` — as
-    /// upright, metadata-preserving HEICs into a new folder (named `folderName`)
-    /// beside the video. HDR videos export 10-bit HDR HEICs (via a reader that
-    /// restarts on failure so one bad frame can't end the export); SDR videos use
-    /// AVAssetImageGenerator (each frame decoded independently).
-    /// `onProgress` is called (off the main thread) with 0…1 completion.
+    /// upright, metadata-preserving HEICs into a folder (named `folderName`) beside
+    /// the video. Frames are named by index and progress is persisted, so a re-run
+    /// resumes where a crash/suspension left off (skipping frames already on disk).
+    /// HDR videos export 10-bit HDR HEICs (via a reader that restarts on failure);
+    /// SDR videos use AVAssetImageGenerator. `onProgress` is called (off the main
+    /// thread) with 0…1 completion.
     static func exportAllFrames(of url: URL,
                                 folderName: String,
                                 onProgress: @escaping @Sendable (Double) -> Void = { _ in })
@@ -545,32 +629,55 @@ enum FileActions {
         let stride = max(minExportStride, Int((fps / exportFramesPerSecond).rounded()))
         let interval = fps > 0 ? Double(stride) / fps : 1.0 / exportFramesPerSecond
         guard duration > 0, interval > 0 else { return (nil, 0) }
+        let total = max(1, Int((duration / interval).rounded(.up)))
 
-        let dir = url.deletingLastPathComponent().appendingPathComponent(safeName, isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Resume into the saved folder if a prior export of this exact file is
+        // unfinished; otherwise start a fresh folder beside the video.
+        let videoKey = videoExportKey(for: url)
+        let dir: URL
+        var startIndex = 0
+        if let saved = exportProgress(forVideoKey: videoKey),
+           FileManager.default.fileExists(atPath: saved.folder) {
+            dir = URL(fileURLWithPath: saved.folder)
+            startIndex = min(max(0, saved.nextIndex), total)
+        } else {
+            dir = url.deletingLastPathComponent().appendingPathComponent(safeName, isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        setExportProgress(ExportProgress(folder: dir.path, total: total, nextIndex: startIndex), forVideoKey: videoKey)
 
+        let result: (URL?, Int)
         if isHDR {
             let transform = (try? await track.load(.preferredTransform)) ?? .identity
-            return await exportFramesHDR(asset: asset, track: track, transform: transform, dir: dir,
-                                         safeName: safeName, props: props, duration: duration,
-                                         interval: interval, onProgress: onProgress)
+            result = await exportFramesHDR(asset: asset, track: track, transform: transform, dir: dir,
+                                           safeName: safeName, props: props, duration: duration, interval: interval,
+                                           total: total, startIndex: startIndex, videoKey: videoKey, onProgress: onProgress)
+        } else {
+            result = await exportFramesSDR(asset: asset, dir: dir, safeName: safeName, props: props,
+                                           duration: duration, interval: interval, total: total,
+                                           startIndex: startIndex, videoKey: videoKey, onProgress: onProgress)
         }
-        return await exportFramesSDR(asset: asset, dir: dir, safeName: safeName, props: props,
-                                     duration: duration, interval: interval, onProgress: onProgress)
+        setExportProgress(nil, forVideoKey: videoKey)   // finished → forget the checkpoint
+        // Report the total frames now on disk (resumed + previously-exported).
+        let onDisk = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil,
+                                                                   options: [.skipsHiddenFiles]))?.count ?? result.1
+        return (result.0, onDisk)
     }
 
-    /// SDR path: AVAssetImageGenerator at evenly-spaced times (one bad frame is skipped).
+    /// SDR path: AVAssetImageGenerator at evenly-spaced times (one bad frame is
+    /// skipped). Resumes from `startIndex`; frames are named by absolute index.
     private static func exportFramesSDR(asset: AVURLAsset, dir: URL, safeName: String,
                                         props: [String: Any], duration: Double, interval: Double,
+                                        total: Int, startIndex: Int, videoKey: String,
                                         onProgress: @escaping @Sendable (Double) -> Void) async -> (URL?, Int) {
-        var times: [NSValue] = []
-        var t = 0.0
-        while t < duration { times.append(NSValue(time: CMTime(seconds: t, preferredTimescale: 600))); t += interval }
-        let total = times.count
-        guard total > 0 else { return (dir, 0) }
+        let times: [NSValue] = (startIndex..<total).map {
+            NSValue(time: CMTime(seconds: Double($0) * interval, preferredTimescale: 600))
+        }
+        guard !times.isEmpty else { return (dir, 0) }
 
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true                 // upright frames
+        generator.maximumSize = CGSize(width: 3840, height: 3840)       // cap peak memory
         generator.requestedTimeToleranceBefore = CMTime(seconds: interval / 2, preferredTimescale: 600)
         generator.requestedTimeToleranceAfter = CMTime(seconds: interval / 2, preferredTimescale: 600)
 
@@ -578,23 +685,35 @@ enum FileActions {
             let lock = NSLock()
             var written = 0
             var processed = 0
+            var done = Set<Int>()
+            var contig = startIndex
             var lastPct = -1
-            generator.generateCGImagesAsynchronously(forTimes: times) { _, image, _, result, _ in
+            let pending = times.count
+            generator.generateCGImagesAsynchronously(forTimes: times) { requested, image, _, result, _ in
                 autoreleasepool {
+                    let i = max(0, Int((requested.seconds / interval).rounded()))
+                    let dest = dir.appendingPathComponent("\(safeName) \(i).heic")
                     lock.lock()
                     processed += 1
-                    if result == .succeeded, let image,
-                       let data = encodeCGImage(image, properties: props) {
+                    if FileManager.default.fileExists(atPath: dest.path) {
+                        done.insert(i)
+                    } else if result == .succeeded, let image, let data = encodeCGImage(image, properties: props) {
+                        try? data.write(to: dest)
                         written += 1
-                        try? data.write(to: dir.appendingPathComponent("\(safeName) (\(written)).heic"))
+                        done.insert(i)
                     }
-                    let pct = Int(Double(processed) / Double(total) * 100)
-                    let report = pct != lastPct
-                    if report { lastPct = pct }
-                    let finished = processed >= total
+                    while done.contains(contig) { contig += 1 }      // contiguous-done frontier
+                    let overall = Double(startIndex + processed) / Double(total)
+                    let pct = Int(overall * 100)
+                    let report = pct != lastPct; if report { lastPct = pct }
+                    let finished = processed >= pending
+                    let checkpoint = contig
                     let count = written
                     lock.unlock()
-                    if report { onProgress(min(1.0, Double(pct) / 100.0)) }
+                    if processed % 25 == 0 || finished {
+                        setExportProgress(ExportProgress(folder: dir.path, total: total, nextIndex: checkpoint), forVideoKey: videoKey)
+                    }
+                    if report { onProgress(min(1.0, overall)) }
                     if finished { cont.resume(returning: (dir, count)) }
                 }
             }
@@ -605,21 +724,24 @@ enum FileActions {
 
     /// HDR path: 10-bit AVAssetReader, time-sampled, restarting after the last
     /// good frame whenever the reader fails — so one undecodable frame can't end
-    /// the whole export. Frames keep their HDR (10-bit HEIC via `encodeFrame`).
+    /// the whole export. Resumes from `startIndex`; frames are named by index.
     private static func exportFramesHDR(asset: AVURLAsset, track: AVAssetTrack, transform: CGAffineTransform,
                                         dir: URL, safeName: String, props: [String: Any],
-                                        duration: Double, interval: Double,
+                                        duration: Double, interval: Double, total: Int, startIndex: Int,
+                                        videoKey: String,
                                         onProgress: @escaping @Sendable (Double) -> Void) async -> (URL?, Int) {
         await Task.detached(priority: .userInitiated) { () -> (URL?, Int) in
             let settings: [String: Any] = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
             ]
             var written = 0
-            var nextTime = 0.0      // next target sample time (seconds)
-            var startTime = 0.0     // where the current reader begins
+            var frameIndex = startIndex                  // next frame index to capture
+            var nextTime = Double(startIndex) * interval  // its target time
+            var startTime = nextTime                      // where the current reader begins
             var failures = 0
             var lastPct = -1
-            while startTime < duration, failures < 6 {
+            var lastSaved = startIndex
+            while startTime < duration, failures < 6, frameIndex < total {
                 guard let reader = try? AVAssetReader(asset: asset) else { break }
                 if startTime > 0 {
                     reader.timeRange = CMTimeRange(start: CMTime(seconds: startTime, preferredTimescale: 600),
@@ -633,19 +755,31 @@ enum FileActions {
 
                 var lastPTS = startTime
                 var advanced = false
-                while reader.status == .reading, let sample = output.copyNextSampleBuffer() {
+                while reader.status == .reading, frameIndex < total, let sample = output.copyNextSampleBuffer() {
                     autoreleasepool {
                         let pts = CMSampleBufferGetPresentationTimeStamp(sample).seconds
                         if pts.isFinite { lastPTS = pts; advanced = true }
-                        if pts.isFinite, pts + 1e-4 >= nextTime,
-                           let pb = CMSampleBufferGetImageBuffer(sample),
-                           let data = encodeFrame(pb, transform: transform, properties: props) {
-                            written += 1
-                            try? data.write(to: dir.appendingPathComponent("\(safeName) (\(written)).heic"))
-                            nextTime += interval
-                            if nextTime <= pts { nextTime = pts + interval }
-                            let pct = Int(min(1.0, pts / duration) * 100)
-                            if pct != lastPct { lastPct = pct; onProgress(min(1.0, pts / duration)) }
+                        if pts.isFinite, pts + 1e-4 >= nextTime {
+                            let dest = dir.appendingPathComponent("\(safeName) \(frameIndex).heic")
+                            if !FileManager.default.fileExists(atPath: dest.path),
+                               let pb = CMSampleBufferGetImageBuffer(sample),
+                               let data = encodeFrame(pb, transform: transform, properties: props) {
+                                try? data.write(to: dest)
+                                written += 1
+                            }
+                            frameIndex += 1
+                            nextTime = Double(frameIndex) * interval
+                            if nextTime <= pts {                          // sparse frames: skip ahead on the grid
+                                frameIndex = Int((pts / interval).rounded(.down)) + 1
+                                nextTime = Double(frameIndex) * interval
+                            }
+                            let overall = min(1.0, Double(frameIndex) / Double(total))
+                            let pct = Int(overall * 100)
+                            if pct != lastPct { lastPct = pct; onProgress(overall) }
+                            if frameIndex - lastSaved >= 25 {
+                                lastSaved = frameIndex
+                                setExportProgress(ExportProgress(folder: dir.path, total: total, nextIndex: frameIndex), forVideoKey: videoKey)
+                            }
                         }
                         CMSampleBufferInvalidate(sample)
                     }
@@ -654,7 +788,10 @@ enum FileActions {
                 if reader.status == .failed {
                     failures += 1
                     startTime = advanced ? lastPTS + interval : startTime + max(interval, 0.5)
-                    if nextTime < startTime { nextTime = startTime }
+                    if nextTime < startTime {
+                        frameIndex = max(frameIndex, Int((startTime / interval).rounded()))
+                        nextTime = Double(frameIndex) * interval
+                    }
                 } else {
                     break       // cancelled / unknown
                 }
@@ -677,18 +814,6 @@ enum FileActions {
         return UIImage(cgImage: image).jpegData(compressionQuality: 0.95)
     }
 
-    static func savePhotoData(_ data: Data) async -> Bool {
-        guard Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryAddUsageDescription") != nil,
-              await ensureAddPermission() else { return false }
-        do {
-            try await PHPhotoLibrary.shared().performChanges {
-                PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
-            }
-            return true
-        } catch {
-            return false
-        }
-    }
 }
 
 /// Requests extra execution time so a long job (e.g. exporting frames) keeps

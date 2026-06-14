@@ -1198,10 +1198,16 @@ struct FolderView: View {
     }
 
     private func performMove(to dest: URL) {
-        let moved = FileActions.move(selectedEntries().map(\.url), to: dest)
-        for pair in moved { library.itemMoved(from: pair.from, to: pair.to) }   // labels follow
+        let outcome = FileActions.move(selectedEntries().map(\.url), to: dest)
+        for pair in outcome.moved { library.itemMoved(from: pair.from, to: pair.to) }   // labels follow
         selection.removeAll(); selecting = false
-        resultMessage = "Moved \(moved.count) item(s)."
+        var msg = "Moved \(outcome.moved.count) item(s)."
+        if !outcome.skipped.isEmpty {
+            let exists = outcome.skipped.filter { $0.reason == "name already exists" }.count
+            msg += " Skipped \(outcome.skipped.count)"
+            msg += exists > 0 ? " (\(exists) already there by name)." : "."
+        }
+        resultMessage = msg
         Task { await reload() }
     }
 

@@ -160,6 +160,7 @@ struct ViewerView: View {
 }
 
 private struct PageView: View {
+    @Environment(Library.self) private var library
     let item: Entry
     let coverSource: CoverFrameSource
     var infoShown: Bool = false
@@ -176,7 +177,8 @@ private struct PageView: View {
             VideoPage(url: item.url, coverSource: coverSource, infoShown: infoShown,
                       onDismiss: onDismiss, onInfo: onInfo,
                       onZoomChanged: onZoomChanged, onControlsHidden: onControlsHidden,
-                      onPrev: onPrev, onNext: onNext)
+                      onPrev: onPrev, onNext: onNext,
+                      onCaptured: { library.contentDidChange() })
         } else {
             ZoomableImageView(url: item.url, coverSource: coverSource, onDismiss: onDismiss, onInfo: onInfo,
                               onZoomChanged: onZoomChanged, onToggleChrome: onToggleChrome,

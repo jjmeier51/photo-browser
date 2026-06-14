@@ -16,6 +16,7 @@ struct VideoPage: View {
     var onControlsHidden: (Bool) -> Void = { _ in }
     var onPrev: () -> Void = {}
     var onNext: () -> Void = {}
+    var onCaptured: () -> Void = {}
 
     @State private var quality: String?
 
@@ -24,7 +25,7 @@ struct VideoPage: View {
             ZoomableVideo(url: url, coverSource: coverSource, infoShown: infoShown,
                           onDismiss: onDismiss, onInfo: onInfo,
                           onZoomChanged: onZoomChanged, onControlsHidden: onControlsHidden,
-                          onPrev: onPrev, onNext: onNext)
+                          onPrev: onPrev, onNext: onNext, onCaptured: onCaptured)
                 .ignoresSafeArea()
 
             if let quality {
@@ -50,6 +51,7 @@ private struct ZoomableVideo: UIViewControllerRepresentable {
     var onControlsHidden: (Bool) -> Void = { _ in }
     let onPrev: () -> Void
     let onNext: () -> Void
+    var onCaptured: () -> Void = {}
 
     func makeUIViewController(context: Context) -> ZoomableVideoController {
         ZoomableVideoController(url: url)
@@ -62,6 +64,7 @@ private struct ZoomableVideo: UIViewControllerRepresentable {
         vc.onControlsVisibilityChanged = onControlsHidden
         vc.onPrev = onPrev
         vc.onNext = onNext
+        vc.onCaptured = onCaptured
         // Pause playback while the info panel is up: a playing video contends with
         // the metadata read (a second AVAsset on the same file) and the main-queue
         // time observer, which together can wedge the UI. Resume on dismiss.
@@ -86,6 +89,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
     var onPrev: () -> Void = {}
     var onNext: () -> Void = {}
     var onControlsVisibilityChanged: (Bool) -> Void = { _ in }
+    var onCaptured: () -> Void = {}
 
     private let player: AVPlayer
     private let playerLayer: AVPlayerLayer
@@ -389,34 +393,45 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
 
     @objc private func captureFrame() {
         let time = player.currentTime()
+        // Save into a "Screenshots" folder beside the video (created on first use)
+        // rather than the iOS Photos library.
+        guard let folder = FileActions.screenshotsFolder(beside: url) else {
+            flashCapture("Couldn’t save"); return
+        }
+        let fileURL = url
         if let output = videoOutput,
            let buffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil) {
             flashCapture("Saving…")
             let transform = preferredTransform
-            let fileURL = url
             Task {
                 let props = await MetadataLoader.exifProperties(forVideo: fileURL)
-                let ok = await FileActions.saveFrame(buffer, transform: transform, properties: props)
-                await MainActor.run { self.flashCapture(ok ? "Saved to Photos" : "Couldn’t save") }
+                let saved = FileActions.saveFrame(buffer, transform: transform, properties: props, in: folder)
+                await MainActor.run { self.finishCapture(saved) }
             }
         } else if let asset = player.currentItem?.asset {
             flashCapture("Saving…")
             Task {
-                let ok = await Self.saveViaGenerator(asset: asset, at: time)
-                await MainActor.run { self.flashCapture(ok ? "Saved to Photos" : "Couldn’t save") }
+                let props = await MetadataLoader.exifProperties(forVideo: fileURL)
+                let saved = await Self.saveViaGenerator(asset: asset, at: time, props: props, in: folder)
+                await MainActor.run { self.finishCapture(saved) }
             }
         }
     }
 
+    private func finishCapture(_ saved: URL?) {
+        flashCapture(saved != nil ? "Saved to Screenshots" : "Couldn’t save")
+        if saved != nil { onCaptured() }   // refresh the folder grid so it appears
+    }
+
     /// SDR fallback when no decoded pixel buffer is available.
-    private static func saveViaGenerator(asset: AVAsset, at time: CMTime) async -> Bool {
+    private static func saveViaGenerator(asset: AVAsset, at time: CMTime,
+                                         props: [String: Any], in folder: URL) async -> URL? {
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.requestedTimeToleranceBefore = .zero
         generator.requestedTimeToleranceAfter = .zero
-        guard let cg = try? await generator.image(at: time).image,
-              let data = UIImage(cgImage: cg).pngData() else { return false }
-        return await FileActions.savePhotoData(data)
+        guard let cg = try? await generator.image(at: time).image else { return nil }
+        return FileActions.saveFrame(cgImage: cg, properties: props, in: folder)
     }
 
     private func flashCapture(_ text: String) {
