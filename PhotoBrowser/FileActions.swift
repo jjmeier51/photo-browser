@@ -568,11 +568,11 @@ enum FileActions {
     }
 
     /// Upper bound on exported frames per second of video.
-    static let exportFramesPerSecond = 10.0
-    /// Minimum source-frame stride: take at most 1 of every 6 frames, so 60fps →
-    /// 10/sec (600/min) and 30fps → 5/sec (300/min). Higher-fps video uses a
-    /// larger stride so it never exceeds `exportFramesPerSecond`.
-    static let minExportStride = 6
+    static let exportFramesPerSecond = 20.0
+    /// Minimum source-frame stride: take at most 1 of every 3 frames, so 24fps →
+    /// 8/sec, 30fps → 10/sec, 60fps → 20/sec. Higher-fps video uses a larger
+    /// stride so it never exceeds `exportFramesPerSecond`.
+    static let minExportStride = 3
 
     // MARK: - Export-progress persistence (resume after a crash/suspension)
 
