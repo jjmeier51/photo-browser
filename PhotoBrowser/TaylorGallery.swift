@@ -164,14 +164,15 @@ enum TaylorGallery {
         return order.map { Album(id: $0, title: titles[$0] ?? "") }
     }
 
+    /// Album thumbnails, found by their Coppermine `thumb_` src directly (robust to
+    /// theme differences in the surrounding anchor/pid markup). Deduped by URL.
     nonisolated private static func parseImages(_ html: String) -> [Image] {
-        var out: [Image] = []; var seen = Set<Int>()
-        for g in matches(html, "href=\"displayimage\\.php\\?[^\"]*?pid=(\\d+)[^\"]*\"[^>]*>\\s*<img[^>]+src=\"([^\"]+)\"") {
-            guard let pid = Int(g[1]), !seen.contains(pid) else { continue }
-            let thumbPath = decode(g[2])
-            guard let thumbURL = absolute(thumbPath), let fullURL = absolute(fullImagePath(from: thumbPath)) else { continue }
-            seen.insert(pid)
-            out.append(Image(pid: pid, fullURL: fullURL, thumbURL: thumbURL, filename: fullURL.lastPathComponent))
+        var out: [Image] = []; var seen = Set<String>()
+        for g in matches(html, "<img[^>]+src=\"([^\"]*thumb_[^\"]+\\.(?:jpe?g|png|gif))\"") {
+            let thumbPath = decode(g[1])
+            guard let thumbURL = absolute(thumbPath), let fullURL = absolute(fullImagePath(from: thumbPath)),
+                  seen.insert(fullURL.absoluteString).inserted else { continue }
+            out.append(Image(pid: out.count, fullURL: fullURL, thumbURL: thumbURL, filename: fullURL.lastPathComponent))
         }
         return out
     }
@@ -271,6 +272,8 @@ extension TaylorGallery {
     struct CrossRefProgress: Sendable { var phase: String; var fraction: Double }
     struct CrossRefResult: Sendable {
         var updated = 0, ambiguous = 0, unmatched = 0, noData = 0, scanned = 0
+        var indexImages = 0, indexAlbums = 0
+        var sampleSite: String?, sampleLocal: String?
         var note: String?
     }
 
@@ -386,6 +389,9 @@ extension TaylorGallery {
             for case let url as URL in walker where classify(url: url, isDirectory: false) == .image { files.append(url) }
         }
         var result = CrossRefResult(); result.scanned = files.count
+        result.indexImages = index.images; result.indexAlbums = index.albums
+        result.sampleSite = index.byFilename.keys.first
+        result.sampleLocal = files.first?.lastPathComponent
         guard !files.isEmpty else { result.note = "No photos in this folder."; return result }
 
         var geocodeCache: [String: CLLocationCoordinate2D?] = [:]

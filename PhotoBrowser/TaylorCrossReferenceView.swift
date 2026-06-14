@@ -53,6 +53,14 @@ struct TaylorCrossReferenceView: View {
                         if result.noData > 0 { Text("\(result.noData) matched but had no date or place").font(.caption).foregroundStyle(.secondary) }
                         if let note = result.note { Text(note).font(.caption).foregroundStyle(.secondary) }
                     }
+                    Section("Diagnostics") {
+                        Text("Gallery index: \(result.indexImages) images across \(result.indexAlbums) albums.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if let site = result.sampleSite, let local = result.sampleLocal {
+                            Text("Example site filename: \(site)").font(.caption).foregroundStyle(.secondary)
+                            Text("Example of your filename: \(local)").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
             .navigationTitle("Cross-Reference")
