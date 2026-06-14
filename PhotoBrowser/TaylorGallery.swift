@@ -1,4 +1,5 @@
 import Foundation
+import CoreLocation
 
 /// Read-only client for the taylorpictures.net photo gallery (a standard
 /// Coppermine install). Lets the browser list categories/albums/images and
@@ -223,5 +224,163 @@ enum TaylorGallery {
             n += 1
         }
         return dest
+    }
+}
+
+// MARK: - Cross-referencing local photos against the gallery
+
+/// Builds a filename→event index of the whole gallery (cached), then matches the
+/// photos in a local folder by filename and writes the gallery's date + location
+/// into each match. Same-file extension so it can reuse the private parsers above.
+///
+/// Honest limits (this is a fuzzy, untestable-here feature — expect tuning):
+/// - Matching is by filename. Coppermine often uses generic sequential names
+///   (001.jpg) that repeat across albums; when a name maps to albums that
+///   *disagree* on date/place it's skipped rather than mis-dated. A content
+///   (perceptual-hash) fallback isn't included because hashing all ~223k site
+///   images on-device is impractical — filename matching is the scalable path.
+/// - Date: the photo's own EXIF capture date wins when present; otherwise the
+///   album/event date parsed from the album title (month-day + the year from the
+///   category, or just the year). Location: the place parsed from the album title
+///   (text after "… in …"), forward-geocoded to coordinates.
+extension TaylorGallery {
+    struct IndexEntry: Codable, Sendable, Equatable { var date: Double?; var place: String? }
+    struct SiteIndex: Codable, Sendable {
+        var byFilename: [String: [IndexEntry]] = [:]
+        var albums = 0
+        var images = 0
+        var builtAt = Date().timeIntervalSince1970
+    }
+    struct CrossRefProgress: Sendable { var phase: String; var fraction: Double }
+    struct CrossRefResult: Sendable {
+        var updated = 0, ambiguous = 0, unmatched = 0, noData = 0, scanned = 0
+        var note: String?
+    }
+
+    // MARK: Index (crawl + cache)
+
+    nonisolated static func buildIndex(progress: @escaping @Sendable (CrossRefProgress) -> Void) async -> SiteIndex {
+        progress(CrossRefProgress(phase: "Listing albums…", fraction: 0))
+        let albums = await collectAlbums(category: nil, year: nil, depth: 0)
+        guard !albums.isEmpty else { return SiteIndex() }
+
+        var index = SiteIndex()
+        var done = 0, idx = 0
+        await withTaskGroup(of: (Album, Int?, [Image]).self) { group in
+            func addNext() {
+                guard idx < albums.count else { return }
+                let item = albums[idx]; idx += 1
+                group.addTask { (item.album, item.year, await images(inAlbum: item.album.id)) }
+            }
+            for _ in 0..<min(6, albums.count) { addNext() }
+            while let (album, year, imgs) = await group.next() {
+                let entry = IndexEntry(date: parseAlbumDate(album.title, year: year)?.timeIntervalSince1970,
+                                       place: parseAlbumPlace(album.title))
+                for img in imgs {
+                    index.byFilename[img.filename.lowercased(), default: []].append(entry)
+                    index.images += 1
+                }
+                index.albums += 1
+                done += 1
+                progress(CrossRefProgress(phase: "Indexing \(done)/\(albums.count) albums…",
+                                          fraction: Double(done) / Double(albums.count)))
+                addNext()
+            }
+        }
+        saveIndex(index)
+        return index
+    }
+
+    /// Depth-first walk of the category tree, carrying the current year (set by a
+    /// 4-digit-year sub-category) so albums inherit it.
+    private nonisolated static func collectAlbums(category: Int?, year: Int?, depth: Int) async -> [(album: Album, year: Int?)] {
+        guard depth < 6 else { return [] }
+        let r = await browse(category: category)
+        var out: [(album: Album, year: Int?)] = r.albums.map { (album: $0, year: year) }
+        for c in r.categories {
+            let parsed = Int(c.title.trimmingCharacters(in: .whitespaces))
+            let y = (parsed.map { (1990...2100).contains($0) } ?? false) ? parsed : year
+            out += await collectAlbums(category: c.id, year: y, depth: depth + 1)
+        }
+        return out
+    }
+
+    nonisolated static func parseAlbumDate(_ title: String, year: Int?) -> Date? {
+        if let d = MetadataLoader.dateFromFilename(title) { return d }   // full yyyy-mm-dd etc.
+        let cal = Calendar(identifier: .gregorian)
+        if let y = year, let g = matches(title, "(?:^|[^0-9])([0-9]{1,2})[-/]([0-9]{1,2})(?:[^0-9]|$)").first,
+           let mo = Int(g[1]), let day = Int(g[2]), (1...12).contains(mo), (1...31).contains(day) {
+            var c = DateComponents(); c.year = y; c.month = mo; c.day = day; c.hour = 12
+            return cal.date(from: c)
+        }
+        if let y = year {                                                // year known, day unknown
+            var c = DateComponents(); c.year = y; c.month = 1; c.day = 1; c.hour = 12
+            return cal.date(from: c)
+        }
+        return nil
+    }
+
+    nonisolated static func parseAlbumPlace(_ title: String) -> String? {
+        guard let r = title.range(of: " in ", options: [.backwards, .caseInsensitive]) else { return nil }
+        let place = String(title[r.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (3...60).contains(place.count) ? place : nil
+    }
+
+    nonisolated static func cachedIndex() -> SiteIndex? {
+        guard let data = try? Data(contentsOf: indexCacheURL) else { return nil }
+        return try? JSONDecoder().decode(SiteIndex.self, from: data)
+    }
+
+    private nonisolated static func saveIndex(_ index: SiteIndex) {
+        let dir = indexCacheURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(index) { try? data.write(to: indexCacheURL) }
+    }
+
+    private nonisolated static var indexCacheURL: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("taylorIndex.json")
+    }
+
+    // MARK: Cross-reference + write
+
+    nonisolated static func crossReference(folder: URL, index: SiteIndex,
+                                           progress: @escaping @Sendable (CrossRefProgress) -> Void) async -> CrossRefResult {
+        let fm = FileManager.default
+        var files: [URL] = []
+        if let walker = fm.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+            for case let url as URL in walker where classify(url: url, isDirectory: false) == .image { files.append(url) }
+        }
+        var result = CrossRefResult(); result.scanned = files.count
+        guard !files.isEmpty else { result.note = "No photos in this folder."; return result }
+
+        var geocodeCache: [String: CLLocationCoordinate2D?] = [:]
+        for (i, url) in files.enumerated() {
+            defer { progress(CrossRefProgress(phase: "Updating \(i + 1)/\(files.count)…",
+                                              fraction: Double(i + 1) / Double(files.count))) }
+            let entries = index.byFilename[url.lastPathComponent.lowercased()] ?? []
+            guard !entries.isEmpty else { result.unmatched += 1; continue }
+            // Skip if the matched albums disagree (a generic filename in many events).
+            guard Set(entries.map { "\($0.date ?? 0)|\($0.place ?? "")" }).count == 1, let entry = entries.first else {
+                result.ambiguous += 1; continue
+            }
+
+            let localEntry = Entry(url: url, name: url.lastPathComponent, kind: .image, size: 0, modified: Date())
+            let date = await MetadataLoader.captureDate(for: localEntry) ?? entry.date.map { Date(timeIntervalSince1970: $0) }
+            var coord: CLLocationCoordinate2D?
+            if let place = entry.place {
+                if let cached = geocodeCache[place] { coord = cached }
+                else { coord = await geocode(place); geocodeCache[place] = coord }
+            }
+            guard date != nil || coord != nil else { result.noData += 1; continue }
+            if await FileActions.applyMetadata(date: date, location: coord, removeLocation: false, to: url) { result.updated += 1 }
+        }
+        return result
+    }
+
+    private nonisolated static func geocode(_ place: String) async -> CLLocationCoordinate2D? {
+        guard let marks = try? await CLGeocoder().geocodeAddressString(place),
+              let c = marks.first?.location?.coordinate, CLLocationCoordinate2DIsValid(c) else { return nil }
+        return c
     }
 }
