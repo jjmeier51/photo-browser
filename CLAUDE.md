@@ -15,10 +15,11 @@ drives — all while keeping per-item labels and captions attached.
 There are no third-party dependencies — it is pure Apple frameworks. A core
 design value is **offline, on-device, privacy-preserving** browsing: nothing is
 ever uploaded, and the app reads only the one folder the user explicitly grants
-access to. The **one** network exception is the opt-in "Add from MEGA" feature,
-which *downloads* (never uploads) the photos/videos from a user-pasted public
-MEGA folder link into a drive folder; outside that explicit action the app makes
-no network calls.
+access to. The network exceptions are both opt-in and *download-only* (never
+upload): "Add from MEGA" pulls photos/videos from a user-pasted public MEGA
+folder link, and "Browse taylorpictures.net" browses that public Coppermine
+gallery and downloads whole albums into a drive folder. Outside those explicit
+actions the app makes no network calls.
 
 > History note: the project grew over ~50 commits from a simple browser into a
 > Photos-like app. An earlier repo layout kept the app under an `ios-app/`

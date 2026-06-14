@@ -90,6 +90,7 @@ struct FolderView: View {
     @State private var showPhotosLibrary = false
     @State private var photosLibraryMoves = false
     @State private var showMegaImport = false
+    @State private var showTaylorBrowser = false
     @State private var importing = false
     @State private var editEntry: Entry?
     @State private var editProcessing = false
@@ -574,6 +575,9 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showPhotosLibrary) {
                 PhotosLibraryView(targetFolder: url, deleteOriginals: photosLibraryMoves)
             }
+            .fullScreenCover(isPresented: $showTaylorBrowser) {
+                TaylorBrowserView(targetFolder: url) { Task { await reload() } }
+            }
             .fullScreenCover(isPresented: $showMegaImport) {
                 MegaImportView(targetFolder: url) { Task { await reload() } }
             }
@@ -967,6 +971,9 @@ struct FolderView: View {
                     }
                     Button { showMegaImport = true } label: {
                         Label("Add from MEGA…", systemImage: "arrow.down.circle")
+                    }
+                    Button { showTaylorBrowser = true } label: {
+                        Label("Browse taylorpictures.net…", systemImage: "globe")
                     }
                     Button { pickFolder(.relink) } label: {
                         Label("Re-link Favorites from a Drive…", systemImage: "link")
