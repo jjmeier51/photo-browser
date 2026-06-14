@@ -643,14 +643,20 @@ struct FolderView: View {
         let bg = BackgroundTaskHolder()
         bg.begin(name: "Restore Capture Dates")
         Task {
-            let (fixed, total) = await FileActions.restoreCaptureDates(in: url) { done, tot in
+            let r = await FileActions.restoreCaptureDates(in: url, origins: library.photoOrigins) { done, tot in
                 Task { @MainActor in fixProgress = tot > 0 ? Double(done) / Double(tot) : 1 }
             }
             fixingDates = false
             bg.end()
-            resultMessage = total == 0
-                ? "No photos or videos here."
-                : "Restored \(fixed) of \(total) item(s) to their capture date."
+            if r.scanned == 0 {
+                resultMessage = "No photos or videos here."
+            } else {
+                var msg = "Restored \(r.fixed) of \(r.scanned) item(s) to their capture date."
+                if r.fromFallback > 0 { msg += " \(r.fromFallback) from filename/EXIF/Photos." }
+                if r.noDate > 0 { msg += " \(r.noDate) had no date." }
+                if r.failed > 0 { msg += " \(r.failed) couldn’t be written." }
+                resultMessage = msg
+            }
             library.contentDidChange()
             await reload()
         }

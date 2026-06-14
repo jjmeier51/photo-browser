@@ -390,13 +390,25 @@ enum FileActions {
         try? FileManager.default.setAttributes([.modificationDate: captured], ofItemAtPath: url.path)
     }
 
+    struct RestoreResult: Sendable {
+        var fixed = 0          // total modified-date writes that succeeded
+        var fromFallback = 0   // of those, ones using a non-embedded source
+        var scanned = 0
+        var noDate = 0         // no date found from any source
+        var failed = 0         // a date was found but the write failed
+    }
+
+    private enum RestoreOutcome { case fixedEmbedded, fixedFallback, unchanged, noDate, failed }
+
     /// Repairs items whose modified date was changed to the import time: walks
     /// `folder` (recursively) and resets each photo/video's modified date to its
-    /// *embedded* capture date (EXIF / QuickTime), which the import never touched.
-    /// Only rewrites when the dates actually differ; files with no embedded date
-    /// are left as-is. Returns (fixed, scanned).
+    /// real capture date. The embedded EXIF/QuickTime date is tried first; when a
+    /// file carries none (PNG/screenshots, stripped MP4s, downloads), it falls back
+    /// to GPS/IPTC EXIF, then the originating Photos asset (`origins`: path→localId),
+    /// then a date parsed from the filename. Only rewrites when the dates differ.
     nonisolated static func restoreCaptureDates(
-        in folder: URL, progress: @escaping @Sendable (Int, Int) -> Void) async -> (fixed: Int, scanned: Int) {
+        in folder: URL, origins: [String: String] = [:],
+        progress: @escaping @Sendable (Int, Int) -> Void) async -> RestoreResult {
         let fm = FileManager.default
         var files: [URL] = []
         if let walker = fm.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey],
@@ -407,32 +419,72 @@ enum FileActions {
             }
         }
         let total = files.count
-        guard total > 0 else { return (0, 0) }
+        guard total > 0 else { return RestoreResult() }
 
-        var fixed = 0, done = 0, index = 0
-        await withTaskGroup(of: Bool.self) { group in
+        var result = RestoreResult(); result.scanned = total
+        var done = 0, index = 0
+        await withTaskGroup(of: RestoreOutcome.self) { group in
             func addNext() {
                 guard index < total else { return }
                 let url = files[index]; index += 1
-                group.addTask {
-                    let kind = classify(url: url, isDirectory: false)
-                    let entry = Entry(url: url, name: url.lastPathComponent, kind: kind, size: 0, modified: Date())
-                    guard let captured = await MetadataLoader.captureDate(for: entry) else { return false }
-                    let current = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                    if let current, abs(current.timeIntervalSince(captured)) < 1 { return false }   // already correct
-                    try? FileManager.default.setAttributes([.modificationDate: captured], ofItemAtPath: url.path)
-                    return true
-                }
+                let originId = origins[url.path]
+                group.addTask { await restoreOne(url, originId: originId) }
             }
             for _ in 0..<min(6, total) { addNext() }
-            while let changed = await group.next() {
-                if changed { fixed += 1 }
+            while let outcome = await group.next() {
+                switch outcome {
+                case .fixedEmbedded: result.fixed += 1
+                case .fixedFallback: result.fixed += 1; result.fromFallback += 1
+                case .noDate:        result.noDate += 1
+                case .failed:        result.failed += 1
+                case .unchanged:     break
+                }
                 done += 1
                 progress(done, total)
                 addNext()
             }
         }
-        return (fixed, total)
+        return result
+    }
+
+    private nonisolated static func restoreOne(_ url: URL, originId: String?) async -> RestoreOutcome {
+        let kind = classify(url: url, isDirectory: false)
+        let entry = Entry(url: url, name: url.lastPathComponent, kind: kind, size: 0, modified: Date())
+        var date = await MetadataLoader.captureDate(for: entry)     // 1. embedded EXIF/QuickTime
+        var fromFallback = false
+        if date == nil {                                            // 2. GPS / IPTC EXIF
+            date = await MetadataLoader.auxCaptureDate(for: entry); if date != nil { fromFallback = true }
+        }
+        if date == nil, let originId {                              // 3. originating Photos asset
+            date = await photosCreationDate(for: originId); if date != nil { fromFallback = true }
+        }
+        if date == nil {                                            // 4. filename
+            date = MetadataLoader.dateFromFilename(url.lastPathComponent); if date != nil { fromFallback = true }
+        }
+        guard let captured = date else { return .noDate }
+        let current = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        if let current, abs(current.timeIntervalSince(captured)) < 1 { return .unchanged }   // already correct
+        guard setModificationDate(captured, on: url) else { return .failed }
+        return fromFallback ? .fixedFallback : .fixedEmbedded
+    }
+
+    /// Writes the file's modified date, retrying via URL resource values if the
+    /// POSIX `setAttributes` path is refused on some volumes.
+    private nonisolated static func setModificationDate(_ date: Date, on url: URL) -> Bool {
+        do {
+            try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: url.path)
+            return true
+        } catch {
+            var u = url
+            var values = URLResourceValues(); values.contentModificationDate = date
+            return (try? u.setResourceValues(values)) != nil
+        }
+    }
+
+    /// Creation date of an originating Photos asset (best-effort; no permission prompt).
+    private nonisolated static func photosCreationDate(for localId: String) async -> Date? {
+        guard Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryUsageDescription") != nil else { return nil }
+        return PHAsset.fetchAssets(withLocalIdentifiers: [localId], options: nil).firstObject?.creationDate
     }
 
     private static func copyRepresentation(_ provider: NSItemProvider, typeID: String, into folder: URL) async -> URL? {

@@ -351,6 +351,104 @@ enum MetadataLoader {
         }
     }
 
+    // MARK: - Fallback capture dates (Restore Capture Dates only)
+
+    /// A plausibility window for any *guessed* capture date: 1990 … tomorrow.
+    private nonisolated static func saneDate(_ d: Date) -> Bool {
+        d > Date(timeIntervalSince1970: 631_152_000) && d < Date().addingTimeInterval(86_400)
+    }
+
+    /// Secondary embedded date for photos that lack a normal EXIF/TIFF capture
+    /// date: GPS date/time (UTC) or IPTC DateCreated/TimeCreated. Off-main.
+    nonisolated static func auxCaptureDate(for entry: Entry) async -> Date? {
+        guard entry.kind == .image else { return nil }
+        return await Task.detached(priority: .utility) { () -> Date? in
+            guard let src = CGImageSourceCreateWithURL(entry.url as CFURL, nil),
+                  let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return nil }
+            if let iptc = props[kCGImagePropertyIPTCDictionary] as? [CFString: Any],
+               let day = iptc[kCGImagePropertyIPTCDateCreated] as? String,
+               let d = parseIPTCDate(day, iptc[kCGImagePropertyIPTCTimeCreated] as? String) { return d }
+            if let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any],
+               let stamp = gps[kCGImagePropertyGPSDateStamp] as? String,
+               let d = parseGPSDate(stamp, gps[kCGImagePropertyGPSTimeStamp]) { return d }
+            return nil
+        }.value
+    }
+
+    /// IPTC: DateCreated "yyyyMMdd" + optional TimeCreated "HHmmss…" (local time).
+    private nonisolated static func parseIPTCDate(_ day: String, _ time: String?) -> Date? {
+        guard day.count == 8, let y = Int(day.prefix(4)),
+              let mo = Int(day.dropFirst(4).prefix(2)), let d = Int(day.dropFirst(6).prefix(2)) else { return nil }
+        var c = DateComponents(); c.year = y; c.month = mo; c.day = d; c.hour = 12
+        if let time, time.count >= 6 {
+            c.hour = Int(time.prefix(2)); c.minute = Int(time.dropFirst(2).prefix(2)); c.second = Int(time.dropFirst(4).prefix(2))
+        }
+        let date = Calendar(identifier: .gregorian).date(from: c)
+        return date.flatMap { saneDate($0) ? $0 : nil }
+    }
+
+    /// GPS: DateStamp "yyyy:MM:dd" + TimeStamp (UTC), as "HH:mm:ss" or [h,m,s].
+    private nonisolated static func parseGPSDate(_ stamp: String, _ time: Any?) -> Date? {
+        let p = stamp.split(separator: ":")
+        guard p.count == 3, let y = Int(p[0]), let mo = Int(p[1]), let d = Int(p[2]) else { return nil }
+        var c = DateComponents(); c.year = y; c.month = mo; c.day = d; c.timeZone = TimeZone(identifier: "UTC")
+        if let s = time as? String {
+            let t = s.split(separator: ":")
+            if t.count >= 3 { c.hour = Int(t[0]); c.minute = Int(t[1]); c.second = Int(Double(t[2]) ?? 0) }
+        } else if let a = time as? [Any], a.count >= 3 {
+            c.hour = (a[0] as? NSNumber)?.intValue; c.minute = (a[1] as? NSNumber)?.intValue; c.second = (a[2] as? NSNumber)?.intValue
+        }
+        let date = Calendar(identifier: .gregorian).date(from: c)
+        return date.flatMap { saneDate($0) ? $0 : nil }
+    }
+
+    /// Best-effort capture date parsed from a filename (the app's own screenshot
+    /// names, IMG_/PXL_/VID_ camera names, WhatsApp, plain yyyy-MM-dd, or a unix
+    /// timestamp). Heuristic — used only when no embedded date exists.
+    nonisolated static func dateFromFilename(_ name: String) -> Date? {
+        let base = (name as NSString).deletingPathExtension
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = .current
+        func build(_ y: Int?, _ mo: Int?, _ d: Int?, _ h: Int, _ mi: Int, _ s: Int) -> Date? {
+            guard let y, let mo, let d, (1...12).contains(mo), (1...31).contains(d),
+                  (0...23).contains(h), (0...59).contains(mi), (0...59).contains(s) else { return nil }
+            var c = DateComponents(); c.year = y; c.month = mo; c.day = d; c.hour = h; c.minute = mi; c.second = s
+            return cal.date(from: c).flatMap { saneDate($0) ? $0 : nil }
+        }
+        // 1. The app's screenshot format: "… 2023-01-15 at 12.05.30".
+        if let g = firstMatch(base, "((?:19|20)[0-9]{2})-([0-9]{2})-([0-9]{2}) at ([0-9]{2})\\.([0-9]{2})\\.([0-9]{2})"),
+           let date = build(Int(g[1]), Int(g[2]), Int(g[3]), Int(g[4]) ?? 12, Int(g[5]) ?? 0, Int(g[6]) ?? 0) { return date }
+        // 2. General yyyy MM dd [+ HH mm ss] with common separators.
+        for g in allMatches(base, "(?<![0-9])((?:19|20)[0-9]{2})[-_.:]?([0-9]{2})[-_.:]?([0-9]{2})(?:[ _tT-]([0-9]{2})[-_.:]?([0-9]{2})[-_.:]?([0-9]{2})?)?") {
+            if let date = build(Int(g[1]), Int(g[2]), Int(g[3]), Int(g[4]) ?? 12, Int(g[5]) ?? 0, Int(g[6]) ?? 0) { return date }
+        }
+        // 3. Bare unix timestamp (10-digit seconds or 13-digit milliseconds).
+        if let g = firstMatch(base, "(?<![0-9])(1[0-9]{9}(?:[0-9]{3})?)(?![0-9])"), let v = Double(g[1]) {
+            let date = Date(timeIntervalSince1970: g[1].count >= 13 ? v / 1000 : v)
+            if saneDate(date) { return date }
+        }
+        return nil
+    }
+
+    /// Capture groups of the first match (index 0 = whole match); "" for absent groups.
+    private nonisolated static func firstMatch(_ s: String, _ pattern: String) -> [String]? {
+        guard let re = try? NSRegularExpression(pattern: pattern),
+              let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) else { return nil }
+        let ns = s as NSString
+        return (0..<m.numberOfRanges).map { i in
+            let r = m.range(at: i); return r.location == NSNotFound ? "" : ns.substring(with: r)
+        }
+    }
+
+    private nonisolated static func allMatches(_ s: String, _ pattern: String) -> [[String]] {
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let ns = s as NSString
+        return re.matches(in: s, range: NSRange(s.startIndex..., in: s)).map { m in
+            (0..<m.numberOfRanges).map { i in
+                let r = m.range(at: i); return r.location == NSNotFound ? "" : ns.substring(with: r)
+            }
+        }
+    }
+
     // MARK: - Full info (for the swipe-up panel)
 
     static func load(for entry: Entry) async -> MediaInfo {
