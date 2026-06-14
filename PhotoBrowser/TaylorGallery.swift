@@ -261,7 +261,9 @@ extension TaylorGallery {
 
     nonisolated static func buildIndex(progress: @escaping @Sendable (CrossRefProgress) -> Void) async -> SiteIndex {
         progress(CrossRefProgress(phase: "Listing albums…", fraction: 0))
-        let albums = await collectAlbums(category: nil, year: nil, depth: 0)
+        let albums = await collectAlbums { found, sections in
+            progress(CrossRefProgress(phase: "Listing albums — \(found) found in \(sections) sections…", fraction: 0))
+        }
         guard !albums.isEmpty else { return SiteIndex() }
 
         var index = SiteIndex()
@@ -291,16 +293,31 @@ extension TaylorGallery {
         return index
     }
 
-    /// Depth-first walk of the category tree, carrying the current year (set by a
-    /// 4-digit-year sub-category) so albums inherit it.
-    private nonisolated static func collectAlbums(category: Int?, year: Int?, depth: Int) async -> [(album: Album, year: Int?)] {
-        guard depth < 6 else { return [] }
-        let r = await browse(category: category)
-        var out: [(album: Album, year: Int?)] = r.albums.map { (album: $0, year: year) }
-        for c in r.categories {
-            let parsed = Int(c.title.trimmingCharacters(in: .whitespaces))
-            let y = (parsed.map { (1990...2100).contains($0) } ?? false) ? parsed : year
-            out += await collectAlbums(category: c.id, year: y, depth: depth + 1)
+    /// Breadth-first walk of the category tree, carrying the current year (set by a
+    /// 4-digit-year sub-category) so albums inherit it. A `visited` set is
+    /// essential: every Coppermine page links back to all the other top categories
+    /// and breadcrumbs, so without it the crawl re-fetches the same sections
+    /// endlessly. `progress` reports (albums found, sections visited).
+    private nonisolated static func collectAlbums(progress: @escaping @Sendable (Int, Int) -> Void) async -> [(album: Album, year: Int?)] {
+        var out: [(album: Album, year: Int?)] = []
+        var seenAlbums = Set<Int>()
+        var visited = Set<Int>()
+        var queue: [(cat: Int?, year: Int?, depth: Int)] = [(nil, nil, 0)]
+        var head = 0
+        while head < queue.count {
+            let node = queue[head]; head += 1
+            if let cat = node.cat {
+                guard visited.insert(cat).inserted else { continue }   // fetch each section once
+            }
+            guard node.depth < 6 else { continue }
+            let r = await browse(category: node.cat)
+            for a in r.albums where seenAlbums.insert(a.id).inserted { out.append((a, node.year)) }
+            for c in r.categories where !visited.contains(c.id) {
+                let parsed = Int(c.title.trimmingCharacters(in: .whitespaces))
+                let y = (parsed.map { (1990...2100).contains($0) } ?? false) ? parsed : node.year
+                queue.append((c.id, y, node.depth + 1))
+            }
+            progress(out.count, visited.count)
         }
         return out
     }
