@@ -175,11 +175,17 @@ private struct GalleryThumb: View {
         .task(id: url) { image = await Self.load(url) }
     }
 
+    private static let cache: NSCache<NSURL, UIImage> = {
+        let c = NSCache<NSURL, UIImage>(); c.countLimit = 2000; return c
+    }()
+
     private static func load(_ url: URL) async -> UIImage? {
+        if let cached = cache.object(forKey: url as NSURL) { return cached }
         var req = URLRequest(url: url)
         req.setValue(TaylorGallery.host, forHTTPHeaderField: "Referer")
         req.setValue(TaylorGallery.userAgent, forHTTPHeaderField: "User-Agent")
-        guard let (data, _) = try? await URLSession.shared.data(for: req) else { return nil }
-        return UIImage(data: data)
+        guard let (data, _) = try? await TaylorGallery.session.data(for: req), let img = UIImage(data: data) else { return nil }
+        cache.setObject(img, forKey: url as NSURL)
+        return img
     }
 }

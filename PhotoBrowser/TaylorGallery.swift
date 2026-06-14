@@ -37,14 +37,21 @@ enum TaylorGallery {
     // MARK: - Browsing
 
     /// Sub-categories and albums under a category (`nil` = the gallery root).
+    /// Results are cached in memory so re-navigating is instant (no re-fetch).
     nonisolated static func browse(category cat: Int?) async -> (categories: [Category], albums: [Album], note: String?) {
+        let key = cat ?? -1
+        if let hit = await GalleryCache.shared.browse(key) { return (hit.0, hit.1, nil) }
         let path = cat.map { "index.php?cat=\($0)" } ?? "index.php"
         guard let html = await fetchHTML(path) else { return ([], [], "Couldn’t reach taylorpictures.net.") }
-        return (parseCategories(html, excluding: cat), parseAlbums(html), nil)
+        let categories = parseCategories(html, excluding: cat)
+        let albums = parseAlbums(html)
+        if !(categories.isEmpty && albums.isEmpty) { await GalleryCache.shared.setBrowse(key, (categories, albums)) }
+        return (categories, albums, nil)
     }
 
-    /// Every image in an album (across all Coppermine pages).
+    /// Every image in an album (across all Coppermine pages). Cached in memory.
     nonisolated static func images(inAlbum id: Int) async -> [Image] {
+        if let hit = await GalleryCache.shared.images(id) { return hit }
         var all: [Image] = []
         var seen = Set<Int>()
         var page = 1
@@ -57,6 +64,7 @@ enum TaylorGallery {
             for img in parsed where !seen.contains(img.pid) { seen.insert(img.pid); all.append(img) }
             page += 1
         } while page <= lastPage && page <= 200                 // hard cap, just in case
+        if !all.isEmpty { await GalleryCache.shared.setImages(id, all) }
         return all
     }
 
@@ -102,7 +110,7 @@ enum TaylorGallery {
         var req = URLRequest(url: image.fullURL)
         req.setValue(host, forHTTPHeaderField: "Referer")
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        guard let (tmp, response) = try? await URLSession.shared.download(for: req),
+        guard let (tmp, response) = try? await session.download(for: req),
               (response as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true else { return false }
         let dest = uniqueDestination(for: sanitize(image.filename), in: folder)
         return (try? FileManager.default.moveItem(at: tmp, to: dest)) != nil
@@ -112,11 +120,20 @@ enum TaylorGallery {
 
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone) PhotoBrowser"
 
+    /// Shared session with a wider connection pool so a grid of thumbnails (and
+    /// album downloads) fetch more in parallel than the default 6 per host.
+    nonisolated static let session: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.httpMaximumConnectionsPerHost = 8
+        cfg.timeoutIntervalForRequest = 30
+        return URLSession(configuration: cfg)
+    }()
+
     nonisolated private static func fetchHTML(_ path: String) async -> String? {
         guard let url = URL(string: host + path) else { return nil }
         var req = URLRequest(url: url)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        guard let (data, _) = try? await URLSession.shared.data(for: req) else { return nil }
+        guard let (data, _) = try? await session.data(for: req) else { return nil }
         return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
     }
 
@@ -399,5 +416,27 @@ extension TaylorGallery {
         guard let marks = try? await CLGeocoder().geocodeAddressString(place),
               let c = marks.first?.location?.coordinate, CLLocationCoordinate2DIsValid(c) else { return nil }
         return c
+    }
+}
+
+/// In-memory cache of parsed browse/album results so the browser doesn't re-fetch
+/// (and re-parse) a section every time it's revisited. Album image lists are
+/// capped so the index crawl can't pin every album's images in memory.
+private actor GalleryCache {
+    static let shared = GalleryCache()
+
+    private var browseByCat: [Int: ([TaylorGallery.Category], [TaylorGallery.Album])] = [:]
+    private var imagesByAlbum: [Int: [TaylorGallery.Image]] = [:]
+    private var imageOrder: [Int] = []
+    private let imageCap = 60
+
+    func browse(_ key: Int) -> ([TaylorGallery.Category], [TaylorGallery.Album])? { browseByCat[key] }
+    func setBrowse(_ key: Int, _ value: ([TaylorGallery.Category], [TaylorGallery.Album])) { browseByCat[key] = value }
+
+    func images(_ id: Int) -> [TaylorGallery.Image]? { imagesByAlbum[id] }
+    func setImages(_ id: Int, _ value: [TaylorGallery.Image]) {
+        if imagesByAlbum[id] == nil { imageOrder.append(id) }
+        imagesByAlbum[id] = value
+        while imageOrder.count > imageCap { imagesByAlbum[imageOrder.removeFirst()] = nil }
     }
 }
