@@ -616,11 +616,11 @@ enum FileActions {
     static func exportAllFrames(of url: URL,
                                 folderName: String,
                                 onProgress: @escaping @Sendable (Double) -> Void = { _ in })
-    async -> (folder: URL?, count: Int) {
+    async -> (folder: URL?, count: Int, firstFrame: URL?) {
         let name = folderName.trimmingCharacters(in: .whitespacesAndNewlines)
         let safeName = name.isEmpty ? (url.deletingPathExtension().lastPathComponent + " Frames") : name
         let asset = AVURLAsset(url: url)
-        guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return (nil, 0) }
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return (nil, 0, nil) }
         let isHDR = ((try? await track.load(.mediaCharacteristics))?.contains(.containsHDRVideo)) ?? false
         let props = await MetadataLoader.exifProperties(forVideo: url)
         let duration = (try? await asset.load(.duration))?.seconds ?? 0
@@ -628,7 +628,7 @@ enum FileActions {
         // 1 of every `stride` frames → 30fps ≈ 5/s, 60fps ≈ 10/s, capped at 10/s.
         let stride = max(minExportStride, Int((fps / exportFramesPerSecond).rounded()))
         let interval = fps > 0 ? Double(stride) / fps : 1.0 / exportFramesPerSecond
-        guard duration > 0, interval > 0 else { return (nil, 0) }
+        guard duration > 0, interval > 0 else { return (nil, 0, nil) }
         let total = max(1, Int((duration / interval).rounded(.up)))
 
         // Resume into the saved folder if a prior export of this exact file is
@@ -661,7 +661,10 @@ enum FileActions {
         // Report the total frames now on disk (resumed + previously-exported).
         let onDisk = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil,
                                                                    options: [.skipsHiddenFiles]))?.count ?? result.1
-        return (result.0, onDisk)
+        // Index-0 frame, used by the caller to seed the new folder's cover.
+        let firstFramePath = dir.appendingPathComponent("\(safeName) 0.heic")
+        let firstFrame = FileManager.default.fileExists(atPath: firstFramePath.path) ? firstFramePath : nil
+        return (result.0, onDisk, firstFrame)
     }
 
     /// SDR path: AVAssetImageGenerator at evenly-spaced times (one bad frame is

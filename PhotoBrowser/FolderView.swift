@@ -1226,11 +1226,15 @@ struct FolderView: View {
         let bg = BackgroundTaskHolder()
         bg.begin(name: "Export All Frames")   // keep running if the app is backgrounded
         Task {
-            let (folder, count) = await FileActions.exportAllFrames(of: entry.url, folderName: name) { p in
+            let (folder, count, firstFrame) = await FileActions.exportAllFrames(of: entry.url, folderName: name) { p in
                 Task { @MainActor in exportProgress = p }
             }
             exporting = false
             bg.end()
+            // Seed the new frames folder's cover with its first frame.
+            if count > 0, let folder, let firstFrame, let cover = UIImage(contentsOfFile: firstFrame.path) {
+                library.setCover(cover, for: folder)
+            }
             let frameWord = count == 1 ? "frame" : "frames"
             resultMessage = count > 0
                 ? "Exported \(count) \(frameWord) to “\(folder?.lastPathComponent ?? "Frames")”."
