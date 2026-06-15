@@ -110,8 +110,14 @@ struct FolderView: View {
     @State private var transferItem: PreviewItem?
     @State private var cellFrames: [URL: CGRect] = [:]
     @State private var dragSelectAdding = true
-    @State private var lastDragURL: URL?
     @State private var lastDragPoint: CGPoint?
+    // Drag-select state, snapshotted at the start of a drag so it's stable while
+    // the grid scrolls: the row-major order, a url→index map, the anchor cell, and
+    // the selection before the drag (so moving back shrinks the painted range).
+    @State private var dragOrder: [URL] = []
+    @State private var dragIndexMap: [URL: Int] = [:]
+    @State private var dragAnchorIndex: Int?
+    @State private var dragBaseSelection: Set<URL> = []
     @State private var gridSize: CGSize = .zero
     @State private var autoScrollDir = 0
     @State private var autoScrollTask: Task<Void, Never>?
@@ -348,13 +354,47 @@ struct FolderView: View {
             .contextMenu { if !selecting { contextMenu(for: entry) } }
     }
 
-    /// Selects (or deselects) cells as a drag passes over them in Select mode.
+    /// Paints a contiguous selection range as the finger moves — like Photos: every
+    /// item between the anchor (where the drag began) and the cell under the finger,
+    /// in row-major order, is selected (or deselected), so full rows fill in even
+    /// when the finger only travels down one column.
     private func dragSelect(at point: CGPoint) {
-        guard let url = cellFrames.first(where: { $0.value.contains(point) })?.key else { return }
-        if lastDragURL == nil { dragSelectAdding = !selection.contains(url) }
-        guard url != lastDragURL else { return }
-        lastDragURL = url
-        if dragSelectAdding { selection.insert(url) } else { selection.remove(url) }
+        guard let curIndex = dragIndex(at: point) else { return }
+        if dragAnchorIndex == nil {
+            // First touch: snapshot the order + the pre-drag selection, and decide
+            // whether this drag adds or removes (based on the anchor's current state).
+            dragOrder = filtered.map(\.url)
+            dragIndexMap = Dictionary(uniqueKeysWithValues: dragOrder.enumerated().map { ($1, $0) })
+            dragAnchorIndex = dragIndexMap[filtered[curIndex].url]
+            dragBaseSelection = selection
+            dragSelectAdding = curIndex < dragOrder.count ? !selection.contains(dragOrder[curIndex]) : true
+        }
+        guard let anchor = dragAnchorIndex else { return }
+        let lo = min(anchor, curIndex), hi = max(anchor, curIndex)
+        var newSel = dragBaseSelection
+        for i in lo...hi where i >= 0 && i < dragOrder.count {
+            if dragSelectAdding { newSel.insert(dragOrder[i]) } else { newSel.remove(dragOrder[i]) }
+        }
+        selection = newSel
+    }
+
+    /// The row-major index of the cell under `point` — or, when the finger is in a
+    /// gap or off the side (e.g. dragging down the right edge), the nearest visible
+    /// cell, so the painted range still extends through the whole rows it passes.
+    private func dragIndex(at point: CGPoint) -> Int? {
+        let map = dragAnchorIndex == nil
+            ? Dictionary(uniqueKeysWithValues: filtered.enumerated().map { ($1.url, $0) })
+            : dragIndexMap
+        if let url = cellFrames.first(where: { $0.value.contains(point) })?.key, let i = map[url] { return i }
+        var best: (idx: Int, dist: CGFloat)?
+        for (url, frame) in cellFrames {
+            guard let i = map[url] else { continue }
+            let dx = max(frame.minX - point.x, point.x - frame.maxX, 0)
+            let dy = max(frame.minY - point.y, point.y - frame.maxY, 0)
+            let d = dx * dx + dy * dy
+            if best == nil || d < best!.dist { best = (i, d) }
+        }
+        return best?.idx
     }
 
     /// Sets the auto-scroll direction when the drag nears the top/bottom edge.
@@ -367,7 +407,10 @@ struct FolderView: View {
     }
 
     private func endDragSelect() {
-        lastDragURL = nil
+        dragAnchorIndex = nil
+        dragOrder = []
+        dragIndexMap = [:]
+        dragBaseSelection = []
         lastDragPoint = nil
         autoScrollDir = 0
     }
