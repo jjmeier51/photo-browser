@@ -757,7 +757,7 @@ struct FolderView: View {
             if !entries.isEmpty { filterBar }
             grid
         }
-        .navigationTitle(isRoot ? library.rootName : url.lastPathComponent)
+        .navigationTitle(isRoot ? "Home" : url.lastPathComponent)
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $query, prompt: "Search folder + subfolders")
         .toolbar { toolbar }
@@ -865,7 +865,7 @@ struct FolderView: View {
     /// crowded by the toolbar + filter chips). Always fully visible above the filters.
     private var header: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(isRoot ? library.rootName : url.lastPathComponent)
+            Text(isRoot ? "Home" : url.lastPathComponent)
                 .font(.title3.weight(.semibold))
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
@@ -882,6 +882,12 @@ struct FolderView: View {
     private var headerSubtitle: String {
         if showFavoritesOnly { return "Favorites" }
         if showAIOnly { return "To AI" }
+        let albums = entries.filter { $0.isFolder }.count
+        if isRoot || albums > 0 {
+            let items = filtered.filter { !$0.isFolder }.count
+            let albumPart = "\(albums) album\(albums == 1 ? "" : "s")"
+            return items > 0 ? "\(albumPart) · \(items) item\(items == 1 ? "" : "s")" : albumPart
+        }
         let n = filtered.count
         return "\(n) item\(n == 1 ? "" : "s")"
     }
