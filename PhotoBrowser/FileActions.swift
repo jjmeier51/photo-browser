@@ -785,13 +785,6 @@ enum FileActions {
         return (try? data.write(to: dest)) != nil ? dest : nil
     }
 
-    /// Upper bound on exported frames per second of video.
-    static let exportFramesPerSecond = 20.0
-    /// Minimum source-frame stride: take at most 1 of every 3 frames, so 24fps →
-    /// 8/sec, 30fps → 10/sec, 60fps → 20/sec. Higher-fps video uses a larger
-    /// stride so it never exceeds `exportFramesPerSecond`.
-    static let minExportStride = 3
-
     // MARK: - Export-progress persistence (resume after a crash/suspension)
 
     /// Saved state for an in-progress frame export. Frames are named by index, so
@@ -824,13 +817,13 @@ enum FileActions {
         return "\(url.path)|\(mtime)|\(rv?.fileSize ?? 0)"
     }
 
-    /// Exports frames of a video — evenly sampled to `exportFramesPerSecond` — as
-    /// upright, metadata-preserving HEICs into a folder (named `folderName`) beside
-    /// the video. Frames are named by index and progress is persisted, so a re-run
-    /// resumes where a crash/suspension left off (skipping frames already on disk).
-    /// HDR videos export 10-bit HDR HEICs (via a reader that restarts on failure);
-    /// SDR videos use AVAssetImageGenerator. `onProgress` is called (off the main
-    /// thread) with 0…1 completion.
+    /// Exports *every* frame of a video — one HEIC per source frame (60fps → 60/s) —
+    /// as upright, metadata-preserving HEICs into a folder (named `folderName`) beside
+    /// the video. A single sequential reader decodes frames in order (10-bit for HDR,
+    /// 8-bit otherwise) so only one frame is in memory at a time and a bad frame
+    /// restarts the reader rather than aborting. Frames are named by index and
+    /// progress is persisted, so a re-run resumes where a crash/suspension left off
+    /// (skipping frames already on disk). `onProgress` is called off the main thread.
     static func exportAllFrames(of url: URL,
                                 folderName: String,
                                 onProgress: @escaping @Sendable (Double) -> Void = { _ in })
@@ -842,12 +835,14 @@ enum FileActions {
         let isHDR = ((try? await track.load(.mediaCharacteristics))?.contains(.containsHDRVideo)) ?? false
         let props = await MetadataLoader.exifProperties(forVideo: url)
         let duration = (try? await asset.load(.duration))?.seconds ?? 0
-        let fps = (try? await track.load(.nominalFrameRate)).map(Double.init) ?? 0
-        // 1 of every `stride` frames → 30fps ≈ 5/s, 60fps ≈ 10/s, capped at 10/s.
-        let stride = max(minExportStride, Int((fps / exportFramesPerSecond).rounded()))
-        let interval = fps > 0 ? Double(stride) / fps : 1.0 / exportFramesPerSecond
-        guard duration > 0, interval > 0 else { return (nil, 0, nil) }
-        let total = max(1, Int((duration / interval).rounded(.up)))
+        let fps = (try? await track.load(.nominalFrameRate)).map(Double.init).flatMap { $0 > 0 ? $0 : nil } ?? 30
+        // Every frame: one output per source frame (60fps → 60/s). The sequential
+        // reader below decodes them in order, so this stays memory-light even for
+        // long, high-fps clips. `fps` only sizes `total`/the time grid; the reader
+        // writes whatever it actually decodes.
+        let interval = 1.0 / fps
+        guard duration > 0 else { return (nil, 0, nil) }
+        let total = max(1, Int((duration * fps).rounded()))
 
         // Resume into the saved folder if a prior export of this exact file is
         // unfinished; otherwise start a fresh folder beside the video.
@@ -864,17 +859,11 @@ enum FileActions {
         }
         setExportProgress(ExportProgress(folder: dir.path, total: total, nextIndex: startIndex), forVideoKey: videoKey)
 
-        let result: (URL?, Int)
-        if isHDR {
-            let transform = (try? await track.load(.preferredTransform)) ?? .identity
-            result = await exportFramesHDR(asset: asset, track: track, transform: transform, dir: dir,
-                                           safeName: safeName, props: props, duration: duration, interval: interval,
-                                           total: total, startIndex: startIndex, videoKey: videoKey, onProgress: onProgress)
-        } else {
-            result = await exportFramesSDR(asset: asset, dir: dir, safeName: safeName, props: props,
-                                           duration: duration, interval: interval, total: total,
-                                           startIndex: startIndex, videoKey: videoKey, onProgress: onProgress)
-        }
+        let transform = (try? await track.load(.preferredTransform)) ?? .identity
+        let result = await exportFramesSequential(asset: asset, track: track, transform: transform, dir: dir,
+                                                  safeName: safeName, props: props, duration: duration, interval: interval,
+                                                  total: total, startIndex: startIndex, videoKey: videoKey, isHDR: isHDR,
+                                                  onProgress: onProgress)
         setExportProgress(nil, forVideoKey: videoKey)   // finished → forget the checkpoint
         // Report the total frames now on disk (resumed + previously-exported).
         let onDisk = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil,
@@ -885,75 +874,20 @@ enum FileActions {
         return (result.0, onDisk, firstFrame)
     }
 
-    /// SDR path: AVAssetImageGenerator at evenly-spaced times (one bad frame is
-    /// skipped). Resumes from `startIndex`; frames are named by absolute index.
-    private static func exportFramesSDR(asset: AVURLAsset, dir: URL, safeName: String,
-                                        props: [String: Any], duration: Double, interval: Double,
-                                        total: Int, startIndex: Int, videoKey: String,
-                                        onProgress: @escaping @Sendable (Double) -> Void) async -> (URL?, Int) {
-        let times: [NSValue] = (startIndex..<total).map {
-            NSValue(time: CMTime(seconds: Double($0) * interval, preferredTimescale: 600))
-        }
-        guard !times.isEmpty else { return (dir, 0) }
-
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true                 // upright frames
-        generator.maximumSize = CGSize(width: 3840, height: 3840)       // cap peak memory
-        generator.requestedTimeToleranceBefore = CMTime(seconds: interval / 2, preferredTimescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(seconds: interval / 2, preferredTimescale: 600)
-
-        let outcome: (URL?, Int) = await withCheckedContinuation { (cont: CheckedContinuation<(URL?, Int), Never>) in
-            let lock = NSLock()
-            var written = 0
-            var processed = 0
-            var done = Set<Int>()
-            var contig = startIndex
-            var lastPct = -1
-            let pending = times.count
-            generator.generateCGImagesAsynchronously(forTimes: times) { requested, image, _, result, _ in
-                autoreleasepool {
-                    let i = max(0, Int((requested.seconds / interval).rounded()))
-                    let dest = dir.appendingPathComponent("\(safeName) \(i).heic")
-                    lock.lock()
-                    processed += 1
-                    if FileManager.default.fileExists(atPath: dest.path) {
-                        done.insert(i)
-                    } else if result == .succeeded, let image, let data = encodeCGImage(image, properties: props) {
-                        try? data.write(to: dest)
-                        written += 1
-                        done.insert(i)
-                    }
-                    while done.contains(contig) { contig += 1 }      // contiguous-done frontier
-                    let overall = Double(startIndex + processed) / Double(total)
-                    let pct = Int(overall * 100)
-                    let report = pct != lastPct; if report { lastPct = pct }
-                    let finished = processed >= pending
-                    let checkpoint = contig
-                    let count = written
-                    lock.unlock()
-                    if processed % 25 == 0 || finished {
-                        setExportProgress(ExportProgress(folder: dir.path, total: total, nextIndex: checkpoint), forVideoKey: videoKey)
-                    }
-                    if report { onProgress(min(1.0, overall)) }
-                    if finished { cont.resume(returning: (dir, count)) }
-                }
-            }
-        }
-        withExtendedLifetime(generator) {}        // keep the generator alive until done
-        return outcome
-    }
-
-    /// HDR path: 10-bit AVAssetReader, time-sampled, restarting after the last
-    /// good frame whenever the reader fails — so one undecodable frame can't end
-    /// the whole export. Resumes from `startIndex`; frames are named by index.
-    private static func exportFramesHDR(asset: AVURLAsset, track: AVAssetTrack, transform: CGAffineTransform,
-                                        dir: URL, safeName: String, props: [String: Any],
-                                        duration: Double, interval: Double, total: Int, startIndex: Int,
-                                        videoKey: String,
-                                        onProgress: @escaping @Sendable (Double) -> Void) async -> (URL?, Int) {
+    /// Sequential AVAssetReader that writes every decoded frame in order (10-bit
+    /// for HDR, 8-bit BGRA otherwise), restarting after the last good frame whenever
+    /// the reader fails — so one undecodable frame can't end the whole export, and
+    /// only one frame is ever in memory at a time. Resumes from `startIndex`; frames
+    /// are named by index.
+    private static func exportFramesSequential(asset: AVURLAsset, track: AVAssetTrack, transform: CGAffineTransform,
+                                               dir: URL, safeName: String, props: [String: Any],
+                                               duration: Double, interval: Double, total: Int, startIndex: Int,
+                                               videoKey: String, isHDR: Bool,
+                                               onProgress: @escaping @Sendable (Double) -> Void) async -> (URL?, Int) {
         await Task.detached(priority: .userInitiated) { () -> (URL?, Int) in
             let settings: [String: Any] = [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+                kCVPixelBufferPixelFormatTypeKey as String:
+                    isHDR ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_32BGRA
             ]
             var written = 0
             var frameIndex = startIndex                  // next frame index to capture

@@ -24,7 +24,7 @@ enum TaylorGallery {
     nonisolated static let host = "https://taylorpictures.net/"
 
     struct Category: Identifiable, Sendable, Hashable { let id: Int; let title: String }
-    struct Album: Identifiable, Sendable, Hashable { let id: Int; let title: String }
+    struct Album: Identifiable, Sendable, Hashable { let id: Int; let title: String; var thumbURL: URL? = nil }
     struct Image: Identifiable, Sendable, Hashable {
         let pid: Int
         let fullURL: URL
@@ -171,17 +171,21 @@ enum TaylorGallery {
     }
 
     nonisolated private static func parseAlbums(_ html: String) -> [Album] {
-        // An album appears both as an image-wrapping anchor (no text) and a title
-        // anchor (the text we want); keep the first non-empty title per album id.
-        var titles: [Int: String] = [:]; var order: [Int] = []
+        // An album appears both as an image-wrapping anchor (the cover thumbnail) and
+        // a title anchor (the text we want); keep the first non-empty title per id and
+        // the first cover thumbnail (the album's `thumb_…` image on the listing page).
+        var titles: [Int: String] = [:]; var order: [Int] = []; var covers: [Int: URL] = [:]
         for g in matches(html, "<a[^>]+href=\"thumbnails\\.php\\?album=(\\d+)\"[^>]*>([\\s\\S]*?)</a>") {
             guard let id = Int(g[1]) else { continue }
             let title = decode(stripTags(g[2]))
             if titles[id] == nil { order.append(id) }
             if (titles[id] ?? "").isEmpty, !title.isEmpty { titles[id] = title }
             else if titles[id] == nil { titles[id] = "" }
+            if covers[id] == nil,
+               let m = matches(g[2], "<img[^>]+src=\"([^\"]+thumb_[^\"]+)\"").first,
+               let u = absolute(decode(m[1])) { covers[id] = u }
         }
-        return order.map { Album(id: $0, title: titles[$0] ?? "") }
+        return order.map { Album(id: $0, title: titles[$0] ?? "", thumbURL: covers[$0]) }
     }
 
     /// Album thumbnails, found by their Coppermine `thumb_` src directly (robust to

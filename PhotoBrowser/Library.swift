@@ -316,6 +316,16 @@ final class Library {
     }
     func isAIGenerated(_ url: URL) -> Bool { aiGeneratedPaths.contains(url.path) }
 
+    // MARK: - taylorpictures.net downloaded albums
+
+    /// Coppermine album ids already downloaded, so the browser can mark them.
+    var downloadedTaylorAlbums: Set<Int> = Set((UserDefaults.standard.array(forKey: "photoBrowser.tpDownloaded") as? [Int]) ?? [])
+    func markTaylorAlbumDownloaded(_ id: Int) {
+        guard downloadedTaylorAlbums.insert(id).inserted else { return }
+        UserDefaults.standard.set(Array(downloadedTaylorAlbums), forKey: "photoBrowser.tpDownloaded")
+    }
+    func isTaylorAlbumDownloaded(_ id: Int) -> Bool { downloadedTaylorAlbums.contains(id) }
+
     // MARK: - "Not duplicates" (user-confirmed non-duplicate pairs)
 
     /// Pairs the user marked as NOT duplicates, as "pathA\npathB" (sorted), so a

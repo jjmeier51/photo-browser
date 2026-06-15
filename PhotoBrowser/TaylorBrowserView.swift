@@ -31,6 +31,7 @@ private struct GalleryCategoryView: View {
     let targetFolder: URL
     let onDownloaded: () -> Void
 
+    @Environment(Library.self) private var library
     @State private var categories: [TaylorGallery.Category] = []
     @State private var albums: [TaylorGallery.Album] = []
     @State private var loading = true
@@ -53,8 +54,18 @@ private struct GalleryCategoryView: View {
             if !albums.isEmpty {
                 Section("Albums") {
                     ForEach(albums) { a in
-                        NavigationLink(a.title.isEmpty ? "Album \(a.id)" : a.title) {
+                        NavigationLink {
                             GalleryAlbumView(album: a, targetFolder: targetFolder, onDownloaded: onDownloaded)
+                        } label: {
+                            HStack(spacing: 10) {
+                                albumThumb(a)
+                                Text(a.title.isEmpty ? "Album \(a.id)" : a.title).lineLimit(2)
+                                Spacer(minLength: 6)
+                                if library.isTaylorAlbumDownloaded(a.id) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(.green).accessibilityLabel("Downloaded")
+                                }
+                            }
                         }
                     }
                 }
@@ -72,6 +83,18 @@ private struct GalleryCategoryView: View {
         note = r.note ?? ((categories.isEmpty && albums.isEmpty) ? "Nothing here." : nil)
         loading = false
     }
+
+    @ViewBuilder private func albumThumb(_ a: TaylorGallery.Album) -> some View {
+        if let t = a.thumbURL {
+            GalleryThumb(url: t)
+                .frame(width: 46, height: 46)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        } else {
+            RoundedRectangle(cornerRadius: 6).fill(Color(white: 0.15))
+                .frame(width: 46, height: 46)
+                .overlay { Image(systemName: "photo").font(.caption).foregroundStyle(.secondary) }
+        }
+    }
 }
 
 /// An album's images, with a button to download them all into `targetFolder`.
@@ -80,6 +103,7 @@ private struct GalleryAlbumView: View {
     let targetFolder: URL
     let onDownloaded: () -> Void
 
+    @Environment(Library.self) private var library
     @State private var images: [TaylorGallery.Image] = []
     @State private var loading = true
     @State private var downloading = false
@@ -149,6 +173,7 @@ private struct GalleryAlbumView: View {
             downloading = false
             bg.end()
             if r.downloaded > 0 {
+                library.markTaylorAlbumDownloaded(album.id)   // remember it (checkmark in the list)
                 onDownloaded()            // reloads the folder and dismisses the browser
             } else {
                 resultNote = r.note ?? "Nothing downloaded."

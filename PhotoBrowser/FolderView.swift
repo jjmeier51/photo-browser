@@ -305,23 +305,25 @@ struct FolderView: View {
             )
             // Smoothly animate the thumbnail-size change.
             .animation(.easeInOut(duration: 0.22), value: library.thumbSize)
-            // In Select mode: tap a cell to toggle it (handled by each cell's own
-            // tap gesture), and press-and-hold then drag to multi-select. This is a
-            // plain `.gesture` (not high-priority) so it sits *below* the cells' tap
-            // gesture — a high-priority long-press here would swallow the taps and
-            // make tap-to-select do nothing.
+            // Press-and-hold then drag your finger across cells to multi-select, with
+            // edge auto-scroll — like Photos. Works from browse mode too: the first
+            // drag enters Select mode (a quick swipe still scrolls because selection
+            // only starts after the hold + ~12pt move; a stationary long-press still
+            // opens the context menu). A plain `.gesture` (not high-priority) keeps it
+            // below the cells' tap gesture so tap-to-open / tap-to-toggle still work.
             .gesture(
-                LongPressGesture(minimumDuration: 0.22)
-                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("grid")))
+                LongPressGesture(minimumDuration: 0.2)
+                    .sequenced(before: DragGesture(minimumDistance: 12, coordinateSpace: .named("grid")))
                     .onChanged { value in
                         if case .second(true, let drag?) = value {
+                            if !selecting { selecting = true }   // long-press + drag → Select mode
                             lastDragPoint = drag.location
                             dragSelect(at: drag.location)
                             updateAutoScroll(for: drag.location)
                         }
                     }
                     .onEnded { _ in endDragSelect() },
-                including: selecting ? .all : .subviews
+                including: .all
             )
             .onChange(of: autoScrollDir) { runAutoScroll(proxy) }
         }
@@ -334,11 +336,11 @@ struct FolderView: View {
                   isAIGenerated: library.isAIGenerated(entry.url),
                   coverURL: entry.isFolder ? library.coverURL(for: entry.url) : nil)
             .background {
-                if selecting {
-                    GeometryReader { geo in
-                        Color.clear.preference(key: CellFramesKey.self,
-                                               value: [entry.url: geo.frame(in: .named("grid"))])
-                    }
+                // Always publish cell frames (only the visible LazyVGrid cells exist)
+                // so a drag-select can begin immediately — even before Select mode.
+                GeometryReader { geo in
+                    Color.clear.preference(key: CellFramesKey.self,
+                                           value: [entry.url: geo.frame(in: .named("grid"))])
                 }
             }
             .onTapGesture { tap(entry) }
