@@ -326,6 +326,30 @@ final class Library {
     }
     func isTaylorAlbumDownloaded(_ id: Int) -> Bool { downloadedTaylorAlbums.contains(id) }
 
+    // MARK: - Frame folders + Tinder-style clean up
+
+    /// Folders produced by "Export All Frames" — "Start Clean Up" appears only here.
+    var framesFolders: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.framesFolders") ?? [])
+    func markFramesFolder(_ url: URL) {
+        guard framesFolders.insert(url.path).inserted else { return }
+        UserDefaults.standard.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
+    }
+    func isFramesFolder(_ url: URL) -> Bool { framesFolders.contains(url.path) }
+
+    /// Clean-up resume cursor per folder: the count of items already reviewed (kept
+    /// items stay at the front of the list, deleted ones vanish), so re-opening
+    /// clean-up shows the item at this index in the current, freshly-sorted list.
+    var cleanupProgress: [String: Int] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.cleanupProgress") as? [String: Int]) ?? [:]
+    func cleanupCursor(for url: URL) -> Int { cleanupProgress[url.path] ?? 0 }
+    func setCleanupCursor(_ n: Int, for url: URL) {
+        cleanupProgress[url.path] = n
+        UserDefaults.standard.set(cleanupProgress, forKey: "photoBrowser.cleanupProgress")
+    }
+    func resetCleanup(for url: URL) {
+        cleanupProgress.removeValue(forKey: url.path)
+        UserDefaults.standard.set(cleanupProgress, forKey: "photoBrowser.cleanupProgress")
+    }
+
     // MARK: - "Not duplicates" (user-confirmed non-duplicate pairs)
 
     /// Pairs the user marked as NOT duplicates, as "pathA\npathB" (sorted), so a
@@ -428,6 +452,7 @@ final class Library {
         let old = oldURL.path, new = newURL.path
         favorites = remapPaths(favorites, old: old, new: new)
         aiLabels  = remapPaths(aiLabels,  old: old, new: new)
+        framesFolders = remapPaths(framesFolders, old: old, new: new)
         customLabels = customLabels.mapValues { remapPaths($0, old: old, new: new) }
 
         captions = remapDict(captions, old: old, new: new)
@@ -436,6 +461,7 @@ final class Library {
 
         UserDefaults.standard.set(Array(favorites), forKey: "photoBrowser.favorites")
         UserDefaults.standard.set(Array(aiLabels), forKey: "photoBrowser.ai")
+        UserDefaults.standard.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
         UserDefaults.standard.set(captions, forKey: "photoBrowser.captions")
         UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
         UserDefaults.standard.set(photoOrigins, forKey: "photoBrowser.photoOrigins")

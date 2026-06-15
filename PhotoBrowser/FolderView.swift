@@ -74,6 +74,7 @@ struct FolderView: View {
     @State private var tsNoLabel = false
     @State private var tsLabelEntries: [Entry] = []
     @State private var showDuplicates = false
+    @State private var showCleanup = false
     @State private var confirmFixDates = false
     @State private var fixingDates = false
     @State private var indexingText = false
@@ -278,6 +279,13 @@ struct FolderView: View {
     }
 
     private var mediaItems: [Entry] { filtered.filter { $0.isViewable } }
+
+    /// Clean-up queue: every viewable item in this folder, stably name-sorted (so the
+    /// resume cursor lines up across sessions regardless of the active sort/filter).
+    private var cleanupItems: [Entry] {
+        entries.filter { $0.isViewable }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
 
     private var availableYears: [Int] {
         Array(Set(entries.filter { !$0.isFolder }.map { year(of: $0) })).sorted(by: >)
@@ -673,6 +681,9 @@ struct FolderView: View {
             }
             .fullScreenCover(isPresented: $showDuplicates) {
                 DuplicatesView(folder: url)
+            }
+            .fullScreenCover(isPresented: $showCleanup, onDismiss: { Task { await reload() } }) {
+                FrameCleanupView(folder: url, items: cleanupItems)
             }
             .overlay(alignment: .bottom) { if selecting { selectionBar } }
             .overlay(alignment: .bottomLeading) {
@@ -1108,6 +1119,10 @@ struct FolderView: View {
                     Image(systemName: "arrow.up.arrow.down")
                 }
                 Menu {
+                    if library.isFramesFolder(url) {
+                        Button { showCleanup = true } label: { Label("Start Clean Up", systemImage: "wand.and.sparkles") }
+                        Divider()
+                    }
                     Button { playSlideshow() } label: { Label("Play Slideshow", systemImage: "play.rectangle") }
                         .disabled(mediaItems.isEmpty)
                     Button { showNewFolder = true } label: { Label("New Folder", systemImage: "folder.badge.plus") }
@@ -1456,9 +1471,13 @@ struct FolderView: View {
             }
             exporting = false
             bg.end()
-            // Seed the new frames folder's cover with its first frame.
-            if count > 0, let folder, let firstFrame, let cover = UIImage(contentsOfFile: firstFrame.path) {
-                library.setCover(cover, for: folder)
+            // Remember it as a frames folder (enables "Start Clean Up") and seed its
+            // cover with the first frame.
+            if count > 0, let folder {
+                library.markFramesFolder(folder)
+                if let firstFrame, let cover = UIImage(contentsOfFile: firstFrame.path) {
+                    library.setCover(cover, for: folder)
+                }
             }
             let frameWord = count == 1 ? "frame" : "frames"
             resultMessage = count > 0
