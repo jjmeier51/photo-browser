@@ -287,6 +287,24 @@ struct FolderView: View {
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
+    private enum CleanupAction {
+        case start, resume, rerun      // no progress / partway / fully reviewed → restart
+        var title: String {
+            switch self {
+            case .start:  return "Start Clean Up"
+            case .resume: return "Resume Clean Up"
+            case .rerun:  return "Re-run Clean Up"
+            }
+        }
+    }
+
+    /// What the clean-up button should do for this folder, given its current items.
+    private var cleanupAction: CleanupAction {
+        let reviewed = library.reviewedInCleanup(url)
+        if reviewed.isEmpty { return .start }
+        return cleanupItems.contains { !reviewed.contains($0.url.path) } ? .resume : .rerun
+    }
+
     private var availableYears: [Int] {
         Array(Set(entries.filter { !$0.isFolder }.map { year(of: $0) })).sorted(by: >)
     }
@@ -1119,9 +1137,11 @@ struct FolderView: View {
                     Image(systemName: "arrow.up.arrow.down")
                 }
                 Menu {
-                    Button { showCleanup = true } label: {
-                        Label(library.cleanupStarted(url) ? "Resume Clean Up" : "Start Clean Up",
-                              systemImage: "wand.and.sparkles")
+                    Button {
+                        if case .rerun = cleanupAction { library.resetCleanup(url) }   // fresh pass over what's left
+                        showCleanup = true
+                    } label: {
+                        Label(cleanupAction.title, systemImage: "wand.and.sparkles")
                     }
                     .disabled(cleanupItems.isEmpty)
                     Divider()

@@ -341,7 +341,6 @@ final class Library {
     /// this set", so it resumes correctly every run regardless of order.
     var cleanupReviewed: [String: [String]] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.cleanupReviewed") as? [String: [String]]) ?? [:]
     func reviewedInCleanup(_ folder: URL) -> Set<String> { Set(cleanupReviewed[folder.path] ?? []) }
-    func cleanupStarted(_ folder: URL) -> Bool { !(cleanupReviewed[folder.path] ?? []).isEmpty }
     func markCleanupReviewed(_ url: URL, in folder: URL) {
         var s = Set(cleanupReviewed[folder.path] ?? [])
         guard s.insert(url.path).inserted else { return }
