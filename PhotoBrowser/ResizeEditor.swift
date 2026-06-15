@@ -20,7 +20,6 @@ struct ResizeEditorView: View {
     @State private var dragBaseY = 0.5
     @State private var aiStatus = ""
     @State private var fill: MediaEditing.ResizeFill = .blur
-    @State private var model = AIExtend.defaultModel
     @State private var extendText = ""
     @State private var saving = false
     @State private var confirmAI = false
@@ -87,16 +86,11 @@ struct ResizeEditorView: View {
                 TextField("Optional: what to show in the new space…", text: $extendText, axis: .vertical)
                     .lineLimit(1...2).textFieldStyle(.roundedBorder).padding(.horizontal)
 
-                HStack(spacing: 10) {
-                    Picker("Model", selection: $model) {
-                        ForEach(AIExtend.AIModel.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .labelsHidden().tint(.white)
-                    Button { AIExtend.isConfigured ? (confirmAI = true) : (showSettings = true) } label: {
-                        Label("Extend with AI", systemImage: "sparkles").font(.subheadline)
-                    }
-                    .buttonStyle(.bordered).tint(.purple).disabled(saving)
+                Button { AIExtend.isConfigured ? (confirmAI = true) : (showSettings = true) } label: {
+                    Label("Extend with AI (Astria)", systemImage: "sparkles")
+                        .font(.subheadline).frame(maxWidth: .infinity).padding(.vertical, 4)
                 }
+                .buttonStyle(.bordered).tint(.purple).disabled(saving)
                 .padding(.horizontal).padding(.bottom, 8)
             }
             .background(Color.black.ignoresSafeArea())
@@ -115,7 +109,7 @@ struct ResizeEditorView: View {
                 Button("Upload & Extend") { runAI() }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This uploads the photo to \(model.rawValue) to extend it. The result is reviewed before saving.")
+                Text("This uploads the photo to Astria to extend it. The result is reviewed before saving.")
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .alert("Couldn’t extend", isPresented: Binding(get: { aiError != nil }, set: { if !$0 { aiError = nil } })) {
@@ -188,33 +182,36 @@ struct ResizeEditorView: View {
         }
     }
 
-    /// Target output frame (capped to the model's max) for the chosen aspect/freeform.
-    private func targetCanvas(ow: Int, oh: Int, cap: Int) -> (Int, Int) {
-        var cw: Double, ch: Double
-        if aspect == .freeform { cw = Double(ow) * freeW; ch = Double(oh) * freeH }
-        else {
-            let imgAR = Double(ow) / Double(oh), ar = Double(aspect.ratio)
-            if imgAR >= ar { cw = Double(ow); ch = Double(ow) / ar } else { ch = Double(oh); cw = Double(oh) * ar }
-        }
-        let long = max(cw, ch)
-        if long > Double(cap) { let s = Double(cap) / long; cw *= s; ch *= s }
-        return (max(64, Int(cw.rounded())), max(64, Int(ch.rounded())))
-    }
-
     private func runAI() {
         saving = true; aiStatus = "Preparing…"
-        let url = entry.url, m = model
+        let url = entry.url, free = aspect == .freeform, fw = freeW, fh = freeH, ratio = aspect.ratio, ox = offsetX, oy = offsetY
         let extra = extendText.trimmingCharacters(in: .whitespacesAndNewlines)
         let prompt = extra.isEmpty ? AIExtend.extendPrompt : AIExtend.extendPrompt + " In the newly added areas, include: \(extra)."
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Extend")
         Task {
-            // Send the ORIGINAL photo (not a pre-blurred canvas, which the models tend
-            // to keep framed in the center) and ask for the larger target frame.
-            let prep = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url, maxPixel: m.maxLongSide) }.value
+            // Astria supports masks, so do a proper outpaint: the original on a black
+            // canvas + a mask that's black over the original (kept) and white around it
+            // (generated). Position follows the freeform drag offset.
+            let prep = await Task.detached(priority: .userInitiated) { () -> (canvas: Data, mask: Data, w: Int, h: Int)? in
+                let cap = AIExtend.maxLongSide
+                // Decode small enough that the extended canvas still fits the model's size.
+                let decodeMax = free ? cap / CGFloat(max(fw, fh)) : cap
+                guard let cg = ZoomableImageView.decodeCG(url: url, maxPixel: decodeMax) else { return nil }
+                let ow = Double(cg.width), oh = Double(cg.height)
+                var cwD: Double, chD: Double
+                if free { cwD = ow * fw; chD = oh * fh }
+                else { let ar = Double(ratio); if ow / oh >= ar { cwD = ow; chD = ow / ar } else { chD = oh; cwD = oh * ar } }
+                let cw = max(cg.width, Int(cwD.rounded())), ch = max(cg.height, Int(chD.rounded()))
+                guard let canvas = MediaEditing.composeCanvas(cg, canvasWidth: cw, canvasHeight: ch, fill: .black, offsetX: ox, offsetY: oy),
+                      let mask = MediaEditing.outpaintMask(canvasWidth: cw, canvasHeight: ch, imageWidth: cg.width, imageHeight: cg.height, offsetX: ox, offsetY: oy),
+                      let cj = AIExtend.uploadJPEG(of: canvas, maxPixel: cap),
+                      let mp = AIExtend.pngData(of: mask, maxPixel: cap) else { return nil }
+                return (cj.data, mp, cj.width, cj.height)
+            }.value
             guard let prep else { saving = false; bg.end(); aiError = "Couldn’t prepare the image."; return }
-            let (cw, ch) = targetCanvas(ow: prep.width, oh: prep.height, cap: Int(m.maxLongSide))
-            aiStatus = "Generating with \(m.rawValue)…"
-            let result = await AIExtend.generate(model: m, prompt: prompt, imageData: prep.data, count: 1, outputSize: (cw, ch))
+            aiStatus = "Generating with Astria…"
+            let result = await AIExtend.generate(prompt: prompt, imageData: prep.canvas, maskData: prep.mask,
+                                                 count: 1, width: prep.w, height: prep.h)
             saving = false; bg.end()
             switch result {
             case .success(let data): aiResults = data

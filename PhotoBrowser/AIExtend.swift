@@ -3,98 +3,108 @@ import ImageIO
 import UniformTypeIdentifiers
 import UIKit
 
-/// Cloud AI image features (opt-in, fal.ai). Two operations share one request
-/// shape (prompt + input image + num_images): "extend" (outpaint a composed
-/// canvas) and "edit" (free-text edit). Results are returned as image data for a
-/// Keep/Delete preview — Keep saves into an "AI" subfolder, inheriting the
-/// original's EXIF. Nothing uploads unless the user invokes it with their key.
+/// Cloud AI image features via Astria (https://astria.ai). Two ops: "extend"
+/// (masked outpaint — the original is preserved by a mask and only the new border
+/// is generated) and "edit" (img2img from a free-text instruction). Astria is
+/// multipart + asynchronous: POST a prompt, then poll the prompt id until its
+/// `images` array is populated, then download. Opt-in: nothing uploads without the
+/// user's key. Results are reviewed (Keep/Delete) before being saved.
 enum AIExtend {
-    enum AIModel: String, CaseIterable, Identifiable, Sendable {
-        case seedream = "Seedream 4.5"
-        case nanoBanana2 = "Nano Banana 2"
-        case nanoBananaPro = "Nano Banana Pro"
-        var id: String { rawValue }
-        var endpoint: String {
-            switch self {
-            case .seedream:      return "https://fal.run/fal-ai/bytedance/seedream/v4.5/edit"
-            case .nanoBanana2:   return "https://fal.run/fal-ai/nano-banana-2/edit"
-            case .nanoBananaPro: return "https://fal.run/fal-ai/nano-banana-pro/edit"
-            }
-        }
-        /// Highest output long-side the model targets (≈4K where supported). The
-        /// input is sent at this size and, for Seedream, requested as the output.
-        var maxLongSide: CGFloat {
-            switch self {
-            case .seedream:      return 4096
-            case .nanoBananaPro: return 4096
-            case .nanoBanana2:   return 4096
-            }
-        }
-    }
+    static let base = "https://api.astria.ai"
+    /// Astria's hard-coded Flux1.dev gallery tune (the default base model).
+    static let defaultTune = 1504944
+    /// Flux renders up to ~1536; super-resolution then ~doubles it toward 4K.
+    static let maxLongSide: CGFloat = 1536
 
     enum AIError: Error { case notConfigured, badImage, network, badResult, server(String) }
 
-    // MARK: - Config (user-supplied; nothing ships by default)
+    // MARK: - Config
 
-    private static let keyKey = "photoBrowser.falKey"
-    private static let promptKey = "photoBrowser.falPrompt"
-    private static let modelKey = "photoBrowser.falModel"
-    static let defaultPrompt = "Expand this exact photo outward to fill the larger frame, generating realistic new surroundings that seamlessly continue the existing scene. Keep the original subject, framing and details unchanged and sharp. Output one single seamless photograph — no borders, frames, blur, padding, or duplicated copies of the original."
+    private static let keyKey = "photoBrowser.astriaKey"
+    private static let tuneKey = "photoBrowser.astriaTune"
+    private static let promptKey = "photoBrowser.astriaPrompt"
+    static let defaultPrompt = "Extend and fill the empty masked border so the photo becomes a single seamless image, naturally continuing the existing scene, lighting, colours and perspective. Do not alter, frame, or duplicate the original area."
 
     static var apiKey: String { UserDefaults.standard.string(forKey: keyKey) ?? "" }
+    static var tuneID: Int {
+        let v = UserDefaults.standard.integer(forKey: tuneKey)
+        return v > 0 ? v : defaultTune
+    }
     static var isConfigured: Bool { !apiKey.isEmpty }
     static var extendPrompt: String {
         let v = UserDefaults.standard.string(forKey: promptKey) ?? ""
         return v.isEmpty ? defaultPrompt : v
     }
-    static var defaultModel: AIModel {
-        AIModel(rawValue: UserDefaults.standard.string(forKey: modelKey) ?? "") ?? .seedream
-    }
-    static func save(apiKey: String, prompt: String, model: AIModel) {
+    static func save(apiKey: String, tuneID: Int, prompt: String) {
         let d = UserDefaults.standard
         d.set(apiKey.trimmingCharacters(in: .whitespacesAndNewlines), forKey: keyKey)
+        d.set(tuneID > 0 ? tuneID : defaultTune, forKey: tuneKey)
         d.set(prompt, forKey: promptKey)
-        d.set(model.rawValue, forKey: modelKey)
     }
 
     // MARK: - Generation
 
-    /// Sends one input image + prompt to the model, asking for `count` images at
-    /// the model's highest resolution. Returns the generated image data (one per
-    /// result) for the Keep/Delete UI.
-    nonisolated static func generate(model: AIModel, prompt: String, imageData: Data,
-                                     count: Int, outputSize: (width: Int, height: Int)? = nil) async -> Result<[Data], AIError> {
+    /// Creates a prompt (optionally img2img with `imageData`, or masked outpaint with
+    /// `maskData`), polls until Astria finishes, and downloads the result image(s).
+    nonisolated static func generate(prompt: String, imageData: Data, maskData: Data? = nil,
+                                     count: Int, width: Int?, height: Int?) async -> Result<[Data], AIError> {
         guard isConfigured else { return .failure(.notConfigured) }
-        guard let url = URL(string: model.endpoint) else { return .failure(.server("Bad endpoint URL.")) }
-        var body: [String: Any] = [
-            "prompt": prompt,
-            "image_urls": ["data:image/jpeg;base64," + imageData.base64EncodedString()]
-        ]
-        if count > 1 { body["num_images"] = count }
-        // Ask for the target output size (controls extend aspect + resolution).
-        if let outputSize {
-            body["image_size"] = ["width": outputSize.width, "height": outputSize.height]
-        }
+        guard let url = URL(string: "\(base)/tunes/\(tuneID)/prompts") else { return .failure(.server("Bad endpoint URL.")) }
 
+        var fields: [String: String] = [
+            "prompt[text]": prompt,
+            "prompt[num_images]": String(min(max(count, 1), 8)),
+            "prompt[super_resolution]": "true",
+            "prompt[denoising_strength]": maskData == nil ? "0.7" : "1.0"
+        ]
+        if let width { fields["prompt[w]"] = String((width / 8) * 8) }
+        if let height { fields["prompt[h]"] = String((height / 8) * 8) }
+        var files: [(name: String, filename: String, mime: String, data: Data)] = [
+            ("prompt[input_image]", "input.jpg", "image/jpeg", imageData)
+        ]
+        if let maskData { files.append(("prompt[mask_image]", "mask.png", "image/png", maskData)) }
+
+        let boundary = "PB-\(UUID().uuidString)"
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        req.timeoutInterval = 240
-        req.setValue("Key \(apiKey)", forHTTPHeaderField: "Authorization")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        req.timeoutInterval = 120
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        req.httpBody = multipart(fields: fields, files: files, boundary: boundary)
 
         guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return .failure(.network) }
         guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             return .failure(.server(message(from: data)))
         }
-        let urls = imageURLs(from: data)
-        guard !urls.isEmpty else { return .failure(.badResult) }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = intValue(json["id"]) else { return .failure(.badResult) }
+
+        let urls = await poll(promptID: id)
+        guard !urls.isEmpty else { return .failure(.server("Generation timed out or returned no images.")) }
         var out: [Data] = []
         await withTaskGroup(of: Data?.self) { group in
             for u in urls { group.addTask { (try? await URLSession.shared.data(from: u))?.0 } }
             for await d in group { if let d { out.append(d) } }
         }
         return out.isEmpty ? .failure(.network) : .success(out)
+    }
+
+    /// Polls the prompt until its `images` array is populated (or it times out).
+    private nonisolated static func poll(promptID: Int) async -> [URL] {
+        guard let url = URL(string: "\(base)/tunes/\(tuneID)/prompts/\(promptID)") else { return [] }
+        for _ in 0..<80 {                                   // ~4 minutes at 3s
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            var req = URLRequest(url: url)
+            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            guard let (data, _) = try? await URLSession.shared.data(for: req),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            if let images = json["images"] as? [String], !images.isEmpty { return images.compactMap { URL(string: $0) } }
+            if let images = json["images"] as? [[String: Any]] {
+                let us = images.compactMap { ($0["url"] as? String).flatMap { URL(string: $0) } }
+                if !us.isEmpty { return us }
+            }
+        }
+        return []
     }
 
     // MARK: - Preparing input + saving results
@@ -112,11 +122,16 @@ enum AIExtend {
         return uploadJPEG(of: cg, maxPixel: maxPixel)
     }
 
-    /// A CGImage as an upload JPEG, downscaled so its long side <= `maxPixel`.
     nonisolated static func uploadJPEG(of cg: CGImage, maxPixel: CGFloat) -> (data: Data, width: Int, height: Int)? {
         let capped = downscale(cg, maxLongSide: maxPixel)
         guard let data = UIImage(cgImage: capped).jpegData(compressionQuality: 0.92) else { return nil }
         return (data, capped.width, capped.height)
+    }
+
+    /// PNG of a (mask) image, downscaled so its long side <= `maxPixel` (kept in
+    /// lock-step with the matching input JPEG).
+    nonisolated static func pngData(of cg: CGImage, maxPixel: CGFloat) -> Data? {
+        UIImage(cgImage: downscale(cg, maxLongSide: maxPixel)).pngData()
     }
 
     private nonisolated static func downscale(_ cg: CGImage, maxLongSide: CGFloat) -> CGImage {
@@ -132,9 +147,9 @@ enum AIExtend {
         return ctx.makeImage() ?? cg
     }
 
-    /// Saves a generated image into an "AI" subfolder beside `original`, carrying
-    /// the original's EXIF/GPS and forcing its capture date (EXIF + the file's own
-    /// date) so it sorts correctly. Tags it as AI-generated. Returns the new URL.
+    /// Saves a generated image into an "AI" subfolder beside `original`, carrying the
+    /// original's EXIF/GPS and forcing its capture date (EXIF + the file's own date)
+    /// so it sorts correctly. Tags it AI-generated. Returns the new URL.
     nonisolated static func saveToAIFolder(_ data: Data, basedOn original: URL) -> URL? {
         guard let resultSrc = CGImageSourceCreateWithData(data as CFData, nil),
               let resultCG = CGImageSourceCreateImageAtIndex(resultSrc, 0, nil) else { return nil }
@@ -145,7 +160,6 @@ enum AIExtend {
         if let src = CGImageSourceCreateWithURL(original as CFURL, nil) {
             props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
         }
-        // Capture date: from the original's EXIF, else its file modified date.
         let captureDate = exifDate(from: props)
             ?? (try? original.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         if let captureDate {
@@ -169,10 +183,36 @@ enum AIExtend {
         guard let d = CGImageDestinationCreateWithURL(dest as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(d, resultCG, props as CFDictionary)
         guard CGImageDestinationFinalize(d) else { return nil }
-        if let captureDate {   // make the file's date match the capture date
+        if let captureDate {
             try? FileManager.default.setAttributes([.creationDate: captureDate, .modificationDate: captureDate], ofItemAtPath: dest.path)
         }
         return dest
+    }
+
+    // MARK: - Helpers
+
+    private nonisolated static func multipart(fields: [String: String],
+                                              files: [(name: String, filename: String, mime: String, data: Data)],
+                                              boundary: String) -> Data {
+        var body = Data()
+        func add(_ s: String) { body.append(s.data(using: .utf8)!) }
+        for (k, v) in fields {
+            add("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(k)\"\r\n\r\n\(v)\r\n")
+        }
+        for f in files {
+            add("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(f.name)\"; filename=\"\(f.filename)\"\r\n")
+            add("Content-Type: \(f.mime)\r\n\r\n")
+            body.append(f.data); add("\r\n")
+        }
+        add("--\(boundary)--\r\n")
+        return body
+    }
+
+    private nonisolated static func intValue(_ any: Any?) -> Int? {
+        if let i = any as? Int { return i }
+        if let n = any as? NSNumber { return n.intValue }
+        if let s = any as? String { return Int(s) }
+        return nil
     }
 
     private nonisolated static func exifDate(from props: [CFString: Any]) -> Date? {
@@ -186,8 +226,6 @@ enum AIExtend {
         return nil
     }
 
-    // MARK: - Helpers
-
     private nonisolated static func uniqueURL(for name: String, in folder: URL) -> URL {
         let fm = FileManager.default
         var dest = folder.appendingPathComponent(name)
@@ -197,20 +235,11 @@ enum AIExtend {
         return dest
     }
 
-    private nonisolated static func imageURLs(from data: Data) -> [URL] {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
-        if let images = json["images"] as? [[String: Any]] {
-            return images.compactMap { ($0["url"] as? String).flatMap(URL.init) }
-        }
-        if let image = json["image"] as? [String: Any], let s = image["url"] as? String, let u = URL(string: s) { return [u] }
-        return []
-    }
-
     private nonisolated static func message(from data: Data) -> String {
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let detail = json["detail"] as? String { return detail }
-            if let detail = json["detail"] as? [[String: Any]], let m = detail.first?["msg"] as? String { return m }
             if let m = json["message"] as? String { return m }
+            if let errors = json["errors"] as? [String], let m = errors.first { return m }
+            if let e = json["error"] as? String { return e }
         }
         return String(data: data.prefix(300), encoding: .utf8) ?? "The provider rejected the request."
     }

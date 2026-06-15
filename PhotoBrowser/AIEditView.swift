@@ -1,14 +1,13 @@
 import SwiftUI
 
-/// AI image editing: the user describes the edit, picks a model and how many
-/// variations to generate, and reviews the results (Keep saves to the AI folder).
+/// AI image editing (Astria): the user describes the edit and how many variations
+/// to generate, and reviews the results (Keep saves to the AI folder).
 struct AIEditView: View {
     @Environment(\.dismiss) private var dismiss
     let entry: Entry
 
     @State private var prompt = ""
     @State private var count = 1
-    @State private var model = AIExtend.defaultModel
     @State private var running = false
     @State private var results: [Data]?
     @State private var error: String?
@@ -24,14 +23,11 @@ struct AIEditView: View {
                         .lineLimit(2...5)
                 }
                 Section {
-                    Picker("Model", selection: $model) {
-                        ForEach(AIExtend.AIModel.allCases) { Text($0.rawValue).tag($0) }
-                    }
                     Picker("Images to generate", selection: $count) {
                         ForEach(counts, id: \.self) { Text("\($0)").tag($0) }
                     }
                 } footer: {
-                    Text("Uploads the photo to your provider to generate edits. Results are reviewed before anything is saved (to an “AI” subfolder, keeping the original's EXIF).")
+                    Text("Uploads the photo to Astria to generate edits. Results are reviewed before anything is saved (to an “AI” subfolder, keeping the original's EXIF).")
                 }
                 if let error {
                     Section { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange).font(.callout) }
@@ -50,7 +46,7 @@ struct AIEditView: View {
                 if running {
                     VStack(spacing: 12) {
                         ProgressView()
-                        Text("Generating \(count) image\(count == 1 ? "" : "s") with \(model.rawValue)…")
+                        Text("Generating \(count) image\(count == 1 ? "" : "s") with Astria…")
                             .font(.callout.weight(.medium)).multilineTextAlignment(.center)
                         Text("This can take up to a minute. Keep the app open — it keeps going briefly in the background.")
                             .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
@@ -69,14 +65,14 @@ struct AIEditView: View {
     private func generate() {
         guard AIExtend.isConfigured else { showSettings = true; return }
         running = true; error = nil
-        let url = entry.url, p = prompt, n = count, m = model
+        let url = entry.url, p = prompt, n = count
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Edit")
         Task {
-            guard let prep = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url, maxPixel: m.maxLongSide) }.value else {
+            guard let prep = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url, maxPixel: AIExtend.maxLongSide) }.value else {
                 running = false; bg.end(); error = "Couldn’t read the photo."; return
             }
-            let result = await AIExtend.generate(model: m, prompt: p, imageData: prep.data, count: n,
-                                                 outputSize: (prep.width, prep.height))
+            let result = await AIExtend.generate(prompt: p, imageData: prep.data, count: n,
+                                                 width: prep.width, height: prep.height)
             running = false; bg.end()
             switch result {
             case .success(let data): results = data

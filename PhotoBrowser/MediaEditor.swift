@@ -456,6 +456,21 @@ enum MediaEditing {
         return ctx.makeImage()
     }
 
+    /// A grayscale outpaint mask matching a composed canvas: white where new content
+    /// should be generated, black over the original's rect (which is preserved).
+    /// Same coordinate math as `composeCanvas` so it lines up exactly.
+    static func outpaintMask(canvasWidth: Int, canvasHeight: Int, imageWidth: Int, imageHeight: Int,
+                             offsetX: CGFloat = 0.5, offsetY: CGFloat = 0.5) -> CGImage? {
+        let cw = CGFloat(max(canvasWidth, imageWidth)), ch = CGFloat(max(canvasHeight, imageHeight))
+        let W = CGFloat(imageWidth), H = CGFloat(imageHeight)
+        guard let ctx = CGContext(data: nil, width: Int(cw), height: Int(ch), bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+        ctx.setFillColor(gray: 1, alpha: 1); ctx.fill(CGRect(x: 0, y: 0, width: cw, height: ch))   // white = generate
+        let dx = ((cw - W) * min(max(offsetX, 0), 1)).rounded(), dy = ((ch - H) * min(max(offsetY, 0), 1)).rounded()
+        ctx.setFillColor(gray: 0, alpha: 1); ctx.fill(CGRect(x: dx, y: dy, width: W, height: H))    // black = keep
+        return ctx.makeImage()
+    }
+
     /// The original scaled to *fill* the canvas, blurred — the Instasize-style backdrop.
     private static func blurredBackground(_ image: CGImage, canvas: CGSize) -> CGImage? {
         let ci = CIImage(cgImage: image)
