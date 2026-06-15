@@ -57,6 +57,15 @@ enum AIExtend {
     static func setTune(_ id: Int, for model: AIModel) {
         UserDefaults.standard.set(id > 0 ? id : model.fallbackTune, forKey: model.tuneKey)
     }
+    // Flux tune used for masked outpaint ("Extend with AI"). Editable in Settings.
+    private static let fluxKey = "photoBrowser.astriaFluxTune"
+    static let defaultFluxTune = 1504944        // Flux1.dev — supports mask_image inpainting
+    static var fluxTune: Int {
+        let v = UserDefaults.standard.integer(forKey: fluxKey)
+        return v > 0 ? v : defaultFluxTune
+    }
+    static func setFluxTune(_ id: Int) { UserDefaults.standard.set(id > 0 ? id : defaultFluxTune, forKey: fluxKey) }
+
     static func save(apiKey: String, defaultModel: AIModel, prompt: String) {
         let d = UserDefaults.standard
         d.set(apiKey.trimmingCharacters(in: .whitespacesAndNewlines), forKey: keyKey)
@@ -84,7 +93,39 @@ enum AIExtend {
         let files: [(name: String, filename: String, mime: String, data: Data)] = [
             ("prompt[input_image]", "input.jpg", "image/jpeg", imageData)
         ]
+        return await submit(tune: tune, url: url, fields: fields, files: files)
+    }
 
+    /// Masked outpaint via Flux (the "Extend" feature). `imageData` is the original
+    /// composited onto the target canvas at the user's chosen position; `maskData`
+    /// is white where new scenery should be generated and black over the kept
+    /// original. Flux regenerates only the white region, so placement is exact —
+    /// this is the real "Generative Expand" behaviour the partner edit models
+    /// (Seedream / Nano Banana) can't do because they take no mask.
+    nonisolated static func generateOutpaint(prompt: String, imageData: Data, maskData: Data,
+                                             width: Int, height: Int) async -> Result<[Data], AIError> {
+        guard isConfigured else { return .failure(.notConfigured) }
+        let tune = fluxTune
+        guard let url = URL(string: "\(base)/tunes/\(tune)/prompts") else { return .failure(.server("Bad endpoint URL.")) }
+        let fields: [String: String] = [
+            "prompt[text]": prompt,
+            "prompt[num_images]": "1",
+            "prompt[w]": String((width / 8) * 8),
+            "prompt[h]": String((height / 8) * 8),
+            "prompt[denoising_strength]": "1.0",
+            "prompt[super_resolution]": "true",
+            "prompt[hires_fix]": "true"
+        ]
+        let files: [(name: String, filename: String, mime: String, data: Data)] = [
+            ("prompt[input_image]", "input.jpg", "image/jpeg", imageData),
+            ("prompt[mask_image]", "mask.png", "image/png", maskData)
+        ]
+        return await submit(tune: tune, url: url, fields: fields, files: files)
+    }
+
+    /// Posts a prompt (multipart), polls until Astria finishes, downloads the image(s).
+    private nonisolated static func submit(tune: Int, url: URL, fields: [String: String],
+                                           files: [(name: String, filename: String, mime: String, data: Data)]) async -> Result<[Data], AIError> {
         let boundary = "PB-\(UUID().uuidString)"
         var req = URLRequest(url: url)
         req.httpMethod = "POST"

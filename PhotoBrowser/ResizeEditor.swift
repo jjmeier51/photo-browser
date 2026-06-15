@@ -21,7 +21,6 @@ struct ResizeEditorView: View {
     @State private var aiStatus = ""
     @State private var fill: MediaEditing.ResizeFill = .blur
     @State private var extendText = ""
-    @State private var model = AIExtend.defaultModel
     @State private var saving = false
     @State private var confirmAI = false
     @State private var showSettings = false
@@ -87,16 +86,10 @@ struct ResizeEditorView: View {
                 TextField("Optional: what to show in the new space…", text: $extendText, axis: .vertical)
                     .lineLimit(1...2).textFieldStyle(.roundedBorder).padding(.horizontal)
 
-                HStack(spacing: 10) {
-                    Picker("Model", selection: $model) {
-                        ForEach(AIExtend.AIModel.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .labelsHidden().tint(.white)
-                    Button { AIExtend.isConfigured ? (confirmAI = true) : (showSettings = true) } label: {
-                        Label("Extend with AI", systemImage: "sparkles").font(.subheadline)
-                    }
-                    .buttonStyle(.bordered).tint(.purple).disabled(saving)
+                Button { AIExtend.isConfigured ? (confirmAI = true) : (showSettings = true) } label: {
+                    Label("Extend with AI", systemImage: "sparkles").font(.subheadline).frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.bordered).tint(.purple).disabled(saving)
                 .padding(.horizontal).padding(.bottom, 8)
             }
             .background(Color.black.ignoresSafeArea())
@@ -115,7 +108,7 @@ struct ResizeEditorView: View {
                 Button("Upload & Extend") { runAI() }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This uploads the photo to \(model.rawValue) (via Astria) to extend it. The result is reviewed before saving.")
+                Text("This uploads the photo to Astria (Flux) to extend it — generating new scenery around the original, kept exactly where you placed it. The result is reviewed before saving.")
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .alert("Couldn’t extend", isPresented: Binding(get: { aiError != nil }, set: { if !$0 { aiError = nil } })) {
@@ -188,48 +181,67 @@ struct ResizeEditorView: View {
         }
     }
 
-    /// Target output frame for the chosen aspect/freeform, capped to the model's max.
-    private func targetCanvas(ow: Int, oh: Int, cap: Int) -> (Int, Int) {
-        var cw: Double, ch: Double
-        if aspect == .freeform { cw = Double(ow) * freeW; ch = Double(oh) * freeH }
-        else {
-            let imgAR = Double(ow) / Double(oh), ar = Double(aspect.ratio)
-            if imgAR >= ar { cw = Double(ow); ch = Double(ow) / ar } else { ch = Double(oh); cw = Double(oh) * ar }
-        }
-        let long = max(cw, ch)
-        if long > Double(cap) { let s = Double(cap) / long; cw *= s; ch *= s }
-        return (max(64, Int(cw.rounded())), max(64, Int(ch.rounded())))
-    }
-
-    /// Where the user dragged the photo within a freeform frame, as words the edit
-    /// models understand (offsetY is canvas-space: 1 = top, 0 = bottom). Centered
-    /// (or any non-freeform aspect) returns nil so the default prompt is unchanged.
-    private func placementPhrase() -> String? {
-        guard aspect == .freeform else { return nil }
-        let h: String? = offsetX < 0.34 ? "left" : offsetX > 0.66 ? "right" : nil
-        let v: String? = offsetY > 0.66 ? "top" : offsetY < 0.34 ? "bottom" : nil
-        let where_ = [v, h].compactMap { $0 }.joined(separator: "-")
-        guard !where_.isEmpty else { return nil }
-        return "Position the original photo toward the \(where_) of the frame, and generate the newly added scenery on the opposite side(s)."
-    }
-
+    /// Masked-outpaint extend via Flux. Builds the target canvas with the original
+    /// composited at the user's chosen position (same as the preview) plus a matching
+    /// outpaint mask (white = generate, black = keep), and sends both: Flux fills only
+    /// the new area, so the original stays exactly where it was placed.
     private func runAI() {
         saving = true; aiStatus = "Preparing…"
-        let url = entry.url, m = model
+        let url = entry.url
         let extra = extendText.trimmingCharacters(in: .whitespacesAndNewlines)
-        var prompt = extra.isEmpty ? AIExtend.extendPrompt : AIExtend.extendPrompt + " In the newly added areas, include: \(extra)."
-        // These tunes have no mask, so placement can't be pixel-pinned; steer it
-        // with a spatial instruction matching where the user dragged the photo.
-        if let place = placementPhrase() { prompt += " " + place }
+        let prompt = extra.isEmpty ? AIExtend.extendPrompt : AIExtend.extendPrompt + " In the newly added areas, include: \(extra)."
+        let free = aspect == .freeform, fw = freeW, fh = freeH, ratio = Double(aspect.ratio)
+        let ox = offsetX, oy = offsetY, style = fill
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Extend")
         Task {
-            // These models are mask-less editors: send the original and request the
-            // larger target frame; they outpaint to fill it.
-            let prep = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url, maxPixel: m.maxLongSide) }.value
+            let prep = await Task.detached(priority: .userInitiated) { () -> (img: Data, mask: Data, w: Int, h: Int)? in
+                guard let raw = ZoomableImageView.decodeCG(url: url, maxPixel: 2000) else { return nil }
+                // Canvas size (>= the image, so it never crops) for the chosen shape.
+                func canvasDims(_ ow: Int, _ oh: Int) -> (Int, Int) {
+                    if free { return (max(ow, Int((Double(ow) * fw).rounded())), max(oh, Int((Double(oh) * fh).rounded()))) }
+                    let ar = Double(ow) / Double(oh)
+                    return ar >= ratio ? (ow, Int((Double(ow) / ratio).rounded()))
+                                       : (Int((Double(oh) * ratio).rounded()), oh)
+                }
+                func scaleCG(_ image: CGImage, longSide: Int) -> CGImage? {
+                    let long = max(image.width, image.height)
+                    guard long > longSide, long > 0 else { return image }
+                    let s = Double(longSide) / Double(long)
+                    let w = max(1, Int((Double(image.width) * s).rounded())), h = max(1, Int((Double(image.height) * s).rounded()))
+                    guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                              space: image.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return image }
+                    ctx.interpolationQuality = .high
+                    ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+                    return ctx.makeImage()
+                }
+                var (cw, ch) = canvasDims(raw.width, raw.height)
+                // Keep the canvas Flux-friendly: cap the long side by scaling the
+                // original down first, so the kept region and the new area scale
+                // together (Flux's super-resolution restores output detail).
+                let cap = 1536
+                var cg = raw
+                if max(cw, ch) > cap {
+                    let s = Double(cap) / Double(max(cw, ch))
+                    let nl = max(8, Int((Double(max(raw.width, raw.height)) * s).rounded()))
+                    cg = scaleCG(raw, longSide: nl) ?? raw
+                    (cw, ch) = canvasDims(cg.width, cg.height)
+                }
+                func r8(_ x: Int) -> Int { ((x + 7) / 8) * 8 }   // Flux wants multiples of 8
+                cw = r8(cw); ch = r8(ch)
+                let ow = cg.width, oh = cg.height
+                guard let canvas = MediaEditing.composeCanvas(cg, canvasWidth: cw, canvasHeight: ch, fill: style,
+                                                              offsetX: ox, offsetY: oy),
+                      let mask = MediaEditing.outpaintMask(canvasWidth: cw, canvasHeight: ch, imageWidth: ow, imageHeight: oh,
+                                                           offsetX: ox, offsetY: oy),
+                      let img = UIImage(cgImage: canvas).jpegData(compressionQuality: 0.95),
+                      let maskData = UIImage(cgImage: mask).pngData() else { return nil }
+                return (img, maskData, canvas.width, canvas.height)
+            }.value
             guard let prep else { saving = false; bg.end(); aiError = "Couldn’t prepare the image."; return }
-            let (cw, ch) = targetCanvas(ow: prep.width, oh: prep.height, cap: Int(m.maxLongSide))
-            aiStatus = "Generating with \(m.rawValue)…"
-            let result = await AIExtend.generate(model: m, prompt: prompt, imageData: prep.data, count: 1, width: cw, height: ch)
+            aiStatus = "Generating…"
+            let result = await AIExtend.generateOutpaint(prompt: prompt, imageData: prep.img, maskData: prep.mask,
+                                                         width: prep.w, height: prep.h)
             saving = false; bg.end()
             switch result {
             case .success(let data): aiResults = data

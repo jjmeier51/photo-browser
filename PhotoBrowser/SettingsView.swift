@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var model = AIExtend.defaultModel
     @State private var tunes: [AIExtend.AIModel: String] = Dictionary(
         uniqueKeysWithValues: AIExtend.AIModel.allCases.map { ($0, String(AIExtend.tuneID(for: $0))) })
+    @State private var flux = String(AIExtend.fluxTune)
     @State private var prompt = AIExtend.extendPrompt
 
     var body: some View {
@@ -23,7 +24,7 @@ struct SettingsView: View {
                 } header: {
                     Text("AI (cloud)")
                 } footer: {
-                    Text("Used only for “Extend with AI” and “Edit with AI”. Those upload the photo to Astria; the rest of the app stays offline. Leave the key blank to disable. Note: providers run content moderation and may refuse some edits.")
+                    Text("Used only for “Extend with AI” (Flux, masked outpaint) and “Edit with AI” (the model below). Those upload the photo to Astria; the rest of the app stays offline. Leave the key blank to disable. Note: providers run content moderation and may refuse some edits.")
                 }
 
                 Section {
@@ -39,10 +40,18 @@ struct SettingsView: View {
                                 .frame(width: 120)
                         }
                     }
+                    HStack {
+                        Text("Flux (extend)")
+                        Spacer()
+                        TextField("Tune ID", text: $flux)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 120)
+                    }
                 } header: {
                     Text("Model tune IDs")
                 } footer: {
-                    Text("Each model is an Astria gallery tune. Paste the tune ID from its gallery page to override the built-in default.")
+                    Text("Each model is an Astria gallery tune. Paste the tune ID from its gallery page to override the built-in default. “Edit with AI” uses the chosen model; “Extend with AI” uses Flux (it’s the one that supports masked outpainting).")
                 }
 
                 Section("Extend prompt") {
@@ -61,6 +70,7 @@ struct SettingsView: View {
                                 AIExtend.setTune(id, for: m)
                             }
                         }
+                        if let id = Int(flux.trimmingCharacters(in: .whitespaces)) { AIExtend.setFluxTune(id) }
                         AIExtend.save(apiKey: key, defaultModel: model, prompt: prompt)
                         dismiss()
                     }
