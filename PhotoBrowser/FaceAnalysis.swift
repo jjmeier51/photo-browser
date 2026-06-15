@@ -43,11 +43,7 @@ enum FaceAnalysis {
         let req = VNGenerateImageFeaturePrintRequest()
         try? VNImageRequestHandler(cgImage: cg, options: [:]).perform([req])
         guard let obs = req.results?.first as? VNFeaturePrintObservation, obs.elementType == .float else { return nil }
-        let count = obs.elementCount
-        return obs.data.withUnsafeBytes { raw -> [Float] in
-            let ptr = raw.bindMemory(to: Float.self)
-            return (0..<count).map { ptr[$0] }
-        }
+        return obs.data.withUnsafeBytes { raw in Array(raw.bindMemory(to: Float.self)) }
     }
 
     /// L2 distance between two feature-print vectors (smaller = more similar). We
