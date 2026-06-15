@@ -14,6 +14,7 @@ struct TaylorCrossReferenceView: View {
     @State private var phase = ""
     @State private var fraction = 0.0
     @State private var rebuildIndex = false
+    @State private var matchContent = false
     @State private var result: TaylorGallery.CrossRefResult?
     @State private var cached: TaylorGallery.SiteIndex?
 
@@ -24,13 +25,19 @@ struct TaylorCrossReferenceView: View {
                     Text("Matches the photos in “\(folder.lastPathComponent)” to taylorpictures.net by filename, then writes the matching date and location into each file. A photo's own EXIF date is kept when present; location comes from the album/event title.")
                         .font(.callout)
                 } footer: {
-                    Text("Only date/location metadata of your local files is changed. Building the gallery index browses thousands of public album pages and can take several minutes the first time — it's cached afterward.")
+                    Text("Only date/location metadata of your local files is changed. Building the gallery index browses thousands of public album pages — it's saved as it goes, so it resumes if interrupted instead of restarting.")
+                }
+
+                Section {
+                    Toggle("Match renamed files by image content", isOn: $matchContent)
+                } footer: {
+                    Text("Slower: also downloads and perceptual-hashes every site thumbnail so photos whose filenames differ from the site can still match. Needed if your files were renamed.")
                 }
 
                 if let cached {
                     Section {
-                        Toggle("Rebuild gallery index", isOn: $rebuildIndex)
-                        Text("Cached index: \(cached.albums) albums, \(cached.images) images.")
+                        Toggle("Rebuild gallery index from scratch", isOn: $rebuildIndex)
+                        Text("Index: \(cached.doneAlbumIDs.count) of \(cached.albumRefs.count) albums done, \(cached.images) images\(cached.hashes.isEmpty ? "" : ", \(cached.hashes.count) hashed").")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -80,23 +87,23 @@ struct TaylorCrossReferenceView: View {
 
     private func start() {
         running = true; result = nil; fraction = 0
-        let useCache = cached != nil && !rebuildIndex
+        let content = matchContent
+        // Content matching needs hashes; if the cached index has none, rebuild it.
+        let needsHashes = content && (cached.map { $0.hashes.isEmpty && !$0.albumRefs.isEmpty } ?? false)
+        let prior = (rebuildIndex || needsHashes) ? nil : cached
         let bg = BackgroundTaskHolder()
         bg.begin(name: "Cross-Reference")
         Task {
-            let index: TaylorGallery.SiteIndex
-            if useCache, let c = cached {
-                index = c
-            } else {
-                index = await TaylorGallery.buildIndex { p in
-                    Task { @MainActor in phase = p.phase; fraction = p.fraction * 0.5 }
-                }
+            // Builds or resumes; a complete cached index returns quickly.
+            let index = await TaylorGallery.buildIndex(resuming: prior, matchContent: content) { p in
+                Task { @MainActor in phase = p.phase; fraction = p.fraction * 0.5 }
             }
             let r = await TaylorGallery.crossReference(folder: folder, index: index) { p in
-                Task { @MainActor in phase = p.phase; fraction = (useCache ? 0 : 0.5) + p.fraction * (useCache ? 1 : 0.5) }
+                Task { @MainActor in phase = p.phase; fraction = 0.5 + p.fraction * 0.5 }
             }
             running = false
             bg.end()
+            cached = index
             result = r
             if r.updated > 0 { library.contentDidChange(); onFinished() }
         }

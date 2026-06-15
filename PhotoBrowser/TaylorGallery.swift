@@ -1,5 +1,7 @@
 import Foundation
 import CoreLocation
+import ImageIO
+import CoreGraphics
 
 /// Read-only client for the taylorpictures.net photo gallery (a standard
 /// Coppermine install). Lets the browser list categories/albums/images and
@@ -255,19 +257,24 @@ enum TaylorGallery {
 /// into each match. Same-file extension so it can reuse the private parsers above.
 ///
 /// Honest limits (this is a fuzzy, untestable-here feature — expect tuning):
-/// - Matching is by filename. Coppermine often uses generic sequential names
-///   (001.jpg) that repeat across albums; when a name maps to albums that
-///   *disagree* on date/place it's skipped rather than mis-dated. A content
-///   (perceptual-hash) fallback isn't included because hashing all ~223k site
-///   images on-device is impractical — filename matching is the scalable path.
+/// - Default matching is by filename (generic names like 001.jpg that map to
+///   conflicting events are skipped, not mis-dated). For renamed local files an
+///   optional content match downloads and perceptual-hashes every site thumbnail
+///   during the build (much slower) and matches by hash distance.
 /// - Date: the photo's own EXIF capture date wins when present; otherwise the
 ///   album/event date parsed from the album title (month-day + the year from the
 ///   category, or just the year). Location: the place parsed from the album title
 ///   (text after "… in …"), forward-geocoded to coordinates.
 extension TaylorGallery {
     struct IndexEntry: Codable, Sendable, Equatable { var date: Double?; var place: String? }
+    struct AlbumRef: Codable, Sendable { var id: Int; var title: String; var year: Int? }
+    /// A site image's perceptual hash + event, for matching renamed local files.
+    struct HashEntry: Codable, Sendable { var hash: UInt64; var date: Double?; var place: String? }
     struct SiteIndex: Codable, Sendable {
         var byFilename: [String: [IndexEntry]] = [:]
+        var hashes: [HashEntry] = []          // only populated when content matching is on
+        var albumRefs: [AlbumRef] = []        // the full album list (so a resume skips re-listing)
+        var doneAlbumIDs: Set<Int> = []       // albums already indexed (resume skips them)
         var albums = 0
         var images = 0
         var builtAt = Date().timeIntervalSince1970
@@ -282,33 +289,57 @@ extension TaylorGallery {
 
     // MARK: Index (crawl + cache)
 
-    nonisolated static func buildIndex(progress: @escaping @Sendable (CrossRefProgress) -> Void) async -> SiteIndex {
-        progress(CrossRefProgress(phase: "Listing albums…", fraction: 0))
-        let albums = await collectAlbums { found, sections in
-            progress(CrossRefProgress(phase: "Listing albums — \(found) found in \(sections) sections…", fraction: 0))
-        }
-        guard !albums.isEmpty else { return SiteIndex() }
+    /// Builds (or resumes) the gallery index. The album list and per-album progress
+    /// are saved to disk periodically, so exiting mid-crawl no longer reindexes from
+    /// scratch — pass the cached index to resume. With `matchContent`, each image's
+    /// thumbnail is also perceptual-hashed so renamed local files can still match.
+    nonisolated static func buildIndex(resuming prior: SiteIndex?, matchContent: Bool,
+                                       progress: @escaping @Sendable (CrossRefProgress) -> Void) async -> SiteIndex {
+        var index = prior ?? SiteIndex()
 
-        var index = SiteIndex()
-        var done = 0, idx = 0
-        await withTaskGroup(of: (Album, Int?, [Image]).self) { group in
-            func addNext() {
-                guard idx < albums.count else { return }
-                let item = albums[idx]; idx += 1
-                group.addTask { (item.album, item.year, await images(inAlbum: item.album.id)) }
+        // 1. Album list — reuse the saved one, else crawl the category tree once.
+        if index.albumRefs.isEmpty {
+            progress(CrossRefProgress(phase: "Listing albums…", fraction: 0))
+            let collected = await collectAlbums { found, sections in
+                progress(CrossRefProgress(phase: "Listing albums — \(found) found in \(sections) sections…", fraction: 0))
             }
-            for _ in 0..<min(6, albums.count) { addNext() }
-            while let (album, year, imgs) = await group.next() {
-                let entry = IndexEntry(date: parseAlbumDate(album.title, year: year)?.timeIntervalSince1970,
-                                       place: parseAlbumPlace(album.title))
-                for img in imgs {
+            index.albumRefs = collected.map { AlbumRef(id: $0.album.id, title: $0.album.title, year: $0.year) }
+            saveIndex(index)
+        }
+        let total = index.albumRefs.count
+        guard total > 0 else { return index }
+
+        // 2. Index the albums that aren't done yet (concurrently), saving periodically.
+        let pending = index.albumRefs.filter { !index.doneAlbumIDs.contains($0.id) }
+        var idx = 0, sinceSave = 0
+        await withTaskGroup(of: (AlbumRef, [Image], [UInt64]).self) { group in
+            func addNext() {
+                guard idx < pending.count else { return }
+                let ref = pending[idx]; idx += 1
+                group.addTask {
+                    let imgs = await images(inAlbum: ref.id)
+                    var hs: [UInt64] = []
+                    if matchContent { for img in imgs { hs.append(await imageHash(img.thumbURL) ?? 0) } }
+                    return (ref, imgs, hs)
+                }
+            }
+            for _ in 0..<min(6, pending.count) { addNext() }
+            while let (ref, imgs, hs) = await group.next() {
+                let entry = IndexEntry(date: parseAlbumDate(ref.title, year: ref.year)?.timeIntervalSince1970,
+                                       place: parseAlbumPlace(ref.title))
+                for (i, img) in imgs.enumerated() {
                     index.byFilename[img.filename.lowercased(), default: []].append(entry)
                     index.images += 1
+                    if matchContent, i < hs.count, hs[i] != 0 {
+                        index.hashes.append(HashEntry(hash: hs[i], date: entry.date, place: entry.place))
+                    }
                 }
-                index.albums += 1
-                done += 1
-                progress(CrossRefProgress(phase: "Indexing \(done)/\(albums.count) albums…",
-                                          fraction: Double(done) / Double(albums.count)))
+                index.doneAlbumIDs.insert(ref.id)
+                index.albums = index.doneAlbumIDs.count
+                sinceSave += 1
+                if sinceSave >= 50 { sinceSave = 0; saveIndex(index) }   // persist progress
+                let done = index.doneAlbumIDs.count
+                progress(CrossRefProgress(phase: "Indexing \(done)/\(total) albums…", fraction: Double(done) / Double(total)))
                 addNext()
             }
         }
@@ -401,17 +432,26 @@ extension TaylorGallery {
         for (i, url) in files.enumerated() {
             defer { progress(CrossRefProgress(phase: "Updating \(i + 1)/\(files.count)…",
                                               fraction: Double(i + 1) / Double(files.count))) }
+            // 1. Filename match.
+            var matchDate: Double?; var matchPlace: String?; var matched = false
             let entries = index.byFilename[url.lastPathComponent.lowercased()] ?? []
-            guard !entries.isEmpty else { result.unmatched += 1; continue }
-            // Skip if the matched albums disagree (a generic filename in many events).
-            guard Set(entries.map { "\($0.date ?? 0)|\($0.place ?? "")" }).count == 1, let entry = entries.first else {
-                result.ambiguous += 1; continue
+            if !entries.isEmpty {
+                if Set(entries.map { "\($0.date ?? 0)|\($0.place ?? "")" }).count == 1, let e = entries.first {
+                    matchDate = e.date; matchPlace = e.place; matched = true
+                } else { result.ambiguous += 1; continue }   // generic name in conflicting events
             }
+            // 2. Content (perceptual-hash) match for renamed files, if hashes exist.
+            if !matched, !index.hashes.isEmpty, let lh = await localHash(url) {
+                var best: HashEntry?; var bestD = 65
+                for he in index.hashes { let d = (lh ^ he.hash).nonzeroBitCount; if d < bestD { bestD = d; best = he } }
+                if let best, bestD <= 8 { matchDate = best.date; matchPlace = best.place; matched = true }
+            }
+            guard matched else { result.unmatched += 1; continue }
 
             let localEntry = Entry(url: url, name: url.lastPathComponent, kind: .image, size: 0, modified: Date())
-            let date = await MetadataLoader.captureDate(for: localEntry) ?? entry.date.map { Date(timeIntervalSince1970: $0) }
+            let date = await MetadataLoader.captureDate(for: localEntry) ?? matchDate.map { Date(timeIntervalSince1970: $0) }
             var coord: CLLocationCoordinate2D?
-            if let place = entry.place {
+            if let place = matchPlace {
                 if let cached = geocodeCache[place] { coord = cached }
                 else { coord = await geocode(place); geocodeCache[place] = coord }
             }
@@ -419,6 +459,44 @@ extension TaylorGallery {
             if await FileActions.applyMetadata(date: date, location: coord, removeLocation: false, to: url) { result.updated += 1 }
         }
         return result
+    }
+
+    // MARK: Perceptual hashing (renamed-file content match)
+
+    /// 64-bit difference hash (dHash) of a remote thumbnail (cached via `session`).
+    private nonisolated static func imageHash(_ url: URL) async -> UInt64? {
+        var req = URLRequest(url: url)
+        req.setValue(host, forHTTPHeaderField: "Referer")
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        guard let (data, _) = try? await session.data(for: req),
+              let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        return dHash(cg)
+    }
+
+    private nonisolated static func localHash(_ url: URL) async -> UInt64? {
+        await Task.detached(priority: .utility) {
+            let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                         kCGImageSourceCreateThumbnailWithTransform: true,
+                                         kCGImageSourceThumbnailMaxPixelSize: 64]
+            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+            return dHash(cg)
+        }.value
+    }
+
+    private nonisolated static func dHash(_ cg: CGImage) -> UInt64 {
+        let w = 9, h = 8
+        var px = [UInt8](repeating: 0, count: w * h)
+        guard let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return 0 }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var hash: UInt64 = 0, bit: UInt64 = 0
+        for y in 0..<h { for x in 0..<(w - 1) {
+            if px[y * w + x] < px[y * w + x + 1] { hash |= (1 << bit) }
+            bit += 1
+        }}
+        return hash
     }
 
     private nonisolated static func geocode(_ place: String) async -> CLLocationCoordinate2D? {
