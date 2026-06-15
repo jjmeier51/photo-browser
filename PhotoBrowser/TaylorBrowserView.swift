@@ -176,7 +176,7 @@ private struct GalleryThumb: View {
     }
 
     private static let cache: NSCache<NSURL, UIImage> = {
-        let c = NSCache<NSURL, UIImage>(); c.countLimit = 2000; return c
+        let c = NSCache<NSURL, UIImage>(); c.countLimit = 5000; return c
     }()
 
     private static func load(_ url: URL) async -> UIImage? {

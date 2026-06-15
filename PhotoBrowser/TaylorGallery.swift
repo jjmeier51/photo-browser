@@ -50,20 +50,20 @@ enum TaylorGallery {
     }
 
     /// Every image in an album (across all Coppermine pages). Cached in memory.
+    /// Page 1 determines the page count, then the rest are fetched concurrently.
     nonisolated static func images(inAlbum id: Int) async -> [Image] {
         if let hit = await GalleryCache.shared.images(id) { return hit }
-        var all: [Image] = []
-        var seen = Set<Int>()
-        var page = 1
-        var lastPage = 1
-        repeat {
-            guard let html = await fetchHTML("thumbnails.php?album=\(id)&page=\(page)") else { break }
-            if page == 1 { lastPage = maxPage(html) }
-            let parsed = parseImages(html)
-            if parsed.isEmpty { break }                         // safety: stop on an empty page
-            for img in parsed where !seen.contains(img.pid) { seen.insert(img.pid); all.append(img) }
-            page += 1
-        } while page <= lastPage && page <= 200                 // hard cap, just in case
+        guard let first = await fetchHTML("thumbnails.php?album=\(id)&page=1") else { return [] }
+        let last = min(maxPage(first), 200)
+        var pages: [Int: [Image]] = [1: parseImages(first)]
+        if last > 1 {
+            await withTaskGroup(of: (Int, [Image]).self) { group in
+                for p in 2...last { group.addTask { (p, parseImages(await fetchHTML("thumbnails.php?album=\(id)&page=\(p)") ?? "")) } }
+                while let (p, imgs) = await group.next() { pages[p] = imgs }
+            }
+        }
+        var all: [Image] = []; var seen = Set<String>()
+        for p in 1...last { for img in (pages[p] ?? []) where seen.insert(img.fullURL.absoluteString).inserted { all.append(img) } }
         if !all.isEmpty { await GalleryCache.shared.setImages(id, all) }
         return all
     }
@@ -120,12 +120,15 @@ enum TaylorGallery {
 
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone) PhotoBrowser"
 
-    /// Shared session with a wider connection pool so a grid of thumbnails (and
-    /// album downloads) fetch more in parallel than the default 6 per host.
+    /// Shared session: a wide connection pool plus a big on-disk cache so thumbnails
+    /// and pages load fast and survive relaunches. Images/pages on this gallery are
+    /// effectively static, so `returnCacheDataElseLoad` is a big speed win.
     nonisolated static let session: URLSession = {
         let cfg = URLSessionConfiguration.default
-        cfg.httpMaximumConnectionsPerHost = 8
+        cfg.httpMaximumConnectionsPerHost = 12
         cfg.timeoutIntervalForRequest = 30
+        cfg.urlCache = URLCache(memoryCapacity: 64 << 20, diskCapacity: 512 << 20)
+        cfg.requestCachePolicy = .returnCacheDataElseLoad
         return URLSession(configuration: cfg)
     }()
 
