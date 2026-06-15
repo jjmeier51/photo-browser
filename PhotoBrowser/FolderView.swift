@@ -57,6 +57,8 @@ struct FolderView: View {
     @State private var renameTarget: Entry?
     @State private var renameDraft = ""
     @State private var showMovePicker = false
+    @State private var moveConflict: MoveConflict?
+    struct MoveConflict: Identifiable { let id = UUID(); let dest: URL; let names: [String] }
     @State private var showCopyPicker = false
     @State private var exporting = false
     @State private var exportProgress: Double = 0
@@ -516,6 +518,17 @@ struct FolderView: View {
             }
             .sheet(item: $previewItem) { item in
                 QuickLookPreview(url: item.url).ignoresSafeArea()
+            }
+            .confirmationDialog(moveConflictTitle, isPresented: Binding(
+                get: { moveConflict != nil }, set: { if !$0 { moveConflict = nil } }),
+                titleVisibility: .visible, presenting: moveConflict) { c in
+                Button("Move All (Keep Both)") { finishMove(to: c.dest, keepBoth: true) }
+                Button("Skip Matching Names") { finishMove(to: c.dest, keepBoth: false) }
+                Button("Cancel", role: .cancel) { moveConflict = nil }
+            } message: { c in
+                let preview = c.names.prefix(6).joined(separator: ", ")
+                let more = c.names.count > 6 ? " and \(c.names.count - 6) more" : ""
+                Text("The destination already has files named: \(preview)\(more). They may be different files — move them anyway (kept with a new name) or skip them?")
             }
             .fullScreenCover(item: $viewerPresentation) { p in
                 ViewerView(items: p.items, startIndex: p.startIndex, slideshow: p.slideshow)
@@ -1332,15 +1345,28 @@ struct FolderView: View {
     }
 
     private func performMove(to dest: URL) {
-        let outcome = FileActions.move(selectedEntries().map(\.url), to: dest)
+        // Surface same-name conflicts (which may be *different* files) and let the
+        // user choose to skip them or keep both, instead of silently dropping them.
+        let collisions = FileActions.collisions(selectedEntries().map(\.url), in: dest)
+        if collisions.isEmpty { finishMove(to: dest, keepBoth: false); return }
+        // Defer so the move-picker sheet finishes dismissing before the dialog shows.
+        let conflict = MoveConflict(dest: dest, names: collisions.map { $0.lastPathComponent })
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { moveConflict = conflict }
+    }
+
+    private var moveConflictTitle: String {
+        let n = moveConflict?.names.count ?? 0
+        return "\(n) item\(n == 1 ? "" : "s") already named in destination"
+    }
+
+    private func finishMove(to dest: URL, keepBoth: Bool) {
+        moveConflict = nil
+        let outcome = FileActions.move(selectedEntries().map(\.url), to: dest, renameOnCollision: keepBoth)
         for pair in outcome.moved { library.itemMoved(from: pair.from, to: pair.to) }   // labels follow
         selection.removeAll(); selecting = false
         var msg = "Moved \(outcome.moved.count) item(s)."
-        if !outcome.skipped.isEmpty {
-            let exists = outcome.skipped.filter { $0.reason == "name already exists" }.count
-            msg += " Skipped \(outcome.skipped.count)"
-            msg += exists > 0 ? " (\(exists) already there by name)." : "."
-        }
+        let skipped = outcome.skipped.filter { $0.reason == "name already exists" }.count
+        if skipped > 0 { msg += " Skipped \(skipped) with matching names." }
         resultMessage = msg
         Task { await reload() }
     }

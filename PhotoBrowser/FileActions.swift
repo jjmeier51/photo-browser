@@ -162,14 +162,24 @@ enum FileActions {
 
     struct MoveOutcome { var moved: [(from: URL, to: URL)] = []; var skipped: [(name: String, reason: String)] = [] }
 
+    /// Items whose name already exists in `folder` (ignoring ones already there) —
+    /// the potential conflicts the move flow surfaces to the user.
+    static func collisions(_ urls: [URL], in folder: URL) -> [URL] {
+        let fm = FileManager.default
+        return urls.filter { url in
+            url.deletingLastPathComponent().standardizedFileURL != folder.standardizedFileURL &&
+            fm.fileExists(atPath: folder.appendingPathComponent(url.lastPathComponent).path)
+        }
+    }
+
     /// Moves items into `folder`. Returns each successful (old, new) pair (so
     /// labels/captions can be migrated) plus the items that were skipped and why.
-    /// A same-name file at the destination is skipped (not overwritten/renamed);
-    /// a plain `moveItem` failure (e.g. crossing a file-provider/volume boundary,
-    /// the documented reason in-folder moves silently failed) falls back to
-    /// copy-then-delete so the file actually moves.
+    /// A same-name file at the destination is, by default, skipped; with
+    /// `renameOnCollision` it's kept-both (moved under a unique name) since a
+    /// matching name may be a different file. A plain `moveItem` failure (e.g.
+    /// crossing a file-provider/volume boundary) falls back to copy-then-delete.
     @discardableResult
-    static func move(_ urls: [URL], to folder: URL) -> MoveOutcome {
+    static func move(_ urls: [URL], to folder: URL, renameOnCollision: Bool = false) -> MoveOutcome {
         let fm = FileManager.default
         var outcome = MoveOutcome()
         for url in urls {
@@ -177,24 +187,23 @@ enum FileActions {
             if url.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
                 outcome.skipped.append((name, "already in this folder")); continue
             }
-            let dest = folder.appendingPathComponent(name)
+            var dest = folder.appendingPathComponent(name)
             if fm.fileExists(atPath: dest.path) {
-                outcome.skipped.append((name, "name already exists")); continue
+                guard renameOnCollision else { outcome.skipped.append((name, "name already exists")); continue }
+                dest = uniqueDestination(for: name, in: folder)   // keep both
             }
-            do {
-                try fm.moveItem(at: url, to: dest)
-                outcome.moved.append((url, dest))
-            } catch {
-                // Cross-volume moves aren't atomic; copy-then-delete instead.
-                if (try? fm.copyItem(at: url, to: dest)) != nil {
-                    try? fm.removeItem(at: url)
-                    outcome.moved.append((url, dest))
-                } else {
-                    outcome.skipped.append((name, "couldn't move"))
-                }
-            }
+            if moveItem(url, to: dest) { outcome.moved.append((url, dest)) }
+            else { outcome.skipped.append((name, "couldn't move")) }
         }
         return outcome
+    }
+
+    /// Moves one item, falling back to copy-then-delete across volumes.
+    private static func moveItem(_ url: URL, to dest: URL) -> Bool {
+        let fm = FileManager.default
+        if (try? fm.moveItem(at: url, to: dest)) != nil { return true }
+        if (try? fm.copyItem(at: url, to: dest)) != nil { try? fm.removeItem(at: url); return true }
+        return false
     }
 
     /// Copies items into `folder`, never colliding (appends " 1", " 2", … on clash,
