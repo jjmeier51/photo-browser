@@ -40,6 +40,14 @@ struct FolderView: View {
     @State private var loaded = false
     @State private var yearFilter: Int?
     @State private var typeFilter: TypeFilter = .all
+    @State private var keepFilter: KeepFilter = .all
+
+    /// Review filter for frames folders: everything, only "Keeping", or only the
+    /// rest ("Deleting" = viewable items not marked Keeping).
+    enum KeepFilter: String, CaseIterable, Identifiable {
+        case all = "All", keeping = "Keeping", deleting = "Deleting"
+        var id: String { rawValue }
+    }
     @State private var showFavoritesOnly = false
     @State private var favoriteEntries: [Entry] = []
     @State private var captureDates: [URL: Date] = [:]
@@ -234,6 +242,12 @@ struct FolderView: View {
         }
         list = applyType(list)
         if advancedActive { list = list.filter { passesAdvanced($0) } }
+        if keepFilter != .all {
+            list = list.filter { e in
+                guard e.isViewable else { return false }    // only media is kept/deleted
+                return keepFilter == .keeping ? library.isKeeping(e.url) : !library.isKeeping(e.url)
+            }
+        }
         return list
     }
 
@@ -1046,6 +1060,17 @@ struct FolderView: View {
                             Button { typeFilter = type } label: { check(type.rawValue, typeFilter == type) }
                         }
                     } label: { chip("Type: \(typeFilter.rawValue)") }
+
+                    if library.isFramesFolder(url) {
+                        Menu {
+                            ForEach(KeepFilter.allCases) { f in
+                                Button { keepFilter = f } label: { check(f.rawValue, keepFilter == f) }
+                            }
+                        } label: {
+                            chip("Review: \(keepFilter.rawValue)")
+                                .foregroundStyle(keepFilter != .all ? Color.accentColor : Color.primary)
+                        }
+                    }
                 }
 
                 Spacer()
@@ -1456,9 +1481,13 @@ struct FolderView: View {
             }
             exporting = false
             bg.end()
-            // Seed the new frames folder's cover with its first frame.
-            if count > 0, let folder, let firstFrame, let cover = UIImage(contentsOfFile: firstFrame.path) {
-                library.setCover(cover, for: folder)
+            // Seed the new frames folder's cover with its first frame, and remember
+            // it as a frames folder so the Keeping/Deleting review filters appear.
+            if count > 0, let folder {
+                library.markFramesFolder(folder)
+                if let firstFrame, let cover = UIImage(contentsOfFile: firstFrame.path) {
+                    library.setCover(cover, for: folder)
+                }
             }
             let frameWord = count == 1 ? "frame" : "frames"
             resultMessage = count > 0
