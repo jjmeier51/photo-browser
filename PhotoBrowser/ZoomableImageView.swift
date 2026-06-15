@@ -90,6 +90,18 @@ struct ZoomableImageView: View {
             return UIImage(cgImage: cg)
         }.value
     }
+
+    /// Synchronous upright-CGImage decode (for off-main compositing pipelines).
+    nonisolated static func decodeCG(url: URL, maxPixel: CGFloat) -> CGImage? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary)
+    }
 }
 
 /// Plays the Live Photo's motion video (looping while held) as a long-press

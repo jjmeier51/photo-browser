@@ -419,8 +419,16 @@ enum MediaEditing {
         guard W > 0, H > 0, targetAspect > 0 else { return nil }
         let imgAR = W / H
         // Smallest target-aspect canvas that contains the image (extend one axis).
-        let canvasW = (imgAR >= targetAspect ? W : (H * targetAspect)).rounded()
-        let canvasH = (imgAR >= targetAspect ? (W / targetAspect) : H).rounded()
+        let canvasW = Int((imgAR >= targetAspect ? W : (H * targetAspect)).rounded())
+        let canvasH = Int((imgAR >= targetAspect ? (W / targetAspect) : H).rounded())
+        return composeCanvas(image, canvasWidth: canvasW, canvasHeight: canvasH, fill: fill)
+    }
+
+    /// Freeform variant: composites `image` centered on an explicit canvas size
+    /// (each dimension at least the image's, so it never crops).
+    static func composeCanvas(_ image: CGImage, canvasWidth: Int, canvasHeight: Int, fill: ResizeFill) -> CGImage? {
+        let W = CGFloat(image.width), H = CGFloat(image.height)
+        let canvasW = CGFloat(max(canvasWidth, image.width)), canvasH = CGFloat(max(canvasHeight, image.height))
         let canvas = CGSize(width: canvasW, height: canvasH)
         let cs = image.colorSpace ?? CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(data: nil, width: Int(canvasW), height: Int(canvasH), bitsPerComponent: 8,
@@ -487,13 +495,26 @@ enum MediaEditing {
         }
     }
 
-    /// Fits the photo at `url` to `targetAspect` with an on-device `fill` and writes
-    /// the result back over the original, preserving EXIF/GPS (like `applyPhotoInPlace`).
+    /// Fits the photo at `url` to `targetAspect` with an on-device `fill`, in place.
     static func resizeCanvasInPlace(url: URL, targetAspect: CGFloat, fill: ResizeFill) -> Bool {
+        resizeCanvasInPlace(url: url, fill: fill) { composeCanvas($0, targetAspect: targetAspect, fill: fill) }
+    }
+
+    /// Freeform variant: extends each side by the given factors (>= 1), in place.
+    static func resizeCanvasInPlace(url: URL, widthFactor: CGFloat, heightFactor: CGFloat, fill: ResizeFill) -> Bool {
+        resizeCanvasInPlace(url: url, fill: fill) {
+            composeCanvas($0, canvasWidth: Int(CGFloat($0.width) * widthFactor),
+                          canvasHeight: Int(CGFloat($0.height) * heightFactor), fill: fill)
+        }
+    }
+
+    /// Loads the full upright photo, lets `compose` build the result, and writes it
+    /// back over the original preserving EXIF/GPS (like `applyPhotoInPlace`).
+    private static func resizeCanvasInPlace(url: URL, fill: ResizeFill, compose: (CGImage) -> CGImage?) -> Bool {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
               let type = CGImageSourceGetType(src),
               let full = loadFullCGImage(src),
-              let out = composeCanvas(full, targetAspect: targetAspect, fill: fill) else { return false }
+              let out = compose(full) else { return false }
 
         var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
         props[kCGImagePropertyOrientation] = 1                       // upright pixels now baked

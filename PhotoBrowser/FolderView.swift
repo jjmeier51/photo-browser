@@ -101,6 +101,7 @@ struct FolderView: View {
     @State private var importing = false
     @State private var editEntry: Entry?
     @State private var resizeEntry: Entry?
+    @State private var aiEditEntry: Entry?
     @State private var editProcessing = false
     @State private var editProgress: Double = 0
     @State private var makingLive = false
@@ -407,6 +408,9 @@ struct FolderView: View {
                     Button { resizeEntry = entry } label: {
                         Label("Resize / Extend", systemImage: "aspectratio")
                     }
+                    Button { aiEditEntry = entry } label: {
+                        Label("Edit with AI", systemImage: "wand.and.stars")
+                    }
                 }
                 Button { metadataTargets = [entry.url]; showMetadataEditor = true } label: {
                     Label("Edit Metadata", systemImage: "calendar.badge.clock")
@@ -597,6 +601,7 @@ struct FolderView: View {
             }
             .fullScreenCover(item: $editEntry) { e in MediaEditorView(entry: e) }
             .fullScreenCover(item: $resizeEntry) { e in ResizeEditorView(entry: e) }
+            .sheet(item: $aiEditEntry) { e in AIEditView(entry: e) }
             .fullScreenCover(isPresented: $showPeople) { PeopleView(folder: url) }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .fullScreenCover(isPresented: $showPhotosLibrary) {

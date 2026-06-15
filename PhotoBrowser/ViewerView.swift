@@ -21,6 +21,7 @@ struct ViewerView: View {
     @State private var showCoverFolderPicker = false
     @State private var showEditor = false
     @State private var showResize = false
+    @State private var showAIEdit = false
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
 
@@ -67,6 +68,9 @@ struct ViewerView: View {
         }
         .fullScreenCover(isPresented: $showResize) {
             if let current { ResizeEditorView(entry: current) }
+        }
+        .sheet(isPresented: $showAIEdit) {
+            if let current { AIEditView(entry: current) }
         }
         .fullScreenCover(item: $coverEntry, onDismiss: {
             if croppedCover != nil { showCoverFolderPicker = true }
@@ -134,6 +138,9 @@ struct ViewerView: View {
                         if current?.kind == .image {
                             Button { showResize = true } label: {
                                 Label("Resize / Extend", systemImage: "aspectratio")
+                            }
+                            Button { showAIEdit = true } label: {
+                                Label("Edit with AI", systemImage: "wand.and.stars")
                             }
                         }
                         Button { useAsAlbumCover() } label: {
