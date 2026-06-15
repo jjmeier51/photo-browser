@@ -14,6 +14,9 @@ struct ResizeEditorView: View {
     @State private var aspect: ResizeAspect = .square
     @State private var fill: MediaEditing.ResizeFill = .blur
     @State private var saving = false
+    @State private var confirmAI = false
+    @State private var showSettings = false
+    @State private var aiError: String?
 
     enum ResizeAspect: String, CaseIterable, Identifiable {
         case square = "1:1", portrait45 = "4:5", landscape = "16:9"
@@ -49,7 +52,16 @@ struct ResizeEditorView: View {
                 Picker("Fill", selection: $fill) {
                     ForEach(MediaEditing.ResizeFill.allCases) { Text($0.rawValue).tag($0) }
                 }
-                .pickerStyle(.segmented).padding(.horizontal).padding(.bottom, 8)
+                .pickerStyle(.segmented).padding(.horizontal)
+
+                Button {
+                    if AIExtend.isConfigured { confirmAI = true } else { showSettings = true }
+                } label: {
+                    Label("Extend with AI (cloud)…", systemImage: "sparkles")
+                        .font(.subheadline).frame(maxWidth: .infinity).padding(.vertical, 4)
+                }
+                .buttonStyle(.bordered).tint(.purple).padding(.horizontal).padding(.bottom, 8)
+                .disabled(saving)
             }
             .background(Color.black.ignoresSafeArea())
             .navigationTitle("Resize")
@@ -61,6 +73,16 @@ struct ResizeEditorView: View {
             .task { await loadSource() }
             .onChange(of: aspect) { regenerate() }
             .onChange(of: fill) { regenerate() }
+            .confirmationDialog("Extend with AI", isPresented: $confirmAI, titleVisibility: .visible) {
+                Button("Upload & Extend") { runAI() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This uploads the photo to your configured provider (e.g. fal.ai / Seedream) to extend it. The photo leaves your device for this edit.")
+            }
+            .sheet(isPresented: $showSettings) { SettingsView() }
+            .alert("Couldn’t extend", isPresented: Binding(get: { aiError != nil }, set: { if !$0 { aiError = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: { Text(aiError ?? "") }
             .overlay {
                 if saving {
                     ProgressView().tint(.white).padding(28)
@@ -95,6 +117,23 @@ struct ResizeEditorView: View {
             saving = false
             if ok { library.contentDidChange() }
             dismiss()
+        }
+    }
+
+    private func runAI() {
+        saving = true
+        let url = entry.url, ratio = aspect.ratio
+        Task {
+            let err = await AIExtend.extendInPlace(url: url, targetAspect: ratio)
+            saving = false
+            switch err {
+            case nil:
+                library.contentDidChange(); dismiss()
+            case .notConfigured?: showSettings = true
+            case .network?: aiError = "Couldn’t reach the provider. Check your connection."
+            case .badImage?, .badResult?: aiError = "The image couldn’t be processed."
+            case .server(let m)?: aiError = m
+            }
         }
     }
 }
