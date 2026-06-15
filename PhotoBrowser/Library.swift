@@ -282,6 +282,21 @@ final class Library {
         persistPeople()
     }
     func deletePerson(_ name: String) { people[name] = nil; persistPeople() }
+
+    // MARK: - "Not duplicates" (user-confirmed non-duplicate pairs)
+
+    /// Pairs the user marked as NOT duplicates, as "pathA\npathB" (sorted), so a
+    /// future Find-Duplicates run hides groups whose every pair is dismissed.
+    var notDuplicatePairs: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.notDuplicates") ?? [])
+
+    private static func pairKey(_ a: String, _ b: String) -> String { a < b ? "\(a)\n\(b)" : "\(b)\n\(a)" }
+    func areNotDuplicates(_ a: String, _ b: String) -> Bool { notDuplicatePairs.contains(Self.pairKey(a, b)) }
+    /// Records every pair among `paths` as not-duplicates.
+    func markNotDuplicates(_ paths: [String]) {
+        guard paths.count >= 2 else { return }
+        for i in 0..<paths.count { for j in (i + 1)..<paths.count { notDuplicatePairs.insert(Self.pairKey(paths[i], paths[j])) } }
+        UserDefaults.standard.set(Array(notDuplicatePairs), forKey: "photoBrowser.notDuplicates")
+    }
     /// The distinct photo paths a person appears in (face IDs are "path#index").
     func photoPaths(forPerson name: String) -> Set<String> {
         Set((people[name] ?? []).map(Self.pathOfFaceID))

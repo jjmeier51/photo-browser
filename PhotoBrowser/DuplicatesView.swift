@@ -21,6 +21,7 @@ struct DuplicatesView: View {
 
     @State private var groups: [DuplicateGroup] = []
     @State private var scanning = true
+    @State private var selection = Set<UUID>()
 
     var body: some View {
         NavigationStack {
@@ -34,26 +35,47 @@ struct DuplicatesView: View {
                     ContentUnavailableView("No Duplicates", systemImage: "checkmark.circle",
                         description: Text("No files in this folder share the same size & dimensions or a similar name."))
                 } else {
-                    List {
+                    List(selection: $selection) {
                         Section {
                             ForEach(groups) { group in
                                 NavigationLink {
                                     DuplicateCompareView(group: group) { removed in remove(removed, from: group) }
+                                        onNotDuplicates: { markNotDuplicates([group]) }
                                 } label: {
                                     DuplicateGroupRow(group: group)
                                 }
+                                .tag(group.id)
                             }
                         } footer: {
-                            Text("Files grouped by matching size & dimensions or a similar name (copies like “name (1)”). Tap a group to compare.")
+                            Text("Files grouped by matching size & dimensions or a similar name (copies like “name (1)”). Tap a group to compare, or select groups and mark them Not Duplicates.")
                         }
                     }
                 }
             }
             .navigationTitle("Find Duplicates")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { if !groups.isEmpty { EditButton() } }
+                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .bottomBar) {
+                    if !selection.isEmpty {
+                        Button("Not Duplicates (\(selection.count))") {
+                            markNotDuplicates(groups.filter { selection.contains($0.id) })
+                            selection.removeAll()
+                        }
+                    }
+                }
+            }
             .task { await scan() }
         }
+    }
+
+    /// Records each group's items as confirmed non-duplicates (so they're hidden in
+    /// future runs) and removes them from the current list.
+    private func markNotDuplicates(_ marked: [DuplicateGroup]) {
+        for g in marked { library.markNotDuplicates(g.entries.map { $0.url.path }) }
+        let ids = Set(marked.map { $0.id })
+        groups.removeAll { ids.contains($0.id) }
     }
 
     private func scan() async {
@@ -86,6 +108,9 @@ struct DuplicatesView: View {
         for i in 0..<n { components[find(i), default: []].append(i) }
         var result: [DuplicateGroup] = []
         for members in components.values where members.count > 1 {
+            // Hide a group the user already confirmed: every pair marked not-duplicate.
+            let paths = members.map { media[$0].url.path }
+            if allPairsDismissed(paths) { continue }
             let entries = members.map { media[$0] }
                 .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             // Members of a name-only group can differ in size/dimensions — describe the
@@ -97,6 +122,14 @@ struct DuplicatesView: View {
         }
         groups = result.sorted { $0.size > $1.size }   // biggest payoff first
         scanning = false
+    }
+
+    /// True only if every pair among `paths` was marked Not Duplicates.
+    private func allPairsDismissed(_ paths: [String]) -> Bool {
+        for i in 0..<paths.count { for j in (i + 1)..<paths.count {
+            if !library.areNotDuplicates(paths[i], paths[j]) { return false }
+        }}
+        return true
     }
 
     /// A filename reduced to its "stem" so copies match: extension removed, lowercased,
@@ -200,6 +233,7 @@ private struct DuplicateCompareView: View {
     @Environment(\.dismiss) private var dismiss
     let group: DuplicateGroup
     var onDelete: (URL) -> Void
+    var onNotDuplicates: () -> Void = {}
 
     /// A mutable copy of the group's items so a rename (which changes a URL) is
     /// reflected immediately in the previews, comparison, and later edits.
@@ -217,9 +251,10 @@ private struct DuplicateCompareView: View {
     /// Bumped after an edit to force the metadata to reload.
     @State private var reloadToken = 0
 
-    init(group: DuplicateGroup, onDelete: @escaping (URL) -> Void) {
+    init(group: DuplicateGroup, onDelete: @escaping (URL) -> Void, onNotDuplicates: @escaping () -> Void = {}) {
         self.group = group
         self.onDelete = onDelete
+        self.onNotDuplicates = onNotDuplicates
         _items = State(initialValue: group.entries)
     }
 
@@ -246,6 +281,11 @@ private struct DuplicateCompareView: View {
         }
         .navigationTitle("Compare")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { onNotDuplicates(); dismiss() } label: { Label("Not Duplicates", systemImage: "checkmark.circle") }
+            }
+        }
         .sheet(item: $editURL, onDismiss: { reloadToken += 1 }) { wrapper in
             MetadataEditorView(urls: [wrapper.url])
         }
