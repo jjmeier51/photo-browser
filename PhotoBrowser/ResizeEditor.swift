@@ -162,15 +162,16 @@ struct ResizeEditorView: View {
         let extra = extendText.trimmingCharacters(in: .whitespacesAndNewlines)
         let prompt = extra.isEmpty ? AIExtend.extendPrompt : AIExtend.extendPrompt + " In the newly extended areas, include: \(extra)."
         Task {
-            // Compose a blurred-fill canvas at a decent resolution and send it for outpainting.
-            let jpeg = await Task.detached(priority: .userInitiated) { () -> Data? in
-                guard let cg = ZoomableImageView.decodeCG(url: url, maxPixel: 2048),
+            // Compose a blurred-fill canvas at the model's max resolution and outpaint it.
+            let prep = await Task.detached(priority: .userInitiated) { () -> (data: Data, width: Int, height: Int)? in
+                guard let cg = ZoomableImageView.decodeCG(url: url, maxPixel: m.maxLongSide),
                       let canvas = free ? MediaEditing.composeCanvas(cg, canvasWidth: Int(CGFloat(cg.width) * w), canvasHeight: Int(CGFloat(cg.height) * h), fill: .blur)
                                         : MediaEditing.composeCanvas(cg, targetAspect: ratio, fill: .blur) else { return nil }
-                return AIExtend.uploadJPEG(of: canvas)
+                return AIExtend.uploadJPEG(of: canvas, maxPixel: m.maxLongSide)
             }.value
-            guard let jpeg else { saving = false; aiError = "Couldn’t prepare the image."; return }
-            let result = await AIExtend.generate(model: m, prompt: prompt, imageData: jpeg, count: 1)
+            guard let prep else { saving = false; aiError = "Couldn’t prepare the image."; return }
+            let result = await AIExtend.generate(model: m, prompt: prompt, imageData: prep.data, count: 1,
+                                                 outputSize: (prep.width, prep.height))
             saving = false
             switch result {
             case .success(let data): aiResults = data

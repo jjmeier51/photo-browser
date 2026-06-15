@@ -59,10 +59,11 @@ struct AIEditView: View {
         running = true; error = nil
         let url = entry.url, p = prompt, n = count, m = model
         Task {
-            guard let jpeg = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url) }.value else {
+            guard let prep = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url, maxPixel: m.maxLongSide) }.value else {
                 running = false; error = "Couldn’t read the photo."; return
             }
-            let result = await AIExtend.generate(model: m, prompt: p, imageData: jpeg, count: n)
+            let result = await AIExtend.generate(model: m, prompt: p, imageData: prep.data, count: n,
+                                                 outputSize: (prep.width, prep.height))
             running = false
             switch result {
             case .success(let data): results = data

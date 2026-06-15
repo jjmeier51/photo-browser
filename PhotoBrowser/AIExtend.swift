@@ -21,6 +21,15 @@ enum AIExtend {
             case .nanoBananaPro: return "https://fal.run/fal-ai/nano-banana-pro/edit"
             }
         }
+        /// Highest output long-side the model targets (≈4K where supported). The
+        /// input is sent at this size and, for Seedream, requested as the output.
+        var maxLongSide: CGFloat {
+            switch self {
+            case .seedream:      return 4096
+            case .nanoBananaPro: return 4096
+            case .nanoBanana2:   return 2048
+            }
+        }
     }
 
     enum AIError: Error { case notConfigured, badImage, network, badResult, server(String) }
@@ -50,10 +59,11 @@ enum AIExtend {
 
     // MARK: - Generation
 
-    /// Sends one input image + prompt to the model, asking for `count` images.
-    /// Returns the generated image data (one per result) for the Keep/Delete UI.
+    /// Sends one input image + prompt to the model, asking for `count` images at
+    /// the model's highest resolution. Returns the generated image data (one per
+    /// result) for the Keep/Delete UI.
     nonisolated static func generate(model: AIModel, prompt: String, imageData: Data,
-                                     count: Int) async -> Result<[Data], AIError> {
+                                     count: Int, outputSize: (width: Int, height: Int)? = nil) async -> Result<[Data], AIError> {
         guard isConfigured else { return .failure(.notConfigured) }
         guard let url = URL(string: model.endpoint) else { return .failure(.server("Bad endpoint URL.")) }
         var body: [String: Any] = [
@@ -61,6 +71,10 @@ enum AIExtend {
             "image_urls": ["data:image/jpeg;base64," + imageData.base64EncodedString()]
         ]
         if count > 1 { body["num_images"] = count }
+        // Seedream takes an explicit output size; ask for the full input resolution.
+        if model == .seedream, let outputSize {
+            body["image_size"] = ["width": outputSize.width, "height": outputSize.height]
+        }
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -85,8 +99,8 @@ enum AIExtend {
 
     // MARK: - Preparing input + saving results
 
-    /// Downscales a photo to a JPEG suitable for upload (<= `maxPixel` per side).
-    nonisolated static func uploadJPEG(of url: URL, maxPixel: CGFloat = 2048) -> Data? {
+    /// A photo as an upload JPEG (long side <= `maxPixel`), with its pixel size.
+    nonisolated static func uploadJPEG(of url: URL, maxPixel: CGFloat) -> (data: Data, width: Int, height: Int)? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -95,11 +109,27 @@ enum AIExtend {
             kCGImageSourceThumbnailMaxPixelSize: maxPixel
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
-        return UIImage(cgImage: cg).jpegData(compressionQuality: 0.92)
+        return uploadJPEG(of: cg, maxPixel: maxPixel)
     }
 
-    nonisolated static func uploadJPEG(of cg: CGImage) -> Data? {
-        UIImage(cgImage: cg).jpegData(compressionQuality: 0.92)
+    /// A CGImage as an upload JPEG, downscaled so its long side <= `maxPixel`.
+    nonisolated static func uploadJPEG(of cg: CGImage, maxPixel: CGFloat) -> (data: Data, width: Int, height: Int)? {
+        let capped = downscale(cg, maxLongSide: maxPixel)
+        guard let data = UIImage(cgImage: capped).jpegData(compressionQuality: 0.92) else { return nil }
+        return (data, capped.width, capped.height)
+    }
+
+    private nonisolated static func downscale(_ cg: CGImage, maxLongSide: CGFloat) -> CGImage {
+        let long = CGFloat(max(cg.width, cg.height))
+        guard long > maxLongSide else { return cg }
+        let s = maxLongSide / long
+        let w = Int((CGFloat(cg.width) * s).rounded()), h = Int((CGFloat(cg.height) * s).rounded())
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: cg.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return cg }
+        ctx.interpolationQuality = .high
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx.makeImage() ?? cg
     }
 
     /// Saves a generated image into an "AI" subfolder beside `original`, inheriting
