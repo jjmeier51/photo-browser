@@ -20,12 +20,13 @@ enum AIExtend {
         case nanoBanana2 = "Nano Banana 2"
         case nanoBananaPro = "Nano Banana Pro"
         var id: String { rawValue }
-        /// Best-known tune id (Seedream 4.0 / Nano Banana Gemini 2.5 as fallbacks).
+        /// Known Astria gallery tune ids (Nano Banana Pro falls back to Nano
+        /// Banana 2's tune until its own id is known; override in Settings).
         var fallbackTune: Int {
             switch self {
-            case .seedream45:    return 3225353
-            case .nanoBanana2:   return 3159068
-            case .nanoBananaPro: return 3159068
+            case .seedream45:    return 3691308
+            case .nanoBanana2:   return 4180298
+            case .nanoBananaPro: return 4180298
             }
         }
         var maxLongSide: CGFloat { 2048 }
