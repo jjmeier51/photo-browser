@@ -78,8 +78,11 @@ enum AIExtend {
             "prompt[text]": prompt,
             "prompt[num_images]": String(min(max(count, 1), 8))
         ]
-        if let width { fields["prompt[w]"] = String((width / 8) * 8) }
-        if let height { fields["prompt[h]"] = String((height / 8) * 8) }
+        if let width, let height {
+            let (w, h) = normalizedSize(width, height)
+            fields["prompt[w]"] = String(w)
+            fields["prompt[h]"] = String(h)
+        }
         let files: [(name: String, filename: String, mime: String, data: Data)] = [
             ("prompt[input_image]", "input.jpg", "image/jpeg", imageData)
         ]
@@ -210,6 +213,22 @@ enum AIExtend {
     }
 
     // MARK: - Helpers
+
+    /// Clamps a requested output size to what the Astria tunes accept: a minimum
+    /// pixel budget (the gallery models reject anything under ~1920×1920) and a
+    /// sane maximum long side, then rounds each side to a multiple of 8. The
+    /// minimum is enforced last so the floor is never violated by the cap.
+    private nonisolated static func normalizedSize(_ w: Int, _ h: Int) -> (Int, Int) {
+        let minPixels = 3_686_400.0, maxLong = 4096.0
+        var cw = Double(max(w, 1)), ch = Double(max(h, 1))
+        func scale(_ s: Double) { cw *= s; ch *= s }
+        if cw * ch < minPixels { scale((minPixels / (cw * ch)).squareRoot()) }
+        let long = max(cw, ch)
+        if long > maxLong { scale(maxLong / long) }
+        if cw * ch < minPixels { scale((minPixels / (cw * ch)).squareRoot()) }
+        func r8(_ x: Double) -> Int { max(8, Int((x / 8).rounded(.up)) * 8) }
+        return (r8(cw), r8(ch))
+    }
 
     private nonisolated static func multipart(fields: [String: String],
                                               files: [(name: String, filename: String, mime: String, data: Data)],
