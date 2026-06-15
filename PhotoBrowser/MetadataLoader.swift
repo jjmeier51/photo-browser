@@ -3,6 +3,7 @@ import ImageIO
 import AVFoundation
 import CoreLocation
 import UniformTypeIdentifiers
+import Vision
 
 /// Everything the swipe-up info panel shows.
 struct MediaInfo: Sendable {
@@ -92,6 +93,76 @@ enum MetadataLoader {
 
     /// Persists any newly-read capture dates. Call after a batch of reads.
     static func flushDateStore() { dateStore.flush() }
+
+    // MARK: - On-device photo-text (OCR) index
+
+    /// Recognized text per photo, keyed `path|mtime|size` (so an edit re-OCRs).
+    /// Persisted to disk so the (slow) Vision pass runs at most once per file.
+    /// An empty string records "scanned, no text" so it isn't re-scanned.
+    private final class OCRStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var map: [String: String]
+        private var dirty = false
+        private let fileURL: URL
+
+        init() {
+            let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            fileURL = dir.appendingPathComponent("ocrText.json")
+            map = (try? Data(contentsOf: fileURL)).flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+        }
+        func lookup(_ key: String) -> String? { lock.lock(); defer { lock.unlock() }; return map[key] }
+        func store(_ key: String, _ text: String) { lock.lock(); map[key] = text; dirty = true; lock.unlock() }
+        func flush() {
+            lock.lock(); guard dirty else { lock.unlock(); return }
+            let snapshot = map; dirty = false; lock.unlock()
+            if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: fileURL, options: .atomic) }
+        }
+    }
+
+    private static let ocrStore = OCRStore()
+    static func flushOCRStore() { ocrStore.flush() }
+
+    private static func storeKey(for entry: Entry) -> String {
+        "\(entry.url.path)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)"
+    }
+
+    /// Cache-only recognized text for search — nil if the photo hasn't been indexed
+    /// yet (never runs OCR on the search hot path).
+    static func ocrTextCached(for entry: Entry) -> String? {
+        let text = ocrStore.lookup(storeKey(for: entry))
+        return (text?.isEmpty ?? true) ? nil : text
+    }
+
+    /// Recognizes (and caches) the text in a photo. Used by the indexing pass; runs
+    /// Vision off the main actor on a downsized copy. Non-images return "".
+    static func ocrText(for entry: Entry) async -> String {
+        guard entry.kind == .image else { return "" }
+        let key = storeKey(for: entry)
+        if let cached = ocrStore.lookup(key) { return cached }
+        let text = await recognizeText(in: entry.url)
+        ocrStore.store(key, text)
+        return text
+    }
+
+    private static func recognizeText(in url: URL) async -> String {
+        await Task.detached(priority: .utility) { () -> String in
+            let opts = [kCGImageSourceShouldCache: false] as CFDictionary
+            guard let src = CGImageSourceCreateWithURL(url as CFURL, opts) else { return "" }
+            let thumbOpts: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: 2000      // enough for legible text, off-main
+            ]
+            guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, thumbOpts as CFDictionary) else { return "" }
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            try? VNImageRequestHandler(cgImage: cg, options: [:]).perform([request])
+            let strings = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+            return strings.joined(separator: " ").lowercased()
+        }.value
+    }
 
     // MARK: - Dimensions + HDR (for resolution/HDR filters)
 

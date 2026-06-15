@@ -74,6 +74,8 @@ struct FolderView: View {
     @State private var showDuplicates = false
     @State private var confirmFixDates = false
     @State private var fixingDates = false
+    @State private var indexingText = false
+    @State private var textIndexProgress = 0.0
     @State private var fixProgress: Double = 0
     @State private var videoRes: VideoRes = .all
     @State private var imageRes: ImageRes = .all
@@ -605,6 +607,7 @@ struct FolderView: View {
             .overlay { if makingLive { makingLiveOverlay } }
             .overlay { if importing { importingOverlay } }
             .overlay { if fixingDates { fixingOverlay } }
+            .overlay { if indexingText { textIndexOverlay } }
             .overlay { emptyOverlay }
             .fullScreenCover(item: $transferItem) { item in
                 DriveTransferView(source: item.url, destination: url)
@@ -665,6 +668,33 @@ struct FolderView: View {
         }
         .padding(24).frame(maxWidth: 280)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    @ViewBuilder private var textIndexOverlay: some View {
+        VStack(spacing: 12) {
+            Text("Reading text in photos…").font(.subheadline.weight(.medium))
+            ProgressView(value: textIndexProgress).progressViewStyle(.linear).frame(width: 220)
+            Text("\(Int(textIndexProgress * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            Text("Afterwards, search also finds words printed inside your photos.")
+                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+        .padding(24).frame(maxWidth: 280)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// OCRs every photo under this folder so search can match text inside them.
+    private func runTextIndex() {
+        indexingText = true; textIndexProgress = 0
+        let bg = BackgroundTaskHolder()
+        bg.begin(name: "Index Text in Photos")
+        Task {
+            let total = await library.buildTextIndex(under: url) { done, tot in
+                Task { @MainActor in textIndexProgress = tot > 0 ? Double(done) / Double(tot) : 1 }
+            }
+            indexingText = false
+            bg.end()
+            resultMessage = total == 0 ? "No photos here to read." : "Read text in \(total) photo(s). Search now finds words inside them."
+        }
     }
 
     /// Resets each photo/video under this folder to its embedded capture date,
@@ -993,6 +1023,7 @@ struct FolderView: View {
                     Button { showNewFolder = true } label: { Label("New Folder", systemImage: "folder.badge.plus") }
                     Button { showDuplicates = true } label: { Label("Find Duplicates", systemImage: "doc.on.doc") }
                     Button { confirmFixDates = true } label: { Label("Restore Capture Dates", systemImage: "clock.arrow.circlepath") }
+                    Button { runTextIndex() } label: { Label("Index Text in Photos", systemImage: "text.viewfinder") }
                     Button { photosLibraryMoves = false; showPhotosLibrary = true } label: { Label("Photos Library", systemImage: "photo.stack") }
                     Divider()
                     Button { pickFolder(.transfer) } label: {

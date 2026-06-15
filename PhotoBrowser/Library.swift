@@ -467,18 +467,41 @@ final class Library {
                 at: folder, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles]) else { return [] }
             var result: [Entry] = []
             for case let url as URL in walker {
-                let nameMatch = url.lastPathComponent.lowercased().contains(q)
-                let capMatch = captions[url.path]?.lowercased().contains(q) ?? false
-                guard nameMatch || capMatch else { continue }
                 let rv = try? url.resourceValues(forKeys: keys)
                 let isDir = rv?.isDirectory ?? false
-                result.append(Entry(url: url, name: url.lastPathComponent,
-                                    kind: classify(url: url, isDirectory: isDir),
-                                    size: Int64(rv?.fileSize ?? 0),
-                                    modified: rv?.contentModificationDate ?? .distantPast))
+                let entry = Entry(url: url, name: url.lastPathComponent,
+                                  kind: classify(url: url, isDirectory: isDir),
+                                  size: Int64(rv?.fileSize ?? 0),
+                                  modified: rv?.contentModificationDate ?? .distantPast)
+                let nameMatch = entry.name.lowercased().contains(q)
+                let capMatch = captions[url.path]?.lowercased().contains(q) ?? false
+                let ocrMatch = !nameMatch && !capMatch && (MetadataLoader.ocrTextCached(for: entry)?.contains(q) ?? false)
+                guard nameMatch || capMatch || ocrMatch else { continue }
+                result.append(entry)
             }
             return Self.sortEntries(result, by: sort)
         }.value
+    }
+
+    /// Runs on-device OCR over every photo under `folder` (recursively, 8 at a time)
+    /// and caches the recognized text so search can match words printed in photos.
+    /// Already-indexed photos are skipped by the per-file cache. Returns the count.
+    nonisolated func buildTextIndex(under folder: URL, progress: @escaping @Sendable (Int, Int) -> Void) async -> Int {
+        let images = await Self.enumerateAll(folder).filter { $0.kind == .image }
+        let total = images.count
+        guard total > 0 else { return 0 }
+        var index = 0, done = 0
+        await withTaskGroup(of: Void.self) { group in
+            func addNext() {
+                guard index < total else { return }
+                let e = images[index]; index += 1
+                group.addTask { _ = await MetadataLoader.ocrText(for: e) }
+            }
+            for _ in 0..<min(8, total) { addNext() }
+            while await group.next() != nil { done += 1; progress(done, total); addNext() }
+        }
+        MetadataLoader.flushOCRStore()
+        return total
     }
 
     // MARK: - Full index (fast search / Library)
@@ -516,7 +539,8 @@ final class Library {
         let base = folder.path
         let matches = index.filter { e in
             (e.url.path == base || e.url.path.hasPrefix(base + "/")) &&
-            (e.name.lowercased().contains(q) || (captions[e.url.path]?.lowercased().contains(q) ?? false))
+            (e.name.lowercased().contains(q) || (captions[e.url.path]?.lowercased().contains(q) ?? false)
+             || (MetadataLoader.ocrTextCached(for: e)?.contains(q) ?? false))   // text inside photos
         }
         return Self.sortEntries(matches, by: sort)
     }
