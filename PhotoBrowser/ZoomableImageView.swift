@@ -15,7 +15,6 @@ struct ZoomableImageView: View {
     var onToggleChrome: () -> Void = {}
     var onPrev: () -> Void = {}
     var onNext: () -> Void = {}
-    var onKeepToggle: () -> Void = {}    // long-press on a (non-live) still toggles Keeping
 
     @State private var displayImage: UIImage?
     @State private var badge: String?
@@ -28,12 +27,7 @@ struct ZoomableImageView: View {
                 ZoomScrollView(image: displayImage, onZoomChanged: onZoomChanged,
                                onDismiss: onDismiss, onInfo: onInfo, onToggleChrome: onToggleChrome,
                                onPrev: onPrev, onNext: onNext,
-                               onLivePress: { pressing in
-                                   // Live still: hold plays the motion. Plain still:
-                                   // hold toggles the Keeping review label.
-                                   if livePairURL != nil { livePlaying = pressing }
-                                   else if pressing { onKeepToggle() }
-                               })
+                               onLivePress: { pressing in if livePairURL != nil { livePlaying = pressing } })
             } else {
                 Color.clear
             }

@@ -1,6 +1,5 @@
 import SwiftUI
 import AVFoundation
-import UIKit
 
 /// Full-screen viewer. Shows one item at a time as a plain SwiftUI view (no
 /// UIPageViewController — that left the first page never appearing). Navigation
@@ -23,11 +22,8 @@ struct ViewerView: View {
     @State private var showEditor = false
     @State private var showResize = false
     @State private var showAIEdit = false
-    @State private var keepFlash: KeepFlash?
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
-
-    private struct KeepFlash: Identifiable { let id = UUID(); let keeping: Bool }
 
     init(items: [Entry], startIndex: Int, slideshow: Bool = false) {
         self.items = items
@@ -56,15 +52,8 @@ struct ViewerView: View {
                          onControlsHidden: { chromeHidden = $0 },
                          onToggleChrome: { chromeHidden.toggle() },
                          onPrev: { go(-1) },
-                         onNext: { go(1) },
-                         onKeepToggle: { toggleKeep() })
+                         onNext: { go(1) })
                     .id(index)
-            }
-
-            if let keepFlash {
-                KeepFlashOverlay(keeping: keepFlash.keeping)
-                    .id(keepFlash.id)
-                    .allowsHitTesting(false)
             }
 
             topChrome
@@ -130,27 +119,6 @@ struct ViewerView: View {
         index = next
     }
 
-    /// Long-press in a frames folder toggles the item's "Keeping" review label and
-    /// shows a green flash (gray when un-kept). Limited to frames folders so it never
-    /// surprises elsewhere (where long-press plays Live Photos / does nothing).
-    private func toggleKeep() {
-        guard let current, current.kind == .image,
-              library.isFramesFolder(current.url.deletingLastPathComponent()) else { return }
-        let nowKeeping = library.toggleKeeping(current.url)
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        let flash = KeepFlash(keeping: nowKeeping)
-        keepFlash = flash
-        Task {
-            try? await Task.sleep(nanoseconds: 800_000_000)
-            if keepFlash?.id == flash.id { keepFlash = nil }
-        }
-    }
-
-    private var currentIsKept: Bool {
-        guard let current else { return false }
-        return library.isKeeping(current.url)
-    }
-
     // Close button + centered title/date; both hidden while zoomed in.
     private var topChrome: some View {
         ZStack(alignment: .top) {
@@ -198,11 +166,6 @@ struct ViewerView: View {
                 Text(date, format: .dateTime.month(.abbreviated).day().year().hour().minute())
                     .font(.caption2).opacity(0.85)
             }
-            if currentIsKept {
-                Label("Keeping", systemImage: "checkmark.circle.fill")
-                    .font(.caption2.weight(.bold)).foregroundStyle(.green)
-                    .padding(.top, 1)
-            }
         }
         .foregroundStyle(.white)
         .frame(maxWidth: .infinity)
@@ -224,7 +187,6 @@ private struct PageView: View {
     let onToggleChrome: () -> Void
     let onPrev: () -> Void
     let onNext: () -> Void
-    var onKeepToggle: () -> Void = {}
 
     var body: some View {
         if item.kind == .video {
@@ -236,32 +198,7 @@ private struct PageView: View {
         } else {
             ZoomableImageView(url: item.url, coverSource: coverSource, onDismiss: onDismiss, onInfo: onInfo,
                               onZoomChanged: onZoomChanged, onToggleChrome: onToggleChrome,
-                              onPrev: onPrev, onNext: onNext, onKeepToggle: onKeepToggle)
+                              onPrev: onPrev, onNext: onNext)
         }
-    }
-}
-
-/// Brief tinted flash + label shown when the Keeping label is toggled in the viewer
-/// (green = now Keeping, gray = removed). Fades itself out; non-interactive.
-private struct KeepFlashOverlay: View {
-    let keeping: Bool
-    @State private var faded = false
-
-    var body: some View {
-        ZStack {
-            (keeping ? Color.green : Color.gray).opacity(faded ? 0 : 0.35)
-            VStack(spacing: 10) {
-                Image(systemName: keeping ? "checkmark.circle.fill" : "xmark.circle")
-                    .font(.system(size: 70, weight: .bold))
-                Text(keeping ? "Keeping" : "Not Keeping")
-                    .font(.title2.weight(.bold))
-            }
-            .foregroundStyle(.white)
-            .shadow(color: .black.opacity(0.5), radius: 6)
-            .scaleEffect(faded ? 1.15 : 1)
-            .opacity(faded ? 0 : 1)
-        }
-        .ignoresSafeArea()
-        .onAppear { withAnimation(.easeOut(duration: 0.7)) { faded = true } }
     }
 }

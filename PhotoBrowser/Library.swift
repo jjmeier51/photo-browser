@@ -326,31 +326,6 @@ final class Library {
     }
     func isTaylorAlbumDownloaded(_ id: Int) -> Bool { downloadedTaylorAlbums.contains(id) }
 
-    // MARK: - Frame review (Keeping / Deleting)
-
-    /// Folders produced by "Export All Frames" — the Keeping/Deleting review filters
-    /// only appear in these.
-    var framesFolders: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.framesFolders") ?? [])
-    func markFramesFolder(_ url: URL) {
-        guard framesFolders.insert(url.path).inserted else { return }
-        UserDefaults.standard.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
-    }
-    func isFramesFolder(_ url: URL) -> Bool { framesFolders.contains(url.path) }
-
-    /// "Keeping" review label (toggled by a long-press in the viewer). Any viewable
-    /// item without it is, by definition, "Deleting".
-    var keepingPaths: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.keeping") ?? [])
-    func isKeeping(_ url: URL) -> Bool { keepingPaths.contains(url.path) }
-    @discardableResult
-    func toggleKeeping(_ url: URL) -> Bool {
-        let now: Bool
-        if keepingPaths.contains(url.path) { keepingPaths.remove(url.path); now = false }
-        else { keepingPaths.insert(url.path); now = true }
-        UserDefaults.standard.set(Array(keepingPaths), forKey: "photoBrowser.keeping")
-        labelsVersion += 1
-        return now
-    }
-
     // MARK: - "Not duplicates" (user-confirmed non-duplicate pairs)
 
     /// Pairs the user marked as NOT duplicates, as "pathA\npathB" (sorted), so a
@@ -453,8 +428,6 @@ final class Library {
         let old = oldURL.path, new = newURL.path
         favorites = remapPaths(favorites, old: old, new: new)
         aiLabels  = remapPaths(aiLabels,  old: old, new: new)
-        keepingPaths = remapPaths(keepingPaths, old: old, new: new)
-        framesFolders = remapPaths(framesFolders, old: old, new: new)
         customLabels = customLabels.mapValues { remapPaths($0, old: old, new: new) }
 
         captions = remapDict(captions, old: old, new: new)
@@ -463,8 +436,6 @@ final class Library {
 
         UserDefaults.standard.set(Array(favorites), forKey: "photoBrowser.favorites")
         UserDefaults.standard.set(Array(aiLabels), forKey: "photoBrowser.ai")
-        UserDefaults.standard.set(Array(keepingPaths), forKey: "photoBrowser.keeping")
-        UserDefaults.standard.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
         UserDefaults.standard.set(captions, forKey: "photoBrowser.captions")
         UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
         UserDefaults.standard.set(photoOrigins, forKey: "photoBrowser.photoOrigins")
