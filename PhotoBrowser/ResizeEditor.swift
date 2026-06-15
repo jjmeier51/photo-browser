@@ -201,11 +201,26 @@ struct ResizeEditorView: View {
         return (max(64, Int(cw.rounded())), max(64, Int(ch.rounded())))
     }
 
+    /// Where the user dragged the photo within a freeform frame, as words the edit
+    /// models understand (offsetY is canvas-space: 1 = top, 0 = bottom). Centered
+    /// (or any non-freeform aspect) returns nil so the default prompt is unchanged.
+    private func placementPhrase() -> String? {
+        guard aspect == .freeform else { return nil }
+        let h: String? = offsetX < 0.34 ? "left" : offsetX > 0.66 ? "right" : nil
+        let v: String? = offsetY > 0.66 ? "top" : offsetY < 0.34 ? "bottom" : nil
+        let where_ = [v, h].compactMap { $0 }.joined(separator: "-")
+        guard !where_.isEmpty else { return nil }
+        return "Position the original photo toward the \(where_) of the frame, and generate the newly added scenery on the opposite side(s)."
+    }
+
     private func runAI() {
         saving = true; aiStatus = "Preparing…"
         let url = entry.url, m = model
         let extra = extendText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let prompt = extra.isEmpty ? AIExtend.extendPrompt : AIExtend.extendPrompt + " In the newly added areas, include: \(extra)."
+        var prompt = extra.isEmpty ? AIExtend.extendPrompt : AIExtend.extendPrompt + " In the newly added areas, include: \(extra)."
+        // These tunes have no mask, so placement can't be pixel-pinned; steer it
+        // with a spatial instruction matching where the user dragged the photo.
+        if let place = placementPhrase() { prompt += " " + place }
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Extend")
         Task {
             // These models are mask-less editors: send the original and request the
