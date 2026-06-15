@@ -20,6 +20,12 @@ final class Library {
         let raw = UserDefaults.standard.dictionary(forKey: "photoBrowser.customLabels") as? [String: [String]] ?? [:]
         return raw.mapValues(Set.init)
     }()
+    /// People library: person name → set of face IDs ("path#index"). Built by the
+    /// approximate on-device "Find People" pass, then renamed/merged by the user.
+    var people: [String: Set<String>] = {
+        let raw = UserDefaults.standard.dictionary(forKey: "photoBrowser.people") as? [String: [String]] ?? [:]
+        return raw.mapValues(Set.init)
+    }()
     /// Bumps on any label change (toggle or move) so views re-query even when the
     /// label count is unchanged (e.g. a move rewrites a path without adding one).
     var labelsVersion = 0
@@ -254,6 +260,43 @@ final class Library {
 
     private func persistCustomLabels() {
         UserDefaults.standard.set(customLabels.mapValues(Array.init), forKey: "photoBrowser.customLabels")
+    }
+
+    // MARK: - People (faces)
+
+    private func persistPeople() {
+        UserDefaults.standard.set(people.mapValues(Array.init), forKey: "photoBrowser.people")
+        labelsVersion += 1
+    }
+    func setPeople(_ p: [String: Set<String>]) { people = p.filter { !$0.value.isEmpty }; persistPeople() }
+    func renamePerson(_ old: String, to new: String) {
+        let name = new.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, name != old, let faces = people[old] else { return }
+        people[old] = nil
+        people[name, default: []].formUnion(faces)   // merge if the new name exists
+        persistPeople()
+    }
+    func mergePeople(_ names: [String], into target: String) {
+        guard people[target] != nil else { return }
+        for n in names where n != target { if let f = people[n] { people[target, default: []].formUnion(f); people[n] = nil } }
+        persistPeople()
+    }
+    func deletePerson(_ name: String) { people[name] = nil; persistPeople() }
+    /// The distinct photo paths a person appears in (face IDs are "path#index").
+    func photoPaths(forPerson name: String) -> Set<String> {
+        Set((people[name] ?? []).map(Self.pathOfFaceID))
+    }
+    /// Splits a face ID ("path#index") at its last "#" (paths rarely contain one).
+    static func pathOfFaceID(_ id: String) -> String {
+        guard let h = id.lastIndex(of: "#") else { return id }
+        return String(id[..<h])
+    }
+    /// The photo path + normalized face rect for a face ID, for rendering a crop.
+    nonisolated func faceRect(for faceID: String) -> (path: String, rect: [CGFloat])? {
+        guard let h = faceID.lastIndex(of: "#"), let idx = Int(faceID[faceID.index(after: h)...]) else { return nil }
+        let path = String(faceID[..<h])
+        guard let faces = FaceStore.shared.faces(path), idx < faces.count else { return nil }
+        return (path, faces[idx].rect)
     }
 
     /// Every path carrying at least one custom label (union across all labels).
@@ -502,6 +545,73 @@ final class Library {
         }
         MetadataLoader.flushOCRStore()
         return total
+    }
+
+    /// Detects faces under `folder` (cached), then groups still-unassigned faces by
+    /// feature-print similarity, attaching each cluster to the closest existing
+    /// person or naming a new "Person N". Existing assignments (incl. manual edits)
+    /// are never disturbed. Returns the new people map; the caller persists it.
+    nonisolated func findPeople(under folder: URL, existing: [String: Set<String>],
+                                progress: @escaping @Sendable (Int, Int) -> Void) async -> [String: Set<String>] {
+        let images = await Self.enumerateAll(folder).filter { $0.kind == .image }
+        let total = images.count
+        guard total > 0 else { return existing }
+
+        var index = 0, done = 0
+        await withTaskGroup(of: Void.self) { group in
+            func addNext() {
+                guard index < total else { return }
+                let path = images[index].url.path; index += 1
+                group.addTask {
+                    if FaceStore.shared.faces(path) == nil {
+                        FaceStore.shared.store(path, await FaceAnalysis.analyze(URL(fileURLWithPath: path)))
+                    }
+                }
+            }
+            for _ in 0..<min(8, total) { addNext() }
+            while await group.next() != nil { done += 1; progress(done, total); addNext() }
+        }
+        FaceStore.shared.flush()
+
+        // Collect every face's vector, keyed faceID = "path#index".
+        var vec: [String: [Float]] = [:]
+        for e in images {
+            for (i, f) in (FaceStore.shared.faces(e.url.path) ?? []).enumerated() where !f.print.isEmpty {
+                vec["\(e.url.path)#\(i)"] = f.print
+            }
+        }
+        let assigned = Set(existing.values.flatMap { $0 })
+        let unassigned = vec.keys.filter { !assigned.contains($0) }
+        let t = FaceAnalysis.sameFaceThreshold
+
+        // Greedy-cluster the unassigned faces.
+        var clusters: [[String]] = []
+        var reps: [[Float]] = []
+        for id in unassigned {
+            guard let v = vec[id] else { continue }
+            var best = -1, i = 0; var bestD = Float.greatestFiniteMagnitude
+            for r in reps { let d = FaceAnalysis.distance(v, r); if d < bestD { bestD = d; best = i }; i += 1 }
+            if best >= 0, bestD < t { clusters[best].append(id) } else { clusters.append([id]); reps.append(v) }
+        }
+
+        // Attach each cluster to the closest existing person, else a new "Person N".
+        var people = existing
+        var personRep: [String: [Float]] = [:]
+        for (name, ids) in existing { if let id = ids.first(where: { vec[$0] != nil }) { personRep[name] = vec[id] } }
+        var counter = 1
+        for (ci, cluster) in clusters.enumerated() {
+            let rep = reps[ci]
+            var match: String?; var matchD = Float.greatestFiniteMagnitude
+            for (name, pr) in personRep { let d = FaceAnalysis.distance(rep, pr); if d < matchD { matchD = d; match = name } }
+            if let match, matchD < t {
+                people[match, default: []].formUnion(cluster)
+            } else {
+                var name = "Person \(counter)"
+                while people[name] != nil { counter += 1; name = "Person \(counter)" }
+                people[name] = Set(cluster); personRep[name] = rep; counter += 1
+            }
+        }
+        return people
     }
 
     // MARK: - Full index (fast search / Library)

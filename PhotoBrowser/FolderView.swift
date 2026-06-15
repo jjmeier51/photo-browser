@@ -76,6 +76,7 @@ struct FolderView: View {
     @State private var fixingDates = false
     @State private var indexingText = false
     @State private var textIndexProgress = 0.0
+    @State private var showPeople = false
     @State private var fixProgress: Double = 0
     @State private var videoRes: VideoRes = .all
     @State private var imageRes: ImageRes = .all
@@ -582,6 +583,7 @@ struct FolderView: View {
             }
             .fullScreenCover(item: $editEntry) { e in MediaEditorView(entry: e) }
             .fullScreenCover(item: $resizeEntry) { e in ResizeEditorView(entry: e) }
+            .fullScreenCover(isPresented: $showPeople) { PeopleView(folder: url) }
             .fullScreenCover(isPresented: $showPhotosLibrary) {
                 PhotosLibraryView(targetFolder: url, deleteOriginals: photosLibraryMoves)
             }
@@ -1031,6 +1033,7 @@ struct FolderView: View {
                     Button { showDuplicates = true } label: { Label("Find Duplicates", systemImage: "doc.on.doc") }
                     Button { confirmFixDates = true } label: { Label("Restore Capture Dates", systemImage: "clock.arrow.circlepath") }
                     Button { runTextIndex() } label: { Label("Index Text in Photos", systemImage: "text.viewfinder") }
+                    Button { showPeople = true } label: { Label("People", systemImage: "person.2.crop.square.stack") }
                     Button { photosLibraryMoves = false; showPhotosLibrary = true } label: { Label("Photos Library", systemImage: "photo.stack") }
                     Divider()
                     Button { pickFolder(.transfer) } label: {
