@@ -86,7 +86,7 @@ struct FrameCleanupView: View {
         .overlay(alignment: .top) {
             stamp("KEEP", icon: "checkmark", color: .green).opacity(keepProgress).padding(.top, 26)
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
+        .padding(.horizontal, 8).padding(.vertical, 4)
         .offset(drag)
         .rotationEffect(.degrees(Double(drag.width) / 22))
         .id(cardToken)
@@ -127,15 +127,11 @@ struct FrameCleanupView: View {
     // MARK: - Controls / states
 
     private var controls: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 44) {
-                circleButton("trash.fill", .red) { commit(delete: true) }
-                circleButton("checkmark", .green) { commit(delete: false) }
-            }
-            Text("Swipe ← to delete  ·  swipe ↑ to keep")
-                .font(.caption).foregroundStyle(.secondary)
+        HStack(spacing: 44) {
+            circleButton("trash.fill", .red) { commit(delete: true) }
+            circleButton("checkmark", .green) { commit(delete: false) }
         }
-        .padding(.vertical, 18)
+        .padding(.top, 10).padding(.bottom, 14)
     }
 
     private func circleButton(_ icon: String, _ color: Color, action: @escaping () -> Void) -> some View {
@@ -172,16 +168,16 @@ struct FrameCleanupView: View {
         guard current != nil else { return }
         flash = Flash(delete: delete)
         UIImpactFeedbackGenerator(style: delete ? .rigid : .soft).impactOccurred()
-        withAnimation(.easeIn(duration: 0.24)) {
+        withAnimation(.easeIn(duration: 0.16)) {
             drag = delete ? CGSize(width: -900, height: drag.height)
                           : CGSize(width: drag.width, height: -1100)
         }
         Task {
-            try? await Task.sleep(nanoseconds: 240_000_000)
+            try? await Task.sleep(nanoseconds: 160_000_000)
             if delete { performDelete() } else { performKeep() }
             drag = .zero
             cardToken += 1                 // fresh, centered card for the next item
-            try? await Task.sleep(nanoseconds: 350_000_000)
+            try? await Task.sleep(nanoseconds: 300_000_000)
             if flash?.delete == delete { flash = nil }
         }
     }
@@ -219,7 +215,7 @@ private struct CleanupFlash: View {
                 .scaleEffect(faded ? 1.2 : 1).opacity(faded ? 0 : 1)
         }
         .ignoresSafeArea().allowsHitTesting(false)
-        .onAppear { withAnimation(.easeOut(duration: 0.55)) { faded = true } }
+        .onAppear { withAnimation(.easeOut(duration: 0.4)) { faded = true } }
     }
 }
 
