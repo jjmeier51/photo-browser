@@ -79,9 +79,7 @@ enum AIExtend {
             "prompt[num_images]": String(min(max(count, 1), 8))
         ]
         if let width, let height {
-            let (w, h) = normalizedSize(width, height)
-            fields["prompt[w]"] = String(w)
-            fields["prompt[h]"] = String(h)
+            fields["prompt[aspect_ratio]"] = aspectRatio(width, height)
         }
         let files: [(name: String, filename: String, mime: String, data: Data)] = [
             ("prompt[input_image]", "input.jpg", "image/jpeg", imageData)
@@ -186,7 +184,8 @@ enum AIExtend {
         let captureDate = exifDate(from: props)
             ?? (try? original.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         if let captureDate {
-            let f = DateFormatter(); f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
+            let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
+            f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
             let stamp = f.string(from: captureDate)
             var exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
             exif[kCGImagePropertyExifDateTimeOriginal] = stamp
@@ -214,20 +213,17 @@ enum AIExtend {
 
     // MARK: - Helpers
 
-    /// Clamps a requested output size to what the Astria tunes accept: a minimum
-    /// pixel budget (the gallery models reject anything under ~1920×1920) and a
-    /// sane maximum long side, then rounds each side to a multiple of 8. The
-    /// minimum is enforced last so the floor is never violated by the cap.
-    private nonisolated static func normalizedSize(_ w: Int, _ h: Int) -> (Int, Int) {
-        let minPixels = 3_686_400.0, maxLong = 4096.0
-        var cw = Double(max(w, 1)), ch = Double(max(h, 1))
-        func scale(_ s: Double) { cw *= s; ch *= s }
-        if cw * ch < minPixels { scale((minPixels / (cw * ch)).squareRoot()) }
-        let long = max(cw, ch)
-        if long > maxLong { scale(maxLong / long) }
-        if cw * ch < minPixels { scale((minPixels / (cw * ch)).squareRoot()) }
-        func r8(_ x: Double) -> Int { max(8, Int((x / 8).rounded(.up)) * 8) }
-        return (r8(cw), r8(ch))
+    /// Astria's gallery tunes control output shape via `aspect_ratio` (they reject
+    /// explicit small `w`/`h` — "requires at least 1920×1920, use aspect_ratio
+    /// instead"), so snap the requested width:height to the nearest ratio the tunes
+    /// accept. The result then matches the shape the user picked.
+    private nonisolated static func aspectRatio(_ w: Int, _ h: Int) -> String {
+        let supported: [(String, Double)] = [
+            ("1:1", 1.0), ("4:5", 0.8), ("5:4", 1.25), ("3:4", 0.75), ("4:3", 1.0 / 0.75),
+            ("2:3", 2.0 / 3.0), ("3:2", 1.5), ("9:16", 9.0 / 16.0), ("16:9", 16.0 / 9.0)
+        ]
+        let target = Double(max(w, 1)) / Double(max(h, 1))
+        return supported.min { abs($0.1 - target) < abs($1.1 - target) }!.0
     }
 
     private nonisolated static func multipart(fields: [String: String],
@@ -260,7 +256,11 @@ enum AIExtend {
         let candidates = [exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
                           exif?[kCGImagePropertyExifDateTimeDigitized] as? String,
                           tiff?[kCGImagePropertyTIFFDateTime] as? String]
-        let f = DateFormatter(); f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
+        // POSIX locale: EXIF dates are a fixed Gregorian format, so the parse must
+        // not depend on the device's locale/calendar (a non-Gregorian default
+        // otherwise fails and the date silently falls back to the file's copy time).
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
         for case let s? in candidates { if let d = f.date(from: s) { return d } }
         return nil
     }

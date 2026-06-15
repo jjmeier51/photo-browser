@@ -120,7 +120,10 @@ enum TaylorGallery {
 
     // MARK: - Networking
 
-    nonisolated static let userAgent = "Mozilla/5.0 (iPhone) PhotoBrowser"
+    // A realistic mobile-Safari User-Agent: the server varies on it (`Vary:
+    // User-Agent`) and some hosts/WAFs reject unfamiliar agents outright, which on
+    // device surfaced as a connection-level "couldn't reach" throw.
+    nonisolated static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
     /// Shared session: a wide connection pool plus a big on-disk cache so thumbnails
     /// and pages load fast and survive relaunches. Images/pages on this gallery are
@@ -136,10 +139,22 @@ enum TaylorGallery {
 
     nonisolated private static func fetchHTML(_ path: String) async -> String? {
         guard let url = URL(string: host + path) else { return nil }
-        var req = URLRequest(url: url)
-        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        guard let (data, _) = try? await session.data(for: req) else { return nil }
-        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+        func request(ignoreCache: Bool) -> URLRequest {
+            var req = URLRequest(url: url)
+            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            req.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+            if ignoreCache { req.cachePolicy = .reloadIgnoringLocalCacheData }
+            return req
+        }
+        // One retry (bypassing the cache) so a single network blip — the only thing
+        // that makes this throw — doesn't surface as a hard "couldn't reach".
+        for attempt in 0..<2 {
+            if let (data, _) = try? await session.data(for: request(ignoreCache: attempt > 0)) {
+                return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+            }
+        }
+        return nil
     }
 
     // MARK: - Parsing (Coppermine HTML — best-effort, defensive)
