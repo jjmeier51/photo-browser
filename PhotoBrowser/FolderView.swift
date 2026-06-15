@@ -58,7 +58,7 @@ struct FolderView: View {
     @State private var renameDraft = ""
     @State private var showMovePicker = false
     @State private var moveConflict: MoveConflict?
-    struct MoveConflict: Identifiable { let id = UUID(); let dest: URL; let names: [String] }
+    struct MoveConflict: Identifiable { let id = UUID(); let dest: URL; let items: [Entry] }
     @State private var showCopyPicker = false
     @State private var exporting = false
     @State private var exportProgress: Double = 0
@@ -523,16 +523,10 @@ struct FolderView: View {
             .sheet(item: $previewItem) { item in
                 QuickLookPreview(url: item.url).ignoresSafeArea()
             }
-            .confirmationDialog(moveConflictTitle, isPresented: Binding(
-                get: { moveConflict != nil }, set: { if !$0 { moveConflict = nil } }),
-                titleVisibility: .visible, presenting: moveConflict) { c in
-                Button("Move All (Keep Both)") { finishMove(to: c.dest, keepBoth: true) }
-                Button("Skip Matching Names") { finishMove(to: c.dest, keepBoth: false) }
-                Button("Cancel", role: .cancel) { moveConflict = nil }
-            } message: { c in
-                let preview = c.names.prefix(6).joined(separator: ", ")
-                let more = c.names.count > 6 ? " and \(c.names.count - 6) more" : ""
-                Text("The destination already has files named: \(preview)\(more). They may be different files — move them anyway (kept with a new name) or skip them?")
+            .sheet(item: $moveConflict) { c in
+                MoveConflictView(dest: c.dest, items: c.items,
+                                 onMoveAll: { finishMove(to: c.dest, keepBoth: true) },
+                                 onSkip: { finishMove(to: c.dest, keepBoth: false) })
             }
             .fullScreenCover(item: $viewerPresentation) { p in
                 ViewerView(items: p.items, startIndex: p.startIndex, slideshow: p.slideshow)
@@ -1352,16 +1346,12 @@ struct FolderView: View {
     private func performMove(to dest: URL) {
         // Surface same-name conflicts (which may be *different* files) and let the
         // user choose to skip them or keep both, instead of silently dropping them.
-        let collisions = FileActions.collisions(selectedEntries().map(\.url), in: dest)
-        if collisions.isEmpty { finishMove(to: dest, keepBoth: false); return }
-        // Defer so the move-picker sheet finishes dismissing before the dialog shows.
-        let conflict = MoveConflict(dest: dest, names: collisions.map { $0.lastPathComponent })
+        let entries = selectedEntries()
+        let collisionURLs = Set(FileActions.collisions(entries.map(\.url), in: dest))
+        if collisionURLs.isEmpty { finishMove(to: dest, keepBoth: false); return }
+        // Defer so the move-picker sheet finishes dismissing before this one shows.
+        let conflict = MoveConflict(dest: dest, items: entries.filter { collisionURLs.contains($0.url) })
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { moveConflict = conflict }
-    }
-
-    private var moveConflictTitle: String {
-        let n = moveConflict?.names.count ?? 0
-        return "\(n) item\(n == 1 ? "" : "s") already named in destination"
     }
 
     private func finishMove(to dest: URL, keepBoth: Bool) {

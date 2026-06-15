@@ -16,6 +16,7 @@ struct ResizeEditorView: View {
     @State private var freeH = 1.5
     @State private var fill: MediaEditing.ResizeFill = .blur
     @State private var model = AIExtend.defaultModel
+    @State private var extendText = ""
     @State private var saving = false
     @State private var confirmAI = false
     @State private var showSettings = false
@@ -64,6 +65,9 @@ struct ResizeEditorView: View {
                     ForEach(MediaEditing.ResizeFill.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented).padding(.horizontal)
+
+                TextField("Optional: what to show in the new space…", text: $extendText, axis: .vertical)
+                    .lineLimit(1...2).textFieldStyle(.roundedBorder).padding(.horizontal)
 
                 HStack(spacing: 10) {
                     Picker("Model", selection: $model) {
@@ -155,6 +159,8 @@ struct ResizeEditorView: View {
     private func runAI() {
         saving = true
         let url = entry.url, free = aspect == .freeform, w = freeW, h = freeH, ratio = aspect.ratio, m = model
+        let extra = extendText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = extra.isEmpty ? AIExtend.extendPrompt : AIExtend.extendPrompt + " In the newly extended areas, include: \(extra)."
         Task {
             // Compose a blurred-fill canvas at a decent resolution and send it for outpainting.
             let jpeg = await Task.detached(priority: .userInitiated) { () -> Data? in
@@ -164,7 +170,7 @@ struct ResizeEditorView: View {
                 return AIExtend.uploadJPEG(of: canvas)
             }.value
             guard let jpeg else { saving = false; aiError = "Couldn’t prepare the image."; return }
-            let result = await AIExtend.generate(model: m, prompt: AIExtend.extendPrompt, imageData: jpeg, count: 1)
+            let result = await AIExtend.generate(model: m, prompt: prompt, imageData: jpeg, count: 1)
             saving = false
             switch result {
             case .success(let data): aiResults = data

@@ -17,7 +17,7 @@ enum AIExtend {
         var endpoint: String {
             switch self {
             case .seedream:      return "https://fal.run/fal-ai/bytedance/seedream/v4.5/edit"
-            case .nanoBanana2:   return "https://fal.run/fal-ai/nano-banana/edit"
+            case .nanoBanana2:   return "https://fal.run/fal-ai/nano-banana-2/edit"
             case .nanoBananaPro: return "https://fal.run/fal-ai/nano-banana-pro/edit"
             }
         }
