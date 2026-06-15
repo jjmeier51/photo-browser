@@ -125,6 +125,17 @@ struct FolderView: View {
     /// The bespoke labeling/filtering only appears inside the "Taylor Swift"
     /// folder (or any folder nested under it).
     private var inTaylorSwift: Bool { url.pathComponents.contains("Taylor Swift") }
+    /// The nearest ancestor folder named "Taylor Swift" strictly above this folder
+    /// (nil when we're at it or outside it) — the target for "Move to Taylor Swift".
+    private var taylorSwiftRoot: URL? {
+        guard let root = library.rootURL?.standardizedFileURL else { return nil }
+        var cur = url.standardizedFileURL
+        while cur.pathComponents.count > root.pathComponents.count {
+            cur = cur.deletingLastPathComponent()
+            if cur.lastPathComponent == "Taylor Swift" { return cur }
+        }
+        return nil
+    }
     private var tsLabelMode: Bool { !tsLabelFilter.isEmpty || tsNoLabel }
     private var availableAges: [Int] { Array(Set(agedList.map { $0.age })).sorted() }
 
@@ -526,8 +537,7 @@ struct FolderView: View {
             }
             .sheet(item: $moveConflict) { c in
                 MoveConflictView(dest: c.dest, items: c.items,
-                                 onMoveAll: { finishMove(to: c.dest, keepBoth: true) },
-                                 onSkip: { finishMove(to: c.dest, keepBoth: false) })
+                                 onConfirm: { keep in finishMove(to: c.dest, keepConflicts: keep) })
             }
             .fullScreenCover(item: $viewerPresentation) { p in
                 ViewerView(items: p.items, startIndex: p.startIndex, slideshow: p.slideshow)
@@ -1144,6 +1154,9 @@ struct FolderView: View {
                 } label: { Label("Rotate", systemImage: "rotate.right") }
                 Button { duplicateEntries(selectedEntries()) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
                 Button { showCopyPicker = true } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
+                if let tsRoot = taylorSwiftRoot {
+                    Button { performMove(to: tsRoot) } label: { Label("Move to “Taylor Swift”", systemImage: "music.mic") }
+                }
                 if let pair = selectedLivePhotoPair {
                     Button { makeLivePhoto(pair) } label: { Label("Make Live Photo", systemImage: "livephoto") }
                 }
@@ -1349,20 +1362,26 @@ struct FolderView: View {
         // user choose to skip them or keep both, instead of silently dropping them.
         let entries = selectedEntries()
         let collisionURLs = Set(FileActions.collisions(entries.map(\.url), in: dest))
-        if collisionURLs.isEmpty { finishMove(to: dest, keepBoth: false); return }
-        // Defer so the move-picker sheet finishes dismissing before this one shows.
+        if collisionURLs.isEmpty { finishMove(to: dest, keepConflicts: []); return }
+        // Defer so the move-picker sheet (or the Menu) finishes dismissing first.
         let conflict = MoveConflict(dest: dest, items: entries.filter { collisionURLs.contains($0.url) })
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { moveConflict = conflict }
     }
 
-    private func finishMove(to dest: URL, keepBoth: Bool) {
+    /// Completes a move. `keepConflicts` are the same-name items the user chose to
+    /// move (renamed to keep both); any other conflicting item is left behind, while
+    /// everything non-conflicting moves normally.
+    private func finishMove(to dest: URL, keepConflicts: Set<URL>) {
         moveConflict = nil
-        let outcome = FileActions.move(selectedEntries().map(\.url), to: dest, renameOnCollision: keepBoth)
+        let allURLs = selectedEntries().map(\.url)
+        let conflicts = Set(FileActions.collisions(allURLs, in: dest))
+        let skip = conflicts.subtracting(keepConflicts)
+        let moveURLs = allURLs.filter { !skip.contains($0) }
+        let outcome = FileActions.move(moveURLs, to: dest, renameOnCollision: true)
         for pair in outcome.moved { library.itemMoved(from: pair.from, to: pair.to) }   // labels follow
         selection.removeAll(); selecting = false
         var msg = "Moved \(outcome.moved.count) item(s)."
-        let skipped = outcome.skipped.filter { $0.reason == "name already exists" }.count
-        if skipped > 0 { msg += " Skipped \(skipped) with matching names." }
+        if !skip.isEmpty { msg += " Skipped \(skip.count) with matching names." }
         resultMessage = msg
         Task { await reload() }
     }
