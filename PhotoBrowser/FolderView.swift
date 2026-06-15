@@ -281,7 +281,7 @@ struct FolderView: View {
     private var mediaItems: [Entry] { filtered.filter { $0.isViewable } }
 
     /// Clean-up queue: every viewable item in this folder, stably name-sorted (so the
-    /// resume cursor lines up across sessions regardless of the active sort/filter).
+    /// review order is consistent across sessions regardless of the active sort/filter).
     private var cleanupItems: [Entry] {
         entries.filter { $0.isViewable }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
@@ -1119,8 +1119,11 @@ struct FolderView: View {
                     Image(systemName: "arrow.up.arrow.down")
                 }
                 Menu {
-                    Button { showCleanup = true } label: { Label("Start Clean Up", systemImage: "wand.and.sparkles") }
-                        .disabled(cleanupItems.isEmpty)
+                    Button { showCleanup = true } label: {
+                        Label(library.cleanupStarted(url) ? "Resume Clean Up" : "Start Clean Up",
+                              systemImage: "wand.and.sparkles")
+                    }
+                    .disabled(cleanupItems.isEmpty)
                     Divider()
                     Button { playSlideshow() } label: { Label("Play Slideshow", systemImage: "play.rectangle") }
                         .disabled(mediaItems.isEmpty)

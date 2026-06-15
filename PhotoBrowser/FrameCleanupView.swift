@@ -4,19 +4,20 @@ import UIKit
 
 /// "Tinder"-style clean-up for a frames folder: one card at a time — swipe left to
 /// delete (red flash, no extra confirmation; the risk is understood), swipe up to
-/// keep (green flash). Progress is a per-folder cursor (kept items stay at the front
-/// of the list, deleted ones vanish), so re-opening resumes where it left off.
+/// keep (green flash). Each decided item is remembered per folder, so the queue on
+/// (re-)open is "viewable items not yet reviewed" — it resumes correctly every run.
 struct FrameCleanupView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
     let folder: URL
 
-    @State private var items: [Entry]
-    @State private var cursor = 0
-    @State private var started = false
+    @State private var items: [Entry]              // live list (deleted items removed)
+    @State private var reviewed: Set<String> = []  // paths decided this session (kept or deleted)
+    @State private var loaded = false
     @State private var drag = CGSize.zero
     @State private var cardToken = 0
     @State private var flash: Flash?
+    @State private var busy = false
 
     private let threshold: CGFloat = 90
 
@@ -26,7 +27,9 @@ struct FrameCleanupView: View {
     }
 
     private struct Flash: Identifiable { let id = UUID(); let delete: Bool }
-    private var current: Entry? { items.indices.contains(cursor) ? items[cursor] : nil }
+    /// Items still awaiting a decision, in order.
+    private var pending: [Entry] { items.filter { !reviewed.contains($0.url.path) } }
+    private var current: Entry? { pending.first }
 
     var body: some View {
         NavigationStack {
@@ -40,7 +43,7 @@ struct FrameCleanupView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if current != nil {
-                        Text("\(min(cursor + 1, items.count)) / \(items.count)")
+                        Text("\(items.count - pending.count + 1) / \(items.count)")
                             .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
                     }
                 }
@@ -49,9 +52,9 @@ struct FrameCleanupView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
-            guard !started else { return }
-            cursor = min(max(0, library.cleanupCursor(for: folder)), items.count)
-            started = true
+            guard !loaded else { return }
+            reviewed = library.reviewedInCleanup(folder)   // resume: skip already-decided items
+            loaded = true
         }
     }
 
@@ -165,7 +168,8 @@ struct FrameCleanupView: View {
     // MARK: - Actions
 
     private func commit(delete: Bool) {
-        guard current != nil else { return }
+        guard !busy, current != nil else { return }   // ignore a second swipe mid-animation
+        busy = true
         flash = Flash(delete: delete)
         UIImpactFeedbackGenerator(style: delete ? .rigid : .soft).impactOccurred()
         withAnimation(.easeIn(duration: 0.16)) {
@@ -177,26 +181,29 @@ struct FrameCleanupView: View {
             if delete { performDelete() } else { performKeep() }
             drag = .zero
             cardToken += 1                 // fresh, centered card for the next item
+            busy = false
             try? await Task.sleep(nanoseconds: 300_000_000)
             if flash?.delete == delete { flash = nil }
         }
     }
 
     private func performKeep() {
-        cursor += 1
-        library.setCleanupCursor(cursor, for: folder)
+        guard let item = current else { return }
+        reviewed.insert(item.url.path)
+        library.markCleanupReviewed(item.url, in: folder)
     }
 
     private func performDelete() {
-        guard items.indices.contains(cursor) else { return }
-        FileActions.delete([items[cursor]])      // risk understood — no extra confirmation
-        items.remove(at: cursor)                 // next item slides into `cursor`
-        library.setCleanupCursor(cursor, for: folder)
+        guard let item = current else { return }
+        FileActions.delete([item])               // risk understood — no extra confirmation
+        reviewed.insert(item.url.path)            // recorded so progress survives a restart
+        library.markCleanupReviewed(item.url, in: folder)
+        items.removeAll { $0.url == item.url }    // gone from disk
     }
 
     private func startOver() {
-        cursor = 0
-        library.setCleanupCursor(0, for: folder)
+        library.resetCleanup(folder)
+        reviewed = []                             // re-review what's left (deleted items stay gone)
         cardToken += 1
     }
 }

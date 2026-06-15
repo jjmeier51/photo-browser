@@ -336,18 +336,22 @@ final class Library {
     }
     func isFramesFolder(_ url: URL) -> Bool { framesFolders.contains(url.path) }
 
-    /// Clean-up resume cursor per folder: the count of items already reviewed (kept
-    /// items stay at the front of the list, deleted ones vanish), so re-opening
-    /// clean-up shows the item at this index in the current, freshly-sorted list.
-    var cleanupProgress: [String: Int] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.cleanupProgress") as? [String: Int]) ?? [:]
-    func cleanupCursor(for url: URL) -> Int { cleanupProgress[url.path] ?? 0 }
-    func setCleanupCursor(_ n: Int, for url: URL) {
-        cleanupProgress[url.path] = n
-        UserDefaults.standard.set(cleanupProgress, forKey: "photoBrowser.cleanupProgress")
+    /// Clean-up review state per folder: the set of item paths already decided on
+    /// (kept or deleted). The queue on (re-)open is simply "viewable items not in
+    /// this set", so it resumes correctly every run regardless of order.
+    var cleanupReviewed: [String: [String]] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.cleanupReviewed") as? [String: [String]]) ?? [:]
+    func reviewedInCleanup(_ folder: URL) -> Set<String> { Set(cleanupReviewed[folder.path] ?? []) }
+    func cleanupStarted(_ folder: URL) -> Bool { !(cleanupReviewed[folder.path] ?? []).isEmpty }
+    func markCleanupReviewed(_ url: URL, in folder: URL) {
+        var s = Set(cleanupReviewed[folder.path] ?? [])
+        guard s.insert(url.path).inserted else { return }
+        cleanupReviewed[folder.path] = Array(s)
+        UserDefaults.standard.set(cleanupReviewed, forKey: "photoBrowser.cleanupReviewed")
     }
-    func resetCleanup(for url: URL) {
-        cleanupProgress.removeValue(forKey: url.path)
-        UserDefaults.standard.set(cleanupProgress, forKey: "photoBrowser.cleanupProgress")
+    func resetCleanup(_ folder: URL) {
+        guard cleanupReviewed[folder.path] != nil else { return }
+        cleanupReviewed.removeValue(forKey: folder.path)
+        UserDefaults.standard.set(cleanupReviewed, forKey: "photoBrowser.cleanupReviewed")
     }
 
     // MARK: - "Not duplicates" (user-confirmed non-duplicate pairs)
