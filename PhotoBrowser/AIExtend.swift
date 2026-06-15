@@ -11,58 +11,77 @@ import UIKit
 /// user's key. Results are reviewed (Keep/Delete) before being saved.
 enum AIExtend {
     static let base = "https://api.astria.ai"
-    /// Astria's hard-coded Flux1.dev gallery tune (the default base model).
-    static let defaultTune = 1504944
-    /// Flux renders up to ~1536; super-resolution then ~doubles it toward 4K.
-    static let maxLongSide: CGFloat = 1536
+
+    /// The partner models, each backed by an Astria gallery "tune". The exact tune
+    /// ids for these newest versions aren't published, so each has a best-known
+    /// default that the user can override in Settings.
+    enum AIModel: String, CaseIterable, Identifiable, Sendable {
+        case seedream45 = "Seedream 4.5"
+        case nanoBanana2 = "Nano Banana 2"
+        case nanoBananaPro = "Nano Banana Pro"
+        var id: String { rawValue }
+        /// Best-known tune id (Seedream 4.0 / Nano Banana Gemini 2.5 as fallbacks).
+        var fallbackTune: Int {
+            switch self {
+            case .seedream45:    return 3225353
+            case .nanoBanana2:   return 3159068
+            case .nanoBananaPro: return 3159068
+            }
+        }
+        var maxLongSide: CGFloat { 2048 }
+        fileprivate var tuneKey: String { "photoBrowser.astriaTune.\(rawValue)" }
+    }
 
     enum AIError: Error { case notConfigured, badImage, network, badResult, server(String) }
 
     // MARK: - Config
 
     private static let keyKey = "photoBrowser.astriaKey"
-    private static let tuneKey = "photoBrowser.astriaTune"
+    private static let modelKey = "photoBrowser.astriaModel"
     private static let promptKey = "photoBrowser.astriaPrompt"
-    static let defaultPrompt = "Extend and fill the empty masked border so the photo becomes a single seamless image, naturally continuing the existing scene, lighting, colours and perspective. Do not alter, frame, or duplicate the original area."
+    static let defaultPrompt = "Expand this exact photo outward to fill the larger frame, generating realistic new surroundings that seamlessly continue the existing scene. Keep the original subject, framing and details unchanged and sharp. Output one single seamless photograph — no borders, frames, padding, or duplicated copies."
 
     static var apiKey: String { UserDefaults.standard.string(forKey: keyKey) ?? "" }
-    static var tuneID: Int {
-        let v = UserDefaults.standard.integer(forKey: tuneKey)
-        return v > 0 ? v : defaultTune
-    }
     static var isConfigured: Bool { !apiKey.isEmpty }
     static var extendPrompt: String {
         let v = UserDefaults.standard.string(forKey: promptKey) ?? ""
         return v.isEmpty ? defaultPrompt : v
     }
-    static func save(apiKey: String, tuneID: Int, prompt: String) {
+    static var defaultModel: AIModel { AIModel(rawValue: UserDefaults.standard.string(forKey: modelKey) ?? "") ?? .seedream45 }
+
+    static func tuneID(for model: AIModel) -> Int {
+        let v = UserDefaults.standard.integer(forKey: model.tuneKey)
+        return v > 0 ? v : model.fallbackTune
+    }
+    static func setTune(_ id: Int, for model: AIModel) {
+        UserDefaults.standard.set(id > 0 ? id : model.fallbackTune, forKey: model.tuneKey)
+    }
+    static func save(apiKey: String, defaultModel: AIModel, prompt: String) {
         let d = UserDefaults.standard
         d.set(apiKey.trimmingCharacters(in: .whitespacesAndNewlines), forKey: keyKey)
-        d.set(tuneID > 0 ? tuneID : defaultTune, forKey: tuneKey)
+        d.set(defaultModel.rawValue, forKey: modelKey)
         d.set(prompt, forKey: promptKey)
     }
 
     // MARK: - Generation
 
-    /// Creates a prompt (optionally img2img with `imageData`, or masked outpaint with
-    /// `maskData`), polls until Astria finishes, and downloads the result image(s).
-    nonisolated static func generate(prompt: String, imageData: Data, maskData: Data? = nil,
+    /// Creates a prompt against `model`'s tune (img2img from `imageData`), polls
+    /// until Astria finishes, and downloads the result image(s).
+    nonisolated static func generate(model: AIModel, prompt: String, imageData: Data,
                                      count: Int, width: Int?, height: Int?) async -> Result<[Data], AIError> {
         guard isConfigured else { return .failure(.notConfigured) }
-        guard let url = URL(string: "\(base)/tunes/\(tuneID)/prompts") else { return .failure(.server("Bad endpoint URL.")) }
+        let tune = tuneID(for: model)
+        guard let url = URL(string: "\(base)/tunes/\(tune)/prompts") else { return .failure(.server("Bad endpoint URL.")) }
 
         var fields: [String: String] = [
             "prompt[text]": prompt,
-            "prompt[num_images]": String(min(max(count, 1), 8)),
-            "prompt[super_resolution]": "true",
-            "prompt[denoising_strength]": maskData == nil ? "0.7" : "1.0"
+            "prompt[num_images]": String(min(max(count, 1), 8))
         ]
         if let width { fields["prompt[w]"] = String((width / 8) * 8) }
         if let height { fields["prompt[h]"] = String((height / 8) * 8) }
-        var files: [(name: String, filename: String, mime: String, data: Data)] = [
+        let files: [(name: String, filename: String, mime: String, data: Data)] = [
             ("prompt[input_image]", "input.jpg", "image/jpeg", imageData)
         ]
-        if let maskData { files.append(("prompt[mask_image]", "mask.png", "image/png", maskData)) }
 
         let boundary = "PB-\(UUID().uuidString)"
         var req = URLRequest(url: url)
@@ -79,7 +98,7 @@ enum AIExtend {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let id = intValue(json["id"]) else { return .failure(.badResult) }
 
-        let urls = await poll(promptID: id)
+        let urls = await poll(promptID: id, tune: tune)
         guard !urls.isEmpty else { return .failure(.server("Generation timed out or returned no images.")) }
         var out: [Data] = []
         await withTaskGroup(of: Data?.self) { group in
@@ -90,8 +109,8 @@ enum AIExtend {
     }
 
     /// Polls the prompt until its `images` array is populated (or it times out).
-    private nonisolated static func poll(promptID: Int) async -> [URL] {
-        guard let url = URL(string: "\(base)/tunes/\(tuneID)/prompts/\(promptID)") else { return [] }
+    private nonisolated static func poll(promptID: Int, tune: Int) async -> [URL] {
+        guard let url = URL(string: "\(base)/tunes/\(tune)/prompts/\(promptID)") else { return [] }
         for _ in 0..<80 {                                   // ~4 minutes at 3s
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             var req = URLRequest(url: url)

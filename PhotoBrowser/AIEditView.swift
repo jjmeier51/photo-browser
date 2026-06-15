@@ -8,6 +8,7 @@ struct AIEditView: View {
 
     @State private var prompt = ""
     @State private var count = 1
+    @State private var model = AIExtend.defaultModel
     @State private var running = false
     @State private var results: [Data]?
     @State private var error: String?
@@ -21,6 +22,12 @@ struct AIEditView: View {
                 Section("What would you like to change?") {
                     TextField("e.g. make the sky a sunset, remove the sign…", text: $prompt, axis: .vertical)
                         .lineLimit(2...5)
+                }
+                Section("Model") {
+                    Picker("Model", selection: $model) {
+                        ForEach(AIExtend.AIModel.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden().pickerStyle(.segmented)
                 }
                 Section {
                     Picker("Images to generate", selection: $count) {
@@ -65,13 +72,13 @@ struct AIEditView: View {
     private func generate() {
         guard AIExtend.isConfigured else { showSettings = true; return }
         running = true; error = nil
-        let url = entry.url, p = prompt, n = count
+        let url = entry.url, p = prompt, n = count, m = model
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Edit")
         Task {
-            guard let prep = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url, maxPixel: AIExtend.maxLongSide) }.value else {
+            guard let prep = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url, maxPixel: m.maxLongSide) }.value else {
                 running = false; bg.end(); error = "Couldn’t read the photo."; return
             }
-            let result = await AIExtend.generate(prompt: p, imageData: prep.data, count: n,
+            let result = await AIExtend.generate(model: m, prompt: p, imageData: prep.data, count: n,
                                                  width: prep.width, height: prep.height)
             running = false; bg.end()
             switch result {
