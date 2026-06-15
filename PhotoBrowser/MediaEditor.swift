@@ -3,6 +3,8 @@ import UIKit
 import AVFoundation
 import ImageIO
 import UniformTypeIdentifiers
+import CoreImage
+import CoreImage.CIFilterBuiltins
 
 /// Crop aspect-ratio options for the editor.
 enum CropAspect: String, CaseIterable, Identifiable {
@@ -397,6 +399,120 @@ enum MediaEditing {
             try? fm.removeItem(at: temp)
             return false
         }
+    }
+
+    // MARK: - Resize / extend (fit to an aspect ratio, on-device fill)
+
+    /// How the extended area is filled when fitting a photo to a new aspect ratio.
+    enum ResizeFill: String, CaseIterable, Identifiable {
+        case blur = "Blur", mirror = "Mirror", white = "White", black = "Black"
+        var id: String { rawValue }
+    }
+
+    private static let ciContext = CIContext()
+
+    /// Composites `image` centered on a larger canvas of aspect `targetAspect`
+    /// (extending the shorter side — never cropping), filling the new area per
+    /// `fill`. Returns the composited image (no file I/O); used for preview + save.
+    static func composeCanvas(_ image: CGImage, targetAspect: CGFloat, fill: ResizeFill) -> CGImage? {
+        let W = CGFloat(image.width), H = CGFloat(image.height)
+        guard W > 0, H > 0, targetAspect > 0 else { return nil }
+        let imgAR = W / H
+        // Smallest target-aspect canvas that contains the image (extend one axis).
+        let canvasW = (imgAR >= targetAspect ? W : (H * targetAspect)).rounded()
+        let canvasH = (imgAR >= targetAspect ? (W / targetAspect) : H).rounded()
+        let canvas = CGSize(width: canvasW, height: canvasH)
+        let cs = image.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(data: nil, width: Int(canvasW), height: Int(canvasH), bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: cs,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        let dx = ((canvasW - W) / 2).rounded(), dy = ((canvasH - H) / 2).rounded()
+        let imgRect = CGRect(x: dx, y: dy, width: W, height: H)
+
+        switch fill {
+        case .white, .black:
+            ctx.setFillColor((fill == .white ? UIColor.white : .black).cgColor)
+            ctx.fill(CGRect(origin: .zero, size: canvas))
+        case .blur:
+            if let bg = blurredBackground(image, canvas: canvas) { ctx.draw(bg, in: CGRect(origin: .zero, size: canvas)) }
+            else { ctx.setFillColor(UIColor.black.cgColor); ctx.fill(CGRect(origin: .zero, size: canvas)) }
+        case .mirror:
+            ctx.setFillColor(UIColor.black.cgColor); ctx.fill(CGRect(origin: .zero, size: canvas))   // base for any uncovered area
+            drawMirrorFill(ctx, image: image, imgRect: imgRect, canvas: canvas)
+        }
+        ctx.draw(image, in: imgRect)   // the sharp original on top
+        return ctx.makeImage()
+    }
+
+    /// The original scaled to *fill* the canvas, blurred — the Instasize-style backdrop.
+    private static func blurredBackground(_ image: CGImage, canvas: CGSize) -> CGImage? {
+        let ci = CIImage(cgImage: image)
+        let scale = max(canvas.width / CGFloat(image.width), canvas.height / CGFloat(image.height))
+        let scaled = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let dx = (canvas.width - scaled.extent.width) / 2 - scaled.extent.origin.x
+        let dy = (canvas.height - scaled.extent.height) / 2 - scaled.extent.origin.y
+        let centered = scaled.transformed(by: CGAffineTransform(translationX: dx, y: dy))
+        let blurred = centered.clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 24])
+            .cropped(to: CGRect(origin: .zero, size: canvas))
+        return ciContext.createCGImage(blurred, from: CGRect(origin: .zero, size: canvas))
+    }
+
+    /// Fills the extended strips by reflecting the image across its edges.
+    private static func drawMirrorFill(_ ctx: CGContext, image: CGImage, imgRect: CGRect, canvas: CGSize) {
+        let W = imgRect.width, H = imgRect.height
+        func clipped(_ rect: CGRect, _ body: () -> Void) {
+            ctx.saveGState(); ctx.clip(to: rect); body(); ctx.restoreGState()
+        }
+        func flipped(_ rect: CGRect, vertical: Bool) {
+            ctx.saveGState()
+            if vertical { ctx.translateBy(x: 0, y: rect.midY); ctx.scaleBy(x: 1, y: -1); ctx.translateBy(x: 0, y: -rect.midY) }
+            else { ctx.translateBy(x: rect.midX, y: 0); ctx.scaleBy(x: -1, y: 1); ctx.translateBy(x: -rect.midX, y: 0) }
+            ctx.draw(image, in: rect); ctx.restoreGState()
+        }
+        if canvas.height > H + 0.5 {            // extended vertically → mirror up & down
+            clipped(CGRect(x: 0, y: 0, width: canvas.width, height: imgRect.minY)) {
+                flipped(CGRect(x: imgRect.minX, y: imgRect.minY - H, width: W, height: H), vertical: true)
+            }
+            clipped(CGRect(x: 0, y: imgRect.maxY, width: canvas.width, height: canvas.height - imgRect.maxY)) {
+                flipped(CGRect(x: imgRect.minX, y: imgRect.maxY, width: W, height: H), vertical: true)
+            }
+        } else if canvas.width > W + 0.5 {      // extended horizontally → mirror left & right
+            clipped(CGRect(x: 0, y: 0, width: imgRect.minX, height: canvas.height)) {
+                flipped(CGRect(x: imgRect.minX - W, y: imgRect.minY, width: W, height: H), vertical: false)
+            }
+            clipped(CGRect(x: imgRect.maxX, y: 0, width: canvas.width - imgRect.maxX, height: canvas.height)) {
+                flipped(CGRect(x: imgRect.maxX, y: imgRect.minY, width: W, height: H), vertical: false)
+            }
+        }
+    }
+
+    /// Fits the photo at `url` to `targetAspect` with an on-device `fill` and writes
+    /// the result back over the original, preserving EXIF/GPS (like `applyPhotoInPlace`).
+    static func resizeCanvasInPlace(url: URL, targetAspect: CGFloat, fill: ResizeFill) -> Bool {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let type = CGImageSourceGetType(src),
+              let full = loadFullCGImage(src),
+              let out = composeCanvas(full, targetAspect: targetAspect, fill: fill) else { return false }
+
+        var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        props[kCGImagePropertyOrientation] = 1                       // upright pixels now baked
+        props[kCGImagePropertyPixelWidth] = out.width
+        props[kCGImagePropertyPixelHeight] = out.height
+        if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+            tiff[kCGImagePropertyTIFFOrientation] = 1; props[kCGImagePropertyTIFFDictionary] = tiff
+        }
+        let tmp = url.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).edit")
+        func encode(_ t: CFString) -> Bool {
+            guard let dst = CGImageDestinationCreateWithURL(tmp as CFURL, t, 1, nil) else { return false }
+            CGImageDestinationAddImage(dst, out, props as CFDictionary)
+            return CGImageDestinationFinalize(dst)
+        }
+        if !encode(type) {
+            try? FileManager.default.removeItem(at: tmp)
+            guard encode(UTType.jpeg.identifier as CFString) else { try? FileManager.default.removeItem(at: tmp); return false }
+        }
+        return replaceInPlace(original: url, temp: tmp)
     }
 
     // MARK: - Video (edit in place, preserving metadata)

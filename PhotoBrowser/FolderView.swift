@@ -96,6 +96,7 @@ struct FolderView: View {
     @State private var showTaylorCrossRef = false
     @State private var importing = false
     @State private var editEntry: Entry?
+    @State private var resizeEntry: Entry?
     @State private var editProcessing = false
     @State private var editProgress: Double = 0
     @State private var makingLive = false
@@ -398,6 +399,11 @@ struct FolderView: View {
                 Button { editEntry = entry } label: {
                     Label("Crop & Rotate", systemImage: "crop.rotate")
                 }
+                if entry.kind == .image {
+                    Button { resizeEntry = entry } label: {
+                        Label("Resize / Extend", systemImage: "aspectratio")
+                    }
+                }
                 Button { metadataTargets = [entry.url]; showMetadataEditor = true } label: {
                     Label("Edit Metadata", systemImage: "calendar.badge.clock")
                 }
@@ -575,6 +581,7 @@ struct FolderView: View {
                     .ignoresSafeArea()
             }
             .fullScreenCover(item: $editEntry) { e in MediaEditorView(entry: e) }
+            .fullScreenCover(item: $resizeEntry) { e in ResizeEditorView(entry: e) }
             .fullScreenCover(isPresented: $showPhotosLibrary) {
                 PhotosLibraryView(targetFolder: url, deleteOriginals: photosLibraryMoves)
             }

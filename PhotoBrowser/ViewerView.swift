@@ -20,6 +20,7 @@ struct ViewerView: View {
     @State private var croppedCover: UIImage?
     @State private var showCoverFolderPicker = false
     @State private var showEditor = false
+    @State private var showResize = false
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
 
@@ -63,6 +64,9 @@ struct ViewerView: View {
         }
         .fullScreenCover(isPresented: $showEditor) {
             if let current { MediaEditorView(entry: current) }
+        }
+        .fullScreenCover(isPresented: $showResize) {
+            if let current { ResizeEditorView(entry: current) }
         }
         .fullScreenCover(item: $coverEntry, onDismiss: {
             if croppedCover != nil { showCoverFolderPicker = true }
@@ -126,6 +130,11 @@ struct ViewerView: View {
                     Menu {
                         Button { showEditor = true } label: {
                             Label("Crop & Rotate", systemImage: "crop.rotate")
+                        }
+                        if current?.kind == .image {
+                            Button { showResize = true } label: {
+                                Label("Resize / Extend", systemImage: "aspectratio")
+                            }
                         }
                         Button { useAsAlbumCover() } label: {
                             Label("Use as Album Cover", systemImage: "rectangle.center.inset.filled.badge.plus")
