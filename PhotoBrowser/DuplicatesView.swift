@@ -32,7 +32,7 @@ struct DuplicatesView: View {
                     }
                 } else if groups.isEmpty {
                     ContentUnavailableView("No Duplicates", systemImage: "checkmark.circle",
-                        description: Text("No files in this folder share the same size and dimensions."))
+                        description: Text("No files in this folder share the same size & dimensions or a similar name."))
                 } else {
                     List {
                         Section {
@@ -44,7 +44,7 @@ struct DuplicatesView: View {
                                 }
                             }
                         } footer: {
-                            Text("Files grouped by matching size and dimensions. Tap a group to compare.")
+                            Text("Files grouped by matching size & dimensions or a similar name (copies like “name (1)”). Tap a group to compare.")
                         }
                     }
                 }
@@ -58,22 +58,64 @@ struct DuplicatesView: View {
 
     private func scan() async {
         scanning = true
+        // All viewable media (images AND videos). Dimensions are only used for the
+        // size+dimensions match; the filename match needs none, so videos always count.
         let media = await library.listing(of: folder, sort: .nameAsc).filter { $0.isViewable }
         let specs = await library.mediaSpecs(for: media)
-        var buckets: [String: [Entry]] = [:]
-        for e in media {
-            guard let spec = specs[e.url], spec.pixels > 0 else { continue }   // skip unreadable
-            buckets["\(e.size)|\(spec.longSide)|\(spec.pixels)", default: []].append(e)
+        let n = media.count
+
+        // Union-find: link two files that share size+dimensions OR a normalized base name.
+        var parent = Array(0..<n)
+        func find(_ x: Int) -> Int { var r = x; while parent[r] != r { parent[r] = parent[parent[r]]; r = parent[r] }; return r }
+        func union(_ a: Int, _ b: Int) { let ra = find(a), rb = find(b); if ra != rb { parent[ra] = rb } }
+
+        var firstBySizeDims: [String: Int] = [:]
+        var firstByName: [String: Int] = [:]
+        for i in 0..<n {
+            if let spec = specs[media[i].url], spec.pixels > 0 {            // size+dimensions edge
+                let key = "\(media[i].size)|\(spec.longSide)|\(spec.pixels)"
+                if let j = firstBySizeDims[key] { union(i, j) } else { firstBySizeDims[key] = i }
+            }
+            let nameKey = Self.normalizedBaseName(media[i].name)             // copy-name edge
+            if !nameKey.isEmpty {
+                if let j = firstByName[nameKey] { union(i, j) } else { firstByName[nameKey] = i }
+            }
         }
+
+        var components: [Int: [Int]] = [:]
+        for i in 0..<n { components[find(i), default: []].append(i) }
         var result: [DuplicateGroup] = []
-        for items in buckets.values where items.count > 1 {
-            let sorted = items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-            let spec = specs[sorted[0].url] ?? MediaSpec()
-            result.append(DuplicateGroup(entries: sorted, size: sorted[0].size,
+        for members in components.values where members.count > 1 {
+            let entries = members.map { media[$0] }
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            // Members of a name-only group can differ in size/dimensions — describe the
+            // group by its largest member.
+            let rep = entries.max { $0.size < $1.size } ?? entries[0]
+            let spec = specs[rep.url] ?? MediaSpec()
+            result.append(DuplicateGroup(entries: entries, size: rep.size,
                                          longSide: spec.longSide, pixels: spec.pixels))
         }
         groups = result.sorted { $0.size > $1.size }   // biggest payoff first
         scanning = false
+    }
+
+    /// A filename reduced to its "stem" so copies match: extension removed, lowercased,
+    /// and a trailing copy-suffix stripped — " (1)", " copy"/" copy 2", "-1"/"_1", or a
+    /// short trailing " 2". So `0123.jpg`, `0123 (1).jpg`, `0123 2.jpeg` → `0123`.
+    static func normalizedBaseName(_ filename: String) -> String {
+        var base = (filename as NSString).deletingPathExtension.lowercased()
+            .trimmingCharacters(in: .whitespaces)
+        let patterns = ["\\s*\\(\\d+\\)$", "\\s+copy(\\s+\\d+)?$", "[-_]\\d{1,2}$", "\\s+\\d{1,2}$"]
+        var changed = true
+        while changed {
+            changed = false
+            for p in patterns where base.range(of: p, options: .regularExpression) != nil {
+                base.removeSubrange(base.range(of: p, options: .regularExpression)!)
+                base = base.trimmingCharacters(in: .whitespaces)
+                changed = true
+            }
+        }
+        return base
     }
 
     private func remove(_ url: URL, from group: DuplicateGroup) {
@@ -83,7 +125,7 @@ struct DuplicatesView: View {
     }
 }
 
-/// A set of files in one folder that share size + dimensions.
+/// A set of files in one folder that share size + dimensions or a similar (copy) name.
 struct DuplicateGroup: Identifiable {
     let id = UUID()
     var entries: [Entry]
@@ -113,10 +155,10 @@ private struct DuplicateGroupRow: View {
                 ForEach(group.entries.prefix(2)) { DuplicateThumb(entry: $0, side: 52) }
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text("\(group.entries.count) matching files").font(.subheadline.weight(.medium))
+                Text("\(group.entries.count) similar files").font(.subheadline.weight(.medium))
                 Text("\(group.size.sizeString) · \(group.dimensionLabel)")
                     .font(.caption).foregroundStyle(.secondary)
-                Label(group.hasPerfectMatch ? "Perfect match" : "Same size & dimensions",
+                Label(group.hasPerfectMatch ? "Perfect match" : "Possible duplicates",
                       systemImage: group.hasPerfectMatch ? "checkmark.seal.fill" : "rectangle.on.rectangle")
                     .font(.caption2)
                     .foregroundStyle(group.hasPerfectMatch ? Color.green : Color.orange)
