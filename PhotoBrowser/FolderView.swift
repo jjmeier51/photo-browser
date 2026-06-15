@@ -118,6 +118,7 @@ struct FolderView: View {
     @State private var dragIndexMap: [URL: Int] = [:]
     @State private var dragAnchorIndex: Int?
     @State private var dragBaseSelection: Set<URL> = []
+    @State private var scrollLocked = false        // page scroll off during a select-drag
     @State private var gridSize: CGSize = .zero
     @State private var autoScrollDir = 0
     @State private var autoScrollTask: Task<Void, Never>?
@@ -292,6 +293,7 @@ struct FolderView: View {
                 }
                 .padding(4)
             }
+            .scrollDisabled(scrollLocked)        // freeze the page while a select-drag is active
             .coordinateSpace(name: "grid")
             .background(
                 GeometryReader { g in
@@ -311,25 +313,27 @@ struct FolderView: View {
             )
             // Smoothly animate the thumbnail-size change.
             .animation(.easeInOut(duration: 0.22), value: library.thumbSize)
-            // Press-and-hold then drag your finger across cells to multi-select, with
-            // edge auto-scroll — like Photos. Works from browse mode too: the first
-            // drag enters Select mode (a quick swipe still scrolls because selection
-            // only starts after the hold + ~12pt move; a stationary long-press still
-            // opens the context menu). A plain `.gesture` (not high-priority) keeps it
-            // below the cells' tap gesture so tap-to-open / tap-to-toggle still work.
+            // Photos-style drag-select (Select mode only): a brief press on a cell
+            // locks page scrolling, then dragging paints a contiguous selection with
+            // edge auto-scroll. The brief hold is what distinguishes a select-drag
+            // from a scroll flick — a quick swipe (no hold) still free-scrolls; only a
+            // deliberate press-then-drag selects. In browse mode the gesture is limited
+            // to subviews so the cells' context menu (long-press) still works.
+            // A plain `.gesture` keeps it below the cells' tap gesture (tap toggles).
             .gesture(
-                LongPressGesture(minimumDuration: 0.2)
-                    .sequenced(before: DragGesture(minimumDistance: 12, coordinateSpace: .named("grid")))
+                LongPressGesture(minimumDuration: 0.12)
+                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("grid")))
                     .onChanged { value in
-                        if case .second(true, let drag?) = value {
-                            if !selecting { selecting = true }   // long-press + drag → Select mode
+                        guard case .second(true, let drag) = value else { return }
+                        scrollLocked = true                  // hold completed → freeze scroll, then select
+                        if let drag {
                             lastDragPoint = drag.location
                             dragSelect(at: drag.location)
                             updateAutoScroll(for: drag.location)
                         }
                     }
                     .onEnded { _ in endDragSelect() },
-                including: .all
+                including: selecting ? .all : .subviews
             )
             .onChange(of: autoScrollDir) { runAutoScroll(proxy) }
         }
@@ -413,6 +417,7 @@ struct FolderView: View {
         dragBaseSelection = []
         lastDragPoint = nil
         autoScrollDir = 0
+        scrollLocked = false
     }
 
     /// Starts/stops the repeating edge auto-scroll, re-selecting at the held point.
