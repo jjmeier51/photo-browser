@@ -1119,10 +1119,9 @@ struct FolderView: View {
                     Image(systemName: "arrow.up.arrow.down")
                 }
                 Menu {
-                    if library.isFramesFolder(url) {
-                        Button { showCleanup = true } label: { Label("Start Clean Up", systemImage: "wand.and.sparkles") }
-                        Divider()
-                    }
+                    Button { showCleanup = true } label: { Label("Start Clean Up", systemImage: "wand.and.sparkles") }
+                        .disabled(cleanupItems.isEmpty)
+                    Divider()
                     Button { playSlideshow() } label: { Label("Play Slideshow", systemImage: "play.rectangle") }
                         .disabled(mediaItems.isEmpty)
                     Button { showNewFolder = true } label: { Label("New Folder", systemImage: "folder.badge.plus") }
