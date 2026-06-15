@@ -712,6 +712,7 @@ struct FolderView: View {
 
     private var content: some View {
         VStack(spacing: 0) {
+            header
             if !entries.isEmpty { filterBar }
             grid
         }
@@ -815,6 +816,33 @@ struct FolderView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Header
+
+    /// Full folder name shown in-content (the inline nav title truncates badly when
+    /// crowded by the toolbar + filter chips). Always fully visible above the filters.
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(isRoot ? library.rootName : url.lastPathComponent)
+                .font(.title3.weight(.semibold))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(headerSubtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
+    }
+
+    private var headerSubtitle: String {
+        if showFavoritesOnly { return "Favorites" }
+        if showAIOnly { return "To AI" }
+        let n = filtered.count
+        return "\(n) item\(n == 1 ? "" : "s")"
     }
 
     // MARK: - Filter bar
