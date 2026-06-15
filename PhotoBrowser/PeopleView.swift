@@ -9,9 +9,6 @@ struct PeopleView: View {
     @Environment(\.dismiss) private var dismiss
     let folder: URL
 
-    @State private var scanning = false
-    @State private var progress = 0.0
-
     private var sortedPeople: [String] {
         library.people.keys.sorted {
             let a = library.people[$0]?.count ?? 0, b = library.people[$1]?.count ?? 0
@@ -23,13 +20,21 @@ struct PeopleView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if library.people.isEmpty {
+                if library.people.isEmpty && library.peopleScanRunning {
+                    VStack(spacing: 12) {
+                        ProgressView(value: library.peopleScanProgress).progressViewStyle(.linear).frame(width: 220)
+                        Text("Finding people… \(Int(library.peopleScanProgress * 100))%")
+                            .font(.callout).foregroundStyle(.secondary)
+                        Text("You can leave this screen — it keeps running and resumes if interrupted.")
+                            .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).padding(.horizontal, 40)
+                    }
+                } else if library.people.isEmpty {
                     ContentUnavailableView {
                         Label("No People Yet", systemImage: "person.crop.circle")
                     } description: {
                         Text("Scan this folder to find faces and group them into people. Grouping is approximate — rename and merge to tidy it up.")
                     } actions: {
-                        Button("Find People") { scan() }.buttonStyle(.borderedProminent)
+                        Button("Find People") { library.startFindPeople(under: folder) }.buttonStyle(.borderedProminent)
                     }
                 } else {
                     ScrollView {
@@ -48,41 +53,26 @@ struct PeopleView: View {
                     }
                 }
             }
+            .safeAreaInset(edge: .top) {
+                if library.peopleScanRunning && !library.people.isEmpty {
+                    HStack(spacing: 10) {
+                        ProgressView().controlSize(.small)
+                        Text("Finding people… \(Int(library.peopleScanProgress * 100))%")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 8).background(.bar)
+                }
+            }
             .navigationTitle("People")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() }.disabled(scanning) }
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(library.people.isEmpty ? "Find People" : "Rescan") { scan() }.disabled(scanning)
+                    Button(library.people.isEmpty ? "Find People" : "Rescan") { library.startFindPeople(under: folder) }
+                        .disabled(library.peopleScanRunning)
                 }
             }
-            .overlay { if scanning { scanOverlay } }
-        }
-    }
-
-    private var scanOverlay: some View {
-        VStack(spacing: 12) {
-            Text("Finding people…").font(.subheadline.weight(.medium))
-            ProgressView(value: progress).progressViewStyle(.linear).frame(width: 220)
-            Text("\(Int(progress * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            Text("Detecting and grouping faces. Grouping is approximate.")
-                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
-        }
-        .padding(24).frame(maxWidth: 280)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    private func scan() {
-        scanning = true; progress = 0
-        let bg = BackgroundTaskHolder()
-        bg.begin(name: "Find People")
-        Task {
-            let result = await library.findPeople(under: folder, existing: library.people) { done, tot in
-                Task { @MainActor in progress = tot > 0 ? Double(done) / Double(tot) : 1 }
-            }
-            library.setPeople(result)
-            scanning = false
-            bg.end()
         }
     }
 }

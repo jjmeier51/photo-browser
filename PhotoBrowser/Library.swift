@@ -264,6 +264,29 @@ final class Library {
 
     // MARK: - People (faces)
 
+    /// People scan runs on the Library so it keeps going when the People view is
+    /// dismissed; detections are flushed periodically so it resumes after an exit.
+    var peopleScanRunning = false
+    var peopleScanProgress = 0.0
+    @ObservationIgnored private var peopleScanBG = BackgroundTaskHolder()
+
+    func startFindPeople(under folder: URL) {
+        guard !peopleScanRunning else { return }
+        peopleScanRunning = true; peopleScanProgress = 0
+        peopleScanBG.begin(name: "Find People")
+        let existing = people
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await self.findPeople(under: folder, existing: existing) { done, total in
+                Task { @MainActor in self.peopleScanProgress = total > 0 ? Double(done) / Double(total) : 1 }
+            }
+            self.setPeople(result)
+            self.peopleScanProgress = 1
+            self.peopleScanRunning = false
+            self.peopleScanBG.end()
+        }
+    }
+
     private func persistPeople() {
         UserDefaults.standard.set(people.mapValues(Array.init), forKey: "photoBrowser.people")
         labelsVersion += 1
@@ -583,8 +606,12 @@ final class Library {
                     }
                 }
             }
-            for _ in 0..<min(8, total) { addNext() }
-            while await group.next() != nil { done += 1; progress(done, total); addNext() }
+            for _ in 0..<min(12, total) { addNext() }          // wider fan-out for speed
+            while await group.next() != nil {
+                done += 1; progress(done, total)
+                if done % 20 == 0 { FaceStore.shared.flush() }  // persist progress so a mid-scan exit resumes
+                addNext()
+            }
         }
         FaceStore.shared.flush()
 
