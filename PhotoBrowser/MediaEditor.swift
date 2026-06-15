@@ -424,9 +424,12 @@ enum MediaEditing {
         return composeCanvas(image, canvasWidth: canvasW, canvasHeight: canvasH, fill: fill)
     }
 
-    /// Freeform variant: composites `image` centered on an explicit canvas size
-    /// (each dimension at least the image's, so it never crops).
-    static func composeCanvas(_ image: CGImage, canvasWidth: Int, canvasHeight: Int, fill: ResizeFill) -> CGImage? {
+    /// Freeform variant: composites `image` on an explicit canvas size (each
+    /// dimension at least the image's, so it never crops). `offsetX`/`offsetY` in
+    /// 0…1 position the image within the extra space (0.5 = centered; note the
+    /// CGContext origin is bottom-left, so offsetY 0 = bottom).
+    static func composeCanvas(_ image: CGImage, canvasWidth: Int, canvasHeight: Int, fill: ResizeFill,
+                              offsetX: CGFloat = 0.5, offsetY: CGFloat = 0.5) -> CGImage? {
         let W = CGFloat(image.width), H = CGFloat(image.height)
         let canvasW = CGFloat(max(canvasWidth, image.width)), canvasH = CGFloat(max(canvasHeight, image.height))
         let canvas = CGSize(width: canvasW, height: canvasH)
@@ -434,7 +437,8 @@ enum MediaEditing {
         guard let ctx = CGContext(data: nil, width: Int(canvasW), height: Int(canvasH), bitsPerComponent: 8,
                                   bytesPerRow: 0, space: cs,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        let dx = ((canvasW - W) / 2).rounded(), dy = ((canvasH - H) / 2).rounded()
+        let dx = ((canvasW - W) * min(max(offsetX, 0), 1)).rounded()
+        let dy = ((canvasH - H) * min(max(offsetY, 0), 1)).rounded()
         let imgRect = CGRect(x: dx, y: dy, width: W, height: H)
 
         switch fill {
@@ -500,11 +504,14 @@ enum MediaEditing {
         resizeCanvasInPlace(url: url, fill: fill) { composeCanvas($0, targetAspect: targetAspect, fill: fill) }
     }
 
-    /// Freeform variant: extends each side by the given factors (>= 1), in place.
-    static func resizeCanvasInPlace(url: URL, widthFactor: CGFloat, heightFactor: CGFloat, fill: ResizeFill) -> Bool {
+    /// Freeform variant: extends each side by the given factors (>= 1), in place,
+    /// with the image positioned by `offsetX`/`offsetY` (0…1).
+    static func resizeCanvasInPlace(url: URL, widthFactor: CGFloat, heightFactor: CGFloat, fill: ResizeFill,
+                                    offsetX: CGFloat = 0.5, offsetY: CGFloat = 0.5) -> Bool {
         resizeCanvasInPlace(url: url, fill: fill) {
             composeCanvas($0, canvasWidth: Int(CGFloat($0.width) * widthFactor),
-                          canvasHeight: Int(CGFloat($0.height) * heightFactor), fill: fill)
+                          canvasHeight: Int(CGFloat($0.height) * heightFactor), fill: fill,
+                          offsetX: offsetX, offsetY: offsetY)
         }
     }
 

@@ -11,6 +11,7 @@ struct EntryCell: View {
     var favorited: Bool = false
     var aiLabeled: Bool = false
     var isLive: Bool = false
+    var isAIGenerated: Bool = false
     var coverURL: URL? = nil
 
     @State private var image: UIImage?
@@ -39,14 +40,11 @@ struct EntryCell: View {
                 }
             }
             .overlay(alignment: .topTrailing) {
-                if isLive {
-                    Label("LIVE", systemImage: "livephoto")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 4).padding(.vertical, 1)
-                        .background(.black.opacity(0.5), in: Capsule())
-                        .padding(4)
+                VStack(alignment: .trailing, spacing: 3) {
+                    if isLive { cornerBadge("LIVE", "livephoto", .black.opacity(0.5)) }
+                    if isAIGenerated { cornerBadge("AI", "sparkles", .purple.opacity(0.85)) }
                 }
+                .padding(4)
             }
             .overlay(alignment: .topLeading) {
                 if favorited || aiLabeled {
@@ -138,6 +136,14 @@ struct EntryCell: View {
         let label = String(format: "%d:%02d", t / 60, t % 60)
         durationCache.setObject(label as NSString, forKey: key)
         return label
+    }
+
+    private func cornerBadge(_ text: String, _ icon: String, _ bg: Color) -> some View {
+        Label(text, systemImage: icon)
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .background(bg, in: Capsule())
     }
 
     private var otherIcon: String {

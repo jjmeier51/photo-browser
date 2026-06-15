@@ -27,7 +27,7 @@ enum AIExtend {
             switch self {
             case .seedream:      return 4096
             case .nanoBananaPro: return 4096
-            case .nanoBanana2:   return 2048
+            case .nanoBanana2:   return 4096
             }
         }
     }
@@ -39,7 +39,7 @@ enum AIExtend {
     private static let keyKey = "photoBrowser.falKey"
     private static let promptKey = "photoBrowser.falPrompt"
     private static let modelKey = "photoBrowser.falModel"
-    static let defaultPrompt = "Replace the blurred border around the photo with a seamless, photorealistic continuation of the scene. Keep the central subject and composition unchanged; match the lighting, colors, grain and perspective."
+    static let defaultPrompt = "Expand this exact photo outward to fill the larger frame, generating realistic new surroundings that seamlessly continue the existing scene. Keep the original subject, framing and details unchanged and sharp. Output one single seamless photograph — no borders, frames, blur, padding, or duplicated copies of the original."
 
     static var apiKey: String { UserDefaults.standard.string(forKey: keyKey) ?? "" }
     static var isConfigured: Bool { !apiKey.isEmpty }
@@ -71,8 +71,8 @@ enum AIExtend {
             "image_urls": ["data:image/jpeg;base64," + imageData.base64EncodedString()]
         ]
         if count > 1 { body["num_images"] = count }
-        // Seedream takes an explicit output size; ask for the full input resolution.
-        if model == .seedream, let outputSize {
+        // Ask for the target output size (controls extend aspect + resolution).
+        if let outputSize {
             body["image_size"] = ["width": outputSize.width, "height": outputSize.height]
         }
 
@@ -132,8 +132,9 @@ enum AIExtend {
         return ctx.makeImage() ?? cg
     }
 
-    /// Saves a generated image into an "AI" subfolder beside `original`, inheriting
-    /// the original's EXIF/GPS. Returns the new file URL.
+    /// Saves a generated image into an "AI" subfolder beside `original`, carrying
+    /// the original's EXIF/GPS and forcing its capture date (EXIF + the file's own
+    /// date) so it sorts correctly. Tags it as AI-generated. Returns the new URL.
     nonisolated static func saveToAIFolder(_ data: Data, basedOn original: URL) -> URL? {
         guard let resultSrc = CGImageSourceCreateWithData(data as CFData, nil),
               let resultCG = CGImageSourceCreateImageAtIndex(resultSrc, 0, nil) else { return nil }
@@ -144,16 +145,45 @@ enum AIExtend {
         if let src = CGImageSourceCreateWithURL(original as CFURL, nil) {
             props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
         }
+        // Capture date: from the original's EXIF, else its file modified date.
+        let captureDate = exifDate(from: props)
+            ?? (try? original.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        if let captureDate {
+            let f = DateFormatter(); f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
+            let stamp = f.string(from: captureDate)
+            var exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
+            exif[kCGImagePropertyExifDateTimeOriginal] = stamp
+            exif[kCGImagePropertyExifDateTimeDigitized] = stamp
+            exif[kCGImagePropertyExifUserComment] = "AI-generated"
+            props[kCGImagePropertyExifDictionary] = exif
+            var tiff = (props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
+            tiff[kCGImagePropertyTIFFDateTime] = stamp
+            tiff[kCGImagePropertyTIFFSoftware] = "PhotoBrowser AI"
+            props[kCGImagePropertyTIFFDictionary] = tiff
+        }
         props[kCGImagePropertyOrientation] = 1
         props[kCGImagePropertyPixelWidth] = resultCG.width
         props[kCGImagePropertyPixelHeight] = resultCG.height
-        if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
-            tiff[kCGImagePropertyTIFFOrientation] = 1; props[kCGImagePropertyTIFFDictionary] = tiff
-        }
+
         let dest = uniqueURL(for: "\(original.deletingPathExtension().lastPathComponent) AI.jpg", in: aiDir)
         guard let d = CGImageDestinationCreateWithURL(dest as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(d, resultCG, props as CFDictionary)
-        return CGImageDestinationFinalize(d) ? dest : nil
+        guard CGImageDestinationFinalize(d) else { return nil }
+        if let captureDate {   // make the file's date match the capture date
+            try? FileManager.default.setAttributes([.creationDate: captureDate, .modificationDate: captureDate], ofItemAtPath: dest.path)
+        }
+        return dest
+    }
+
+    private nonisolated static func exifDate(from props: [CFString: Any]) -> Date? {
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let candidates = [exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
+                          exif?[kCGImagePropertyExifDateTimeDigitized] as? String,
+                          tiff?[kCGImagePropertyTIFFDateTime] as? String]
+        let f = DateFormatter(); f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
+        for case let s? in candidates { if let d = f.date(from: s) { return d } }
+        return nil
     }
 
     // MARK: - Helpers

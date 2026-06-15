@@ -320,6 +320,7 @@ struct FolderView: View {
         EntryCell(entry: entry, selecting: selecting, selected: selection.contains(entry.url),
                   favorited: library.isFavorite(entry.url), aiLabeled: library.isAI(entry.url),
                   isLive: liveImageURLs.contains(entry.url),
+                  isAIGenerated: library.isAIGenerated(entry.url),
                   coverURL: entry.isFolder ? library.coverURL(for: entry.url) : nil)
             .background {
                 if selecting {

@@ -33,7 +33,7 @@ struct AIResultsView: View {
                                 HStack(spacing: 12) {
                                     Button { keep(i) } label: { Label("Keep", systemImage: "checkmark").frame(maxWidth: .infinity) }
                                         .buttonStyle(.borderedProminent)
-                                    Button(role: .destructive) { decided[i] = .deleted } label: {
+                                    Button(role: .destructive) { decided[i] = .deleted; finishIfDone() } label: {
                                         Label("Delete", systemImage: "trash").frame(maxWidth: .infinity)
                                     }
                                     .buttonStyle(.bordered)
@@ -60,7 +60,15 @@ struct AIResultsView: View {
         Task {
             let url = await Task.detached(priority: .userInitiated) { AIExtend.saveToAIFolder(data, basedOn: orig) }.value
             decided[i] = .kept
-            if url != nil { savedAny = true }
+            if let url { savedAny = true; library.markAIGenerated(url) }
+            finishIfDone()
         }
+    }
+
+    /// Once every result is kept or discarded, return to the photo automatically.
+    private func finishIfDone() {
+        guard decided.count >= results.count else { return }
+        if savedAny { library.contentDidChange() }
+        dismiss()
     }
 }

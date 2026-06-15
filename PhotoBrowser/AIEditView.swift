@@ -46,7 +46,19 @@ struct AIEditView: View {
                         .disabled(running || prompt.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
-            .overlay { if running { ProgressView("Generating…").padding(24).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16)) } }
+            .overlay {
+                if running {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Generating \(count) image\(count == 1 ? "" : "s") with \(model.rawValue)…")
+                            .font(.callout.weight(.medium)).multilineTextAlignment(.center)
+                        Text("This can take up to a minute. Keep the app open — it keeps going briefly in the background.")
+                            .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    }
+                    .padding(28).frame(maxWidth: 300)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                }
+            }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(item: Binding(get: { results.map { ResultsBox(data: $0) } }, set: { results = $0?.data })) { box in
                 AIResultsView(original: entry.url, results: box.data)
@@ -58,13 +70,14 @@ struct AIEditView: View {
         guard AIExtend.isConfigured else { showSettings = true; return }
         running = true; error = nil
         let url = entry.url, p = prompt, n = count, m = model
+        let bg = BackgroundTaskHolder(); bg.begin(name: "AI Edit")
         Task {
             guard let prep = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url, maxPixel: m.maxLongSide) }.value else {
-                running = false; error = "Couldn’t read the photo."; return
+                running = false; bg.end(); error = "Couldn’t read the photo."; return
             }
             let result = await AIExtend.generate(model: m, prompt: p, imageData: prep.data, count: n,
                                                  outputSize: (prep.width, prep.height))
-            running = false
+            running = false; bg.end()
             switch result {
             case .success(let data): results = data
             case .failure(.notConfigured): showSettings = true

@@ -14,6 +14,11 @@ struct ResizeEditorView: View {
     @State private var aspect: ResizeAspect = .square
     @State private var freeW = 1.5
     @State private var freeH = 1.5
+    @State private var offsetX = 0.5
+    @State private var offsetY = 0.5
+    @State private var dragBaseX = 0.5
+    @State private var dragBaseY = 0.5
+    @State private var aiStatus = ""
     @State private var fill: MediaEditing.ResizeFill = .blur
     @State private var model = AIExtend.defaultModel
     @State private var extendText = ""
@@ -48,6 +53,17 @@ struct ResizeEditorView: View {
                     else { ProgressView().tint(.white) }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture()
+                        .onChanged { v in
+                            guard aspect == .freeform else { return }
+                            offsetX = min(max(dragBaseX + Double(v.translation.width) / 280, 0), 1)
+                            offsetY = min(max(dragBaseY - Double(v.translation.height) / 280, 0), 1)   // screen y-down → canvas y-up
+                            regenerate()
+                        }
+                        .onEnded { _ in dragBaseX = offsetX; dragBaseY = offsetY }
+                )
 
                 Picker("Aspect", selection: $aspect) {
                     ForEach(ResizeAspect.allCases) { Text($0.rawValue).tag($0) }
@@ -58,6 +74,8 @@ struct ResizeEditorView: View {
                     VStack(spacing: 2) {
                         slider("Width", value: $freeW)
                         slider("Height", value: $freeH)
+                        Text("Drag the preview to position the photo in the frame.")
+                            .font(.caption2).foregroundStyle(.secondary)
                     }.padding(.horizontal)
                 }
 
@@ -107,8 +125,20 @@ struct ResizeEditorView: View {
                    onDismiss: { dismiss() }) { box in
                 AIResultsView(original: entry.url, results: box.data)
             }
+            .overlay { if saving && !aiStatus.isEmpty { aiProgressOverlay } }
         }
         .preferredColorScheme(.dark)
+    }
+
+    private var aiProgressOverlay: some View {
+        VStack(spacing: 12) {
+            ProgressView().tint(.white)
+            Text(aiStatus).font(.callout.weight(.medium)).foregroundStyle(.white)
+            Text("This can take up to a minute. Keep the app open — it keeps going briefly in the background.")
+                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+        .padding(28).frame(maxWidth: 300)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
 
     private func slider(_ label: String, value: Binding<Double>) -> some View {
@@ -124,11 +154,12 @@ struct ResizeEditorView: View {
         regenerate()
     }
 
-    /// Composes the preview for the current aspect/freeform + fill.
+    /// Composes the preview for the current aspect/freeform + fill (+ drag offset).
     private func composed(_ cg: CGImage, fill: MediaEditing.ResizeFill) -> CGImage? {
         if aspect == .freeform {
             return MediaEditing.composeCanvas(cg, canvasWidth: Int(Double(cg.width) * freeW),
-                                              canvasHeight: Int(Double(cg.height) * freeH), fill: fill)
+                                              canvasHeight: Int(Double(cg.height) * freeH), fill: fill,
+                                              offsetX: offsetX, offsetY: offsetY)
         }
         return MediaEditing.composeCanvas(cg, targetAspect: aspect.ratio, fill: fill)
     }
@@ -145,9 +176,10 @@ struct ResizeEditorView: View {
     private func save() {
         saving = true
         let url = entry.url, style = fill, free = aspect == .freeform, w = freeW, h = freeH, ratio = aspect.ratio
+        let ox = offsetX, oy = offsetY
         Task {
             let ok = await Task.detached(priority: .userInitiated) {
-                free ? MediaEditing.resizeCanvasInPlace(url: url, widthFactor: w, heightFactor: h, fill: style)
+                free ? MediaEditing.resizeCanvasInPlace(url: url, widthFactor: w, heightFactor: h, fill: style, offsetX: ox, offsetY: oy)
                      : MediaEditing.resizeCanvasInPlace(url: url, targetAspect: ratio, fill: style)
             }.value
             saving = false
@@ -156,23 +188,34 @@ struct ResizeEditorView: View {
         }
     }
 
+    /// Target output frame (capped to the model's max) for the chosen aspect/freeform.
+    private func targetCanvas(ow: Int, oh: Int, cap: Int) -> (Int, Int) {
+        var cw: Double, ch: Double
+        if aspect == .freeform { cw = Double(ow) * freeW; ch = Double(oh) * freeH }
+        else {
+            let imgAR = Double(ow) / Double(oh), ar = Double(aspect.ratio)
+            if imgAR >= ar { cw = Double(ow); ch = Double(ow) / ar } else { ch = Double(oh); cw = Double(oh) * ar }
+        }
+        let long = max(cw, ch)
+        if long > Double(cap) { let s = Double(cap) / long; cw *= s; ch *= s }
+        return (max(64, Int(cw.rounded())), max(64, Int(ch.rounded())))
+    }
+
     private func runAI() {
-        saving = true
-        let url = entry.url, free = aspect == .freeform, w = freeW, h = freeH, ratio = aspect.ratio, m = model
+        saving = true; aiStatus = "Preparing…"
+        let url = entry.url, m = model
         let extra = extendText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let prompt = extra.isEmpty ? AIExtend.extendPrompt : AIExtend.extendPrompt + " In the newly extended areas, include: \(extra)."
+        let prompt = extra.isEmpty ? AIExtend.extendPrompt : AIExtend.extendPrompt + " In the newly added areas, include: \(extra)."
+        let bg = BackgroundTaskHolder(); bg.begin(name: "AI Extend")
         Task {
-            // Compose a blurred-fill canvas at the model's max resolution and outpaint it.
-            let prep = await Task.detached(priority: .userInitiated) { () -> (data: Data, width: Int, height: Int)? in
-                guard let cg = ZoomableImageView.decodeCG(url: url, maxPixel: m.maxLongSide),
-                      let canvas = free ? MediaEditing.composeCanvas(cg, canvasWidth: Int(CGFloat(cg.width) * w), canvasHeight: Int(CGFloat(cg.height) * h), fill: .blur)
-                                        : MediaEditing.composeCanvas(cg, targetAspect: ratio, fill: .blur) else { return nil }
-                return AIExtend.uploadJPEG(of: canvas, maxPixel: m.maxLongSide)
-            }.value
-            guard let prep else { saving = false; aiError = "Couldn’t prepare the image."; return }
-            let result = await AIExtend.generate(model: m, prompt: prompt, imageData: prep.data, count: 1,
-                                                 outputSize: (prep.width, prep.height))
-            saving = false
+            // Send the ORIGINAL photo (not a pre-blurred canvas, which the models tend
+            // to keep framed in the center) and ask for the larger target frame.
+            let prep = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url, maxPixel: m.maxLongSide) }.value
+            guard let prep else { saving = false; bg.end(); aiError = "Couldn’t prepare the image."; return }
+            let (cw, ch) = targetCanvas(ow: prep.width, oh: prep.height, cap: Int(m.maxLongSide))
+            aiStatus = "Generating with \(m.rawValue)…"
+            let result = await AIExtend.generate(model: m, prompt: prompt, imageData: prep.data, count: 1, outputSize: (cw, ch))
+            saving = false; bg.end()
             switch result {
             case .success(let data): aiResults = data
             case .failure(.notConfigured): showSettings = true

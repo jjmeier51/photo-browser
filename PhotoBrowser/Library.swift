@@ -306,6 +306,16 @@ final class Library {
     }
     func deletePerson(_ name: String) { people[name] = nil; persistPeople() }
 
+    // MARK: - AI-generated images
+
+    var aiGeneratedPaths: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.aiGenerated") ?? [])
+    func markAIGenerated(_ url: URL) {
+        aiGeneratedPaths.insert(url.path)
+        UserDefaults.standard.set(Array(aiGeneratedPaths), forKey: "photoBrowser.aiGenerated")
+        labelsVersion += 1
+    }
+    func isAIGenerated(_ url: URL) -> Bool { aiGeneratedPaths.contains(url.path) }
+
     // MARK: - "Not duplicates" (user-confirmed non-duplicate pairs)
 
     /// Pairs the user marked as NOT duplicates, as "pathA\npathB" (sorted), so a
