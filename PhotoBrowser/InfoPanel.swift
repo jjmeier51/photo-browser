@@ -54,10 +54,12 @@ struct InfoPanel: View {
                         row("Location", String(format: "%.5f, %.5f", c.latitude, c.longitude))
                     }
                     if let savedFrom { row("Saved from", savedFrom) }
+                    if let poster = library.postedBy(for: entry.url) { row("Posted by", "@\(poster)") }
                     row("Folder", entry.url.deletingLastPathComponent().lastPathComponent)
                     row("Path", entry.url.deletingLastPathComponent().path)
                     let labels = [library.isFavorite(entry.url) ? "Favorite" : nil,
-                                  library.isAI(entry.url) ? "To AI" : nil].compactMap { $0 }
+                                  library.isAI(entry.url) ? "To AI" : nil,
+                                  library.postedBy(for: entry.url) != nil ? "Instagram" : nil].compactMap { $0 }
                     row("Labels", labels.isEmpty ? "None" : labels.joined(separator: ", "))
                 }
 

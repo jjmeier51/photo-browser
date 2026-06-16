@@ -375,6 +375,23 @@ final class Library {
         }
     }
 
+    /// Highlight subfolders (shown as bubbles inside an Instagram profile folder).
+    var instagramHighlights: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.instagramHighlights") ?? [])
+    func isInstagramHighlight(_ folder: URL) -> Bool { instagramHighlights.contains(folder.path) }
+    func markInstagramHighlight(_ folder: URL) {
+        guard instagramHighlights.insert(folder.path).inserted else { return }
+        UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
+    }
+
+    /// File path → posting Instagram handle ("Posted by"); presence also marks the
+    /// item as coming from Instagram.
+    var igPostedBy: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.igPostedBy") as? [String: String]) ?? [:]
+    func postedBy(for url: URL) -> String? { igPostedBy[url.path] }
+    func setPostedBy(_ handle: String, for url: URL) {
+        igPostedBy[url.path] = handle
+        UserDefaults.standard.set(igPostedBy, forKey: "photoBrowser.igPostedBy")
+    }
+
     // MARK: - "Not duplicates" (user-confirmed non-duplicate pairs)
 
     /// Pairs the user marked as NOT duplicates, as "pathA\npathB" (sorted), so a
@@ -487,6 +504,11 @@ final class Library {
         }
         instagramFolders = remappedIG
         persistInstagramFolders()
+
+        instagramHighlights = remapPaths(instagramHighlights, old: old, new: new)
+        UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
+        igPostedBy = remapDict(igPostedBy, old: old, new: new)
+        UserDefaults.standard.set(igPostedBy, forKey: "photoBrowser.igPostedBy")
 
         captions = remapDict(captions, old: old, new: new)
         folderCovers = remapDict(folderCovers, old: old, new: new)

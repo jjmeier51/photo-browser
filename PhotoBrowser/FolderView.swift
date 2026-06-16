@@ -225,8 +225,8 @@ struct FolderView: View {
             return results
         }
 
-        // Instagram profile subfolders are shown as highlight bubbles, not grid tiles.
-        var list = entries.filter { !($0.isFolder && library.isInstagramFolder($0.url)) }
+        // Instagram profile + highlight subfolders are shown as bubbles, not grid tiles.
+        var list = entries.filter { !($0.isFolder && (library.isInstagramFolder($0.url) || library.isInstagramHighlight($0.url))) }
         if let yearFilter {
             // Files must match the year; folders are hidden once we know they hold
             // nothing from that year (shown until their years are computed).
@@ -992,7 +992,7 @@ struct FolderView: View {
     /// Instagram profile subfolders, shown as a row of circular bubbles (like the
     /// highlights on a profile) instead of regular grid tiles.
     private var igBubbles: [Entry] {
-        entries.filter { $0.isFolder && library.isInstagramFolder($0.url) }
+        entries.filter { $0.isFolder && (library.isInstagramFolder($0.url) || library.isInstagramHighlight($0.url)) }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
     private var showBubbles: Bool {

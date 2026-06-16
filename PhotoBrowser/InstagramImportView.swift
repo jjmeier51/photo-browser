@@ -93,6 +93,17 @@ struct InstagramImportView: View {
         }
     }
 
+    /// A thumbnail of the first photo/video in `dir` (for a highlight bubble cover).
+    private func firstItemThumbnail(in dir: URL) async -> UIImage? {
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        guard let first = files.filter({ [.image, .video].contains(classify(url: $0, isDirectory: false)) })
+            .sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending })
+            .first else { return nil }
+        let entry = Entry(url: first, name: first.lastPathComponent,
+                          kind: classify(url: first, isDirectory: false), size: 0, modified: Date())
+        return await Thumbnailer.shared.thumbnail(for: entry, size: CGSize(width: 200, height: 200), scale: 2)
+    }
+
     private var sanitizedHandle: String {
         var h = handle.trimmingCharacters(in: .whitespacesAndNewlines)
         if let r = h.range(of: "instagram.com/") { h = String(h[r.upperBound...]) }
@@ -136,9 +147,19 @@ struct InstagramImportView: View {
                 Task { @MainActor in progress = p }
             }
 
-            // Apply the app-side metadata: captions, folder cover, and the tracking record.
+            // Apply the app-side metadata: captions, "posted by", folder cover, and
+            // the tracking record.
             for (path, caption) in r.captions { library.setCaption(caption, for: URL(fileURLWithPath: path)) }
+            for (path, handle) in r.postedBy { library.setPostedBy(handle, for: URL(fileURLWithPath: path)) }
             if let picData = r.profilePic, let img = UIImage(data: picData) { library.setCover(img, for: dest) }
+            // Highlights become bubbles inside the folder, thumbnailed by their first item.
+            for path in r.highlightFolders {
+                let dir = URL(fileURLWithPath: path)
+                library.markInstagramHighlight(dir)
+                if library.coverURL(for: dir) == nil, let cover = await firstItemThumbnail(in: dir) {
+                    library.setCover(cover, for: dir)
+                }
+            }
             if let profile = r.profile {
                 let info = IGFolderInfo(handle: profile.handle, userID: profile.userID,
                                         lastUpdated: Date().timeIntervalSince1970,
