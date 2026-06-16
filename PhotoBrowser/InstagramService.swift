@@ -159,6 +159,26 @@ enum InstagramService {
                        postCount: media?["count"] as? Int ?? 0)
     }
 
+    /// Full media-info for one post (includes `video_dash_manifest` with the high-res
+    /// renditions that the feed list omits).
+    nonisolated private static func fetchMediaInfo(pk: String, handle: String, creds: Credentials) async -> [String: Any]? {
+        guard let url = URL(string: "https://i.instagram.com/api/v1/media/\(pk)/info/"),
+              let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return (json["items"] as? [[String: Any]])?.first
+    }
+
+    /// Whether a post has video but no DASH manifest yet (so it's worth a media-info fetch).
+    nonisolated private static func lacksDash(_ item: [String: Any]) -> Bool {
+        switch item["media_type"] as? Int ?? 1 {
+        case 2: return item["video_dash_manifest"] == nil
+        case 8:
+            let c = item["carousel_media"] as? [[String: Any]] ?? []
+            return c.contains { ($0["media_type"] as? Int) == 2 && $0["video_dash_manifest"] == nil }
+        default: return false
+        }
+    }
+
     /// Paginated, newest-first feed (posts or tagged); stops at the first known item.
     nonisolated private static func collectFeed(base: String, folder: URL, already: Set<String>, poster: String,
                                                 creds: Credentials, taggedUser: (id: String, username: String)? = nil,
@@ -177,7 +197,15 @@ enum InstagramService {
             for item in items {
                 guard let code = item["code"] as? String else { continue }
                 if already.contains(code) { break loop }
-                jobs += jobsFor(item: item, id: code, folder: folder, defaultPoster: poster, taggedUser: taggedUser)
+                // The user feed omits the DASH manifest (only progressive video_versions),
+                // so the high-res VP9/AV1/HDR renditions are invisible. Fetch the media-info
+                // endpoint to get them — only when a transcoder is present to use them.
+                var enriched = item
+                if VideoTranscoder.isAvailable, lacksDash(item), let pk = idString(item["pk"]),
+                   let info = await fetchMediaInfo(pk: pk, handle: poster, creds: creds) {
+                    enriched = info
+                }
+                jobs += jobsFor(item: enriched, id: code, folder: folder, defaultPoster: poster, taggedUser: taggedUser)
             }
             found(jobs.count)
             let more = json["more_available"] as? Bool ?? false
@@ -359,11 +387,14 @@ enum InstagramService {
             let videos = dash?.videos ?? []
             let audio = dash?.audio
             let bestCompat = videos.filter { isCompat($0.codec) }.max { $0.height < $1.height }
-            let bestAny = videos.max { $0.height < $1.height }
-            // With a transcoder, take the absolute-highest rendition (any codec).
-            if VideoTranscoder.isAvailable, let bestAny, let audio, bestAny.height > max(progH, bestCompat?.height ?? 0) {
+            // Rank by resolution, then prefer an HDR rendition at the same resolution.
+            let bestAny = videos.max { rank($0) < rank($1) }
+            // With a transcoder, take the highest rendition (any codec) — and grab an
+            // HDR rendition even when it isn't taller than the progressive one.
+            if VideoTranscoder.isAvailable, let bestAny, let audio,
+               bestAny.height > max(progH, bestCompat?.height ?? 0) || (bestAny.height >= progH && isHDR(bestAny.codec)) {
                 let xcode = !isCompat(bestAny.codec)
-                let q = "\(bestAny.codec) \(bestAny.height)p (DASH, \(xcode ? "transcode→HEVC" : "mux"))"
+                let q = "\(bestAny.codec) \(bestAny.height)p\(isHDR(bestAny.codec) ? " HDR" : "") (DASH, \(xcode ? "transcode→HEVC" : "mux"))"
                 return [MediaRef(isVideo: true, url: bestAny.url, audio: audio, fallback: progURL, transcode: xcode, quality: q)]
             }
             // Otherwise the best H.264/HEVC DASH rendition (muxed by AVFoundation)…
@@ -404,6 +435,14 @@ enum InstagramService {
 
     nonisolated private static func isCompat(_ codec: String) -> Bool {
         codec.hasPrefix("avc") || codec.hasPrefix("hvc") || codec.hasPrefix("hev")
+    }
+    /// 10-bit / HDR codec strings: VP9 profile 2, HEVC Main10, Dolby Vision.
+    nonisolated private static func isHDR(_ codec: String) -> Bool {
+        codec.hasPrefix("vp09.02") || codec.hasPrefix("hev1.2") || codec.hasPrefix("hvc1.2") || codec.contains("dvh")
+    }
+    /// (resolution, HDR) so the highest — then HDR-at-equal-resolution — wins.
+    nonisolated private static func rank(_ v: (url: String, height: Int, codec: String)) -> (Int, Int) {
+        (v.height, isHDR(v.codec) ? 1 : 0)
     }
 
     /// Passthrough-mux a separate video + audio stream into one mp4 (no re-encode,

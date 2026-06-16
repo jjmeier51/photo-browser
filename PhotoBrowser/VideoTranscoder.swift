@@ -44,9 +44,9 @@ enum VideoTranscoder {
             if let audio { cmd += " -i \"\(audio.path)\"" }
             cmd += " -map 0:v:0"
             cmd += audio != nil ? " -map 1:a:0?" : " -map 0:a:0?"
-            // HEVC via VideoToolbox (hardware); hvc1 tag so iOS/Photos plays it. HDR
-            // color metadata is carried from the source.
-            cmd += transcode ? " -c:v hevc_videotoolbox -tag:v hvc1 -q:v 60" : " -c:v copy"
+            // HEVC via VideoToolbox (hardware), Main10/10-bit + hvc1 tag so iOS/Photos
+            // plays it and an HDR source keeps its 10-bit BT.2020 color.
+            cmd += transcode ? " -c:v hevc_videotoolbox -profile:v main10 -tag:v hvc1 -q:v 60" : " -c:v copy"
             cmd += " -c:a aac -b:a 192k -movflags +faststart"
             cmd += " -metadata creation_time=\"\(ISO8601DateFormatter().string(from: date))\""
             if let lat, let lng, !(lat == 0 && lng == 0) {
