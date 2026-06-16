@@ -712,6 +712,76 @@ enum FileActions {
         }
     }
 
+    // MARK: - Matching drive files ↔ the Photos library
+
+    /// Base filename without extension, lowercased, with a trailing copy-suffix
+    /// (" 1", " (1)", "-1") stripped — so an import collision rename still matches.
+    private nonisolated static func normalizeBase(_ name: String) -> String {
+        var b = (name as NSString).deletingPathExtension.lowercased()
+        if let r = b.range(of: "[ \\-]\\(?\\d+\\)?$", options: .regularExpression) { b.removeSubrange(r) }
+        return b.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Identity signature for a drive media file: base name + pixel size
+    /// (orientation-independent), e.g. "img_0042|4032x3024". nil for non-media.
+    nonisolated static func fileSignature(_ url: URL) async -> String? {
+        let kind = classify(url: url, isDirectory: false)
+        guard kind == .image || kind == .video else { return nil }
+        let entry = Entry(url: url, name: url.lastPathComponent, kind: kind, size: 0, modified: Date())
+        let spec = await MetadataLoader.mediaSpec(for: entry)
+        guard spec.longSide > 0, spec.pixels > 0 else { return nil }
+        return "\(normalizeBase(url.lastPathComponent))|\(spec.longSide)x\(spec.pixels / spec.longSide)"
+    }
+
+    /// Same signature for a Photos asset (original filename + pixel size).
+    nonisolated static func assetSignature(_ asset: PHAsset) -> String? {
+        guard let name = PHAssetResource.assetResources(for: asset).first?.originalFilename else { return nil }
+        let long = max(asset.pixelWidth, asset.pixelHeight), short = min(asset.pixelWidth, asset.pixelHeight)
+        guard long > 0 else { return nil }
+        return "\(normalizeBase(name))|\(long)x\(short)"
+    }
+
+    /// Photos-library localIds that exactly match an item in `urls` — by stored
+    /// origin (imported items), else base-name + pixel size. For "delete the iPhone
+    /// copies of what's archived here".
+    nonisolated static func photosMatches(for urls: [URL], origins: [String: String],
+                                          progress: @escaping @Sendable (Double) -> Void) async -> [String] {
+        guard Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryUsageDescription") != nil,
+              await ensureReadWritePermission() else { return [] }
+        var sigToId: [String: String] = [:]
+        var validIds = Set<String>()
+        for type in [PHAssetMediaType.image, .video] {
+            PHAsset.fetchAssets(with: type, options: nil).enumerateObjects { a, _, _ in
+                validIds.insert(a.localIdentifier)
+                if let sig = assetSignature(a) { sigToId[sig] = a.localIdentifier }
+            }
+        }
+        var matched = Set<String>()
+        for (i, url) in urls.enumerated() {
+            if let oid = origins[url.path], validIds.contains(oid) { matched.insert(oid) }
+            else if let sig = await fileSignature(url), let id = sigToId[sig] { matched.insert(id) }
+            progress(Double(i + 1) / Double(max(urls.count, 1)))
+        }
+        return Array(matched)
+    }
+
+    /// Of `assets`, the localIds already present in `folder` (by stored origin, else
+    /// base-name + pixel size) — so an import can skip re-downloading duplicates.
+    nonisolated static func assetsAlreadyInFolder(_ assets: [PHAsset], folder: URL, origins: [String: String]) async -> Set<String> {
+        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        var folderSigs = Set<String>(), folderOrigins = Set<String>()
+        for f in files {
+            if let oid = origins[f.path] { folderOrigins.insert(oid) }
+            if let sig = await fileSignature(f) { folderSigs.insert(sig) }
+        }
+        var present = Set<String>()
+        for a in assets {
+            if folderOrigins.contains(a.localIdentifier) { present.insert(a.localIdentifier) }
+            else if let sig = assetSignature(a), folderSigs.contains(sig) { present.insert(a.localIdentifier) }
+        }
+        return present
+    }
+
     // MARK: - Video frame capture (content only, HDR-aware)
 
     private static let ciContext = CIContext()

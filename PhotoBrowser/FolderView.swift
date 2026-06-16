@@ -81,6 +81,9 @@ struct FolderView: View {
     @State private var fixingDates = false
     @State private var indexingText = false
     @State private var textIndexProgress = 0.0
+    @State private var confirmPhoneCheck = false
+    @State private var checkingPhone = false
+    @State private var phoneProgress = 0.0
     @State private var showPeople = false
     @State private var showSettings = false
     @State private var fixProgress: Double = 0
@@ -663,6 +666,12 @@ struct FolderView: View {
             } message: {
                 Text("Resets each photo and video in this folder (and its subfolders) to its original capture date, fixing items whose date was changed when added. Items with no embedded date are left unchanged.")
             }
+            .alert("Check if on iPhone", isPresented: $confirmPhoneCheck) {
+                Button("Check & Remove", role: .destructive) { runPhoneCheck() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Finds items in this folder that are still in your iPhone Photos (exact matches) and removes the iPhone copies — the drive copies stay. iOS will ask you to confirm the deletion.")
+            }
             .alert("Export All Frames", isPresented: $showExportPrompt) {
                 TextField("Folder name", text: $exportName)
                 Button("Export") { if let t = exportTarget { exportFrames(t, name: exportName) } }
@@ -733,6 +742,7 @@ struct FolderView: View {
             .overlay { if importing { importingOverlay } }
             .overlay { if fixingDates { fixingOverlay } }
             .overlay { if indexingText { textIndexOverlay } }
+            .overlay { if checkingPhone { phoneCheckOverlay } }
             .overlay { emptyOverlay }
             .fullScreenCover(item: $transferItem) { item in
                 DriveTransferView(source: item.url, destination: url)
@@ -805,6 +815,41 @@ struct FolderView: View {
         }
         .padding(24).frame(maxWidth: 280)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    @ViewBuilder private var phoneCheckOverlay: some View {
+        VStack(spacing: 12) {
+            Text("Checking your iPhone Photos…").font(.subheadline.weight(.medium))
+            ProgressView(value: phoneProgress).progressViewStyle(.linear).frame(width: 220)
+            Text("Matching this folder against your library.")
+                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+        .padding(24).frame(maxWidth: 280)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// Finds this folder's items that are still in the iPhone Photos library (exact
+    /// matches) and removes the iPhone copies — the drive copies stay.
+    private func runPhoneCheck() {
+        checkingPhone = true; phoneProgress = 0
+        let urls = entries.filter { $0.isViewable }.map(\.url)
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Check if on iPhone")
+        Task {
+            let ids = await FileActions.photosMatches(for: urls, origins: library.photoOrigins) { p in
+                Task { @MainActor in phoneProgress = p }
+            }
+            checkingPhone = false
+            if ids.isEmpty {
+                bg.end()
+                resultMessage = "None of these are still on your iPhone."
+                return
+            }
+            let removed = await FileActions.deletePhotosAssets(ids)   // iOS shows its own confirmation
+            bg.end()
+            resultMessage = removed
+                ? "Removed \(ids.count) item(s) from your iPhone (the copies here are kept)."
+                : "Found \(ids.count) on your iPhone, but the removal was cancelled."
+        }
     }
 
     /// OCRs every photo under this folder so search can match text inside them.
@@ -1257,6 +1302,8 @@ struct FolderView: View {
                     Button { showDuplicates = true } label: { Label("Find Duplicates", systemImage: "doc.on.doc") }
                     Button { confirmFixDates = true } label: { Label("Restore Capture Dates", systemImage: "clock.arrow.circlepath") }
                     Button { runTextIndex() } label: { Label("Index Text in Photos", systemImage: "text.viewfinder") }
+                    Button { confirmPhoneCheck = true } label: { Label("Check if on iPhone", systemImage: "iphone") }
+                        .disabled(mediaItems.isEmpty)
                     Button { showPeople = true } label: { Label("People", systemImage: "person.2.crop.square.stack") }
                     Button { showSettings = true } label: { Label("Settings", systemImage: "gearshape") }
                     Button { photosLibraryMoves = false; showPhotosLibrary = true } label: { Label("Photos Library", systemImage: "photo.stack") }

@@ -250,6 +250,16 @@ private struct AssetGridView: View {
         guard let folder = targetFolder, !list.isEmpty else { return }
         importing = true; importDone = 0; importTotal = list.count
         importTask = Task {
+            // Skip anything already in the destination folder (by origin, or name+size).
+            let present = await FileActions.assetsAlreadyInFolder(list, folder: folder, origins: library.photoOrigins)
+            let toImport = list.filter { !present.contains($0.localIdentifier) }
+            let skipped = list.count - toImport.count
+            importTotal = toImport.count; importDone = 0
+            guard !toImport.isEmpty else {
+                importing = false; selecting = false; selectedIDs.removeAll()
+                note = "All \(list.count) already in “\(folder.lastPathComponent)”."
+                return
+            }
             var saved = 0
             var cancelled = false
             var importedIDs: [String] = []
@@ -259,12 +269,12 @@ private struct AssetGridView: View {
             await withTaskGroup(of: (id: String, url: URL?).self) { group in
                 var i = 0
                 func addNext() {
-                    guard i < list.count, !Task.isCancelled else { return }
-                    let asset = list[i]; i += 1
+                    guard i < toImport.count, !Task.isCancelled else { return }
+                    let asset = toImport[i]; i += 1
                     let id = asset.localIdentifier
                     group.addTask { (id: id, url: await PhotosThumbs.importAsset(asset, to: folder)) }
                 }
-                for _ in 0..<min(maxConcurrent, list.count) { addNext() }
+                for _ in 0..<min(maxConcurrent, toImport.count) { addNext() }
                 while let result = await group.next() {
                     if let dest = result.url {
                         library.setOrigin(result.id, for: dest)
@@ -287,14 +297,15 @@ private struct AssetGridView: View {
 
             importing = false
             selecting = false; selectedIDs.removeAll()
+            let extra = skipped > 0 ? " (\(skipped) already here)" : ""
             if cancelled {
-                note = "Stopped — \(deleteOriginals ? "moved" : "added") \(saved)."
+                note = "Stopped — \(deleteOriginals ? "moved" : "added") \(saved)." + extra
             } else if deleteOriginals {
                 note = removed
-                    ? "Moved \(saved) to “\(folder.lastPathComponent)” and removed them from Photos."
-                    : "Added \(saved) to “\(folder.lastPathComponent)”; Photos removal was cancelled or failed."
+                    ? "Moved \(saved) to “\(folder.lastPathComponent)” and removed them from Photos." + extra
+                    : "Added \(saved) to “\(folder.lastPathComponent)”; Photos removal was cancelled or failed." + extra
             } else {
-                note = "Added \(saved) of \(list.count) to “\(folder.lastPathComponent)”."
+                note = "Added \(saved) to “\(folder.lastPathComponent)”." + extra
             }
         }
     }
