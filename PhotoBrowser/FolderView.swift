@@ -76,6 +76,7 @@ struct FolderView: View {
     @State private var showDuplicates = false
     @State private var showCleanup = false
     @State private var showInstagram = false
+    @State private var igForceFull = false
     @State private var confirmFixDates = false
     @State private var fixingDates = false
     @State private var indexingText = false
@@ -705,8 +706,8 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showCleanup, onDismiss: { Task { await reload() } }) {
                 FrameCleanupView(folder: url, items: cleanupItems)
             }
-            .fullScreenCover(isPresented: $showInstagram, onDismiss: { Task { await reload() } }) {
-                InstagramImportView(targetFolder: url, existing: library.instagramInfo(for: url)) { Task { await reload() } }
+            .fullScreenCover(isPresented: $showInstagram, onDismiss: { igForceFull = false; Task { await reload() } }) {
+                InstagramImportView(targetFolder: url, existing: library.instagramInfo(for: url), forceFull: igForceFull) { Task { await reload() } }
             }
             .overlay(alignment: .bottom) { if selecting { selectionBar } }
             .overlay(alignment: .bottomLeading) {
@@ -1226,9 +1227,14 @@ struct FolderView: View {
                     Button { showMegaImport = true } label: {
                         Label("Add from MEGA…", systemImage: "arrow.down.circle")
                     }
-                    Button { showInstagram = true } label: {
+                    Button { igForceFull = false; showInstagram = true } label: {
                         Label(library.isInstagramFolder(url) ? "Get New Instagram Posts" : "Download Instagram Profile…",
                               systemImage: library.isInstagramFolder(url) ? "arrow.triangle.2.circlepath" : "camera")
+                    }
+                    if library.isInstagramFolder(url) {
+                        Button { igForceFull = true; showInstagram = true } label: {
+                            Label("Re-download Entire Profile", systemImage: "arrow.clockwise.circle")
+                        }
                     }
                     Button { showTaylorBrowser = true } label: {
                         Label("Browse taylorpictures.net…", systemImage: "globe")

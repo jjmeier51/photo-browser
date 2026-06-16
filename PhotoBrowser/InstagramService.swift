@@ -91,7 +91,7 @@ enum InstagramService {
     // MARK: - Orchestration
 
     nonisolated static func run(handle: String, into folder: URL, alreadyDownloaded: Set<String>,
-                                creds: Credentials,
+                                creds: Credentials, replaceExisting: Bool = false,
                                 progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
         progress(Progress(phase: "Loading @\(handle)…", fraction: 0, done: 0, total: 0))
@@ -136,7 +136,7 @@ enum InstagramService {
             result.note = alreadyDownloaded.isEmpty ? "No downloadable media found." : "No new posts, stories or highlights."
             return result
         }
-        result = await download(jobs: jobs, progress: progress)
+        result = await download(jobs: jobs, replace: replaceExisting, progress: progress)
         result.profile = profile
         result.highlightFolders = highlightDirs
         result.profilePic = await downloadData(profile.profilePicURL)
@@ -287,7 +287,7 @@ enum InstagramService {
 
     // MARK: - Downloading
 
-    nonisolated private static func download(jobs: [Job], progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
+    nonisolated private static func download(jobs: [Job], replace: Bool, progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
         let total = jobs.count
         var done = 0
@@ -297,7 +297,7 @@ enum InstagramService {
             func addNext() {
                 guard idx < jobs.count else { return }
                 let job = jobs[idx]; idx += 1
-                group.addTask { await downloadJob(job) }
+                group.addTask { await downloadJob(job, replace: replace) }
             }
             for _ in 0..<min(maxConcurrent, jobs.count) { addNext() }
             while let r = await group.next() {
@@ -315,10 +315,13 @@ enum InstagramService {
         return result
     }
 
-    nonisolated private static func downloadJob(_ job: Job) async -> (ok: Bool, isVideo: Bool, path: String, caption: String, poster: String) {
+    nonisolated private static func downloadJob(_ job: Job, replace: Bool) async -> (ok: Bool, isVideo: Bool, path: String, caption: String, poster: String) {
         try? FileManager.default.createDirectory(at: job.folder, withIntermediateDirectories: true)
         let ext = job.isVideo ? "mp4" : "jpg"
-        let dest = uniqueDestination("\(job.name).\(ext)", in: job.folder)
+        // Re-download replaces the existing file in place; otherwise avoid collisions.
+        let dest = replace ? job.folder.appendingPathComponent("\(job.name).\(ext)")
+                           : uniqueDestination("\(job.name).\(ext)", in: job.folder)
+        if replace { try? FileManager.default.removeItem(at: dest) }
 
         if job.isVideo { print("[Instagram] video \(job.name).mp4 → \(job.quality)") }
 

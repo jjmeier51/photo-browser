@@ -12,6 +12,7 @@ struct InstagramImportView: View {
     @Environment(\.dismiss) private var dismiss
     let targetFolder: URL
     let existing: IGFolderInfo?
+    var forceFull: Bool = false           // re-download the whole profile, replacing files
     let onFinished: () -> Void
 
     @State private var handle = ""
@@ -30,7 +31,9 @@ struct InstagramImportView: View {
                     Section {
                         Label("@\(existing?.handle ?? "")", systemImage: "person.crop.circle")
                     } footer: {
-                        Text("Fetches posts you don’t already have into “\(targetFolder.lastPathComponent)”.")
+                        Text(forceFull
+                             ? "Re-downloads the entire profile, replacing existing files (e.g. to re-pull at the latest quality)."
+                             : "Fetches posts you don’t already have into “\(targetFolder.lastPathComponent)”.")
                     }
                 } else {
                     Section {
@@ -73,7 +76,7 @@ struct InstagramImportView: View {
                     }
                 }
             }
-            .navigationTitle(isUpdate ? "Get New Posts" : "Add from Instagram")
+            .navigationTitle(forceFull ? "Re-download Profile" : (isUpdate ? "Get New Posts" : "Add from Instagram"))
             .navigationBarTitleDisplayMode(.inline)
             .interactiveDismissDisabled(running)
             .toolbar {
@@ -81,7 +84,7 @@ struct InstagramImportView: View {
                     Button(result != nil ? "Done" : "Cancel") { dismiss() }.disabled(running)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isUpdate ? "Get New" : "Download") { start() }
+                    Button(forceFull ? "Re-download" : (isUpdate ? "Get New" : "Download")) { start() }
                         .disabled(running || !loggedIn || (!isUpdate && sanitizedHandle.isEmpty))
                 }
             }
@@ -146,11 +149,13 @@ struct InstagramImportView: View {
                 library.setLastIGHandle(h, for: targetFolder)          // remember it for next time
             }
             // Resume incrementally if this profile folder already exists (even when
-            // re-run from the parent), so we only fetch new posts.
+            // re-run from the parent), so we only fetch new posts — unless this is a
+            // full re-download, which ignores the dedup set and replaces files.
             let prior = isUpdate ? existing : library.instagramInfo(for: dest)
-            let already = Set(prior?.downloaded ?? [])
+            let already = forceFull ? [] : Set(prior?.downloaded ?? [])
 
-            let r = await InstagramService.run(handle: h, into: dest, alreadyDownloaded: already, creds: creds) { p in
+            let r = await InstagramService.run(handle: h, into: dest, alreadyDownloaded: already, creds: creds,
+                                               replaceExisting: forceFull) { p in
                 Task { @MainActor in progress = p }
             }
 
@@ -171,8 +176,8 @@ struct InstagramImportView: View {
                 let info = IGFolderInfo(handle: profile.handle, userID: profile.userID,
                                         lastUpdated: Date().timeIntervalSince1970,
                                         downloaded: Array(already.union(r.newIDs)),
-                                        photos: (prior?.photos ?? 0) + r.photos,
-                                        videos: (prior?.videos ?? 0) + r.videos)
+                                        photos: forceFull ? r.photos : (prior?.photos ?? 0) + r.photos,
+                                        videos: forceFull ? r.videos : (prior?.videos ?? 0) + r.videos)
                 library.setInstagramInfo(info, for: dest)
             } else if !isUpdate {
                 // Profile never loaded — drop the empty folder we created.
