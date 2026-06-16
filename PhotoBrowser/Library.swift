@@ -383,6 +383,15 @@ final class Library {
         UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
     }
 
+    /// Folders the user turned into "album highlights" — shown as bubbles like the
+    /// Instagram ones (but for any folder).
+    var albumHighlights: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.albumHighlights") ?? [])
+    func isAlbumHighlight(_ folder: URL) -> Bool { albumHighlights.contains(folder.path) }
+    func setAlbumHighlight(_ on: Bool, for folder: URL) {
+        if on { albumHighlights.insert(folder.path) } else { albumHighlights.remove(folder.path) }
+        UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
+    }
+
     /// File path → posting Instagram handle ("Posted by"); presence also marks the
     /// item as coming from Instagram.
     var igPostedBy: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.igPostedBy") as? [String: String]) ?? [:]
@@ -515,6 +524,8 @@ final class Library {
 
         instagramHighlights = remapPaths(instagramHighlights, old: old, new: new)
         UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
+        albumHighlights = remapPaths(albumHighlights, old: old, new: new)
+        UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
         igPostedBy = remapDict(igPostedBy, old: old, new: new)
         UserDefaults.standard.set(igPostedBy, forKey: "photoBrowser.igPostedBy")
         igLastHandle = remapDict(igLastHandle, old: old, new: new)

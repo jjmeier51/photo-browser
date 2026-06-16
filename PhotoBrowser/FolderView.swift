@@ -226,8 +226,8 @@ struct FolderView: View {
             return results
         }
 
-        // Instagram profile + highlight subfolders are shown as bubbles, not grid tiles.
-        var list = entries.filter { !($0.isFolder && (library.isInstagramFolder($0.url) || library.isInstagramHighlight($0.url))) }
+        // Bubble folders (Instagram + album highlights) are shown as bubbles, not tiles.
+        var list = entries.filter { !($0.isFolder && isBubbleFolder($0.url)) }
         if let yearFilter {
             // Files must match the year; folders are hidden once we know they hold
             // nothing from that year (shown until their years are computed).
@@ -486,6 +486,12 @@ struct FolderView: View {
             }
             Button { renameTarget = entry; renameDraft = entry.name } label: {
                 Label("Rename", systemImage: "pencil")
+            }
+            if !library.isInstagramFolder(entry.url) && !library.isInstagramHighlight(entry.url) {
+                Button { makeAlbumHighlight(entry) } label: {
+                    Label(library.isAlbumHighlight(entry.url) ? "Remove from Highlights" : "Turn into Album Highlight",
+                          systemImage: library.isAlbumHighlight(entry.url) ? "circle.badge.minus" : "circle.dashed.inset.filled")
+                }
             }
         } else {
             if entry.isViewable {
@@ -992,9 +998,18 @@ struct FolderView: View {
 
     /// Instagram profile subfolders, shown as a row of circular bubbles (like the
     /// highlights on a profile) instead of regular grid tiles.
+    /// Folders shown as circular bubbles: Instagram profiles/highlights and any
+    /// folder the user turned into an "album highlight".
+    private func isBubbleFolder(_ url: URL) -> Bool {
+        library.isInstagramFolder(url) || library.isInstagramHighlight(url) || library.isAlbumHighlight(url)
+    }
     private var igBubbles: [Entry] {
-        entries.filter { $0.isFolder && (library.isInstagramFolder($0.url) || library.isInstagramHighlight($0.url)) }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        entries.filter { $0.isFolder && isBubbleFolder($0.url) }
+            .sorted { a, b in
+                let ai = library.isInstagramFolder(a.url), bi = library.isInstagramFolder(b.url)
+                if ai != bi { return ai }      // the Instagram folder is always listed first
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            }
     }
     private var showBubbles: Bool {
         query.trimmingCharacters(in: .whitespaces).isEmpty && !labelMode && !tsLabelMode && ageFilter == nil && !igBubbles.isEmpty
@@ -1004,8 +1019,9 @@ struct FolderView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(alignment: .top, spacing: 14) {
                 ForEach(igBubbles) { entry in
-                    Button { library.path.append(entry.url) } label: { bubble(entry) }
+                    Button { tap(entry) } label: { bubble(entry) }      // select-aware (toggle vs open)
                         .buttonStyle(.plain)
+                        .contextMenu { if !selecting { contextMenu(for: entry) } }
                 }
             }
             .padding(.horizontal, 14).padding(.vertical, 8)
@@ -1013,7 +1029,8 @@ struct FolderView: View {
     }
 
     private func bubble(_ entry: Entry) -> some View {
-        VStack(spacing: 5) {
+        let isSel = selection.contains(entry.url)
+        return VStack(spacing: 5) {
             ZStack {
                 Circle()
                     .strokeBorder(
@@ -1024,6 +1041,13 @@ struct FolderView: View {
                         lineWidth: 2.5)
                     .frame(width: 72, height: 72)
                 bubbleImage(entry).frame(width: 62, height: 62).clipShape(Circle())
+                    .overlay { if selecting && !isSel { Circle().fill(.black.opacity(0.4)) } }
+                if selecting {
+                    Image(systemName: isSel ? "checkmark.circle.fill" : "circle")
+                        .font(.body).foregroundStyle(isSel ? Color.accentColor : .white)
+                        .background(Circle().fill(.black.opacity(0.4)))
+                        .offset(x: 22, y: 22)
+                }
             }
             Text(library.instagramInfo(for: entry.url).map { "@\($0.handle)" } ?? entry.name)
                 .font(.caption2).lineLimit(1).frame(maxWidth: 76)
@@ -1035,8 +1059,27 @@ struct FolderView: View {
             Image(uiImage: img).resizable().scaledToFill()
         } else {
             Circle().fill(Color(white: 0.2))
-                .overlay { Image(systemName: "camera").font(.title3).foregroundStyle(.secondary) }
+                .overlay { Image(systemName: "photo.stack").font(.title3).foregroundStyle(.secondary) }
         }
+    }
+
+    /// Toggles a folder's "album highlight" status; seeds its bubble cover from the
+    /// first item when it has none.
+    private func makeAlbumHighlight(_ entry: Entry) {
+        let on = !library.isAlbumHighlight(entry.url)
+        library.setAlbumHighlight(on, for: entry.url)
+        if on, library.coverURL(for: entry.url) == nil {
+            Task { if let cover = await firstFolderThumbnail(entry.url) { library.setCover(cover, for: entry.url) } }
+        }
+    }
+
+    private func firstFolderThumbnail(_ dir: URL) async -> UIImage? {
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        guard let first = files.filter({ [.image, .video].contains(classify(url: $0, isDirectory: false)) })
+            .sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending })
+            .first else { return nil }
+        let e = Entry(url: first, name: first.lastPathComponent, kind: classify(url: first, isDirectory: false), size: 0, modified: Date())
+        return await Thumbnailer.shared.thumbnail(for: e, size: CGSize(width: 200, height: 200), scale: 2)
     }
 
     private var headerSubtitle: String {
@@ -1173,7 +1216,7 @@ struct FolderView: View {
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
             if selecting {
-                Button(selection.count == filtered.count ? "None" : "All") { toggleAll() }
+                Button(selection.count == selectableEntries.count ? "None" : "All") { toggleAll() }
             } else {
                 if !isRoot {
                     Button { library.goHome() } label: { Image(systemName: "house") }
@@ -1441,8 +1484,9 @@ struct FolderView: View {
     }
 
     private func toggleAll() {
-        if selection.count == filtered.count { selection.removeAll() }
-        else { selection = Set(filtered.map(\.url)) }
+        let all = selectableEntries
+        if selection.count == all.count { selection.removeAll() }
+        else { selection = Set(all.map(\.url)) }
     }
 
     private func reload() async {
@@ -1581,7 +1625,9 @@ struct FolderView: View {
         }
     }
 
-    private func selectedEntries() -> [Entry] { filtered.filter { selection.contains($0.url) } }
+    /// Everything selectable in this view — the grid plus the bubble folders (when shown).
+    private var selectableEntries: [Entry] { showBubbles ? filtered + igBubbles : filtered }
+    private func selectedEntries() -> [Entry] { selectableEntries.filter { selection.contains($0.url) } }
 
     /// Image URLs in `entries` that have a same-basename sibling video.
     private static func detectLivePairs(in entries: [Entry]) -> Set<URL> {
