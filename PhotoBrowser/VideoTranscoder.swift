@@ -11,9 +11,15 @@ import ffmpegkit
 /// FFmpegKit is a large third-party binary and was retired upstream in 2025, so it
 /// is **not bundled**. Add the `ffmpegkit` xcframework to the Xcode project and this
 /// lights up automatically (`#if canImport(ffmpegkit)`); without it, the app falls
-/// back to the best AVFoundation-muxable (H.264/HEVC) rendition. The exact FFmpegKit
-/// Swift API can differ by distribution — adjust the calls below to your build if
-/// they don't resolve.
+/// back to the best AVFoundation-muxable (H.264/HEVC) rendition.
+///
+/// To enable VP9/AV1 → HEVC transcoding, add a re-published FFmpegKit build, e.g.
+/// NooruddinLakhani/ffmpeg-kit-ios-full-gpl (FFmpeg 6.0, full-gpl): download its
+/// `ffmpeg-kit-full-gpl-6.0-ios-xcframework.zip`, unzip, and drag every `*.xcframework`
+/// (`ffmpegkit` + the `libav*`/`libsw*` frameworks) into the target with "Embed &
+/// Sign". The Swift module is `ffmpegkit` regardless of distribution. The exact
+/// FFmpegKit Swift API can differ by build — adjust the calls below if they don't
+/// resolve.
 enum VideoTranscoder {
     /// True only when FFmpegKit is linked into the build.
     nonisolated static var isAvailable: Bool {
