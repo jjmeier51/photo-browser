@@ -353,6 +353,28 @@ final class Library {
         UserDefaults.standard.set(cleanupReviewed, forKey: "photoBrowser.cleanupReviewed")
     }
 
+    // MARK: - Instagram profile folders
+
+    /// Folder path → the Instagram profile downloaded into it (handle, last-updated,
+    /// downloaded post ids for incremental "Get New", and photo/video counts).
+    var instagramFolders: [String: IGFolderInfo] = {
+        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.instagramFolders"),
+              let m = try? JSONDecoder().decode([String: IGFolderInfo].self, from: data) else { return [:] }
+        return m
+    }()
+    func instagramInfo(for folder: URL) -> IGFolderInfo? { instagramFolders[folder.path] }
+    func isInstagramFolder(_ folder: URL) -> Bool { instagramFolders[folder.path] != nil }
+    func setInstagramInfo(_ info: IGFolderInfo, for folder: URL) {
+        instagramFolders[folder.path] = info
+        persistInstagramFolders()
+        changeToken += 1
+    }
+    private func persistInstagramFolders() {
+        if let data = try? JSONEncoder().encode(instagramFolders) {
+            UserDefaults.standard.set(data, forKey: "photoBrowser.instagramFolders")
+        }
+    }
+
     // MARK: - "Not duplicates" (user-confirmed non-duplicate pairs)
 
     /// Pairs the user marked as NOT duplicates, as "pathA\npathB" (sorted), so a
@@ -457,6 +479,14 @@ final class Library {
         aiLabels  = remapPaths(aiLabels,  old: old, new: new)
         framesFolders = remapPaths(framesFolders, old: old, new: new)
         customLabels = customLabels.mapValues { remapPaths($0, old: old, new: new) }
+
+        var remappedIG = instagramFolders
+        for (key, value) in instagramFolders where key == old || key.hasPrefix(old + "/") {
+            remappedIG.removeValue(forKey: key)
+            remappedIG[new + key.dropFirst(old.count)] = value
+        }
+        instagramFolders = remappedIG
+        persistInstagramFolders()
 
         captions = remapDict(captions, old: old, new: new)
         folderCovers = remapDict(folderCovers, old: old, new: new)

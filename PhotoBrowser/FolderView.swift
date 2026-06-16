@@ -75,6 +75,7 @@ struct FolderView: View {
     @State private var tsLabelEntries: [Entry] = []
     @State private var showDuplicates = false
     @State private var showCleanup = false
+    @State private var showInstagram = false
     @State private var confirmFixDates = false
     @State private var fixingDates = false
     @State private var indexingText = false
@@ -703,6 +704,9 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showCleanup, onDismiss: { Task { await reload() } }) {
                 FrameCleanupView(folder: url, items: cleanupItems)
             }
+            .fullScreenCover(isPresented: $showInstagram, onDismiss: { Task { await reload() } }) {
+                InstagramImportView(targetFolder: url, existing: library.instagramInfo(url)) { Task { await reload() } }
+            }
             .overlay(alignment: .bottom) { if selecting { selectionBar } }
             .overlay(alignment: .bottomLeading) {
                 if isRoot && !selecting {
@@ -984,6 +988,11 @@ struct FolderView: View {
     private var headerSubtitle: String {
         if showFavoritesOnly { return "Favorites" }
         if showAIOnly { return "To AI" }
+        if let ig = library.instagramInfo(url) {
+            let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
+            let when = f.string(from: Date(timeIntervalSince1970: ig.lastUpdated))
+            return "Last Updated on \(when) · \(ig.photos) Photos and \(ig.videos) Videos"
+        }
         let albums = entries.filter { $0.isFolder }.count
         if isRoot || albums > 0 {
             let items = filtered.filter { !$0.isFolder }.count
@@ -1163,6 +1172,10 @@ struct FolderView: View {
                     }
                     Button { showMegaImport = true } label: {
                         Label("Add from MEGA…", systemImage: "arrow.down.circle")
+                    }
+                    Button { showInstagram = true } label: {
+                        Label(library.isInstagramFolder(url) ? "Get New Instagram Posts" : "Download Instagram Profile…",
+                              systemImage: library.isInstagramFolder(url) ? "arrow.triangle.2.circlepath" : "camera")
                     }
                     Button { showTaylorBrowser = true } label: {
                         Label("Browse taylorpictures.net…", systemImage: "globe")
