@@ -392,6 +392,14 @@ final class Library {
         UserDefaults.standard.set(igPostedBy, forKey: "photoBrowser.igPostedBy")
     }
 
+    /// Last Instagram handle downloaded from a folder, so reruns prefill it.
+    var igLastHandle: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.igLastHandle") as? [String: String]) ?? [:]
+    func lastIGHandle(for folder: URL) -> String? { igLastHandle[folder.path] }
+    func setLastIGHandle(_ handle: String, for folder: URL) {
+        igLastHandle[folder.path] = handle
+        UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
+    }
+
     // MARK: - "Not duplicates" (user-confirmed non-duplicate pairs)
 
     /// Pairs the user marked as NOT duplicates, as "pathA\npathB" (sorted), so a
@@ -509,6 +517,8 @@ final class Library {
         UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
         igPostedBy = remapDict(igPostedBy, old: old, new: new)
         UserDefaults.standard.set(igPostedBy, forKey: "photoBrowser.igPostedBy")
+        igLastHandle = remapDict(igLastHandle, old: old, new: new)
+        UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
 
         captions = remapDict(captions, old: old, new: new)
         folderCovers = remapDict(folderCovers, old: old, new: new)

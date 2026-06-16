@@ -38,6 +38,7 @@ enum VideoTranscoder {
                                          transcode: Bool, date: Date, lat: Double?, lng: Double?) async -> Bool {
         #if canImport(ffmpegkit)
         return await Task.detached(priority: .userInitiated) { () -> Bool in
+            print("[Instagram]   🎬 FFmpegKit \(transcode ? "transcode→HEVC" : "mux") starting: \(dest.lastPathComponent)")
             try? FileManager.default.removeItem(at: dest)
             var cmd = "-y -i \"\(video.path)\""
             if let audio { cmd += " -i \"\(audio.path)\"" }
@@ -54,6 +55,7 @@ enum VideoTranscoder {
             cmd += " \"\(dest.path)\""
             let session = FFmpegKit.execute(cmd)
             let ok = ReturnCode.isSuccess(session?.getReturnCode())
+            print("[Instagram]   🎬 FFmpegKit \(ok ? "✅ done" : "❌ failed (rc=\(session?.getReturnCode()?.getValue() ?? -1))"): \(dest.lastPathComponent)")
             return ok && FileManager.default.fileExists(atPath: dest.path)
         }.value
         #else

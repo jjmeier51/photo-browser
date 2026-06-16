@@ -60,9 +60,10 @@ enum InstagramService {
         let audioURL: String?          // separate dash audio (mux it with the video url)
         let fallbackURL: String?       // progressive url, used if mux/transcode fails
         let transcode: Bool            // re-encode the (VP9/AV1) video to HEVC
+        let quality: String            // human label of the chosen rendition (for logging)
         let date: Date; let lat: Double?; let lng: Double?; let caption: String
     }
-    private struct MediaRef: Sendable { let isVideo: Bool; let url: String; let audio: String?; let fallback: String?; let transcode: Bool }
+    private struct MediaRef: Sendable { let isVideo: Bool; let url: String; let audio: String?; let fallback: String?; let transcode: Bool; let quality: String }
 
     struct DownloadResult: Sendable {
         var photos = 0, videos = 0, failed = 0
@@ -99,16 +100,19 @@ enum InstagramService {
             return result
         }
 
+        print("[Instagram] start @\(handle) — FFmpegKit transcoder available: \(VideoTranscoder.isAvailable)")
         var jobs: [Job] = []
         // Posts → main folder.
         jobs += await collectFeed(base: "feed/user/\(profile.userID)/", folder: folder, already: alreadyDownloaded,
                                   poster: profile.handle, creds: creds) { n in
             progress(Progress(phase: "Finding posts — \(n) item(s)…", fraction: 0, done: 0, total: 0))
         }
-        // Tagged media → main folder (the original poster's handle is kept per item).
+        // Tagged media → main folder, but only the specific photos/videos this user is
+        // actually tagged in (not whole carousels). The original poster's handle is kept.
         progress(Progress(phase: "Finding tagged media…", fraction: 0, done: 0, total: 0))
         jobs += await collectFeed(base: "usertags/\(profile.userID)/feed/", folder: folder, already: alreadyDownloaded,
-                                  poster: profile.handle, creds: creds) { _ in }
+                                  poster: profile.handle, creds: creds,
+                                  taggedUser: (id: profile.userID, username: profile.handle)) { _ in }
         // Current stories → "Stories" subfolder.
         progress(Progress(phase: "Finding stories…", fraction: 0, done: 0, total: 0))
         let stories = await fetchReel(path: "feed/user/\(profile.userID)/reel_media/", handle: profile.handle, creds: creds)
@@ -157,7 +161,8 @@ enum InstagramService {
 
     /// Paginated, newest-first feed (posts or tagged); stops at the first known item.
     nonisolated private static func collectFeed(base: String, folder: URL, already: Set<String>, poster: String,
-                                                creds: Credentials, found: @escaping @Sendable (Int) -> Void) async -> [Job] {
+                                                creds: Credentials, taggedUser: (id: String, username: String)? = nil,
+                                                found: @escaping @Sendable (Int) -> Void) async -> [Job] {
         var jobs: [Job] = []
         var maxID: String?
         var pages = 0
@@ -172,7 +177,7 @@ enum InstagramService {
             for item in items {
                 guard let code = item["code"] as? String else { continue }
                 if already.contains(code) { break loop }
-                jobs += jobsFor(item: item, id: code, folder: folder, defaultPoster: poster)
+                jobs += jobsFor(item: item, id: code, folder: folder, defaultPoster: poster, taggedUser: taggedUser)
             }
             found(jobs.count)
             let more = json["more_available"] as? Bool ?? false
@@ -218,17 +223,37 @@ enum InstagramService {
         return jobs
     }
 
-    nonisolated private static func jobsFor(item: [String: Any], id: String, folder: URL, defaultPoster: String) -> [Job] {
+    nonisolated private static func jobsFor(item: [String: Any], id: String, folder: URL, defaultPoster: String,
+                                            taggedUser: (id: String, username: String)? = nil) -> [Job] {
         let date = Date(timeIntervalSince1970: Double(item["taken_at"] as? Int ?? 0))
         let caption = ((item["caption"] as? [String: Any])?["text"] as? String) ?? ""
         let loc = item["location"] as? [String: Any]
         let lat = loc?["lat"] as? Double, lng = loc?["lng"] as? Double
         let poster = ((item["user"] as? [String: Any])?["username"] as? String) ?? defaultPoster
-        let refs = media(from: item)
+
+        let refs: [MediaRef]
+        // Tagged feed: only the carousel items this user is actually tagged in (not
+        // the whole post). Single-media tagged posts are kept as-is.
+        if let taggedUser, (item["media_type"] as? Int) == 8, let carousel = item["carousel_media"] as? [[String: Any]] {
+            let hasTagData = carousel.contains { ($0["usertags"] as? [String: Any])?["in"] != nil }
+            let chosen = hasTagData ? carousel.filter { isUserTagged($0, taggedUser) } : carousel
+            refs = chosen.flatMap { media(from: $0) }
+        } else {
+            refs = media(from: item)
+        }
+
         return refs.enumerated().map { (i, m) in
             Job(id: id, folder: folder, name: refs.count > 1 ? "\(id)_\(i + 1)" : id, poster: poster,
                 isVideo: m.isVideo, url: m.url, audioURL: m.audio, fallbackURL: m.fallback, transcode: m.transcode,
-                date: date, lat: lat, lng: lng, caption: caption)
+                quality: m.quality, date: date, lat: lat, lng: lng, caption: caption)
+        }
+    }
+
+    nonisolated private static func isUserTagged(_ media: [String: Any], _ user: (id: String, username: String)) -> Bool {
+        guard let tags = (media["usertags"] as? [String: Any])?["in"] as? [[String: Any]] else { return false }
+        return tags.contains { t in
+            let u = t["user"] as? [String: Any]
+            return idString(u?["pk"]) == user.id || (u?["username"] as? String) == user.username
         }
     }
 
@@ -267,6 +292,8 @@ enum InstagramService {
         let ext = job.isVideo ? "mp4" : "jpg"
         let dest = uniqueDestination("\(job.name).\(ext)", in: job.folder)
 
+        if job.isVideo { print("[Instagram] video \(job.name).mp4 → \(job.quality)") }
+
         if job.isVideo, let audio = job.audioURL,
            let v = await downloadToTemp(job.url), let a = await downloadToTemp(audio) {
             let ok = job.transcode
@@ -274,6 +301,7 @@ enum InstagramService {
                 : await mux(video: v, audio: a, to: dest, date: job.date, lat: job.lat, lng: job.lng)
             try? FileManager.default.removeItem(at: v); try? FileManager.default.removeItem(at: a)
             if ok { setFileDate(dest, job.date); return (true, true, dest.path, job.caption, job.poster) }
+            print("[Instagram]   ⚠️ \(job.transcode ? "transcode" : "mux") failed for \(job.name) — falling back to progressive")
             try? FileManager.default.removeItem(at: dest)
         }
 
@@ -334,18 +362,23 @@ enum InstagramService {
             let bestAny = videos.max { $0.height < $1.height }
             // With a transcoder, take the absolute-highest rendition (any codec).
             if VideoTranscoder.isAvailable, let bestAny, let audio, bestAny.height > max(progH, bestCompat?.height ?? 0) {
-                return [MediaRef(isVideo: true, url: bestAny.url, audio: audio, fallback: progURL, transcode: !isCompat(bestAny.codec))]
+                let xcode = !isCompat(bestAny.codec)
+                let q = "\(bestAny.codec) \(bestAny.height)p (DASH, \(xcode ? "transcode→HEVC" : "mux"))"
+                return [MediaRef(isVideo: true, url: bestAny.url, audio: audio, fallback: progURL, transcode: xcode, quality: q)]
             }
             // Otherwise the best H.264/HEVC DASH rendition (muxed by AVFoundation)…
             if let bestCompat, let audio, bestCompat.height > progH {
-                return [MediaRef(isVideo: true, url: bestCompat.url, audio: audio, fallback: progURL, transcode: false)]
+                let q = "\(bestCompat.codec) \(bestCompat.height)p (DASH, mux)"
+                return [MediaRef(isVideo: true, url: bestCompat.url, audio: audio, fallback: progURL, transcode: false, quality: q)]
             }
             // …or the best progressive stream.
-            if let progURL { return [MediaRef(isVideo: true, url: progURL, audio: nil, fallback: nil, transcode: false)] }
+            if let progURL {
+                return [MediaRef(isVideo: true, url: progURL, audio: nil, fallback: nil, transcode: false, quality: "progressive \(progH)p")]
+            }
         }
         if let cands = (item["image_versions2"] as? [String: Any])?["candidates"] as? [[String: Any]],
            let best = bestURL(cands) {
-            return [MediaRef(isVideo: false, url: best, audio: nil, fallback: nil, transcode: false)]
+            return [MediaRef(isVideo: false, url: best, audio: nil, fallback: nil, transcode: false, quality: "image")]
         }
         return []
     }

@@ -89,7 +89,10 @@ struct InstagramImportView: View {
                 InstagramLoginView { Task { loggedIn = await InstagramAuth.isLoggedIn() } }
             }
             .task { loggedIn = await InstagramAuth.isLoggedIn() }
-            .onAppear { if let existing { handle = existing.handle } }
+            .onAppear {
+                if let existing { handle = existing.handle }
+                else if handle.isEmpty { handle = library.lastIGHandle(for: targetFolder) ?? "" }   // prefill last used
+            }
         }
     }
 
@@ -140,8 +143,12 @@ struct InstagramImportView: View {
                 let sub = targetFolder.appendingPathComponent(h, isDirectory: true)
                 try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
                 dest = sub
+                library.setLastIGHandle(h, for: targetFolder)          // remember it for next time
             }
-            let already = Set(existing?.downloaded ?? [])
+            // Resume incrementally if this profile folder already exists (even when
+            // re-run from the parent), so we only fetch new posts.
+            let prior = isUpdate ? existing : library.instagramInfo(for: dest)
+            let already = Set(prior?.downloaded ?? [])
 
             let r = await InstagramService.run(handle: h, into: dest, alreadyDownloaded: already, creds: creds) { p in
                 Task { @MainActor in progress = p }
@@ -164,8 +171,8 @@ struct InstagramImportView: View {
                 let info = IGFolderInfo(handle: profile.handle, userID: profile.userID,
                                         lastUpdated: Date().timeIntervalSince1970,
                                         downloaded: Array(already.union(r.newIDs)),
-                                        photos: (existing?.photos ?? 0) + r.photos,
-                                        videos: (existing?.videos ?? 0) + r.videos)
+                                        photos: (prior?.photos ?? 0) + r.photos,
+                                        videos: (prior?.videos ?? 0) + r.videos)
                 library.setInstagramInfo(info, for: dest)
             } else if !isUpdate {
                 // Profile never loaded — drop the empty folder we created.
