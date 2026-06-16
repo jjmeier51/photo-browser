@@ -6,19 +6,19 @@ import AVFoundation
 import WebKit
 
 /// Per-folder record for a downloaded Instagram profile (drives "Get New posts",
-/// the folder subtitle, and dedup). Persisted on `Library`.
+/// the highlight-bubble display, the folder subtitle, and dedup). On `Library`.
 struct IGFolderInfo: Codable, Sendable {
     var handle: String
     var userID: String
     var lastUpdated: Double          // unix time of the last successful run
-    var downloaded: [String]         // post shortcodes already pulled (dedup)
+    var downloaded: [String]         // post/story/highlight ids already pulled (dedup)
     var photos: Int
     var videos: Int
 }
 
-/// Reads the logged-in Instagram session straight from the in-app browser's
-/// persistent cookie store (so the user logs in once, in a real web view, and we
-/// never store their password). MainActor — `WKHTTPCookieStore` is main-bound.
+/// Reads the logged-in Instagram session from the in-app browser's persistent
+/// cookie store (the user logs in once, in a real web view; we never see the
+/// password). MainActor — `WKHTTPCookieStore` is main-bound.
 @MainActor
 enum InstagramAuth {
     static func cookies() async -> [HTTPCookie] {
@@ -28,19 +28,9 @@ enum InstagramAuth {
             }
         }
     }
-
     static func isLoggedIn() async -> Bool {
         await cookies().contains { $0.name == "sessionid" && !$0.value.isEmpty }
     }
-
-    static func logOut() async {
-        let store = WKWebsiteDataStore.default().httpCookieStore
-        for c in await cookies() {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in store.delete(c) { cont.resume() } }
-        }
-    }
-
-    /// (Cookie header, csrftoken) for the API requests, or nil if not signed in.
     static func credentials() async -> InstagramService.Credentials? {
         let cs = await cookies()
         guard cs.contains(where: { $0.name == "sessionid" && !$0.value.isEmpty }) else { return nil }
@@ -50,12 +40,13 @@ enum InstagramAuth {
     }
 }
 
-/// Downloads a profile's media via Instagram's (unofficial) web/mobile API, using
-/// the user's own logged-in session. Like the MEGA client, this is a best-effort
-/// reverse-engineered scraper: Instagram changes endpoints/headers often and
-/// rate-limits aggressively, so failures are surfaced as notes, never crashes.
-/// Everything is `nonisolated` — networking, crypto-free JSON, ImageIO/AVFoundation
-/// metadata writes, and large file writes must all stay off the main actor.
+/// Downloads a profile's posts, stories and highlights via Instagram's (unofficial)
+/// mobile API, using the user's own logged-in session. Best-effort and download-only
+/// like the MEGA client — Instagram changes endpoints/headers often and rate-limits,
+/// so failures surface as notes. Video uses the highest practical quality: the best
+/// progressive `video_versions`, or, when the DASH manifest offers a higher-res
+/// H.264/HEVC rendition, that stream muxed with its audio on-device (HDR preserved).
+/// Everything is `nonisolated` — networking, ImageIO/AVFoundation, large writes.
 enum InstagramService {
     struct Credentials: Sendable { let cookie: String; let csrf: String }
     struct Profile: Sendable { let userID: String; let handle: String; let fullName: String; let profilePicURL: String; let postCount: Int }
@@ -63,15 +54,22 @@ enum InstagramService {
 
     /// One media file to fetch (a post can be a carousel of several).
     private struct Job: Sendable {
-        let code: String; let index: Int; let total: Int
-        let urlString: String; let isVideo: Bool
+        let id: String                 // dedup key (post code or story/highlight pk)
+        let folder: URL                // destination folder
+        let name: String               // base filename (no extension)
+        let isVideo: Bool
+        let url: String                // image url, or progressive/dash video url
+        let audioURL: String?          // when set, mux this audio with the video url
+        let fallbackURL: String?       // progressive video url, used if the mux fails
         let date: Date; let lat: Double?; let lng: Double?; let caption: String
     }
+
+    private struct MediaRef: Sendable { let isVideo: Bool; let url: String; let audio: String?; let fallback: String? }
 
     struct DownloadResult: Sendable {
         var photos = 0, videos = 0, failed = 0
         var newIDs: [String] = []
-        var captions: [String: String] = [:]    // file path → caption (applied to the app's caption field)
+        var captions: [String: String] = [:]    // file path → caption (to the app's caption field)
         var profilePic: Data?
         var profile: Profile?
         var note: String?
@@ -92,9 +90,6 @@ enum InstagramService {
 
     // MARK: - Orchestration
 
-    /// Full run: load the profile, enumerate posts (stopping at already-downloaded
-    /// ones for an update), download every media file with metadata, and fetch the
-    /// profile picture. `alreadyDownloaded` makes "Get New Posts" incremental.
     nonisolated static func run(handle: String, into folder: URL, alreadyDownloaded: Set<String>,
                                 creds: Credentials,
                                 progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
@@ -106,16 +101,30 @@ enum InstagramService {
         }
         result.profile = profile
 
-        let jobs = await collectJobs(profile: profile, creds: creds, alreadyDownloaded: alreadyDownloaded) { found in
-            progress(Progress(phase: "Finding posts — \(found) item(s) so far…", fraction: 0, done: 0, total: 0))
+        var jobs: [Job] = []
+        // Posts (newest-first; stop paging at the first already-downloaded post).
+        jobs += await collectPostJobs(profile: profile, folder: folder, already: alreadyDownloaded, creds: creds) { n in
+            progress(Progress(phase: "Finding posts — \(n) item(s) so far…", fraction: 0, done: 0, total: 0))
         }
-        guard !jobs.isEmpty else {
-            result.profilePic = await downloadData(profile.profilePicURL)
-            result.note = alreadyDownloaded.isEmpty ? "No downloadable posts found." : "No new posts."
-            return result
+        // Current stories → a "Stories" subfolder.
+        progress(Progress(phase: "Finding stories…", fraction: 0, done: 0, total: 0))
+        let storyItems = await fetchReel(path: "feed/user/\(profile.userID)/reel_media/", handle: profile.handle, creds: creds)
+        jobs += reelJobs(items: storyItems, folder: folder.appendingPathComponent("Stories", isDirectory: true), already: alreadyDownloaded)
+        // Highlights → "Highlights/<title>" subfolders.
+        progress(Progress(phase: "Finding highlights…", fraction: 0, done: 0, total: 0))
+        for h in await fetchHighlights(userID: profile.userID, handle: profile.handle, creds: creds) {
+            let encoded = h.id.replacingOccurrences(of: ":", with: "%3A")
+            let items = await fetchReel(path: "feed/reels_media/?reel_ids=\(encoded)", handle: profile.handle, creds: creds, reelKey: h.id)
+            let dir = folder.appendingPathComponent("Highlights", isDirectory: true).appendingPathComponent(sanitize(h.title), isDirectory: true)
+            jobs += reelJobs(items: items, folder: dir, already: alreadyDownloaded)
         }
 
-        result = await download(jobs: jobs, into: folder, creds: creds, progress: progress)
+        guard !jobs.isEmpty else {
+            result.profilePic = await downloadData(profile.profilePicURL)
+            result.note = alreadyDownloaded.isEmpty ? "No downloadable media found." : "No new posts, stories or highlights."
+            return result
+        }
+        result = await download(jobs: jobs, progress: progress)
         result.profile = profile
         result.profilePic = await downloadData(profile.profilePicURL)
         return result
@@ -124,8 +133,8 @@ enum InstagramService {
     // MARK: - API
 
     nonisolated static func fetchProfile(handle: String, creds: Credentials) async -> Profile? {
-        guard let url = URL(string: "https://i.instagram.com/api/v1/users/web_profile_info/?username=\(handle)") else { return nil }
-        guard let (data, resp) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+        guard let url = URL(string: "https://i.instagram.com/api/v1/users/web_profile_info/?username=\(handle)"),
+              let (data, resp) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
               (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? false,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let user = (json["data"] as? [String: Any])?["user"] as? [String: Any] else { return nil }
@@ -137,12 +146,8 @@ enum InstagramService {
                        postCount: media?["count"] as? Int ?? 0)
     }
 
-    /// Walks the user feed newest-first, building a flat job list. Stops as soon as
-    /// it reaches a post already downloaded (the feed is chronological), making
-    /// updates cheap.
-    nonisolated private static func collectJobs(profile: Profile, creds: Credentials,
-                                                alreadyDownloaded: Set<String>,
-                                                found: @escaping @Sendable (Int) -> Void) async -> [Job] {
+    nonisolated private static func collectPostJobs(profile: Profile, folder: URL, already: Set<String>, creds: Credentials,
+                                                    found: @escaping @Sendable (Int) -> Void) async -> [Job] {
         var jobs: [Job] = []
         var maxID: String?
         var pages = 0
@@ -156,15 +161,8 @@ enum InstagramService {
             let items = json["items"] as? [[String: Any]] ?? []
             for item in items {
                 guard let code = item["code"] as? String else { continue }
-                if alreadyDownloaded.contains(code) { break loop }       // reached known posts
-                let date = Date(timeIntervalSince1970: Double(item["taken_at"] as? Int ?? 0))
-                let caption = ((item["caption"] as? [String: Any])?["text"] as? String) ?? ""
-                let loc = item["location"] as? [String: Any]
-                let media = mediaURLs(from: item)
-                for (i, m) in media.enumerated() {
-                    jobs.append(Job(code: code, index: i, total: media.count, urlString: m.0, isVideo: m.1,
-                                    date: date, lat: loc?["lat"] as? Double, lng: loc?["lng"] as? Double, caption: caption))
-                }
+                if already.contains(code) { break loop }            // reached known posts
+                jobs += jobsFor(item: item, id: code, folder: folder)
             }
             found(jobs.count)
             let more = json["more_available"] as? Bool ?? false
@@ -174,10 +172,60 @@ enum InstagramService {
         return jobs
     }
 
-    // MARK: - Downloading + metadata
+    /// A story/highlight reel's items (each a single photo/video).
+    nonisolated private static func fetchReel(path: String, handle: String, creds: Credentials, reelKey: String? = nil) async -> [[String: Any]] {
+        guard let url = URL(string: "https://i.instagram.com/api/v1/\(path)"),
+              let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+        if let items = json["items"] as? [[String: Any]] { return items }
+        if let reel = json["reel"] as? [String: Any], let items = reel["items"] as? [[String: Any]] { return items }
+        if let reels = json["reels"] as? [String: Any] {
+            if let key = reelKey, let r = reels[key] as? [String: Any], let items = r["items"] as? [[String: Any]] { return items }
+            if let first = reels.values.first as? [String: Any], let items = first["items"] as? [[String: Any]] { return items }
+        }
+        if let arr = json["reels_media"] as? [[String: Any]], let items = arr.first?["items"] as? [[String: Any]] { return items }
+        return []
+    }
 
-    nonisolated private static func download(jobs: [Job], into folder: URL, creds: Credentials,
-                                             progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
+    nonisolated private static func fetchHighlights(userID: String, handle: String, creds: Credentials) async -> [(id: String, title: String)] {
+        guard let url = URL(string: "https://i.instagram.com/api/v1/highlights/\(userID)/highlights_tray/"),
+              let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tray = json["tray"] as? [[String: Any]] else { return [] }
+        return tray.compactMap { node in
+            guard let id = idString(node["id"]) else { return nil }
+            let rid = id.hasPrefix("highlight:") ? id : "highlight:\(id)"
+            return (rid, node["title"] as? String ?? "Highlight")
+        }
+    }
+
+    nonisolated private static func reelJobs(items: [[String: Any]], folder: URL, already: Set<String>) -> [Job] {
+        var jobs: [Job] = []
+        for item in items {
+            let id = (item["code"] as? String) ?? idString(item["pk"]) ?? idString(item["id"])
+            guard let id, !already.contains(id) else { continue }
+            jobs += jobsFor(item: item, id: id, folder: folder)
+        }
+        return jobs
+    }
+
+    /// Turns one feed/reel item into download jobs (carousels expand).
+    nonisolated private static func jobsFor(item: [String: Any], id: String, folder: URL) -> [Job] {
+        let date = Date(timeIntervalSince1970: Double(item["taken_at"] as? Int ?? 0))
+        let caption = ((item["caption"] as? [String: Any])?["text"] as? String) ?? ""
+        let loc = item["location"] as? [String: Any]
+        let lat = loc?["lat"] as? Double, lng = loc?["lng"] as? Double
+        let refs = media(from: item)
+        return refs.enumerated().map { (i, m) in
+            Job(id: id, folder: folder, name: refs.count > 1 ? "\(id)_\(i + 1)" : id,
+                isVideo: m.isVideo, url: m.url, audioURL: m.audio, fallbackURL: m.fallback,
+                date: date, lat: lat, lng: lng, caption: caption)
+        }
+    }
+
+    // MARK: - Downloading
+
+    nonisolated private static func download(jobs: [Job], progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
         let total = jobs.count
         var done = 0
@@ -187,7 +235,7 @@ enum InstagramService {
             func addNext() {
                 guard idx < jobs.count else { return }
                 let job = jobs[idx]; idx += 1
-                group.addTask { await downloadJob(job, into: folder) }
+                group.addTask { await downloadJob(job) }
             }
             for _ in 0..<min(maxConcurrent, jobs.count) { addNext() }
             while let r = await group.next() {
@@ -200,25 +248,50 @@ enum InstagramService {
                 addNext()
             }
         }
-        result.newIDs = Array(Set(jobs.map { $0.code }))
+        result.newIDs = Array(Set(jobs.map { $0.id }))
         return result
     }
 
-    nonisolated private static func downloadJob(_ job: Job, into folder: URL) async -> (ok: Bool, isVideo: Bool, path: String, caption: String) {
+    nonisolated private static func downloadJob(_ job: Job) async -> (ok: Bool, isVideo: Bool, path: String, caption: String) {
+        try? FileManager.default.createDirectory(at: job.folder, withIntermediateDirectories: true)
         let ext = job.isVideo ? "mp4" : "jpg"
-        let name = job.total > 1 ? "\(job.code)_\(job.index + 1).\(ext)" : "\(job.code).\(ext)"
-        let dest = uniqueDestination(name, in: folder)
-        guard let url = URL(string: job.urlString) else { return (false, job.isVideo, "", "") }
-        var req = URLRequest(url: url); req.setValue(userAgent, forHTTPHeaderField: "User-Agent"); req.timeoutInterval = 120
-        guard let (tmp, resp) = try? await session.download(for: req),
-              (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true,
-              (try? FileManager.default.moveItem(at: tmp, to: dest)) != nil else { return (false, job.isVideo, "", "") }
-        // Capture date + location (+ caption into IPTC for photos). HDR video is
-        // preserved: the passthrough export copies streams without re-encoding.
-        if job.isVideo { await writeVideoMeta(date: job.date, lat: job.lat, lng: job.lng, to: dest) }
-        else { writeImageMeta(date: job.date, lat: job.lat, lng: job.lng, caption: job.caption, to: dest) }
-        try? FileManager.default.setAttributes([.creationDate: job.date, .modificationDate: job.date], ofItemAtPath: dest.path)
+        let dest = uniqueDestination("\(job.name).\(ext)", in: job.folder)
+
+        if job.isVideo {
+            // Prefer a DASH (higher-res) video muxed with its audio; fall back to the
+            // progressive rendition. Either way HDR streams pass through untouched.
+            if let audio = job.audioURL,
+               let v = await downloadToTemp(job.url), let a = await downloadToTemp(audio) {
+                let ok = await mux(video: v, audio: a, to: dest, date: job.date, lat: job.lat, lng: job.lng)
+                try? FileManager.default.removeItem(at: v); try? FileManager.default.removeItem(at: a)
+                if ok { setFileDate(dest, job.date); return (true, true, dest.path, job.caption) }
+            }
+            try? FileManager.default.removeItem(at: dest)        // clear any partial mux output
+            let progressive = job.fallbackURL ?? job.url
+            guard await downloadFile(progressive, to: dest) else { return (false, true, "", "") }
+            await writeVideoMeta(date: job.date, lat: job.lat, lng: job.lng, to: dest)
+        } else {
+            guard await downloadFile(job.url, to: dest) else { return (false, false, "", "") }
+            writeImageMeta(date: job.date, lat: job.lat, lng: job.lng, caption: job.caption, to: dest)
+        }
+        setFileDate(dest, job.date)
         return (true, job.isVideo, dest.path, job.caption)
+    }
+
+    nonisolated private static func downloadFile(_ urlString: String, to dest: URL) async -> Bool {
+        guard let tmp = await downloadToTemp(urlString) else { return false }
+        do { try FileManager.default.moveItem(at: tmp, to: dest); return true }
+        catch { try? FileManager.default.removeItem(at: tmp); return false }
+    }
+
+    nonisolated private static func downloadToTemp(_ urlString: String) async -> URL? {
+        guard let url = URL(string: urlString) else { return nil }
+        var req = URLRequest(url: url); req.setValue(userAgent, forHTTPHeaderField: "User-Agent"); req.timeoutInterval = 180
+        guard let (tmp, resp) = try? await session.download(for: req),
+              (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true else { return nil }
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("ig_" + UUID().uuidString)
+        guard (try? FileManager.default.moveItem(at: tmp, to: out)) != nil else { return nil }
+        return out
     }
 
     nonisolated static func downloadData(_ urlString: String) async -> Data? {
@@ -227,7 +300,80 @@ enum InstagramService {
         return (try? await session.data(for: req))?.0
     }
 
-    /// Lossless EXIF rewrite: capture date, GPS, and the caption in IPTC.
+    nonisolated private static func setFileDate(_ url: URL, _ date: Date) {
+        try? FileManager.default.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: url.path)
+    }
+
+    // MARK: - Best media selection (incl. DASH)
+
+    nonisolated private static func media(from item: [String: Any]) -> [MediaRef] {
+        let type = item["media_type"] as? Int ?? 1
+        if type == 8, let carousel = item["carousel_media"] as? [[String: Any]] {
+            return carousel.flatMap { media(from: $0) }
+        }
+        if type == 2 {
+            let vv = item["video_versions"] as? [[String: Any]] ?? []
+            let progBest = vv.max { area($0) < area($1) }
+            let progURL = progBest?["url"] as? String
+            let progH = (progBest?["height"] as? Int) ?? 0
+            if let mpd = item["video_dash_manifest"] as? String,
+               let dash = bestDash(decodeEntities(mpd)), dash.height > progH, let audio = dash.audio {
+                return [MediaRef(isVideo: true, url: dash.video, audio: audio, fallback: progURL)]
+            }
+            if let progURL { return [MediaRef(isVideo: true, url: progURL, audio: nil, fallback: nil)] }
+        }
+        if let cands = (item["image_versions2"] as? [String: Any])?["candidates"] as? [[String: Any]],
+           let best = bestURL(cands) {
+            return [MediaRef(isVideo: false, url: best, audio: nil, fallback: nil)]
+        }
+        return []
+    }
+
+    /// Best AVFoundation-muxable video (H.264/HEVC) + an audio stream from a DASH MPD.
+    /// VP9/AV1 representations are skipped (iOS can't passthrough-mux them).
+    nonisolated private static func bestDash(_ mpd: String) -> (video: String, height: Int, audio: String?)? {
+        var bestVideo: (url: String, height: Int)?
+        var audio: String?
+        for rep in regex(mpd, "<Representation([^>]*)>([\\s\\S]*?)</Representation>") {
+            let attrs = rep[1], body = rep[2]
+            guard let base = regex(body, "<BaseURL>([\\s\\S]*?)</BaseURL>").first?[1] else { continue }
+            let urlStr = decodeEntities(base.trimmingCharacters(in: .whitespacesAndNewlines))
+            let codecs = attr(attrs, "codecs").lowercased()
+            let h = Int(attr(attrs, "height")) ?? 0
+            if codecs.hasPrefix("avc1") || codecs.hasPrefix("hvc1") || codecs.hasPrefix("hev1") {
+                if bestVideo == nil || h > bestVideo!.height { bestVideo = (urlStr, h) }
+            } else if codecs.hasPrefix("mp4a") || attr(attrs, "audioSamplingRate").isEmpty == false {
+                if audio == nil { audio = urlStr }
+            }
+        }
+        return bestVideo.map { ($0.url, $0.height, audio) }
+    }
+
+    /// Passthrough-mux a separate video + audio stream into one mp4 (no re-encode,
+    /// HDR preserved), embedding the capture date / location.
+    nonisolated private static func mux(video: URL, audio: URL, to dest: URL, date: Date, lat: Double?, lng: Double?) async -> Bool {
+        let comp = AVMutableComposition()
+        let vAsset = AVURLAsset(url: video)
+        guard let vTrack = try? await vAsset.loadTracks(withMediaType: .video).first,
+              let compV = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+              let dur = try? await vAsset.load(.duration), dur.seconds > 0 else { return false }
+        try? compV.insertTimeRange(CMTimeRange(start: .zero, duration: dur), of: vTrack, at: .zero)
+        if let t = try? await vTrack.load(.preferredTransform) { compV.preferredTransform = t }
+        let aAsset = AVURLAsset(url: audio)
+        if let aTrack = try? await aAsset.loadTracks(withMediaType: .audio).first,
+           let compA = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            let aDur = (try? await aAsset.load(.duration)) ?? dur
+            try? compA.insertTimeRange(CMTimeRange(start: .zero, duration: CMTimeMinimum(dur, aDur)), of: aTrack, at: .zero)
+        }
+        guard let export = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetPassthrough) else { return false }
+        export.metadata = videoMetadata(date: date, lat: lat, lng: lng)
+        export.outputURL = dest; export.outputFileType = .mp4
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in export.exportAsynchronously { c.resume() } }
+        return export.status == .completed
+    }
+
+    // MARK: - Metadata writers (nonisolated, off-main)
+
     nonisolated private static func writeImageMeta(date: Date, lat: Double?, lng: Double?, caption: String, to url: URL) {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
               let type = CGImageSourceGetType(src) else { return }
@@ -261,11 +407,22 @@ enum InstagramService {
         _ = try? FileManager.default.replaceItemAt(url, withItemAt: tmp)
     }
 
-    /// Passthrough re-mux to set the video's creation date / location (preserves HDR).
     nonisolated private static func writeVideoMeta(date: Date, lat: Double?, lng: Double?, to url: URL) async {
         let asset = AVURLAsset(url: url)
         guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else { return }
         var meta = (try? await asset.load(.metadata)) ?? []
+        meta += videoMetadata(date: date, lat: lat, lng: lng)
+        export.metadata = meta
+        let tmp = url.deletingLastPathComponent()
+            .appendingPathComponent(".igtmp_" + UUID().uuidString).appendingPathExtension("mp4")
+        export.outputURL = tmp; export.outputFileType = .mp4
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in export.exportAsynchronously { c.resume() } }
+        guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return }
+        _ = try? FileManager.default.replaceItemAt(url, withItemAt: tmp)
+    }
+
+    nonisolated private static func videoMetadata(date: Date, lat: Double?, lng: Double?) -> [AVMetadataItem] {
+        var meta: [AVMetadataItem] = []
         let iso = ISO8601DateFormatter().string(from: date)
         for id in [AVMetadataIdentifier.commonIdentifierCreationDate, .quickTimeMetadataCreationDate] {
             let item = AVMutableMetadataItem(); item.identifier = id; item.value = iso as NSString; meta.append(item)
@@ -276,13 +433,7 @@ enum InstagramService {
                 let item = AVMutableMetadataItem(); item.identifier = id; item.value = iso6709 as NSString; meta.append(item)
             }
         }
-        export.metadata = meta
-        let tmp = url.deletingLastPathComponent()
-            .appendingPathComponent(".igtmp_" + UUID().uuidString).appendingPathExtension("mp4")
-        export.outputURL = tmp; export.outputFileType = .mp4
-        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in export.exportAsynchronously { c.resume() } }
-        guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return }
-        _ = try? FileManager.default.replaceItemAt(url, withItemAt: tmp)
+        return meta
     }
 
     // MARK: - Helpers
@@ -300,27 +451,10 @@ enum InstagramService {
         return req
     }
 
-    /// Best (largest) media URLs for one feed item — recurses into carousels.
-    nonisolated private static func mediaURLs(from item: [String: Any]) -> [(String, Bool)] {
-        let type = item["media_type"] as? Int ?? 1
-        if type == 8, let carousel = item["carousel_media"] as? [[String: Any]] {
-            return carousel.flatMap { mediaURLs(from: $0) }
-        }
-        if type == 2, let vids = item["video_versions"] as? [[String: Any]], let best = bestURL(vids) {
-            return [(best, true)]
-        }
-        if let cands = (item["image_versions2"] as? [String: Any])?["candidates"] as? [[String: Any]],
-           let best = bestURL(cands) {
-            return [(best, false)]
-        }
-        return []
-    }
-
     nonisolated private static func bestURL(_ arr: [[String: Any]]) -> String? {
-        arr.max { a, b in
-            ((a["width"] as? Int ?? 0) * (a["height"] as? Int ?? 0)) < ((b["width"] as? Int ?? 0) * (b["height"] as? Int ?? 0))
-        }?["url"] as? String
+        arr.max { area($0) < area($1) }?["url"] as? String
     }
+    nonisolated private static func area(_ d: [String: Any]) -> Int { (d["width"] as? Int ?? 0) * (d["height"] as? Int ?? 0) }
 
     nonisolated private static func validCoord(_ lat: Double?, _ lng: Double?) -> CLLocationCoordinate2D? {
         guard let lat, let lng, !(lat == 0 && lng == 0) else { return nil }
@@ -335,6 +469,12 @@ enum InstagramService {
         return nil
     }
 
+    nonisolated private static func sanitize(_ name: String) -> String {
+        let cleaned = name.components(separatedBy: CharacterSet(charactersIn: "/\\:?%*|\"<>")).joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "Highlight" : String(cleaned.prefix(60))
+    }
+
     nonisolated private static func uniqueDestination(_ name: String, in folder: URL) -> URL {
         let fm = FileManager.default
         var dest = folder.appendingPathComponent(name)
@@ -344,5 +484,23 @@ enum InstagramService {
             dest = folder.appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)"); n += 1
         }
         return dest
+    }
+
+    nonisolated private static func regex(_ s: String, _ pattern: String) -> [[String]] {
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else { return [] }
+        let ns = s as NSString
+        return re.matches(in: s, range: NSRange(location: 0, length: ns.length)).map { m in
+            (0..<m.numberOfRanges).map { i in
+                let r = m.range(at: i); return r.location == NSNotFound ? "" : ns.substring(with: r)
+            }
+        }
+    }
+    nonisolated private static func attr(_ attrs: String, _ name: String) -> String {
+        regex(attrs, "\(name)=\"([^\"]*)\"").first?[1] ?? ""
+    }
+    nonisolated private static func decodeEntities(_ s: String) -> String {
+        s.replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&lt;", with: "<").replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
     }
 }

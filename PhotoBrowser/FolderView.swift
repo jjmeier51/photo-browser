@@ -225,7 +225,8 @@ struct FolderView: View {
             return results
         }
 
-        var list = entries
+        // Instagram profile subfolders are shown as highlight bubbles, not grid tiles.
+        var list = entries.filter { !($0.isFolder && library.isInstagramFolder($0.url)) }
         if let yearFilter {
             // Files must match the year; folders are hidden once we know they hold
             // nothing from that year (shown until their years are computed).
@@ -860,6 +861,7 @@ struct FolderView: View {
     private var content: some View {
         VStack(spacing: 0) {
             header
+            if showBubbles { instagramBubbleRow }
             if !entries.isEmpty { filterBar }
             grid
         }
@@ -983,6 +985,57 @@ struct FolderView: View {
         .padding(.horizontal, 14)
         .padding(.top, 6)
         .padding(.bottom, 4)
+    }
+
+    // MARK: - Instagram highlight bubbles
+
+    /// Instagram profile subfolders, shown as a row of circular bubbles (like the
+    /// highlights on a profile) instead of regular grid tiles.
+    private var igBubbles: [Entry] {
+        entries.filter { $0.isFolder && library.isInstagramFolder($0.url) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+    private var showBubbles: Bool {
+        query.trimmingCharacters(in: .whitespaces).isEmpty && !labelMode && !tsLabelMode && ageFilter == nil && !igBubbles.isEmpty
+    }
+
+    private var instagramBubbleRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 14) {
+                ForEach(igBubbles) { entry in
+                    Button { library.path.append(entry.url) } label: { bubble(entry) }
+                        .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 8)
+        }
+    }
+
+    private func bubble(_ entry: Entry) -> some View {
+        VStack(spacing: 5) {
+            ZStack {
+                Circle()
+                    .strokeBorder(
+                        LinearGradient(colors: [Color(red: 0.99, green: 0.6, blue: 0.11),
+                                                Color(red: 0.95, green: 0.27, blue: 0.42),
+                                                Color(red: 0.56, green: 0.23, blue: 0.83)],
+                                       startPoint: .topLeading, endPoint: .bottomTrailing),
+                        lineWidth: 2.5)
+                    .frame(width: 72, height: 72)
+                bubbleImage(entry).frame(width: 62, height: 62).clipShape(Circle())
+            }
+            Text(library.instagramInfo(for: entry.url).map { "@\($0.handle)" } ?? entry.name)
+                .font(.caption2).lineLimit(1).frame(maxWidth: 76)
+        }
+    }
+
+    @ViewBuilder private func bubbleImage(_ entry: Entry) -> some View {
+        if let cover = library.coverURL(for: entry.url), let img = UIImage(contentsOfFile: cover.path) {
+            Image(uiImage: img).resizable().scaledToFill()
+        } else {
+            Circle().fill(Color(white: 0.2))
+                .overlay { Image(systemName: "camera").font(.title3).foregroundStyle(.secondary) }
+        }
     }
 
     private var headerSubtitle: String {
