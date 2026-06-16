@@ -471,8 +471,7 @@ enum InstagramService {
     // MARK: - Metadata writers (nonisolated, off-main)
 
     nonisolated private static func writeImageMeta(date: Date, lat: Double?, lng: Double?, caption: String, poster: String, to url: URL) {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let type = CGImageSourceGetType(src) else { return }
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return }
         var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
         let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
@@ -496,10 +495,19 @@ enum InstagramService {
         if !poster.isEmpty { iptc[kCGImagePropertyIPTCByline] = "@\(poster)" }
         iptc[kCGImagePropertyIPTCKeywords] = ["Instagram"]                            // "Instagram" label
         props[kCGImagePropertyIPTCDictionary] = iptc
+        // Always write JPEG (the file is named .jpg): ImageIO can't *write* WebP, so
+        // a WebP download (common from Instagram's CDN) must be re-encoded. JPEG
+        // sources are copied losslessly (metadata-only).
+        let jpegType = UTType.jpeg.identifier as CFString
         let tmp = url.deletingLastPathComponent()
-            .appendingPathComponent(".igtmp_" + UUID().uuidString).appendingPathExtension(url.pathExtension)
-        guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL, type, 1, nil) else { return }
-        CGImageDestinationAddImageFromSource(dest, src, 0, props as CFDictionary)
+            .appendingPathComponent(".igtmp_" + UUID().uuidString).appendingPathExtension("jpg")
+        guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL, jpegType, 1, nil) else { return }
+        if (CGImageSourceGetType(src) as String?) == UTType.jpeg.identifier {
+            CGImageDestinationAddImageFromSource(dest, src, 0, props as CFDictionary)
+        } else if let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) {
+            var p = props; p[kCGImageDestinationLossyCompressionQuality] = 0.95
+            CGImageDestinationAddImage(dest, cg, p as CFDictionary)
+        } else { try? FileManager.default.removeItem(at: tmp); return }
         guard CGImageDestinationFinalize(dest) else { try? FileManager.default.removeItem(at: tmp); return }
         _ = try? FileManager.default.replaceItemAt(url, withItemAt: tmp)
     }
