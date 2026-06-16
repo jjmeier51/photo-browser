@@ -103,6 +103,7 @@ struct FolderView: View {
     @State private var photosLibraryMoves = false
     @State private var showMegaImport = false
     @State private var showTaylorBrowser = false
+    @State private var showKardashian = false
     @State private var showTaylorCrossRef = false
     @State private var importing = false
     @State private var editEntry: Entry?
@@ -708,6 +709,9 @@ struct FolderView: View {
             }
             .fullScreenCover(isPresented: $showTaylorBrowser) {
                 TaylorBrowserView(targetFolder: url) { Task { await reload() } }
+            }
+            .fullScreenCover(isPresented: $showKardashian) {
+                KardashianWorldView(targetFolder: url) { Task { await reload() } }
             }
             .fullScreenCover(isPresented: $showTaylorCrossRef) {
                 TaylorCrossReferenceView(folder: url) { Task { await reload() } }
@@ -1328,6 +1332,9 @@ struct FolderView: View {
                     }
                     Button { showTaylorBrowser = true } label: {
                         Label("Browse taylorpictures.net…", systemImage: "globe")
+                    }
+                    Button { showKardashian = true } label: {
+                        Label("Download from KardashianWorld…", systemImage: "clock.arrow.circlepath")
                     }
                     Button { showTaylorCrossRef = true } label: {
                         Label("Cross-Reference with taylorpictures.net…", systemImage: "calendar.badge.exclamationmark")
