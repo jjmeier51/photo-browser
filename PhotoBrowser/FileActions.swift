@@ -411,10 +411,10 @@ enum FileActions {
 
     /// Repairs items whose modified date was changed to the import time: walks
     /// `folder` (recursively) and resets each photo/video's modified date to its
-    /// real capture date. The embedded EXIF/QuickTime date is tried first; when a
-    /// file carries none (PNG/screenshots, stripped MP4s, downloads), it falls back
-    /// to GPS/IPTC EXIF, then the originating Photos asset (`origins`: path→localId),
-    /// then a date parsed from the filename. Only rewrites when the dates differ.
+    /// real capture date. A date parsed from the filename wins first (it survives
+    /// exports/renames that rewrite the embedded date); otherwise the embedded
+    /// EXIF/QuickTime date, then GPS/IPTC EXIF, then the originating Photos asset
+    /// (`origins`: path→localId). Only rewrites when the dates differ.
     nonisolated static func restoreCaptureDates(
         in folder: URL, origins: [String: String] = [:],
         progress: @escaping @Sendable (Int, Int) -> Void) async -> RestoreResult {
@@ -459,16 +459,19 @@ enum FileActions {
     private nonisolated static func restoreOne(_ url: URL, originId: String?) async -> RestoreOutcome {
         let kind = classify(url: url, isDirectory: false)
         let entry = Entry(url: url, name: url.lastPathComponent, kind: kind, size: 0, modified: Date())
-        var date = await MetadataLoader.captureDate(for: entry)     // 1. embedded EXIF/QuickTime
+        var date: Date?
         var fromFallback = false
-        if date == nil {                                            // 2. GPS / IPTC EXIF
-            date = await MetadataLoader.auxCaptureDate(for: entry); if date != nil { fromFallback = true }
-        }
-        if date == nil, let originId {                              // 3. originating Photos asset
-            date = await photosCreationDate(for: originId); if date != nil { fromFallback = true }
-        }
-        if date == nil {                                            // 4. filename
-            date = MetadataLoader.dateFromFilename(url.lastPathComponent); if date != nil { fromFallback = true }
+        // 1. Filename date wins when present: for renamed/exported files (e.g.
+        //    "2022-08-19 17.00.57_4.mov") the name preserves the true original date
+        //    even after an export rewrote the embedded creation date to "now".
+        if let fn = MetadataLoader.dateFromFilename(url.lastPathComponent) {
+            date = fn; fromFallback = true
+        } else if let embedded = await MetadataLoader.captureDate(for: entry) {   // 2. embedded EXIF/QuickTime
+            date = embedded
+        } else if let aux = await MetadataLoader.auxCaptureDate(for: entry) {     // 3. GPS / IPTC EXIF
+            date = aux; fromFallback = true
+        } else if let originId, let pd = await photosCreationDate(for: originId) { // 4. originating Photos asset
+            date = pd; fromFallback = true
         }
         guard let captured = date else { return .noDate }
         let current = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
