@@ -705,7 +705,7 @@ struct FolderView: View {
                 FrameCleanupView(folder: url, items: cleanupItems)
             }
             .fullScreenCover(isPresented: $showInstagram, onDismiss: { Task { await reload() } }) {
-                InstagramImportView(targetFolder: url, existing: library.instagramInfo(url)) { Task { await reload() } }
+                InstagramImportView(targetFolder: url, existing: library.instagramInfo(for: url)) { Task { await reload() } }
             }
             .overlay(alignment: .bottom) { if selecting { selectionBar } }
             .overlay(alignment: .bottomLeading) {
@@ -988,7 +988,7 @@ struct FolderView: View {
     private var headerSubtitle: String {
         if showFavoritesOnly { return "Favorites" }
         if showAIOnly { return "To AI" }
-        if let ig = library.instagramInfo(url) {
+        if let ig = library.instagramInfo(for: url) {
             let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
             let when = f.string(from: Date(timeIntervalSince1970: ig.lastUpdated))
             return "Last Updated on \(when) · \(ig.photos) Photos and \(ig.videos) Videos"
