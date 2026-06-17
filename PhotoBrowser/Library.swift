@@ -423,21 +423,60 @@ final class Library {
         UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
     }
 
-    // MARK: - KardashianWorld batch download progress
+    // MARK: - accessKardashian per-member downloads
 
-    /// Where the batched KardashianWorld (Internet Archive) download left off.
-    struct KWProgress: Codable, Sendable { var root: String; var cursor: Int; var total: Int }
-    var kardashianProgress: KWProgress? = {
-        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.kardashianProgress") else { return nil }
-        return try? JSONDecoder().decode(KWProgress.self, from: data)
+    /// The fixed Kardashian category labels, used like the Taylor Swift ones inside
+    /// a member's folder (downloaded photos are tagged with one of these).
+    static let kardashianLabels = ["Public Appearances", "Photoshoots", "Candids",
+                                   "Brand Photos", "Fashion Shows", "Social Media", "Others"]
+
+    /// Per-member download state: where the photos live, whether the gallery was
+    /// fully crawled, and the last counts — so the UI can offer Resume vs. Fetch New
+    /// vs. Re-download and remember it across launches. Keyed by member name.
+    struct AKMember: Codable, Sendable {
+        var folderPath: String
+        var completed: Bool       // the whole gallery was crawled+downloaded (not paused)
+        var total: Int            // images the last crawl found
+        var downloaded: Int       // images present after the last run
+        var updated: Double       // last-run timestamp
+    }
+    var accessKardashian: [String: AKMember] = {
+        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.accessKardashian"),
+              let m = try? JSONDecoder().decode([String: AKMember].self, from: data) else { return [:] }
+        return m
     }()
-    func setKardashianProgress(_ p: KWProgress?) {
-        kardashianProgress = p
-        if let p, let data = try? JSONEncoder().encode(p) {
-            UserDefaults.standard.set(data, forKey: "photoBrowser.kardashianProgress")
-        } else {
-            UserDefaults.standard.removeObject(forKey: "photoBrowser.kardashianProgress")
+    func akMember(_ name: String) -> AKMember? { accessKardashian[name] }
+    func setAKMember(_ name: String, _ state: AKMember?) {
+        if let state { accessKardashian[name] = state } else { accessKardashian.removeValue(forKey: name) }
+        if let data = try? JSONEncoder().encode(accessKardashian) {
+            UserDefaults.standard.set(data, forKey: "photoBrowser.accessKardashian")
         }
+        changeToken += 1
+    }
+
+    /// Member folder paths (so the folder view knows to show the Kardashian filter
+    /// chips inside them or any subfolder).
+    var kardashianFolders: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.kardashianFolders") ?? [])
+    func markKardashianFolder(_ folder: URL) {
+        guard kardashianFolders.insert(folder.path).inserted else { return }
+        UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
+    }
+    /// Whether `folder` is a member folder or nested inside one.
+    func inKardashianContext(_ folder: URL) -> Bool {
+        let p = folder.path
+        return kardashianFolders.contains { p == $0 || p.hasPrefix($0 + "/") }
+    }
+
+    /// Batch-applies custom labels (labelName → paths) in one persist — used by the
+    /// Kardashian importer to tag thousands of downloaded photos by category.
+    func addLabels(_ pathsByLabel: [String: [String]]) {
+        var changed = false
+        for (name, paths) in pathsByLabel where !paths.isEmpty {
+            customLabels[name, default: []].formUnion(paths); changed = true
+        }
+        guard changed else { return }
+        persistCustomLabels()
+        labelsVersion += 1
     }
 
     // MARK: - "Not duplicates" (user-confirmed non-duplicate pairs)
@@ -561,6 +600,17 @@ final class Library {
         UserDefaults.standard.set(igPostedBy, forKey: "photoBrowser.igPostedBy")
         igLastHandle = remapDict(igLastHandle, old: old, new: new)
         UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
+
+        kardashianFolders = remapPaths(kardashianFolders, old: old, new: new)
+        UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
+        var akChanged = false
+        for (name, var state) in accessKardashian where state.folderPath == old || state.folderPath.hasPrefix(old + "/") {
+            state.folderPath = new + state.folderPath.dropFirst(old.count)
+            accessKardashian[name] = state; akChanged = true
+        }
+        if akChanged, let data = try? JSONEncoder().encode(accessKardashian) {
+            UserDefaults.standard.set(data, forKey: "photoBrowser.accessKardashian")
+        }
 
         captions = remapDict(captions, old: old, new: new)
         folderCovers = remapDict(folderCovers, old: old, new: new)

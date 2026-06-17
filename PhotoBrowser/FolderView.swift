@@ -104,7 +104,7 @@ struct FolderView: View {
     @State private var photosLibraryMoves = false
     @State private var showMegaImport = false
     @State private var showTaylorBrowser = false
-    @State private var showKardashian = false
+    @State private var showAccessKardashian = false
     @State private var showTaylorCrossRef = false
     @State private var importing = false
     @State private var editEntry: Entry?
@@ -151,6 +151,16 @@ struct FolderView: View {
         }
         return nil
     }
+    /// Bespoke category labeling also applies inside an accessKardashian member
+    /// folder (or any subfolder), with that member's seven Kardashian categories.
+    private var inKardashian: Bool { library.inKardashianContext(url) }
+    /// Whether this folder offers custom label chips (Taylor Swift or Kardashian).
+    private var hasCustomLabels: Bool { inTaylorSwift || inKardashian }
+    /// The label set offered here (Kardashian categories take precedence when both
+    /// somehow apply, since the Kardashian folders are the more specific context).
+    private var currentLabelSet: [String] { inKardashian ? Library.kardashianLabels : Library.taylorSwiftLabels }
+    private var customLabelMenuTitle: String { inKardashian ? "Category" : "Taylor Swift Label" }
+
     private var tsLabelMode: Bool { !tsLabelFilter.isEmpty || tsNoLabel }
     private var availableAges: [Int] { Array(Set(agedList.map { $0.age })).sorted() }
 
@@ -711,8 +721,8 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showTaylorBrowser) {
                 TaylorBrowserView(targetFolder: url) { Task { await reload() } }
             }
-            .fullScreenCover(isPresented: $showKardashian) {
-                KardashianWorldView(targetFolder: url) { Task { await reload() } }
+            .fullScreenCover(isPresented: $showAccessKardashian) {
+                AccessKardashianView(targetFolder: url) { Task { await reload() } }
             }
             .fullScreenCover(isPresented: $showTaylorCrossRef) {
                 TaylorCrossReferenceView(folder: url) { Task { await reload() } }
@@ -1184,11 +1194,11 @@ struct FolderView: View {
                     .foregroundStyle(showAIOnly ? Color.yellow : Color.primary)
                 }
 
-                if inTaylorSwift {
+                if hasCustomLabels {
                     Menu {
                         Button { toggleTSNoLabel() } label: { check("No Label", tsNoLabel) }
                         Divider()
-                        ForEach(Library.taylorSwiftLabels, id: \.self) { name in
+                        ForEach(currentLabelSet, id: \.self) { name in
                             Button { toggleTSLabelFilter(name) } label: { check(name, tsLabelFilter.contains(name)) }
                         }
                         if tsLabelMode {
@@ -1340,8 +1350,8 @@ struct FolderView: View {
                     Button { showTaylorBrowser = true } label: {
                         Label("Browse taylorpictures.net…", systemImage: "globe")
                     }
-                    Button { showKardashian = true } label: {
-                        Label("Download from KardashianWorld…", systemImage: "clock.arrow.circlepath")
+                    Button { showAccessKardashian = true } label: {
+                        Label("Download from accessKardashian…", systemImage: "person.2.crop.square.stack.fill")
                     }
                     Button { showTaylorCrossRef = true } label: {
                         Label("Cross-Reference with taylorpictures.net…", systemImage: "calendar.badge.exclamationmark")
@@ -1401,14 +1411,14 @@ struct FolderView: View {
             Spacer()
             Menu {
                 Button { startBulkMetadataEdit() } label: { Label("Edit Metadata", systemImage: "calendar.badge.clock") }
-                if inTaylorSwift {
+                if hasCustomLabels {
                     Menu {
-                        ForEach(Library.taylorSwiftLabels, id: \.self) { name in
+                        ForEach(currentLabelSet, id: \.self) { name in
                             Button { bulkToggleTSLabel(name) } label: {
                                 check(name, !selection.isEmpty && selectedEntries().allSatisfy { library.hasLabel(name, $0.url) })
                             }
                         }
-                    } label: { Label("Taylor Swift Label", systemImage: "tag") }
+                    } label: { Label(customLabelMenuTitle, systemImage: "tag") }
                 }
                 Menu {
                     Button { bulkRotate(2) } label: { Label("Rotate 180°", systemImage: "arrow.clockwise") }
