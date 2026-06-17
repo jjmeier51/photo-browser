@@ -248,7 +248,7 @@ enum AccessKardashian {
                 let a = albums[idx]; idx += 1
                 group.addTask { (a, await images(inAlbum: a.id)) }
             }
-            for _ in 0..<min(16, albums.count) { addNext() }       // list albums fast (the long pole)
+            for _ in 0..<min(10, albums.count) { addNext() }       // gentle enough to avoid throttling the listing
             while let (a, imgs) = await group.next() {
                 let albumDate = parseAlbumDate(a.title, year: a.year)
                 let place = parseAlbumPlace(a.title)
@@ -617,6 +617,12 @@ enum AccessKardashian {
 
     // MARK: - Networking
 
+    /// Fetch a gallery page, retrying hard. This is the load-bearing reliability
+    /// fix for coverage: when the site throttles during the listing burst, a failed
+    /// fetch would silently drop a whole album (0 images) or even a whole subtree
+    /// (a year/month and all its albums). Retry up to 5× with exponential backoff,
+    /// bypassing the cache and rejecting throttle responses (non-2xx or a too-short
+    /// body), so a transient 429/503/timeout doesn't lose photos.
     nonisolated private static func fetchHTML(_ path: String) async -> String? {
         guard let url = URL(string: host + path) else { return nil }
         func request(ignoreCache: Bool) -> URLRequest {
@@ -627,10 +633,15 @@ enum AccessKardashian {
             if ignoreCache { req.cachePolicy = .reloadIgnoringLocalCacheData }
             return req
         }
-        for attempt in 0..<2 {
-            if let (data, _) = try? await session.data(for: request(ignoreCache: attempt > 0)) {
-                return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+        for attempt in 0..<5 {
+            if let (data, resp) = try? await session.data(for: request(ignoreCache: attempt > 0)) {
+                let ok = (resp as? HTTPURLResponse).map { (200...299).contains($0.statusCode) } ?? true
+                if ok, let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1),
+                   html.count > 200 {                                  // a real Coppermine page is large; short = error/throttle
+                    return html
+                }
             }
+            if attempt < 4 { try? await Task.sleep(nanoseconds: UInt64(400_000_000) << attempt) }   // 0.4,0.8,1.6,3.2s
         }
         return nil
     }
