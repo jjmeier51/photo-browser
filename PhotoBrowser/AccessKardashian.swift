@@ -79,7 +79,7 @@ enum AccessKardashian {
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
     nonisolated static let session: URLSession = {
         let cfg = URLSessionConfiguration.default
-        cfg.httpMaximumConnectionsPerHost = 12       // blazing-fast: a wide connection pool
+        cfg.httpMaximumConnectionsPerHost = 16       // blazing-fast: a wide connection pool
         cfg.timeoutIntervalForRequest = 45
         cfg.urlCache = URLCache(memoryCapacity: 64 << 20, diskCapacity: 512 << 20)
         cfg.requestCachePolicy = .returnCacheDataElseLoad
@@ -113,8 +113,10 @@ enum AccessKardashian {
         assignDestNames(&plan)
         result.total = plan.count
 
-        // Pre-geocode the distinct album places once (CLGeocoder is rate-limited).
-        let distinctPlaces = Set(plan.compactMap(\.place))
+        // Pre-geocode the distinct album places once (CLGeocoder is rate-limited, so
+        // this is serial). Capped so it can never become the bottleneck before
+        // downloads start — beyond the cap, those photos just don't get a location.
+        let distinctPlaces = Array(Set(plan.compactMap(\.place)).prefix(60))
         var coords: [String: Coord?] = [:]
         if !distinctPlaces.isEmpty {
             progress(Progress(phase: "Locating \(distinctPlaces.count) place(s)…", fraction: 0, done: 0, total: plan.count))
@@ -131,7 +133,7 @@ enum AccessKardashian {
 
         await withTaskGroup(of: (ok: Bool, skipped: Bool, path: String?, category: String, caption: String?).self) { group in
             var idx = 0
-            let maxConcurrent = 10              // many images at once — speed is the goal
+            let maxConcurrent = 14              // many images at once — speed is the goal
             func addNext() {
                 guard idx < plan.count, !isCancelled() else { return }
                 let p = plan[idx]; idx += 1
@@ -246,7 +248,7 @@ enum AccessKardashian {
                 let a = albums[idx]; idx += 1
                 group.addTask { (a, await images(inAlbum: a.id)) }
             }
-            for _ in 0..<min(8, albums.count) { addNext() }
+            for _ in 0..<min(16, albums.count) { addNext() }       // list albums fast (the long pole)
             while let (a, imgs) = await group.next() {
                 let albumDate = parseAlbumDate(a.title, year: a.year)
                 let place = parseAlbumPlace(a.title)
@@ -340,10 +342,11 @@ enum AccessKardashian {
         return nil
     }
 
-    /// A place named in the album title — text after "… in …" or the Portuguese
-    /// "… em …".
+    /// A place named in the album title — text after "… in …" or its Portuguese
+    /// equivalents ("… em / no / na …"), taking the last occurrence (real titles
+    /// read like "… pop-up … no SoHo, Nova York").
     nonisolated static func parseAlbumPlace(_ title: String) -> String? {
-        for sep in [" in ", " em "] {
+        for sep in [" in ", " em ", " no ", " na "] {
             guard let r = title.range(of: sep, options: [.backwards, .caseInsensitive]) else { continue }
             let place = String(title[r.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
             if (3...60).contains(place.count) { return place }
@@ -509,12 +512,8 @@ enum AccessKardashian {
         let normalURL = fullURL.deletingLastPathComponent().appendingPathComponent("normal_" + filename)
         for url in [fullURL, normalURL] {
             for attempt in 0..<3 {
-                if let data = await fetchImageData(url) {
-                    try? FileManager.default.removeItem(at: dest)          // overwrite / re-run safety
-                    if (try? data.write(to: dest, options: .atomic)) != nil {
-                        applyDateAndPlace(to: dest, albumDate: date, coord: coord)
-                        return true
-                    }
+                if let data = await fetchImageData(url), saveImage(data, to: dest, albumDate: date, coord: coord) {
+                    return true
                 }
                 try? await Task.sleep(nanoseconds: UInt64(250_000_000) << attempt)   // 0.25s, 0.5s, 1s
             }
@@ -534,46 +533,34 @@ enum AccessKardashian {
         return data.count >= 512 ? data : nil
     }
 
-    /// Preserve the photo's own EXIF where it exists; only fill gaps from the album.
-    /// If the image has no capture date, write the album date into EXIF (so the app's
-    /// year/Age features see it — `captureDate` reads EXIF only, never file mtime).
-    /// If it has no GPS and the album names a place, write that location.
-    nonisolated private static func applyDateAndPlace(to url: URL, albumDate: Date?, coord: Coord?) {
-        let have = existingMetadata(of: url)
-        let needDate = !have.hasDate ? albumDate : nil
-        let needCoord: Coord? = !have.hasGPS ? coord : nil
-        if needDate != nil || needCoord != nil {
-            _ = writeMetadata(to: url, date: needDate, coord: needCoord)
+    /// Write the downloaded bytes in a *single pass*: if the image lacks a capture
+    /// date (or GPS, when the album names a place), embed the album's date/location
+    /// straight from the in-memory bytes while writing — no decode/temp-file/replace
+    /// round-trip. Files that already carry EXIF are written verbatim. This is the
+    /// hot path (tens of thousands of images), so it does exactly one disk write.
+    nonisolated private static func saveImage(_ data: Data, to dest: URL, albumDate: Date?, coord: Coord?) -> Bool {
+        try? FileManager.default.removeItem(at: dest)            // overwrite / re-run safety
+        var effectiveDate = albumDate
+        if let src = CGImageSourceCreateWithData(data as CFData, nil), let type = CGImageSourceGetType(src) {
+            let have = existingMetadata(src)
+            effectiveDate = have.date ?? albumDate
+            let needDate = have.hasDate ? nil : albumDate
+            let needCoord: Coord? = have.hasGPS ? nil : coord
+            if needDate != nil || needCoord != nil,
+               writeImage(src: src, type: type, to: dest, date: needDate, coord: needCoord) {
+                setFileDate(dest, effectiveDate); return true
+            }
         }
-        // Mirror the effective capture date onto the file's dates too (cheap), so
-        // date sorting and Finder show something sane even if the EXIF write failed.
-        if let d = have.date ?? albumDate {
-            try? FileManager.default.setAttributes([.creationDate: d, .modificationDate: d], ofItemAtPath: url.path)
-        }
+        // Nothing to embed (or embedding failed) — write the bytes as-is.
+        guard (try? data.write(to: dest, options: .atomic)) != nil else { return false }
+        setFileDate(dest, effectiveDate)
+        return true
     }
 
-    nonisolated private static func existingMetadata(of url: URL) -> (hasDate: Bool, date: Date?, hasGPS: Bool) {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return (false, nil, false) }
-        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
-        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
-        let hasGPS = props[kCGImagePropertyGPSDictionary] != nil
-        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
-        for case let s? in [exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
-                            exif?[kCGImagePropertyExifDateTimeDigitized] as? String,
-                            tiff?[kCGImagePropertyTIFFDateTime] as? String] {
-            if let d = f.date(from: s) { return (true, d, hasGPS) }
-        }
-        return (false, nil, hasGPS)
-    }
-
-    /// Additive EXIF write (preserves the rest of the metadata): sets the capture
-    /// date and/or GPS, then atomically replaces the file. `nonisolated` so it runs
-    /// off the main actor (unlike `FileActions.applyMetadata`, which is MainActor).
-    nonisolated private static func writeMetadata(to url: URL, date: Date?, coord: Coord?) -> Bool {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let type = CGImageSourceGetType(src) else { return false }
+    /// Lossless metadata-embedding write: copies the encoded image (no pixel
+    /// re-encode, via `AddImageFromSource`) with the capture date and/or GPS set.
+    nonisolated private static func writeImage(src: CGImageSource, type: CFString, to dest: URL,
+                                               date: Date?, coord: Coord?) -> Bool {
         var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
         if let date {
             let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
@@ -595,13 +582,30 @@ enum AccessKardashian {
                 kCGImagePropertyGPSLongitudeRef: coord.lng >= 0 ? "E" : "W"
             ] as [CFString: Any]
         }
-        let tmp = url.deletingLastPathComponent()
-            .appendingPathComponent(".akmeta_" + UUID().uuidString).appendingPathExtension(url.pathExtension)
-        guard let dst = CGImageDestinationCreateWithURL(tmp as CFURL, type, 1, nil) else { return false }
+        guard let dst = CGImageDestinationCreateWithURL(dest as CFURL, type, 1, nil) else { return false }
         CGImageDestinationAddImageFromSource(dst, src, 0, props as CFDictionary)
-        guard CGImageDestinationFinalize(dst) else { try? FileManager.default.removeItem(at: tmp); return false }
-        do { _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp); return true }
-        catch { try? FileManager.default.removeItem(at: tmp); return false }
+        return CGImageDestinationFinalize(dst)
+    }
+
+    nonisolated private static func setFileDate(_ url: URL, _ date: Date?) {
+        guard let date else { return }
+        try? FileManager.default.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: url.path)
+    }
+
+    /// EXIF/TIFF capture date + GPS presence, read from an in-memory image source.
+    nonisolated private static func existingMetadata(_ src: CGImageSource) -> (hasDate: Bool, date: Date?, hasGPS: Bool) {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return (false, nil, false) }
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let hasGPS = props[kCGImagePropertyGPSDictionary] != nil
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
+        for case let s? in [exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
+                            exif?[kCGImagePropertyExifDateTimeDigitized] as? String,
+                            tiff?[kCGImagePropertyTIFFDateTime] as? String] {
+            if let d = f.date(from: s) { return (true, d, hasGPS) }
+        }
+        return (false, nil, hasGPS)
     }
 
     nonisolated private static func geocode(_ place: String) async -> Coord? {
