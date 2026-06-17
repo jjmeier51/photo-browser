@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 
 /// Salvages the (defunct) kardashianworld.net photo gallery from the Internet
 /// Archive. The live domain is now parked, so this queries the Wayback Machine's
@@ -40,7 +41,8 @@ enum KardashianWorldDownloader {
         return URLSession(configuration: cfg)
     }()
 
-    private struct Shot: Sendable { let original: String; let timestamp: String }
+    private struct Shot: Sendable { let original: String; let timestamp: String; let length: Int }
+    nonisolated private static let minBytes = 150 * 1024        // weed out low-res photos
     private struct Job: Sendable { let member: String; let url: String; let timestamp: String; let name: String }
 
     /// Members in priority order (more-specific names first; "kim" last so it can't
@@ -68,6 +70,7 @@ enum KardashianWorldDownloader {
         }
         let jobs = buildJobs(shots)
         result.total = jobs.count
+        if jobs.isEmpty { result.note = "No photos over \(minBytes / 1024) KB were archived."; return result }
         guard startIndex < jobs.count else { result.nextIndex = jobs.count; return result }   // already finished
         let batch = Array(jobs[startIndex..<min(startIndex + batchSize, jobs.count)])
         result.nextIndex = startIndex + batch.count
@@ -97,59 +100,63 @@ enum KardashianWorldDownloader {
 
     // MARK: - Wayback CDX
 
-    /// Every unique archived JPEG under the domain: `original` URL + best timestamp.
+    /// Every archived JPEG under the domain, with its archived byte `length`. We
+    /// collapse only by content digest (not by url), so different resolutions and
+    /// re-crawls all stay visible — letting us pick the largest version per image.
     nonisolated private static func fetchCDX() async -> [Shot] {
         let q = "https://web.archive.org/cdx/search/cdx?url=\(host)&matchType=domain"
-            + "&filter=mimetype:image/jpeg&filter=statuscode:200&collapse=urlkey"
-            + "&fl=original,timestamp&output=text"
+            + "&filter=mimetype:image/jpeg&filter=statuscode:200&collapse=digest"
+            + "&fl=original,timestamp,length&output=text"
         guard let url = URL(string: q) else { return [] }
         var req = URLRequest(url: url)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        req.timeoutInterval = 180
+        req.timeoutInterval = 300
         guard let (data, _) = try? await session.data(for: req),
               let text = String(data: data, encoding: .utf8) else { return [] }
         var shots: [Shot] = []
         for line in text.split(separator: "\n") {
             let cols = line.split(separator: " ", omittingEmptySubsequences: true)
-            guard cols.count >= 2 else { continue }
-            shots.append(Shot(original: String(cols[0]), timestamp: String(cols[1])))
+            guard cols.count >= 3 else { continue }
+            shots.append(Shot(original: String(cols[0]), timestamp: String(cols[1]), length: Int(cols[2]) ?? 0))
         }
         return shots
     }
 
-    /// Best version of each unique gallery image (full > `normal_` > `thumb_`), as
-    /// download jobs grouped by member. UI/theme assets are skipped.
+    /// One job per unique gallery image — the largest archived version of it (across
+    /// thumb_/normal_/full variants AND snapshots) — keeping only those over the size
+    /// floor. UI/theme assets are skipped.
     nonisolated private static func buildJobs(_ shots: [Shot]) -> [Job] {
-        struct Best { var shot: Shot; var rank: Int; var base: String }
+        struct Best { var shot: Shot; var base: String }
         var best: [String: Best] = [:]
         for s in shots {
             guard let path = URLComponents(string: s.original)?.path, !path.isEmpty else { continue }
             let lower = path.lowercased()
             if junk.contains(where: { lower.contains($0) }) { continue }       // skip UI/theme images
             let file = (path as NSString).lastPathComponent
-            var base = file, rank = 2
-            if file.hasPrefix("thumb_")  { base = String(file.dropFirst(6)); rank = 0 }
-            else if file.hasPrefix("normal_") { base = String(file.dropFirst(7)); rank = 1 }
-            let dir = (path as NSString).deletingLastPathComponent
-            let key = (dir + "/" + base).lowercased()
-            if let e = best[key], e.rank >= rank { continue }                  // already have an equal/better one
-            best[key] = Best(shot: s, rank: rank, base: base)
+            var base = file
+            if file.hasPrefix("thumb_")  { base = String(file.dropFirst(6)) }  // canonicalize to the full image
+            else if file.hasPrefix("normal_") { base = String(file.dropFirst(7)) }
+            let key = ((path as NSString).deletingLastPathComponent + "/" + base).lowercased()
+            if let e = best[key], e.shot.length >= s.length { continue }       // keep the largest archived version
+            best[key] = Best(shot: s, base: base)
         }
-        return best.values.compactMap { b -> Job? in
-            guard let path = URLComponents(string: b.shot.original)?.path else { return nil }
-            return Job(member: member(for: path), url: b.shot.original, timestamp: b.shot.timestamp, name: sanitize(b.base))
-        }
-        .sorted { $0.url < $1.url }      // deterministic order so a resume index is stable
+        return best.values
+            .filter { $0.shot.length >= minBytes }                            // drop low-res / thumbnail-only images
+            .compactMap { b -> Job? in
+                guard let path = URLComponents(string: b.shot.original)?.path else { return nil }
+                return Job(member: member(for: path), url: b.shot.original, timestamp: b.shot.timestamp, name: sanitize(b.base))
+            }
+            .sorted { $0.url < $1.url }      // deterministic order so a resume index is stable
     }
 
     nonisolated private static let junk = ["/themes/", "/templates/", "/images/", "/css/", "/js/", "/include",
                                "smilies", "/avatars/", "/ratings/", "/buttons/", "favicon", "/docs/", "/banner"]
 
     nonisolated private static func member(for path: String) -> String {
-        let segs = path.lowercased().split(separator: "/").map {
-            $0.replacingOccurrences(of: "[^a-z0-9]", with: "", options: .regularExpression)
-        }
-        for (key, name) in members where segs.contains(where: { $0.contains(key) }) { return name }
+        // Check the whole normalized path (not just one segment) so a member name in
+        // the album/category dir or filename is caught regardless of where it sits.
+        let p = path.lowercased().replacingOccurrences(of: "[^a-z0-9]", with: "", options: .regularExpression)
+        for (key, name) in members where p.contains(key) { return name }
         return "Other"
     }
 
@@ -166,7 +173,36 @@ enum KardashianWorldDownloader {
         guard let (tmp, resp) = try? await session.download(for: req),
               (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true else { return false }
         let dest = uniqueDestination(for: job.name, in: dir)
-        return (try? FileManager.default.moveItem(at: tmp, to: dest)) != nil
+        guard (try? FileManager.default.moveItem(at: tmp, to: dest)) != nil else { return false }
+        // Date: the photo's own EXIF capture date if present (preserved), else the
+        // Wayback snapshot date — never "now" (which would show as the current year).
+        if let date = exifCaptureDate(of: dest) ?? archiveDate(job.timestamp) {
+            try? FileManager.default.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: dest.path)
+        }
+        return true
+    }
+
+    /// The image's embedded EXIF/TIFF capture date, if any (POSIX-locale parse).
+    nonisolated private static func exifCaptureDate(of url: URL) -> Date? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return nil }
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
+        for case let s? in [exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
+                            exif?[kCGImagePropertyExifDateTimeDigitized] as? String,
+                            tiff?[kCGImagePropertyTIFFDateTime] as? String] {
+            if let d = f.date(from: s) { return d }
+        }
+        return nil
+    }
+
+    /// A Wayback 14-digit timestamp ("yyyyMMddHHmmss") as a Date.
+    nonisolated private static func archiveDate(_ timestamp: String) -> Date? {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMddHHmmss"; f.timeZone = TimeZone(identifier: "UTC")
+        return f.date(from: timestamp)
     }
 
     // MARK: - Helpers
