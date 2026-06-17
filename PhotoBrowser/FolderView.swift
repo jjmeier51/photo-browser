@@ -77,6 +77,7 @@ struct FolderView: View {
     @State private var showCleanup = false
     @State private var showInstagram = false
     @State private var igForceFull = false
+    @State private var showTikTok = false
     @State private var confirmFixDates = false
     @State private var fixingDates = false
     @State private var indexingText = false
@@ -728,6 +729,9 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showInstagram, onDismiss: { igForceFull = false; Task { await reload() } }) {
                 InstagramImportView(targetFolder: url, existing: library.instagramInfo(for: url), forceFull: igForceFull) { Task { await reload() } }
             }
+            .fullScreenCover(isPresented: $showTikTok, onDismiss: { Task { await reload() } }) {
+                TikTokImportView(targetFolder: url) { Task { await reload() } }
+            }
             .overlay(alignment: .bottom) { if selecting { selectionBar } }
             .overlay(alignment: .bottomLeading) {
                 if isRoot && !selecting {
@@ -1329,6 +1333,9 @@ struct FolderView: View {
                         Button { igForceFull = true; showInstagram = true } label: {
                             Label("Re-download Entire Profile", systemImage: "arrow.clockwise.circle")
                         }
+                    }
+                    Button { showTikTok = true } label: {
+                        Label("Download TikTok Profile…", systemImage: "music.note")
                     }
                     Button { showTaylorBrowser = true } label: {
                         Label("Browse taylorpictures.net…", systemImage: "globe")
