@@ -423,6 +423,23 @@ final class Library {
         UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
     }
 
+    // MARK: - KardashianWorld batch download progress
+
+    /// Where the batched KardashianWorld (Internet Archive) download left off.
+    struct KWProgress: Codable, Sendable { var root: String; var cursor: Int; var total: Int }
+    var kardashianProgress: KWProgress? = {
+        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.kardashianProgress") else { return nil }
+        return try? JSONDecoder().decode(KWProgress.self, from: data)
+    }()
+    func setKardashianProgress(_ p: KWProgress?) {
+        kardashianProgress = p
+        if let p, let data = try? JSONEncoder().encode(p) {
+            UserDefaults.standard.set(data, forKey: "photoBrowser.kardashianProgress")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "photoBrowser.kardashianProgress")
+        }
+    }
+
     // MARK: - "Not duplicates" (user-confirmed non-duplicate pairs)
 
     /// Pairs the user marked as NOT duplicates, as "pathA\npathB" (sorted), so a

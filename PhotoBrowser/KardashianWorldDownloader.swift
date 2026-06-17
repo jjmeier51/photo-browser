@@ -14,11 +14,22 @@ enum KardashianWorldDownloader {
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
     struct Progress: Sendable { var phase: String; var fraction: Double; var done: Int; var total: Int }
-    struct DownloadResult: Sendable {
-        var downloaded = 0, failed = 0, members = 0
-        var folderName: String?
+    struct BatchResult: Sendable {
+        var downloaded = 0, failed = 0
+        var nextIndex = 0           // where the next batch resumes
+        var total = 0              // total archived photos available
+        var membersTouched: Set<String> = []
         var note: String?
     }
+
+    /// Member birthdays (for the per-folder "Age" feature). Names match `members`.
+    nonisolated static let birthdays: [String: DateComponents] = [
+        "Kim Kardashian":      DateComponents(year: 1980, month: 10, day: 21),
+        "Kylie Jenner":        DateComponents(year: 1997, month: 8, day: 10),
+        "Kendall Jenner":      DateComponents(year: 1995, month: 11, day: 3),
+        "Khloé Kardashian":    DateComponents(year: 1984, month: 6, day: 27),
+        "Kourtney Kardashian": DateComponents(year: 1979, month: 4, day: 18),
+    ]
 
     nonisolated static let session: URLSession = {
         let cfg = URLSessionConfiguration.default
@@ -43,9 +54,12 @@ enum KardashianWorldDownloader {
 
     // MARK: - Run
 
-    nonisolated static func run(into parent: URL,
-                               progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
-        var result = DownloadResult()
+    /// Downloads up to `batchSize` photos starting at `startIndex` into `root`
+    /// (already sorted into per-member subfolders). The job list is deterministically
+    /// ordered, so `startIndex` resumes exactly where a previous batch stopped.
+    nonisolated static func runBatch(into root: URL, startIndex: Int, batchSize: Int = 1000,
+                                     progress: @escaping @Sendable (Progress) -> Void) async -> BatchResult {
+        var result = BatchResult()
         progress(Progress(phase: "Searching the Internet Archive…", fraction: 0, done: 0, total: 0))
         let shots = await fetchCDX()
         guard !shots.isEmpty else {
@@ -53,33 +67,31 @@ enum KardashianWorldDownloader {
             return result
         }
         let jobs = buildJobs(shots)
-        guard !jobs.isEmpty else { result.note = "No gallery photos were archived for this site."; return result }
+        result.total = jobs.count
+        guard startIndex < jobs.count else { result.nextIndex = jobs.count; return result }   // already finished
+        let batch = Array(jobs[startIndex..<min(startIndex + batchSize, jobs.count)])
+        result.nextIndex = startIndex + batch.count
 
-        let root = uniqueDir(parent.appendingPathComponent("KardashianWorld", isDirectory: true))
-        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        result.folderName = root.lastPathComponent
-        result.members = Set(jobs.map { $0.member }).count
-
-        let total = jobs.count
+        let total = batch.count
         var done = 0
-        await withTaskGroup(of: Bool.self) { group in
+        await withTaskGroup(of: (ok: Bool, member: String).self) { group in
             var idx = 0
             let maxConcurrent = 4               // the Archive throttles; keep it modest
             func addNext() {
-                guard idx < jobs.count else { return }
-                let job = jobs[idx]; idx += 1
-                group.addTask { await download(job, into: root) }
+                guard idx < batch.count else { return }
+                let job = batch[idx]; idx += 1
+                group.addTask { (ok: await download(job, into: root), member: job.member) }
             }
             for _ in 0..<min(maxConcurrent, total) { addNext() }
-            while let ok = await group.next() {
-                if ok { result.downloaded += 1 } else { result.failed += 1 }
+            while let r = await group.next() {
+                if r.ok { result.downloaded += 1; result.membersTouched.insert(r.member) } else { result.failed += 1 }
                 done += 1
                 progress(Progress(phase: "Downloading", fraction: Double(done) / Double(total), done: done, total: total))
                 addNext()
             }
         }
-        if result.downloaded == 0 { result.note = "Found \(total) archived photo(s) but none could be downloaded." }
-        else if result.failed > 0 { result.note = "\(result.failed) image(s) couldn’t be downloaded from the Archive." }
+        if result.downloaded == 0 { result.note = "This batch couldn’t be downloaded from the Archive." }
+        else if result.failed > 0 { result.note = "\(result.failed) image(s) in this batch couldn’t be downloaded." }
         return result
     }
 
@@ -127,6 +139,7 @@ enum KardashianWorldDownloader {
             guard let path = URLComponents(string: b.shot.original)?.path else { return nil }
             return Job(member: member(for: path), url: b.shot.original, timestamp: b.shot.timestamp, name: sanitize(b.base))
         }
+        .sorted { $0.url < $1.url }      // deterministic order so a resume index is stable
     }
 
     nonisolated private static let junk = ["/themes/", "/templates/", "/images/", "/css/", "/js/", "/include",
@@ -162,15 +175,6 @@ enum KardashianWorldDownloader {
         let cleaned = name.components(separatedBy: CharacterSet(charactersIn: "/\\:?%*|\"<>")).joined(separator: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? "image.jpg" : String(cleaned.prefix(120))
-    }
-
-    nonisolated private static func uniqueDir(_ dir: URL) -> URL {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: dir.path) else { return dir }
-        var n = 2
-        var candidate = dir.deletingLastPathComponent().appendingPathComponent(dir.lastPathComponent + " \(n)", isDirectory: true)
-        while fm.fileExists(atPath: candidate.path) { n += 1; candidate = dir.deletingLastPathComponent().appendingPathComponent(dir.lastPathComponent + " \(n)", isDirectory: true) }
-        return candidate
     }
 
     nonisolated private static func uniqueDestination(for name: String, in folder: URL) -> URL {
