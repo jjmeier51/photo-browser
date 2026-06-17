@@ -161,6 +161,9 @@ private struct AKMemberDownloadView: View {
             // (Portuguese now; translated to English on iOS 18+).
             library.addLabels(r.labelsByCategory)
             if !r.captions.isEmpty { library.setCaptions(r.captions); pendingCaptions = r.captions }
+            // Clear Coppermine file-info tooltips an earlier version wrongly stored as captions.
+            let stale = library.captions.filter { $0.key.hasPrefix(folder.path + "/") && AccessKardashian.isInfoBlock($0.value) }
+            if !stale.isEmpty { library.setCaptions(stale.mapValues { _ in "" }) }
 
             let present = r.downloaded + r.skipped
             library.setAKMember(member.name, .init(folderPath: folder.path, completed: !r.cancelled,

@@ -247,11 +247,14 @@ enum AccessKardashian {
             }
             for _ in 0..<min(8, albums.count) { addNext() }
             while let (a, imgs) = await group.next() {
-                let date = parseAlbumDate(a.title, year: a.year)
+                let albumDate = parseAlbumDate(a.title, year: a.year)
                 let place = parseAlbumPlace(a.title)
                 for img in imgs {
+                    // Per-image "Date added" is the most reliable date; fall back to the
+                    // album's date when an image doesn't carry one.
                     planned.append(Planned(fullURL: img.fullURL, destName: img.filename,
-                                           category: a.category, date: date, place: place, caption: img.caption))
+                                           category: a.category, date: img.dateAdded ?? albumDate,
+                                           place: place, caption: img.caption))
                 }
                 addNext()
             }
@@ -351,7 +354,7 @@ enum AccessKardashian {
 
     struct Category: Sendable { let id: Int; let title: String }
     struct Album: Sendable { let id: Int; let title: String }
-    struct Image: Sendable { let fullURL: URL; let filename: String; let caption: String? }
+    struct Image: Sendable { let fullURL: URL; let filename: String; let caption: String?; let dateAdded: Date? }
 
     /// Sub-categories + albums under a category. Coppermine paginates the album
     /// list within a category, so we read *every* album page (`&page=P`), not just
@@ -369,7 +372,10 @@ enum AccessKardashian {
         let last = min(maxPage(first), 100)
         if last > 1 {
             await withTaskGroup(of: [Album].self) { group in
-                for p in 2...last { group.addTask { parseAlbums(await fetchHTML(path(p)) ?? "") } }
+                for p in 2...last {
+                    let page = path(p)              // capture a Sendable String, not the local func
+                    group.addTask { parseAlbums(await fetchHTML(page) ?? "") }
+                }
                 for await list in group { add(list) }
             }
         }
@@ -416,8 +422,9 @@ enum AccessKardashian {
     }
 
     /// Thumbnails on an album page, by their Coppermine `thumb_` src. The full-size
-    /// path drops the `thumb_` prefix; the caption is taken from the `<img>`'s
-    /// `title`/`alt` when it's descriptive (not just the filename) — best-effort.
+    /// path drops the `thumb_` prefix. The `<img>`'s `title`/`alt` holds Coppermine's
+    /// info tooltip ("Filename=… Filesize=… Date added=DD.MM.YY"), from which we pull
+    /// the per-image date; a genuinely descriptive title is kept as the caption.
     nonisolated private static func parseImages(_ html: String) -> [Image] {
         var out: [Image] = []; var seen = Set<String>()
         for g in matches(html, "<img[^>]+src=\"([^\"]*thumb_[^\"]+\\.(?:jpe?g|png|gif))\"[^>]*>") {
@@ -426,23 +433,50 @@ enum AccessKardashian {
             guard let fullURL = absolute(fullImagePath(from: thumbPath)),
                   seen.insert(fullURL.absoluteString).inserted else { continue }
             let filename = fullURL.lastPathComponent
-            var caption: String?
+            var caption: String?; var dateAdded: Date?
             for attr in ["title", "alt"] {
-                if let m = matches(tag, "\(attr)=\"([^\"]*)\"").first {
-                    let text = decode(m[1])
-                    if isUsefulCaption(text, filename: filename) { caption = text; break }
-                }
+                guard let m = matches(tag, "\(attr)=\"([^\"]*)\"").first else { continue }
+                let text = decode(m[1])
+                if dateAdded == nil { dateAdded = parseDateAdded(text) }
+                if caption == nil, isUsefulCaption(text, filename: filename) { caption = text }
             }
-            out.append(Image(fullURL: fullURL, filename: filename, caption: caption))
+            out.append(Image(fullURL: fullURL, filename: filename, caption: caption, dateAdded: dateAdded))
         }
         return out
     }
 
-    /// A caption is useful only if it's prose — not the filename, a bare number, or
-    /// Coppermine's default "image NNN" alt text.
+    /// Coppermine's per-image "Date added=DD.MM.YY" (Brazilian day-first), used as
+    /// the capture date when the file carries none. Swaps to mm/dd only when the
+    /// first field can't be a day.
+    nonisolated private static func parseDateAdded(_ text: String) -> Date? {
+        // Prefer the labeled field; fall back to a bare DD.MM.YY (covers a
+        // Portuguese-labeled tooltip — "Dimensions=1080x1440" can't match, no dots).
+        let g = matches(text, "date\\s*added\\s*[=:]?\\s*([0-9]{1,2})[./-]([0-9]{1,2})[./-]([0-9]{2,4})").first
+            ?? matches(text, "([0-9]{1,2})\\.([0-9]{1,2})\\.([0-9]{2,4})").first
+        guard let g, var day = Int(g[1]), var mon = Int(g[2]), var year = Int(g[3]) else { return nil }
+        if year < 100 { year += 2000 }
+        if mon > 12 && day <= 12 { swap(&day, &mon) }
+        guard (1...12).contains(mon), (1...31).contains(day), (1990...2100).contains(year) else { return nil }
+        var c = DateComponents(); c.year = year; c.month = mon; c.day = day; c.hour = 12
+        return Calendar(identifier: .gregorian).date(from: c)
+    }
+
+    /// Whether a stored string is Coppermine's file-info tooltip ("Filename=… Date
+    /// added=…") — wrongly saved as a caption by an earlier version, so a re-run can
+    /// clear it.
+    nonisolated static func isInfoBlock(_ s: String) -> Bool {
+        let l = s.lowercased()
+        return ["filename=", "filesize=", "dimensions=", "date added"].contains { l.contains($0) }
+    }
+
+    /// A caption is useful only if it's prose — not Coppermine's file-info tooltip,
+    /// the filename, a bare number, or the default "image NNN" alt text.
     nonisolated private static func isUsefulCaption(_ text: String, filename: String) -> Bool {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard t.count >= 4 else { return false }
+        let lower = t.lowercased()
+        // The info tooltip ("Filename=… Filesize=… Dimensions=… Date added=…") is metadata, not a caption.
+        if ["filename=", "filesize=", "dimensions=", "date added"].contains(where: { lower.contains($0) }) { return false }
         let base = (filename as NSString).deletingPathExtension
         if t.caseInsensitiveCompare(filename) == .orderedSame || t.caseInsensitiveCompare(base) == .orderedSame { return false }
         if Double(t) != nil { return false }
