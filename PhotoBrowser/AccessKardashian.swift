@@ -218,7 +218,7 @@ enum AccessKardashian {
         var head = 0
         while head < queue.count {
             let node = queue[head]; head += 1
-            guard visited.insert(node.cat).inserted, node.depth < 5 else { continue }
+            guard visited.insert(node.cat).inserted, node.depth < 6 else { continue }
             let r = await browse(category: node.cat)
 
             for a in r.albums where seenAlbums.insert(a.id).inserted {
@@ -353,10 +353,27 @@ enum AccessKardashian {
     struct Album: Sendable { let id: Int; let title: String }
     struct Image: Sendable { let fullURL: URL; let filename: String; let caption: String? }
 
+    /// Sub-categories + albums under a category. Coppermine paginates the album
+    /// list within a category, so we read *every* album page (`&page=P`), not just
+    /// the first — otherwise large galleries lose all but their first ~20 albums.
     nonisolated private static func browse(category cat: Int?) async -> (categories: [Category], albums: [Album]) {
-        let path = cat.map { "index.php?cat=\($0)" } ?? "index.php"
-        guard let html = await fetchHTML(path) else { return ([], []) }
-        return (parseCategories(html, excluding: cat), parseAlbums(html))
+        func path(_ p: Int) -> String {
+            if let cat { return "index.php?cat=\(cat)&page=\(p)" }
+            return "index.php?page=\(p)"
+        }
+        guard let first = await fetchHTML(path(1)) else { return ([], []) }
+        let cats = parseCategories(first, excluding: cat)
+        var byID: [Int: Album] = [:]; var order: [Int] = []
+        func add(_ list: [Album]) { for a in list where byID[a.id] == nil { byID[a.id] = a; order.append(a.id) } }
+        add(parseAlbums(first))
+        let last = min(maxPage(first), 100)
+        if last > 1 {
+            await withTaskGroup(of: [Album].self) { group in
+                for p in 2...last { group.addTask { parseAlbums(await fetchHTML(path(p)) ?? "") } }
+                for await list in group { add(list) }
+            }
+        }
+        return (cats, order.compactMap { byID[$0] })
     }
 
     /// Every image in an album across all Coppermine pages (page 1 sets the count).
@@ -448,17 +465,38 @@ enum AccessKardashian {
 
     // MARK: - Download + metadata
 
-    nonisolated private static func downloadImage(_ url: URL, to dest: URL, date: Date?, coord: Coord?) async -> Bool {
+    /// Download the original bytes, retrying transient failures (the gallery
+    /// throttles under load, which surfaced as a high failure rate with no retry).
+    /// If the full-size original genuinely can't be fetched, fall back to the
+    /// `normal_` (resized) version so the photo isn't lost entirely.
+    nonisolated private static func downloadImage(_ fullURL: URL, to dest: URL, date: Date?, coord: Coord?) async -> Bool {
+        let filename = fullURL.lastPathComponent
+        let normalURL = fullURL.deletingLastPathComponent().appendingPathComponent("normal_" + filename)
+        for url in [fullURL, normalURL] {
+            for attempt in 0..<3 {
+                if let data = await fetchImageData(url) {
+                    try? FileManager.default.removeItem(at: dest)          // overwrite / re-run safety
+                    if (try? data.write(to: dest, options: .atomic)) != nil {
+                        applyDateAndPlace(to: dest, albumDate: date, coord: coord)
+                        return true
+                    }
+                }
+                try? await Task.sleep(nanoseconds: UInt64(250_000_000) << attempt)   // 0.25s, 0.5s, 1s
+            }
+        }
+        return false
+    }
+
+    /// Fetch image bytes, rejecting non-2xx responses and tiny bodies (HTML error
+    /// pages the gallery returns instead of a 404).
+    nonisolated private static func fetchImageData(_ url: URL) async -> Data? {
         var req = URLRequest(url: url)
         req.setValue(host, forHTTPHeaderField: "Referer")
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 90
-        guard let (tmp, resp) = try? await session.download(for: req),
-              (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true else { return false }
-        try? FileManager.default.removeItem(at: dest)                 // overwrite mode / re-run safety
-        guard (try? FileManager.default.moveItem(at: tmp, to: dest)) != nil else { return false }
-        applyDateAndPlace(to: dest, albumDate: date, coord: coord)
-        return true
+        guard let (data, resp) = try? await session.data(for: req) else { return nil }
+        if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return nil }
+        return data.count >= 512 ? data : nil
     }
 
     /// Preserve the photo's own EXIF where it exists; only fill gaps from the album.
