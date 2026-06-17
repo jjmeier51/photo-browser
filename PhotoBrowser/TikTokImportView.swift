@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import Observation
 
 /// "Download TikTok Profile": opens the profile in a real in-app web view (so
 /// TikTok's lazy-loaded video grid actually populates and any login/captcha can be
@@ -13,7 +14,7 @@ struct TikTokImportView: View {
     let targetFolder: URL
     let onFinished: () -> Void
 
-    @StateObject private var scraper = TikTokScraper()
+    @State private var scraper = TikTokScraper()
     @State private var handle = ""
     @State private var opened = false
     @State private var running = false
@@ -125,10 +126,11 @@ private struct WebViewHolder: UIViewRepresentable {
 }
 
 /// Owns a visible WKWebView and drives the auto-scroll harvest of `/video/` links.
+@Observable
 @MainActor
-final class TikTokScraper: ObservableObject {
-    let webView: WKWebView
-    @Published var status = ""
+final class TikTokScraper {
+    @ObservationIgnored let webView: WKWebView
+    var status = ""
 
     init() {
         let cfg = WKWebViewConfiguration()
