@@ -35,16 +35,17 @@ enum AccessKardashian {
         var id: String { name }
     }
 
-    /// The four members the user asked for (no Khloé, no Kris). Kendall's gallery id
-    /// (cat=6) is known; the others are discovered by name at run time.
+    /// The four members the user asked for (no Khloé, no Kris). Gallery category ids
+    /// are verified against the live site (Kim=4, Kourtney=5, Kendall=6, Kylie=7),
+    /// so no name discovery is needed.
     nonisolated static let members: [Member] = [
-        Member(name: "Kim Kardashian", token: "kim", knownCat: nil,
+        Member(name: "Kim Kardashian", token: "kim", knownCat: 4,
                birthday: DateComponents(year: 1980, month: 10, day: 21)),
-        Member(name: "Kourtney Kardashian", token: "kourtney", knownCat: nil,
+        Member(name: "Kourtney Kardashian", token: "kourtney", knownCat: 5,
                birthday: DateComponents(year: 1979, month: 4, day: 18)),
         Member(name: "Kendall Jenner", token: "kendall", knownCat: 6,
                birthday: DateComponents(year: 1995, month: 11, day: 3)),
-        Member(name: "Kylie Jenner", token: "kylie", knownCat: nil,
+        Member(name: "Kylie Jenner", token: "kylie", knownCat: 7,
                birthday: DateComponents(year: 1997, month: 8, day: 10)),
     ]
 
