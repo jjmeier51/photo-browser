@@ -160,9 +160,10 @@ struct InstagramImportView: View {
             }
 
             // Apply the app-side metadata: captions, "posted by", folder cover, and
-            // the tracking record.
-            for (path, caption) in r.captions { library.setCaption(caption, for: URL(fileURLWithPath: path)) }
-            for (path, handle) in r.postedBy { library.setPostedBy(handle, for: URL(fileURLWithPath: path)) }
+            // the tracking record. Batched so they persist once (per-item writes were
+            // O(n²) and hung the app at the end of a large profile download).
+            library.setCaptions(r.captions)
+            library.setPostedBy(r.postedBy)
             if let picData = r.profilePic, let img = UIImage(data: picData) { library.setCover(img, for: dest) }
             // Highlights become bubbles inside the folder, thumbnailed by their first item.
             for path in r.highlightFolders {

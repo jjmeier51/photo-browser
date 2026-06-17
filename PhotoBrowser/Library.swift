@@ -211,6 +211,14 @@ final class Library {
         UserDefaults.standard.set(captions, forKey: "photoBrowser.captions")
     }
 
+    /// Batch caption set (persists once) — avoids O(n²) UserDefaults writes when a
+    /// bulk import applies hundreds of captions at once.
+    func setCaptions(_ map: [String: String]) {
+        guard !map.isEmpty else { return }
+        for (k, v) in map { captions[k] = v.trimmingCharacters(in: .whitespacesAndNewlines) }
+        UserDefaults.standard.set(captions, forKey: "photoBrowser.captions")
+    }
+
     /// Reads existing captions embedded in the files (pull-in), bounded concurrency.
     nonisolated func fileCaptions(for entries: [Entry]) async -> [URL: String] {
         let files = entries.filter { !$0.isFolder }
@@ -398,6 +406,12 @@ final class Library {
     func postedBy(for url: URL) -> String? { igPostedBy[url.path] }
     func setPostedBy(_ handle: String, for url: URL) {
         igPostedBy[url.path] = handle
+        UserDefaults.standard.set(igPostedBy, forKey: "photoBrowser.igPostedBy")
+    }
+    /// Batch "posted by" set (persists once) — avoids O(n²) writes on bulk imports.
+    func setPostedBy(_ map: [String: String]) {
+        guard !map.isEmpty else { return }
+        for (k, v) in map { igPostedBy[k] = v }
         UserDefaults.standard.set(igPostedBy, forKey: "photoBrowser.igPostedBy")
     }
 
