@@ -2,10 +2,15 @@ import SwiftUI
 import AVFoundation
 import UIKit
 
+/// A clean-up swipe decision, shared by the view and its flash overlay.
+private enum CleanupDecision { case delete, keep, favorite }
+
 /// "Tinder"-style clean-up for a folder: one card at a time — swipe left to
-/// delete (red flash, no extra confirmation; the risk is understood), swipe up to
-/// keep (green flash). Each decided item is remembered per folder, so the queue on
-/// (re-)open is "viewable items not yet reviewed" — it resumes correctly every run.
+/// delete (red flash), swipe up to keep (green flash), swipe down to favorite
+/// (pink flash); no extra confirmation, the risk is understood. Each decided item
+/// is remembered per folder, so the queue on (re-)open is "viewable items not yet
+/// reviewed" — it resumes correctly every run. Videos auto-play and can be
+/// scrubbed, and the current item can be moved or copied to another folder.
 ///
 /// `randomized` presents the same items in a shuffled order (the "Randomized Clean
 /// Up" entry point) rather than the caller's order; it shares the same per-folder
@@ -17,12 +22,15 @@ struct FrameCleanupView: View {
     let randomized: Bool
 
     @State private var items: [Entry]              // live list (deleted items removed)
-    @State private var reviewed: Set<String> = []  // paths decided this session (kept or deleted)
+    @State private var reviewed: Set<String> = []  // paths decided this session (kept/deleted/favorited)
     @State private var loaded = false
     @State private var drag = CGSize.zero
     @State private var cardToken = 0
     @State private var flash: Flash?
     @State private var busy = false
+    @State private var player: CleanupPlayer?      // shared player for the current video (scrubbable)
+    @State private var showMovePicker = false
+    @State private var showCopyPicker = false
 
     private let threshold: CGFloat = 90
 
@@ -32,7 +40,7 @@ struct FrameCleanupView: View {
         _items = State(initialValue: randomized ? items.shuffled() : items)
     }
 
-    private struct Flash: Identifiable { let id = UUID(); let delete: Bool }
+    private struct Flash: Identifiable { let id = UUID(); let decision: CleanupDecision }
     /// Items still awaiting a decision, in order.
     private var pending: [Entry] { items.filter { !reviewed.contains($0.url.path) } }
     private var current: Entry? { pending.first }
@@ -40,9 +48,11 @@ struct FrameCleanupView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Color.black.ignoresSafeArea()
+                LinearGradient(colors: [Color(red: 0.12, green: 0.05, blue: 0.0), Color(red: 0.58, green: 0.24, blue: 0.0)],
+                               startPoint: .top, endPoint: .bottom)
+                    .ignoresSafeArea()
                 content
-                if let flash { CleanupFlash(delete: flash.delete).id(flash.id) }
+                if let flash { CleanupFlash(decision: flash.decision).id(flash.id) }
             }
             .navigationTitle(randomized ? "Randomized Clean Up" : "Clean Up")
             .navigationBarTitleDisplayMode(.inline)
@@ -50,10 +60,22 @@ struct FrameCleanupView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     if current != nil {
                         Text("\(items.count - pending.count + 1) / \(items.count)")
-                            .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+                            .font(.subheadline.monospacedDigit()).foregroundStyle(.white.opacity(0.85))
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    if current != nil {
+                        Button { showMovePicker = true } label: { Image(systemName: "folder") }
+                        Button { showCopyPicker = true } label: { Image(systemName: "doc.on.doc") }
+                    }
+                    Button("Done") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showMovePicker) {
+                FolderPicker(root: library.rootURL ?? folder) { dest in moveCurrent(to: dest) }
+            }
+            .sheet(isPresented: $showCopyPicker) {
+                FolderPicker(root: library.rootURL ?? folder, confirmTitle: "Copy Here") { dest in copyCurrent(to: dest) }
             }
         }
         .preferredColorScheme(.dark)
@@ -61,6 +83,11 @@ struct FrameCleanupView: View {
             guard !loaded else { return }
             reviewed = library.reviewedInCleanup(folder)   // resume: skip already-decided items
             loaded = true
+        }
+        // Set up / tear down the scrubbable player as the current video changes.
+        .task(id: current?.url.path ?? "·") {
+            player?.stop(); player = nil
+            if let c = current, c.kind == .video { player = CleanupPlayer(url: c.url) }
         }
     }
 
@@ -72,6 +99,7 @@ struct FrameCleanupView: View {
         } else {
             VStack(spacing: 0) {
                 card
+                scrubber
                 controls
             }
         }
@@ -87,6 +115,7 @@ struct FrameCleanupView: View {
             }
             RoundedRectangle(cornerRadius: 20).fill(.red).opacity(deleteProgress * 0.35)
             RoundedRectangle(cornerRadius: 20).fill(.green).opacity(keepProgress * 0.35)
+            RoundedRectangle(cornerRadius: 20).fill(.pink).opacity(favoriteProgress * 0.35)
         }
         .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(.white.opacity(0.12)))
         .overlay(alignment: .topLeading) {
@@ -94,6 +123,9 @@ struct FrameCleanupView: View {
         }
         .overlay(alignment: .top) {
             stamp("KEEP", icon: "checkmark", color: .green).opacity(keepProgress).padding(.top, 26)
+        }
+        .overlay(alignment: .bottom) {
+            stamp("FAVORITE", icon: "heart.fill", color: .pink).opacity(favoriteProgress).padding(.bottom, 26)
         }
         .padding(.horizontal, 8).padding(.vertical, 4)
         .offset(drag)
@@ -104,16 +136,40 @@ struct FrameCleanupView: View {
                 .onChanged { drag = $0.translation }
                 .onEnded { v in
                     let t = v.translation
-                    if t.height < -threshold && abs(t.height) >= abs(t.width) { commit(delete: false) }
-                    else if t.width < -threshold { commit(delete: true) }
+                    if t.height < -threshold && abs(t.height) >= abs(t.width) { commit(.keep) }
+                    else if t.height > threshold && abs(t.height) >= abs(t.width) { commit(.favorite) }
+                    else if t.width < -threshold { commit(.delete) }
                     else { withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { drag = .zero } }
                 }
         )
     }
 
     @ViewBuilder private func mediaView(_ entry: Entry) -> some View {
-        if entry.kind == .video { CleanupVideo(url: entry.url) }
-        else { CleanupPhoto(url: entry.url) }
+        if entry.kind == .video {
+            if let player { CleanupVideoLayer(player: player.player) }
+            else { Color.black }
+        } else { CleanupPhoto(url: entry.url) }
+    }
+
+    /// Scrubber for the current video (auto-playing); seeks as it's dragged. Sits
+    /// below the card so it never conflicts with the card's swipe gestures.
+    @ViewBuilder private var scrubber: some View {
+        if current?.kind == .video, let player, player.duration > 0 {
+            HStack(spacing: 8) {
+                Text(timecode(player.current)).font(.caption2.monospacedDigit()).foregroundStyle(.white.opacity(0.8))
+                Slider(value: Binding(get: { min(player.current, player.duration) },
+                                      set: { player.seek(to: $0) }),
+                       in: 0...player.duration)
+                    .tint(.white)
+                Text(timecode(player.duration)).font(.caption2.monospacedDigit()).foregroundStyle(.white.opacity(0.8))
+            }
+            .padding(.horizontal, 18).padding(.top, 8)
+        }
+    }
+
+    private func timecode(_ s: Double) -> String {
+        guard s.isFinite, s >= 0 else { return "0:00" }
+        let t = Int(s.rounded()); return String(format: "%d:%02d", t / 60, t % 60)
     }
 
     private func stamp(_ text: String, icon: String, color: Color) -> some View {
@@ -132,13 +188,18 @@ struct FrameCleanupView: View {
         guard drag.height < 0, abs(drag.height) >= abs(drag.width) else { return 0 }
         return min(1, Double(-drag.height) / Double(threshold))
     }
+    private var favoriteProgress: Double {
+        guard drag.height > 0, abs(drag.height) >= abs(drag.width) else { return 0 }
+        return min(1, Double(drag.height) / Double(threshold))
+    }
 
     // MARK: - Controls / states
 
     private var controls: some View {
-        HStack(spacing: 44) {
-            circleButton("trash.fill", .red) { commit(delete: true) }
-            circleButton("checkmark", .green) { commit(delete: false) }
+        HStack(spacing: 30) {
+            circleButton("trash.fill", .red) { commit(.delete) }
+            circleButton("heart.fill", .pink) { commit(.favorite) }
+            circleButton("checkmark", .green) { commit(.keep) }
         }
         .padding(.top, 10).padding(.bottom, 14)
     }
@@ -146,7 +207,7 @@ struct FrameCleanupView: View {
     private func circleButton(_ icon: String, _ color: Color, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon).font(.title.weight(.bold)).foregroundStyle(color)
-                .frame(width: 66, height: 66)
+                .frame(width: 62, height: 62)
                 .background(.ultraThinMaterial, in: Circle())
                 .overlay(Circle().strokeBorder(color.opacity(0.5), lineWidth: 1.5))
         }
@@ -157,7 +218,7 @@ struct FrameCleanupView: View {
             Image(systemName: "checkmark.circle.fill").font(.system(size: 76)).foregroundStyle(.green)
             Text("All cleaned up!").font(.title2.weight(.bold))
             Text("\(items.count) \(items.count == 1 ? "item" : "items") kept.")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.white.opacity(0.85))
             Button { startOver() } label: { Label("Review Again", systemImage: "arrow.counterclockwise") }
                 .buttonStyle(.bordered).tint(.white).padding(.top, 6)
         }
@@ -166,35 +227,49 @@ struct FrameCleanupView: View {
 
     private func message(_ text: String, icon: String) -> some View {
         VStack(spacing: 12) {
-            Image(systemName: icon).font(.system(size: 60)).foregroundStyle(.secondary)
-            Text(text).font(.headline).foregroundStyle(.secondary)
+            Image(systemName: icon).font(.system(size: 60)).foregroundStyle(.white.opacity(0.8))
+            Text(text).font(.headline).foregroundStyle(.white.opacity(0.85))
         }
     }
 
     // MARK: - Actions
 
-    private func commit(delete: Bool) {
+    private func commit(_ decision: CleanupDecision) {
         guard !busy, current != nil else { return }   // ignore a second swipe mid-animation
         busy = true
-        flash = Flash(delete: delete)
-        UIImpactFeedbackGenerator(style: delete ? .rigid : .soft).impactOccurred()
+        flash = Flash(decision: decision)
+        UIImpactFeedbackGenerator(style: decision == .delete ? .rigid : .soft).impactOccurred()
         withAnimation(.easeIn(duration: 0.16)) {
-            drag = delete ? CGSize(width: -900, height: drag.height)
-                          : CGSize(width: drag.width, height: -1100)
+            switch decision {
+            case .delete:   drag = CGSize(width: -900, height: drag.height)
+            case .keep:     drag = CGSize(width: drag.width, height: -1100)
+            case .favorite: drag = CGSize(width: drag.width, height: 1100)
+            }
         }
         Task {
             try? await Task.sleep(nanoseconds: 160_000_000)
-            if delete { performDelete() } else { performKeep() }
+            switch decision {
+            case .delete:   performDelete()
+            case .keep:     performKeep()
+            case .favorite: performFavorite()
+            }
             drag = .zero
             cardToken += 1                 // fresh, centered card for the next item
             busy = false
             try? await Task.sleep(nanoseconds: 300_000_000)
-            if flash?.delete == delete { flash = nil }
+            if flash?.decision == decision { flash = nil }
         }
     }
 
     private func performKeep() {
         guard let item = current else { return }
+        reviewed.insert(item.url.path)
+        library.markCleanupReviewed(item.url, in: folder)
+    }
+
+    private func performFavorite() {
+        guard let item = current else { return }
+        if !library.isFavorite(item.url) { library.toggleFavorite(item.url) }   // keep + favorite
         reviewed.insert(item.url.path)
         library.markCleanupReviewed(item.url, in: folder)
     }
@@ -207,6 +282,26 @@ struct FrameCleanupView: View {
         items.removeAll { $0.url == item.url }    // gone from disk
     }
 
+    /// Moves the current item to another folder (re-keying its labels) and advances.
+    private func moveCurrent(to dest: URL) {
+        guard let item = current else { return }
+        let outcome = FileActions.move([item.url], to: dest, renameOnCollision: true)
+        guard !outcome.moved.isEmpty else { return }
+        for (from, to) in outcome.moved { library.itemMoved(from: from, to: to) }
+        items.removeAll { $0.url == item.url }    // left this folder
+        library.contentDidChange()
+        cardToken += 1
+    }
+
+    /// Copies the current item to another folder (fresh file, no labels); the item
+    /// stays in the queue.
+    private func copyCurrent(to dest: URL) {
+        guard let item = current else { return }
+        _ = FileActions.copy([item.url], to: dest)
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        library.contentDidChange()
+    }
+
     private func startOver() {
         library.resetCleanup(folder)
         reviewed = []                             // re-review what's left (deleted items stay gone)
@@ -214,15 +309,64 @@ struct FrameCleanupView: View {
     }
 }
 
-/// Brief full-screen tint + label confirming the swipe (red = deleted, green = kept).
+/// A scrubbable, looping, auto-playing player shared between the card (display) and
+/// the scrubber (control) for the current video.
+@Observable @MainActor
+final class CleanupPlayer {
+    @ObservationIgnored let player: AVQueuePlayer
+    @ObservationIgnored private var looper: AVPlayerLooper?
+    @ObservationIgnored private var observer: Any?
+    var current: Double = 0
+    var duration: Double = 0
+
+    init(url: URL) {
+        let item = AVPlayerItem(url: url)
+        let p = AVQueuePlayer()
+        looper = AVPlayerLooper(player: p, templateItem: item)
+        p.isMuted = true
+        player = p
+        observer = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main) { [weak self] t in
+            guard let self else { return }
+            current = t.seconds.isFinite ? t.seconds : 0
+            if duration == 0, let d = p.currentItem?.duration.seconds, d.isFinite, d > 0 { duration = d }
+        }
+        p.play()
+    }
+
+    func seek(to seconds: Double) {
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    func stop() {
+        if let observer { player.removeTimeObserver(observer); self.observer = nil }
+        player.pause()
+    }
+}
+
+/// Renders an existing (externally-owned) AVPlayer.
+private struct CleanupVideoLayer: UIViewRepresentable {
+    let player: AVQueuePlayer
+    func makeUIView(context: Context) -> PlayerLayerView {
+        let v = PlayerLayerView(); v.playerLayer.player = player; v.playerLayer.videoGravity = .resizeAspect; return v
+    }
+    func updateUIView(_ v: PlayerLayerView, context: Context) {
+        if v.playerLayer.player !== player { v.playerLayer.player = player }
+    }
+    final class PlayerLayerView: UIView {
+        override class var layerClass: AnyClass { AVPlayerLayer.self }
+        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+    }
+}
+
+/// Brief full-screen tint + label confirming the swipe.
 private struct CleanupFlash: View {
-    let delete: Bool
+    let decision: CleanupDecision
     @State private var faded = false
 
     var body: some View {
         ZStack {
-            (delete ? Color.red : Color.green).opacity(faded ? 0 : 0.4)
-            Label(delete ? "Deleted" : "Kept", systemImage: delete ? "trash.fill" : "checkmark.circle.fill")
+            color.opacity(faded ? 0 : 0.4)
+            Label(text, systemImage: icon)
                 .font(.title.weight(.bold)).foregroundStyle(.white)
                 .shadow(color: .black.opacity(0.5), radius: 5)
                 .scaleEffect(faded ? 1.2 : 1).opacity(faded ? 0 : 1)
@@ -230,6 +374,10 @@ private struct CleanupFlash: View {
         .ignoresSafeArea().allowsHitTesting(false)
         .onAppear { withAnimation(.easeOut(duration: 0.4)) { faded = true } }
     }
+
+    private var color: Color { decision == .delete ? .red : decision == .favorite ? .pink : .green }
+    private var icon: String { decision == .delete ? "trash.fill" : decision == .favorite ? "heart.fill" : "checkmark.circle.fill" }
+    private var text: String { decision == .delete ? "Deleted" : decision == .favorite ? "Favorited" : "Kept" }
 }
 
 /// Async photo for a clean-up card: a fast preview, then the full image.
@@ -246,35 +394,5 @@ private struct CleanupPhoto: View {
             if let preview = await ZoomableImageView.decode(url: url, maxPixel: 1200, fullQuality: false) { image = preview }
             if let full = await ZoomableImageView.decode(url: url, maxPixel: 2400, fullQuality: true) { image = full }
         }
-    }
-}
-
-/// Looping, muted, auto-playing video preview for a clean-up card.
-private struct CleanupVideo: UIViewRepresentable {
-    let url: URL
-
-    func makeUIView(context: Context) -> LoopView { let v = LoopView(); v.load(url); return v }
-    func updateUIView(_ v: LoopView, context: Context) { if v.url != url { v.load(url) } }
-    static func dismantleUIView(_ v: LoopView, coordinator: ()) { v.stop() }
-
-    final class LoopView: UIView {
-        override class var layerClass: AnyClass { AVPlayerLayer.self }
-        private(set) var url: URL?
-        private var player: AVQueuePlayer?
-        private var looper: AVPlayerLooper?
-        private var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
-
-        func load(_ url: URL) {
-            self.url = url
-            let p = AVQueuePlayer()
-            looper = AVPlayerLooper(player: p, templateItem: AVPlayerItem(url: url))
-            p.isMuted = true
-            playerLayer.player = p
-            playerLayer.videoGravity = .resizeAspect
-            player = p
-            p.play()
-        }
-
-        func stop() { player?.pause() }
     }
 }
