@@ -1,22 +1,35 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// The app-wide orange gradient background (used behind the browsing surfaces).
+struct AppGradient: View {
+    var body: some View {
+        LinearGradient(colors: [Color(red: 0.12, green: 0.05, blue: 0.0),
+                                Color(red: 0.58, green: 0.24, blue: 0.0)],
+                       startPoint: .top, endPoint: .bottom)
+            .ignoresSafeArea()
+    }
+}
+
 struct ContentView: View {
     @Environment(Library.self) private var library
 
     var body: some View {
         @Bindable var library = library
-        NavigationStack(path: $library.path) {
-            Group {
-                if let root = library.rootURL {
-                    FolderView(url: root, isRoot: true)
-                        .id(root)            // reload when the root folder changes
-                } else {
-                    EmptyState()
+        ZStack {
+            AppGradient()
+            NavigationStack(path: $library.path) {
+                Group {
+                    if let root = library.rootURL {
+                        FolderView(url: root, isRoot: true)
+                            .id(root)            // reload when the root folder changes
+                    } else {
+                        EmptyState()
+                    }
                 }
-            }
-            .navigationDestination(for: URL.self) { url in
-                FolderView(url: url, isRoot: false)
+                .navigationDestination(for: URL.self) { url in
+                    FolderView(url: url, isRoot: false)
+                }
             }
         }
     }
@@ -53,6 +66,7 @@ struct EmptyState: View {
             .buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppGradient())
         .navigationTitle("Photo Browser")
         .navigationBarTitleDisplayMode(.inline)
         .fileImporter(isPresented: $showImporter,

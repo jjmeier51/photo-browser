@@ -941,6 +941,7 @@ struct FolderView: View {
             if !entries.isEmpty { filterBar }
             grid
         }
+        .background(AppGradient())
         .navigationTitle(isRoot ? "Home" : url.lastPathComponent)
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $query, prompt: "Search folder + subfolders")

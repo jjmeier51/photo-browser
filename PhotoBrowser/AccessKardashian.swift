@@ -95,7 +95,7 @@ enum AccessKardashian {
     /// write + eviction churn per image). Both together speed downloads up several-fold.
     nonisolated static let downloadSession: URLSession = {
         let cfg = URLSessionConfiguration.default
-        cfg.httpMaximumConnectionsPerHost = 32
+        cfg.httpMaximumConnectionsPerHost = 22
         cfg.timeoutIntervalForRequest = 60
         cfg.urlCache = nil
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -162,7 +162,7 @@ enum AccessKardashian {
 
         await withTaskGroup(of: (ok: Bool, skipped: Bool, path: String?, category: String, caption: String?).self) { group in
             var idx = 0
-            let maxConcurrent = 32              // wide fan-out — downloads are the bottleneck
+            let maxConcurrent = 22              // matched to the connection pool (higher throttled)
             func addNext() {
                 guard idx < plan.count, !isCancelled() else { return }
                 let p = plan[idx]; idx += 1

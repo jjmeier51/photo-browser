@@ -32,6 +32,7 @@ struct LibraryView: View {
                 }
                 .padding(4)
             }
+            .background(AppGradient())
             .navigationTitle("Library")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
