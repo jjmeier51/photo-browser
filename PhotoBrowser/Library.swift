@@ -400,6 +400,16 @@ final class Library {
         UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
     }
 
+    /// User-chosen order of the highlight bubbles within a folder (parent path →
+    /// ordered child bubble paths). The Instagram bubble is always pinned first by
+    /// the view regardless of this order; everything else follows it.
+    var bubbleOrders: [String: [String]] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.bubbleOrder") as? [String: [String]]) ?? [:]
+    func bubbleOrder(for parent: URL) -> [String] { bubbleOrders[parent.path] ?? [] }
+    func setBubbleOrder(_ paths: [String], for parent: URL) {
+        bubbleOrders[parent.path] = paths
+        UserDefaults.standard.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
+    }
+
     /// File path → posting Instagram handle ("Posted by"); presence also marks the
     /// item as coming from Instagram.
     var igPostedBy: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.igPostedBy") as? [String: String]) ?? [:]
@@ -603,6 +613,9 @@ final class Library {
 
         kardashianFolders = remapPaths(kardashianFolders, old: old, new: new)
         UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
+        func remap(_ p: String) -> String { (p == old || p.hasPrefix(old + "/")) ? new + p.dropFirst(old.count) : p }
+        bubbleOrders = Dictionary(uniqueKeysWithValues: bubbleOrders.map { (remap($0.key), $0.value.map(remap)) })
+        UserDefaults.standard.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
         var akChanged = false
         for (name, var state) in accessKardashian where state.folderPath == old || state.folderPath.hasPrefix(old + "/") {
             state.folderPath = new + state.folderPath.dropFirst(old.count)

@@ -76,6 +76,8 @@ struct FolderView: View {
     @State private var showDuplicates = false
     @State private var showCleanup = false
     @State private var showRandomCleanup = false
+    @State private var bubbleItems: [Entry] = []       // live order while dragging highlight bubbles
+    @State private var draggingBubble: Entry?
     @State private var showInstagram = false
     @State private var igForceFull = false
     @State private var showTikTok = false
@@ -1071,10 +1073,15 @@ struct FolderView: View {
         library.isInstagramFolder(url) || library.isInstagramHighlight(url) || library.isAlbumHighlight(url)
     }
     private var igBubbles: [Entry] {
-        entries.filter { $0.isFolder && isBubbleFolder($0.url) }
+        let order = library.bubbleOrder(for: url)
+        return entries.filter { $0.isFolder && isBubbleFolder($0.url) }
             .sorted { a, b in
                 let ai = library.isInstagramFolder(a.url), bi = library.isInstagramFolder(b.url)
                 if ai != bi { return ai }      // the Instagram folder is always listed first
+                // Then the user's chosen order (drag to rearrange); unordered ones last, A–Z.
+                let ia = order.firstIndex(of: a.url.path) ?? Int.max
+                let ib = order.firstIndex(of: b.url.path) ?? Int.max
+                if ia != ib { return ia < ib }
                 return a.name.localizedStandardCompare(b.name) == .orderedAscending
             }
     }
@@ -1085,13 +1092,33 @@ struct FolderView: View {
     private var instagramBubbleRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(alignment: .top, spacing: 14) {
-                ForEach(igBubbles) { entry in
-                    Button { tap(entry) } label: { bubble(entry) }      // select-aware (toggle vs open)
-                        .buttonStyle(.plain)
-                        .contextMenu { if !selecting { contextMenu(for: entry) } }
+                ForEach(bubbleItems.isEmpty ? igBubbles : bubbleItems) { entry in
+                    bubbleCell(entry)
                 }
             }
             .padding(.horizontal, 14).padding(.vertical, 8)
+        }
+        // Keep the live drag list in sync with the persisted order (and any
+        // added/removed bubbles), except mid-drag.
+        .task(id: igBubbles.map(\.url)) { bubbleItems = igBubbles }
+    }
+
+    /// One highlight bubble. Long-press initiates a drag to rearrange (the Instagram
+    /// bubble is pinned first, so it isn't draggable and can't be displaced).
+    @ViewBuilder private func bubbleCell(_ entry: Entry) -> some View {
+        let button = Button { tap(entry) } label: { bubble(entry) }      // select-aware (toggle vs open)
+            .buttonStyle(.plain)
+            .contextMenu { if !selecting { contextMenu(for: entry) } }
+        if selecting || library.isInstagramFolder(entry.url) {
+            button
+        } else {
+            button
+                .opacity(draggingBubble == entry ? 0.4 : 1)
+                .onDrag { draggingBubble = entry; return NSItemProvider(object: entry.url.path as NSString) }
+                .onDrop(of: [UTType.text], delegate: BubbleDropDelegate(
+                    item: entry, items: $bubbleItems, dragging: $draggingBubble,
+                    isPinned: { library.isInstagramFolder($0) },
+                    onReorder: { library.setBubbleOrder($0.map { $0.url.path }, for: url) }))
         }
     }
 
