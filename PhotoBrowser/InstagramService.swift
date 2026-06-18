@@ -291,7 +291,8 @@ enum InstagramService {
         var result = DownloadResult()
         let total = jobs.count
         var done = 0
-        await withTaskGroup(of: (ok: Bool, isVideo: Bool, path: String, caption: String, poster: String).self) { group in
+        var succeeded = Set<String>(), failedIDs = Set<String>()
+        await withTaskGroup(of: (ok: Bool, isVideo: Bool, path: String, caption: String, poster: String, id: String).self) { group in
             var idx = 0
             let maxConcurrent = 5
             func addNext() {
@@ -306,16 +307,20 @@ enum InstagramService {
                     if r.isVideo { result.videos += 1 } else { result.photos += 1 }
                     if !r.caption.isEmpty { result.captions[r.path] = r.caption }
                     if !r.poster.isEmpty { result.postedBy[r.path] = r.poster }
-                } else { result.failed += 1 }
+                    succeeded.insert(r.id)
+                } else { result.failed += 1; failedIDs.insert(r.id) }
                 progress(Progress(phase: "Downloading", fraction: Double(done) / Double(total), done: done, total: total))
                 addNext()
             }
         }
-        result.newIDs = Array(Set(jobs.map { $0.id }))
+        // Mark a post downloaded only when *every* job for it succeeded, so anything
+        // that failed (or a carousel that partly failed) is retried on the next
+        // "Get New Posts" instead of being treated as already-done.
+        result.newIDs = Array(succeeded.subtracting(failedIDs))
         return result
     }
 
-    nonisolated private static func downloadJob(_ job: Job, replace: Bool) async -> (ok: Bool, isVideo: Bool, path: String, caption: String, poster: String) {
+    nonisolated private static func downloadJob(_ job: Job, replace: Bool) async -> (ok: Bool, isVideo: Bool, path: String, caption: String, poster: String, id: String) {
         try? FileManager.default.createDirectory(at: job.folder, withIntermediateDirectories: true)
         let ext = job.isVideo ? "mp4" : "jpg"
         // Re-download replaces the existing file in place; otherwise avoid collisions.
@@ -331,21 +336,21 @@ enum InstagramService {
                 ? await VideoTranscoder.muxTranscode(video: v, audio: a, to: dest, transcode: true, date: job.date, lat: job.lat, lng: job.lng)
                 : await mux(video: v, audio: a, to: dest, date: job.date, lat: job.lat, lng: job.lng)
             try? FileManager.default.removeItem(at: v); try? FileManager.default.removeItem(at: a)
-            if ok { setFileDate(dest, job.date); return (true, true, dest.path, job.caption, job.poster) }
+            if ok { setFileDate(dest, job.date); return (true, true, dest.path, job.caption, job.poster, job.id) }
             print("[Instagram]   ⚠️ \(job.transcode ? "transcode" : "mux") failed for \(job.name) — falling back to progressive")
             try? FileManager.default.removeItem(at: dest)
         }
 
         if job.isVideo {
             let progressive = job.fallbackURL ?? job.url
-            guard await downloadFile(progressive, to: dest) else { return (false, true, "", "", "") }
+            guard await downloadFile(progressive, to: dest) else { return (false, true, "", "", "", job.id) }
             await writeVideoMeta(date: job.date, lat: job.lat, lng: job.lng, to: dest)
         } else {
-            guard await downloadFile(job.url, to: dest) else { return (false, false, "", "", "") }
+            guard await downloadFile(job.url, to: dest) else { return (false, false, "", "", "", job.id) }
             writeImageMeta(date: job.date, lat: job.lat, lng: job.lng, caption: job.caption, poster: job.poster, to: dest)
         }
         setFileDate(dest, job.date)
-        return (true, job.isVideo, dest.path, job.caption, job.poster)
+        return (true, job.isVideo, dest.path, job.caption, job.poster, job.id)
     }
 
     nonisolated private static func downloadFile(_ urlString: String, to dest: URL) async -> Bool {
