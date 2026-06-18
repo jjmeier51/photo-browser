@@ -238,6 +238,8 @@ enum AccessKardashian {
             }
         }
         guard !albums.isEmpty else { return [] }
+        let byCat = Dictionary(grouping: albums, by: \.category).mapValues(\.count)
+        print("[AccessKardashian] \(member.name): crawled \(albums.count) albums by category \(byCat)")
 
         // Fetch each album's images concurrently and flatten into the plan.
         var planned: [Planned] = []
@@ -262,6 +264,7 @@ enum AccessKardashian {
                 addNext()
             }
         }
+        print("[AccessKardashian] \(member.name): planned \(planned.count) images from \(albums.count) albums")
         return planned
     }
 
@@ -360,9 +363,10 @@ enum AccessKardashian {
     struct Album: Sendable { let id: Int; let title: String }
     struct Image: Sendable { let fullURL: URL; let filename: String; let caption: String?; let dateAdded: Date? }
 
-    /// Sub-categories + albums under a category. Coppermine paginates the album
-    /// list within a category, so we read *every* album page (`&page=P`), not just
-    /// the first — otherwise large galleries lose all but their first ~20 albums.
+    /// Sub-categories + albums under a category. Coppermine paginates the album list
+    /// within a category; rather than trust the pager's page count (it can show a
+    /// windowed range that undercounts), we keep fetching pages until one adds no new
+    /// album — guaranteeing we see every album regardless of how the pager renders.
     nonisolated private static func browse(category cat: Int?) async -> (categories: [Category], albums: [Album]) {
         func path(_ p: Int) -> String {
             if let cat { return "index.php?cat=\(cat)&page=\(p)" }
@@ -371,40 +375,41 @@ enum AccessKardashian {
         guard let first = await fetchHTML(path(1)) else { return ([], []) }
         let cats = parseCategories(first, excluding: cat)
         var byID: [Int: Album] = [:]; var order: [Int] = []
-        func add(_ list: [Album]) { for a in list where byID[a.id] == nil { byID[a.id] = a; order.append(a.id) } }
+        @discardableResult func add(_ list: [Album]) -> Int {
+            var added = 0
+            for a in list where byID[a.id] == nil { byID[a.id] = a; order.append(a.id); added += 1 }
+            return added
+        }
         add(parseAlbums(first))
-        let last = min(maxPage(first), 100)
-        if last > 1 {
-            await withTaskGroup(of: [Album].self) { group in
-                for p in 2...last {
-                    let page = path(p)              // capture a Sendable String, not the local func
-                    group.addTask { parseAlbums(await fetchHTML(page) ?? "") }
-                }
-                for await list in group { add(list) }
-            }
+        var p = 2
+        while p <= 500 {                                // hard safety cap
+            guard let html = await fetchHTML(path(p)) else { break }     // hard failure after retries — stop
+            if add(parseAlbums(html)) == 0 { break }    // out-of-range pages repeat/empty → done
+            p += 1
         }
         return (cats, order.compactMap { byID[$0] })
     }
 
-    /// Every image in an album across all Coppermine pages (page 1 sets the count).
+    /// Every image in an album. Same "paginate until a page adds nothing new"
+    /// approach as `browse`, so a windowed thumbnail pager can't truncate a big album.
     nonisolated private static func images(inAlbum id: Int) async -> [Image] {
-        guard let first = await fetchHTML("thumbnails.php?album=\(id)&page=1") else { return [] }
-        let last = min(maxPage(first), 200)
-        var pages: [Int: [Image]] = [1: parseImages(first)]
-        if last > 1 {
-            await withTaskGroup(of: (Int, [Image]).self) { group in
-                for p in 2...last { group.addTask { (p, parseImages(await fetchHTML("thumbnails.php?album=\(id)&page=\(p)") ?? "")) } }
-                while let (p, imgs) = await group.next() { pages[p] = imgs }
-            }
-        }
         var all: [Image] = []; var seen = Set<String>()
-        for p in 1...last { for img in (pages[p] ?? []) where seen.insert(img.fullURL.absoluteString).inserted { all.append(img) } }
+        var p = 1
+        while p <= 500 {
+            guard let html = await fetchHTML("thumbnails.php?album=\(id)&page=\(p)") else { break }
+            var added = 0
+            for img in parseImages(html) where seen.insert(img.fullURL.absoluteString).inserted { all.append(img); added += 1 }
+            if added == 0 { break }
+            p += 1
+        }
         return all
     }
 
     nonisolated private static func parseCategories(_ html: String, excluding current: Int?) -> [Category] {
         var seen = Set<Int>(); var out: [Category] = []
-        for g in matches(html, "<a[^>]+href=\"index\\.php\\?cat=(\\d+)\"[^>]*>([\\s\\S]*?)</a>") {
+        // Tolerate any params/quoting after the id (e.g. `cat=12&amp;…`), so links
+        // aren't silently dropped when they carry extra query parameters.
+        for g in matches(html, "<a[^>]+href=[\"']?index\\.php\\?cat=(\\d+)[^>]*>([\\s\\S]*?)</a>") {
             guard let id = Int(g[1]), id != current, !seen.contains(id) else { continue }
             let title = decode(stripTags(g[2]))
             guard !title.isEmpty else { continue }
@@ -415,7 +420,7 @@ enum AccessKardashian {
 
     nonisolated private static func parseAlbums(_ html: String) -> [Album] {
         var titles: [Int: String] = [:]; var order: [Int] = []
-        for g in matches(html, "<a[^>]+href=\"thumbnails\\.php\\?album=(\\d+)\"[^>]*>([\\s\\S]*?)</a>") {
+        for g in matches(html, "<a[^>]+href=[\"']?thumbnails\\.php\\?album=(\\d+)[^>]*>([\\s\\S]*?)</a>") {
             guard let id = Int(g[1]) else { continue }
             let title = decode(stripTags(g[2]))
             if titles[id] == nil { order.append(id) }
@@ -493,12 +498,6 @@ enum AccessKardashian {
         if file.hasPrefix("thumb_") { file = String(file.dropFirst("thumb_".count)) }
         comps[comps.count - 1] = file
         return comps.joined(separator: "/")
-    }
-
-    nonisolated private static func maxPage(_ html: String) -> Int {
-        var maxP = 1
-        for g in matches(html, "[?&]page=(\\d+)") { if let p = Int(g[1]) { maxP = max(maxP, p) } }
-        return maxP
     }
 
     // MARK: - Download + metadata
