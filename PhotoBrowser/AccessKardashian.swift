@@ -80,12 +80,25 @@ enum AccessKardashian {
     private struct PlanCache: Codable { var plan: [Planned]; var builtAt: Double }
 
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    /// Session for HTML listing pages — cached (pages re-fetched during the crawl).
     nonisolated static let session: URLSession = {
         let cfg = URLSessionConfiguration.default
-        cfg.httpMaximumConnectionsPerHost = 16       // blazing-fast: a wide connection pool
+        cfg.httpMaximumConnectionsPerHost = 16
         cfg.timeoutIntervalForRequest = 45
         cfg.urlCache = URLCache(memoryCapacity: 64 << 20, diskCapacity: 512 << 20)
         cfg.requestCachePolicy = .returnCacheDataElseLoad
+        return URLSession(configuration: cfg)
+    }()
+
+    /// Session for image downloads — a much wider connection pool and **no URL cache**
+    /// (the bytes are written straight to disk, so caching them only added a redundant
+    /// write + eviction churn per image). Both together speed downloads up several-fold.
+    nonisolated static let downloadSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.httpMaximumConnectionsPerHost = 32
+        cfg.timeoutIntervalForRequest = 60
+        cfg.urlCache = nil
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: cfg)
     }()
 
@@ -149,7 +162,7 @@ enum AccessKardashian {
 
         await withTaskGroup(of: (ok: Bool, skipped: Bool, path: String?, category: String, caption: String?).self) { group in
             var idx = 0
-            let maxConcurrent = 14              // many images at once — speed is the goal
+            let maxConcurrent = 32              // wide fan-out — downloads are the bottleneck
             func addNext() {
                 guard idx < plan.count, !isCancelled() else { return }
                 let p = plan[idx]; idx += 1
@@ -171,7 +184,11 @@ enum AccessKardashian {
                     if let cap = r.caption, !cap.isEmpty { captions[path] = cap }
                 }
                 done += 1
-                progress(Progress(phase: "Downloading", fraction: Double(done) / Double(total), done: done, total: total))
+                // Throttle UI updates — at this fan-out a callback per image floods the
+                // main actor and slows everything down.
+                if done == total || done % 12 == 0 {
+                    progress(Progress(phase: "Downloading", fraction: Double(done) / Double(total), done: done, total: total))
+                }
                 addNext()
             }
         }
@@ -585,7 +602,7 @@ enum AccessKardashian {
         req.setValue(host, forHTTPHeaderField: "Referer")
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 90
-        guard let (data, resp) = try? await session.data(for: req) else { return nil }
+        guard let (data, resp) = try? await downloadSession.data(for: req) else { return nil }
         if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return nil }
         return data.count >= 512 ? data : nil
     }
