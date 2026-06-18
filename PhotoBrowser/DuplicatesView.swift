@@ -114,11 +114,20 @@ struct DuplicatesView: View {
         var bySizeDims: [String: [Int]] = [:]
         var byName: [String: [Int]] = [:]
         for i in media.indices {
+            let name = media[i].name
+            // Video-frame screenshots ("Frame.png", "Frame 2.png", "Frame 300.png", …)
+            // all share one video's dimensions, so size+dimensions alone would pair
+            // different frames. Keep them out of the looser name-based grouping, and
+            // only treat them as an *exact* duplicate when the name matches too.
+            let isFrame = name.localizedCaseInsensitiveContains("frame")
             if let spec = specs[media[i].url], spec.pixels > 0 {
-                bySizeDims["\(media[i].size)|\(spec.longSide)|\(spec.pixels)", default: []].append(i)
+                let key = "\(media[i].size)|\(spec.longSide)|\(spec.pixels)"
+                bySizeDims[isFrame ? "\(key)|\(name.lowercased())" : key, default: []].append(i)
             }
-            let nameKey = Self.normalizedBaseName(media[i].name)
-            if !nameKey.isEmpty { byName[nameKey, default: []].append(i) }
+            if !isFrame {
+                let nameKey = Self.normalizedBaseName(name)
+                if !nameKey.isEmpty { byName[nameKey, default: []].append(i) }
+            }
         }
 
         var result: [DuplicateGroup] = []

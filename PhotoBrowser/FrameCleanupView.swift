@@ -2,14 +2,19 @@ import SwiftUI
 import AVFoundation
 import UIKit
 
-/// "Tinder"-style clean-up for a frames folder: one card at a time — swipe left to
+/// "Tinder"-style clean-up for a folder: one card at a time — swipe left to
 /// delete (red flash, no extra confirmation; the risk is understood), swipe up to
 /// keep (green flash). Each decided item is remembered per folder, so the queue on
 /// (re-)open is "viewable items not yet reviewed" — it resumes correctly every run.
+///
+/// `randomized` presents the same items in a shuffled order (the "Randomized Clean
+/// Up" entry point) rather than the caller's order; it shares the same per-folder
+/// review progress, so the two modes complement each other.
 struct FrameCleanupView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
     let folder: URL
+    let randomized: Bool
 
     @State private var items: [Entry]              // live list (deleted items removed)
     @State private var reviewed: Set<String> = []  // paths decided this session (kept or deleted)
@@ -21,9 +26,10 @@ struct FrameCleanupView: View {
 
     private let threshold: CGFloat = 90
 
-    init(folder: URL, items: [Entry]) {
+    init(folder: URL, items: [Entry], randomized: Bool = false) {
         self.folder = folder
-        _items = State(initialValue: items)
+        self.randomized = randomized
+        _items = State(initialValue: randomized ? items.shuffled() : items)
     }
 
     private struct Flash: Identifiable { let id = UUID(); let delete: Bool }
@@ -38,7 +44,7 @@ struct FrameCleanupView: View {
                 content
                 if let flash { CleanupFlash(delete: flash.delete).id(flash.id) }
             }
-            .navigationTitle("Clean Up")
+            .navigationTitle(randomized ? "Randomized Clean Up" : "Clean Up")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {

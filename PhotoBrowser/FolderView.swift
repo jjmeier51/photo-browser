@@ -75,6 +75,7 @@ struct FolderView: View {
     @State private var tsLabelEntries: [Entry] = []
     @State private var showDuplicates = false
     @State private var showCleanup = false
+    @State private var showRandomCleanup = false
     @State private var showInstagram = false
     @State private var igForceFull = false
     @State private var showTikTok = false
@@ -736,6 +737,9 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showCleanup, onDismiss: { Task { await reload() } }) {
                 FrameCleanupView(folder: url, items: cleanupItems)
             }
+            .fullScreenCover(isPresented: $showRandomCleanup, onDismiss: { Task { await reload() } }) {
+                FrameCleanupView(folder: url, items: cleanupItems, randomized: true)
+            }
             .fullScreenCover(isPresented: $showInstagram, onDismiss: { igForceFull = false; Task { await reload() } }) {
                 InstagramImportView(targetFolder: url, existing: library.instagramInfo(for: url), forceFull: igForceFull) { Task { await reload() } }
             }
@@ -1311,6 +1315,13 @@ struct FolderView: View {
                         showCleanup = true
                     } label: {
                         Label(cleanupAction.title, systemImage: "wand.and.sparkles")
+                    }
+                    .disabled(cleanupItems.isEmpty)
+                    Button {
+                        if case .rerun = cleanupAction { library.resetCleanup(url) }   // fresh random pass
+                        showRandomCleanup = true
+                    } label: {
+                        Label("Randomized Clean Up", systemImage: "shuffle")
                     }
                     .disabled(cleanupItems.isEmpty)
                     Divider()
