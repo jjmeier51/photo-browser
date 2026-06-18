@@ -69,8 +69,34 @@ struct ZoomableImageView: View {
         }
     }
 
+    /// A same-named sibling video is only treated as the Live Photo's motion part if
+    /// it *actually* belongs to this still — i.e. the still's Apple maker-note asset
+    /// identifier (key "17") matches the video's QuickTime content identifier. Pairing
+    /// on filename alone wrongly fused unrelated photos and videos that happened to
+    /// share a base name (common in downloaded galleries with generic names).
     private static func findLivePair(for url: URL) async -> URL? {
-        await Task.detached(priority: .utility) { livePhotoVideoURL(for: url) }.value
+        guard let candidate = await Task.detached(priority: .utility) { livePhotoVideoURL(for: url) }.value else { return nil }
+        guard let stillID = await Task.detached(priority: .utility) { imageAssetIdentifier(url) }.value, !stillID.isEmpty,
+              let videoID = await videoContentIdentifier(candidate), stillID == videoID else { return nil }
+        return candidate
+    }
+
+    /// The Live Photo asset identifier embedded in a still's Apple maker note ("17").
+    nonisolated static func imageAssetIdentifier(_ url: URL) -> String? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let maker = props[kCGImagePropertyMakerAppleDictionary] as? [String: Any] else { return nil }
+        return maker["17"] as? String
+    }
+
+    /// The QuickTime content identifier tying a Live Photo's motion video to its still.
+    static func videoContentIdentifier(_ url: URL) async -> String? {
+        let asset = AVURLAsset(url: url)
+        guard let meta = try? await asset.load(.metadata) else { return nil }
+        for item in meta where item.identifier == .quickTimeMetadataContentIdentifier {
+            if let s = try? await item.load(.stringValue) { return s }
+        }
+        return nil
     }
 
     /// `fullQuality == false` allows ImageIO to use the file's embedded thumbnail
