@@ -1436,6 +1436,7 @@ struct FolderView: View {
                     Button { bulkRotate(-1) } label: { Label("Rotate Left", systemImage: "rotate.left") }
                     Button { bulkRotate(1) } label: { Label("Rotate Right", systemImage: "rotate.right") }
                 } label: { Label("Rotate", systemImage: "rotate.right") }
+                Button { bulkUpscale() } label: { Label("Upscale Video to 1080p", systemImage: "arrow.up.right.video") }
                 Button { duplicateEntries(selectedEntries()) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
                 Button { showCopyPicker = true } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
                 if let tsRoot = taylorSwiftRoot {
@@ -1488,6 +1489,34 @@ struct FolderView: View {
             resultMessage = failed == 0
                 ? "Rotated \(targets.count) item(s)."
                 : "Rotated \(targets.count - failed) of \(targets.count); \(failed) couldn’t be saved."
+            library.contentDidChange()
+            await reload()
+        }
+    }
+
+    /// Upscales the selected videos to 1080p in place (labels/dates/captions kept,
+    /// originals replaced). Videos already ≥1080p are skipped.
+    private func bulkUpscale() {
+        let targets = selectedEntries().filter { $0.kind == .video }
+        guard !targets.isEmpty else { resultMessage = "Select one or more videos."; return }
+        selecting = false; selection.removeAll()
+        editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Upscale Videos")
+        Task {
+            var upscaled = 0, skipped = 0, failed = 0
+            for (i, e) in targets.enumerated() {
+                switch await MediaEditing.upscaleVideoTo1080(url: e.url, progress: { _ in }) {
+                case .upscaled: upscaled += 1
+                case .skipped:  skipped += 1
+                case .failed:   failed += 1
+                }
+                editProgress = Double(i + 1) / Double(targets.count)
+            }
+            editProcessing = false; bg.end()
+            var msg = "Upscaled \(upscaled) video\(upscaled == 1 ? "" : "s") to 1080p."
+            if skipped > 0 { msg += " \(skipped) already ≥1080p." }
+            if failed > 0 { msg += " \(failed) couldn’t be processed." }
+            resultMessage = msg
             library.contentDidChange()
             await reload()
         }

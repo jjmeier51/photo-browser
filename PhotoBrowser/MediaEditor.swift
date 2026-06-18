@@ -630,6 +630,62 @@ enum MediaEditing {
         return replaceInPlace(original: url, temp: tmp)
     }
 
+    enum UpscaleResult: Sendable { case upscaled, skipped, failed }
+
+    /// Upscales a video so its short side is 1080 px ("1080p"), preserving aspect
+    /// and orientation. Re-encodes at highest quality with `AVAssetExportSession`,
+    /// carries the source metadata across (creation date / GPS), and **replaces the
+    /// file in place** — so its path-keyed labels/captions/Favorite state are kept
+    /// automatically and the original is gone. Videos already ≥1080p are skipped
+    /// (never downscaled). Lossy by nature (re-encode), and best-effort.
+    static func upscaleVideoTo1080(url: URL, progress: @escaping @Sendable (Double) -> Void) async -> UpscaleResult {
+        let asset = AVURLAsset(url: url)
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return .failed }
+        let natural = (try? await track.load(.naturalSize)) ?? .zero
+        let pt = (try? await track.load(.preferredTransform)) ?? .identity
+        let duration = (try? await asset.load(.duration)) ?? .zero
+        let fps = (try? await track.load(.nominalFrameRate)).map { $0 > 0 ? $0 : 30 } ?? 30
+        guard natural.width > 0, natural.height > 0, duration.seconds > 0 else { return .failed }
+
+        let dispRect = CGRect(origin: .zero, size: natural).applying(pt)
+        let dispW = abs(dispRect.width), dispH = abs(dispRect.height)
+        let shortSide = min(dispW, dispH)
+        guard shortSide > 0 else { return .failed }
+        guard shortSide < 1080 else { return .skipped }            // already ≥1080p — don't downscale
+        let scale = 1080.0 / shortSide
+        let targetW = max(2, (dispW * scale / 2).rounded() * 2)    // even dimensions
+        let targetH = max(2, (dispH * scale / 2).rounded() * 2)
+
+        let comp = AVMutableVideoComposition()
+        comp.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(fps.rounded(), 1)))
+        comp.renderSize = CGSize(width: targetW, height: targetH)
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+        let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
+        layer.setTransform(pt.concatenating(CGAffineTransform(scaleX: scale, y: scale)), at: .zero)
+        instruction.layerInstructions = [layer]
+        comp.instructions = [instruction]
+
+        let folder = url.deletingLastPathComponent()
+        let tmp = folder.appendingPathComponent(".\(UUID().uuidString).mov")
+        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else { return .failed }
+        export.videoComposition = comp
+        export.outputURL = tmp
+        export.outputFileType = .mov
+        if let md = try? await asset.load(.metadata) { export.metadata = md }   // keep date/location
+
+        let poll = Task {
+            while !Task.isCancelled { progress(Double(export.progress)); try? await Task.sleep(nanoseconds: 200_000_000) }
+        }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            export.exportAsynchronously { cont.resume() }
+        }
+        poll.cancel()
+        guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return .failed }
+        progress(1)
+        return replaceInPlace(original: url, temp: tmp) ? .upscaled : .failed
+    }
+
     /// Rotates an already display-oriented frame clockwise by `quarters` × 90°,
     /// keeping it in the positive quadrant (display size W×H).
     private static func rotationTransform(quarters: Int, displayW: CGFloat, displayH: CGFloat) -> CGAffineTransform {
