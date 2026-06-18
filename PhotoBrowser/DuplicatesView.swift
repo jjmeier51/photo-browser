@@ -4,12 +4,15 @@ import CoreLocation
 /// Finds likely-duplicate photos/videos in a single folder and lets the user
 /// compare and prune them.
 ///
-/// Two files are grouped when they share the same **file size** and the same
-/// **pixel dimensions** (long side + total pixels, which together fix W×H). If
-/// two also share a **filename** it's flagged a *perfect* match; otherwise it's
-/// a probable match with a different name. The comparison screen shows the two
-/// items side-by-side with a same/different metadata breakdown, an inline
-/// metadata editor, and a per-side delete.
+/// Groups are built from **two independent criteria, never chained together**:
+/// an *Exact* group is files with identical **size + pixel dimensions** (a
+/// near-certain duplicate), and a *Similar name* group is files whose names
+/// normalize the same (copies like `name (1)`). Keeping them separate avoids the
+/// old failure where union-find chained A↔B (size) and B↔C (name) into one group
+/// of unrelated files. An **Exact Matches** filter hides the weaker name-only
+/// groups. The comparison screen shows the two items side-by-side with a
+/// same/different metadata breakdown, an inline metadata editor, a "Not
+/// Duplicates" action, and a per-side delete.
 ///
 /// The scan is **non-recursive** (the chosen folder only). Dimension reads go
 /// through `Library.mediaSpecs` (cached, bounded concurrency, off the main
@@ -22,6 +25,13 @@ struct DuplicatesView: View {
     @State private var groups: [DuplicateGroup] = []
     @State private var scanning = true
     @State private var selection = Set<UUID>()
+    @State private var exactOnly = false
+
+    /// The groups currently shown, honoring the Exact-Matches filter.
+    private var shownGroups: [DuplicateGroup] {
+        exactOnly ? groups.filter { $0.matchKind == .exact } : groups
+    }
+    private var exactCount: Int { groups.filter { $0.matchKind == .exact }.count }
 
     var body: some View {
         NavigationStack {
@@ -35,19 +45,30 @@ struct DuplicatesView: View {
                     ContentUnavailableView("No Duplicates", systemImage: "checkmark.circle",
                         description: Text("No files in this folder share the same size & dimensions or a similar name."))
                 } else {
-                    List(selection: $selection) {
-                        Section {
-                            ForEach(groups) { group in
-                                NavigationLink {
-                                    DuplicateCompareView(group: group) { removed in remove(removed, from: group) }
-                                        onNotDuplicates: { markNotDuplicates([group]) }
-                                } label: {
-                                    DuplicateGroupRow(group: group)
+                    VStack(spacing: 0) {
+                        Picker("Filter", selection: $exactOnly) {
+                            Text("All (\(groups.count))").tag(false)
+                            Text("Exact Matches (\(exactCount))").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .padding(.horizontal).padding(.vertical, 8)
+
+                        List(selection: $selection) {
+                            Section {
+                                ForEach(shownGroups) { group in
+                                    NavigationLink {
+                                        DuplicateCompareView(group: group) { removed in remove(removed, from: group) }
+                                            onNotDuplicates: { markNotDuplicates([group]) }
+                                    } label: {
+                                        DuplicateGroupRow(group: group)
+                                    }
+                                    .tag(group.id)
                                 }
-                                .tag(group.id)
+                            } footer: {
+                                Text(exactOnly
+                                     ? "Exact matches share identical size and pixel dimensions — almost always true duplicates."
+                                     : "“Exact” groups share identical size & dimensions; “Similar name” groups share a copy-style name (like “name (1)”). Tap to compare, or select groups and mark them Not Duplicates.")
                             }
-                        } footer: {
-                            Text("Files grouped by matching size & dimensions or a similar name (copies like “name (1)”). Tap a group to compare, or select groups and mark them Not Duplicates.")
                         }
                     }
                 }
@@ -84,43 +105,43 @@ struct DuplicatesView: View {
         // size+dimensions match; the filename match needs none, so videos always count.
         let media = await library.listing(of: folder, sort: .nameAsc).filter { $0.isViewable }
         let specs = await library.mediaSpecs(for: media)
-        let n = media.count
 
-        // Union-find: link two files that share size+dimensions OR a normalized base name.
-        var parent = Array(0..<n)
-        func find(_ x: Int) -> Int { var r = x; while parent[r] != r { parent[r] = parent[parent[r]]; r = parent[r] }; return r }
-        func union(_ a: Int, _ b: Int) { let ra = find(a), rb = find(b); if ra != rb { parent[ra] = rb } }
-
-        var firstBySizeDims: [String: Int] = [:]
-        var firstByName: [String: Int] = [:]
-        for i in 0..<n {
-            if let spec = specs[media[i].url], spec.pixels > 0 {            // size+dimensions edge
-                let key = "\(media[i].size)|\(spec.longSide)|\(spec.pixels)"
-                if let j = firstBySizeDims[key] { union(i, j) } else { firstBySizeDims[key] = i }
+        // Build the two kinds of group SEPARATELY — never chaining across them. The old
+        // union-find linked A↔B by size+dimensions and B↔C by name into one component,
+        // so A and C landed together despite sharing nothing. Now an "Exact" group is
+        // strictly files with identical size+dimensions, and a "Similar name" group is
+        // strictly files whose names normalize the same; a file can appear in both.
+        var bySizeDims: [String: [Int]] = [:]
+        var byName: [String: [Int]] = [:]
+        for i in media.indices {
+            if let spec = specs[media[i].url], spec.pixels > 0 {
+                bySizeDims["\(media[i].size)|\(spec.longSide)|\(spec.pixels)", default: []].append(i)
             }
-            let nameKey = Self.normalizedBaseName(media[i].name)             // copy-name edge
-            if !nameKey.isEmpty {
-                if let j = firstByName[nameKey] { union(i, j) } else { firstByName[nameKey] = i }
-            }
+            let nameKey = Self.normalizedBaseName(media[i].name)
+            if !nameKey.isEmpty { byName[nameKey, default: []].append(i) }
         }
 
-        var components: [Int: [Int]] = [:]
-        for i in 0..<n { components[find(i), default: []].append(i) }
         var result: [DuplicateGroup] = []
-        for members in components.values where members.count > 1 {
-            // Hide a group the user already confirmed: every pair marked not-duplicate.
-            let paths = members.map { media[$0].url.path }
-            if allPairsDismissed(paths) { continue }
-            let entries = members.map { media[$0] }
+        var seenSets = Set<Set<String>>()
+        func addGroup(_ indices: [Int], kind: DuplicateMatchKind) {
+            guard indices.count > 1 else { return }
+            let paths = indices.map { media[$0].url.path }
+            if allPairsDismissed(paths) { return }                       // user already confirmed not-dupes
+            guard seenSets.insert(Set(paths)).inserted else { return }   // same set already added (prefer Exact)
+            let entries = indices.map { media[$0] }
                 .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-            // Members of a name-only group can differ in size/dimensions — describe the
-            // group by its largest member.
             let rep = entries.max { $0.size < $1.size } ?? entries[0]
             let spec = specs[rep.url] ?? MediaSpec()
             result.append(DuplicateGroup(entries: entries, size: rep.size,
-                                         longSide: spec.longSide, pixels: spec.pixels))
+                                         longSide: spec.longSide, pixels: spec.pixels, matchKind: kind))
         }
-        groups = result.sorted { $0.size > $1.size }   // biggest payoff first
+        for g in bySizeDims.values { addGroup(g, kind: .exact) }         // exact first, so it wins a dedupe tie
+        for g in byName.values { addGroup(g, kind: .name) }
+
+        // Exact matches first, then biggest payoff.
+        groups = result.sorted {
+            $0.matchKind != $1.matchKind ? $0.matchKind == .exact : $0.size > $1.size
+        }
         scanning = false
     }
 
@@ -158,24 +179,23 @@ struct DuplicatesView: View {
     }
 }
 
-/// A set of files in one folder that share size + dimensions or a similar (copy) name.
+/// Why a group was formed: identical size **and** pixel dimensions (a near-certain
+/// duplicate), or just a similar/copy name (a weaker signal).
+enum DuplicateMatchKind { case exact, name }
+
+/// A set of files in one folder that share size + dimensions, or a similar (copy) name.
 struct DuplicateGroup: Identifiable {
     let id = UUID()
     var entries: [Entry]
     let size: Int64
     let longSide: Int
     let pixels: Int
+    var matchKind: DuplicateMatchKind = .exact
 
     /// "W × H" derived from the long side and total pixels (orientation-agnostic).
     var dimensionLabel: String {
         guard longSide > 0 else { return "—" }
         return "\(longSide) × \(pixels / longSide)"
-    }
-
-    /// Two items sharing a filename means an exact (size + dimensions + name) match.
-    var hasPerfectMatch: Bool {
-        let names = entries.map { $0.name.lowercased() }
-        return Set(names).count < names.count
     }
 }
 
@@ -188,13 +208,14 @@ private struct DuplicateGroupRow: View {
                 ForEach(group.entries.prefix(2)) { DuplicateThumb(entry: $0, side: 52) }
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text("\(group.entries.count) similar files").font(.subheadline.weight(.medium))
+                Text("\(group.entries.count) \(group.matchKind == .exact ? "exact" : "similarly-named") files")
+                    .font(.subheadline.weight(.medium))
                 Text("\(group.size.sizeString) · \(group.dimensionLabel)")
                     .font(.caption).foregroundStyle(.secondary)
-                Label(group.hasPerfectMatch ? "Perfect match" : "Possible duplicates",
-                      systemImage: group.hasPerfectMatch ? "checkmark.seal.fill" : "rectangle.on.rectangle")
+                Label(group.matchKind == .exact ? "Exact match (size & dimensions)" : "Similar name",
+                      systemImage: group.matchKind == .exact ? "checkmark.seal.fill" : "textformat.abc")
                     .font(.caption2)
-                    .foregroundStyle(group.hasPerfectMatch ? Color.green : Color.orange)
+                    .foregroundStyle(group.matchKind == .exact ? Color.green : Color.orange)
             }
         }
         .padding(.vertical, 4)
@@ -275,6 +296,14 @@ private struct DuplicateCompareView: View {
 
                     legend
                     comparison
+
+                    Button { onNotDuplicates(); dismiss() } label: {
+                        Label("Not Duplicates", systemImage: "checkmark.circle")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity).padding(.vertical, 10)
+                            .background(Color.green.opacity(0.2), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    .tint(.green).padding(.top, 4)
                 }
             }
             .padding()
