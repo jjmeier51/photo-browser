@@ -614,7 +614,7 @@ final class Library {
         kardashianFolders = remapPaths(kardashianFolders, old: old, new: new)
         UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
         func remap(_ p: String) -> String { (p == old || p.hasPrefix(old + "/")) ? new + p.dropFirst(old.count) : p }
-        bubbleOrders = Dictionary(uniqueKeysWithValues: bubbleOrders.map { (remap($0.key), $0.value.map(remap)) })
+        bubbleOrders = Dictionary(bubbleOrders.map { (remap($0.key), $0.value.map(remap)) }, uniquingKeysWith: { a, _ in a })
         UserDefaults.standard.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
         var akChanged = false
         for (name, var state) in accessKardashian where state.folderPath == old || state.folderPath.hasPrefix(old + "/") {
