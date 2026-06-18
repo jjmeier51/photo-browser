@@ -632,13 +632,17 @@ enum MediaEditing {
 
     enum UpscaleResult: Sendable { case upscaled, skipped, failed }
 
-    /// Upscales a video so its short side is 1080 px ("1080p"), preserving aspect
-    /// and orientation. Re-encodes at highest quality with `AVAssetExportSession`,
-    /// carries the source metadata across (creation date / GPS), and **replaces the
-    /// file in place** — so its path-keyed labels/captions/Favorite state are kept
-    /// automatically and the original is gone. Videos already ≥1080p are skipped
-    /// (never downscaled). Lossy by nature (re-encode), and best-effort.
-    static func upscaleVideoTo1080(url: URL, progress: @escaping @Sendable (Double) -> Void) async -> UpscaleResult {
+    /// Upscales a video so its short side is at least `targetShort` px (1080 = 1080p,
+    /// 2160 = 4K), preserving aspect and orientation. **HDR is preserved**: when the
+    /// source is HLG or PQ (HDR10) the video composition renders in BT.2020 with the
+    /// matching transfer function and exports 10-bit HEVC, instead of tone-mapping to
+    /// SDR. Capture date and location are read robustly (across container formats) and
+    /// re-stamped so they reliably survive the re-encode; all other metadata is carried
+    /// across. **Replaces the file in place** — so its path-keyed labels/captions/
+    /// Favorite state are kept and the original is gone. Videos already ≥ `targetShort`
+    /// are skipped (never downscaled). Lossy by nature, and best-effort.
+    static func upscaleVideo(url: URL, targetShort: CGFloat,
+                             progress: @escaping @Sendable (Double) -> Void) async -> UpscaleResult {
         let asset = AVURLAsset(url: url)
         guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return .failed }
         let natural = (try? await track.load(.naturalSize)) ?? .zero
@@ -651,14 +655,31 @@ enum MediaEditing {
         let dispW = abs(dispRect.width), dispH = abs(dispRect.height)
         let shortSide = min(dispW, dispH)
         guard shortSide > 0 else { return .failed }
-        guard shortSide < 1080 else { return .skipped }            // already ≥1080p — don't downscale
-        let scale = 1080.0 / shortSide
+        guard shortSide < targetShort else { return .skipped }     // already at/above target — don't downscale
+        let scale = targetShort / shortSide
         let targetW = max(2, (dispW * scale / 2).rounded() * 2)    // even dimensions
         let targetH = max(2, (dispH * scale / 2).rounded() * 2)
+
+        // Detect the source's HDR transfer function from its format description.
+        var isPQ = false, isHLG = false
+        if let fd = (try? await track.load(.formatDescriptions))?.first,
+           let ext = CMFormatDescriptionGetExtensions(fd) as? [CFString: Any] {
+            let tf = ext[kCMFormatDescriptionExtension_TransferFunction] as? String
+            isPQ = tf == (kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String)
+            isHLG = tf == (kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG as String)
+        }
+        let isHDR = isPQ || isHLG
 
         let comp = AVMutableVideoComposition()
         comp.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(fps.rounded(), 1)))
         comp.renderSize = CGSize(width: targetW, height: targetH)
+        if isHDR {
+            // Keep the working/output color space in HDR so it isn't tone-mapped to SDR.
+            comp.colorPrimaries = AVVideoColorPrimaries_ITU_R_2020
+            comp.colorTransferFunction = isPQ ? AVVideoTransferFunction_SMPTE_ST_2084_PQ
+                                              : AVVideoTransferFunction_ITU_R_2100_HLG
+            comp.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_2020
+        }
         let instruction = AVMutableVideoCompositionInstruction()
         instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
         let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
@@ -666,13 +687,30 @@ enum MediaEditing {
         instruction.layerInstructions = [layer]
         comp.instructions = [instruction]
 
+        // Preserve metadata across containers, then re-stamp the capture date so it
+        // reliably survives (it was previously read from common metadata only, which
+        // misses videos that carry the date in QuickTime metadata).
+        var meta = ((try? await asset.load(.metadata)) ?? [])
+            + ((try? await asset.loadMetadata(for: .quickTimeMetadata)) ?? [])
+        meta = meta.filter { $0.commonKey != .commonKeyCreationDate
+            && $0.identifier != .quickTimeMetadataCreationDate && $0.identifier != .commonIdentifierCreationDate }
+        let captureDate = await videoCreationDate(asset)
+        if let captureDate {
+            let iso = ISO8601DateFormatter().string(from: captureDate)
+            for id in [AVMetadataIdentifier.commonIdentifierCreationDate, .quickTimeMetadataCreationDate] {
+                let item = AVMutableMetadataItem(); item.identifier = id; item.value = iso as NSString; meta.append(item)
+            }
+        }
+
         let folder = url.deletingLastPathComponent()
         let tmp = folder.appendingPathComponent(".\(UUID().uuidString).mov")
-        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else { return .failed }
+        // HEVC for HDR (10-bit); HighestQuality (H.264) otherwise.
+        let preset = isHDR ? AVAssetExportPresetHEVCHighestQuality : AVAssetExportPresetHighestQuality
+        guard let export = AVAssetExportSession(asset: asset, presetName: preset) else { return .failed }
         export.videoComposition = comp
         export.outputURL = tmp
         export.outputFileType = .mov
-        if let md = try? await asset.load(.metadata) { export.metadata = md }   // keep date/location
+        export.metadata = meta
 
         let poll = Task {
             while !Task.isCancelled { progress(Double(export.progress)); try? await Task.sleep(nanoseconds: 200_000_000) }
@@ -683,7 +721,36 @@ enum MediaEditing {
         poll.cancel()
         guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return .failed }
         progress(1)
-        return replaceInPlace(original: url, temp: tmp) ? .upscaled : .failed
+        guard replaceInPlace(original: url, temp: tmp) else { return .failed }
+        // Mirror the capture date onto the file's dates too (date sorting / Finder).
+        if let captureDate {
+            try? FileManager.default.setAttributes([.creationDate: captureDate, .modificationDate: captureDate], ofItemAtPath: url.path)
+        }
+        return .upscaled
+    }
+
+    /// The video's capture date, read across container formats (the synthesized
+    /// `.creationDate`, then QuickTime, then common metadata) so it isn't missed.
+    private static func videoCreationDate(_ asset: AVURLAsset) async -> Date? {
+        func parse(_ s: String) -> Date? {
+            ISO8601DateFormatter().date(from: s) ?? {
+                let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
+                f.dateFormat = "yyyy:MM:dd HH:mm:ss"; return f.date(from: s)
+            }()
+        }
+        if let item = try? await asset.load(.creationDate) {
+            if let d = try? await item.load(.dateValue) { return d }
+            if let s = try? await item.load(.stringValue), let d = parse(s) { return d }
+        }
+        let groups = [(try? await asset.loadMetadata(for: .quickTimeMetadata)) ?? [],
+                      (try? await asset.load(.metadata)) ?? []]
+        for group in groups {
+            for item in group where item.identifier == .quickTimeMetadataCreationDate || item.commonKey == .commonKeyCreationDate {
+                if let d = try? await item.load(.dateValue) { return d }
+                if let s = try? await item.load(.stringValue), let d = parse(s) { return d }
+            }
+        }
+        return nil
     }
 
     /// Rotates an already display-oriented frame clockwise by `quarters` × 90°,
