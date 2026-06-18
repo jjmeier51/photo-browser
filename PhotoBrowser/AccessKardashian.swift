@@ -67,7 +67,7 @@ enum AccessKardashian {
     }
 
     private struct Coord: Sendable { let lat: Double; let lng: Double }
-    private struct Planned: Sendable {
+    private struct Planned: Sendable, Codable {
         let fullURL: URL
         var destName: String
         let category: String
@@ -75,6 +75,9 @@ enum AccessKardashian {
         let place: String?
         let caption: String?
     }
+    /// On-disk cache of a member's fully-built plan, so re-runs (Resume / Re-download)
+    /// skip the slow gallery crawl entirely.
+    private struct PlanCache: Codable { var plan: [Planned]; var builtAt: Double }
 
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
     nonisolated static let session: URLSession = {
@@ -90,27 +93,40 @@ enum AccessKardashian {
 
     /// Crawls `member`'s gallery and downloads it into `folder`. `overwrite` re-fetches
     /// images already on disk (Re-download); otherwise existing files are skipped
-    /// (Fetch New / Resume). `isCancelled` is polled so the UI can pause/cancel —
-    /// everything already downloaded stays put, and a later run resumes by skipping it.
-    nonisolated static func run(member: Member, into folder: URL, overwrite: Bool,
+    /// (Fetch New / Resume). `refreshIndex` forces a fresh crawl (Fetch New); otherwise
+    /// a previously-cached album index is reused so listing is instant. `isCancelled`
+    /// is polled so the UI can pause/cancel — everything already downloaded stays put.
+    nonisolated static func run(member: Member, into folder: URL, overwrite: Bool, refreshIndex: Bool,
                                 progress: @escaping @Sendable (Progress) -> Void,
                                 isCancelled: @escaping @Sendable () -> Bool) async -> Result {
         var result = Result()
-        progress(Progress(phase: "Finding \(member.name)’s gallery…", fraction: 0, done: 0, total: 0))
-        guard let rootCat = await memberRootCat(member) else {
-            result.note = "Couldn’t find \(member.name)’s gallery on accesskardashian.com.br."
-            return result
+
+        // Reuse the cached album index unless a refresh was asked for — this is what
+        // makes Resume/Re-download skip the (slow) crawl that was stalling on "Listing".
+        var plan: [Planned]
+        if !refreshIndex, let cached = loadCachedPlan(member), !cached.isEmpty {
+            progress(Progress(phase: "Loaded saved index — \(cached.count) photos", fraction: 0, done: 0, total: cached.count))
+            plan = cached
+        } else {
+            progress(Progress(phase: "Finding \(member.name)’s gallery…", fraction: 0, done: 0, total: 0))
+            guard let rootCat = await memberRootCat(member) else {
+                result.note = "Couldn’t find \(member.name)’s gallery on accesskardashian.com.br."
+                return result
+            }
+            plan = await buildPlan(rootCat: rootCat, member: member, progress: progress, isCancelled: isCancelled)
+            guard !plan.isEmpty else {
+                if isCancelled() { result.cancelled = true }
+                else { result.note = "No photos found in \(member.name)’s gallery." }
+                return result
+            }
+            // Deterministic order (stable across runs so resume lines up) + unique flat
+            // filenames, since everything lands directly in the member folder.
+            plan.sort { $0.fullURL.absoluteString < $1.fullURL.absoluteString }
+            assignDestNames(&plan)
+            // Only cache a *complete* crawl, so a paused listing re-crawls next time.
+            if !isCancelled() { saveCachedPlan(member, plan) }
         }
-        progress(Progress(phase: "Listing albums…", fraction: 0, done: 0, total: 0))
-        var plan = await buildPlan(rootCat: rootCat, member: member)
-        guard !plan.isEmpty else {
-            result.note = "No photos found in \(member.name)’s gallery."
-            return result
-        }
-        // Deterministic order (stable across runs so resume lines up) + unique flat
-        // filenames, since everything lands directly in the member folder.
-        plan.sort { $0.fullURL.absoluteString < $1.fullURL.absoluteString }
-        assignDestNames(&plan)
+        if isCancelled() { result.cancelled = true; return result }
         result.total = plan.count
 
         // Pre-geocode the distinct album places once (CLGeocoder is rate-limited, so
@@ -167,6 +183,24 @@ enum AccessKardashian {
         return result
     }
 
+    // MARK: - Plan cache (album index on disk)
+
+    nonisolated private static func planCacheURL(_ member: Member) -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("accessKardashian", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(member.token).json")
+    }
+    nonisolated private static func loadCachedPlan(_ member: Member) -> [Planned]? {
+        guard let data = try? Data(contentsOf: planCacheURL(member)),
+              let cache = try? JSONDecoder().decode(PlanCache.self, from: data) else { return nil }
+        return cache.plan
+    }
+    nonisolated private static func saveCachedPlan(_ member: Member, _ plan: [Planned]) {
+        guard let data = try? JSONEncoder().encode(PlanCache(plan: plan, builtAt: Date().timeIntervalSince1970)) else { return }
+        try? data.write(to: planCacheURL(member))
+    }
+
     /// Flat layout: ensure every planned image has a unique filename in the member
     /// folder (Coppermine filenames can collide across albums).
     nonisolated private static func assignDestNames(_ plan: inout [Planned]) {
@@ -209,33 +243,54 @@ enum AccessKardashian {
     /// another member's name, never up into a parent/root section. (Coppermine prints
     /// the category menu + breadcrumb on every page, so we can't prune by what a page
     /// lists — only by what we choose to enqueue.)
-    nonisolated private static func buildPlan(rootCat: Int, member: Member) async -> [Planned] {
+    nonisolated private static func buildPlan(rootCat: Int, member: Member,
+                                              progress: @escaping @Sendable (Progress) -> Void,
+                                              isCancelled: @escaping @Sendable () -> Bool) async -> [Planned] {
         let others = Set(members.map(\.token)).subtracting([member.token])
-        struct Node { let cat: Int; let category: String?; let year: Int?; let depth: Int }
+        struct Node: Sendable { let cat: Int; let category: String?; let year: Int?; let depth: Int }
         struct AlbumMeta: Sendable { let id: Int; let title: String; let category: String; let year: Int? }
 
         var albums: [AlbumMeta] = []
         var seenAlbums = Set<Int>()
-        var visited = Set<Int>()
-        var queue = [Node(cat: rootCat, category: nil, year: nil, depth: 0)]
-        var head = 0
-        while head < queue.count {
-            let node = queue[head]; head += 1
-            guard visited.insert(node.cat).inserted, node.depth < 6 else { continue }
-            let r = await browse(category: node.cat)
+        var visited = Set<Int>([rootCat])
 
-            for a in r.albums where seenAlbums.insert(a.id).inserted {
-                albums.append(AlbumMeta(id: a.id, title: a.title, category: node.category ?? "Others", year: node.year))
+        // Level-synchronized parallel BFS: browse all of a level's categories at once
+        // (was sequential, which crawled hundreds of year/month nodes one at a time and
+        // stalled on "Listing albums"). Discovery is recorded in `visited` as children
+        // are found so the same category isn't queued twice within a level.
+        var frontier = [Node(cat: rootCat, category: nil, year: nil, depth: 0)]
+        while !frontier.isEmpty && !isCancelled() {
+            var next: [Node] = []
+            let level = frontier
+            var idx = 0
+            await withTaskGroup(of: (Node, [Category], [Album]).self) { group in
+                func addNext() {
+                    guard idx < level.count, !isCancelled() else { return }
+                    let n = level[idx]; idx += 1
+                    group.addTask { let r = await browse(category: n.cat); return (n, r.categories, r.albums) }
+                }
+                for _ in 0..<min(12, level.count) { addNext() }
+                while let (node, cats, albs) = await group.next() {
+                    for a in albs where seenAlbums.insert(a.id).inserted {
+                        albums.append(AlbumMeta(id: a.id, title: a.title, category: node.category ?? "Others", year: node.year))
+                    }
+                    if node.depth < 6 {
+                        for c in cats where !visited.contains(c.id) {
+                            let t = norm(c.title)
+                            if others.contains(where: { t.contains($0) }) { continue }   // don't cross into another member
+                            if rootWords.contains(where: { t.contains($0) }) { continue } // don't climb to a parent/root section
+                            visited.insert(c.id)
+                            let childCategory = normalizeCategory(c.title) ?? node.category
+                            let parsedYear = Int(c.title.trimmingCharacters(in: .whitespaces))
+                            let childYear = (parsedYear.map { (1980...2100).contains($0) } ?? false) ? parsedYear : node.year
+                            next.append(Node(cat: c.id, category: childCategory, year: childYear, depth: node.depth + 1))
+                        }
+                    }
+                    progress(Progress(phase: "Listing albums — \(albums.count) found…", fraction: 0, done: albums.count, total: 0))
+                    addNext()
+                }
             }
-            for c in r.categories where !visited.contains(c.id) {
-                let t = norm(c.title)
-                if others.contains(where: { t.contains($0) }) { continue }   // don't cross into another member
-                if rootWords.contains(where: { t.contains($0) }) { continue } // don't climb to a parent/root section
-                let childCategory = normalizeCategory(c.title) ?? node.category
-                let parsedYear = Int(c.title.trimmingCharacters(in: .whitespaces))
-                let childYear = (parsedYear.map { (1980...2100).contains($0) } ?? false) ? parsedYear : node.year
-                queue.append(Node(cat: c.id, category: childCategory, year: childYear, depth: node.depth + 1))
-            }
+            frontier = next
         }
         guard !albums.isEmpty else { return [] }
         let byCat = Dictionary(grouping: albums, by: \.category).mapValues(\.count)
@@ -243,14 +298,14 @@ enum AccessKardashian {
 
         // Fetch each album's images concurrently and flatten into the plan.
         var planned: [Planned] = []
-        var idx = 0
+        var idx = 0, doneAlbums = 0
         await withTaskGroup(of: (AlbumMeta, [Image]).self) { group in
             func addNext() {
-                guard idx < albums.count else { return }
+                guard idx < albums.count, !isCancelled() else { return }
                 let a = albums[idx]; idx += 1
                 group.addTask { (a, await images(inAlbum: a.id)) }
             }
-            for _ in 0..<min(10, albums.count) { addNext() }       // gentle enough to avoid throttling the listing
+            for _ in 0..<min(12, albums.count) { addNext() }
             while let (a, imgs) = await group.next() {
                 let albumDate = parseAlbumDate(a.title, year: a.year)
                 let place = parseAlbumPlace(a.title)
@@ -261,6 +316,9 @@ enum AccessKardashian {
                                            category: a.category, date: img.dateAdded ?? albumDate,
                                            place: place, caption: img.caption))
                 }
+                doneAlbums += 1
+                progress(Progress(phase: "Listing photos — \(planned.count) in \(doneAlbums)/\(albums.count) albums…",
+                                  fraction: Double(doneAlbums) / Double(albums.count), done: planned.count, total: albums.count))
                 addNext()
             }
         }

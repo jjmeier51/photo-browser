@@ -105,7 +105,7 @@ private struct AKMemberDownloadView: View {
                     }
                 }
                 Section { ForEach(actions, id: \.title) { action in
-                    Button { run(overwrite: action.overwrite) } label: { Label(action.title, systemImage: action.icon) }
+                    Button { run(overwrite: action.overwrite, refresh: action.refresh) } label: { Label(action.title, systemImage: action.icon) }
                 } }
             }
         }
@@ -116,22 +116,27 @@ private struct AKMemberDownloadView: View {
 
     // MARK: - Actions for the current state
 
-    private struct Action { let title: String; let icon: String; let overwrite: Bool }
+    // `refresh` re-crawls the gallery (Fetch New, to discover new content); the others
+    // reuse the cached album index so listing is instant.
+    private struct Action { let title: String; let icon: String; let overwrite: Bool; let refresh: Bool }
     private var actions: [Action] {
         guard let s = state else {
-            return [Action(title: "Download Gallery for \(member.name)", icon: "square.and.arrow.down", overwrite: false)]
+            return [Action(title: "Download Gallery for \(member.name)", icon: "square.and.arrow.down", overwrite: false, refresh: false)]
         }
         if s.completed {
-            return [Action(title: "Fetch New Photos for \(member.name)", icon: "arrow.down.circle", overwrite: false),
-                    Action(title: "Re-download Gallery for \(member.name)", icon: "arrow.clockwise.circle", overwrite: true)]
+            return [Action(title: "Fetch New Photos for \(member.name)", icon: "arrow.down.circle", overwrite: false, refresh: true),
+                    Action(title: "Re-download Gallery for \(member.name)", icon: "arrow.clockwise.circle", overwrite: true, refresh: false)]
         }
-        return [Action(title: "Resume Download for \(member.name)", icon: "play.circle", overwrite: false),
-                Action(title: "Re-download Gallery for \(member.name)", icon: "arrow.clockwise.circle", overwrite: true)]
+        return [Action(title: "Resume Download for \(member.name)", icon: "play.circle", overwrite: false, refresh: false),
+                Action(title: "Re-download Gallery for \(member.name)", icon: "arrow.clockwise.circle", overwrite: true, refresh: false)]
     }
 
     private var progressLine: String {
-        guard progress.total > 0 else { return progress.phase }
-        return "Downloading \(progress.done) of \(progress.total)…"
+        // During listing the phase text is descriptive ("Listing albums — N found…");
+        // only the download phase reports a "done of total" count.
+        progress.phase == "Downloading"
+            ? "Downloading \(progress.done) of \(progress.total)…"
+            : progress.phase
     }
 
     private func summary(_ r: AccessKardashian.Result) -> String {
@@ -144,7 +149,7 @@ private struct AKMemberDownloadView: View {
 
     // MARK: - Run / pause
 
-    private func run(overwrite: Bool) {
+    private func run(overwrite: Bool, refresh: Bool) {
         let folder = targetFolder.appendingPathComponent(member.name, isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         library.markKardashianFolder(folder)
@@ -154,7 +159,7 @@ private struct AKMemberDownloadView: View {
         running = true; result = nil
         let bg = BackgroundTaskHolder(); bg.begin(name: "accessKardashian \(member.name)")
         task = Task {
-            let r = await AccessKardashian.run(member: member, into: folder, overwrite: overwrite,
+            let r = await AccessKardashian.run(member: member, into: folder, overwrite: overwrite, refreshIndex: refresh,
                                                progress: { p in Task { @MainActor in progress = p } },
                                                isCancelled: { flag.isSet })
             // Tag every downloaded photo with its category label, and store captions
