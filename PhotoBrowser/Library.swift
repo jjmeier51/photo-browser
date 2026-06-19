@@ -32,7 +32,19 @@ final class Library {
     /// Bumps when files are added/edited from outside the folder view (e.g. the
     /// editor saving a cropped copy) so the current folder reloads.
     var changeToken = 0
-    func contentDidChange() { changeToken += 1; folderYearsCache.removeAll() }
+    func contentDidChange() { changeToken += 1; folderYearsCache.removeAll(); listingCache.removeAll() }
+
+    /// In-memory cache of recent folder listings so re-opening a folder paints
+    /// instantly (then refreshes) — a big win on a slow external drive. Cleared on
+    /// any content change; bounded to the most-recent folders.
+    @ObservationIgnored private var listingCache: [String: [Entry]] = [:]
+    @ObservationIgnored private var listingOrder: [String] = []
+    func cachedListing(of folder: URL) -> [Entry]? { listingCache[folder.path] }
+    func cacheListing(_ entries: [Entry], for folder: URL) {
+        if listingCache[folder.path] == nil { listingOrder.append(folder.path) }
+        listingCache[folder.path] = entries
+        while listingOrder.count > 60 { listingCache.removeValue(forKey: listingOrder.removeFirst()) }
+    }
 
     /// Grid thumbnail minimum size (points); pinch-to-zoom adjusts it ±30%.
     var thumbSize: Double = (UserDefaults.standard.object(forKey: "photoBrowser.thumbSize") as? Double) ?? 110

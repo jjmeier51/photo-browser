@@ -950,6 +950,12 @@ struct FolderView: View {
         .task(id: library.sort) { await reload() }
         .onChange(of: library.changeToken) { Task { await reload() } }
         .task(id: "search-\(query)-\(library.sort.rawValue)-\(library.index.count)") { await runSearch() }
+        // Embedded captions are only needed to match a search; load them lazily so a
+        // plain folder open doesn't read every file on the drive.
+        .task(id: "filecaps-\(query.trimmingCharacters(in: .whitespaces).isEmpty)-\(entries.count)") {
+            if query.trimmingCharacters(in: .whitespaces).isEmpty { fileCaptions = [:] }
+            else if fileCaptions.isEmpty { fileCaptions = await library.fileCaptions(for: entries) }
+        }
         .task(id: "labels-\(showFavoritesOnly)-\(showAIOnly)-\(library.labelsVersion)-\(library.sort.rawValue)") {
             // Favorites / To AI are scoped to *this* folder (and its subfolders), not
             // the whole library.
@@ -1635,26 +1641,34 @@ struct FolderView: View {
     }
 
     private func reload() async {
-        loaded = false
-        captureDates = [:]; fileCaptions = [:]; fileSpecs = [:]; folderYears = [:]
+        // Paint a cached listing instantly so re-opening a folder is snappy; we still
+        // re-read from disk below and update if anything changed.
+        if let cached = library.cachedListing(of: url), !cached.isEmpty {
+            entries = cached; liveImageURLs = Self.detectLivePairs(in: cached); loaded = true
+        } else {
+            loaded = false
+        }
+        fileSpecs = [:]; folderYears = [:]
         let list = await library.listing(of: url, sort: library.sort)
+        library.cacheListing(list, for: url)
         entries = list
         liveImageURLs = Self.detectLivePairs(in: list)
         loaded = true
-        // Capture dates + captions only (cheap). Media specs — which open every
-        // video with AVAsset — load lazily, only when the resolution/HDR filter
-        // is actually used; otherwise opening a folder (or returning from an
-        // export) would needlessly scan every file and stall.
-        async let dates = library.captureDates(for: list)
-        async let caps = library.fileCaptions(for: list)
-        captureDates = await dates
-        fileCaptions = await caps
-        // The date-based sorts order by the *file's* modified date, which for an
-        // imported/copied item is the time it was added. Now that the real capture
-        // dates are in, re-order by those so "newest" reflects when media was taken
-        // (down to the time, not just the day).
-        if library.sort == .smart || library.sort == .dateDesc || library.sort == .dateAsc {
-            entries = sortedByCaptureDate(entries)
+        // Capture dates are only loaded when the active sort/filters need them; on a
+        // slow external drive, reading EXIF from every file otherwise starves the
+        // thumbnails of disk bandwidth. Embedded captions load lazily (only while
+        // searching). Media specs load on demand (resolution/HDR filter).
+        let needsDates = [SortKey.smart, .dateDesc, .dateAsc].contains(library.sort)
+            || library.sort.isAge || yearFilter != nil || ageFilter != nil
+        if needsDates {
+            captureDates = await library.captureDates(for: list)
+            // Now that real capture dates are in, re-order so "newest" reflects when
+            // media was taken (the file's modified date is just when it was added).
+            if library.sort == .smart || library.sort == .dateDesc || library.sort == .dateAsc {
+                entries = sortedByCaptureDate(entries)
+            }
+        } else {
+            captureDates = [:]
         }
     }
 
