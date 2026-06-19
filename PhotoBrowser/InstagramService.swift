@@ -113,9 +113,15 @@ enum InstagramService {
         jobs += await collectFeed(base: "usertags/\(profile.userID)/feed/", folder: folder, already: alreadyDownloaded,
                                   poster: profile.handle, creds: creds,
                                   taggedUser: (id: profile.userID, username: profile.handle)) { _ in }
-        // Current stories → "Stories" subfolder.
+        // Current stories (the last 24 hours) → "Stories" subfolder. Prefer the
+        // reels-media tray (the endpoint that reliably returns the logged-in viewer's
+        // story), falling back to the older per-user reel_media.
         progress(Progress(phase: "Finding stories…", fraction: 0, done: 0, total: 0))
-        let stories = await fetchReel(path: "feed/user/\(profile.userID)/reel_media/", handle: profile.handle, creds: creds)
+        var stories = await fetchReel(path: "feed/reels_media/?reel_ids=\(profile.userID)",
+                                      handle: profile.handle, creds: creds, reelKey: profile.userID)
+        if stories.isEmpty {
+            stories = await fetchReel(path: "feed/user/\(profile.userID)/reel_media/", handle: profile.handle, creds: creds)
+        }
         jobs += reelJobs(items: stories, folder: folder.appendingPathComponent("Stories", isDirectory: true),
                          already: alreadyDownloaded, poster: profile.handle)
         // Highlights → one subfolder per highlight (shown as bubbles inside the folder).

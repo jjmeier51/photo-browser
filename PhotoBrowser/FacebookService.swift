@@ -140,27 +140,38 @@ enum FacebookService {
 
     // MARK: - Profile
 
-    /// Resolves a profile/share URL to its mbasic id, name, and picture by following
-    /// the link (share links redirect to the real profile) and parsing the page.
+    /// Resolves a profile/share URL to its id, name, and picture. Share links
+    /// (`facebook.com/share/…`) only redirect on the real mobile site, so we follow
+    /// the link there first to learn the canonical profile, then read its details
+    /// from mbasic.
     nonisolated static func resolveProfile(_ profileURL: String, creds: Credentials) async -> Profile? {
-        // Normalize to the mbasic host and follow redirects to the canonical URL.
-        let normalized = profileURL.replacingOccurrences(of: "https://www.facebook.com/", with: host)
-            .replacingOccurrences(of: "https://facebook.com/", with: host)
-            .replacingOccurrences(of: "https://m.facebook.com/", with: host)
-        guard let (html, finalURL) = await fetchHTML(normalized.hasPrefix("http") ? normalized : host + normalized, creds: creds) else { return nil }
+        // 1. Follow the link on m.facebook.com (handles /share/ redirects); capture
+        //    where it lands.
+        var start = profileURL.trimmingCharacters(in: .whitespaces)
+        if !start.hasPrefix("http") { start = "https://m.facebook.com/" + start.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+        start = start.replacingOccurrences(of: "www.facebook.com", with: "m.facebook.com")
+        guard let (firstHTML, finalURL) = await fetchHTML(start, creds: creds) else { return nil }
 
-        // Profile id: a numeric id in the final URL or page (profile.php?id=…, owner_id, etc.).
-        let idPatterns = ["[?&]id=(\\d{5,})", "profile_id=(\\d{5,})", "owner_id=(\\d{5,})", "/(\\d{8,})(?:[/?]|$)"]
-        var pid: String?
-        for p in idPatterns { if let m = matches(finalURL + " " + html, p).first { pid = m[1]; break } }
-        // Username fallback (vanity URL) — usable directly as an mbasic path.
+        // 2. Identify the profile by numeric id (from the redirected URL or page) or by
+        //    vanity username (from the URL path).
+        let pid = matches(finalURL, "[?&]id=(\\d{6,})").first?[1]
+            ?? matches(finalURL, "facebook\\.com/(\\d{8,})").first?[1]
+            ?? matches(firstHTML, "\"(?:userID|owner_id|profile_id)\":\"?(\\d{6,})").first?[1]
         let username = vanityName(from: finalURL)
-        guard let id = pid ?? username else { return nil }
+        guard pid != nil || username != nil else { return nil }
 
+        // 3. Read name + picture (+ confirm the id) from the mbasic profile page.
+        let profilePath = pid.map { "profile.php?id=\($0)" } ?? (username ?? "")
+        let html = await fetchHTML(host + profilePath, creds: creds)?.html ?? firstHTML
+        let id = pid
+            ?? firstMatch(html, "owner_id=(\\d{6,})")
+            ?? firstMatch(html, "[?&]id=(\\d{6,})")
+            ?? username ?? ""
         let name = firstMatch(html, "<title>([^<]+)</title>").map(decode)
-            ?? firstMatch(html, "\"name\":\"([^\"]+)\"").map(decode)
+            ?? firstMatch(firstHTML, "<title>([^<]+)</title>").map(decode)
             ?? "Facebook Profile"
-        let pic = firstMatch(html, "<img[^>]+src=\"(https://[^\"]*scontent[^\"]+)\"").map(decode) ?? ""
+        let pic = firstMatch(html, "<img[^>]+src=\"(https://[^\"]*scontent[^\"]+)\"").map(decode)
+            ?? firstMatch(firstHTML, "<img[^>]+src=\"(https://[^\"]*scontent[^\"]+)\"").map(decode) ?? ""
         return Profile(id: id, name: cleanName(name), url: finalURL, picURL: pic)
     }
 
@@ -189,8 +200,10 @@ enum FacebookService {
         while let p = next, pages < maxPages {
             pages += 1
             guard let (html, _) = await fetchHTML(p.hasPrefix("http") ? p : host + p, creds: creds) else { break }
-            // Photo pages: photo.php?fbid=… or /photo/?fbid=…  Video pages: /…/videos/…
-            let pat = isVideo ? "href=\"(/[^\"]*?/videos/(\\d+)[^\"]*)\"" : "href=\"(/photo\\.php\\?[^\"]*fbid=(\\d+)[^\"]*)\""
+            // Photo links carry an fbid (photo.php?fbid=…, /…/photos/…/PID, etc.); video
+            // links go through /…/videos/PID. Match the id wherever it appears in the href.
+            let pat = isVideo ? "href=\"(/[^\"]*?/videos/(\\d+)[^\"]*)\""
+                              : "href=\"(/[^\"]*?(?:fbid=|/photos/[^\"]*?/)(\\d{6,})[^\"]*)\""
             for g in matches(html, pat) {
                 let id = g[2]
                 guard seen.insert(id).inserted else { continue }
