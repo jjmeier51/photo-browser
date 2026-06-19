@@ -702,6 +702,13 @@ enum MediaEditing {
             }
         }
 
+        // The original file's date — used as a fallback so the re-encode never gets
+        // stamped with "today" when the source carries no embedded capture date.
+        let sourceFileDate: Date? = {
+            let a = try? FileManager.default.attributesOfItem(atPath: url.path)
+            return (a?[.creationDate] as? Date) ?? (a?[.modificationDate] as? Date)
+        }()
+
         let folder = url.deletingLastPathComponent()
         let tmp = folder.appendingPathComponent(".\(UUID().uuidString).mov")
         // HEVC for HDR (10-bit); HighestQuality (H.264) otherwise.
@@ -722,9 +729,10 @@ enum MediaEditing {
         guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return .failed }
         progress(1)
         guard replaceInPlace(original: url, temp: tmp) else { return .failed }
-        // Mirror the capture date onto the file's dates too (date sorting / Finder).
-        if let captureDate {
-            try? FileManager.default.setAttributes([.creationDate: captureDate, .modificationDate: captureDate], ofItemAtPath: url.path)
+        // Stamp the file's dates with the capture date, or the original file's date if
+        // the source carried none — never leave it at the re-encode time ("today").
+        if let fileDate = captureDate ?? sourceFileDate {
+            try? FileManager.default.setAttributes([.creationDate: fileDate, .modificationDate: fileDate], ofItemAtPath: url.path)
         }
         return .upscaled
     }

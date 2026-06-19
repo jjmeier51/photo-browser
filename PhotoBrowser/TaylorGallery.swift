@@ -101,6 +101,9 @@ enum TaylorGallery {
         guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)) != nil else {
             return DownloadResult(downloaded: 0, failed: 0, folderName: nil, note: "Couldn’t create the album folder.")
         }
+        // The event date parsed from the album title (gallery JPGs usually carry no
+        // EXIF date), written into each image so they don't default to "today".
+        let albumDate = parseAlbumDate(album.title, year: nil)
 
         let total = images.count
         var done = 0, downloaded = 0, failed = 0, index = 0
@@ -109,7 +112,7 @@ enum TaylorGallery {
             func addNext() {
                 guard index < total else { return }
                 let image = images[index]; index += 1
-                group.addTask { await downloadImage(image, into: folder) }
+                group.addTask { await downloadImage(image, into: folder, albumDate: albumDate) }
             }
             for _ in 0..<min(maxConcurrent, total) { addNext() }
             while let ok = await group.next() {
@@ -124,14 +127,65 @@ enum TaylorGallery {
                               note: failed > 0 ? "\(failed) image(s) couldn’t be downloaded." : nil)
     }
 
-    nonisolated private static func downloadImage(_ image: Image, into folder: URL) async -> Bool {
+    nonisolated private static func downloadImage(_ image: Image, into folder: URL, albumDate: Date?) async -> Bool {
         var req = URLRequest(url: image.fullURL)
         req.setValue(host, forHTTPHeaderField: "Referer")
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        guard let (tmp, response) = try? await session.download(for: req),
-              (response as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true else { return false }
+        guard let (data, response) = try? await session.data(for: req),
+              (response as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true,
+              data.count >= 256 else { return false }
         let dest = uniqueDestination(for: sanitize(image.filename), in: folder)
-        return (try? FileManager.default.moveItem(at: tmp, to: dest)) != nil
+        return saveImage(data, to: dest, date: albumDate)
+    }
+
+    /// Writes the bytes, embedding the album date as the capture date when the image
+    /// has no EXIF date of its own (the usual case for gallery JPGs) and stamping the
+    /// file's dates so it never shows up as "today".
+    nonisolated private static func saveImage(_ data: Data, to dest: URL, date: Date?) -> Bool {
+        if let src = CGImageSourceCreateWithData(data as CFData, nil), let type = CGImageSourceGetType(src) {
+            let existing = exifDate(src)
+            if existing == nil, let date {
+                var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+                let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
+                f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
+                let s = f.string(from: date)
+                var exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
+                exif[kCGImagePropertyExifDateTimeOriginal] = s; exif[kCGImagePropertyExifDateTimeDigitized] = s
+                props[kCGImagePropertyExifDictionary] = exif
+                var tiff = (props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
+                tiff[kCGImagePropertyTIFFDateTime] = s; props[kCGImagePropertyTIFFDictionary] = tiff
+                if let d = CGImageDestinationCreateWithURL(dest as CFURL, type, 1, nil) {
+                    CGImageDestinationAddImageFromSource(d, src, 0, props as CFDictionary)
+                    if CGImageDestinationFinalize(d) { setFileDate(dest, date); return true }
+                }
+            }
+            // Already had a date (keep its bytes) or embedding failed — fall through.
+            if (try? data.write(to: dest, options: .atomic)) != nil { setFileDate(dest, existing ?? date); return true }
+            return false
+        }
+        guard (try? data.write(to: dest, options: .atomic)) != nil else { return false }
+        setFileDate(dest, date)
+        return true
+    }
+
+    /// The image's embedded EXIF/TIFF capture date, if any.
+    nonisolated private static func exifDate(_ src: CGImageSource) -> Date? {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return nil }
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
+        for case let s? in [exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
+                            exif?[kCGImagePropertyExifDateTimeDigitized] as? String,
+                            tiff?[kCGImagePropertyTIFFDateTime] as? String] {
+            if let d = f.date(from: s) { return d }
+        }
+        return nil
+    }
+
+    nonisolated private static func setFileDate(_ url: URL, _ date: Date?) {
+        guard let date else { return }
+        try? FileManager.default.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: url.path)
     }
 
     // MARK: - Networking
@@ -326,15 +380,19 @@ extension TaylorGallery {
                                        progress: @escaping @Sendable (CrossRefProgress) -> Void) async -> SiteIndex {
         var index = prior ?? SiteIndex()
 
-        // 1. Album list — reuse the saved one, else crawl the category tree once.
-        if index.albumRefs.isEmpty {
-            progress(CrossRefProgress(phase: "Listing albums…", fraction: 0))
-            let collected = await collectAlbums { found, sections in
-                progress(CrossRefProgress(phase: "Listing albums — \(found) found in \(sections) sections…", fraction: 0))
-            }
-            index.albumRefs = collected.map { AlbumRef(id: $0.album.id, title: $0.album.title, year: $0.year) }
-            saveIndex(index)
+        // 1. Album list — (re)crawl the category tree and MERGE any newly-found albums
+        //    into the saved list, so resuming picks up albums a previous (truncated)
+        //    crawl missed without re-indexing the ones already done. Already-indexed
+        //    albums (doneAlbumIDs) are skipped in step 2, so only the new ones cost time.
+        progress(CrossRefProgress(phase: "Listing albums…", fraction: 0))
+        let collected = await collectAlbums { found, sections in
+            progress(CrossRefProgress(phase: "Listing albums — \(found) found in \(sections) sections…", fraction: 0))
         }
+        var seenRefs = Set(index.albumRefs.map { $0.id })
+        for c in collected where seenRefs.insert(c.album.id).inserted {
+            index.albumRefs.append(AlbumRef(id: c.album.id, title: c.album.title, year: c.year))
+        }
+        saveIndex(index)
         let total = index.albumRefs.count
         guard total > 0 else { return index }
 
@@ -470,10 +528,25 @@ extension TaylorGallery {
                 } else { result.ambiguous += 1; continue }   // generic name in conflicting events
             }
             // 2. Content (perceptual-hash) match for renamed files, if hashes exist.
+            //    A coarse dHash means visually-similar shots from *different* events can
+            //    land a few bits apart, which was assigning wrong dates (e.g. an Eras
+            //    Tour photo dated 2007). So only accept a *close* match (≤6 bits) whose
+            //    near-equal candidates all agree on the date; conflicting events → skip.
             if !matched, !index.hashes.isEmpty, let lh = await localHash(url) {
-                var best: HashEntry?; var bestD = 65
-                for he in index.hashes { let d = (lh ^ he.hash).nonzeroBitCount; if d < bestD { bestD = d; best = he } }
-                if let best, bestD <= 8 { matchDate = best.date; matchPlace = best.place; matched = true }
+                var bestD = 65
+                var near: [(entry: HashEntry, dist: Int)] = []
+                for he in index.hashes {
+                    let d = (lh ^ he.hash).nonzeroBitCount
+                    if d < bestD { bestD = d }
+                    if d <= 8 { near.append((he, d)) }
+                }
+                if bestD <= 6 {
+                    let window = near.filter { $0.dist <= bestD + 2 }       // candidates ~as close as the best
+                    let days = Set(window.compactMap { $0.entry.date.map { Int($0 / 86400) } })
+                    if days.count <= 1, let pick = window.min(by: { $0.dist < $1.dist }) {
+                        matchDate = pick.entry.date; matchPlace = pick.entry.place; matched = true
+                    } else { result.ambiguous += 1; continue }              // similar but conflicting events
+                }
             }
             guard matched else { result.unmatched += 1; continue }
 
