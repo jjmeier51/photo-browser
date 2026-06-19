@@ -160,7 +160,74 @@ enum FileActions {
         return (try? FileManager.default.moveItem(at: url, to: dest)) != nil ? dest : nil
     }
 
-    struct MoveOutcome { var moved: [(from: URL, to: URL)] = []; var skipped: [(name: String, reason: String)] = [] }
+    struct MoveOutcome: Sendable { var moved: [(from: URL, to: URL)] = []; var skipped: [(name: String, reason: String)] = [] }
+    struct CopyOutcome: Sendable { var copied: [(from: URL, to: URL)] = []; var skipped: [String] = [] }
+
+    /// Off-main batch move with progress, so a large selection can't block (and get
+    /// the app killed by the watchdog). Same collision rule as `move`.
+    nonisolated static func moveItems(_ urls: [URL], to folder: URL, renameOnCollision: Bool,
+                                      progress: @escaping @Sendable (Double) -> Void) async -> MoveOutcome {
+        await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            var outcome = MoveOutcome()
+            let total = max(urls.count, 1)
+            for (i, url) in urls.enumerated() {
+                defer { progress(Double(i + 1) / Double(total)) }
+                let name = url.lastPathComponent
+                if url.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
+                    outcome.skipped.append((name, "already in this folder")); continue
+                }
+                var dest = folder.appendingPathComponent(name)
+                if fm.fileExists(atPath: dest.path) {
+                    guard renameOnCollision else { outcome.skipped.append((name, "name already exists")); continue }
+                    dest = uniqueDest(name, in: folder)
+                }
+                if moveOne(url, to: dest) { outcome.moved.append((from: url, to: dest)) }
+                else { outcome.skipped.append((name, "couldn't move")) }
+            }
+            return outcome
+        }.value
+    }
+
+    /// Off-main batch copy with progress. `skipCollisions` skips items whose name
+    /// already exists in the destination (treats them as duplicates), like move.
+    nonisolated static func copyItems(_ urls: [URL], to folder: URL, skipCollisions: Bool,
+                                      progress: @escaping @Sendable (Double) -> Void) async -> CopyOutcome {
+        await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            var outcome = CopyOutcome()
+            let total = max(urls.count, 1)
+            for (i, url) in urls.enumerated() {
+                defer { progress(Double(i + 1) / Double(total)) }
+                let name = url.lastPathComponent
+                if skipCollisions, fm.fileExists(atPath: folder.appendingPathComponent(name).path) {
+                    outcome.skipped.append(name); continue
+                }
+                let dest = uniqueDest(name, in: folder)
+                if (try? fm.copyItem(at: url, to: dest)) != nil { outcome.copied.append((from: url, to: dest)) }
+                else { outcome.skipped.append(name) }
+            }
+            return outcome
+        }.value
+    }
+
+    private nonisolated static func moveOne(_ url: URL, to dest: URL) -> Bool {
+        let fm = FileManager.default
+        if (try? fm.moveItem(at: url, to: dest)) != nil { return true }
+        if (try? fm.copyItem(at: url, to: dest)) != nil { try? fm.removeItem(at: url); return true }
+        return false
+    }
+
+    private nonisolated static func uniqueDest(_ name: String, in folder: URL) -> URL {
+        let fm = FileManager.default
+        var dest = folder.appendingPathComponent(name)
+        let base = dest.deletingPathExtension().lastPathComponent, ext = dest.pathExtension
+        var n = 1
+        while fm.fileExists(atPath: dest.path) {
+            dest = folder.appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)"); n += 1
+        }
+        return dest
+    }
 
     /// Items whose name already exists in `folder` (ignoring ones already there) —
     /// the potential conflicts the move flow surfaces to the user.

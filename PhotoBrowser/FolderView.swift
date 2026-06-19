@@ -58,7 +58,7 @@ struct FolderView: View {
     @State private var renameDraft = ""
     @State private var showMovePicker = false
     @State private var moveConflict: MoveConflict?
-    struct MoveConflict: Identifiable { let id = UUID(); let dest: URL; let items: [Entry] }
+    struct MoveConflict: Identifiable { let id = UUID(); let dest: URL; let items: [Entry]; var isCopy = false }
     @State private var showCopyPicker = false
     @State private var exporting = false
     @State private var exportProgress: Double = 0
@@ -639,8 +639,9 @@ struct FolderView: View {
                 QuickLookPreview(url: item.url).ignoresSafeArea()
             }
             .sheet(item: $moveConflict) { c in
-                MoveConflictView(dest: c.dest, items: c.items,
-                                 onConfirm: { keep in finishMove(to: c.dest, keepConflicts: keep) })
+                MoveConflictView(dest: c.dest, items: c.items, verb: c.isCopy ? "Copy" : "Move",
+                                 onConfirm: { keep in c.isCopy ? finishCopy(to: c.dest, keepConflicts: keep)
+                                                               : finishMove(to: c.dest, keepConflicts: keep) })
             }
             .fullScreenCover(item: $viewerPresentation) { p in
                 ViewerView(items: p.items, startIndex: p.startIndex, slideshow: p.slideshow)
@@ -1715,31 +1716,63 @@ struct FolderView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { moveConflict = conflict }
     }
 
-    /// Completes a move. `keepConflicts` are the same-name items the user chose to
-    /// move (renamed to keep both); any other conflicting item is left behind, while
-    /// everything non-conflicting moves normally.
+    /// Completes a move (off the main thread, with a progress bar). `keepConflicts`
+    /// are the same-name items the user chose to move (renamed to keep both); any
+    /// other conflicting item is left behind. Labels follow in one batched re-key.
     private func finishMove(to dest: URL, keepConflicts: Set<URL>) {
         moveConflict = nil
         let allURLs = selectedEntries().map(\.url)
-        let conflicts = Set(FileActions.collisions(allURLs, in: dest))
-        let skip = conflicts.subtracting(keepConflicts)
+        let skip = Set(FileActions.collisions(allURLs, in: dest)).subtracting(keepConflicts)
         let moveURLs = allURLs.filter { !skip.contains($0) }
-        let outcome = FileActions.move(moveURLs, to: dest, renameOnCollision: true)
-        for pair in outcome.moved { library.itemMoved(from: pair.from, to: pair.to) }   // labels follow
         selection.removeAll(); selecting = false
-        var msg = "Moved \(outcome.moved.count) item(s)."
-        if !skip.isEmpty { msg += " Skipped \(skip.count) with matching names." }
-        resultMessage = msg
-        Task { await reload() }
+        guard !moveURLs.isEmpty else { resultMessage = "Nothing to move."; return }
+        editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Move Items")
+        Task {
+            let outcome = await FileActions.moveItems(moveURLs, to: dest, renameOnCollision: true) { p in
+                Task { @MainActor in editProgress = p }
+            }
+            library.itemsMoved(outcome.moved)                 // labels follow, one persist
+            editProcessing = false; bg.end()
+            var msg = "Moved \(outcome.moved.count) item(s)."
+            if !skip.isEmpty { msg += " Skipped \(skip.count) with matching names." }
+            resultMessage = msg
+            await reload()
+        }
     }
 
+    /// Copy checks for same-name duplicates like Move: it surfaces conflicts so the
+    /// user can keep both or skip them, instead of silently making extra copies.
     private func performCopy(to dest: URL) {
-        let copied = FileActions.copy(selectedEntries().map(\.url), to: dest)
+        let entries = selectedEntries()
+        let collisionURLs = Set(FileActions.collisions(entries.map(\.url), in: dest))
+        if collisionURLs.isEmpty { finishCopy(to: dest, keepConflicts: []); return }
+        let conflict = MoveConflict(dest: dest, items: entries.filter { collisionURLs.contains($0.url) }, isCopy: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { moveConflict = conflict }
+    }
+
+    /// Completes a copy (off the main thread, with a progress bar). `keepConflicts`
+    /// copy under a new name; conflicting items the user deselected are skipped as
+    /// duplicates. Copies don't carry labels (the originals keep theirs).
+    private func finishCopy(to dest: URL, keepConflicts: Set<URL>) {
+        moveConflict = nil
+        let allURLs = selectedEntries().map(\.url)
+        let skip = Set(FileActions.collisions(allURLs, in: dest)).subtracting(keepConflicts)
+        let copyURLs = allURLs.filter { !skip.contains($0) }
         selection.removeAll(); selecting = false
-        resultMessage = "Copied \(copied.count) item(s)."
-        // Copies don't carry labels (the originals keep theirs), so no metadata
-        // migration. Only reload if the copies landed in the folder on screen.
-        if dest.standardizedFileURL == url.standardizedFileURL { Task { await reload() } }
+        guard !copyURLs.isEmpty else { resultMessage = "Nothing to copy."; return }
+        editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Copy Items")
+        Task {
+            let outcome = await FileActions.copyItems(copyURLs, to: dest, skipCollisions: false) { p in
+                Task { @MainActor in editProgress = p }
+            }
+            editProcessing = false; bg.end()
+            var msg = "Copied \(outcome.copied.count) item(s)."
+            if !skip.isEmpty { msg += " Skipped \(skip.count) duplicate name(s)." }
+            resultMessage = msg
+            if dest.standardizedFileURL == url.standardizedFileURL { await reload() }
+        }
     }
 
     private func exportFrames(_ entry: Entry, name: String) {

@@ -587,76 +587,71 @@ final class Library {
     /// Keeps Favorite / To AI labels and captions attached to an item after it's
     /// moved or renamed within the app. Rewrites the stored path (and, when a
     /// folder moves, every label/caption for items underneath it).
+    /// Keeps labels, captions, covers, etc. attached to an item after it's moved or
+    /// renamed within the app, by rewriting the stored path (and, for a folder, every
+    /// path underneath it).
     func itemMoved(from oldURL: URL, to newURL: URL) {
         let old = oldURL.path, new = newURL.path
-        favorites = remapPaths(favorites, old: old, new: new)
-        aiLabels  = remapPaths(aiLabels,  old: old, new: new)
-        framesFolders = remapPaths(framesFolders, old: old, new: new)
-        customLabels = customLabels.mapValues { remapPaths($0, old: old, new: new) }
+        applyRemap { p in (p == old || p.hasPrefix(old + "/")) ? new + p.dropFirst(old.count) : p }
+    }
 
-        var remappedIG = instagramFolders
-        for (key, value) in instagramFolders where key == old || key.hasPrefix(old + "/") {
-            remappedIG.removeValue(forKey: key)
-            remappedIG[new + key.dropFirst(old.count)] = value
+    /// Batch version: re-keys all moved items in a single pass with one persist, so
+    /// moving a large selection doesn't do N×(serialize + write) on the main thread
+    /// (which froze/killed the app).
+    func itemsMoved(_ moves: [(from: URL, to: URL)]) {
+        guard !moves.isEmpty else { return }
+        let pairs = moves.map { (old: $0.from.path, new: $0.to.path) }
+        applyRemap { p in
+            for pr in pairs where p == pr.old || p.hasPrefix(pr.old + "/") { return pr.new + p.dropFirst(pr.old.count) }
+            return p
         }
-        instagramFolders = remappedIG
-        persistInstagramFolders()
+    }
 
-        instagramHighlights = remapPaths(instagramHighlights, old: old, new: new)
-        UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
-        albumHighlights = remapPaths(albumHighlights, old: old, new: new)
-        UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
-        igPostedBy = remapDict(igPostedBy, old: old, new: new)
-        UserDefaults.standard.set(igPostedBy, forKey: "photoBrowser.igPostedBy")
-        igLastHandle = remapDict(igLastHandle, old: old, new: new)
-        UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
-
-        kardashianFolders = remapPaths(kardashianFolders, old: old, new: new)
-        UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
-        func remap(_ p: String) -> String { (p == old || p.hasPrefix(old + "/")) ? new + p.dropFirst(old.count) : p }
+    /// Applies `remap` to every path-keyed collection, then persists once.
+    private func applyRemap(_ remap: (String) -> String) {
+        favorites = Set(favorites.map(remap))
+        aiLabels = Set(aiLabels.map(remap))
+        framesFolders = Set(framesFolders.map(remap))
+        kardashianFolders = Set(kardashianFolders.map(remap))
+        instagramHighlights = Set(instagramHighlights.map(remap))
+        albumHighlights = Set(albumHighlights.map(remap))
+        customLabels = customLabels.mapValues { Set($0.map(remap)) }
+        captions = remapKeys(captions, remap)
+        folderCovers = remapKeys(folderCovers, remap)
+        photoOrigins = remapKeys(photoOrigins, remap)
+        igPostedBy = remapKeys(igPostedBy, remap)
+        igLastHandle = remapKeys(igLastHandle, remap)
+        folderBirthdays = remapKeys(folderBirthdays, remap)
+        instagramFolders = remapKeys(instagramFolders, remap)
         bubbleOrders = Dictionary(bubbleOrders.map { (remap($0.key), $0.value.map(remap)) }, uniquingKeysWith: { a, _ in a })
-        UserDefaults.standard.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
-        var akChanged = false
-        for (name, var state) in accessKardashian where state.folderPath == old || state.folderPath.hasPrefix(old + "/") {
-            state.folderPath = new + state.folderPath.dropFirst(old.count)
-            accessKardashian[name] = state; akChanged = true
+        for (name, var state) in accessKardashian {
+            let nf = remap(state.folderPath)
+            if nf != state.folderPath { state.folderPath = nf; accessKardashian[name] = state }
         }
-        if akChanged, let data = try? JSONEncoder().encode(accessKardashian) {
-            UserDefaults.standard.set(data, forKey: "photoBrowser.accessKardashian")
-        }
-
-        captions = remapDict(captions, old: old, new: new)
-        folderCovers = remapDict(folderCovers, old: old, new: new)
-        photoOrigins = remapDict(photoOrigins, old: old, new: new)
 
         UserDefaults.standard.set(Array(favorites), forKey: "photoBrowser.favorites")
         UserDefaults.standard.set(Array(aiLabels), forKey: "photoBrowser.ai")
         UserDefaults.standard.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
+        UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
+        UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
+        UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
         UserDefaults.standard.set(captions, forKey: "photoBrowser.captions")
         UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
         UserDefaults.standard.set(photoOrigins, forKey: "photoBrowser.photoOrigins")
+        UserDefaults.standard.set(igPostedBy, forKey: "photoBrowser.igPostedBy")
+        UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
+        UserDefaults.standard.set(folderBirthdays, forKey: "photoBrowser.birthdays")
+        UserDefaults.standard.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
         persistCustomLabels()
+        persistInstagramFolders()
+        if let data = try? JSONEncoder().encode(accessKardashian) {
+            UserDefaults.standard.set(data, forKey: "photoBrowser.accessKardashian")
+        }
         labelsVersion += 1
     }
 
-    /// Returns `dict` with any key equal to `old` (or under `old/`) re-pointed to `new`.
-    private func remapDict(_ dict: [String: String], old: String, new: String) -> [String: String] {
-        var result = dict
-        for (key, value) in dict where key == old || key.hasPrefix(old + "/") {
-            result.removeValue(forKey: key)
-            result[new + key.dropFirst(old.count)] = value
-        }
-        return result
-    }
-
-    /// Returns `set` with `old` (and any path under `old/`) re-pointed to `new`.
-    private func remapPaths(_ set: Set<String>, old: String, new: String) -> Set<String> {
-        var result = set
-        for path in set where path == old || path.hasPrefix(old + "/") {
-            result.remove(path)
-            result.insert(new + path.dropFirst(old.count))
-        }
-        return result
+    private func remapKeys<V>(_ dict: [String: V], _ remap: (String) -> String) -> [String: V] {
+        Dictionary(dict.map { (remap($0.key), $0.value) }, uniquingKeysWith: { a, _ in a })
     }
 
     /// Re-keys all per-item data (Favorites, To AI, captions, album covers, Photos

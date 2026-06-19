@@ -8,14 +8,16 @@ struct MoveConflictView: View {
     @Environment(\.dismiss) private var dismiss
     let dest: URL
     let items: [Entry]
-    /// The conflicting items the user chose to move (keep both); the rest are skipped.
+    let verb: String        // "Move" or "Copy"
+    /// The conflicting items the user chose to keep (under a new name); rest skipped.
     let onConfirm: (Set<URL>) -> Void
 
     @State private var keep: Set<URL>
 
-    init(dest: URL, items: [Entry], onConfirm: @escaping (Set<URL>) -> Void) {
+    init(dest: URL, items: [Entry], verb: String = "Move", onConfirm: @escaping (Set<URL>) -> Void) {
         self.dest = dest
         self.items = items
+        self.verb = verb
         self.onConfirm = onConfirm
         _keep = State(initialValue: Set(items.map(\.url)))   // default: keep both for all
     }
@@ -23,7 +25,7 @@ struct MoveConflictView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                Text("\(items.count) item\(items.count == 1 ? "" : "s") already have a file with the same name in “\(dest.lastPathComponent)”. They may be different — compare below and pick which to move (kept under a new name). Unselected ones stay where they are; everything else in your selection moves normally.")
+                Text("\(items.count) item\(items.count == 1 ? "" : "s") already have a file with the same name in “\(dest.lastPathComponent)”. They may be different — compare below and pick which to \(verb.lowercased()) (kept under a new name). Unselected ones are skipped; everything else in your selection \(verb.lowercased())s normally.")
                     .font(.callout).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading).padding()
 
@@ -59,9 +61,9 @@ struct MoveConflictView: View {
     private var allSelected: Bool { keep.count == items.count }
 
     private var confirmLabel: String {
-        if keep.isEmpty { return "Skip All & Move the Rest" }
-        if allSelected { return "Move All (Keep Both)" }
-        return "Move \(keep.count) Selected (Keep Both)"
+        if keep.isEmpty { return "Skip All & \(verb) the Rest" }
+        if allSelected { return "\(verb) All (Keep Both)" }
+        return "\(verb) \(keep.count) Selected (Keep Both)"
     }
 
     private func toggle(_ u: URL) { if keep.contains(u) { keep.remove(u) } else { keep.insert(u) } }
@@ -76,7 +78,7 @@ struct MoveConflictView: View {
                 Spacer()
             }
             HStack(spacing: 10) {
-                thumb(item, caption: "Moving")
+                thumb(item, caption: verb == "Copy" ? "Copying" : "Moving")
                 Image(systemName: "arrow.right").foregroundStyle(.secondary)
                 thumb(existing(item), caption: "Already here")
             }
