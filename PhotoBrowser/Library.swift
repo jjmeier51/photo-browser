@@ -54,6 +54,34 @@ final class Library {
         UserDefaults.standard.set(url.path, forKey: "photoBrowser.lastTransferDest")
     }
 
+    // MARK: - Facebook profile folders
+
+    /// Folder path → the Facebook profile downloaded into it (drives "Get New",
+    /// the blue-ringed bubble, the subtitle, and dedup).
+    var facebookFolders: [String: FBFolderInfo] = {
+        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.facebookFolders"),
+              let m = try? JSONDecoder().decode([String: FBFolderInfo].self, from: data) else { return [:] }
+        return m
+    }()
+    func facebookInfo(for folder: URL) -> FBFolderInfo? { facebookFolders[folder.path] }
+    func isFacebookFolder(_ folder: URL) -> Bool { facebookFolders[folder.path] != nil }
+    func setFacebookInfo(_ info: FBFolderInfo, for folder: URL) {
+        facebookFolders[folder.path] = info
+        persistFacebookFolders()
+        changeToken += 1
+    }
+    private func persistFacebookFolders() {
+        if let data = try? JSONEncoder().encode(facebookFolders) {
+            UserDefaults.standard.set(data, forKey: "photoBrowser.facebookFolders")
+        }
+    }
+    var lastFacebookURLByFolder: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.lastFacebookURL") as? [String: String]) ?? [:]
+    func lastFacebookURL(for folder: URL) -> String? { lastFacebookURLByFolder[folder.path] }
+    func setLastFacebookURL(_ url: String, for folder: URL) {
+        lastFacebookURLByFolder[folder.path] = url
+        UserDefaults.standard.set(lastFacebookURLByFolder, forKey: "photoBrowser.lastFacebookURL")
+    }
+
     /// Grid thumbnail minimum size (points); pinch-to-zoom adjusts it ±30%.
     var thumbSize: Double = (UserDefaults.standard.object(forKey: "photoBrowser.thumbSize") as? Double) ?? 110
     func setThumbSize(_ value: Double) {
@@ -643,6 +671,7 @@ final class Library {
         igLastHandle = remapKeys(igLastHandle, remap)
         folderBirthdays = remapKeys(folderBirthdays, remap)
         instagramFolders = remapKeys(instagramFolders, remap)
+        facebookFolders = remapKeys(facebookFolders, remap)
         bubbleOrders = Dictionary(bubbleOrders.map { (remap($0.key), $0.value.map(remap)) }, uniquingKeysWith: { a, _ in a })
         for (name, var state) in accessKardashian {
             let nf = remap(state.folderPath)
@@ -664,6 +693,7 @@ final class Library {
         UserDefaults.standard.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
         persistCustomLabels()
         persistInstagramFolders()
+        persistFacebookFolders()
         if let data = try? JSONEncoder().encode(accessKardashian) {
             UserDefaults.standard.set(data, forKey: "photoBrowser.accessKardashian")
         }

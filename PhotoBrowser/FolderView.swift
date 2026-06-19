@@ -80,6 +80,7 @@ struct FolderView: View {
     @State private var draggingBubble: Entry?
     @State private var showInstagram = false
     @State private var igForceFull = false
+    @State private var showFacebook = false
     @State private var showTikTok = false
     @State private var confirmFixDates = false
     @State private var fixingDates = false
@@ -746,6 +747,9 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showInstagram, onDismiss: { igForceFull = false; Task { await reload() } }) {
                 InstagramImportView(targetFolder: url, existing: library.instagramInfo(for: url), forceFull: igForceFull) { Task { await reload() } }
             }
+            .fullScreenCover(isPresented: $showFacebook, onDismiss: { Task { await reload() } }) {
+                FacebookImportView(targetFolder: url, existing: library.facebookInfo(for: url)) { Task { await reload() } }
+            }
             .fullScreenCover(isPresented: $showTikTok, onDismiss: { Task { await reload() } }) {
                 TikTokImportView(targetFolder: url) { Task { await reload() } }
             }
@@ -1076,17 +1080,24 @@ struct FolderView: View {
 
     /// Instagram profile subfolders, shown as a row of circular bubbles (like the
     /// highlights on a profile) instead of regular grid tiles.
-    /// Folders shown as circular bubbles: Instagram profiles/highlights and any
-    /// folder the user turned into an "album highlight".
+    /// Folders shown as circular bubbles: Instagram profiles/highlights, Facebook
+    /// profiles, and any folder turned into an "album highlight".
     private func isBubbleFolder(_ url: URL) -> Bool {
-        library.isInstagramFolder(url) || library.isInstagramHighlight(url) || library.isAlbumHighlight(url)
+        library.isInstagramFolder(url) || library.isInstagramHighlight(url)
+            || library.isAlbumHighlight(url) || library.isFacebookFolder(url)
+    }
+    /// Pin rank: Instagram first, the Facebook profile next, everything else after.
+    private func bubbleRank(_ url: URL) -> Int {
+        if library.isInstagramFolder(url) { return 0 }
+        if library.isFacebookFolder(url) { return 1 }
+        return 2
     }
     private var igBubbles: [Entry] {
         let order = library.bubbleOrder(for: url)
         return entries.filter { $0.isFolder && isBubbleFolder($0.url) }
             .sorted { a, b in
-                let ai = library.isInstagramFolder(a.url), bi = library.isInstagramFolder(b.url)
-                if ai != bi { return ai }      // the Instagram folder is always listed first
+                let ra = bubbleRank(a.url), rb = bubbleRank(b.url)
+                if ra != rb { return ra < rb }     // Instagram, then Facebook, pinned
                 // Then the user's chosen order (drag to rearrange); unordered ones last, A–Z.
                 let ia = order.firstIndex(of: a.url.path) ?? Int.max
                 let ib = order.firstIndex(of: b.url.path) ?? Int.max
@@ -1118,30 +1129,26 @@ struct FolderView: View {
         let button = Button { tap(entry) } label: { bubble(entry) }      // select-aware (toggle vs open)
             .buttonStyle(.plain)
             .contextMenu { if !selecting { contextMenu(for: entry) } }
-        if selecting || library.isInstagramFolder(entry.url) {
-            button
+        if selecting || library.isInstagramFolder(entry.url) || library.isFacebookFolder(entry.url) {
+            button                                              // Instagram + Facebook are pinned
         } else {
             button
                 .opacity(draggingBubble == entry ? 0.4 : 1)
                 .onDrag { draggingBubble = entry; return NSItemProvider(object: entry.url.path as NSString) }
                 .onDrop(of: [UTType.text], delegate: BubbleDropDelegate(
                     item: entry, items: $bubbleItems, dragging: $draggingBubble,
-                    isPinned: { library.isInstagramFolder($0) },
+                    isPinned: { library.isInstagramFolder($0) || library.isFacebookFolder($0) },
                     onReorder: { library.setBubbleOrder($0.map { $0.url.path }, for: url) }))
         }
     }
 
     private func bubble(_ entry: Entry) -> some View {
         let isSel = selection.contains(entry.url)
+        let isFB = library.isFacebookFolder(entry.url)
         return VStack(spacing: 5) {
             ZStack {
                 Circle()
-                    .strokeBorder(
-                        LinearGradient(colors: [Color(red: 0.99, green: 0.6, blue: 0.11),
-                                                Color(red: 0.95, green: 0.27, blue: 0.42),
-                                                Color(red: 0.56, green: 0.23, blue: 0.83)],
-                                       startPoint: .topLeading, endPoint: .bottomTrailing),
-                        lineWidth: 2.5)
+                    .strokeBorder(facebookRing(isFB), lineWidth: 2.5)
                     .frame(width: 72, height: 72)
                 bubbleImage(entry).frame(width: 62, height: 62).clipShape(Circle())
                     .overlay { if selecting && !isSel { Circle().fill(.black.opacity(0.4)) } }
@@ -1152,9 +1159,29 @@ struct FolderView: View {
                         .offset(x: 22, y: 22)
                 }
             }
-            Text(library.instagramInfo(for: entry.url).map { "@\($0.handle)" } ?? entry.name)
+            Text(bubbleLabel(entry))
                 .font(.caption2).lineLimit(1).frame(maxWidth: 76)
         }
+    }
+
+    private func bubbleLabel(_ entry: Entry) -> String {
+        if let ig = library.instagramInfo(for: entry.url) { return "@\(ig.handle)" }
+        if let fb = library.facebookInfo(for: entry.url) { return fb.profileName }
+        return entry.name
+    }
+
+    /// The bubble ring: a blue gradient for a Facebook profile, the Instagram-style
+    /// warm gradient otherwise.
+    private func facebookRing(_ isFB: Bool) -> AnyShapeStyle {
+        if isFB {
+            return AnyShapeStyle(LinearGradient(colors: [Color(red: 0.10, green: 0.46, blue: 0.91),
+                                                         Color(red: 0.30, green: 0.62, blue: 0.99)],
+                                                startPoint: .topLeading, endPoint: .bottomTrailing))
+        }
+        return AnyShapeStyle(LinearGradient(colors: [Color(red: 0.99, green: 0.6, blue: 0.11),
+                                                     Color(red: 0.95, green: 0.27, blue: 0.42),
+                                                     Color(red: 0.56, green: 0.23, blue: 0.83)],
+                                            startPoint: .topLeading, endPoint: .bottomTrailing))
     }
 
     @ViewBuilder private func bubbleImage(_ entry: Entry) -> some View {
@@ -1192,6 +1219,11 @@ struct FolderView: View {
             let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
             let when = f.string(from: Date(timeIntervalSince1970: ig.lastUpdated))
             return "Last Updated on \(when) · \(ig.photos) Photos and \(ig.videos) Videos"
+        }
+        if let fb = library.facebookInfo(for: url) {
+            let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
+            let when = f.string(from: Date(timeIntervalSince1970: fb.lastUpdated))
+            return "Last Updated on \(when) · \(fb.photos) Photos and \(fb.videos) Videos"
         }
         let albums = entries.filter { $0.isFolder }.count
         if isRoot || albums > 0 {
@@ -1390,6 +1422,10 @@ struct FolderView: View {
                         Button { igForceFull = true; showInstagram = true } label: {
                             Label("Re-download Entire Profile", systemImage: "arrow.clockwise.circle")
                         }
+                    }
+                    Button { showFacebook = true } label: {
+                        Label(library.isFacebookFolder(url) ? "Get New Facebook Photos" : "Download Facebook Profile…",
+                              systemImage: library.isFacebookFolder(url) ? "arrow.triangle.2.circlepath" : "person.2.fill")
                     }
                     Button { showTikTok = true } label: {
                         Label("Download TikTok Profile…", systemImage: "music.note")
