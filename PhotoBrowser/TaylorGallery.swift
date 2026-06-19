@@ -39,33 +39,49 @@ enum TaylorGallery {
     // MARK: - Browsing
 
     /// Sub-categories and albums under a category (`nil` = the gallery root).
-    /// Results are cached in memory so re-navigating is instant (no re-fetch).
+    /// Coppermine paginates the album list within a category, so we read *every*
+    /// album page (not just the first) — otherwise large categories lose all but
+    /// their first page of albums. Cached in memory so re-navigating is instant.
     nonisolated static func browse(category cat: Int?) async -> (categories: [Category], albums: [Album], note: String?) {
         let key = cat ?? -1
         if let hit = await GalleryCache.shared.browse(key) { return (hit.0, hit.1, nil) }
-        let path = cat.map { "index.php?cat=\($0)" } ?? "index.php"
-        guard let html = await fetchHTML(path) else { return ([], [], "Couldn’t reach taylorpictures.net.") }
-        let categories = parseCategories(html, excluding: cat)
-        let albums = parseAlbums(html)
+        func path(_ p: Int) -> String {
+            if let cat { return "index.php?cat=\(cat)&page=\(p)" }
+            return "index.php?page=\(p)"
+        }
+        guard let first = await fetchHTML(path(1)) else { return ([], [], "Couldn’t reach taylorpictures.net.") }
+        let categories = parseCategories(first, excluding: cat)
+        var byID: [Int: Album] = [:]; var order: [Int] = []
+        @discardableResult func add(_ list: [Album]) -> Int {
+            var added = 0
+            for a in list where byID[a.id] == nil { byID[a.id] = a; order.append(a.id); added += 1 }
+            return added
+        }
+        add(parseAlbums(first))
+        var p = 2
+        while p <= 500 {                                // keep paging until one adds nothing new
+            guard let html = await fetchHTML(path(p)) else { break }
+            if add(parseAlbums(html)) == 0 { break }
+            p += 1
+        }
+        let albums = order.compactMap { byID[$0] }
         if !(categories.isEmpty && albums.isEmpty) { await GalleryCache.shared.setBrowse(key, (categories, albums)) }
         return (categories, albums, nil)
     }
 
-    /// Every image in an album (across all Coppermine pages). Cached in memory.
-    /// Page 1 determines the page count, then the rest are fetched concurrently.
+    /// Every image in an album. Pages until one adds nothing new, so a windowed
+    /// thumbnail pager can't truncate a big album. Cached in memory.
     nonisolated static func images(inAlbum id: Int) async -> [Image] {
         if let hit = await GalleryCache.shared.images(id) { return hit }
-        guard let first = await fetchHTML("thumbnails.php?album=\(id)&page=1") else { return [] }
-        let last = min(maxPage(first), 200)
-        var pages: [Int: [Image]] = [1: parseImages(first)]
-        if last > 1 {
-            await withTaskGroup(of: (Int, [Image]).self) { group in
-                for p in 2...last { group.addTask { (p, parseImages(await fetchHTML("thumbnails.php?album=\(id)&page=\(p)") ?? "")) } }
-                while let (p, imgs) = await group.next() { pages[p] = imgs }
-            }
-        }
         var all: [Image] = []; var seen = Set<String>()
-        for p in 1...last { for img in (pages[p] ?? []) where seen.insert(img.fullURL.absoluteString).inserted { all.append(img) } }
+        var p = 1
+        while p <= 500 {
+            guard let html = await fetchHTML("thumbnails.php?album=\(id)&page=\(p)") else { break }
+            var added = 0
+            for img in parseImages(html) where seen.insert(img.fullURL.absoluteString).inserted { all.append(img); added += 1 }
+            if added == 0 { break }
+            p += 1
+        }
         if !all.isEmpty { await GalleryCache.shared.setImages(id, all) }
         return all
     }
@@ -161,7 +177,7 @@ enum TaylorGallery {
 
     nonisolated private static func parseCategories(_ html: String, excluding current: Int?) -> [Category] {
         var seen = Set<Int>(); var out: [Category] = []
-        for g in matches(html, "<a[^>]+href=\"index\\.php\\?cat=(\\d+)\"[^>]*>([\\s\\S]*?)</a>") {
+        for g in matches(html, "<a[^>]+href=[\"']?index\\.php\\?cat=(\\d+)[^>]*>([\\s\\S]*?)</a>") {
             guard let id = Int(g[1]), id != current, !seen.contains(id) else { continue }
             let title = decode(stripTags(g[2]))
             guard !title.isEmpty else { continue }
@@ -175,7 +191,7 @@ enum TaylorGallery {
         // a title anchor (the text we want); keep the first non-empty title per id and
         // the first cover thumbnail (the album's `thumb_…` image on the listing page).
         var titles: [Int: String] = [:]; var order: [Int] = []; var covers: [Int: URL] = [:]
-        for g in matches(html, "<a[^>]+href=\"thumbnails\\.php\\?album=(\\d+)\"[^>]*>([\\s\\S]*?)</a>") {
+        for g in matches(html, "<a[^>]+href=[\"']?thumbnails\\.php\\?album=(\\d+)[^>]*>([\\s\\S]*?)</a>") {
             guard let id = Int(g[1]) else { continue }
             let title = decode(stripTags(g[2]))
             if titles[id] == nil { order.append(id) }
@@ -208,12 +224,6 @@ enum TaylorGallery {
         if file.hasPrefix("thumb_") { file = String(file.dropFirst("thumb_".count)) }
         comps[comps.count - 1] = file
         return comps.joined(separator: "/")
-    }
-
-    nonisolated private static func maxPage(_ html: String) -> Int {
-        var maxP = 1
-        for g in matches(html, "[?&]page=(\\d+)") { if let p = Int(g[1]) { maxP = max(maxP, p) } }
-        return maxP
     }
 
     // MARK: - Small helpers
