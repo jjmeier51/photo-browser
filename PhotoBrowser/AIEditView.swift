@@ -74,19 +74,28 @@ struct AIEditView: View {
         running = true; error = nil
         let url = entry.url, p = prompt, n = count, m = model
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Edit")
+        let activity = AIProgressActivity()
+        activity.begin(title: "AI Edit", detail: "Generating with Astria…")
         Task {
             guard let prep = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url, maxPixel: m.maxLongSide) }.value else {
-                running = false; bg.end(); error = "Couldn’t read the photo."; return
+                running = false; bg.end(); error = "Couldn’t read the photo."
+                activity.finish(success: false, message: "Couldn’t read the photo."); return
             }
             let result = await AIExtend.generate(model: m, prompt: p, imageData: prep.data, count: n,
                                                  width: prep.width, height: prep.height)
             running = false; bg.end()
             switch result {
-            case .success(let data): results = data
-            case .failure(.notConfigured): showSettings = true
-            case .failure(.network): error = "Couldn’t reach the provider."
-            case .failure(.badImage), .failure(.badResult): error = "The image couldn’t be processed."
-            case .failure(.server(let m)): error = m
+            case .success(let data):
+                results = data
+                activity.finish(success: true, message: "\(data.count) AI image\(data.count == 1 ? "" : "s") ready to review.")
+            case .failure(.notConfigured):
+                showSettings = true; activity.finish(success: false, message: "Add your Astria API key in Settings.")
+            case .failure(.network):
+                error = "Couldn’t reach the provider."; activity.finish(success: false, message: "Couldn’t reach the provider.")
+            case .failure(.badImage), .failure(.badResult):
+                error = "The image couldn’t be processed."; activity.finish(success: false, message: "The image couldn’t be processed.")
+            case .failure(.server(let m)):
+                error = m; activity.finish(success: false, message: m)
             }
         }
     }

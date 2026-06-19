@@ -193,6 +193,8 @@ struct ResizeEditorView: View {
         let free = aspect == .freeform, fw = freeW, fh = freeH, ratio = Double(aspect.ratio)
         let ox = offsetX, oy = offsetY, style = fill
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Extend")
+        let activity = AIProgressActivity()
+        activity.begin(title: "AI Extend", detail: "Extending with Astria…")
         Task {
             let prep = await Task.detached(priority: .userInitiated) { () -> (img: Data, mask: Data, w: Int, h: Int)? in
                 guard let raw = ZoomableImageView.decodeCG(url: url, maxPixel: 2000) else { return nil }
@@ -238,17 +240,26 @@ struct ResizeEditorView: View {
                       let maskData = UIImage(cgImage: mask).pngData() else { return nil }
                 return (img, maskData, canvas.width, canvas.height)
             }.value
-            guard let prep else { saving = false; bg.end(); aiError = "Couldn’t prepare the image."; return }
+            guard let prep else {
+                saving = false; bg.end(); aiError = "Couldn’t prepare the image."
+                activity.finish(success: false, message: "Couldn’t prepare the image."); return
+            }
             aiStatus = "Generating…"
             let result = await AIExtend.generateOutpaint(prompt: prompt, imageData: prep.img, maskData: prep.mask,
                                                          width: prep.w, height: prep.h)
             saving = false; bg.end()
             switch result {
-            case .success(let data): aiResults = data
-            case .failure(.notConfigured): showSettings = true
-            case .failure(.network): aiError = "Couldn’t reach the provider."
-            case .failure(.badImage), .failure(.badResult): aiError = "The image couldn’t be processed."
-            case .failure(.server(let msg)): aiError = msg
+            case .success(let data):
+                aiResults = data
+                activity.finish(success: true, message: "\(data.count) extended image\(data.count == 1 ? "" : "s") ready to review.")
+            case .failure(.notConfigured):
+                showSettings = true; activity.finish(success: false, message: "Add your Astria API key in Settings.")
+            case .failure(.network):
+                aiError = "Couldn’t reach the provider."; activity.finish(success: false, message: "Couldn’t reach the provider.")
+            case .failure(.badImage), .failure(.badResult):
+                aiError = "The image couldn’t be processed."; activity.finish(success: false, message: "The image couldn’t be processed.")
+            case .failure(.server(let msg)):
+                aiError = msg; activity.finish(success: false, message: msg)
             }
         }
     }
