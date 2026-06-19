@@ -620,7 +620,10 @@ struct FolderView: View {
     }
 
     var body: some View {
-        content
+        // The presentation chain (≈35 sheets/covers/alerts + ≈10 overlays) nested
+        // `ModifiedContent` so deep the runtime overflowed the stack computing the
+        // type metadata. Applying it in AnyView-separated chunks caps the depth.
+        let g1 = AnyView(content
             .fileImporter(isPresented: $showFolderPicker,
                           allowedContentTypes: [.folder],
                           allowsMultipleSelection: false) { result in
@@ -656,6 +659,8 @@ struct FolderView: View {
             .sheet(isPresented: $showCopyPicker) {
                 FolderPicker(root: library.rootURL ?? url, confirmTitle: "Copy Here", startAt: library.lastTransferDestination) { dest in performCopy(to: dest) }
             }
+        )
+        let g2 = AnyView(g1
             .confirmationDialog("Delete \(selection.count) item(s)? This permanently removes them from the drive.",
                                 isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("Delete", role: .destructive) { performDelete() }
@@ -702,6 +707,8 @@ struct FolderView: View {
                 Button("Rename") { performRename() }
                 Button("Cancel", role: .cancel) { renameTarget = nil }
             }
+        )
+        let g3 = AnyView(g2
             .sheet(item: $infoEntry) { e in InfoPanel(entry: e) }
             .sheet(item: $folderInfoItem) { item in FolderInfoView(folder: item.url) }
             .sheet(item: $birthdayFolderItem) { item in
@@ -720,6 +727,8 @@ struct FolderView: View {
             .sheet(item: $aiEditEntry) { e in AIEditView(entry: e) }
             .fullScreenCover(isPresented: $showPeople) { PeopleView(folder: url) }
             .sheet(isPresented: $showSettings) { SettingsView() }
+        )
+        let g4 = AnyView(g3
             .fullScreenCover(isPresented: $showPhotosLibrary) {
                 PhotosLibraryView(targetFolder: url, deleteOriginals: photosLibraryMoves)
             }
@@ -753,6 +762,8 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showTikTok, onDismiss: { Task { await reload() } }) {
                 TikTokImportView(targetFolder: url) { Task { await reload() } }
             }
+        )
+        return AnyView(g4
             .overlay(alignment: .bottom) { if selecting { selectionBar } }
             .overlay(alignment: .bottomLeading) {
                 if isRoot && !selecting {
@@ -776,6 +787,7 @@ struct FolderView: View {
             .fullScreenCover(item: $transferItem) { item in
                 DriveTransferView(source: item.url, destination: url)
             }
+        )
     }
 
     /// Opens the folder picker for a given purpose. Deferred a beat so the
@@ -940,74 +952,85 @@ struct FolderView: View {
     }
 
     private var content: some View {
-        VStack(spacing: 0) {
-            header
-            if showBubbles { instagramBubbleRow }
-            if !entries.isEmpty { filterBar }
-            grid
-        }
-        .background(AppGradient())
-        .navigationTitle(isRoot ? "Home" : url.lastPathComponent)
-        .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $query, prompt: "Search folder + subfolders")
-        .toolbar { toolbar }
-        .task(id: library.sort) { await reload() }
-        .onChange(of: library.changeToken) { Task { await reload() } }
-        .task(id: "search-\(query)-\(library.sort.rawValue)-\(library.index.count)") { await runSearch() }
-        // Embedded captions are only needed to match a search; load them lazily so a
-        // plain folder open doesn't read every file on the drive.
-        .task(id: "filecaps-\(query.trimmingCharacters(in: .whitespaces).isEmpty)-\(entries.count)") {
-            if query.trimmingCharacters(in: .whitespaces).isEmpty { fileCaptions = [:] }
-            else if fileCaptions.isEmpty { fileCaptions = await library.fileCaptions(for: entries) }
-        }
-        .task(id: "labels-\(showFavoritesOnly)-\(showAIOnly)-\(library.labelsVersion)-\(library.sort.rawValue)") {
-            // Favorites / To AI are scoped to *this* folder (and its subfolders), not
-            // the whole library.
-            if showFavoritesOnly {
-                favoriteEntries = await library.labeledEntries(under: url, paths: library.favorites, sort: library.sort)
+        // Built in AnyView-separated chunks: the modifier chain (background + nav +
+        // searchable + toolbar + ~9 tasks) was nesting `ModifiedContent` so deep that
+        // the runtime overflowed the stack computing the type's generic metadata
+        // (EXC_BAD_ACCESS in content.getter). Type-erasing between groups caps the depth.
+        let core = AnyView(
+            VStack(spacing: 0) {
+                header
+                if showBubbles { instagramBubbleRow }
+                if !entries.isEmpty { filterBar }
+                grid
             }
-            if showAIOnly {
-                aiEntries = await library.labeledEntries(under: url, paths: library.aiLabels, sort: library.sort)
+            .background(AppGradient())
+        )
+        let chrome = AnyView(core
+            .navigationTitle(isRoot ? "Home" : url.lastPathComponent)
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $query, prompt: "Search folder + subfolders")
+            .toolbar { toolbar }
+        )
+        let loaders = AnyView(chrome
+            .task(id: library.sort) { await reload() }
+            .onChange(of: library.changeToken) { Task { await reload() } }
+            .task(id: "search-\(query)-\(library.sort.rawValue)-\(library.index.count)") { await runSearch() }
+            // Embedded captions are only needed to match a search; load them lazily so a
+            // plain folder open doesn't read every file on the drive.
+            .task(id: "filecaps-\(query.trimmingCharacters(in: .whitespaces).isEmpty)-\(entries.count)") {
+                if query.trimmingCharacters(in: .whitespaces).isEmpty { fileCaptions = [:] }
+                else if fileCaptions.isEmpty { fileCaptions = await library.fileCaptions(for: entries) }
             }
-        }
-        // Taylor Swift label filter: either items carrying every selected label,
-        // or (No Label) every photo/video under this folder with no label yet.
-        .task(id: "tslabels-\(tsLabelFilter.sorted().joined(separator: "|"))-\(tsNoLabel)-\(library.labelsVersion)-\(library.sort.rawValue)") {
-            if tsNoLabel {
-                tsLabelEntries = await library.unlabeledMedia(under: url, labeled: library.allLabeledPaths(), sort: library.sort)
-            } else if !tsLabelFilter.isEmpty {
-                tsLabelEntries = await library.labeledEntries(under: url, paths: library.pathsMatchingAll(tsLabelFilter), sort: library.sort)
-            } else {
-                tsLabelEntries = []
+            .task(id: "labels-\(showFavoritesOnly)-\(showAIOnly)-\(library.labelsVersion)-\(library.sort.rawValue)") {
+                // Favorites / To AI are scoped to *this* folder (and its subfolders).
+                if showFavoritesOnly {
+                    favoriteEntries = await library.labeledEntries(under: url, paths: library.favorites, sort: library.sort)
+                }
+                if showAIOnly {
+                    aiEntries = await library.labeledEntries(under: url, paths: library.aiLabels, sort: library.sort)
+                }
             }
-        }
-        // Load dimensions/HDR only when the resolution filter is on, and only once.
-        .task(id: "specs-\(advancedActive)-\(entries.count)-\(url.path)") {
-            if advancedActive, fileSpecs.isEmpty {
-                fileSpecs = await library.mediaSpecs(for: entries)
+        )
+        return AnyView(loaders
+            // Taylor Swift label filter: either items carrying every selected label,
+            // or (No Label) every photo/video under this folder with no label yet.
+            .task(id: "tslabels-\(tsLabelFilter.sorted().joined(separator: "|"))-\(tsNoLabel)-\(library.labelsVersion)-\(library.sort.rawValue)") {
+                if tsNoLabel {
+                    tsLabelEntries = await library.unlabeledMedia(under: url, labeled: library.allLabeledPaths(), sort: library.sort)
+                } else if !tsLabelFilter.isEmpty {
+                    tsLabelEntries = await library.labeledEntries(under: url, paths: library.pathsMatchingAll(tsLabelFilter), sort: library.sort)
+                } else {
+                    tsLabelEntries = []
+                }
             }
-        }
-        // Compute ages (folder + subfolders) when a birthday is in context — used
-        // by the Age filter and age search.
-        .task(id: "ages-\(library.changeToken)-\(url.path)") {
-            if library.hasBirthdayContext(url) {
-                loadingAges = true
-                agedList = await library.agedMedia(under: url, birthdays: library.folderBirthdays, sort: library.sort)
-                loadingAges = false
-            } else {
-                agedList = []
-                if ageFilter != nil { ageFilter = nil }
+            // Load dimensions/HDR only when the resolution filter is on, and only once.
+            .task(id: "specs-\(advancedActive)-\(entries.count)-\(url.path)") {
+                if advancedActive, fileSpecs.isEmpty {
+                    fileSpecs = await library.mediaSpecs(for: entries)
+                }
             }
-        }
-        // While a year filter is active, learn which years each subfolder holds so
-        // folders with nothing from that year drop out (computed lazily, cached).
-        .task(id: "folderyears-\(yearFilter ?? -1)-\(entries.count)-\(library.changeToken)-\(url.path)") {
-            guard yearFilter != nil else { return }
-            for folder in entries where folder.isFolder && folderYears[folder.url] == nil {
-                if Task.isCancelled { return }
-                folderYears[folder.url] = await library.folderYears(of: folder.url)
+            // Compute ages (folder + subfolders) when a birthday is in context — used
+            // by the Age filter and age search.
+            .task(id: "ages-\(library.changeToken)-\(url.path)") {
+                if library.hasBirthdayContext(url) {
+                    loadingAges = true
+                    agedList = await library.agedMedia(under: url, birthdays: library.folderBirthdays, sort: library.sort)
+                    loadingAges = false
+                } else {
+                    agedList = []
+                    if ageFilter != nil { ageFilter = nil }
+                }
             }
-        }
+            // While a year filter is active, learn which years each subfolder holds so
+            // folders with nothing from that year drop out (computed lazily, cached).
+            .task(id: "folderyears-\(yearFilter ?? -1)-\(entries.count)-\(library.changeToken)-\(url.path)") {
+                guard yearFilter != nil else { return }
+                for folder in entries where folder.isFolder && folderYears[folder.url] == nil {
+                    if Task.isCancelled { return }
+                    folderYears[folder.url] = await library.folderYears(of: folder.url)
+                }
+            }
+        )
     }
 
     @ViewBuilder private var exportingOverlay: some View {
