@@ -289,47 +289,76 @@ enum FileActions {
 
     struct SaveResult { var saved: Int; var failed: Int; var note: String? }
 
-    struct TransferResult { var destFolder: URL?; var moved: Int; var failed: Int }
+    struct TransferResult: Sendable { var destFolder: URL?; var moved: Int; var failed: Int; var paused = false }
     struct TransferProgress: Sendable { var fraction: Double; var done: Int; var total: Int; var currentName: String }
 
-    /// Copies (or moves) the entire contents of `source` into a new subfolder of
+    /// Copies (or moves) the entire contents of `source` into a subfolder of
     /// `parent` named after the source, file-by-file (recursively) so progress is
     /// real-time. Cross-volume moves copy-then-delete, so this works between two
     /// external drives. The new subfolder is returned so labels can be migrated to it.
-    static func transferContents(from source: URL, into parent: URL, move: Bool,
-                                 progress: @escaping @Sendable (TransferProgress) -> Void) async -> TransferResult {
+    ///
+    /// Everything (the recursive scan included) runs `nonisolated`/off-main so a slow
+    /// external drive never blocks the UI, and the copy fans out `maxConcurrent` files
+    /// at a time. The work is **resumable**: pass the previous run's `reuseDestination`
+    /// and any file already present at the target with the same byte size is skipped
+    /// (and, for a move, its lingering source copy is removed). `isPaused` is polled
+    /// between files — when it flips true the in-flight copies finish, no new ones start,
+    /// and the result comes back with `paused == true` so the caller can resume later.
+    nonisolated static func transferContents(
+        from source: URL, into parent: URL, reuseDestination: URL? = nil, move: Bool,
+        isPaused: @escaping @Sendable () -> Bool = { false },
+        progress: @escaping @Sendable (TransferProgress) -> Void) async -> TransferResult {
+        // A slow SSD hides latency well behind overlap; 8-way matches the codebase's
+        // bounded fan-out convention and is ~2× the old serial-ish 4.
+        let maxConcurrent = 8
         let fm = FileManager.default
         let folderName = source.lastPathComponent.isEmpty ? "Imported Drive" : source.lastPathComponent
-        let destFolder = uniqueDestination(for: folderName, in: parent)
+        let destFolder = reuseDestination ?? uniqueDestination(for: folderName, in: parent)
         try? fm.createDirectory(at: destFolder, withIntermediateDirectories: true)
 
         progress(TransferProgress(fraction: 0, done: 0, total: 0, currentName: "Scanning…"))
-        // Every regular file under the source, recursively.
-        var files: [URL] = []
-        if let walker = fm.enumerator(at: source, includingPropertiesForKeys: [.isRegularFileKey],
+        // Every regular file under the source, recursively, with its size (used to tell
+        // an already-transferred file apart from one only partially written).
+        var files: [(url: URL, size: Int64)] = []
+        if let walker = fm.enumerator(at: source, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
                                       options: [.skipsHiddenFiles]) {
             for case let url as URL in walker {
-                if (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true {
-                    files.append(url)
-                }
+                let rv = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                if rv?.isRegularFile == true { files.append((url, Int64(rv?.fileSize ?? 0))) }
             }
         }
         let total = files.count
-        guard total > 0 else { return TransferResult(destFolder: destFolder, moved: 0, failed: 0) }
+        guard total > 0 else {
+            if move { removeEmptyDirectories(under: source) }
+            return TransferResult(destFolder: destFolder, moved: 0, failed: 0)
+        }
         let sourcePath = source.path
 
         var moved = 0, failed = 0, done = 0
+        var paused = false
+        // Result tuple: (succeeded, name).
         await withTaskGroup(of: (Bool, String).self) { group in
             var index = 0
             func addNext() {
+                guard !isPaused() else { return }   // stop scheduling once paused
                 guard index < total else { return }
-                let file = files[index]; index += 1
+                let file = files[index].url
+                let srcSize = files[index].size
+                index += 1
                 let rel = String(file.path.dropFirst(sourcePath.count).drop(while: { $0 == "/" }))
                 let target = destFolder.appendingPathComponent(rel)
                 group.addTask(priority: .userInitiated) {
                     let fm = FileManager.default
+                    // Resume: a file already at the target with the same size was copied on
+                    // an earlier pass — skip the transfer (and clear the source leftover on move).
+                    if srcSize > 0,
+                       let tv = try? target.resourceValues(forKeys: [.fileSizeKey]),
+                       Int64(tv.fileSize ?? -1) == srcSize {
+                        if move { try? fm.removeItem(at: file) }
+                        return (true, file.lastPathComponent)
+                    }
                     try? fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: target) }
+                    if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: target) }   // partial leftover
                     do {
                         if move { try fm.moveItem(at: file, to: target) }
                         else { try fm.copyItem(at: file, to: target) }
@@ -338,21 +367,23 @@ enum FileActions {
                     } catch { return (false, file.lastPathComponent) }
                 }
             }
-            for _ in 0..<min(4, total) { addNext() }
+            for _ in 0..<min(maxConcurrent, total) { addNext() }
             while let (ok, name) = await group.next() {
                 if ok { moved += 1 } else { failed += 1 }
                 done += 1
                 progress(TransferProgress(fraction: Double(done) / Double(total),
                                           done: done, total: total, currentName: name))
-                addNext()
+                if isPaused() { paused = true } else { addNext() }
             }
         }
-        if move { removeEmptyDirectories(under: source) }
-        return TransferResult(destFolder: destFolder, moved: moved, failed: failed)
+        // Only tidy the emptied source tree on a full, unpaused move — a paused run
+        // still has files to come, so leave its folders in place for the resume.
+        if move && !paused { removeEmptyDirectories(under: source) }
+        return TransferResult(destFolder: destFolder, moved: moved, failed: failed, paused: paused)
     }
 
     /// Removes empty directories left behind after a file-by-file move.
-    private static func removeEmptyDirectories(under root: URL) {
+    nonisolated private static func removeEmptyDirectories(under root: URL) {
         let fm = FileManager.default
         guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey],
                                          options: []) else { return }
@@ -454,16 +485,19 @@ enum FileActions {
         return imported
     }
 
-    /// Sets a media file's modification date to its embedded capture date, so a
-    /// freshly imported/copied file sorts by when it was *taken*, not when it was
-    /// added to the drive (the import writes the file "now"). No-op for non-media
-    /// or files with no readable capture date — those keep their existing date.
+    /// Stamps a media file's creation **and** modification dates with its embedded
+    /// capture date, so a freshly imported/copied/transferred file sorts by when it was
+    /// *taken*, not when it landed on the drive (a copy writes the file "now"). The
+    /// embedded EXIF/QuickTime metadata itself is preserved automatically by the byte
+    /// copy — this only fixes the filesystem dates. No-op for non-media or files with no
+    /// readable capture date — those keep their existing dates.
     nonisolated static func preserveCaptureDate(_ url: URL) async {
         let kind = classify(url: url, isDirectory: false)
         guard kind == .image || kind == .video else { return }
         let entry = Entry(url: url, name: url.lastPathComponent, kind: kind, size: 0, modified: Date())
         guard let captured = await MetadataLoader.captureDate(for: entry) else { return }
-        try? FileManager.default.setAttributes([.modificationDate: captured], ofItemAtPath: url.path)
+        try? FileManager.default.setAttributes(
+            [.creationDate: captured, .modificationDate: captured], ofItemAtPath: url.path)
     }
 
     struct RestoreResult: Sendable {
@@ -744,7 +778,7 @@ enum FileActions {
     }
 
     /// A non-colliding destination URL inside `folder` for the given filename.
-    static func uniqueDestination(for name: String, in folder: URL) -> URL {
+    nonisolated static func uniqueDestination(for name: String, in folder: URL) -> URL {
         let fm = FileManager.default
         var dest = folder.appendingPathComponent(name.isEmpty ? "Photo" : name)
         let base = dest.deletingPathExtension().lastPathComponent

@@ -76,6 +76,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 - **Move / Copy** run off the main thread with a progress bar, batch the label
   re-keying, Copy checks for duplicates like Move, and both **remember the last
   destination folder**.
+- **"Move Here from Another Drive…"** is faster (8-way copy, fully off-main) and now
+  **pausable** — Pause finishes the in-flight files and parks the job; **Resume** picks
+  up where it left off (already-transferred files are skipped, none re-copied). Moved
+  files are deleted from the old drive as they go, and each file's **creation + capture
+  date** is stamped from its embedded metadata (EXIF is carried over by the byte copy).
 - **Faster large-folder loading** on a slow external drive (in-memory listing
   cache + lazy EXIF/caption reads).
 - **Favorites / To AI** are scoped to the current folder (and its subfolders).
