@@ -46,6 +46,14 @@ final class Library {
         while listingOrder.count > 60 { listingCache.removeValue(forKey: listingOrder.removeFirst()) }
     }
 
+    /// The last folder a Move/Copy sent items to, so the picker can default there.
+    var lastTransferDestination: URL? = UserDefaults.standard.string(forKey: "photoBrowser.lastTransferDest")
+        .map { URL(fileURLWithPath: $0) }
+    func setLastTransferDestination(_ url: URL) {
+        lastTransferDestination = url
+        UserDefaults.standard.set(url.path, forKey: "photoBrowser.lastTransferDest")
+    }
+
     /// Grid thumbnail minimum size (points); pinch-to-zoom adjusts it ±30%.
     var thumbSize: Double = (UserDefaults.standard.object(forKey: "photoBrowser.thumbSize") as? Double) ?? 110
     func setThumbSize(_ value: Double) {

@@ -84,7 +84,7 @@ enum InstagramService {
         cfg.httpShouldSetCookies = false
         cfg.httpCookieStorage = nil
         cfg.timeoutIntervalForRequest = 60
-        cfg.httpMaximumConnectionsPerHost = 6
+        cfg.httpMaximumConnectionsPerHost = 10
         return URLSession(configuration: cfg)
     }()
 
@@ -294,7 +294,7 @@ enum InstagramService {
         var succeeded = Set<String>(), failedIDs = Set<String>()
         await withTaskGroup(of: (ok: Bool, isVideo: Bool, path: String, caption: String, poster: String, id: String).self) { group in
             var idx = 0
-            let maxConcurrent = 5
+            let maxConcurrent = 8        // modestly wider; Instagram is rate-limit sensitive
             func addNext() {
                 guard idx < jobs.count else { return }
                 let job = jobs[idx]; idx += 1

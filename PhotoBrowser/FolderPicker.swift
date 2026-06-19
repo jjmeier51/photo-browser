@@ -11,10 +11,22 @@ struct FolderPicker: View {
     @State private var stack: [URL]
     @State private var folders: [Entry] = []
 
-    init(root: URL, confirmTitle: String = "Move Here", onPick: @escaping (URL) -> Void) {
+    init(root: URL, confirmTitle: String = "Move Here", startAt: URL? = nil, onPick: @escaping (URL) -> Void) {
         self.onPick = onPick
         self.confirmTitle = confirmTitle
-        _stack = State(initialValue: [root])
+        // Open at the last-used destination (if it's under root and still exists), with
+        // back-navigation up to root.
+        var initial = [root]
+        if let startAt, startAt.standardizedFileURL != root.standardizedFileURL,
+           FileManager.default.fileExists(atPath: startAt.path) {
+            let rootComps = root.standardizedFileURL.pathComponents
+            let destComps = startAt.standardizedFileURL.pathComponents
+            if destComps.count > rootComps.count, Array(destComps.prefix(rootComps.count)) == rootComps {
+                var cur = root.standardizedFileURL
+                for comp in destComps[rootComps.count...] { cur.appendPathComponent(comp); initial.append(cur) }
+            }
+        }
+        _stack = State(initialValue: initial)
     }
 
     private var current: URL { stack.last ?? stack[0] }

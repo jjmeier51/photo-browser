@@ -31,8 +31,14 @@ struct FrameCleanupView: View {
     @State private var player: CleanupPlayer?      // shared player for the current video (scrubbable)
     @State private var showMovePicker = false
     @State private var showCopyPicker = false
+    @State private var moveToast: String?          // brief "Moved to …" confirmation
 
     private let threshold: CGFloat = 90
+
+    /// Quick-sort destinations offered when cleaning up the "iMessage" folder.
+    private static let iMessagePeople = ["Caitlin Turney", "Keri", "Kelsey", "Shannon",
+                                         "Mrs. McCarthy", "Leighanne", "Kim Murphy", "Tyler Haas"]
+    private var isIMessage: Bool { folder.lastPathComponent == "iMessage" }
 
     init(folder: URL, items: [Entry], randomized: Bool = false) {
         self.folder = folder
@@ -53,6 +59,7 @@ struct FrameCleanupView: View {
                     .ignoresSafeArea()
                 content
                 if let flash { CleanupFlash(decision: flash.decision).id(flash.id) }
+                if let moveToast { MoveToast(text: moveToast).id(moveToast) }
             }
             .navigationTitle(randomized ? "Randomized Clean Up" : "Clean Up")
             .navigationBarTitleDisplayMode(.inline)
@@ -72,10 +79,12 @@ struct FrameCleanupView: View {
                 }
             }
             .sheet(isPresented: $showMovePicker) {
-                FolderPicker(root: library.rootURL ?? folder) { dest in moveCurrent(to: dest) }
+                FolderPicker(root: library.rootURL ?? folder, startAt: library.lastTransferDestination) { dest in
+                    moveCurrent(to: dest, confirm: dest.lastPathComponent)
+                }
             }
             .sheet(isPresented: $showCopyPicker) {
-                FolderPicker(root: library.rootURL ?? folder, confirmTitle: "Copy Here") { dest in copyCurrent(to: dest) }
+                FolderPicker(root: library.rootURL ?? folder, confirmTitle: "Copy Here", startAt: library.lastTransferDestination) { dest in copyCurrent(to: dest) }
             }
         }
         .preferredColorScheme(.dark)
@@ -100,9 +109,33 @@ struct FrameCleanupView: View {
             VStack(spacing: 0) {
                 card
                 scrubber
+                if isIMessage { sortRow }
                 controls
             }
         }
+    }
+
+    /// Quick "sort to person" chips shown when cleaning up the iMessage folder. One
+    /// tap moves the current item to that person's folder (a sibling of iMessage),
+    /// confirms, and advances. "Elsewhere" opens the folder picker.
+    private var sortRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Self.iMessagePeople, id: \.self) { name in
+                    Button { sortTo(name) } label: { chipLabel(name, system: "person.fill") }
+                }
+                Button { showMovePicker = true } label: { chipLabel("Move elsewhere…", system: "folder") }
+            }
+            .padding(.horizontal, 14)
+        }
+        .padding(.vertical, 6)
+    }
+
+    private func chipLabel(_ text: String, system: String) -> some View {
+        Label(text, systemImage: system)
+            .font(.caption.weight(.medium)).foregroundStyle(.white)
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(.white.opacity(0.18), in: Capsule())
     }
 
     // MARK: - Card
@@ -282,15 +315,32 @@ struct FrameCleanupView: View {
         items.removeAll { $0.url == item.url }    // gone from disk
     }
 
-    /// Moves the current item to another folder (re-keying its labels) and advances.
-    private func moveCurrent(to dest: URL) {
+    /// Moves the current item to another folder (re-keying its labels), confirms with
+    /// a brief toast, and advances — no "Done" needed.
+    private func moveCurrent(to dest: URL, confirm: String? = nil) {
         guard let item = current else { return }
         let outcome = FileActions.move([item.url], to: dest, renameOnCollision: true)
         guard !outcome.moved.isEmpty else { return }
         for (from, to) in outcome.moved { library.itemMoved(from: from, to: to) }
+        library.setLastTransferDestination(dest)
         items.removeAll { $0.url == item.url }    // left this folder
         library.contentDidChange()
+        if let confirm { showToast("Moved to \(confirm)") }
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
         cardToken += 1
+    }
+
+    /// iMessage quick-sort: move the current item into the named person's folder (a
+    /// sibling of "iMessage", created if needed).
+    private func sortTo(_ person: String) {
+        let dest = folder.deletingLastPathComponent().appendingPathComponent(person, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+        moveCurrent(to: dest, confirm: person)
+    }
+
+    private func showToast(_ text: String) {
+        moveToast = text
+        Task { try? await Task.sleep(nanoseconds: 1_200_000_000); if moveToast == text { moveToast = nil } }
     }
 
     /// Copies the current item to another folder (fresh file, no labels); the item
@@ -355,6 +405,30 @@ private struct CleanupVideoLayer: UIViewRepresentable {
     final class PlayerLayerView: UIView {
         override class var layerClass: AnyClass { AVPlayerLayer.self }
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+    }
+}
+
+/// Brief "Moved to …" confirmation banner near the top, auto-fading.
+private struct MoveToast: View {
+    let text: String
+    @State private var shown = false
+
+    var body: some View {
+        VStack {
+            Label(text, systemImage: "checkmark.circle.fill")
+                .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .background(.green.opacity(0.9), in: Capsule())
+                .shadow(color: .black.opacity(0.4), radius: 4)
+                .padding(.top, 8)
+                .opacity(shown ? 1 : 0).offset(y: shown ? 0 : -12)
+            Spacer()
+        }
+        .allowsHitTesting(false)
+        .onAppear {
+            withAnimation(.spring(response: 0.3)) { shown = true }
+            withAnimation(.easeIn(duration: 0.3).delay(0.9)) { shown = false }
+        }
     }
 }
 

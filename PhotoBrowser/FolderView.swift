@@ -650,10 +650,10 @@ struct FolderView: View {
                 FilesExporter(urls: exportURLs) { showExporter = false }
             }
             .sheet(isPresented: $showMovePicker) {
-                FolderPicker(root: library.rootURL ?? url) { dest in performMove(to: dest) }
+                FolderPicker(root: library.rootURL ?? url, startAt: library.lastTransferDestination) { dest in performMove(to: dest) }
             }
             .sheet(isPresented: $showCopyPicker) {
-                FolderPicker(root: library.rootURL ?? url, confirmTitle: "Copy Here") { dest in performCopy(to: dest) }
+                FolderPicker(root: library.rootURL ?? url, confirmTitle: "Copy Here", startAt: library.lastTransferDestination) { dest in performCopy(to: dest) }
             }
             .confirmationDialog("Delete \(selection.count) item(s)? This permanently removes them from the drive.",
                                 isPresented: $confirmDelete, titleVisibility: .visible) {
@@ -1747,6 +1747,7 @@ struct FolderView: View {
                 Task { @MainActor in editProgress = p }
             }
             library.itemsMoved(outcome.moved)                 // labels follow, one persist
+            if !outcome.moved.isEmpty { library.setLastTransferDestination(dest) }
             editProcessing = false; bg.end()
             var msg = "Moved \(outcome.moved.count) item(s)."
             if !skip.isEmpty { msg += " Skipped \(skip.count) with matching names." }
@@ -1781,6 +1782,7 @@ struct FolderView: View {
             let outcome = await FileActions.copyItems(copyURLs, to: dest, skipCollisions: false) { p in
                 Task { @MainActor in editProgress = p }
             }
+            if !outcome.copied.isEmpty { library.setLastTransferDestination(dest) }
             editProcessing = false; bg.end()
             var msg = "Copied \(outcome.copied.count) item(s)."
             if !skip.isEmpty { msg += " Skipped \(skip.count) duplicate name(s)." }
