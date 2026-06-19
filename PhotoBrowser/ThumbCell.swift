@@ -18,9 +18,16 @@ struct EntryCell: View {
     @State private var duration: String?
     @State private var cover: UIImage?
 
+    /// Folders without a cover blend into the (orange) app background instead of
+    /// showing a stark dark tile; everything else keeps a dark placeholder while its
+    /// thumbnail loads.
+    private var placeholderFill: Color {
+        (entry.isFolder && cover == nil) ? .clear : Color(white: 0.10)
+    }
+
     var body: some View {
         Rectangle()
-            .fill(Color(white: 0.10))
+            .fill(placeholderFill)
             .aspectRatio(1, contentMode: .fit)
             .overlay { content }
             .overlay(alignment: .bottomTrailing) {
@@ -92,10 +99,13 @@ struct EntryCell: View {
                 }
             } else {
                 VStack(spacing: 6) {
-                    Image(systemName: "folder.fill").font(.system(size: 34)).foregroundStyle(.tint)
+                    Image(systemName: "folder.fill").font(.system(size: 34))
+                        .foregroundStyle(.white.opacity(0.55))               // soft, blends with the background
                     Text(entry.name)
                         .font(.caption2).lineLimit(2)
                         .multilineTextAlignment(.center).padding(.horizontal, 4)
+                        .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.5), radius: 1)       // legible on the gradient
                 }
             }
         } else if let image {

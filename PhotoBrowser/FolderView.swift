@@ -950,12 +950,13 @@ struct FolderView: View {
         .onChange(of: library.changeToken) { Task { await reload() } }
         .task(id: "search-\(query)-\(library.sort.rawValue)-\(library.index.count)") { await runSearch() }
         .task(id: "labels-\(showFavoritesOnly)-\(showAIOnly)-\(library.labelsVersion)-\(library.sort.rawValue)") {
-            let root = library.rootURL ?? url
+            // Favorites / To AI are scoped to *this* folder (and its subfolders), not
+            // the whole library.
             if showFavoritesOnly {
-                favoriteEntries = await library.labeledEntries(under: root, paths: library.favorites, sort: library.sort)
+                favoriteEntries = await library.labeledEntries(under: url, paths: library.favorites, sort: library.sort)
             }
             if showAIOnly {
-                aiEntries = await library.labeledEntries(under: root, paths: library.aiLabels, sort: library.sort)
+                aiEntries = await library.labeledEntries(under: url, paths: library.aiLabels, sort: library.sort)
             }
         }
         // Taylor Swift label filter: either items carrying every selected label,

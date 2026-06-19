@@ -1,11 +1,12 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The app-wide orange gradient background (used behind the browsing surfaces).
+/// The app-wide orange gradient background (used behind the browsing surfaces):
+/// vibrant orange at the top fading to a very light orange at the bottom.
 struct AppGradient: View {
     var body: some View {
-        LinearGradient(colors: [Color(red: 0.12, green: 0.05, blue: 0.0),
-                                Color(red: 0.58, green: 0.24, blue: 0.0)],
+        LinearGradient(colors: [Color(red: 1.0, green: 0.45, blue: 0.05),
+                                Color(red: 1.0, green: 0.93, blue: 0.82)],
                        startPoint: .top, endPoint: .bottom)
             .ignoresSafeArea()
     }
