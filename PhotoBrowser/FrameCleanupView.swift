@@ -330,10 +330,12 @@ struct FrameCleanupView: View {
         cardToken += 1
     }
 
-    /// iMessage quick-sort: move the current item into the named person's folder (a
-    /// sibling of "iMessage", created if needed).
+    /// iMessage quick-sort: move the current item into the named person's folder at
+    /// the drive root (the SanDisk SSD top level, where iMessage also lives), created
+    /// if needed.
     private func sortTo(_ person: String) {
-        let dest = folder.deletingLastPathComponent().appendingPathComponent(person, isDirectory: true)
+        let base = library.rootURL ?? folder.deletingLastPathComponent()
+        let dest = base.appendingPathComponent(person, isDirectory: true)
         try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
         moveCurrent(to: dest, confirm: person)
     }
