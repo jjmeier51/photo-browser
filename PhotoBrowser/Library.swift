@@ -11,21 +11,22 @@ final class Library {
     var rootName = ""
     var path: [URL] = []
     var sort: SortKey = .smart
-    var favorites: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.favorites") ?? [])
-    var aiLabels: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.ai") ?? [])
+    var favorites: Set<String> = Library.migrateBulk("favorites", legacyKey: "photoBrowser.favorites") {
+        Set(UserDefaults.standard.stringArray(forKey: $0) ?? [])
+    }
+    var aiLabels: Set<String> = Library.migrateBulk("ai", legacyKey: "photoBrowser.ai") {
+        Set(UserDefaults.standard.stringArray(forKey: $0) ?? [])
+    }
     /// Custom labels offered inside the "Taylor Swift" folder, keyed labelName →
-    /// set of file paths (an item may carry several). Persisted as a dict of
-    /// arrays since `UserDefaults` can't store `Set`.
-    var customLabels: [String: Set<String>] = {
-        let raw = UserDefaults.standard.dictionary(forKey: "photoBrowser.customLabels") as? [String: [String]] ?? [:]
-        return raw.mapValues(Set.init)
-    }()
+    /// set of file paths (an item may carry several).
+    var customLabels: [String: Set<String>] = Library.migrateBulk("customLabels", legacyKey: "photoBrowser.customLabels") {
+        (UserDefaults.standard.dictionary(forKey: $0) as? [String: [String]] ?? [:]).mapValues(Set.init)
+    }
     /// People library: person name → set of face IDs ("path#index"). Built by the
     /// approximate on-device "Find People" pass, then renamed/merged by the user.
-    var people: [String: Set<String>] = {
-        let raw = UserDefaults.standard.dictionary(forKey: "photoBrowser.people") as? [String: [String]] ?? [:]
-        return raw.mapValues(Set.init)
-    }()
+    var people: [String: Set<String>] = Library.migrateBulk("people", legacyKey: "photoBrowser.people") {
+        (UserDefaults.standard.dictionary(forKey: $0) as? [String: [String]] ?? [:]).mapValues(Set.init)
+    }
     /// Bumps on any label change (toggle or move) so views re-query even when the
     /// label count is unchanged (e.g. a move rewrites a path without adding one).
     var labelsVersion = 0
@@ -33,6 +34,36 @@ final class Library {
     /// editor saving a cropped copy) so the current folder reloads.
     var changeToken = 0
     func contentDidChange() { changeToken += 1; folderYearsCache.removeAll(); listingCache.removeAll() }
+
+    // MARK: - Bulk store (file-backed)
+
+    /// Large per-photo collections (labels/captions/etc.) are stored in JSON files,
+    /// NOT UserDefaults: a Kardashian/Instagram download adds tens of thousands of
+    /// path keys, and UserDefaults rejects any single value ≥ 4 MB ("invalid"), which
+    /// corrupted the prefs and crashed the app. Files have no such limit.
+    @ObservationIgnored nonisolated static let bulkDir: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("bulkStore", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+    nonisolated static func loadBulk<T: Decodable>(_ name: String, as type: T.Type = T.self) -> T? {
+        guard let data = try? Data(contentsOf: bulkDir.appendingPathComponent(name + ".json")) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+    nonisolated static func saveBulk<T: Encodable>(_ value: T, _ name: String) {
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        try? data.write(to: bulkDir.appendingPathComponent(name + ".json"), options: .atomic)
+    }
+    /// Loads from the bulk file, else migrates the legacy UserDefaults value once
+    /// (then drops the oversized/corrupt UserDefaults key).
+    nonisolated static func migrateBulk<T: Codable>(_ name: String, legacyKey: String, legacy: (String) -> T) -> T {
+        if let v: T = loadBulk(name) { return v }
+        let v = legacy(legacyKey)
+        saveBulk(v, name)
+        UserDefaults.standard.removeObject(forKey: legacyKey)
+        return v
+    }
 
     /// In-memory cache of recent folder listings so re-opening a folder paints
     /// instantly (then refreshes) — a big win on a slow external drive. Cleared on
@@ -89,11 +120,15 @@ final class Library {
         UserDefaults.standard.set(thumbSize, forKey: "photoBrowser.thumbSize")
     }
     /// App-stored caption overrides keyed by file path ("" = explicitly cleared).
-    var captions: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.captions") as? [String: String]) ?? [:]
+    var captions: [String: String] = Library.migrateBulk("captions", legacyKey: "photoBrowser.captions") {
+        (UserDefaults.standard.dictionary(forKey: $0) as? [String: String]) ?? [:]
+    }
     /// Folder path → cover-image filename (stored under Application Support/folderCovers).
     var folderCovers: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.folderCovers") as? [String: String]) ?? [:]
     /// Drive file path → originating Photos-library asset identifier (for imports).
-    var photoOrigins: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.photoOrigins") as? [String: String]) ?? [:]
+    var photoOrigins: [String: String] = Library.migrateBulk("photoOrigins", legacyKey: "photoBrowser.photoOrigins") {
+        (UserDefaults.standard.dictionary(forKey: $0) as? [String: String]) ?? [:]
+    }
     /// Folder path → birthday (stored as a Unix timestamp). Files in the folder and
     /// its subfolders get an "Age" computed from this and their EXIF capture date.
     var folderBirthdays: [String: Double] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.birthdays") as? [String: Double]) ?? [:]
@@ -137,14 +172,14 @@ final class Library {
 
     func setOrigin(_ assetID: String, for url: URL) {
         photoOrigins[url.path] = assetID
-        UserDefaults.standard.set(photoOrigins, forKey: "photoBrowser.photoOrigins")
+        Self.saveBulk(photoOrigins, "photoOrigins")
     }
 
     func origin(for url: URL) -> String? { photoOrigins[url.path] }
 
     func clearOrigins(_ urls: [URL]) {
         for u in urls { photoOrigins.removeValue(forKey: u.path) }
-        UserDefaults.standard.set(photoOrigins, forKey: "photoBrowser.photoOrigins")
+        Self.saveBulk(photoOrigins, "photoOrigins")
     }
 
     // MARK: - Folder birthday / Age
@@ -256,7 +291,7 @@ final class Library {
 
     func setCaption(_ text: String, for url: URL) {
         captions[url.path] = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        UserDefaults.standard.set(captions, forKey: "photoBrowser.captions")
+        Self.saveBulk(captions, "captions")
     }
 
     /// Batch caption set (persists once) — avoids O(n²) UserDefaults writes when a
@@ -264,7 +299,7 @@ final class Library {
     func setCaptions(_ map: [String: String]) {
         guard !map.isEmpty else { return }
         for (k, v) in map { captions[k] = v.trimmingCharacters(in: .whitespacesAndNewlines) }
-        UserDefaults.standard.set(captions, forKey: "photoBrowser.captions")
+        Self.saveBulk(captions, "captions")
     }
 
     /// Reads existing captions embedded in the files (pull-in), bounded concurrency.
@@ -295,7 +330,7 @@ final class Library {
 
     func toggleFavorite(_ url: URL) {
         if favorites.contains(url.path) { favorites.remove(url.path) } else { favorites.insert(url.path) }
-        UserDefaults.standard.set(Array(favorites), forKey: "photoBrowser.favorites")
+        Self.saveBulk(favorites, "favorites")
         labelsVersion += 1
     }
 
@@ -303,7 +338,7 @@ final class Library {
 
     func toggleAI(_ url: URL) {
         if aiLabels.contains(url.path) { aiLabels.remove(url.path) } else { aiLabels.insert(url.path) }
-        UserDefaults.standard.set(Array(aiLabels), forKey: "photoBrowser.ai")
+        Self.saveBulk(aiLabels, "ai")
         labelsVersion += 1
     }
 
@@ -315,7 +350,7 @@ final class Library {
                                     "Movie", "AI", "The Life of a Showgirl", "Beach"]
 
     private func persistCustomLabels() {
-        UserDefaults.standard.set(customLabels.mapValues(Array.init), forKey: "photoBrowser.customLabels")
+        Self.saveBulk(customLabels, "customLabels")
     }
 
     // MARK: - People (faces)
@@ -344,7 +379,7 @@ final class Library {
     }
 
     private func persistPeople() {
-        UserDefaults.standard.set(people.mapValues(Array.init), forKey: "photoBrowser.people")
+        Self.saveBulk(people, "people")
         labelsVersion += 1
     }
     func setPeople(_ p: [String: Set<String>]) { people = p.filter { !$0.value.isEmpty }; persistPeople() }
@@ -364,10 +399,12 @@ final class Library {
 
     // MARK: - AI-generated images
 
-    var aiGeneratedPaths: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.aiGenerated") ?? [])
+    var aiGeneratedPaths: Set<String> = Library.migrateBulk("aiGenerated", legacyKey: "photoBrowser.aiGenerated") {
+        Set(UserDefaults.standard.stringArray(forKey: $0) ?? [])
+    }
     func markAIGenerated(_ url: URL) {
         aiGeneratedPaths.insert(url.path)
-        UserDefaults.standard.set(Array(aiGeneratedPaths), forKey: "photoBrowser.aiGenerated")
+        Self.saveBulk(aiGeneratedPaths, "aiGenerated")
         labelsVersion += 1
     }
     func isAIGenerated(_ url: URL) -> Bool { aiGeneratedPaths.contains(url.path) }
@@ -395,18 +432,20 @@ final class Library {
     /// Clean-up review state per folder: the set of item paths already decided on
     /// (kept or deleted). The queue on (re-)open is simply "viewable items not in
     /// this set", so it resumes correctly every run regardless of order.
-    var cleanupReviewed: [String: [String]] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.cleanupReviewed") as? [String: [String]]) ?? [:]
+    var cleanupReviewed: [String: [String]] = Library.migrateBulk("cleanupReviewed", legacyKey: "photoBrowser.cleanupReviewed") {
+        (UserDefaults.standard.dictionary(forKey: $0) as? [String: [String]]) ?? [:]
+    }
     func reviewedInCleanup(_ folder: URL) -> Set<String> { Set(cleanupReviewed[folder.path] ?? []) }
     func markCleanupReviewed(_ url: URL, in folder: URL) {
         var s = Set(cleanupReviewed[folder.path] ?? [])
         guard s.insert(url.path).inserted else { return }
         cleanupReviewed[folder.path] = Array(s)
-        UserDefaults.standard.set(cleanupReviewed, forKey: "photoBrowser.cleanupReviewed")
+        Self.saveBulk(cleanupReviewed, "cleanupReviewed")
     }
     func resetCleanup(_ folder: URL) {
         guard cleanupReviewed[folder.path] != nil else { return }
         cleanupReviewed.removeValue(forKey: folder.path)
-        UserDefaults.standard.set(cleanupReviewed, forKey: "photoBrowser.cleanupReviewed")
+        Self.saveBulk(cleanupReviewed, "cleanupReviewed")
     }
 
     // MARK: - Instagram profile folders
@@ -460,17 +499,19 @@ final class Library {
 
     /// File path → posting Instagram handle ("Posted by"); presence also marks the
     /// item as coming from Instagram.
-    var igPostedBy: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.igPostedBy") as? [String: String]) ?? [:]
+    var igPostedBy: [String: String] = Library.migrateBulk("igPostedBy", legacyKey: "photoBrowser.igPostedBy") {
+        (UserDefaults.standard.dictionary(forKey: $0) as? [String: String]) ?? [:]
+    }
     func postedBy(for url: URL) -> String? { igPostedBy[url.path] }
     func setPostedBy(_ handle: String, for url: URL) {
         igPostedBy[url.path] = handle
-        UserDefaults.standard.set(igPostedBy, forKey: "photoBrowser.igPostedBy")
+        Self.saveBulk(igPostedBy, "igPostedBy")
     }
     /// Batch "posted by" set (persists once) — avoids O(n²) writes on bulk imports.
     func setPostedBy(_ map: [String: String]) {
         guard !map.isEmpty else { return }
         for (k, v) in map { igPostedBy[k] = v }
-        UserDefaults.standard.set(igPostedBy, forKey: "photoBrowser.igPostedBy")
+        Self.saveBulk(igPostedBy, "igPostedBy")
     }
 
     /// Last Instagram handle downloaded from a folder, so reruns prefill it.
@@ -541,7 +582,9 @@ final class Library {
 
     /// Pairs the user marked as NOT duplicates, as "pathA\npathB" (sorted), so a
     /// future Find-Duplicates run hides groups whose every pair is dismissed.
-    var notDuplicatePairs: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.notDuplicates") ?? [])
+    var notDuplicatePairs: Set<String> = Library.migrateBulk("notDuplicates", legacyKey: "photoBrowser.notDuplicates") {
+        Set(UserDefaults.standard.stringArray(forKey: $0) ?? [])
+    }
 
     private static func pairKey(_ a: String, _ b: String) -> String { a < b ? "\(a)\n\(b)" : "\(b)\n\(a)" }
     func areNotDuplicates(_ a: String, _ b: String) -> Bool { notDuplicatePairs.contains(Self.pairKey(a, b)) }
@@ -549,7 +592,7 @@ final class Library {
     func markNotDuplicates(_ paths: [String]) {
         guard paths.count >= 2 else { return }
         for i in 0..<paths.count { for j in (i + 1)..<paths.count { notDuplicatePairs.insert(Self.pairKey(paths[i], paths[j])) } }
-        UserDefaults.standard.set(Array(notDuplicatePairs), forKey: "photoBrowser.notDuplicates")
+        Self.saveBulk(notDuplicatePairs, "notDuplicates")
     }
     /// The distinct photo paths a person appears in (face IDs are "path#index").
     func photoPaths(forPerson name: String) -> Set<String> {
@@ -678,16 +721,16 @@ final class Library {
             if nf != state.folderPath { state.folderPath = nf; accessKardashian[name] = state }
         }
 
-        UserDefaults.standard.set(Array(favorites), forKey: "photoBrowser.favorites")
-        UserDefaults.standard.set(Array(aiLabels), forKey: "photoBrowser.ai")
+        Self.saveBulk(favorites, "favorites")
+        Self.saveBulk(aiLabels, "ai")
         UserDefaults.standard.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
         UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
         UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
         UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
-        UserDefaults.standard.set(captions, forKey: "photoBrowser.captions")
+        Self.saveBulk(captions, "captions")
         UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
-        UserDefaults.standard.set(photoOrigins, forKey: "photoBrowser.photoOrigins")
-        UserDefaults.standard.set(igPostedBy, forKey: "photoBrowser.igPostedBy")
+        Self.saveBulk(photoOrigins, "photoOrigins")
+        Self.saveBulk(igPostedBy, "igPostedBy")
         UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
         UserDefaults.standard.set(folderBirthdays, forKey: "photoBrowser.birthdays")
         UserDefaults.standard.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
@@ -749,11 +792,11 @@ final class Library {
         folderBirthdays = newBirthdays
         UserDefaults.standard.set(folderBirthdays, forKey: "photoBrowser.birthdays")
 
-        UserDefaults.standard.set(Array(favorites), forKey: "photoBrowser.favorites")
-        UserDefaults.standard.set(Array(aiLabels), forKey: "photoBrowser.ai")
-        UserDefaults.standard.set(captions, forKey: "photoBrowser.captions")
+        Self.saveBulk(favorites, "favorites")
+        Self.saveBulk(aiLabels, "ai")
+        Self.saveBulk(captions, "captions")
         UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
-        UserDefaults.standard.set(photoOrigins, forKey: "photoBrowser.photoOrigins")
+        Self.saveBulk(photoOrigins, "photoOrigins")
         persistCustomLabels()
         labelsVersion += 1
         changeToken += 1
