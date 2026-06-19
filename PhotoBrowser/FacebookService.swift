@@ -157,7 +157,9 @@ enum FacebookService {
         let username = vanityName(from: finalURL)
         guard let id = pid ?? username else { return nil }
 
-        let name = decode(firstMatch(html, "<title>([^<]+)</title>")) ?? decode(firstMatch(html, "\"name\":\"([^\"]+)\"")) ?? "Facebook Profile"
+        let name = firstMatch(html, "<title>([^<]+)</title>").map(decode)
+            ?? firstMatch(html, "\"name\":\"([^\"]+)\"").map(decode)
+            ?? "Facebook Profile"
         let pic = firstMatch(html, "<img[^>]+src=\"(https://[^\"]*scontent[^\"]+)\"").map(decode) ?? ""
         return Profile(id: id, name: cleanName(name), url: finalURL, picURL: pic)
     }
