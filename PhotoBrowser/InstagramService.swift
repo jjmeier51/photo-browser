@@ -139,14 +139,16 @@ enum InstagramService {
         guard !jobs.isEmpty else {
             result.profile = profile
             result.highlightFolders = highlightDirs
-            result.profilePic = await downloadData(profile.profilePicURL)
+            result.profilePic = await fetchProfilePic(userID: profile.userID, handle: profile.handle,
+                                                       creds: creds, fallback: profile.profilePicURL)
             result.note = alreadyDownloaded.isEmpty ? "No downloadable media found." : "No new posts, stories or highlights."
             return result
         }
         result = await download(jobs: jobs, replace: replaceExisting, progress: progress)
         result.profile = profile
         result.highlightFolders = highlightDirs
-        result.profilePic = await downloadData(profile.profilePicURL)
+        result.profilePic = await fetchProfilePic(userID: profile.userID, handle: profile.handle,
+                                                   creds: creds, fallback: profile.profilePicURL)
         return result
     }
 
@@ -186,6 +188,30 @@ enum InstagramService {
                                       ofItemAtPath: dest.path)
             }
         }
+    }
+
+    /// Highest-resolution profile-picture URL for a user. The `web_profile_info` HD
+    /// field is usually only ~320px; the private `users/{id}/info/` endpoint exposes
+    /// `hd_profile_pic_versions` (the full set of sizes), so we pick the largest.
+    /// Falls back to whatever `web_profile_info` gave us if that endpoint fails.
+    nonisolated static func bestProfilePicURL(userID: String, handle: String, creds: Credentials, fallback: String) async -> String {
+        guard !userID.isEmpty,
+              let url = URL(string: "https://i.instagram.com/api/v1/users/\(userID)/info/"),
+              let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let user = json["user"] as? [String: Any] else { return fallback }
+        if let versions = user["hd_profile_pic_versions"] as? [[String: Any]],
+           let best = versions.max(by: { area($0) < area($1) })?["url"] as? String {
+            return best
+        }
+        if let info = user["hd_profile_pic_url_info"] as? [String: Any], let u = info["url"] as? String { return u }
+        return (user["profile_pic_url_hd"] as? String) ?? fallback
+    }
+
+    /// Downloads a user's highest-resolution profile picture (see `bestProfilePicURL`).
+    nonisolated static func fetchProfilePic(userID: String, handle: String, creds: Credentials, fallback: String) async -> Data? {
+        let best = await bestProfilePicURL(userID: userID, handle: handle, creds: creds, fallback: fallback)
+        return await downloadData(best)
     }
 
     // MARK: - API

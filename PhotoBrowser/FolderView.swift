@@ -100,6 +100,7 @@ struct FolderView: View {
     @State private var infoEntry: Entry?
     @State private var folderInfoItem: PreviewItem?
     @State private var birthdayFolderItem: PreviewItem?
+    @State private var profilePhotoItem: PreviewItem?    // cover URL of an IG folder, viewed full-screen
     @State private var ageFilter: Int?
     @State private var agedList: [(entry: Entry, age: Int)] = []
     @State private var loadingAges = false
@@ -507,6 +508,11 @@ struct FolderView: View {
             Button { renameTarget = entry; renameDraft = entry.name } label: {
                 Label("Rename", systemImage: "pencil")
             }
+            if library.isInstagramFolder(entry.url), let cover = library.coverURL(for: entry.url) {
+                Button { profilePhotoItem = PreviewItem(url: cover) } label: {
+                    Label("View Profile Photo", systemImage: "person.crop.circle")
+                }
+            }
             if !library.isInstagramFolder(entry.url) && !library.isInstagramHighlight(entry.url) {
                 Button { makeAlbumHighlight(entry) } label: {
                     Label(library.isAlbumHighlight(entry.url) ? "Remove from Highlights" : "Turn into Album Highlight",
@@ -759,6 +765,9 @@ struct FolderView: View {
             }
             .fullScreenCover(isPresented: $showAllStories, onDismiss: { Task { await reload() } }) {
                 AllStoriesView(root: library.rootURL ?? url) { Task { await reload() } }
+            }
+            .fullScreenCover(item: $profilePhotoItem) { item in
+                ProfilePhotoView(url: item.url) { profilePhotoItem = nil }
             }
             .fullScreenCover(isPresented: $showFacebook, onDismiss: { Task { await reload() } }) {
                 FacebookImportView(targetFolder: url, existing: library.facebookInfo(for: url)) { Task { await reload() } }

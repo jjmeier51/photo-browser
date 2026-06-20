@@ -28,6 +28,10 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   **"Today's Instagram Stories"** folder at the root (appended while it's under 24h
   old, cleared and refilled once it ages past that). Finishes with a per-user count
   ("@spottssa 2 stories, @brenn_smith 4 stories").
+- **Highest-resolution profile pictures** — profile downloads (and the stories sweep)
+  now pull the full-size `hd_profile_pic_versions` image instead of the ~320px thumb,
+  and long-pressing an Instagram folder offers **"View Profile Photo"** (full-screen,
+  zoomable).
 - Highlights shown as bubbles; stories/highlights, and **tagged-media** downloads.
 - **Higher-quality video**: best DASH rendition muxed on-device, HDR-aware, with
   optional FFmpegKit transcoding (VP9/AV1 → HEVC); WebP metadata fix.

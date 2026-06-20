@@ -164,6 +164,13 @@ struct AllStoriesView: View {
                 overallDone = i
                 guard !userID.isEmpty else { continue }
 
+                // Refresh the folder cover to the user's highest-resolution profile photo.
+                if let picData = await InstagramService.fetchProfilePic(
+                    userID: userID, handle: entry.info.handle, creds: creds, fallback: ""),
+                   let img = UIImage(data: picData) {
+                    library.setCover(img, for: entry.url)
+                }
+
                 let storiesFolder = entry.url.appendingPathComponent("Stories", isDirectory: true)
                 let already = Set(entry.info.downloaded)
                 let r = await InstagramService.runStories(
@@ -199,5 +206,29 @@ struct AllStoriesView: View {
             library.contentDidChange()
             onFinished()
         }
+    }
+}
+
+/// Full-screen viewer for an Instagram folder's profile photo (the folder cover, which
+/// holds the highest-resolution profile picture). Pinch/double-tap to zoom; swipe down
+/// or tap the close button to exit. Reached via long-press → "View Profile Photo".
+struct ProfilePhotoView: View {
+    let url: URL
+    var onClose: () -> Void = {}
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            ZoomableImageView(url: url, onDismiss: onClose)
+        }
+        .overlay(alignment: .topLeading) {
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.headline).foregroundStyle(.white)
+                    .padding(10).background(.ultraThinMaterial, in: Circle())
+            }
+            .padding(.top, 50).padding(.leading, 16)
+        }
+        .statusBarHidden()
     }
 }
