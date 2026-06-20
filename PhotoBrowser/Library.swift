@@ -514,6 +514,15 @@ final class Library {
         Self.saveBulk(igPostedBy, "igPostedBy")
     }
 
+    /// When the shared "Today's Instagram Stories" temp folder was last (re)started.
+    /// The homepage stories sweep appends to it while it's under 24h old, and clears +
+    /// replaces it once it ages past that. 0 = never created.
+    var igStoriesTempStart: Double = UserDefaults.standard.double(forKey: "photoBrowser.igStoriesTempStart")
+    func setIGStoriesTempStart(_ when: Double) {
+        igStoriesTempStart = when
+        UserDefaults.standard.set(when, forKey: "photoBrowser.igStoriesTempStart")
+    }
+
     /// Last Instagram handle downloaded from a folder, so reruns prefill it.
     var igLastHandle: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.igLastHandle") as? [String: String]) ?? [:]
     func lastIGHandle(for folder: URL) -> String? { igLastHandle[folder.path] }

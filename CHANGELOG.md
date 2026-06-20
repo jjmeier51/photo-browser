@@ -22,6 +22,12 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 - **TikTok profile downloader** (ssstik-style, best-effort).
 
 ### Instagram
+- **"Get All New Instagram Stories"** (homepage) — sweeps every saved Instagram
+  profile folder on the drive, downloads each user's new last-24h stories into their
+  own "Stories" folder, and gathers the collective new stories into a rolling
+  **"Today's Instagram Stories"** folder at the root (appended while it's under 24h
+  old, cleared and refilled once it ages past that). Finishes with a per-user count
+  ("@spottssa 2 stories, @brenn_smith 4 stories").
 - Highlights shown as bubbles; stories/highlights, and **tagged-media** downloads.
 - **Higher-quality video**: best DASH rendition muxed on-device, HDR-aware, with
   optional FFmpegKit transcoding (VP9/AV1 → HEVC); WebP metadata fix.

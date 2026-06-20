@@ -68,6 +68,7 @@ enum InstagramService {
     struct DownloadResult: Sendable {
         var photos = 0, videos = 0, failed = 0
         var newIDs: [String] = []
+        var files: [String] = []                 // dest paths of every file written this run
         var captions: [String: String] = [:]    // file path → caption
         var postedBy: [String: String] = [:]    // file path → posting handle
         var highlightFolders: [String] = []     // folder paths that hold a highlight
@@ -147,6 +148,44 @@ enum InstagramService {
         result.highlightFolders = highlightDirs
         result.profilePic = await downloadData(profile.profilePicURL)
         return result
+    }
+
+    /// Downloads only the **current stories** (last 24h) for one already-known profile
+    /// into its `storiesFolder`, skipping anything in `already`. Used by the homepage
+    /// "Get All New Instagram Stories" sweep, which already knows each user's id/handle
+    /// and doesn't want the full posts/tagged/highlights crawl that `run` performs.
+    nonisolated static func runStories(handle: String, userID: String, into storiesFolder: URL,
+                                       already: Set<String>, creds: Credentials,
+                                       progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
+        // Prefer the reels-media tray (reliably returns the logged-in viewer's story),
+        // falling back to the older per-user reel_media — same order as `run`.
+        var stories = await fetchReel(path: "feed/reels_media/?reel_ids=\(userID)",
+                                      handle: handle, creds: creds, reelKey: userID)
+        if stories.isEmpty {
+            stories = await fetchReel(path: "feed/user/\(userID)/reel_media/", handle: handle, creds: creds)
+        }
+        let jobs = reelJobs(items: stories, folder: storiesFolder, already: already, poster: handle)
+        guard !jobs.isEmpty else { return DownloadResult() }
+        return await download(jobs: jobs, replace: false, progress: progress)
+    }
+
+    /// Copies freshly-downloaded story files into the shared "Today's Instagram Stories"
+    /// folder, prefixing each name with the handle so two users' stories can't collide.
+    /// The story files already carry their capture date; we copy those filesystem dates
+    /// across rather than re-reading EXIF. Best-effort and off-main (big writes).
+    nonisolated static func copyToTemp(_ files: [String], handle: String, into tempFolder: URL) async {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: tempFolder, withIntermediateDirectories: true)
+        for path in files {
+            let src = URL(fileURLWithPath: path)
+            let dest = uniqueDestination("\(handle)_\(src.lastPathComponent)", in: tempFolder)
+            guard (try? fm.copyItem(at: src, to: dest)) != nil else { continue }
+            let vals = try? src.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+            if let created = vals?.creationDate, let modified = vals?.contentModificationDate {
+                try? fm.setAttributes([.creationDate: created, .modificationDate: modified],
+                                      ofItemAtPath: dest.path)
+            }
+        }
     }
 
     // MARK: - API
@@ -311,6 +350,7 @@ enum InstagramService {
                 done += 1
                 if r.ok {
                     if r.isVideo { result.videos += 1 } else { result.photos += 1 }
+                    result.files.append(r.path)
                     if !r.caption.isEmpty { result.captions[r.path] = r.caption }
                     if !r.poster.isEmpty { result.postedBy[r.path] = r.poster }
                     succeeded.insert(r.id)

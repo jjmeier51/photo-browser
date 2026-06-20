@@ -80,6 +80,7 @@ struct FolderView: View {
     @State private var draggingBubble: Entry?
     @State private var showInstagram = false
     @State private var igForceFull = false
+    @State private var showAllStories = false
     @State private var showFacebook = false
     @State private var showTikTok = false
     @State private var confirmFixDates = false
@@ -755,6 +756,9 @@ struct FolderView: View {
             }
             .fullScreenCover(isPresented: $showInstagram, onDismiss: { igForceFull = false; Task { await reload() } }) {
                 InstagramImportView(targetFolder: url, existing: library.instagramInfo(for: url), forceFull: igForceFull) { Task { await reload() } }
+            }
+            .fullScreenCover(isPresented: $showAllStories, onDismiss: { Task { await reload() } }) {
+                AllStoriesView(root: library.rootURL ?? url) { Task { await reload() } }
             }
             .fullScreenCover(isPresented: $showFacebook, onDismiss: { Task { await reload() } }) {
                 FacebookImportView(targetFolder: url, existing: library.facebookInfo(for: url)) { Task { await reload() } }
@@ -1444,6 +1448,11 @@ struct FolderView: View {
                     if library.isInstagramFolder(url) {
                         Button { igForceFull = true; showInstagram = true } label: {
                             Label("Re-download Entire Profile", systemImage: "arrow.clockwise.circle")
+                        }
+                    }
+                    if isRoot && !library.instagramFolders.isEmpty {
+                        Button { showAllStories = true } label: {
+                            Label("Get All New Instagram Stories", systemImage: "sparkles.rectangle.stack")
                         }
                     }
                     Button { showFacebook = true } label: {
