@@ -37,7 +37,8 @@ struct FrameCleanupView: View {
 
     /// Quick-sort destinations offered when cleaning up the "iMessage" folder.
     private static let iMessagePeople = ["Caitlin Turney", "Keri", "Kelsey", "Shannon",
-                                         "Mrs. McCarthy", "Leighanne", "Kim Murphy", "Tyler Haas"]
+                                         "Mrs. McCarthy", "Leighanne", "Kim Murphy", "Tyler Haas",
+                                         "Riley Fergus", "Tori Eshbach", "Megan Puleo"]
     private var isIMessage: Bool { folder.lastPathComponent == "iMessage" }
 
     init(folder: URL, items: [Entry], randomized: Bool = false) {
