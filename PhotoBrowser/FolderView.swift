@@ -1140,14 +1140,16 @@ struct FolderView: View {
     private func isBubbleFolder(_ url: URL) -> Bool {
         library.isInstagramFolder(url) || library.isInstagramHighlight(url)
             || library.isAlbumHighlight(url) || library.isFacebookFolder(url)
+            || library.isTikTokFolder(url)
     }
     /// Pin rank: a profile's "Stories" highlight first, then the Instagram profile, the
-    /// Facebook profile, and everything else after.
+    /// Facebook profile, the TikTok profile, and everything else after.
     private func bubbleRank(_ url: URL) -> Int {
         if library.isInstagramHighlight(url) && url.lastPathComponent == "Stories" { return -1 }
         if library.isInstagramFolder(url) { return 0 }
         if library.isFacebookFolder(url) { return 1 }
-        return 2
+        if library.isTikTokFolder(url) { return 2 }
+        return 3
     }
     private var igBubbles: [Entry] {
         let order = library.bubbleOrder(for: url)
@@ -1204,15 +1206,15 @@ struct FolderView: View {
     private func isPinnedBubble(_ url: URL) -> Bool {
         (library.isInstagramHighlight(url) && url.lastPathComponent == "Stories")
             || library.isInstagramFolder(url) || library.isFacebookFolder(url)
+            || library.isTikTokFolder(url)
     }
 
     private func bubble(_ entry: Entry) -> some View {
         let isSel = selection.contains(entry.url)
-        let isFB = library.isFacebookFolder(entry.url)
         return VStack(spacing: 5) {
             ZStack {
                 Circle()
-                    .strokeBorder(facebookRing(isFB), lineWidth: 2.5)
+                    .strokeBorder(bubbleRing(entry.url), lineWidth: 2.5)
                     .frame(width: 72, height: 72)
                 bubbleImage(entry).frame(width: 62, height: 62).clipShape(Circle())
                     .overlay { if selecting && !isSel { Circle().fill(.black.opacity(0.4)) } }
@@ -1231,15 +1233,22 @@ struct FolderView: View {
     private func bubbleLabel(_ entry: Entry) -> String {
         if let ig = library.instagramInfo(for: entry.url) { return "@\(ig.handle)" }
         if let fb = library.facebookInfo(for: entry.url) { return fb.profileName }
+        if let tt = library.tiktokInfo(for: entry.url) { return "@\(tt.handle)" }
         return entry.name
     }
 
     /// The bubble ring: a blue gradient for a Facebook profile, the Instagram-style
     /// warm gradient otherwise.
-    private func facebookRing(_ isFB: Bool) -> AnyShapeStyle {
-        if isFB {
+    /// Ring color by source: Facebook blue, TikTok cyan→red, else the Instagram gradient.
+    private func bubbleRing(_ url: URL) -> AnyShapeStyle {
+        if library.isFacebookFolder(url) {
             return AnyShapeStyle(LinearGradient(colors: [Color(red: 0.10, green: 0.46, blue: 0.91),
                                                          Color(red: 0.30, green: 0.62, blue: 0.99)],
+                                                startPoint: .topLeading, endPoint: .bottomTrailing))
+        }
+        if library.isTikTokFolder(url) {
+            return AnyShapeStyle(LinearGradient(colors: [Color(red: 0.14, green: 0.96, blue: 0.93),   // #25F4EE
+                                                         Color(red: 0.99, green: 0.17, blue: 0.33)],  // #FE2C55
                                                 startPoint: .topLeading, endPoint: .bottomTrailing))
         }
         return AnyShapeStyle(LinearGradient(colors: [Color(red: 0.99, green: 0.6, blue: 0.11),
@@ -1502,7 +1511,8 @@ struct FolderView: View {
                               systemImage: library.isFacebookFolder(url) ? "arrow.triangle.2.circlepath" : "person.2.fill")
                     }
                     Button { showTikTok = true } label: {
-                        Label("Download TikTok Profile…", systemImage: "music.note")
+                        Label(library.lastTikTokHandle(for: url) != nil ? "Get New TikTok Videos" : "Download TikTok Profile…",
+                              systemImage: "music.note")
                     }
                     Button { showTaylorBrowser = true } label: {
                         Label("Browse taylorpictures.net…", systemImage: "globe")

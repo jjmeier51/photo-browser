@@ -30,6 +30,7 @@ struct ContentView: View {
                 }
                 .navigationDestination(for: URL.self) { url in
                     FolderView(url: url, isRoot: false)
+                        .id(url)            // fresh identity per folder, so a path *replace* (e.g. "Open Stories") reloads the listing
                 }
             }
         }

@@ -2,6 +2,17 @@ import Foundation
 import AVFoundation
 import WebKit
 
+/// Per-folder record for a downloaded TikTok profile (drives "Get New videos", the
+/// pinned highlight bubble, and dedup). Stored on `Library`, keyed by the `@handle`
+/// folder path. Mirrors `IGFolderInfo` / `FBFolderInfo`.
+struct TTFolderInfo: Codable, Sendable {
+    var handle: String
+    var secUid: String
+    var lastUpdated: Double           // unix time of the last successful run
+    var downloaded: [String]          // video ids already pulled (dedup)
+    var videos: Int
+}
+
 /// Reads the logged-in TikTok session from the in-app browser's cookie store.
 @MainActor
 enum TikTokAuth {
@@ -33,6 +44,9 @@ enum TikTokService {
     struct DownloadResult: Sendable {
         var videos = 0, skippedReposts = 0, failed = 0
         var captions: [String: String] = [:]
+        var downloadedIDs: [String] = []     // ids successfully pulled this run (for dedup)
+        var secUid = ""
+        var nickname = ""
         var avatar: Data?
         var note: String?
     }
@@ -58,15 +72,22 @@ enum TikTokService {
         var result = DownloadResult()
         progress(Progress(phase: "Loading @\(username)…", fraction: 0, done: 0, total: 0))
         let user = await resolveUser(username: username, cookie: cookie)
-        if let user { result.avatar = await downloadData(user.avatarURL) }
+        if let user {
+            result.avatar = await downloadData(user.avatarURL)
+            result.secUid = user.secUid
+            result.nickname = user.nickname
+        }
 
-        let ids = videoURLs.compactMap { videoID(from: $0) }.filter { !alreadyDownloaded.contains($0) }
+        // De-dup by id, keeping the newest (TikTok lists newest-first, so first-seen wins).
+        var seen = Set<String>()
+        let ids = videoURLs.compactMap { videoID(from: $0) }
+            .filter { seen.insert($0).inserted && !alreadyDownloaded.contains($0) }
         guard !ids.isEmpty else { result.note = alreadyDownloaded.isEmpty ? "No videos found on the profile." : "No new videos."; return result }
 
         let total = ids.count
         var done = 0
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        await withTaskGroup(of: (ok: Bool, repost: Bool, path: String, caption: String).self) { group in
+        await withTaskGroup(of: (ok: Bool, repost: Bool, path: String, caption: String, id: String).self) { group in
             var idx = 0
             let maxConcurrent = 4
             func addNext() {
@@ -78,7 +99,11 @@ enum TikTokService {
             for _ in 0..<min(maxConcurrent, total) { addNext() }
             while let r = await group.next() {
                 if r.repost { result.skippedReposts += 1 }
-                else if r.ok { result.videos += 1; if !r.caption.isEmpty { result.captions[r.path] = r.caption } }
+                else if r.ok {
+                    result.videos += 1
+                    result.downloadedIDs.append(r.id)
+                    if !r.caption.isEmpty { result.captions[r.path] = r.caption }
+                }
                 else { result.failed += 1 }
                 done += 1
                 progress(Progress(phase: "Downloading", fraction: Double(done) / Double(total), done: done, total: total))
@@ -103,14 +128,14 @@ enum TikTokService {
     }
 
     nonisolated private static func fetchAndDownload(id: String, username: String, ownerId: String,
-                                                     cookie: String, into folder: URL) async -> (ok: Bool, repost: Bool, path: String, caption: String) {
-        guard let info = await videoInfo(id: id, username: username, cookie: cookie) else { return (false, false, "", "") }
+                                                     cookie: String, into folder: URL) async -> (ok: Bool, repost: Bool, path: String, caption: String, id: String) {
+        guard let info = await videoInfo(id: id, username: username, cookie: cookie) else { return (false, false, "", "", id) }
         // Skip reposts: the item's author isn't the profile owner.
-        if !ownerId.isEmpty, !info.authorId.isEmpty, info.authorId != ownerId { return (false, true, "", "") }
+        if !ownerId.isEmpty, !info.authorId.isEmpty, info.authorId != ownerId { return (false, true, "", "", id) }
 
         let dest = folder.appendingPathComponent("\(id).mp4")
-        if FileManager.default.fileExists(atPath: dest.path) { return (true, false, dest.path, info.desc) }   // already have it
-        guard let vurl = URL(string: info.url) else { return (false, false, "", "") }
+        if FileManager.default.fileExists(atPath: dest.path) { return (true, false, dest.path, info.desc, id) }   // already have it
+        guard let vurl = URL(string: info.url) else { return (false, false, "", "", id) }
         var req = URLRequest(url: vurl)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("https://www.tiktok.com/", forHTTPHeaderField: "Referer")
@@ -118,10 +143,10 @@ enum TikTokService {
         req.timeoutInterval = 180
         guard let (tmp, resp) = try? await session.download(for: req),
               (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true,
-              (try? FileManager.default.moveItem(at: tmp, to: dest)) != nil else { return (false, false, "", "") }
+              (try? FileManager.default.moveItem(at: tmp, to: dest)) != nil else { return (false, false, "", "", id) }
         await writeVideoDate(info.createTime, to: dest)                 // EXIF/QuickTime capture date (HDR preserved)
         try? FileManager.default.setAttributes([.creationDate: info.createTime, .modificationDate: info.createTime], ofItemAtPath: dest.path)
-        return (true, false, dest.path, info.desc)
+        return (true, false, dest.path, info.desc, id)
     }
 
     nonisolated private static func videoInfo(id: String, username: String, cookie: String) async -> VideoInfo? {

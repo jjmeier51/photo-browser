@@ -16,8 +16,17 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   highlight bubble with its own thumbnail inside the Instagram folder.
 - **"Open … Stories" now navigates** — from a collected story's info panel, the link to
   that person's Stories folder closes the viewer first, then pushes on the next runloop tick
-  (changing the path mid-dismiss was being swallowed, so it looked like nothing happened).
-  Story links also survive folder moves now.
+  (changing the path mid-dismiss was being swallowed). Pushed folders also get a per-URL
+  identity so a path *replace* actually reloads the listing (previously the title changed to
+  the new folder but the files didn't). Story links also survive folder moves now.
+- **TikTok profile downloader, reworked** — the in-app browser now harvests the **whole**
+  profile, not just the last screenful: it installs a link accumulator + DOM observer so
+  videos virtualized out of the grid are still captured as you scroll. Videos download at
+  the highest available bitrate (HDR preserved) with post date + caption. The download lands
+  in an `@handle` folder **inside** the person's folder, shown as a **pinned highlight
+  bubble** (cyan→red ring) with the profile avatar. The profile is **remembered per folder**,
+  so the menu becomes "Get New TikTok Videos" and re-runs only pull new videos (dedup by id).
+  The screen stays awake during the scrape + download.
 - **Screen stays awake during Instagram downloads** — single, bulk, and the "All New
   Stories" sweep disable the idle timer while running (re-enabled when they finish or the
   screen closes), so long downloads aren't interrupted by the phone sleeping.

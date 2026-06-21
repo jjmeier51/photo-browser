@@ -118,6 +118,36 @@ final class Library {
         UserDefaults.standard.set(lastFacebookURLByFolder, forKey: "photoBrowser.lastFacebookURL")
     }
 
+    // MARK: - TikTok profile folders
+
+    /// `@handle` folder path → the TikTok profile downloaded into it (drives "Get New
+    /// videos", the pinned highlight bubble, and dedup). Mirrors `facebookFolders`.
+    var tiktokFolders: [String: TTFolderInfo] = {
+        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.tiktokFolders"),
+              let m = try? JSONDecoder().decode([String: TTFolderInfo].self, from: data) else { return [:] }
+        return m
+    }()
+    func tiktokInfo(for folder: URL) -> TTFolderInfo? { tiktokFolders[folder.path] }
+    func isTikTokFolder(_ folder: URL) -> Bool { tiktokFolders[folder.path] != nil }
+    func setTikTokInfo(_ info: TTFolderInfo, for folder: URL) {
+        tiktokFolders[folder.path] = info
+        persistTikTokFolders()
+        changeToken += 1
+    }
+    private func persistTikTokFolders() {
+        if let data = try? JSONEncoder().encode(tiktokFolders) {
+            UserDefaults.standard.set(data, forKey: "photoBrowser.tiktokFolders")
+        }
+    }
+    /// Person-folder path → the TikTok handle last downloaded under it, so re-opening the
+    /// downloader from that folder prefills the handle and resumes the same `@handle` folder.
+    var lastTikTokHandleByFolder: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.lastTikTokHandle") as? [String: String]) ?? [:]
+    func lastTikTokHandle(for folder: URL) -> String? { lastTikTokHandleByFolder[folder.path] }
+    func setLastTikTokHandle(_ handle: String, for folder: URL) {
+        lastTikTokHandleByFolder[folder.path] = handle
+        UserDefaults.standard.set(lastTikTokHandleByFolder, forKey: "photoBrowser.lastTikTokHandle")
+    }
+
     /// Grid thumbnail minimum size (points); pinch-to-zoom adjusts it ±30%.
     var thumbSize: Double = (UserDefaults.standard.object(forKey: "photoBrowser.thumbSize") as? Double) ?? 110
     func setThumbSize(_ value: Double) {
@@ -862,6 +892,8 @@ final class Library {
         folderBirthdays = remapKeys(folderBirthdays, remap)
         instagramFolders = remapKeys(instagramFolders, remap)
         facebookFolders = remapKeys(facebookFolders, remap)
+        tiktokFolders = remapKeys(tiktokFolders, remap)
+        lastTikTokHandleByFolder = remapKeys(lastTikTokHandleByFolder, remap)
         bubbleOrders = Dictionary(bubbleOrders.map { (remap($0.key), $0.value.map(remap)) }, uniquingKeysWith: { a, _ in a })
         for (name, var state) in accessKardashian {
             let nf = remap(state.folderPath)
@@ -882,9 +914,11 @@ final class Library {
         UserDefaults.standard.set(storyLinks, forKey: "photoBrowser.storyLinks")
         UserDefaults.standard.set(folderBirthdays, forKey: "photoBrowser.birthdays")
         UserDefaults.standard.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
+        UserDefaults.standard.set(lastTikTokHandleByFolder, forKey: "photoBrowser.lastTikTokHandle")
         persistCustomLabels()
         persistInstagramFolders()
         persistFacebookFolders()
+        persistTikTokFolders()
         if let data = try? JSONEncoder().encode(accessKardashian) {
             UserDefaults.standard.set(data, forKey: "photoBrowser.accessKardashian")
         }
@@ -1127,7 +1161,8 @@ final class Library {
     /// the cover is set on the main actor.
     func ensureRandomCover(for folder: URL) async {
         guard folderCovers[folder.path] == nil else { return }
-        guard instagramInfo(for: folder) == nil else { return }   // IG profile folders show the profile photo, not a random post
+        // Profile folders show their avatar (set on download), not a random item.
+        guard instagramInfo(for: folder) == nil, tiktokInfo(for: folder) == nil else { return }
         guard let pick = await Self.randomMedia(in: folder) else { return }
         let entry = Entry(url: pick, name: pick.lastPathComponent,
                           kind: classify(url: pick, isDirectory: false), size: 0, modified: Date())
