@@ -475,10 +475,11 @@ final class Library {
     /// home screen). For each such person folder it creates a `@handle` subfolder, moves
     /// the folder's **Instagram** content into it — known IG post files (tracked in
     /// `igPostedBy`) plus its highlight / "Stories" subfolders — re-keys that content's
-    /// metadata, and moves the registration + profile-photo cover down. The person folder
-    /// stays a regular folder with the Instagram folder nested inside. Only files known to
-    /// be from Instagram are moved, so the user's own files are never touched. Folders
-    /// already named exactly the handle are left alone (never nested into themselves).
+    /// metadata, and moves the registration down (copying the profile-photo cover so both the
+    /// person folder and the nested bubble keep a thumbnail). The person folder stays a
+    /// regular folder with the Instagram folder nested inside. Only files known to be from
+    /// Instagram are moved, so the user's own files are never touched. Folders already named
+    /// exactly the handle are left alone (never nested into themselves).
     func migrateInstagramPersonFolders() {
         // v2 key — re-runs even if the earlier, empty-only migration already ran.
         guard !UserDefaults.standard.bool(forKey: "photoBrowser.didMigrateIGPersonFolders2") else { return }
@@ -515,10 +516,18 @@ final class Library {
                     }
                 }
                 instagramFolders[igFolder.path] = info
-                if let cover = folderCovers[path] { folderCovers[igFolder.path] = cover }   // profile photo → bubble
+                // Give the @handle bubble its *own copy* of the profile-photo cover, and
+                // leave the person folder's cover in place — don't strip its thumbnail to a
+                // bare folder icon.
+                if let coverName = folderCovers[path] {
+                    let newName = UUID().uuidString + ".jpg"
+                    if (try? fm.copyItem(at: coversDirectory.appendingPathComponent(coverName),
+                                         to: coversDirectory.appendingPathComponent(newName))) != nil {
+                        folderCovers[igFolder.path] = newName
+                    }
+                }
             }
             instagramFolders.removeValue(forKey: path)          // person folder is no longer the Instagram folder
-            folderCovers.removeValue(forKey: path)              // …and becomes a plain folder
             igLastHandle[person.path] = info.handle              // re-mapping still prefills the handle
             changed = true
         }
@@ -534,6 +543,34 @@ final class Library {
             itemsMoved(moves)     // re-keys all moved content + persists every path-keyed collection
         }
         changeToken += 1
+    }
+
+    /// Corrective for installs where the first nesting migration *moved* (rather than copied)
+    /// each person folder's profile-photo cover down into its `@handle` subfolder, leaving the
+    /// person folder a bare folder icon. Gives every such person folder its own copy of the
+    /// nested Instagram folder's cover back, so its thumbnail returns. One-time, idempotent.
+    func restorePersonFolderCovers() {
+        guard !UserDefaults.standard.bool(forKey: "photoBrowser.didRestorePersonCovers") else { return }
+        UserDefaults.standard.set(true, forKey: "photoBrowser.didRestorePersonCovers")
+        let fm = FileManager.default
+        let rootPath = activeRoot?.path ?? rootURL?.path
+        var changed = false
+        for igPath in instagramFolders.keys {
+            let person = URL(fileURLWithPath: igPath).deletingLastPathComponent()
+            guard person.path != rootPath else { continue }          // @handle sits directly at the root — no person folder
+            guard instagramFolders[person.path] == nil else { continue }   // parent isn't itself an Instagram folder
+            guard folderCovers[person.path] == nil, let name = folderCovers[igPath] else { continue }
+            let newName = UUID().uuidString + ".jpg"
+            if (try? fm.copyItem(at: coversDirectory.appendingPathComponent(name),
+                                 to: coversDirectory.appendingPathComponent(newName))) != nil {
+                folderCovers[person.path] = newName
+                changed = true
+            }
+        }
+        if changed {
+            UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
+            changeToken += 1
+        }
     }
 
     /// Highlight subfolders (shown as bubbles inside an Instagram profile folder).
@@ -1118,6 +1155,7 @@ final class Library {
             UserDefaults.standard.set(data, forKey: bookmarkKey)
         }
         migrateInstagramPersonFolders()   // reshape before indexing so the index is current
+        restorePersonFolderCovers()       // re-seed person-folder thumbnails lost to the first migration
         buildIndex()
     }
 
@@ -1131,6 +1169,7 @@ final class Library {
         rootURL = url
         rootName = url.lastPathComponent
         migrateInstagramPersonFolders()   // reshape before indexing so the index is current
+        restorePersonFolderCovers()       // re-seed person-folder thumbnails lost to the first migration
         buildIndex()
     }
 

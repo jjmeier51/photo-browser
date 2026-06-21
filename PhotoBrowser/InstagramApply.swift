@@ -17,7 +17,18 @@ enum InstagramApply {
         // Batched so they persist once (per-item writes were O(n²) on big profiles).
         library.setCaptions(r.captions)
         library.setPostedBy(r.postedBy)
-        if let picData = r.profilePic, let img = UIImage(data: picData) { library.setCover(img, for: dest) }
+        if let picData = r.profilePic, let img = UIImage(data: picData) {
+            library.setCover(img, for: dest)
+            // Seed the enclosing person folder's thumbnail too, so it shows the profile photo
+            // instead of a bare folder icon. Skip if it already has a cover, is itself an
+            // Instagram folder, or `dest` sits directly at the root (no person folder around it).
+            let person = dest.deletingLastPathComponent()
+            if person.path != library.rootURL?.path,
+               library.coverURL(for: person) == nil,
+               library.instagramInfo(for: person) == nil {
+                library.setCover(img, for: person)
+            }
+        }
         // Highlights become bubbles inside the folder, thumbnailed by their first item.
         for path in r.highlightFolders {
             let dir = URL(fileURLWithPath: path)

@@ -28,7 +28,8 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   relocates existing person-folder registrations into their `@handle` subfolder — for
   already-downloaded folders it also moves the known Instagram content (post files tracked
   as "posted by", plus Stories/highlight subfolders) down into the subfolder, leaving the
-  user's own files untouched.
+  user's own files untouched. The person folder keeps the profile photo as its thumbnail
+  (and the nested bubble gets its own copy), so nesting never strips a folder's cover.
 - **"Stories" is a pinned highlight bubble** — each profile's "Stories" folder is shown
   as a highlight bubble inside the Instagram folder, always pinned first.
 - **Skip tagged media** and **Upscale videos to 1080p** options on both single and bulk
