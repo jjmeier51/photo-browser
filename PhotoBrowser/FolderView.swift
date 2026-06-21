@@ -655,7 +655,14 @@ struct FolderView: View {
                                  onConfirm: { keep in c.isCopy ? finishCopy(to: c.dest, keepConflicts: keep)
                                                                : finishMove(to: c.dest, keepConflicts: keep) })
             }
-            .fullScreenCover(item: $viewerPresentation) { p in
+            .fullScreenCover(item: $viewerPresentation, onDismiss: {
+                // A jump requested from inside the viewer (e.g. "Open Stories") lands here once
+                // the cover is fully gone — now the navigation push is actually visible.
+                if let target = library.pendingFolderNavigation {
+                    library.pendingFolderNavigation = nil
+                    library.path = [target]
+                }
+            }) { p in
                 ViewerView(items: p.items, startIndex: p.startIndex, slideshow: p.slideshow)
             }
             .sheet(isPresented: $showExporter) {

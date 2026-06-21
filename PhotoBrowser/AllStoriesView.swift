@@ -121,6 +121,9 @@ struct AllStoriesView: View {
                 loggedIn = await InstagramAuth.isLoggedIn()
                 if loggedIn && trackedCount > 0 { start() }     // auto-run when ready
             }
+            // Keep the screen awake while the (potentially long) sweep runs.
+            .onChange(of: running) { _, isRunning in UIApplication.shared.isIdleTimerDisabled = isRunning }
+            .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         }
     }
 

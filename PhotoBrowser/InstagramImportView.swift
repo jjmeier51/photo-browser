@@ -106,6 +106,9 @@ struct InstagramImportView: View {
                 if let existing { handle = existing.handle }
                 else if handle.isEmpty { handle = library.lastIGHandle(for: targetFolder) ?? "" }   // prefill last used
             }
+            // Keep the screen awake while a (potentially long) download runs.
+            .onChange(of: running) { _, isRunning in UIApplication.shared.isIdleTimerDisabled = isRunning }
+            .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         }
     }
 

@@ -60,7 +60,11 @@ struct ViewerView: View {
         }
         .statusBarHidden(true)
         .onChange(of: index) { isZoomed = false; if !slideshow { chromeHidden = false } }
-        .sheet(isPresented: $showInfo) {
+        .sheet(isPresented: $showInfo, onDismiss: {
+            // "Open Stories" (etc.) requested a folder jump from the info panel — close the
+            // viewer too so the folder view underneath can perform the push.
+            if library.pendingFolderNavigation != nil { dismiss() }
+        }) {
             if let current { InfoPanel(entry: current) }
         }
         .fullScreenCover(isPresented: $showEditor) {

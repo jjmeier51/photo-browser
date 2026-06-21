@@ -2,6 +2,19 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-06-21
+
+- **Auto folder thumbnails** — on launch, every folder that has no cover gets one
+  automatically, picked from a random photo/video inside it (or, for folders that only
+  hold subfolders, a representative item from below). Manually-set covers are never
+  touched, and folders with no media stay plain. (`Library.autoFillFolderCovers`)
+- **"Open … Stories" now navigates** — from a collected story's info panel, the link to
+  that person's Stories folder tears down the viewer first, so the push is actually visible
+  instead of just hiding the info card. Story links also survive folder moves now.
+- **Screen stays awake during Instagram downloads** — single, bulk, and the "All New
+  Stories" sweep disable the idle timer while running (re-enabled when they finish or the
+  screen closes), so long downloads aren't interrupted by the phone sleeping.
+
 ## 2026-06-16 → 2026-06-19
 
 ### New download sources

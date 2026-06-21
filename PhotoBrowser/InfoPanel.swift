@@ -69,7 +69,7 @@ struct InfoPanel: View {
                 if let storiesURL = library.storyLink(for: entry.url) {
                     Section("Instagram Story") {
                         Button {
-                            library.path = [storiesURL]      // navigate to that person's Stories
+                            library.pendingFolderNavigation = storiesURL   // viewer tears down, then the folder view pushes
                             dismiss()
                         } label: {
                             Label("Open \(storiesURL.deletingLastPathComponent().lastPathComponent)’s Stories",

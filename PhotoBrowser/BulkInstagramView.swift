@@ -83,6 +83,9 @@ struct BulkInstagramView: View {
                 loggedIn = await InstagramAuth.isLoggedIn()
                 await loadFolders()
             }
+            // Keep the screen awake while a (potentially long) download runs.
+            .onChange(of: running) { _, isRunning in UIApplication.shared.isIdleTimerDisabled = isRunning }
+            .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         }
     }
 
