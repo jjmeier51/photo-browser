@@ -1,11 +1,15 @@
 import SwiftUI
+import UIKit
 
 /// "Bulk Download Instagram Profiles" — map existing folders on the drive to Instagram
-/// handles, then download every mapped profile in one pass. Each download is identical
+/// handles, then either **Set Handles** (just save the folder ⇄ handle mappings, no
+/// download) or **Download** every mapped profile in one pass. Each download is identical
 /// to a single import (posts + tagged → the folder, stories → its "Stories" subfolder,
 /// highlights → their own bubble subfolders, HD profile-photo cover, captions/"posted
 /// by"/dates), and any stories found today are also collected into the shared
-/// "Today's Instagram Stories" folder. Handles are remembered per folder for next time.
+/// "Today's Instagram Stories" folder. The download pass **skips** any folder that's
+/// already a downloaded Instagram profile (its record shows ≥1 pulled item). Handles are
+/// remembered per folder for next time.
 struct BulkInstagramView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
@@ -40,6 +44,8 @@ struct BulkInstagramView: View {
     @State private var overallTotal = 0
     @State private var currentFraction = 0.0
     @State private var results: [BulkSummary] = []
+    @State private var settingMode = false       // true while "Set Handles" runs (vs. download)
+    @State private var setResultCount: Int?      // non-nil when the finished screen is a Set summary
 
     private var readyCount: Int { mappings.filter { !cleanHandle($0.handle).isEmpty }.count }
 
@@ -109,7 +115,18 @@ struct BulkInstagramView: View {
             } header: {
                 Text("Map folders to handles")
             } footer: {
-                Text("Type a handle next to each folder you want to fill. Blank folders are skipped. Each downloads posts, tagged media, stories and highlights into that folder — just like a single Instagram download — and today's stories are also added to “Today's Instagram Stories”.")
+                Text("Type a handle next to each folder you want to fill. Blank folders are skipped. “Download” pulls posts, tagged media, stories and highlights into each folder — just like a single Instagram download — and today's stories are also added to “Today's Instagram Stories”. Folders that are already downloaded profiles are skipped.")
+            }
+
+            if !mappings.isEmpty {
+                Section {
+                    Button { setHandles() } label: {
+                        Label("Set Handles Without Downloading", systemImage: "tag")
+                    }
+                    .disabled(readyCount == 0)
+                } footer: {
+                    Text("Saves each handle to its folder (marking it an Instagram folder) without downloading now. Pull the media later — per profile, with Download here, or via “Get All New Instagram Stories”.")
+                }
             }
         }
     }
@@ -124,7 +141,9 @@ struct BulkInstagramView: View {
             if currentFraction > 0 {
                 ProgressView(value: currentFraction).progressViewStyle(.linear).frame(width: 220)
             }
-            Text("Downloading \(overallTotal) profile\(overallTotal == 1 ? "" : "s"). Keep the app open.")
+            Text(settingMode
+                 ? "Saving \(overallTotal) handle\(overallTotal == 1 ? "" : "s")…"
+                 : "Downloading \(overallTotal) profile\(overallTotal == 1 ? "" : "s"). Keep the app open.")
                 .font(.caption2).foregroundStyle(.tertiary)
             Spacer()
         }
@@ -132,7 +151,17 @@ struct BulkInstagramView: View {
     }
 
     private var summaryView: some View {
-        Form {
+        if let count = setResultCount {
+            return AnyView(Form {
+                Section {
+                    Label("Set \(count) handle\(count == 1 ? "" : "s").", systemImage: "checkmark.circle")
+                        .foregroundStyle(.green)
+                } footer: {
+                    Text("These folders are now mapped to their handles. Download their media anytime — per profile, here with Download, or via “Get All New Instagram Stories”.")
+                }
+            })
+        }
+        return AnyView(Form {
             Section {
                 if results.isEmpty {
                     Label("Nothing downloaded.", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
@@ -152,7 +181,7 @@ struct BulkInstagramView: View {
             } header: {
                 Text(totalItems == 0 ? "Done" : "Downloaded \(totalItems) item\(totalItems == 1 ? "" : "s")")
             }
-        }
+        })
     }
 
     private func detail(_ r: BulkSummary) -> String {
@@ -199,7 +228,7 @@ struct BulkInstagramView: View {
                 return h.isEmpty ? nil : (m.folder, m.name, h)
             }
             guard !jobs.isEmpty else { return }
-            running = true; results = []
+            running = true; results = []; settingMode = false; setResultCount = nil
             overallTotal = jobs.count
             let bg = BackgroundTaskHolder(); bg.begin(name: "Bulk Instagram Download")
 
@@ -211,6 +240,14 @@ struct BulkInstagramView: View {
                 currentFraction = 0
                 statusLine = "@\(job.handle) → \(job.name) (\(i + 1) of \(jobs.count))…"
                 library.setLastIGHandle(job.handle, for: job.folder)     // remember the mapping
+
+                // Skip folders that are already a downloaded Instagram profile (≥1 pulled item).
+                if alreadyDownloaded(job.folder) {
+                    results.append(BulkSummary(name: job.name, handle: job.handle,
+                                               photos: 0, videos: 0, stories: 0,
+                                               note: "Skipped — already downloaded"))
+                    continue
+                }
 
                 let prior = library.instagramInfo(for: job.folder)
                 let already = Set(prior?.downloaded ?? [])
@@ -240,6 +277,64 @@ struct BulkInstagramView: View {
             }
 
             running = false; finished = true; bg.end()
+            library.contentDidChange()
+            onFinished()
+        }
+    }
+
+    /// True when `folder` (or an immediate subfolder, for the single-download "@handle"
+    /// layout) is already a tracked Instagram profile whose record shows pulled content.
+    /// Uses the `IGFolderInfo` counters rather than counting files on disk, so a folder
+    /// that merely has the handle *set* (or unrelated photos) isn't mistaken for done.
+    private func alreadyDownloaded(_ folder: URL) -> Bool {
+        func hasContent(_ url: URL) -> Bool {
+            guard let info = library.instagramInfo(for: url) else { return false }
+            return info.photos + info.videos > 0 || !info.downloaded.isEmpty
+        }
+        if hasContent(folder) { return true }
+        let children = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+        return children.contains { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true && hasContent($0) }
+    }
+
+    /// Saves the folder ⇄ handle mappings without downloading any media: each mapped
+    /// folder becomes a tracked Instagram folder (its handle remembered), with the user
+    /// id — and a profile-photo cover — resolved when logged in. Existing download
+    /// records (ids/counts) are preserved.
+    private func setHandles() {
+        Task {
+            let creds = await InstagramAuth.credentials()
+            let jobs = mappings.compactMap { m -> (folder: URL, name: String, handle: String)? in
+                let h = cleanHandle(m.handle)
+                return h.isEmpty ? nil : (m.folder, m.name, h)
+            }
+            guard !jobs.isEmpty else { return }
+            running = true; settingMode = true; results = []
+            overallTotal = jobs.count
+            let now = Date().timeIntervalSince1970
+            for (i, job) in jobs.enumerated() {
+                overallDone = i
+                statusLine = "@\(job.handle) → \(job.name) (\(i + 1) of \(jobs.count))…"
+                var info = library.instagramInfo(for: job.folder)
+                    ?? IGFolderInfo(handle: job.handle, userID: "", lastUpdated: now,
+                                    downloaded: [], photos: 0, videos: 0)
+                info.handle = job.handle
+                // Resolve the user id (and refresh the cover to the HD profile photo) when possible.
+                if let creds, info.userID.isEmpty,
+                   let profile = await InstagramService.fetchProfile(handle: job.handle, creds: creds) {
+                    info.userID = profile.userID
+                    if let data = await InstagramService.fetchProfilePic(
+                        userID: profile.userID, handle: profile.handle, creds: creds, fallback: profile.profilePicURL),
+                       let img = UIImage(data: data) {
+                        library.setCover(img, for: job.folder)
+                    }
+                }
+                library.setInstagramInfo(info, for: job.folder)
+                library.setLastIGHandle(job.handle, for: job.folder)
+            }
+            overallDone = jobs.count
+            setResultCount = jobs.count
+            running = false; finished = true
             library.contentDidChange()
             onFinished()
         }
