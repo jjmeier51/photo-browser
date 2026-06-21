@@ -99,17 +99,6 @@ struct InstagramImportView: View {
         }
     }
 
-    /// A thumbnail of the first photo/video in `dir` (for a highlight bubble cover).
-    private func firstItemThumbnail(in dir: URL) async -> UIImage? {
-        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
-        guard let first = files.filter({ [.image, .video].contains(classify(url: $0, isDirectory: false)) })
-            .sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending })
-            .first else { return nil }
-        let entry = Entry(url: first, name: first.lastPathComponent,
-                          kind: classify(url: first, isDirectory: false), size: 0, modified: Date())
-        return await Thumbnailer.shared.thumbnail(for: entry, size: CGSize(width: 200, height: 200), scale: 2)
-    }
-
     private var sanitizedHandle: String {
         var h = handle.trimmingCharacters(in: .whitespacesAndNewlines)
         if let r = h.range(of: "instagram.com/") { h = String(h[r.upperBound...]) }
@@ -159,28 +148,11 @@ struct InstagramImportView: View {
                 Task { @MainActor in progress = p }
             }
 
-            // Apply the app-side metadata: captions, "posted by", folder cover, and
-            // the tracking record. Batched so they persist once (per-item writes were
-            // O(n²) and hung the app at the end of a large profile download).
-            library.setCaptions(r.captions)
-            library.setPostedBy(r.postedBy)
-            if let picData = r.profilePic, let img = UIImage(data: picData) { library.setCover(img, for: dest) }
-            // Highlights become bubbles inside the folder, thumbnailed by their first item.
-            for path in r.highlightFolders {
-                let dir = URL(fileURLWithPath: path)
-                library.markInstagramHighlight(dir)
-                if library.coverURL(for: dir) == nil, let cover = await firstItemThumbnail(in: dir) {
-                    library.setCover(cover, for: dir)
-                }
-            }
-            if let profile = r.profile {
-                let info = IGFolderInfo(handle: profile.handle, userID: profile.userID,
-                                        lastUpdated: Date().timeIntervalSince1970,
-                                        downloaded: Array(already.union(r.newIDs)),
-                                        photos: forceFull ? r.photos : (prior?.photos ?? 0) + r.photos,
-                                        videos: forceFull ? r.videos : (prior?.videos ?? 0) + r.videos)
-                library.setInstagramInfo(info, for: dest)
-            } else if !isUpdate {
+            // Apply the app-side metadata (captions, "posted by", cover, highlight
+            // bubbles, and the tracking record) exactly like the bulk import.
+            await InstagramApply.apply(r, to: dest, already: already, prior: prior,
+                                       forceFull: forceFull, library: library)
+            if r.profile == nil, !isUpdate {
                 // Profile never loaded — drop the empty folder we created.
                 if let contents = try? FileManager.default.contentsOfDirectory(atPath: dest.path), contents.isEmpty {
                     try? FileManager.default.removeItem(at: dest)

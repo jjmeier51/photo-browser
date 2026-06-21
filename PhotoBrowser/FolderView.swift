@@ -81,6 +81,7 @@ struct FolderView: View {
     @State private var showInstagram = false
     @State private var igForceFull = false
     @State private var showAllStories = false
+    @State private var showBulkInstagram = false
     @State private var showFacebook = false
     @State private var showTikTok = false
     @State private var confirmFixDates = false
@@ -765,6 +766,9 @@ struct FolderView: View {
             }
             .fullScreenCover(isPresented: $showAllStories, onDismiss: { Task { await reload() } }) {
                 AllStoriesView(root: library.rootURL ?? url) { Task { await reload() } }
+            }
+            .fullScreenCover(isPresented: $showBulkInstagram, onDismiss: { Task { await reload() } }) {
+                BulkInstagramView(root: library.rootURL ?? url) { Task { await reload() } }
             }
             .fullScreenCover(item: $profilePhotoItem) { item in
                 ProfilePhotoView(url: item.url) { profilePhotoItem = nil }
@@ -1462,6 +1466,11 @@ struct FolderView: View {
                     if isRoot && !library.instagramFolders.isEmpty {
                         Button { showAllStories = true } label: {
                             Label("Get All New Instagram Stories", systemImage: "sparkles.rectangle.stack")
+                        }
+                    }
+                    if isRoot {
+                        Button { showBulkInstagram = true } label: {
+                            Label("Bulk Download Instagram Profiles…", systemImage: "person.3.sequence")
                         }
                     }
                     Button { showFacebook = true } label: {

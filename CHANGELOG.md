@@ -22,6 +22,12 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 - **TikTok profile downloader** (ssstik-style, best-effort).
 
 ### Instagram
+- **"Bulk Download Instagram Profiles"** (homepage) — map existing drive folders to
+  Instagram handles in one screen, then download every mapped profile in a single pass.
+  Each downloads exactly like a single import (posts + tagged into the folder, stories
+  into "Stories", highlights into their own bubble subfolders, HD profile-photo cover,
+  captions/dates), today's stories are also added to "Today's Instagram Stories", and
+  the handle is remembered per folder.
 - **"Get All New Instagram Stories"** (homepage) — sweeps every saved Instagram
   profile folder on the drive, downloads each user's new last-24h stories into their
   own "Stories" folder, and gathers the collective new stories into a rolling

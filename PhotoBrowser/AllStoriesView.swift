@@ -143,14 +143,8 @@ struct AllStoriesView: View {
             overallTotal = folders.count
 
             // Shared temp folder: clear + replace once it ages past 24h, otherwise append.
-            let tempFolder = root.appendingPathComponent("Today's Instagram Stories", isDirectory: true)
             let now = Date().timeIntervalSince1970
-            let startedAt = library.igStoriesTempStart
-            if startedAt == 0 || now - startedAt > 24 * 3600 {
-                try? FileManager.default.removeItem(at: tempFolder)
-                library.setIGStoriesTempStart(now)
-            }
-            try? FileManager.default.createDirectory(at: tempFolder, withIntermediateDirectories: true)
+            let tempFolder = library.prepareTodaysStoriesFolder(root: root)
 
             var summary: [StorySummary] = []
             for (i, entry) in folders.enumerated() {

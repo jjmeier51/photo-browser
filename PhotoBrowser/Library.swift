@@ -523,6 +523,20 @@ final class Library {
         UserDefaults.standard.set(when, forKey: "photoBrowser.igStoriesTempStart")
     }
 
+    /// Returns the shared "Today's Instagram Stories" folder under `root`, clearing it
+    /// first when it has aged past 24h (so same-day runs append and a new day replaces).
+    /// Both the homepage stories sweep and the bulk profile download collect into it.
+    func prepareTodaysStoriesFolder(root: URL) -> URL {
+        let folder = root.appendingPathComponent("Today's Instagram Stories", isDirectory: true)
+        let now = Date().timeIntervalSince1970
+        if igStoriesTempStart == 0 || now - igStoriesTempStart > 24 * 3600 {
+            try? FileManager.default.removeItem(at: folder)
+            setIGStoriesTempStart(now)
+        }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
+    }
+
     /// Last Instagram handle downloaded from a folder, so reruns prefill it.
     var igLastHandle: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.igLastHandle") as? [String: String]) ?? [:]
     func lastIGHandle(for folder: URL) -> String? { igLastHandle[folder.path] }
