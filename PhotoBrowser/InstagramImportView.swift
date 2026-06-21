@@ -21,6 +21,9 @@ struct InstagramImportView: View {
     @State private var showLogin = false
     @State private var progress = InstagramService.Progress(phase: "", fraction: 0, done: 0, total: 0)
     @State private var result: InstagramService.DownloadResult?
+    @State private var skipTagged = false
+    @State private var upscale1080 = false
+    @State private var upscaleLine = ""
 
     private var isUpdate: Bool { existing != nil }
 
@@ -54,6 +57,13 @@ struct InstagramImportView: View {
                         }
                     } footer: {
                         Text("You log in inside the app; only the session cookie is kept, on this device.")
+                    }
+                }
+
+                if !running && result == nil {
+                    Section("Options") {
+                        Toggle("Skip tagged photos & videos", isOn: $skipTagged)
+                        Toggle("Upscale videos to 1080p", isOn: $upscale1080)
                     }
                 }
 
@@ -108,6 +118,7 @@ struct InstagramImportView: View {
     }
 
     private var progressLine: String {
+        if !upscaleLine.isEmpty { return upscaleLine }
         if progress.total > 0 { return "Downloading \(progress.done) of \(progress.total)…" }
         return progress.phase
     }
@@ -144,7 +155,7 @@ struct InstagramImportView: View {
             let already = forceFull ? [] : Set(prior?.downloaded ?? [])
 
             let r = await InstagramService.run(handle: h, into: dest, alreadyDownloaded: already, creds: creds,
-                                               replaceExisting: forceFull) { p in
+                                               replaceExisting: forceFull, includeTagged: !skipTagged) { p in
                 Task { @MainActor in progress = p }
             }
 
@@ -156,6 +167,12 @@ struct InstagramImportView: View {
                 // Profile never loaded — drop the empty folder we created.
                 if let contents = try? FileManager.default.contentsOfDirectory(atPath: dest.path), contents.isEmpty {
                     try? FileManager.default.removeItem(at: dest)
+                }
+            }
+            // Optionally upscale every downloaded video to 1080p (in place, metadata kept).
+            if upscale1080 {
+                await InstagramApply.upscaleVideosTo1080(r.files) { done, total in
+                    upscaleLine = "Upscaling videos to 1080p — \(done) of \(total)…"
                 }
             }
 

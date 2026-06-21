@@ -470,6 +470,40 @@ final class Library {
         }
     }
 
+    /// One-time fix for an earlier model where bulk "Set Handles" / download registered
+    /// the *person* folder itself as the Instagram folder (so it showed as a bubble on
+    /// the home screen). Moves any such **empty** registration (nothing pulled yet) down
+    /// into a `@handle` subfolder, leaving the person folder a regular folder with the
+    /// Instagram folder nested inside it. Only touches registrations whose folder name
+    /// differs from the handle, so genuine "@handle" download folders are never nested.
+    func migrateInstagramPersonFolders() {
+        guard !UserDefaults.standard.bool(forKey: "photoBrowser.didMigrateIGPersonFolders") else { return }
+        UserDefaults.standard.set(true, forKey: "photoBrowser.didMigrateIGPersonFolders")
+        let fm = FileManager.default
+        var moved = false
+        for (path, info) in Array(instagramFolders) {        // snapshot — we mutate the dict below
+            guard info.downloaded.isEmpty, info.photos == 0, info.videos == 0, !info.handle.isEmpty else { continue }
+            let person = URL(fileURLWithPath: path)
+            guard person.lastPathComponent.caseInsensitiveCompare(info.handle) != .orderedSame else { continue }
+            let igFolder = person.appendingPathComponent(info.handle, isDirectory: true)
+            // Don't clobber a real "@handle" subfolder that's already registered with content.
+            if instagramFolders[igFolder.path] == nil {
+                try? fm.createDirectory(at: igFolder, withIntermediateDirectories: true)
+                instagramFolders[igFolder.path] = info
+                if let cover = folderCovers[path] { folderCovers[igFolder.path] = cover }   // move profile-photo cover down
+            }
+            instagramFolders.removeValue(forKey: path)      // person folder is no longer the Instagram folder
+            folderCovers.removeValue(forKey: path)          // …and becomes a plain folder
+            igLastHandle[person.path] = info.handle          // re-mapping still prefills the handle
+            moved = true
+        }
+        guard moved else { return }
+        persistInstagramFolders()
+        UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
+        UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
+        changeToken += 1
+    }
+
     /// Highlight subfolders (shown as bubbles inside an Instagram profile folder).
     var instagramHighlights: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.instagramHighlights") ?? [])
     func isInstagramHighlight(_ folder: URL) -> Bool { instagramHighlights.contains(folder.path) }
@@ -523,6 +557,19 @@ final class Library {
         UserDefaults.standard.set(when, forKey: "photoBrowser.igStoriesTempStart")
     }
 
+    /// "Today's Instagram Stories" file path → that person's own Stories folder path, so
+    /// a collected story can link back to where the rest of that person's stories live
+    /// (surfaced as an "Open Stories" action in the info panel).
+    var storyLinks: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.storyLinks") as? [String: String]) ?? [:]
+    func storyLink(for url: URL) -> URL? {
+        storyLinks[url.path].map { URL(fileURLWithPath: $0) }
+    }
+    func setStoryLinks(_ paths: [String], to storiesFolder: URL) {
+        guard !paths.isEmpty else { return }
+        for p in paths { storyLinks[p] = storiesFolder.path }
+        UserDefaults.standard.set(storyLinks, forKey: "photoBrowser.storyLinks")
+    }
+
     /// Returns the shared "Today's Instagram Stories" folder under `root`, clearing it
     /// first when it has aged past 24h (so same-day runs append and a new day replaces).
     /// Both the homepage stories sweep and the bulk profile download collect into it.
@@ -532,6 +579,8 @@ final class Library {
         if igStoriesTempStart == 0 || now - igStoriesTempStart > 24 * 3600 {
             try? FileManager.default.removeItem(at: folder)
             setIGStoriesTempStart(now)
+            storyLinks = [:]                                  // the linked temp files are gone now
+            UserDefaults.standard.set(storyLinks, forKey: "photoBrowser.storyLinks")
         }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder
@@ -1049,6 +1098,7 @@ final class Library {
         rootURL = url
         rootName = url.lastPathComponent
         buildIndex()
+        migrateInstagramPersonFolders()
     }
 
     func goHome() { path.removeAll() }
@@ -1060,7 +1110,7 @@ final class Library {
         guard !files.isEmpty else { return [:] }
         var result: [URL: Date] = [:]
         var index = 0
-        let maxConcurrent = 8
+        let maxConcurrent = 12
         await withTaskGroup(of: (URL, Date?).self) { group in
             func addNext() {
                 guard index < files.count else { return }
@@ -1186,25 +1236,36 @@ final class Library {
     // MARK: - Listing a single directory (non-recursive, off the main thread)
 
     nonisolated func listing(of folder: URL, sort: SortKey) async -> [Entry] {
-        await Task.detached(priority: .userInitiated) {
-            let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
-            guard let urls = try? FileManager.default.contentsOfDirectory(
-                at: folder, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles]) else {
-                return []
-            }
-            var entries: [Entry] = []
-            entries.reserveCapacity(urls.count)
-            for url in urls {
-                let rv = try? url.resourceValues(forKeys: keys)
-                let isDir = rv?.isDirectory ?? false
-                entries.append(Entry(url: url,
+        // Enumerate names only (fast), then read each file's size/date/type concurrently.
+        // On a slow external/file-provider drive each stat blocks, so overlapping them is
+        // the difference between a folder opening instantly and taking 5–30s; on a local
+        // SSD it's neutral. The directory read itself stays on a detached task.
+        let urls: [URL] = await Task.detached(priority: .userInitiated) {
+            (try? FileManager.default.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        }.value
+        guard !urls.isEmpty else { return [] }
+
+        var slots = [Entry?](repeating: nil, count: urls.count)
+        await withTaskGroup(of: (Int, Entry).self) { group in
+            var index = 0
+            let maxConcurrent = 32
+            func addNext() {
+                guard index < urls.count else { return }
+                let i = index; let url = urls[i]; index += 1
+                group.addTask {
+                    let rv = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey])
+                    return (i, Entry(url: url,
                                      name: url.lastPathComponent,
-                                     kind: classify(url: url, isDirectory: isDir),
+                                     kind: classify(url: url, isDirectory: rv?.isDirectory ?? false),
                                      size: Int64(rv?.fileSize ?? 0),
                                      modified: rv?.contentModificationDate ?? .distantPast))
+                }
             }
-            return Self.sortEntries(entries, by: sort)
-        }.value
+            for _ in 0..<min(maxConcurrent, urls.count) { addNext() }
+            while let (i, e) = await group.next() { slots[i] = e; addNext() }
+        }
+        return Self.sortEntries(slots.compactMap { $0 }, by: sort)
     }
 
     nonisolated static func sortEntries(_ entries: [Entry], by sort: SortKey) -> [Entry] {

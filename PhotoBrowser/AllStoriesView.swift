@@ -184,7 +184,8 @@ struct AllStoriesView: View {
                     updated.photos += r.photos
                     updated.videos += r.videos
                     library.setInstagramInfo(updated, for: entry.url)
-                    await InstagramService.copyToTemp(r.files, handle: entry.info.handle, into: tempFolder)
+                    let copied = await InstagramService.copyToTemp(r.files, handle: entry.info.handle, into: tempFolder)
+                    library.setStoryLinks(copied, to: storiesFolder)     // link back to this person's Stories
                     summary.append(StorySummary(handle: entry.info.handle, count: n))
                 }
             }

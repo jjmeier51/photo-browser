@@ -1126,8 +1126,10 @@ struct FolderView: View {
         library.isInstagramFolder(url) || library.isInstagramHighlight(url)
             || library.isAlbumHighlight(url) || library.isFacebookFolder(url)
     }
-    /// Pin rank: Instagram first, the Facebook profile next, everything else after.
+    /// Pin rank: a profile's "Stories" highlight first, then the Instagram profile, the
+    /// Facebook profile, and everything else after.
     private func bubbleRank(_ url: URL) -> Int {
+        if library.isInstagramHighlight(url) && url.lastPathComponent == "Stories" { return -1 }
         if library.isInstagramFolder(url) { return 0 }
         if library.isFacebookFolder(url) { return 1 }
         return 2
@@ -1169,17 +1171,24 @@ struct FolderView: View {
         let button = Button { tap(entry) } label: { bubble(entry) }      // select-aware (toggle vs open)
             .buttonStyle(.plain)
             .contextMenu { if !selecting { contextMenu(for: entry) } }
-        if selecting || library.isInstagramFolder(entry.url) || library.isFacebookFolder(entry.url) {
-            button                                              // Instagram + Facebook are pinned
+        if selecting || isPinnedBubble(entry.url) {
+            button                                              // Stories, Instagram + Facebook are pinned
         } else {
             button
                 .opacity(draggingBubble == entry ? 0.4 : 1)
                 .onDrag { draggingBubble = entry; return NSItemProvider(object: entry.url.path as NSString) }
                 .onDrop(of: [UTType.text], delegate: BubbleDropDelegate(
                     item: entry, items: $bubbleItems, dragging: $draggingBubble,
-                    isPinned: { library.isInstagramFolder($0) || library.isFacebookFolder($0) },
+                    isPinned: { isPinnedBubble($0) },
                     onReorder: { library.setBubbleOrder($0.map { $0.url.path }, for: url) }))
         }
+    }
+
+    /// Bubbles that stay fixed (not drag-rearrangeable): a profile's "Stories" highlight,
+    /// the Instagram profile, and the Facebook profile.
+    private func isPinnedBubble(_ url: URL) -> Bool {
+        (library.isInstagramHighlight(url) && url.lastPathComponent == "Stories")
+            || library.isInstagramFolder(url) || library.isFacebookFolder(url)
     }
 
     private func bubble(_ entry: Entry) -> some View {

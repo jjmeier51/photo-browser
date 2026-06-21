@@ -4,6 +4,7 @@ import CoreLocation
 /// The swipe-up details sheet — like the iOS Photos info card.
 struct InfoPanel: View {
     @Environment(Library.self) private var library
+    @Environment(\.dismiss) private var dismiss
     let entry: Entry
     @State private var info: MediaInfo?
     @State private var fileCaption: String?
@@ -61,6 +62,21 @@ struct InfoPanel: View {
                                   library.isAI(entry.url) ? "To AI" : nil,
                                   library.postedBy(for: entry.url) != nil ? "Instagram" : nil].compactMap { $0 }
                     row("Labels", labels.isEmpty ? "None" : labels.joined(separator: ", "))
+                }
+
+                // A collected "Today's Instagram Stories" item links back to the person's
+                // own Stories folder (where the rest of their stories live).
+                if let storiesURL = library.storyLink(for: entry.url) {
+                    Section("Instagram Story") {
+                        Button {
+                            library.path = [storiesURL]      // navigate to that person's Stories
+                            dismiss()
+                        } label: {
+                            Label("Open \(storiesURL.deletingLastPathComponent().lastPathComponent)’s Stories",
+                                  systemImage: "arrow.up.forward.square")
+                        }
+                        row("Stories Folder", storiesURL.path)
+                    }
                 }
 
                 if inTaylorSwift {

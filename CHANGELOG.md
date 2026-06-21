@@ -22,6 +22,19 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 - **TikTok profile downloader** (ssstik-style, best-effort).
 
 ### Instagram
+- **Person folders stay regular folders** — bulk "Set Handles" / download now put the
+  Instagram folder in a `@handle` subfolder *inside* the person folder (only the nested
+  Instagram folder is a highlight bubble, not the person folder). A one-time migration
+  relocates existing empty person-folder registrations into their `@handle` subfolder.
+- **"Stories" is a pinned highlight bubble** — each profile's "Stories" folder is shown
+  as a highlight bubble inside the Instagram folder, always pinned first.
+- **Skip tagged media** and **Upscale videos to 1080p** options on both single and bulk
+  downloads (upscale preserves HDR/EXIF/caption/capture-date, in place).
+- **No duplicates** in "Today's Instagram Stories" (deterministic per-handle names), and
+  each collected story links back to that person's own Stories folder (an **"Open
+  Stories"** action in the info panel).
+- Profile-picture download hardened to reliably pick the **largest** available size.
+- Instagram downloads ~10–20% faster (wider connection pool + concurrency).
 - **"Bulk Download Instagram Profiles"** (homepage) — map existing drive folders to
   Instagram handles in one screen, then either **Set Handles** (just save the folder ⇄
   handle mappings, no download) or **Download** every mapped profile in a single pass.
@@ -100,7 +113,8 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   files are deleted from the old drive as they go, and each file's **creation + capture
   date** is stamped from its embedded metadata (EXIF is carried over by the byte copy).
 - **Faster large-folder loading** on a slow external drive (in-memory listing
-  cache + lazy EXIF/caption reads).
+  cache + lazy EXIF/caption reads; per-file stats now read concurrently so big
+  folders that took 5–30s open far quicker).
 - **Favorites / To AI** are scoped to the current folder (and its subfolders).
 - **App-wide orange gradient** (vibrant orange → light) with transparent
   no-thumbnail folder tiles.

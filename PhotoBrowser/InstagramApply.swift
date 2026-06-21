@@ -36,6 +36,18 @@ enum InstagramApply {
         }
     }
 
+    /// Upscales every downloaded video to at least 1080p **in place**, preserving HDR,
+    /// metadata, caption and capture date (via `MediaEditing.upscaleVideo`). Videos
+    /// already ≥1080p are left untouched. Reports (done, total). Best-effort.
+    static func upscaleVideosTo1080(_ files: [String], progress: @escaping (Int, Int) -> Void) async {
+        let videos = files.filter { $0.lowercased().hasSuffix(".mp4") || $0.lowercased().hasSuffix(".mov") }
+        guard !videos.isEmpty else { return }
+        for (i, path) in videos.enumerated() {
+            _ = await MediaEditing.upscaleVideo(url: URL(fileURLWithPath: path), targetShort: 1080) { _ in }
+            progress(i + 1, videos.count)
+        }
+    }
+
     /// A thumbnail of the first photo/video in `dir` (for a highlight-bubble cover).
     static func firstItemThumbnail(in dir: URL) async -> UIImage? {
         let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []

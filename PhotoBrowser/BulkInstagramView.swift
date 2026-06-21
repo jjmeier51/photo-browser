@@ -46,6 +46,8 @@ struct BulkInstagramView: View {
     @State private var results: [BulkSummary] = []
     @State private var settingMode = false       // true while "Set Handles" runs (vs. download)
     @State private var setResultCount: Int?      // non-nil when the finished screen is a Set summary
+    @State private var skipTagged = false
+    @State private var upscale1080 = false
 
     private var readyCount: Int { mappings.filter { !cleanHandle($0.handle).isEmpty }.count }
 
@@ -119,6 +121,10 @@ struct BulkInstagramView: View {
             }
 
             if !mappings.isEmpty {
+                Section("Options") {
+                    Toggle("Skip tagged photos & videos", isOn: $skipTagged)
+                    Toggle("Upscale videos to 1080p", isOn: $upscale1080)
+                }
                 Section {
                     Button { setHandles() } label: {
                         Label("Set Handles Without Downloading", systemImage: "tag")
@@ -203,11 +209,16 @@ struct BulkInstagramView: View {
         let subfolders = await library.listing(of: root, sort: .nameAsc)
             .filter { $0.isFolder && $0.name != "Today's Instagram Stories" }
         mappings = subfolders.map { entry in
-            let prefilled = library.instagramInfo(for: entry.url)?.handle
-                ?? library.lastIGHandle(for: entry.url) ?? ""
-            return Mapping(folder: entry.url, name: entry.name, handle: prefilled)
+            // The remembered handle is kept on the person folder, so it prefills next time.
+            Mapping(folder: entry.url, name: entry.name, handle: library.lastIGHandle(for: entry.url) ?? "")
         }
         loadingFolders = false
+    }
+
+    /// The Instagram folder for a person folder: a "@handle" subfolder inside it, so the
+    /// person folder stays a regular folder and the nested folder is the bubble.
+    private func igFolder(for person: URL, handle: String) -> URL {
+        person.appendingPathComponent(handle, isDirectory: true)
     }
 
     private func cleanHandle(_ raw: String) -> String {
@@ -241,28 +252,39 @@ struct BulkInstagramView: View {
                 statusLine = "@\(job.handle) → \(job.name) (\(i + 1) of \(jobs.count))…"
                 library.setLastIGHandle(job.handle, for: job.folder)     // remember the mapping
 
+                // The Instagram folder lives *inside* the person folder, so the person
+                // folder stays a regular folder and only the "@handle" folder is a bubble.
+                let dest = igFolder(for: job.folder, handle: job.handle)
+
                 // Skip folders that are already a downloaded Instagram profile (≥1 pulled item).
-                if alreadyDownloaded(job.folder) {
+                if alreadyDownloaded(dest) {
                     results.append(BulkSummary(name: job.name, handle: job.handle,
                                                photos: 0, videos: 0, stories: 0,
                                                note: "Skipped — already downloaded"))
                     continue
                 }
+                try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
 
-                let prior = library.instagramInfo(for: job.folder)
+                let prior = library.instagramInfo(for: dest)
                 let already = Set(prior?.downloaded ?? [])
-                let r = await InstagramService.run(handle: job.handle, into: job.folder,
-                                                   alreadyDownloaded: already, creds: creds) { p in
+                let r = await InstagramService.run(handle: job.handle, into: dest, alreadyDownloaded: already,
+                                                   creds: creds, includeTagged: !skipTagged) { p in
                     Task { @MainActor in currentFraction = p.fraction }
                 }
-                await InstagramApply.apply(r, to: job.folder, already: already, prior: prior,
+                await InstagramApply.apply(r, to: dest, already: already, prior: prior,
                                            forceFull: false, library: library)
+                if upscale1080 {
+                    await InstagramApply.upscaleVideosTo1080(r.files) { done, total in
+                        statusLine = "@\(job.handle): upscaling videos — \(done) of \(total)…"
+                    }
+                }
 
                 // Any stories pulled this run are today's — collect them into the shared folder.
-                let storiesPrefix = job.folder.appendingPathComponent("Stories", isDirectory: true).path + "/"
-                let storyFiles = r.files.filter { $0.hasPrefix(storiesPrefix) }
+                let storiesFolder = dest.appendingPathComponent("Stories", isDirectory: true)
+                let storyFiles = r.files.filter { $0.hasPrefix(storiesFolder.path + "/") }
                 if !storyFiles.isEmpty {
-                    await InstagramService.copyToTemp(storyFiles, handle: job.handle, into: tempFolder)
+                    let copied = await InstagramService.copyToTemp(storyFiles, handle: job.handle, into: tempFolder)
+                    library.setStoryLinks(copied, to: storiesFolder)        // metadata link → person's Stories
                 }
 
                 results.append(BulkSummary(name: job.name, handle: job.handle,
@@ -315,7 +337,10 @@ struct BulkInstagramView: View {
             for (i, job) in jobs.enumerated() {
                 overallDone = i
                 statusLine = "@\(job.handle) → \(job.name) (\(i + 1) of \(jobs.count))…"
-                var info = library.instagramInfo(for: job.folder)
+                // Register the "@handle" subfolder (a bubble inside the regular person folder).
+                let dest = igFolder(for: job.folder, handle: job.handle)
+                try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+                var info = library.instagramInfo(for: dest)
                     ?? IGFolderInfo(handle: job.handle, userID: "", lastUpdated: now,
                                     downloaded: [], photos: 0, videos: 0)
                 info.handle = job.handle
@@ -326,10 +351,10 @@ struct BulkInstagramView: View {
                     if let data = await InstagramService.fetchProfilePic(
                         userID: profile.userID, handle: profile.handle, creds: creds, fallback: profile.profilePicURL),
                        let img = UIImage(data: data) {
-                        library.setCover(img, for: job.folder)
+                        library.setCover(img, for: dest)
                     }
                 }
-                library.setInstagramInfo(info, for: job.folder)
+                library.setInstagramInfo(info, for: dest)
                 library.setLastIGHandle(job.handle, for: job.folder)
             }
             overallDone = jobs.count

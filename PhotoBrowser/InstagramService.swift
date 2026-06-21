@@ -85,14 +85,14 @@ enum InstagramService {
         cfg.httpShouldSetCookies = false
         cfg.httpCookieStorage = nil
         cfg.timeoutIntervalForRequest = 60
-        cfg.httpMaximumConnectionsPerHost = 10
+        cfg.httpMaximumConnectionsPerHost = 12      // ~20% more parallel connections
         return URLSession(configuration: cfg)
     }()
 
     // MARK: - Orchestration
 
     nonisolated static func run(handle: String, into folder: URL, alreadyDownloaded: Set<String>,
-                                creds: Credentials, replaceExisting: Bool = false,
+                                creds: Credentials, replaceExisting: Bool = false, includeTagged: Bool = true,
                                 progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
         progress(Progress(phase: "Loading @\(handle)…", fraction: 0, done: 0, total: 0))
@@ -110,10 +110,13 @@ enum InstagramService {
         }
         // Tagged media → main folder, but only the specific photos/videos this user is
         // actually tagged in (not whole carousels). The original poster's handle is kept.
-        progress(Progress(phase: "Finding tagged media…", fraction: 0, done: 0, total: 0))
-        jobs += await collectFeed(base: "usertags/\(profile.userID)/feed/", folder: folder, already: alreadyDownloaded,
-                                  poster: profile.handle, creds: creds,
-                                  taggedUser: (id: profile.userID, username: profile.handle)) { _ in }
+        // Skippable (it's the slowest, least-wanted category).
+        if includeTagged {
+            progress(Progress(phase: "Finding tagged media…", fraction: 0, done: 0, total: 0))
+            jobs += await collectFeed(base: "usertags/\(profile.userID)/feed/", folder: folder, already: alreadyDownloaded,
+                                      poster: profile.handle, creds: creds,
+                                      taggedUser: (id: profile.userID, username: profile.handle)) { _ in }
+        }
         // Current stories (the last 24 hours) → "Stories" subfolder. Prefer the
         // reels-media tray (the endpoint that reliably returns the logged-in viewer's
         // story), falling back to the older per-user reel_media.
@@ -123,11 +126,14 @@ enum InstagramService {
         if stories.isEmpty {
             stories = await fetchReel(path: "feed/user/\(profile.userID)/reel_media/", handle: profile.handle, creds: creds)
         }
-        jobs += reelJobs(items: stories, folder: folder.appendingPathComponent("Stories", isDirectory: true),
-                         already: alreadyDownloaded, poster: profile.handle)
-        // Highlights → one subfolder per highlight (shown as bubbles inside the folder).
+        let storiesFolder = folder.appendingPathComponent("Stories", isDirectory: true)
+        let storyJobs = reelJobs(items: stories, folder: storiesFolder, already: alreadyDownloaded, poster: profile.handle)
+        jobs += storyJobs
+        // Highlights → one subfolder per highlight (shown as bubbles inside the folder). The
+        // "Stories" folder is treated as a (pinned-first) highlight bubble too.
         progress(Progress(phase: "Finding highlights…", fraction: 0, done: 0, total: 0))
         var highlightDirs: [String] = []
+        if !storyJobs.isEmpty { highlightDirs.append(storiesFolder.path) }
         for h in await fetchHighlights(userID: profile.userID, handle: profile.handle, creds: creds) {
             let encoded = h.id.replacingOccurrences(of: ":", with: "%3A")
             let items = await fetchReel(path: "feed/reels_media/?reel_ids=\(encoded)", handle: profile.handle, creds: creds, reelKey: h.id)
@@ -173,39 +179,66 @@ enum InstagramService {
 
     /// Copies freshly-downloaded story files into the shared "Today's Instagram Stories"
     /// folder, prefixing each name with the handle so two users' stories can't collide.
-    /// The story files already carry their capture date; we copy those filesystem dates
-    /// across rather than re-reading EXIF. Best-effort and off-main (big writes).
-    nonisolated static func copyToTemp(_ files: [String], handle: String, into tempFolder: URL) async {
+    /// The destination name is deterministic (`handle_storyfile`), so re-running in the
+    /// same window **skips files that are already there** — no duplicates. The story files
+    /// already carry their capture date; we copy those filesystem dates across rather than
+    /// re-reading EXIF. Returns the paths actually written. Best-effort, off-main.
+    @discardableResult
+    nonisolated static func copyToTemp(_ files: [String], handle: String, into tempFolder: URL) async -> [String] {
         let fm = FileManager.default
         try? fm.createDirectory(at: tempFolder, withIntermediateDirectories: true)
+        var written: [String] = []
         for path in files {
             let src = URL(fileURLWithPath: path)
-            let dest = uniqueDestination("\(handle)_\(src.lastPathComponent)", in: tempFolder)
+            let dest = tempFolder.appendingPathComponent("\(handle)_\(src.lastPathComponent)")
+            if fm.fileExists(atPath: dest.path) { continue }      // already copied this run/window — dedup
             guard (try? fm.copyItem(at: src, to: dest)) != nil else { continue }
             let vals = try? src.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
             if let created = vals?.creationDate, let modified = vals?.contentModificationDate {
                 try? fm.setAttributes([.creationDate: created, .modificationDate: modified],
                                       ofItemAtPath: dest.path)
             }
+            written.append(dest.path)
         }
+        return written
     }
 
     /// Highest-resolution profile-picture URL for a user. The `web_profile_info` HD
-    /// field is usually only ~320px; the private `users/{id}/info/` endpoint exposes
-    /// `hd_profile_pic_versions` (the full set of sizes), so we pick the largest.
-    /// Falls back to whatever `web_profile_info` gave us if that endpoint fails.
+    /// field is usually only ~320px; the private `users/{id}/info/` endpoint exposes the
+    /// full set of sizes, so we pick the largest by pixel area. Robust to width/height
+    /// arriving as Int, NSNumber or String. Falls back to the next-best source at each
+    /// step, finally to whatever `web_profile_info` gave us.
     nonisolated static func bestProfilePicURL(userID: String, handle: String, creds: Credentials, fallback: String) async -> String {
         guard !userID.isEmpty,
               let url = URL(string: "https://i.instagram.com/api/v1/users/\(userID)/info/"),
               let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let user = json["user"] as? [String: Any] else { return fallback }
-        if let versions = user["hd_profile_pic_versions"] as? [[String: Any]],
-           let best = versions.max(by: { area($0) < area($1) })?["url"] as? String {
-            return best
+        // Pick the largest across every size list Instagram may return.
+        let lists = ["hd_profile_pic_versions", "profile_pic_versions"]
+        var best: (area: Int, url: String)?
+        for key in lists {
+            for v in (user[key] as? [[String: Any]] ?? []) {
+                guard let u = v["url"] as? String else { continue }
+                let a = picArea(v)
+                if best == nil || a > best!.area { best = (a, u) }
+            }
         }
+        if let best { return best.url }
         if let info = user["hd_profile_pic_url_info"] as? [String: Any], let u = info["url"] as? String { return u }
-        return (user["profile_pic_url_hd"] as? String) ?? fallback
+        return (user["hd_profile_pic_url"] as? String)
+            ?? (user["profile_pic_url_hd"] as? String) ?? fallback
+    }
+
+    /// Pixel area of a size dictionary, tolerant of numeric or string width/height.
+    nonisolated private static func picArea(_ d: [String: Any]) -> Int {
+        func n(_ any: Any?) -> Int {
+            if let i = any as? Int { return i }
+            if let n = any as? NSNumber { return n.intValue }
+            if let s = any as? String { return Int(s) ?? 0 }
+            return 0
+        }
+        return n(d["width"]) * n(d["height"])
     }
 
     /// Downloads a user's highest-resolution profile picture (see `bestProfilePicURL`).
@@ -365,7 +398,7 @@ enum InstagramService {
         var succeeded = Set<String>(), failedIDs = Set<String>()
         await withTaskGroup(of: (ok: Bool, isVideo: Bool, path: String, caption: String, poster: String, id: String).self) { group in
             var idx = 0
-            let maxConcurrent = 8        // modestly wider; Instagram is rate-limit sensitive
+            let maxConcurrent = 9        // modestly wider; Instagram is rate-limit sensitive
             func addNext() {
                 guard idx < jobs.count else { return }
                 let job = jobs[idx]; idx += 1
