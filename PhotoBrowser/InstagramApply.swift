@@ -18,14 +18,15 @@ enum InstagramApply {
         library.setCaptions(r.captions)
         library.setPostedBy(r.postedBy)
         if let picData = r.profilePic, let img = UIImage(data: picData) {
-            library.setCover(img, for: dest)
+            library.setCover(img, for: dest)     // the @handle folder always shows the profile photo
             // Seed the enclosing person folder's thumbnail too, so it shows the profile photo
-            // instead of a bare folder icon. Skip if it already has a cover, is itself an
-            // Instagram folder, or `dest` sits directly at the root (no person folder around it).
+            // instead of a bare folder icon. Force it on a fresh download (overriding any
+            // auto-generated cover); on a re-download only fill a missing one. Never touch the
+            // root or a folder that is itself an Instagram folder.
             let person = dest.deletingLastPathComponent()
             if person.path != library.rootURL?.path,
-               library.coverURL(for: person) == nil,
-               library.instagramInfo(for: person) == nil {
+               library.instagramInfo(for: person) == nil,
+               prior == nil || library.coverURL(for: person) == nil {
                 library.setCover(img, for: person)
             }
         }

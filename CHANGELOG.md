@@ -7,11 +7,17 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 - **Auto folder thumbnails** — any folder with no cover gets one automatically as its cell
   appears, picked from a random photo/video inside it (descending into subfolders when it
   holds only folders). Filled lazily while you browse — reads just that folder, so it
-  doesn't wait on the whole-drive index. Manually-set covers are never touched, and folders
-  with no media stay plain. (`Library.ensureRandomCover`)
+  doesn't wait on the whole-drive index. Instagram profile folders are left for their
+  profile photo (never given a random post), manually-set covers are never touched, and
+  folders with no media stay plain. (`Library.ensureRandomCover`)
+- **Instagram download covers are reliable** — the `@handle` folder always takes the profile
+  photo (forced, so the lazy auto-cover can't beat it to a random post), the person folder
+  shows it too on a fresh download, and every Stories/highlight subfolder is marked a
+  highlight bubble with its own thumbnail inside the Instagram folder.
 - **"Open … Stories" now navigates** — from a collected story's info panel, the link to
-  that person's Stories folder tears down the viewer first, so the push is actually visible
-  instead of just hiding the info card. Story links also survive folder moves now.
+  that person's Stories folder closes the viewer first, then pushes on the next runloop tick
+  (changing the path mid-dismiss was being swallowed, so it looked like nothing happened).
+  Story links also survive folder moves now.
 - **Screen stays awake during Instagram downloads** — single, bulk, and the "All New
   Stories" sweep disable the idle timer while running (re-enabled when they finish or the
   screen closes), so long downloads aren't interrupted by the phone sleeping.

@@ -664,10 +664,11 @@ struct FolderView: View {
             }
             .fullScreenCover(item: $viewerPresentation, onDismiss: {
                 // A jump requested from inside the viewer (e.g. "Open Stories") lands here once
-                // the cover is fully gone — now the navigation push is actually visible.
+                // the cover is fully gone. Defer to the next runloop tick — changing the
+                // navigation path *during* the cover's dismissal gets swallowed.
                 if let target = library.pendingFolderNavigation {
                     library.pendingFolderNavigation = nil
-                    library.path = [target]
+                    DispatchQueue.main.async { library.path = [target] }
                 }
             }) { p in
                 ViewerView(items: p.items, startIndex: p.startIndex, slideshow: p.slideshow)

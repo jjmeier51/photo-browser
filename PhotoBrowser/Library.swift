@@ -1127,6 +1127,7 @@ final class Library {
     /// the cover is set on the main actor.
     func ensureRandomCover(for folder: URL) async {
         guard folderCovers[folder.path] == nil else { return }
+        guard instagramInfo(for: folder) == nil else { return }   // IG profile folders show the profile photo, not a random post
         guard let pick = await Self.randomMedia(in: folder) else { return }
         let entry = Entry(url: pick, name: pick.lastPathComponent,
                           kind: classify(url: pick, isDirectory: false), size: 0, modified: Date())
