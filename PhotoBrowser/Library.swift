@@ -1117,70 +1117,49 @@ final class Library {
             let all = await Self.enumerateAll(root)
             self.index = all
             self.indexing = false
-            self.autoFillFolderCovers()
         }
     }
 
-    /// Gives every cover-less folder a thumbnail by picking a random photo/video from inside
-    /// it (or, for folders that only hold subfolders, a representative item from below). Runs
-    /// after each index build; the directory/thumbnail work is off the main actor and the
-    /// covers are applied in one batch. Only cover-less folders are touched, so manual choices
-    /// are kept and newly-added folders fill in on a later launch; folders with no media
-    /// beneath them stay plain.
-    func autoFillFolderCovers() {
-        let snapshot = index
-        guard !snapshot.isEmpty else { return }
-        let covered = Set(folderCovers.keys)
-        let dir = coversDirectory
-        Task.detached(priority: .utility) {
-            let picks = Self.pickFolderCovers(from: snapshot, covered: covered)
-            guard !picks.isEmpty else { return }
-            var written: [String: String] = [:]
-            for (folderPath, mediaURL) in picks {
-                let entry = Entry(url: mediaURL, name: mediaURL.lastPathComponent,
-                                  kind: classify(url: mediaURL, isDirectory: false), size: 0, modified: Date())
-                guard let img = await Thumbnailer.shared.thumbnail(
-                          for: entry, size: CGSize(width: 240, height: 240), scale: 2),
-                      let data = img.jpegData(compressionQuality: 0.9) else { continue }
-                let name = UUID().uuidString + ".jpg"
-                if (try? data.write(to: dir.appendingPathComponent(name))) != nil { written[folderPath] = name }
-            }
-            guard !written.isEmpty else { return }
-            await MainActor.run {
-                var changed = false
-                for (fp, name) in written where self.folderCovers[fp] == nil {   // skip any set in the meantime
-                    self.folderCovers[fp] = name; changed = true
-                }
-                if changed {
-                    UserDefaults.standard.set(self.folderCovers, forKey: "photoBrowser.folderCovers")
-                    self.changeToken += 1
-                }
-            }
-        }
+    /// Ensures `folder` has a cover thumbnail, picking a **random** photo/video from inside it
+    /// (descending into subfolders when it holds only folders). Called lazily as folder cells
+    /// appear, so covers fill in as you browse without waiting on the whole-drive index. A
+    /// no-op if the folder already has a cover or contains no media. Off-main directory scan;
+    /// the cover is set on the main actor.
+    func ensureRandomCover(for folder: URL) async {
+        guard folderCovers[folder.path] == nil else { return }
+        guard let pick = await Self.randomMedia(in: folder) else { return }
+        let entry = Entry(url: pick, name: pick.lastPathComponent,
+                          kind: classify(url: pick, isDirectory: false), size: 0, modified: Date())
+        guard let img = await Thumbnailer.shared.thumbnail(
+                  for: entry, size: CGSize(width: 240, height: 240), scale: 2) else { return }
+        if folderCovers[folder.path] == nil { setCover(img, for: folder) }   // still missing — set it
     }
 
-    /// Picks a cover candidate for each cover-less folder in `index`: a random direct child
-    /// when the folder holds photos/videos, otherwise a representative item from a subfolder.
-    /// Folders with no media beneath them are omitted. `nonisolated` so it runs off-main.
-    nonisolated static func pickFolderCovers(from index: [Entry], covered: Set<String>) -> [(String, URL)] {
-        var directMedia: [String: [URL]] = [:]
-        var anyDescendant: [String: URL] = [:]
-        for e in index where e.kind == .image || e.kind == .video {
-            let parent = e.url.deletingLastPathComponent().path
-            directMedia[parent, default: []].append(e.url)
-            var d = parent                                   // mark this item for the parent and every ancestor
-            while !d.isEmpty, d != "/" {
-                if anyDescendant[d] == nil { anyDescendant[d] = e.url } else { break }
-                d = (d as NSString).deletingLastPathComponent
+    /// A random photo/video somewhere under `folder`: prefers a direct child, otherwise
+    /// descends breadth-first (bounded) into subfolders for a representative item. Reads only
+    /// the folders it needs, off the main actor.
+    nonisolated static func randomMedia(in folder: URL) async -> URL? {
+        await Task.detached(priority: .utility) {
+            let fm = FileManager.default
+            var level = [folder]
+            var depth = 0
+            while !level.isEmpty, depth < 8 {
+                var media: [URL] = []
+                var subdirs: [URL] = []
+                for dir in level {
+                    let items = (try? fm.contentsOfDirectory(
+                        at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+                    for u in items {
+                        if (try? u.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true { subdirs.append(u) }
+                        else if [.image, .video].contains(classify(url: u, isDirectory: false)) { media.append(u) }
+                    }
+                }
+                if let pick = media.randomElement() { return pick }   // prefer the shallowest media
+                level = subdirs
+                depth += 1
             }
-        }
-        var picks: [(String, URL)] = []
-        for e in index where e.isFolder && !covered.contains(e.url.path) {
-            let fp = e.url.path
-            if let direct = directMedia[fp]?.randomElement() { picks.append((fp, direct)) }
-            else if let rep = anyDescendant[fp] { picks.append((fp, rep)) }
-        }
-        return picks
+            return nil
+        }.value
     }
 
     nonisolated static func enumerateAll(_ root: URL) async -> [Entry] {

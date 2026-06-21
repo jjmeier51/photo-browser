@@ -4,10 +4,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-06-21
 
-- **Auto folder thumbnails** — on launch, every folder that has no cover gets one
-  automatically, picked from a random photo/video inside it (or, for folders that only
-  hold subfolders, a representative item from below). Manually-set covers are never
-  touched, and folders with no media stay plain. (`Library.autoFillFolderCovers`)
+- **Auto folder thumbnails** — any folder with no cover gets one automatically as its cell
+  appears, picked from a random photo/video inside it (descending into subfolders when it
+  holds only folders). Filled lazily while you browse — reads just that folder, so it
+  doesn't wait on the whole-drive index. Manually-set covers are never touched, and folders
+  with no media stay plain. (`Library.ensureRandomCover`)
 - **"Open … Stories" now navigates** — from a collected story's info panel, the link to
   that person's Stories folder tears down the viewer first, so the push is actually visible
   instead of just hiding the info card. Story links also survive folder moves now.

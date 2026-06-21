@@ -407,6 +407,13 @@ struct FolderView: View {
             .onTapGesture { tap(entry) }
             // No long-press menu while selecting — press-and-hold there starts a drag-select.
             .contextMenu { if !selecting { contextMenu(for: entry) } }
+            // Auto-thumbnail: a cover-less folder gets a random photo from inside it the first
+            // time its cell appears, so the grid fills in as you browse.
+            .task(id: entry.url) {
+                if entry.isFolder, library.coverURL(for: entry.url) == nil {
+                    await library.ensureRandomCover(for: entry.url)
+                }
+            }
     }
 
     /// Paints a contiguous selection range as the finger moves — like Photos: every
