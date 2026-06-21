@@ -25,7 +25,10 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 - **Person folders stay regular folders** — bulk "Set Handles" / download now put the
   Instagram folder in a `@handle` subfolder *inside* the person folder (only the nested
   Instagram folder is a highlight bubble, not the person folder). A one-time migration
-  relocates existing empty person-folder registrations into their `@handle` subfolder.
+  relocates existing person-folder registrations into their `@handle` subfolder — for
+  already-downloaded folders it also moves the known Instagram content (post files tracked
+  as "posted by", plus Stories/highlight subfolders) down into the subfolder, leaving the
+  user's own files untouched.
 - **"Stories" is a pinned highlight bubble** — each profile's "Stories" folder is shown
   as a highlight bubble inside the Instagram folder, always pinned first.
 - **Skip tagged media** and **Upscale videos to 1080p** options on both single and bulk

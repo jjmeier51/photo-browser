@@ -471,36 +471,68 @@ final class Library {
     }
 
     /// One-time fix for an earlier model where bulk "Set Handles" / download registered
-    /// the *person* folder itself as the Instagram folder (so it showed as a bubble on
-    /// the home screen). Moves any such **empty** registration (nothing pulled yet) down
-    /// into a `@handle` subfolder, leaving the person folder a regular folder with the
-    /// Instagram folder nested inside it. Only touches registrations whose folder name
-    /// differs from the handle, so genuine "@handle" download folders are never nested.
+    /// the *person* folder itself as the Instagram folder (so it showed as a bubble on the
+    /// home screen). For each such person folder it creates a `@handle` subfolder, moves
+    /// the folder's **Instagram** content into it — known IG post files (tracked in
+    /// `igPostedBy`) plus its highlight / "Stories" subfolders — re-keys that content's
+    /// metadata, and moves the registration + profile-photo cover down. The person folder
+    /// stays a regular folder with the Instagram folder nested inside. Only files known to
+    /// be from Instagram are moved, so the user's own files are never touched. Folders
+    /// already named exactly the handle are left alone (never nested into themselves).
     func migrateInstagramPersonFolders() {
-        guard !UserDefaults.standard.bool(forKey: "photoBrowser.didMigrateIGPersonFolders") else { return }
-        UserDefaults.standard.set(true, forKey: "photoBrowser.didMigrateIGPersonFolders")
+        // v2 key — re-runs even if the earlier, empty-only migration already ran.
+        guard !UserDefaults.standard.bool(forKey: "photoBrowser.didMigrateIGPersonFolders2") else { return }
+        UserDefaults.standard.set(true, forKey: "photoBrowser.didMigrateIGPersonFolders2")
         let fm = FileManager.default
-        var moved = false
-        for (path, info) in Array(instagramFolders) {        // snapshot — we mutate the dict below
-            guard info.downloaded.isEmpty, info.photos == 0, info.videos == 0, !info.handle.isEmpty else { continue }
+        var moves: [(from: URL, to: URL)] = []
+        var newStoryHighlights: [String] = []
+        var changed = false
+
+        for (path, info) in Array(instagramFolders) {           // snapshot — we mutate the dict below
+            guard !info.handle.isEmpty else { continue }
             let person = URL(fileURLWithPath: path)
             guard person.lastPathComponent.caseInsensitiveCompare(info.handle) != .orderedSame else { continue }
             let igFolder = person.appendingPathComponent(info.handle, isDirectory: true)
-            // Don't clobber a real "@handle" subfolder that's already registered with content.
+
             if instagramFolders[igFolder.path] == nil {
                 try? fm.createDirectory(at: igFolder, withIntermediateDirectories: true)
+                // Move only this folder's *Instagram* content down into the @handle folder:
+                // its highlight/Stories subfolders, and files we know came from Instagram.
+                let children = (try? fm.contentsOfDirectory(
+                    at: person, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+                for child in children where child.path != igFolder.path {
+                    let isDir = (try? child.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                    let isStories = isDir && child.lastPathComponent == "Stories"
+                    let isIGContent = isDir
+                        ? (instagramHighlights.contains(child.path) || isStories)
+                        : (igPostedBy[child.path] != nil)
+                    guard isIGContent else { continue }
+                    let target = igFolder.appendingPathComponent(child.lastPathComponent)
+                    guard !fm.fileExists(atPath: target.path) else { continue }     // never overwrite
+                    if (try? fm.moveItem(at: child, to: target)) != nil {
+                        moves.append((child, target))
+                        if isStories { newStoryHighlights.append(target.path) }     // pinned Stories bubble
+                    }
+                }
                 instagramFolders[igFolder.path] = info
-                if let cover = folderCovers[path] { folderCovers[igFolder.path] = cover }   // move profile-photo cover down
+                if let cover = folderCovers[path] { folderCovers[igFolder.path] = cover }   // profile photo → bubble
             }
-            instagramFolders.removeValue(forKey: path)      // person folder is no longer the Instagram folder
-            folderCovers.removeValue(forKey: path)          // …and becomes a plain folder
-            igLastHandle[person.path] = info.handle          // re-mapping still prefills the handle
-            moved = true
+            instagramFolders.removeValue(forKey: path)          // person folder is no longer the Instagram folder
+            folderCovers.removeValue(forKey: path)              // …and becomes a plain folder
+            igLastHandle[person.path] = info.handle              // re-mapping still prefills the handle
+            changed = true
         }
-        guard moved else { return }
-        persistInstagramFolders()
-        UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
-        UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
+
+        guard changed else { return }
+        for s in newStoryHighlights { instagramHighlights.insert(s) }   // ensure "Stories" is a highlight bubble
+        if moves.isEmpty {
+            persistInstagramFolders()
+            UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
+            UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
+            UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
+        } else {
+            itemsMoved(moves)     // re-keys all moved content + persists every path-keyed collection
+        }
         changeToken += 1
     }
 
@@ -1085,6 +1117,7 @@ final class Library {
         if let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
             UserDefaults.standard.set(data, forKey: bookmarkKey)
         }
+        migrateInstagramPersonFolders()   // reshape before indexing so the index is current
         buildIndex()
     }
 
@@ -1097,8 +1130,8 @@ final class Library {
         activeRoot = url
         rootURL = url
         rootName = url.lastPathComponent
+        migrateInstagramPersonFolders()   // reshape before indexing so the index is current
         buildIndex()
-        migrateInstagramPersonFolders()
     }
 
     func goHome() { path.removeAll() }
