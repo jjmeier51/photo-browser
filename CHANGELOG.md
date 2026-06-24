@@ -2,6 +2,27 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-06-24
+
+- **TikTok downloader rebuilt the ssstik way** — dropped the in-app web-scrape (TikTok caps
+  the web grid to a screenful, virtualizes it, and gates it behind login, so downloads
+  failed). It now resolves through a public TikTok API (no login, no signing): pages through
+  the profile's **entire** video list and downloads each watermark-free at the highest
+  quality offered, with post date + caption. Lands in a pinned `@handle` bubble inside the
+  person's folder; profile remembered per folder; dedup by id on re-runs. *Only the public
+  handle is sent out — nothing is uploaded.*
+- **Faster folders** — thumbnail memory cache enlarged (4000 / 512 MB) and a folder's tiles
+  are **prefetched** (bounded, off-main) the moment it opens, so they pop in instead of
+  generating as you scroll. Re-opening / scrolling back is instant.
+- **Upscale progress fixed** — the overlay said "Rotating…" for every op; it now shows the
+  real action (Upscaling / Enhancing / Moving / …) and the upscale bar tracks true per-frame
+  progress, not just per-video.
+- **"AI Enhance to 1080p"** — a new upscale option that runs each frame through a denoise +
+  unsharp-detail Core Image pipeline as it upscales, for a cleaner, sharper result than a
+  plain rescale (SDR; HDR uses the standard upscale).
+- **Highlight bubble thumbnails** — Stories/highlight bubbles that were missing a cover now
+  fill one from a random item inside them.
+
 ## 2026-06-21
 
 - **Auto folder thumbnails** — any folder with no cover gets one automatically as its cell

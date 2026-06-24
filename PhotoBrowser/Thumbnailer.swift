@@ -22,10 +22,36 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         diskDir = caches.appendingPathComponent("thumbs", isDirectory: true)
         try? FileManager.default.createDirectory(at: diskDir, withIntermediateDirectories: true)
-        // Bound by actual memory, not count — 1000 large-tile thumbnails could
-        // be gigabytes; NSCache only evicts cost-tracked entries proactively.
-        memory.countLimit = 1000
-        memory.totalCostLimit = 256 * 1024 * 1024
+        // Bound by actual memory, not count — NSCache only evicts cost-tracked entries
+        // proactively. Generous so a whole folder's tiles stay resident and re-opening /
+        // scrolling back is instant.
+        memory.countLimit = 4000
+        memory.totalCostLimit = 512 * 1024 * 1024
+    }
+
+    /// Warms the cache for a folder's items ahead of scroll, so tiles pop in instead of
+    /// generating on demand. Fire-and-forget, bounded concurrency, off the main thread;
+    /// in-flight de-duplication means a tile that scrolls into view reuses this work rather
+    /// than starting its own. The cache key ignores the requested size, so prefetching at the
+    /// grid size also satisfies larger requests.
+    func prefetch(_ entries: [Entry], size: CGSize, scale: CGFloat) {
+        let items = entries.filter { $0.kind == .image || $0.kind == .video || $0.kind == .pdf }
+        guard !items.isEmpty else { return }
+        let batch = Array(items.prefix(1500))          // cap so an enormous folder can't runaway
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            await withTaskGroup(of: Void.self) { group in
+                var idx = 0
+                let maxConcurrent = 6
+                func next() {
+                    guard idx < batch.count else { return }
+                    let e = batch[idx]; idx += 1
+                    group.addTask { _ = await self.thumbnail(for: e, size: size, scale: scale) }
+                }
+                for _ in 0..<min(maxConcurrent, batch.count) { next() }
+                while await group.next() != nil { next() }
+            }
+        }
     }
 
     func thumbnail(for entry: Entry, size: CGSize, scale: CGFloat) async -> UIImage? {

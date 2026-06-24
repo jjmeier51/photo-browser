@@ -1,52 +1,56 @@
 import SwiftUI
 import UIKit
-import WebKit
-import Observation
 
-/// "Download TikTok Profile": opens the profile in a real in-app web view (so
-/// TikTok's lazy-loaded video grid actually populates and any login/captcha can be
-/// handled), auto-scrolls to harvest *every* video link, then downloads each video
-/// (highest quality, HDR preserved, post date + caption set) into an "@handle" folder
-/// nested in the current folder and shown as a pinned highlight bubble — like the
-/// Instagram one. Reposts are skipped, and the profile is remembered per folder so a
-/// re-run only pulls new videos. Best-effort: TikTok actively blocks scraping.
+/// "Download TikTok Profile": enter a handle and pull the profile's own videos (highest
+/// quality, watermark-free, with post date + caption) into an "@handle" folder nested in the
+/// current folder, shown as a pinned highlight bubble — like the Instagram one. The profile is
+/// remembered per folder, so a re-run only fetches new videos (dedup by video id). No browser
+/// or login needed: resolution goes through a public TikTok resolver (see `TikTokService`).
+/// Best-effort — the resolver is unofficial and rate-limited.
 struct TikTokImportView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
     let targetFolder: URL
     let onFinished: () -> Void
 
-    @State private var scraper = TikTokScraper()
     @State private var handle = ""
-    @State private var opened = false
     @State private var running = false
     @State private var progress = TikTokService.Progress(phase: "", fraction: 0, done: 0, total: 0)
     @State private var result: TikTokService.DownloadResult?
 
+    private var username: String { TikTokService.sanitizeHandle(handle) }
+    private var isUpdate: Bool { library.lastTikTokHandle(for: targetFolder) != nil }
+
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                HStack(spacing: 8) {
+            Form {
+                Section {
                     TextField("tiktok handle (e.g. zachking)", text: $handle)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .textFieldStyle(.roundedBorder).disabled(running)
-                        .onSubmit { open() }
-                    Button("Open") { open() }
-                        .buttonStyle(.bordered).disabled(running || username.isEmpty)
+                        .keyboardType(.twitter).disabled(running)
+                } header: {
+                    Text("TikTok profile")
+                } footer: {
+                    Text("Downloads this profile's own videos (reposts excluded) into an “@\(username.isEmpty ? "handle" : username)” folder here, watermark-free at the highest quality offered. Only the public handle is sent out; nothing is uploaded.")
                 }
-                .padding(.horizontal).padding(.vertical, 8)
 
-                WebViewHolder(webView: scraper.webView)
-                    .overlay { if running { overlay } }
+                if running {
+                    Section {
+                        VStack(spacing: 10) {
+                            ProgressView(value: progress.total > 0 ? progress.fraction : 0)
+                                .progressViewStyle(.linear)
+                            Text(progress.total > 0 ? "Downloading \(progress.done) of \(progress.total)…"
+                                                    : (progress.phase.isEmpty ? "Working…" : progress.phase))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
 
                 if let result {
-                    Text(summary(result)).font(.callout)
-                        .foregroundStyle(result.videos > 0 ? .green : .orange)
-                        .padding(8).frame(maxWidth: .infinity)
-                        .background(.bar)
+                    Section { Text(summary(result)).foregroundStyle(result.videos > 0 ? .green : .orange) }
                 }
             }
-            .navigationTitle("TikTok")
+            .navigationTitle(isUpdate ? "Get New TikTok Videos" : "Download TikTok Profile")
             .navigationBarTitleDisplayMode(.inline)
             .interactiveDismissDisabled(running)
             .toolbar {
@@ -54,51 +58,21 @@ struct TikTokImportView: View {
                     Button(result != nil ? "Done" : "Cancel") { dismiss() }.disabled(running)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Download All") { start() }.disabled(running || !opened)
+                    Button("Download") { start() }.disabled(running || username.isEmpty)
                 }
-            }
-            .safeAreaInset(edge: .bottom) {
-                Text(opened ? "Log in if prompted, then tap Download All. It scrolls the whole profile to find every video."
-                            : "Enter a handle and tap Open. You can log in in the page below if TikTok asks.")
-                    .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    .padding(8).frame(maxWidth: .infinity).background(.bar)
             }
             .onAppear {
-                // Resume the same profile this folder was last downloaded with.
-                if handle.isEmpty, let last = library.lastTikTokHandle(for: targetFolder) {
-                    handle = last
-                    open()
-                }
+                if handle.isEmpty, let last = library.lastTikTokHandle(for: targetFolder) { handle = last }
             }
-            // Keep the screen awake while the (potentially long) scrape + download runs.
+            // Keep the screen awake while the (potentially long) download runs.
             .onChange(of: running) { _, isRunning in UIApplication.shared.isIdleTimerDisabled = isRunning }
             .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         }
     }
 
-    private var username: String { TikTokService.sanitizeHandle(handle) }
-
-    private var overlay: some View {
-        VStack(spacing: 12) {
-            ProgressView(value: progress.total > 0 ? progress.fraction : 0).progressViewStyle(.linear).frame(width: 220)
-            Text(progress.total > 0 ? "Downloading \(progress.done) of \(progress.total)…" : (scraper.status.isEmpty ? progress.phase : scraper.status))
-                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-        }
-        .padding(20).frame(maxWidth: 280)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-    }
-
     private func summary(_ r: TikTokService.DownloadResult) -> String {
         guard r.videos > 0 else { return r.note ?? "Nothing downloaded." }
-        var s = "Downloaded \(r.videos) video\(r.videos == 1 ? "" : "s")"
-        if r.skippedReposts > 0 { s += " (skipped \(r.skippedReposts) repost\(r.skippedReposts == 1 ? "" : "s"))" }
-        return s + "."
-    }
-
-    private func open() {
-        guard !username.isEmpty else { return }
-        scraper.load("https://www.tiktok.com/@\(username)")
-        opened = true
+        return "Downloaded \(r.videos) video\(r.videos == 1 ? "" : "s")."
     }
 
     private func start() {
@@ -113,12 +87,7 @@ struct TikTokImportView: View {
             let prior = library.tiktokInfo(for: dest)
             let already = Set(prior?.downloaded ?? [])
 
-            let urls = await scraper.scanVideos()
-            let cookie = await TikTokAuth.cookieHeader()
-            try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
-
-            let r = await TikTokService.run(username: user, videoURLs: urls, into: dest,
-                                            cookie: cookie, alreadyDownloaded: already) { p in
+            let r = await TikTokService.run(username: user, into: dest, alreadyDownloaded: already) { p in
                 Task { @MainActor in progress = p }
             }
             library.setCaptions(r.captions)
@@ -132,7 +101,6 @@ struct TikTokImportView: View {
 
             let resolvedProfile = !r.secUid.isEmpty || prior != nil
             if r.videos > 0 || resolvedProfile {
-                // Register / update the profile record: pinned bubble + remembered for "Get New".
                 let info = TTFolderInfo(handle: user,
                                         secUid: r.secUid.isEmpty ? (prior?.secUid ?? "") : r.secUid,
                                         lastUpdated: Date().timeIntervalSince1970,
@@ -147,90 +115,6 @@ struct TikTokImportView: View {
 
             running = false; bg.end()
             result = r
-        }
-    }
-}
-
-/// Hosts a (shared) WKWebView so the user can see/drive the TikTok page.
-private struct WebViewHolder: UIViewRepresentable {
-    let webView: WKWebView
-    func makeUIView(context: Context) -> WKWebView { webView }
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
-}
-
-/// Owns a visible WKWebView and drives the auto-scroll harvest of `/video/` links.
-/// TikTok virtualizes its grid (it drops off-screen tiles from the DOM), so a single
-/// `querySelectorAll` at the end only sees the last screenful — the cause of "only the
-/// last ~12 videos". We instead install a `Set` accumulator plus a `MutationObserver`
-/// that captures every `/video/` link the moment it appears, then scroll the whole page
-/// so all tiles render at least once. That harvests the entire profile.
-@Observable
-@MainActor
-final class TikTokScraper: NSObject, WKNavigationDelegate {
-    @ObservationIgnored let webView: WKWebView
-    var status = ""
-
-    override init() {
-        let cfg = WKWebViewConfiguration()
-        cfg.websiteDataStore = .default()       // persistent cookies, shared with TikTokAuth
-        cfg.allowsInlineMediaPlayback = true
-        webView = WKWebView(frame: .zero, configuration: cfg)
-        super.init()
-        webView.customUserAgent = TikTokService.userAgent
-        webView.navigationDelegate = self
-    }
-
-    func load(_ urlString: String) {
-        guard let url = URL(string: urlString) else { return }
-        status = "Loading profile…"
-        webView.load(URLRequest(url: url))
-    }
-
-    // Surface page load state so a blank/blocked page isn't a silent mystery.
-    nonisolated func webView(_ wv: WKWebView, didFinish navigation: WKNavigation!) {
-        Task { @MainActor in status = "" }
-    }
-    nonisolated func webView(_ wv: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        Task { @MainActor in status = "Couldn’t load the page — check the handle / your connection." }
-    }
-    nonisolated func webView(_ wv: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        Task { @MainActor in status = "Couldn’t load the page — check the handle / your connection." }
-    }
-
-    /// Scrolls the whole profile, accumulating every `/video/` link as it renders, until the
-    /// count stops growing at the bottom. Returns all unique links seen.
-    func scanVideos(maxScrolls: Int = 300) async -> [String] {
-        status = "Finding videos…"
-        try? await Task.sleep(nanoseconds: 2_500_000_000)
-        // Install the accumulator + observer (idempotent; survives until the next navigation).
-        _ = await eval("""
-        (function(){
-          if(!window.__ttSet){window.__ttSet=new Set();}
-          window.__ttCollect=function(){var ls=document.querySelectorAll('a[href*="/video/"]');for(var i=0;i<ls.length;i++){window.__ttSet.add(ls[i].href);}return window.__ttSet.size;};
-          if(!window.__ttObs){window.__ttObs=new MutationObserver(window.__ttCollect);window.__ttObs.observe(document.documentElement,{childList:true,subtree:true});}
-          return window.__ttCollect();
-        })();
-        """)
-        var last = -1, stable = 0
-        for _ in 0..<maxScrolls {
-            _ = await eval("window.scrollBy(0, Math.round(window.innerHeight*0.85)); 1")
-            try? await Task.sleep(nanoseconds: 1_100_000_000)
-            let count = (await eval("window.__ttCollect()")) as? Int ?? 0
-            let atBottom = (await eval("(window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 100)")) as? Bool ?? false
-            status = "Found \(count) videos…"
-            if count <= last { stable += 1 } else { stable = 0 }
-            if atBottom && stable >= 3 { break }     // settled at the end
-            if stable >= 8 { break }                 // safety: no growth for a while
-            last = count
-        }
-        let res = (await eval("Array.from(window.__ttSet)")) as? [String] ?? []
-        status = ""
-        return Array(Set(res))
-    }
-
-    private func eval(_ js: String) async -> Any? {
-        await withCheckedContinuation { cont in
-            webView.evaluateJavaScript(js) { value, _ in cont.resume(returning: value) }
         }
     }
 }

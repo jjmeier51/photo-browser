@@ -1819,6 +1819,8 @@ struct FolderView: View {
         entries = list
         liveImageURLs = Self.detectLivePairs(in: list)
         loaded = true
+        // Warm the whole folder's thumbnails ahead of scroll so tiles pop in instantly.
+        Thumbnailer.shared.prefetch(list, size: CGSize(width: 110, height: 110), scale: UIScreen.main.scale)
         // Capture dates are only loaded when the active sort/filters need them; on a
         // slow external drive, reading EXIF from every file otherwise starves the
         // thumbnails of disk bandwidth. Embedded captions load lazily (only while

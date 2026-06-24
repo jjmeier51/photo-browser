@@ -1,48 +1,34 @@
 import Foundation
 import AVFoundation
-import WebKit
 
-/// Per-folder record for a downloaded TikTok profile (drives "Get New videos", the
-/// pinned highlight bubble, and dedup). Stored on `Library`, keyed by the `@handle`
-/// folder path. Mirrors `IGFolderInfo` / `FBFolderInfo`.
+/// Per-folder record for a downloaded TikTok profile (drives "Get New videos", the pinned
+/// highlight bubble, and dedup). Stored on `Library`, keyed by the `@handle` folder path.
 struct TTFolderInfo: Codable, Sendable {
     var handle: String
-    var secUid: String
+    var secUid: String                // TikTok author id (kept for future use)
     var lastUpdated: Double           // unix time of the last successful run
     var downloaded: [String]          // video ids already pulled (dedup)
     var videos: Int
 }
 
-/// Reads the logged-in TikTok session from the in-app browser's cookie store.
-@MainActor
-enum TikTokAuth {
-    static func cookies() async -> [HTTPCookie] {
-        await withCheckedContinuation { cont in
-            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { all in
-                cont.resume(returning: all.filter { $0.domain.contains("tiktok.com") })
-            }
-        }
-    }
-    static func cookieHeader() async -> String {
-        await cookies().map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-    }
-}
-
-/// Downloads a TikTok user's own videos (not reposts) — like ssstik, but for a whole
-/// profile. The profile's video list is harvested by a visible in-app web view (the
-/// only reliable way past TikTok's request-signing + lazy-loaded grid); this service
-/// then resolves each video's best-quality source from its page's SSR JSON, downloads
-/// it (HDR preserved via passthrough), and stamps the post date + caption.
+/// Downloads a whole TikTok profile's own videos — like ssstik/snaptik, but for the entire
+/// profile rather than one URL. Those tools don't scrape TikTok's web grid (which TikTok
+/// caps to a screenful, virtualizes, and gates behind login); they go through a resolver API.
+/// This uses the public **tikwm.com** API, which needs no login or request-signing: its
+/// `user/posts` endpoint paginates the full video list and returns direct, watermark-free **HD**
+/// download URLs. We page through every video, then download each at the highest quality
+/// offered, stamping post date + caption.
 ///
-/// Best-effort and download-only, like the MEGA/Instagram features — TikTok changes
-/// constantly and rate-limits hard, so failures are surfaced as notes.
+/// Download-only and best-effort, like the MEGA / Instagram features: only the public handle
+/// is sent to the resolver, nothing is uploaded, and because the API is unofficial and
+/// rate-limited, failures are surfaced as notes rather than treated as fatal.
 enum TikTokService {
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    nonisolated static let apiBase = "https://www.tikwm.com"
 
-    struct User: Sendable { let id: String; let secUid: String; let nickname: String; let avatarURL: String }
     struct Progress: Sendable { var phase: String; var fraction: Double; var done: Int; var total: Int }
     struct DownloadResult: Sendable {
-        var videos = 0, skippedReposts = 0, failed = 0
+        var videos = 0, failed = 0
         var captions: [String: String] = [:]
         var downloadedIDs: [String] = []     // ids successfully pulled this run (for dedup)
         var secUid = ""
@@ -50,154 +36,142 @@ enum TikTokService {
         var avatar: Data?
         var note: String?
     }
-    private struct VideoInfo: Sendable {
-        let id: String; let authorId: String; let createTime: Date; let desc: String; let url: String
-    }
+    private struct Video: Sendable { let id: String; let url: String; let createTime: Date; let desc: String }
 
     nonisolated static let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.httpShouldSetCookies = false
         cfg.httpCookieStorage = nil
         cfg.timeoutIntervalForRequest = 60
-        cfg.httpMaximumConnectionsPerHost = 5
+        cfg.httpMaximumConnectionsPerHost = 6
         return URLSession(configuration: cfg)
     }()
 
     // MARK: - Orchestration
 
-    /// `videoURLs` are the `/@user/video/<id>` links harvested from the profile grid.
-    nonisolated static func run(username: String, videoURLs: [String], into folder: URL,
-                                cookie: String, alreadyDownloaded: Set<String>,
+    /// Lists every video on `@username` (paginated) and downloads the ones not in
+    /// `alreadyDownloaded` into `folder`, newest-quality first.
+    nonisolated static func run(username: String, into folder: URL, alreadyDownloaded: Set<String>,
                                 progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
-        progress(Progress(phase: "Loading @\(username)…", fraction: 0, done: 0, total: 0))
-        let user = await resolveUser(username: username, cookie: cookie)
-        if let user {
-            result.avatar = await downloadData(user.avatarURL)
-            result.secUid = user.secUid
-            result.nickname = user.nickname
+        progress(Progress(phase: "Finding @\(username)’s videos…", fraction: 0, done: 0, total: 0))
+        let listing = await listAllVideos(username: username, progress: progress)
+        result.secUid = listing.authorId
+        result.nickname = listing.nickname
+        if !listing.avatar.isEmpty { result.avatar = await downloadData(absolute(listing.avatar)) }
+
+        let pending = listing.videos.filter { !alreadyDownloaded.contains($0.id) }
+        guard !pending.isEmpty else {
+            result.note = listing.videos.isEmpty
+                ? "Couldn’t find any videos — TikTok or the resolver may be blocking, or the handle is wrong."
+                : "No new videos."
+            return result
         }
 
-        // De-dup by id, keeping the newest (TikTok lists newest-first, so first-seen wins).
-        var seen = Set<String>()
-        let ids = videoURLs.compactMap { videoID(from: $0) }
-            .filter { seen.insert($0).inserted && !alreadyDownloaded.contains($0) }
-        guard !ids.isEmpty else { result.note = alreadyDownloaded.isEmpty ? "No videos found on the profile." : "No new videos."; return result }
-
-        let total = ids.count
+        let total = pending.count
         var done = 0
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        await withTaskGroup(of: (ok: Bool, repost: Bool, path: String, caption: String, id: String).self) { group in
+        await withTaskGroup(of: (ok: Bool, id: String, path: String, caption: String).self) { group in
             var idx = 0
             let maxConcurrent = 4
             func addNext() {
-                guard idx < ids.count else { return }
-                let id = ids[idx]; idx += 1
-                let uid = user?.id ?? ""
-                group.addTask { await fetchAndDownload(id: id, username: username, ownerId: uid, cookie: cookie, into: folder) }
+                guard idx < pending.count else { return }
+                let v = pending[idx]; idx += 1
+                group.addTask { await downloadOne(v, into: folder) }
             }
             for _ in 0..<min(maxConcurrent, total) { addNext() }
             while let r = await group.next() {
-                if r.repost { result.skippedReposts += 1 }
-                else if r.ok {
+                if r.ok {
                     result.videos += 1
                     result.downloadedIDs.append(r.id)
                     if !r.caption.isEmpty { result.captions[r.path] = r.caption }
-                }
-                else { result.failed += 1 }
+                } else { result.failed += 1 }
                 done += 1
                 progress(Progress(phase: "Downloading", fraction: Double(done) / Double(total), done: done, total: total))
                 addNext()
             }
         }
-        if result.videos == 0 { result.note = "Couldn’t download any videos (TikTok may be blocking or rate-limiting)." }
+        if result.videos == 0 { result.note = "Couldn’t download any videos (the resolver may be rate-limiting — try again)." }
         return result
     }
 
-    // MARK: - Profile + video resolution (SSR JSON)
+    // MARK: - Listing (tikwm user/posts, paginated)
 
-    nonisolated static func resolveUser(username: String, cookie: String) async -> User? {
-        guard let json = await fetchSSR("https://www.tiktok.com/@\(username)", cookie: cookie),
-              let scope = json["__DEFAULT_SCOPE__"] as? [String: Any],
-              let user = ((scope["webapp.user-detail"] as? [String: Any])?["userInfo"] as? [String: Any])?["user"] as? [String: Any]
-        else { return nil }
-        return User(id: idString(user["id"]) ?? "",
-                    secUid: user["secUid"] as? String ?? "",
-                    nickname: user["nickname"] as? String ?? username,
-                    avatarURL: (user["avatarLarger"] as? String) ?? (user["avatarMedium"] as? String) ?? "")
+    nonisolated private static func listAllVideos(username: String, progress: @escaping @Sendable (Progress) -> Void)
+        async -> (videos: [Video], avatar: String, authorId: String, nickname: String) {
+        var all: [Video] = []
+        var seen = Set<String>()
+        var avatar = "", authorId = "", nickname = ""
+        var cursor = "0"
+        // Safety cap: 60 pages × 35 ≈ 2100 videos. Stops earlier when the API says no more.
+        for _ in 0..<60 {
+            guard let data = await apiGet("/api/user/posts",
+                                          query: ["unique_id": username, "count": "35", "cursor": cursor]),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  intValue(json["code"]) == 0,
+                  let d = json["data"] as? [String: Any] else { break }
+            let vids = (d["videos"] as? [[String: Any]]) ?? []
+            for v in vids {
+                guard let id = idString(v["video_id"]) ?? idString(v["aweme_id"]) ?? idString(v["id"]),
+                      seen.insert(id).inserted else { continue }
+                let url = (v["hdplay"] as? String) ?? (v["play"] as? String) ?? ""
+                guard !url.isEmpty else { continue }
+                let ct = Date(timeIntervalSince1970: Double(intValue(v["create_time"]) ?? 0))
+                all.append(Video(id: id, url: url, createTime: ct, desc: (v["title"] as? String) ?? ""))
+                if let author = v["author"] as? [String: Any] {
+                    if avatar.isEmpty { avatar = (author["avatar"] as? String) ?? "" }
+                    if authorId.isEmpty { authorId = idString(author["id"]) ?? "" }
+                    if nickname.isEmpty { nickname = (author["nickname"] as? String) ?? "" }
+                }
+            }
+            progress(Progress(phase: "Found \(all.count) videos…", fraction: 0, done: 0, total: 0))
+            let hasMore = (d["hasMore"] as? Bool) ?? (intValue(d["hasMore"]) == 1)
+            let next = idString(d["cursor"]) ?? ""
+            if !hasMore || next.isEmpty || next == cursor { break }
+            cursor = next
+            try? await Task.sleep(nanoseconds: 1_100_000_000)     // tikwm rate-limits ~1 req/sec
+        }
+        return (all, avatar, authorId, nickname)
     }
 
-    nonisolated private static func fetchAndDownload(id: String, username: String, ownerId: String,
-                                                     cookie: String, into folder: URL) async -> (ok: Bool, repost: Bool, path: String, caption: String, id: String) {
-        guard let info = await videoInfo(id: id, username: username, cookie: cookie) else { return (false, false, "", "", id) }
-        // Skip reposts: the item's author isn't the profile owner.
-        if !ownerId.isEmpty, !info.authorId.isEmpty, info.authorId != ownerId { return (false, true, "", "", id) }
-
-        let dest = folder.appendingPathComponent("\(id).mp4")
-        if FileManager.default.fileExists(atPath: dest.path) { return (true, false, dest.path, info.desc, id) }   // already have it
-        guard let vurl = URL(string: info.url) else { return (false, false, "", "", id) }
-        var req = URLRequest(url: vurl)
+    nonisolated private static func downloadOne(_ v: Video, into folder: URL) async -> (ok: Bool, id: String, path: String, caption: String) {
+        let dest = folder.appendingPathComponent("\(v.id).mp4")
+        if FileManager.default.fileExists(atPath: dest.path) { return (true, v.id, dest.path, v.desc) }   // already have it
+        guard let url = URL(string: absolute(v.url)) else { return (false, v.id, "", "") }
+        var req = URLRequest(url: url)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("https://www.tiktok.com/", forHTTPHeaderField: "Referer")
-        req.setValue(cookie, forHTTPHeaderField: "Cookie")
+        req.setValue("\(apiBase)/", forHTTPHeaderField: "Referer")
         req.timeoutInterval = 180
         guard let (tmp, resp) = try? await session.download(for: req),
               (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true,
-              (try? FileManager.default.moveItem(at: tmp, to: dest)) != nil else { return (false, false, "", "", id) }
-        await writeVideoDate(info.createTime, to: dest)                 // EXIF/QuickTime capture date (HDR preserved)
-        try? FileManager.default.setAttributes([.creationDate: info.createTime, .modificationDate: info.createTime], ofItemAtPath: dest.path)
-        return (true, false, dest.path, info.desc, id)
+              (try? FileManager.default.moveItem(at: tmp, to: dest)) != nil else { return (false, v.id, "", "") }
+        await writeVideoDate(v.createTime, to: dest)                 // EXIF/QuickTime capture date (HDR preserved)
+        try? FileManager.default.setAttributes([.creationDate: v.createTime, .modificationDate: v.createTime], ofItemAtPath: dest.path)
+        return (true, v.id, dest.path, v.desc)
     }
 
-    nonisolated private static func videoInfo(id: String, username: String, cookie: String) async -> VideoInfo? {
-        guard let json = await fetchSSR("https://www.tiktok.com/@\(username)/video/\(id)", cookie: cookie),
-              let scope = json["__DEFAULT_SCOPE__"] as? [String: Any],
-              let item = ((scope["webapp.video-detail"] as? [String: Any])?["itemInfo"] as? [String: Any])?["itemStruct"] as? [String: Any]
-        else { return nil }
-        let author = item["author"] as? [String: Any]
-        let video = item["video"] as? [String: Any]
-        guard let url = bestVideoURL(video) else { return nil }
-        return VideoInfo(id: idString(item["id"]) ?? id,
-                         authorId: idString(author?["id"]) ?? "",
-                         createTime: Date(timeIntervalSince1970: Double(intValue(item["createTime"]) ?? 0)),
-                         desc: item["desc"] as? String ?? "",
-                         url: url)
-    }
+    // MARK: - HTTP
 
-    /// Highest-bitrate, watermark-free source from the video's `bitrateInfo`
-    /// (falls back to `playAddr`). TikTok's HDR renditions, when present, are the
-    /// top bitrate, so picking max bitrate also gets HDR.
-    nonisolated private static func bestVideoURL(_ video: [String: Any]?) -> String? {
-        guard let video else { return nil }
-        if let infos = video["bitrateInfo"] as? [[String: Any]] {
-            let best = infos.max { (intValue($0["Bitrate"]) ?? 0) < (intValue($1["Bitrate"]) ?? 0) }
-            if let urls = (best?["PlayAddr"] as? [String: Any])?["UrlList"] as? [String], let u = urls.first { return u }
-        }
-        return (video["playAddr"] as? String) ?? (video["downloadAddr"] as? String)
-    }
-
-    // MARK: - SSR fetch
-
-    /// Fetches a TikTok page and parses its `__UNIVERSAL_DATA_FOR_REHYDRATION__` JSON.
-    nonisolated private static func fetchSSR(_ urlString: String, cookie: String) async -> [String: Any]? {
-        guard let url = URL(string: urlString) else { return nil }
+    nonisolated private static func apiGet(_ path: String, query: [String: String]) async -> Data? {
+        guard var comps = URLComponents(string: apiBase + path) else { return nil }
+        comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+        guard let url = comps.url else { return nil }
         var req = URLRequest(url: url)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue(cookie, forHTTPHeaderField: "Cookie")
-        req.timeoutInterval = 45
-        guard let (data, _) = try? await session.data(for: req),
-              let html = String(data: data, encoding: .utf8) else { return nil }
-        // <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">{…}</script>
-        guard let m = firstMatch(html, "__UNIVERSAL_DATA_FOR_REHYDRATION__\"[^>]*>([\\s\\S]*?)</script>"),
-              let jsonData = m.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { return nil }
-        return json
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.timeoutInterval = 30
+        return (try? await session.data(for: req))?.0
     }
 
     nonisolated static func downloadData(_ urlString: String) async -> Data? {
         guard !urlString.isEmpty, let url = URL(string: urlString) else { return nil }
         var req = URLRequest(url: url); req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         return (try? await session.data(for: req))?.0
+    }
+
+    /// tikwm sometimes returns site-relative media paths; make them absolute.
+    nonisolated private static func absolute(_ u: String) -> String {
+        u.hasPrefix("http") ? u : apiBase + (u.hasPrefix("/") ? u : "/" + u)
     }
 
     /// Sets a video's creation date via a passthrough re-mux (preserves HDR).
@@ -219,9 +193,6 @@ enum TikTokService {
 
     // MARK: - Helpers
 
-    nonisolated static func videoID(from url: String) -> String? {
-        firstMatch(url, "/video/(\\d+)")
-    }
     nonisolated static func sanitizeHandle(_ s: String) -> String {
         var h = s.trimmingCharacters(in: .whitespacesAndNewlines)
         if let r = h.range(of: "tiktok.com/@") { h = String(h[r.upperBound...]) }
@@ -230,7 +201,7 @@ enum TikTokService {
         return h.replacingOccurrences(of: "@", with: "")
     }
     nonisolated private static func idString(_ any: Any?) -> String? {
-        if let s = any as? String { return s }
+        if let s = any as? String { return s.isEmpty ? nil : s }
         if let n = any as? NSNumber { return n.stringValue }
         return nil
     }
@@ -239,12 +210,5 @@ enum TikTokService {
         if let n = any as? NSNumber { return n.intValue }
         if let s = any as? String { return Int(s) }
         return nil
-    }
-    nonisolated private static func firstMatch(_ s: String, _ pattern: String) -> String? {
-        guard let re = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]),
-              let m = re.firstMatch(in: s, range: NSRange(location: 0, length: (s as NSString).length)),
-              m.numberOfRanges > 1 else { return nil }
-        let r = m.range(at: 1)
-        return r.location == NSNotFound ? nil : (s as NSString).substring(with: r)
     }
 }
