@@ -737,6 +737,97 @@ enum MediaEditing {
         return .upscaled
     }
 
+    /// "AI Enhance & Upscale": upscales so the short side is ≥ `targetShort` *and* runs each
+    /// frame through a Core Image enhancement pipeline — light noise reduction to clean up
+    /// compression blocking, then an unsharp mask to recover perceived detail — for a sharper,
+    /// cleaner result than a plain rescale. SDR only: HDR sources fall back to the standard
+    /// `upscaleVideo` so their wide-gamut/transfer isn't tone-mapped to SDR. Replaces the file
+    /// in place, preserving metadata, labels, and capture date. Lossy and best-effort.
+    static func enhanceVideo(url: URL, targetShort: CGFloat,
+                             progress: @escaping @Sendable (Double) -> Void) async -> UpscaleResult {
+        let asset = AVURLAsset(url: url)
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return .failed }
+        let natural = (try? await track.load(.naturalSize)) ?? .zero
+        let pt = (try? await track.load(.preferredTransform)) ?? .identity
+        let duration = (try? await asset.load(.duration)) ?? .zero
+        let fps = (try? await track.load(.nominalFrameRate)).map { $0 > 0 ? $0 : 30 } ?? 30
+        guard natural.width > 0, natural.height > 0, duration.seconds > 0 else { return .failed }
+
+        // HDR → standard upscale (Core Image would tone-map the wide gamut/transfer to SDR).
+        if let fd = (try? await track.load(.formatDescriptions))?.first,
+           let ext = CMFormatDescriptionGetExtensions(fd) as? [CFString: Any] {
+            let tf = ext[kCMFormatDescriptionExtension_TransferFunction] as? String
+            if tf == (kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String)
+                || tf == (kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG as String) {
+                return await upscaleVideo(url: url, targetShort: targetShort, progress: progress)
+            }
+        }
+
+        let dispRect = CGRect(origin: .zero, size: natural).applying(pt)
+        let dispW = abs(dispRect.width), dispH = abs(dispRect.height)
+        let shortSide = min(dispW, dispH)
+        guard shortSide > 0 else { return .failed }
+        guard shortSide < targetShort else { return .skipped }     // already at/above target
+        let scale = targetShort / shortSide
+        let targetW = max(2, (dispW * scale / 2).rounded() * 2)
+        let targetH = max(2, (dispH * scale / 2).rounded() * 2)
+        let renderSize = CGSize(width: targetW, height: targetH)
+
+        // The convenience initializer hands us display-oriented frames at the natural size; we
+        // scale up and enhance, then crop to the target render size.
+        let ciContext = CIContext()
+        let comp = AVMutableVideoComposition(asset: asset, applyingCIFiltersWithHandler: { request in
+            var img = request.sourceImage.clampedToExtent()
+            img = img.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            img = img.applyingFilter("CINoiseReduction", parameters: ["inputNoiseLevel": 0.015, "inputSharpness": 0.4])
+            img = img.applyingFilter("CIUnsharpMask", parameters: [kCIInputRadiusKey: 2.5, kCIInputIntensityKey: 0.7])
+            img = img.cropped(to: CGRect(origin: .zero, size: renderSize))
+            request.finish(with: img, context: ciContext)
+        })
+        comp.renderSize = renderSize
+        comp.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(fps.rounded(), 1)))
+
+        // Preserve + re-stamp capture date exactly like upscaleVideo (so Age/year/place survive).
+        var meta = ((try? await asset.load(.metadata)) ?? [])
+            + ((try? await asset.loadMetadata(for: .quickTimeMetadata)) ?? [])
+        meta = meta.filter { $0.commonKey != .commonKeyCreationDate
+            && $0.identifier != .quickTimeMetadataCreationDate && $0.identifier != .commonIdentifierCreationDate }
+        let captureDate = await videoCreationDate(asset)
+        if let captureDate {
+            let iso = ISO8601DateFormatter().string(from: captureDate)
+            for id in [AVMetadataIdentifier.commonIdentifierCreationDate, .quickTimeMetadataCreationDate] {
+                let item = AVMutableMetadataItem(); item.identifier = id; item.value = iso as NSString; meta.append(item)
+            }
+        }
+        let sourceFileDate: Date? = {
+            let a = try? FileManager.default.attributesOfItem(atPath: url.path)
+            return (a?[.creationDate] as? Date) ?? (a?[.modificationDate] as? Date)
+        }()
+
+        let folder = url.deletingLastPathComponent()
+        let tmp = folder.appendingPathComponent(".\(UUID().uuidString).mov")
+        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else { return .failed }
+        export.videoComposition = comp
+        export.outputURL = tmp
+        export.outputFileType = .mov
+        export.metadata = meta
+
+        let poll = Task {
+            while !Task.isCancelled { progress(Double(export.progress)); try? await Task.sleep(nanoseconds: 200_000_000) }
+        }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            export.exportAsynchronously { cont.resume() }
+        }
+        poll.cancel()
+        guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return .failed }
+        progress(1)
+        guard replaceInPlace(original: url, temp: tmp) else { return .failed }
+        if let fileDate = captureDate ?? sourceFileDate {
+            try? FileManager.default.setAttributes([.creationDate: fileDate, .modificationDate: fileDate], ofItemAtPath: url.path)
+        }
+        return .upscaled
+    }
+
     /// The video's capture date, read across container formats (the synthesized
     /// `.creationDate`, then QuickTime, then common metadata) so it isn't missed.
     private static func videoCreationDate(_ asset: AVURLAsset) async -> Date? {

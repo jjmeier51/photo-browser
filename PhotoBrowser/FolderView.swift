@@ -119,6 +119,7 @@ struct FolderView: View {
     @State private var aiEditEntry: Entry?
     @State private var editProcessing = false
     @State private var editProgress: Double = 0
+    @State private var editLabel = "Working…"
     @State private var makingLive = false
     @State private var metadataTargets: [URL] = []
     @State private var showMetadataEditor = false
@@ -849,7 +850,7 @@ struct FolderView: View {
 
     @ViewBuilder private var editingOverlay: some View {
         VStack(spacing: 12) {
-            Text("Rotating…").font(.subheadline.weight(.medium))
+            Text(editLabel).font(.subheadline.weight(.medium))
             ProgressView(value: editProgress).progressViewStyle(.linear).frame(width: 220)
             Text("\(Int(editProgress * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             Text("You can leave the app — it keeps going briefly in the background.")
@@ -1188,6 +1189,11 @@ struct FolderView: View {
         let button = Button { tap(entry) } label: { bubble(entry) }      // select-aware (toggle vs open)
             .buttonStyle(.plain)
             .contextMenu { if !selecting { contextMenu(for: entry) } }
+            // Fill a missing bubble thumbnail (e.g. a highlight/Stories folder) from a random
+            // item inside it. ensureRandomCover skips IG/TikTok profile folders (they use the avatar).
+            .task(id: entry.url) {
+                if library.coverURL(for: entry.url) == nil { await library.ensureRandomCover(for: entry.url) }
+            }
         if selecting || isPinnedBubble(entry.url) {
             button                                              // Stories, Instagram + Facebook are pinned
         } else {
@@ -1595,6 +1601,8 @@ struct FolderView: View {
                 Menu {
                     Button { bulkUpscale(to: 1080, label: "1080p") } label: { Label("1080p", systemImage: "arrow.up.right.video") }
                     Button { bulkUpscale(to: 2160, label: "4K") } label: { Label("4K", systemImage: "arrow.up.right.video") }
+                    Divider()
+                    Button { bulkEnhance(to: 1080, label: "1080p") } label: { Label("AI Enhance to 1080p", systemImage: "wand.and.stars") }
                 } label: { Label("Upscale Video", systemImage: "arrow.up.right.video") }
                 Button { duplicateEntries(selectedEntries()) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
                 Button { showCopyPicker = true } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
@@ -1627,7 +1635,7 @@ struct FolderView: View {
         let targets = selectedEntries().filter { $0.isViewable }
         guard !targets.isEmpty else { resultMessage = "Select one or more photos or videos."; return }
         selecting = false; selection.removeAll()
-        editProcessing = true; editProgress = 0
+        editLabel = "Rotating…"; editProcessing = true; editProgress = 0
         let bg = BackgroundTaskHolder()
         bg.begin(name: "Rotate Media")
         Task {
@@ -1660,20 +1668,57 @@ struct FolderView: View {
         let targets = selectedEntries().filter { $0.kind == .video }
         guard !targets.isEmpty else { resultMessage = "Select one or more videos."; return }
         selecting = false; selection.removeAll()
-        editProcessing = true; editProgress = 0
+        editLabel = "Upscaling to \(label)…"; editProcessing = true; editProgress = 0
         let bg = BackgroundTaskHolder(); bg.begin(name: "Upscale Videos")
         Task {
             var upscaled = 0, skipped = 0, failed = 0
+            let n = targets.count
             for (i, e) in targets.enumerated() {
-                switch await MediaEditing.upscaleVideo(url: e.url, targetShort: target, progress: { _ in }) {
+                // Real progress: per-video index blended with the export's per-frame fraction.
+                switch await MediaEditing.upscaleVideo(url: e.url, targetShort: target, progress: { f in
+                    Task { @MainActor in editProgress = (Double(i) + f) / Double(n) }
+                }) {
                 case .upscaled: upscaled += 1
                 case .skipped:  skipped += 1
                 case .failed:   failed += 1
                 }
-                editProgress = Double(i + 1) / Double(targets.count)
+                editProgress = Double(i + 1) / Double(n)
             }
             editProcessing = false; bg.end()
             var msg = "Upscaled \(upscaled) video\(upscaled == 1 ? "" : "s") to \(label)."
+            if skipped > 0 { msg += " \(skipped) already ≥\(label)." }
+            if failed > 0 { msg += " \(failed) couldn’t be processed." }
+            resultMessage = msg
+            library.contentDidChange()
+            await reload()
+        }
+    }
+
+    /// Like `bulkUpscale`, but runs each frame through a Core Image enhancement pipeline
+    /// (denoise + unsharp detail recovery) as it upscales — sharper, cleaner output than a
+    /// plain rescale. SDR only; HDR videos fall back to the standard upscale so they aren't
+    /// tone-mapped. Replaces in place, preserving metadata/labels/date.
+    private func bulkEnhance(to target: CGFloat, label: String) {
+        let targets = selectedEntries().filter { $0.kind == .video }
+        guard !targets.isEmpty else { resultMessage = "Select one or more videos."; return }
+        selecting = false; selection.removeAll()
+        editLabel = "Enhancing to \(label)…"; editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Enhance Videos")
+        Task {
+            var done = 0, skipped = 0, failed = 0
+            let n = targets.count
+            for (i, e) in targets.enumerated() {
+                switch await MediaEditing.enhanceVideo(url: e.url, targetShort: target, progress: { f in
+                    Task { @MainActor in editProgress = (Double(i) + f) / Double(n) }
+                }) {
+                case .upscaled: done += 1
+                case .skipped:  skipped += 1
+                case .failed:   failed += 1
+                }
+                editProgress = Double(i + 1) / Double(n)
+            }
+            editProcessing = false; bg.end()
+            var msg = "Enhanced \(done) video\(done == 1 ? "" : "s") to \(label)."
             if skipped > 0 { msg += " \(skipped) already ≥\(label)." }
             if failed > 0 { msg += " \(failed) couldn’t be processed." }
             resultMessage = msg
@@ -1860,7 +1905,7 @@ struct FolderView: View {
         let moveURLs = allURLs.filter { !skip.contains($0) }
         selection.removeAll(); selecting = false
         guard !moveURLs.isEmpty else { resultMessage = "Nothing to move."; return }
-        editProcessing = true; editProgress = 0
+        editLabel = "Moving…"; editProcessing = true; editProgress = 0
         let bg = BackgroundTaskHolder(); bg.begin(name: "Move Items")
         Task {
             let outcome = await FileActions.moveItems(moveURLs, to: dest, renameOnCollision: true) { p in
@@ -1896,7 +1941,7 @@ struct FolderView: View {
         let copyURLs = allURLs.filter { !skip.contains($0) }
         selection.removeAll(); selecting = false
         guard !copyURLs.isEmpty else { resultMessage = "Nothing to copy."; return }
-        editProcessing = true; editProgress = 0
+        editLabel = "Copying…"; editProcessing = true; editProgress = 0
         let bg = BackgroundTaskHolder(); bg.begin(name: "Copy Items")
         Task {
             let outcome = await FileActions.copyItems(copyURLs, to: dest, skipCollisions: false) { p in
