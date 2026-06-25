@@ -43,7 +43,22 @@ nonisolated final class BackgroundDownloader: NSObject, URLSessionDownloadDelega
 
     /// Travels with each task (persisted by the session) so completions can be filed correctly,
     /// even across an app relaunch.
-    struct Meta: Codable, Sendable { let dest: String; let createTime: Double; let caption: String; let folder: String; let id: String }
+    struct Meta: Codable, Sendable {
+        let dest: String; let createTime: Double; let caption: String; let folder: String; let id: String; var likes: Int
+        init(dest: String, createTime: Double, caption: String, folder: String, id: String, likes: Int = 0) {
+            self.dest = dest; self.createTime = createTime; self.caption = caption; self.folder = folder; self.id = id; self.likes = likes
+        }
+        // Tolerate `likes` being absent — a download enqueued by an older build won't carry it.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            dest = try c.decode(String.self, forKey: .dest)
+            createTime = try c.decode(Double.self, forKey: .createTime)
+            caption = try c.decode(String.self, forKey: .caption)
+            folder = try c.decode(String.self, forKey: .folder)
+            id = try c.decode(String.self, forKey: .id)
+            likes = (try? c.decode(Int.self, forKey: .likes)) ?? 0
+        }
+    }
 
     /// Touching `shared` already recreates the session (see `init`); this just makes that intent
     /// explicit at the call site (app launch / background relaunch).
@@ -97,7 +112,7 @@ nonisolated final class BackgroundDownloader: NSObject, URLSessionDownloadDelega
         lock.lock(); defer { lock.unlock() }
         var arr = (UserDefaults.standard.array(forKey: Self.pendingKey) as? [[String: Any]]) ?? []
         arr.append(["inbox": inbox, "dest": meta.dest, "createTime": meta.createTime,
-                    "caption": meta.caption, "folder": meta.folder, "id": meta.id])
+                    "caption": meta.caption, "folder": meta.folder, "id": meta.id, "likes": meta.likes])
         UserDefaults.standard.set(arr, forKey: Self.pendingKey)
     }
 

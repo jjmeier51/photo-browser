@@ -119,7 +119,7 @@ struct TikTokImportView: View {
                     guard let url = URL(string: v.url) else { return }
                     let meta = BackgroundDownloader.Meta(dest: dest.appendingPathComponent("\(v.id).mp4").path,
                                                          createTime: v.createTime.timeIntervalSince1970,
-                                                         caption: v.desc, folder: destPath, id: v.id)
+                                                         caption: v.desc, folder: destPath, id: v.id, likes: v.likes)
                     BackgroundDownloader.shared.enqueue(url: url, meta: meta)
                     Task { @MainActor in
                         // On the first resolved video, register the profile (pinned bubble +

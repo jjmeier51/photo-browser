@@ -14,6 +14,8 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   background-task window for a few minutes after you background the app — so whatever's been
   resolved keeps downloading even after the app is closed, and the rest is picked up on the
   next "Get New" run.
+- **TikTok like counts** — each downloaded video's like count is captured and shown as a
+  "Likes" row in the info panel (compact, e.g. 1.2M).
 
 ## 2026-06-24
 

@@ -29,8 +29,8 @@ enum TikTokService {
 
     struct Progress: Sendable { var phase: String; var fraction: Double; var done: Int; var total: Int }
     /// A video ready to download: a direct best-quality URL plus the metadata to stamp on it.
-    struct ResolvedVideo: Sendable { let id: String; let url: String; let createTime: Date; let desc: String }
-    private struct Video: Sendable { let id: String; let hd: String; let sd: String; let createTime: Date; let desc: String }
+    struct ResolvedVideo: Sendable { let id: String; let url: String; let createTime: Date; let desc: String; let likes: Int }
+    private struct Video: Sendable { let id: String; let hd: String; let sd: String; let createTime: Date; let desc: String; let likes: Int }
 
     nonisolated static let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
@@ -77,7 +77,7 @@ enum TikTokService {
                 try? await Task.sleep(nanoseconds: 1_100_000_000)
             }
             guard !best.isEmpty else { continue }
-            onResolved(ResolvedVideo(id: v.id, url: absolute(best), createTime: v.createTime, desc: v.desc))
+            onResolved(ResolvedVideo(id: v.id, url: absolute(best), createTime: v.createTime, desc: v.desc, likes: v.likes))
             resolved += 1
         }
         return (listing.authorId, listing.nickname, listing.videos.count, resolved,
@@ -106,7 +106,8 @@ enum TikTokService {
                 let sd = (v["play"] as? String) ?? (v["wmplay"] as? String) ?? ""
                 guard !(hd.isEmpty && sd.isEmpty) else { continue }
                 let ct = Date(timeIntervalSince1970: Double(intValue(v["create_time"]) ?? 0))
-                all.append(Video(id: id, hd: hd, sd: sd, createTime: ct, desc: (v["title"] as? String) ?? ""))
+                let likes = intValue(v["digg_count"]) ?? 0          // tikwm: likes (hearts)
+                all.append(Video(id: id, hd: hd, sd: sd, createTime: ct, desc: (v["title"] as? String) ?? "", likes: likes))
                 if let author = v["author"] as? [String: Any] {
                     if avatar.isEmpty { avatar = (author["avatar"] as? String) ?? "" }
                     if authorId.isEmpty { authorId = idString(author["id"]) ?? "" }

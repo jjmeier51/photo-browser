@@ -56,6 +56,7 @@ struct InfoPanel: View {
                     }
                     if let savedFrom { row("Saved from", savedFrom) }
                     if let poster = library.postedBy(for: entry.url) { row("Posted by", "@\(poster)") }
+                    if let likes = library.tiktokLikeCount(for: entry.url) { row("Likes", Self.compactCount(likes)) }
                     row("Folder", entry.url.deletingLastPathComponent().lastPathComponent)
                     row("Path", entry.url.deletingLastPathComponent().path)
                     let labels = [library.isFavorite(entry.url) ? "Favorite" : nil,
@@ -147,6 +148,18 @@ struct InfoPanel: View {
             Text(key).foregroundStyle(.secondary)
             Spacer(minLength: 16)
             Text(value).multilineTextAlignment(.trailing)
+        }
+    }
+
+    /// 1234 → "1,234", 12_300 → "12.3K", 1_200_000 → "1.2M" — TikTok-style compact counts.
+    static func compactCount(_ n: Int) -> String {
+        switch n {
+        case 1_000_000...:
+            return String(format: "%.1fM", Double(n) / 1_000_000).replacingOccurrences(of: ".0M", with: "M")
+        case 1_000...:
+            return String(format: "%.1fK", Double(n) / 1_000).replacingOccurrences(of: ".0K", with: "K")
+        default:
+            return n.formatted(.number.grouping(.automatic))
         }
     }
 }

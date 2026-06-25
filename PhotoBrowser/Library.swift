@@ -139,6 +139,11 @@ final class Library {
             UserDefaults.standard.set(data, forKey: "photoBrowser.tiktokFolders")
         }
     }
+    /// Video file path → its TikTok like count (shown in the info panel).
+    var tiktokLikes: [String: Int] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.tiktokLikes") as? [String: Int]) ?? [:]
+    func tiktokLikeCount(for url: URL) -> Int? { tiktokLikes[url.path] }
+    private func persistTikTokLikes() { UserDefaults.standard.set(tiktokLikes, forKey: "photoBrowser.tiktokLikes") }
+
     /// Person-folder path → the TikTok handle last downloaded under it, so re-opening the
     /// downloader from that folder prefills the handle and resumes the same `@handle` folder.
     var lastTikTokHandleByFolder: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.lastTikTokHandle") as? [String: String]) ?? [:]
@@ -179,10 +184,12 @@ final class Library {
                 try? fm.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: dest)
             }
             if let caption = rec["caption"] as? String, !caption.isEmpty { captionUpdates[dest] = caption }
+            if let likes = rec["likes"] as? Int, likes > 0 { tiktokLikes[dest] = likes }
             if let folder = rec["folder"] as? String, let id = rec["id"] as? String { idsByFolder[folder, default: []].append(id) }
             changed = true
         }
         BackgroundDownloader.shared.requeue(requeue)
+        if changed { persistTikTokLikes() }
         setCaptions(captionUpdates)
         for (folder, ids) in idsByFolder {
             guard var info = tiktokFolders[folder] else { continue }
@@ -941,6 +948,7 @@ final class Library {
         instagramFolders = remapKeys(instagramFolders, remap)
         facebookFolders = remapKeys(facebookFolders, remap)
         tiktokFolders = remapKeys(tiktokFolders, remap)
+        tiktokLikes = remapKeys(tiktokLikes, remap)
         lastTikTokHandleByFolder = remapKeys(lastTikTokHandleByFolder, remap)
         bubbleOrders = Dictionary(bubbleOrders.map { (remap($0.key), $0.value.map(remap)) }, uniquingKeysWith: { a, _ in a })
         for (name, var state) in accessKardashian {
@@ -967,6 +975,7 @@ final class Library {
         persistInstagramFolders()
         persistFacebookFolders()
         persistTikTokFolders()
+        persistTikTokLikes()
         if let data = try? JSONEncoder().encode(accessKardashian) {
             UserDefaults.standard.set(data, forKey: "photoBrowser.accessKardashian")
         }
