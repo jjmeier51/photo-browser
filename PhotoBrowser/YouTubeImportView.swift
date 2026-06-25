@@ -20,6 +20,13 @@ struct YouTubeImportView: View {
 
     private let qualities: [(String, Int)] = [("Best (up to 4K)", 2160), ("1440p", 1440), ("1080p", 1080), ("720p", 720)]
 
+    /// Reflects whether the on-device transcoder (FFmpegKit) is linked, so 1440p/4K (VP9/AV1) work.
+    private var qualityNote: String {
+        VideoTranscoder.isAvailable
+            ? "1440p/4K enabled (FFmpegKit linked) — those renditions are transcoded to HEVC on-device."
+            : "1440p/4K need FFmpegKit added to the project; without it, this caps at the best 1080p (H.264) rendition."
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -31,7 +38,7 @@ struct YouTubeImportView: View {
                         ForEach(qualities, id: \.1) { Text($0.0).tag($0.1) }
                     }.disabled(running)
                 } footer: {
-                    Text("Downloads the video into “\(targetFolder.lastPathComponent)”. The title becomes the file name, the description the caption, and the upload date the capture date. 1440p/4K need FFmpegKit added to the project; otherwise it caps at the best 1080p rendition. Only the public link is sent out.")
+                    Text("Downloads the video into “\(targetFolder.lastPathComponent)”. The title becomes the file name, the description the caption, and the upload date the capture date. \(qualityNote) Only the public link is sent out.")
                 }
 
                 if running {
