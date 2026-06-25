@@ -195,6 +195,10 @@ enum MetadataLoader {
             return await Task.detached(priority: .utility) { () -> MediaSpec in
                 var spec = MediaSpec()
                 let asset = AVURLAsset(url: entry.url)
+                if let d = try? await asset.load(.duration) {
+                    let s = d.seconds
+                    if s.isFinite, s > 0 { spec.duration = s }
+                }
                 if let track = try? await asset.loadTracks(withMediaType: .video).first {
                     if let size = try? await track.load(.naturalSize) {
                         let w = Int(abs(size.width)), h = Int(abs(size.height))

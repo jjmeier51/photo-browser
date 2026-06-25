@@ -15,7 +15,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   resolved keeps downloading even after the app is closed, and the rest is picked up on the
   next "Get New" run.
 - **TikTok like counts** — each downloaded video's like count is captured and shown as a
-  "Likes" row in the info panel (compact, e.g. 1.2M).
+  "Likes" row in the info panel and as a heart badge on its thumbnail (compact, e.g. 1.2M).
+  TikTok folders gain a **"Most liked"** sort, and every "Get New TikTok Videos" run also
+  refreshes the like counts on already-downloaded videos.
+- **Sort by video length** — all folders gain **"Longest first" / "Shortest first"** sorts
+  (durations are read once per video and cached with the other media specs).
 
 ## 2026-06-24
 

@@ -138,6 +138,8 @@ struct TikTokImportView: View {
                 },
                 progress: { p in Task { @MainActor in phase = p.phase } })
 
+            // Refresh like counts on already-downloaded videos too (not just the new ones).
+            library.applyTikTokLikes(result.allStats, in: dest)
             // Record the resolved author id (kept for future use) without disturbing counts.
             if !result.authorId.isEmpty, var info = library.tiktokInfo(for: dest), info.secUid.isEmpty {
                 info.secUid = result.authorId

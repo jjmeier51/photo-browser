@@ -13,6 +13,7 @@ struct EntryCell: View {
     var isLive: Bool = false
     var isAIGenerated: Bool = false
     var coverURL: URL? = nil
+    var likeCount: Int? = nil
 
     @State private var image: UIImage?
     @State private var duration: String?
@@ -37,14 +38,23 @@ struct EntryCell: View {
                 }
             }
             .overlay(alignment: .bottomLeading) {
-                if entry.kind == .video, let duration {
-                    Text(duration)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 4).padding(.vertical, 1)
-                        .background(.black.opacity(0.5), in: Capsule())
-                        .padding(4)
+                VStack(alignment: .leading, spacing: 2) {
+                    if let likeCount {
+                        Label(InfoPanel.compactCount(likeCount), systemImage: "heart.fill")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(.black.opacity(0.5), in: Capsule())
+                    }
+                    if entry.kind == .video, let duration {
+                        Text(duration)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(.black.opacity(0.5), in: Capsule())
+                    }
                 }
+                .padding(4)
             }
             .overlay(alignment: .topTrailing) {
                 VStack(alignment: .trailing, spacing: 3) {

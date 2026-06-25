@@ -144,6 +144,20 @@ final class Library {
     func tiktokLikeCount(for url: URL) -> Int? { tiktokLikes[url.path] }
     private func persistTikTokLikes() { UserDefaults.standard.set(tiktokLikes, forKey: "photoBrowser.tiktokLikes") }
 
+    /// Refreshes the like counts of already-downloaded videos in `folder` from a fresh `id → likes`
+    /// map (a "Get New" run), so existing videos' counts update too. Persists + reloads once.
+    func applyTikTokLikes(_ statsByID: [String: Int], in folder: URL) {
+        guard !statsByID.isEmpty else { return }
+        let fm = FileManager.default
+        var changed = false
+        for (id, likes) in statsByID where likes > 0 {
+            let path = folder.appendingPathComponent("\(id).mp4").path
+            guard fm.fileExists(atPath: path) else { continue }
+            if tiktokLikes[path] != likes { tiktokLikes[path] = likes; changed = true }
+        }
+        if changed { persistTikTokLikes(); contentDidChange() }
+    }
+
     /// Person-folder path → the TikTok handle last downloaded under it, so re-opening the
     /// downloader from that folder prefills the handle and resumes the same `@handle` folder.
     var lastTikTokHandleByFolder: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.lastTikTokHandle") as? [String: String]) ?? [:]
@@ -1512,7 +1526,8 @@ final class Library {
             case .dateAsc:  return a.modified < b.modified
             case .sizeDesc: return a.size > b.size
             case .sizeAsc:  return a.size < b.size
-            case .smart, .kind, .ageAsc, .ageDesc: return nameAsc(a, b)   // handled above / in the view
+            case .smart, .kind, .ageAsc, .ageDesc, .likesDesc, .durationDesc, .durationAsc:
+                return nameAsc(a, b)   // handled above / in the view
             }
         }
     }

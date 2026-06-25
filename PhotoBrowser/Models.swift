@@ -75,6 +75,7 @@ struct MediaSpec: Sendable {
     var longSide: Int = 0
     var pixels: Int = 0
     var isHDR: Bool = false
+    var duration: Double = 0          // seconds (videos); 0 for photos
     var videoRes: VideoRes { longSide >= 3840 ? .uhd : longSide >= 1920 ? .fhd : longSide >= 1280 ? .hd : .low }
     var imageRes: ImageRes { pixels >= 2_000_000 ? .high : .low }
 }
@@ -114,9 +115,16 @@ enum SortKey: String, CaseIterable, Identifiable {
     case kind     = "Kind"
     case ageAsc   = "Age: youngest"
     case ageDesc  = "Age: oldest"
+    case likesDesc    = "Most liked"
+    case durationDesc = "Longest first"
+    case durationAsc  = "Shortest first"
     var id: String { rawValue }
     /// Age sorting is applied in the folder view (it needs per-file ages).
     var isAge: Bool { self == .ageAsc || self == .ageDesc }
+    /// Likes sorting (TikTok folders) is applied in the folder view (needs per-file likes).
+    var isLikes: Bool { self == .likesDesc }
+    /// Length sorting is applied in the folder view (needs per-file video durations).
+    var isDuration: Bool { self == .durationDesc || self == .durationAsc }
 }
 
 func classify(url: URL, isDirectory: Bool) -> FileKind {

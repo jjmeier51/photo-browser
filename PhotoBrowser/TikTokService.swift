@@ -53,17 +53,22 @@ enum TikTokService {
         onAvatar: @escaping @Sendable (Data) -> Void,
         onResolved: @escaping @Sendable (ResolvedVideo) -> Void,
         progress: @escaping @Sendable (Progress) -> Void
-    ) async -> (authorId: String, nickname: String, totalFound: Int, resolved: Int, note: String?) {
+    ) async -> (authorId: String, nickname: String, totalFound: Int, resolved: Int, allStats: [String: Int], note: String?) {
         progress(Progress(phase: "Finding @\(username)’s videos…", fraction: 0, done: 0, total: 0))
         let listing = await listAllVideos(username: username, progress: progress)
         if !listing.avatar.isEmpty, let data = await downloadData(absolute(listing.avatar)) { onAvatar(data) }
+
+        // Like counts for *every* listed video (id → likes) — lets the caller refresh the
+        // counts on already-downloaded videos too, not just the new ones.
+        var allStats: [String: Int] = [:]
+        for v in listing.videos where v.likes > 0 { allStats[v.id] = v.likes }
 
         let pending = listing.videos.filter { !alreadyDownloaded.contains($0.id) }
         guard !pending.isEmpty else {
             let note = listing.videos.isEmpty
                 ? "Couldn’t find any videos — TikTok or the resolver may be blocking, or the handle is wrong."
                 : "No new videos."
-            return (listing.authorId, listing.nickname, listing.videos.count, 0, note)
+            return (listing.authorId, listing.nickname, listing.videos.count, 0, allStats, note)
         }
 
         var resolved = 0
@@ -80,7 +85,7 @@ enum TikTokService {
             onResolved(ResolvedVideo(id: v.id, url: absolute(best), createTime: v.createTime, desc: v.desc, likes: v.likes))
             resolved += 1
         }
-        return (listing.authorId, listing.nickname, listing.videos.count, resolved,
+        return (listing.authorId, listing.nickname, listing.videos.count, resolved, allStats,
                 resolved == 0 ? "Couldn’t resolve any download links (the resolver may be rate-limiting — try again)." : nil)
     }
 

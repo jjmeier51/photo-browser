@@ -185,7 +185,34 @@ struct FolderView: View {
 
     private var filtered: [Entry] {
         let list = filteredRaw
-        return library.sort.isAge ? sortByAge(list) : list
+        if library.sort.isAge { return sortByAge(list) }
+        if library.sort.isLikes { return sortByLikes(list) }
+        if library.sort.isDuration { return sortByDuration(list) }
+        return list
+    }
+
+    /// Sorts by TikTok like count, most-liked first (folders first; items without a count last).
+    private func sortByLikes(_ list: [Entry]) -> [Entry] {
+        list.sorted { a, b in
+            if a.isFolder != b.isFolder { return a.isFolder }
+            let la = library.tiktokLikeCount(for: a.url), lb = library.tiktokLikeCount(for: b.url)
+            if let x = la, let y = lb { return x != y ? x > y : a.name.localizedStandardCompare(b.name) == .orderedAscending }
+            if la == nil && lb == nil { return a.name.localizedStandardCompare(b.name) == .orderedAscending }
+            return la != nil      // items with a like count come first
+        }
+    }
+
+    /// Sorts by video length (folders first; items without a known duration last). Durations
+    /// come from the per-file media specs loaded for this folder.
+    private func sortByDuration(_ list: [Entry]) -> [Entry] {
+        let ascending = (library.sort == .durationAsc)
+        return list.sorted { a, b in
+            if a.isFolder != b.isFolder { return a.isFolder }
+            let da = fileSpecs[a.url]?.duration ?? 0, db = fileSpecs[b.url]?.duration ?? 0
+            if da > 0 && db > 0 { return da != db ? (ascending ? da < db : da > db) : a.name.localizedStandardCompare(b.name) == .orderedAscending }
+            if da == 0 && db == 0 { return a.name.localizedStandardCompare(b.name) == .orderedAscending }
+            return da > 0         // items with a duration come first
+        }
     }
 
     /// Sorts entries by computed age (folders first; items without an age last).
@@ -396,7 +423,8 @@ struct FolderView: View {
                   favorited: library.isFavorite(entry.url), aiLabeled: library.isAI(entry.url),
                   isLive: liveImageURLs.contains(entry.url),
                   isAIGenerated: library.isAIGenerated(entry.url),
-                  coverURL: entry.isFolder ? library.coverURL(for: entry.url) : nil)
+                  coverURL: entry.isFolder ? library.coverURL(for: entry.url) : nil,
+                  likeCount: entry.kind == .video ? library.tiktokLikeCount(for: entry.url) : nil)
             .background {
                 // Always publish cell frames (only the visible LazyVGrid cells exist)
                 // so a drag-select can begin immediately — even before Select mode.
@@ -1036,9 +1064,9 @@ struct FolderView: View {
                     tsLabelEntries = []
                 }
             }
-            // Load dimensions/HDR only when the resolution filter is on, and only once.
-            .task(id: "specs-\(advancedActive)-\(entries.count)-\(url.path)") {
-                if advancedActive, fileSpecs.isEmpty {
+            // Load dimensions/HDR/duration when the resolution filter is on or sorting by length.
+            .task(id: "specs-\(advancedActive)-\(library.sort.isDuration)-\(entries.count)-\(url.path)") {
+                if (advancedActive || library.sort.isDuration), fileSpecs.isEmpty {
                     fileSpecs = await library.mediaSpecs(for: entries)
                 }
             }
@@ -1440,8 +1468,8 @@ struct FolderView: View {
                 }
                 Menu {
                     ForEach(SortKey.allCases) { key in
-                        // Age sorting only where a birthday is in context.
-                        if !key.isAge || library.hasBirthdayContext(url) {
+                        // Age sorting only where a birthday is in context; "Most liked" only in TikTok folders.
+                        if (!key.isAge || library.hasBirthdayContext(url)) && (!key.isLikes || library.isTikTokFolder(url)) {
                             Button {
                                 library.sort = key
                             } label: {
