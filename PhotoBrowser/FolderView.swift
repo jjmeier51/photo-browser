@@ -84,6 +84,7 @@ struct FolderView: View {
     @State private var showBulkInstagram = false
     @State private var showFacebook = false
     @State private var showTikTok = false
+    @State private var showYouTube = false
     @State private var confirmFixDates = false
     @State private var fixingDates = false
     @State private var indexingText = false
@@ -823,6 +824,9 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showTikTok, onDismiss: { Task { await reload() } }) {
                 TikTokImportView(targetFolder: url) { Task { await reload() } }
             }
+            .sheet(isPresented: $showYouTube, onDismiss: { Task { await reload() } }) {
+                YouTubeImportView(targetFolder: url) { Task { await reload() } }
+            }
         )
         return AnyView(g4
             .overlay(alignment: .bottom) { if selecting { selectionBar } }
@@ -1547,6 +1551,9 @@ struct FolderView: View {
                     Button { showTikTok = true } label: {
                         Label(library.lastTikTokHandle(for: url) != nil ? "Get New TikTok Videos" : "Download TikTok Profile…",
                               systemImage: "music.note")
+                    }
+                    Button { showYouTube = true } label: {
+                        Label("Download YouTube Video Here…", systemImage: "play.rectangle.fill")
                     }
                     Button { showTaylorBrowser = true } label: {
                         Label("Browse taylorpictures.net…", systemImage: "globe")

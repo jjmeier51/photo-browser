@@ -2,6 +2,16 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-06-25 (later)
+
+- **Download YouTube video here** — a folder-menu action that takes a YouTube link (auto-filled
+  from the clipboard) and downloads it into the current folder at the highest quality the device
+  can assemble. YouTube serves >720p as separate video+audio (DASH), so — like yt-dlp — it
+  resolves through a public Piped instance (which deciphers server-side) and muxes on-device:
+  best H.264+AAC (≤1080p) via AVFoundation, or VP9/AV1 (1440p/4K) → HEVC when FFmpegKit is added
+  to the project. The title becomes the file name, the description the caption, and the upload
+  date the capture date. Video + audio download in parallel; runs under a background-task window.
+
 ## 2026-06-25
 
 - **TikTok: true HD + background downloads** — every video is now resolved through the
