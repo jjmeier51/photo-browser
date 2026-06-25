@@ -78,9 +78,8 @@ struct TikTokImportView: View {
                 guard batchToken > 0 else { return }
                 while !Task.isCancelled {
                     library.processPendingTikTok()
-                    let r = await BackgroundDownloader.shared.remainingCount()
-                    remaining = r
-                    if r == 0 { break }
+                    remaining = await BackgroundDownloader.shared.remainingCount()
+                    if remaining == 0 && !resolving { break }   // keep going while more links are still resolving
                     try? await Task.sleep(nanoseconds: 2_500_000_000)
                 }
             }
@@ -91,48 +90,63 @@ struct TikTokImportView: View {
         let user = username
         guard !user.isEmpty else { return }
         resolving = true; note = nil; queued = 0; remaining = 0
+
+        let dest = targetFolder.appendingPathComponent("@\(user)", isDirectory: true)
+        let parent = targetFolder
+        let prior = library.tiktokInfo(for: dest)
+        let already = Set(prior?.downloaded ?? [])
+        batchToken += 1                                          // start the monitor loop
+
+        // A background-task window so link resolution keeps going for a few minutes after the app
+        // is backgrounded; each resolved video's download is handed to the background session
+        // immediately, so it continues even after the app is fully closed.
+        let bg = BackgroundTaskHolder(); bg.begin(name: "TikTok Resolve")
         Task {
-            let dest = targetFolder.appendingPathComponent("@\(user)", isDirectory: true)
-            let prior = library.tiktokInfo(for: dest)
-            let already = Set(prior?.downloaded ?? [])
-
-            let result = await TikTokService.enumerate(username: user, alreadyDownloaded: already) { p in
-                Task { @MainActor in phase = p.phase }
-            }
-
-            // Register the profile up front so the pinned bubble + remembered handle appear now;
-            // the per-video count grows as background downloads are filed (processPendingTikTok).
-            if result.totalFound > 0 || prior != nil {
-                if let avatar = result.avatar, let img = UIImage(data: avatar) {
-                    library.setCover(img, for: dest)
-                    if library.coverURL(for: targetFolder) == nil,
-                       library.instagramInfo(for: targetFolder) == nil, !library.isTikTokFolder(targetFolder) {
-                        library.setCover(img, for: targetFolder)
+            let destPath = dest.path
+            let result = await TikTokService.enumerateStreaming(
+                username: user, alreadyDownloaded: already,
+                onAvatar: { data in
+                    Task { @MainActor in
+                        guard let img = UIImage(data: data) else { return }
+                        library.setCover(img, for: dest)
+                        if library.coverURL(for: parent) == nil,
+                           library.instagramInfo(for: parent) == nil, !library.isTikTokFolder(parent) {
+                            library.setCover(img, for: parent)
+                        }
                     }
-                }
-                let info = TTFolderInfo(handle: user,
-                                        secUid: result.authorId.isEmpty ? (prior?.secUid ?? "") : result.authorId,
-                                        lastUpdated: Date().timeIntervalSince1970,
-                                        downloaded: prior?.downloaded ?? [],
-                                        videos: prior?.videos ?? 0)
+                },
+                onResolved: { v in
+                    guard let url = URL(string: v.url) else { return }
+                    let meta = BackgroundDownloader.Meta(dest: dest.appendingPathComponent("\(v.id).mp4").path,
+                                                         createTime: v.createTime.timeIntervalSince1970,
+                                                         caption: v.desc, folder: destPath, id: v.id)
+                    BackgroundDownloader.shared.enqueue(url: url, meta: meta)
+                    Task { @MainActor in
+                        // On the first resolved video, register the profile (pinned bubble +
+                        // remembered handle) and create its folder so the bubble can appear.
+                        if library.tiktokInfo(for: dest) == nil {
+                            try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+                            let info = TTFolderInfo(handle: user, secUid: prior?.secUid ?? "",
+                                                    lastUpdated: Date().timeIntervalSince1970,
+                                                    downloaded: prior?.downloaded ?? [], videos: prior?.videos ?? 0)
+                            library.setTikTokInfo(info, for: dest)
+                            library.setLastTikTokHandle(user, for: parent)
+                            library.contentDidChange()           // surface the new @handle bubble
+                        }
+                        queued += 1                               // `remaining` is owned by the monitor poll
+                    }
+                },
+                progress: { p in Task { @MainActor in phase = p.phase } })
+
+            // Record the resolved author id (kept for future use) without disturbing counts.
+            if !result.authorId.isEmpty, var info = library.tiktokInfo(for: dest), info.secUid.isEmpty {
+                info.secUid = result.authorId
                 library.setTikTokInfo(info, for: dest)
-                library.setLastTikTokHandle(user, for: targetFolder)
             }
-
-            try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
-            for v in result.videos {
-                guard let url = URL(string: v.url) else { continue }
-                let meta = BackgroundDownloader.Meta(dest: dest.appendingPathComponent("\(v.id).mp4").path,
-                                                     createTime: v.createTime.timeIntervalSince1970,
-                                                     caption: v.desc, folder: dest.path, id: v.id)
-                BackgroundDownloader.shared.enqueue(url: url, meta: meta)
-            }
-
             resolving = false
-            queued = result.videos.count
-            remaining = result.videos.count
-            note = result.videos.isEmpty ? (result.note ?? "Nothing to download.") : nil
-            if queued > 0 { batchToken += 1; onFinished() }       // kick the monitor loop
+            note = (queued == 0) ? (result.note ?? "Nothing to download.") : nil
+            if queued > 0 { onFinished() }
+            bg.end()
         }
     }
 }

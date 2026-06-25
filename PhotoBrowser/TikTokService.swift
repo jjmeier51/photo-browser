@@ -41,27 +41,34 @@ enum TikTokService {
         return URLSession(configuration: cfg)
     }()
 
-    // MARK: - Enumerate + resolve (foreground)
+    // MARK: - Enumerate + resolve (streaming)
 
     /// Lists every video on `@username`, then resolves each not-yet-downloaded one to its
-    /// best-quality (HD) direct URL. Returns the avatar image data, author id, and a note.
-    nonisolated static func enumerate(username: String, alreadyDownloaded: Set<String>,
-                                      progress: @escaping @Sendable (Progress) -> Void)
-        async -> (videos: [ResolvedVideo], avatar: Data?, authorId: String, nickname: String, totalFound: Int, note: String?) {
+    /// best-quality (HD) direct URL — calling `onResolved` for each the *moment* it's ready, so
+    /// the caller can start its background download immediately instead of waiting for the whole
+    /// profile. `onAvatar` fires once with the profile picture. Honors task cancellation, so it
+    /// stops cleanly when its background-task window expires.
+    nonisolated static func enumerateStreaming(
+        username: String, alreadyDownloaded: Set<String>,
+        onAvatar: @escaping @Sendable (Data) -> Void,
+        onResolved: @escaping @Sendable (ResolvedVideo) -> Void,
+        progress: @escaping @Sendable (Progress) -> Void
+    ) async -> (authorId: String, nickname: String, totalFound: Int, resolved: Int, note: String?) {
         progress(Progress(phase: "Finding @\(username)’s videos…", fraction: 0, done: 0, total: 0))
         let listing = await listAllVideos(username: username, progress: progress)
-        let avatar = listing.avatar.isEmpty ? nil : await downloadData(absolute(listing.avatar))
+        if !listing.avatar.isEmpty, let data = await downloadData(absolute(listing.avatar)) { onAvatar(data) }
 
         let pending = listing.videos.filter { !alreadyDownloaded.contains($0.id) }
         guard !pending.isEmpty else {
             let note = listing.videos.isEmpty
                 ? "Couldn’t find any videos — TikTok or the resolver may be blocking, or the handle is wrong."
                 : "No new videos."
-            return ([], avatar, listing.authorId, listing.nickname, listing.videos.count, note)
+            return (listing.authorId, listing.nickname, listing.videos.count, 0, note)
         }
 
-        var resolved: [ResolvedVideo] = []
+        var resolved = 0
         for (i, v) in pending.enumerated() {
+            if Task.isCancelled { break }
             progress(Progress(phase: "Preparing HD links — \(i + 1) of \(pending.count)…", fraction: 0, done: 0, total: 0))
             var best = v.hd
             if best.isEmpty {
@@ -70,10 +77,11 @@ enum TikTokService {
                 try? await Task.sleep(nanoseconds: 1_100_000_000)
             }
             guard !best.isEmpty else { continue }
-            resolved.append(ResolvedVideo(id: v.id, url: absolute(best), createTime: v.createTime, desc: v.desc))
+            onResolved(ResolvedVideo(id: v.id, url: absolute(best), createTime: v.createTime, desc: v.desc))
+            resolved += 1
         }
-        return (resolved, avatar, listing.authorId, listing.nickname, listing.videos.count,
-                resolved.isEmpty ? "Couldn’t resolve any download links (the resolver may be rate-limiting — try again)." : nil)
+        return (listing.authorId, listing.nickname, listing.videos.count, resolved,
+                resolved == 0 ? "Couldn’t resolve any download links (the resolver may be rate-limiting — try again)." : nil)
     }
 
     // MARK: - Listing (tikwm user/posts, paginated)

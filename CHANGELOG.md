@@ -9,8 +9,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   quality offered (1080p/HD, watermark-free) instead of a lower-res fallback. Transfers run
   on a **background `URLSession`**, so they continue — and finish — even if you close the app;
   completed videos are filed into the folder the next time the app is in the foreground.
-  Links are resolved up front while the app is open, then handed off; the screen no longer
-  needs to stay awake for the transfers.
+  Resolution **streams**: each video's download starts the instant its HD link resolves
+  (rather than after the whole profile), and resolution itself keeps running under a
+  background-task window for a few minutes after you background the app — so whatever's been
+  resolved keeps downloading even after the app is closed, and the rest is picked up on the
+  next "Get New" run.
 
 ## 2026-06-24
 
