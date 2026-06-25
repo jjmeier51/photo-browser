@@ -2,6 +2,16 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-06-25
+
+- **TikTok: true HD + background downloads** — every video is now resolved through the
+  resolver's single-video `hd=1` endpoint (like ssstik), so it downloads at the highest
+  quality offered (1080p/HD, watermark-free) instead of a lower-res fallback. Transfers run
+  on a **background `URLSession`**, so they continue — and finish — even if you close the app;
+  completed videos are filed into the folder the next time the app is in the foreground.
+  Links are resolved up front while the app is open, then handed off; the screen no longer
+  needs to stay awake for the transfers.
+
 ## 2026-06-24
 
 - **TikTok downloader rebuilt the ssstik way** — dropped the in-app web-scrape (TikTok caps

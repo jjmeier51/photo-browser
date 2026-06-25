@@ -1,5 +1,4 @@
 import Foundation
-import AVFoundation
 
 /// Per-folder record for a downloaded TikTok profile (drives "Get New videos", the pinned
 /// highlight bubble, and dedup). Stored on `Library`, keyed by the `@handle` folder path.
@@ -11,32 +10,27 @@ struct TTFolderInfo: Codable, Sendable {
     var videos: Int
 }
 
-/// Downloads a whole TikTok profile's own videos — like ssstik/snaptik, but for the entire
-/// profile rather than one URL. Those tools don't scrape TikTok's web grid (which TikTok
-/// caps to a screenful, virtualizes, and gates behind login); they go through a resolver API.
-/// This uses the public **tikwm.com** API, which needs no login or request-signing: its
-/// `user/posts` endpoint paginates the full video list and returns direct, watermark-free **HD**
-/// download URLs. We page through every video, then download each at the highest quality
-/// offered, stamping post date + caption.
+/// Resolves a whole TikTok profile's own videos — like ssstik/snaptik, but for the entire
+/// profile rather than one URL. Those tools don't scrape TikTok's web grid (which TikTok caps
+/// to a screenful, virtualizes, and gates behind login); they go through a resolver API. This
+/// uses the public **tikwm.com** API (no login, no request-signing): its `user/posts` endpoint
+/// paginates the full video list, and — to guarantee the **highest quality** (1080p/HD,
+/// watermark-free) — each video is resolved through the single-video endpoint with `hd=1`,
+/// exactly like ssstik does per URL.
 ///
-/// Download-only and best-effort, like the MEGA / Instagram features: only the public handle
-/// is sent to the resolver, nothing is uploaded, and because the API is unofficial and
-/// rate-limited, failures are surfaced as notes rather than treated as fatal.
+/// This type only *enumerates and resolves* download URLs (with post date + caption); the actual
+/// transfers run on a background `URLSession` (see `BackgroundDownloader`) so they continue when
+/// the app is closed. Download-only and best-effort: only the public handle is sent to the
+/// resolver, nothing is uploaded, and because the API is unofficial and rate-limited, failures
+/// are surfaced as notes rather than treated as fatal.
 enum TikTokService {
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
     nonisolated static let apiBase = "https://www.tikwm.com"
 
     struct Progress: Sendable { var phase: String; var fraction: Double; var done: Int; var total: Int }
-    struct DownloadResult: Sendable {
-        var videos = 0, failed = 0
-        var captions: [String: String] = [:]
-        var downloadedIDs: [String] = []     // ids successfully pulled this run (for dedup)
-        var secUid = ""
-        var nickname = ""
-        var avatar: Data?
-        var note: String?
-    }
-    private struct Video: Sendable { let id: String; let url: String; let createTime: Date; let desc: String }
+    /// A video ready to download: a direct best-quality URL plus the metadata to stamp on it.
+    struct ResolvedVideo: Sendable { let id: String; let url: String; let createTime: Date; let desc: String }
+    private struct Video: Sendable { let id: String; let hd: String; let sd: String; let createTime: Date; let desc: String }
 
     nonisolated static let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
@@ -47,52 +41,39 @@ enum TikTokService {
         return URLSession(configuration: cfg)
     }()
 
-    // MARK: - Orchestration
+    // MARK: - Enumerate + resolve (foreground)
 
-    /// Lists every video on `@username` (paginated) and downloads the ones not in
-    /// `alreadyDownloaded` into `folder`, newest-quality first.
-    nonisolated static func run(username: String, into folder: URL, alreadyDownloaded: Set<String>,
-                                progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
-        var result = DownloadResult()
+    /// Lists every video on `@username`, then resolves each not-yet-downloaded one to its
+    /// best-quality (HD) direct URL. Returns the avatar image data, author id, and a note.
+    nonisolated static func enumerate(username: String, alreadyDownloaded: Set<String>,
+                                      progress: @escaping @Sendable (Progress) -> Void)
+        async -> (videos: [ResolvedVideo], avatar: Data?, authorId: String, nickname: String, totalFound: Int, note: String?) {
         progress(Progress(phase: "Finding @\(username)’s videos…", fraction: 0, done: 0, total: 0))
         let listing = await listAllVideos(username: username, progress: progress)
-        result.secUid = listing.authorId
-        result.nickname = listing.nickname
-        if !listing.avatar.isEmpty { result.avatar = await downloadData(absolute(listing.avatar)) }
+        let avatar = listing.avatar.isEmpty ? nil : await downloadData(absolute(listing.avatar))
 
         let pending = listing.videos.filter { !alreadyDownloaded.contains($0.id) }
         guard !pending.isEmpty else {
-            result.note = listing.videos.isEmpty
+            let note = listing.videos.isEmpty
                 ? "Couldn’t find any videos — TikTok or the resolver may be blocking, or the handle is wrong."
                 : "No new videos."
-            return result
+            return ([], avatar, listing.authorId, listing.nickname, listing.videos.count, note)
         }
 
-        let total = pending.count
-        var done = 0
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        await withTaskGroup(of: (ok: Bool, id: String, path: String, caption: String).self) { group in
-            var idx = 0
-            let maxConcurrent = 4
-            func addNext() {
-                guard idx < pending.count else { return }
-                let v = pending[idx]; idx += 1
-                group.addTask { await downloadOne(v, into: folder) }
+        var resolved: [ResolvedVideo] = []
+        for (i, v) in pending.enumerated() {
+            progress(Progress(phase: "Preparing HD links — \(i + 1) of \(pending.count)…", fraction: 0, done: 0, total: 0))
+            var best = v.hd
+            if best.isEmpty {
+                // No HD in the listing — ask the single-video endpoint for it (rate-limited).
+                best = await resolveDetailHD(id: v.id, username: username) ?? v.sd
+                try? await Task.sleep(nanoseconds: 1_100_000_000)
             }
-            for _ in 0..<min(maxConcurrent, total) { addNext() }
-            while let r = await group.next() {
-                if r.ok {
-                    result.videos += 1
-                    result.downloadedIDs.append(r.id)
-                    if !r.caption.isEmpty { result.captions[r.path] = r.caption }
-                } else { result.failed += 1 }
-                done += 1
-                progress(Progress(phase: "Downloading", fraction: Double(done) / Double(total), done: done, total: total))
-                addNext()
-            }
+            guard !best.isEmpty else { continue }
+            resolved.append(ResolvedVideo(id: v.id, url: absolute(best), createTime: v.createTime, desc: v.desc))
         }
-        if result.videos == 0 { result.note = "Couldn’t download any videos (the resolver may be rate-limiting — try again)." }
-        return result
+        return (resolved, avatar, listing.authorId, listing.nickname, listing.videos.count,
+                resolved.isEmpty ? "Couldn’t resolve any download links (the resolver may be rate-limiting — try again)." : nil)
     }
 
     // MARK: - Listing (tikwm user/posts, paginated)
@@ -103,10 +84,9 @@ enum TikTokService {
         var seen = Set<String>()
         var avatar = "", authorId = "", nickname = ""
         var cursor = "0"
-        // Safety cap: 60 pages × 35 ≈ 2100 videos. Stops earlier when the API says no more.
-        for _ in 0..<60 {
+        for _ in 0..<60 {     // safety cap: 60 pages × 35 ≈ 2100 videos
             guard let data = await apiGet("/api/user/posts",
-                                          query: ["unique_id": username, "count": "35", "cursor": cursor]),
+                                          query: ["unique_id": username, "count": "35", "cursor": cursor, "hd": "1"]),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   intValue(json["code"]) == 0,
                   let d = json["data"] as? [String: Any] else { break }
@@ -114,10 +94,11 @@ enum TikTokService {
             for v in vids {
                 guard let id = idString(v["video_id"]) ?? idString(v["aweme_id"]) ?? idString(v["id"]),
                       seen.insert(id).inserted else { continue }
-                let url = (v["hdplay"] as? String) ?? (v["play"] as? String) ?? ""
-                guard !url.isEmpty else { continue }
+                let hd = (v["hdplay"] as? String) ?? ""
+                let sd = (v["play"] as? String) ?? (v["wmplay"] as? String) ?? ""
+                guard !(hd.isEmpty && sd.isEmpty) else { continue }
                 let ct = Date(timeIntervalSince1970: Double(intValue(v["create_time"]) ?? 0))
-                all.append(Video(id: id, url: url, createTime: ct, desc: (v["title"] as? String) ?? ""))
+                all.append(Video(id: id, hd: hd, sd: sd, createTime: ct, desc: (v["title"] as? String) ?? ""))
                 if let author = v["author"] as? [String: Any] {
                     if avatar.isEmpty { avatar = (author["avatar"] as? String) ?? "" }
                     if authorId.isEmpty { authorId = idString(author["id"]) ?? "" }
@@ -134,20 +115,14 @@ enum TikTokService {
         return (all, avatar, authorId, nickname)
     }
 
-    nonisolated private static func downloadOne(_ v: Video, into folder: URL) async -> (ok: Bool, id: String, path: String, caption: String) {
-        let dest = folder.appendingPathComponent("\(v.id).mp4")
-        if FileManager.default.fileExists(atPath: dest.path) { return (true, v.id, dest.path, v.desc) }   // already have it
-        guard let url = URL(string: absolute(v.url)) else { return (false, v.id, "", "") }
-        var req = URLRequest(url: url)
-        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("\(apiBase)/", forHTTPHeaderField: "Referer")
-        req.timeoutInterval = 180
-        guard let (tmp, resp) = try? await session.download(for: req),
-              (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true,
-              (try? FileManager.default.moveItem(at: tmp, to: dest)) != nil else { return (false, v.id, "", "") }
-        await writeVideoDate(v.createTime, to: dest)                 // EXIF/QuickTime capture date (HDR preserved)
-        try? FileManager.default.setAttributes([.creationDate: v.createTime, .modificationDate: v.createTime], ofItemAtPath: dest.path)
-        return (true, v.id, dest.path, v.desc)
+    /// The HD (watermark-free) URL for a single video, via the resolver's single-video endpoint.
+    nonisolated private static func resolveDetailHD(id: String, username: String) async -> String? {
+        let videoURL = "https://www.tiktok.com/@\(username)/video/\(id)"
+        guard let data = await apiGet("/api/", query: ["url": videoURL, "hd": "1"]),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              intValue(json["code"]) == 0, let d = json["data"] as? [String: Any] else { return nil }
+        let hd = (d["hdplay"] as? String) ?? ""
+        return hd.isEmpty ? (d["play"] as? String) : hd
     }
 
     // MARK: - HTTP
@@ -170,25 +145,8 @@ enum TikTokService {
     }
 
     /// tikwm sometimes returns site-relative media paths; make them absolute.
-    nonisolated private static func absolute(_ u: String) -> String {
+    nonisolated static func absolute(_ u: String) -> String {
         u.hasPrefix("http") ? u : apiBase + (u.hasPrefix("/") ? u : "/" + u)
-    }
-
-    /// Sets a video's creation date via a passthrough re-mux (preserves HDR).
-    nonisolated private static func writeVideoDate(_ date: Date, to url: URL) async {
-        let asset = AVURLAsset(url: url)
-        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else { return }
-        var meta = (try? await asset.load(.metadata)) ?? []
-        let iso = ISO8601DateFormatter().string(from: date)
-        for id in [AVMetadataIdentifier.commonIdentifierCreationDate, .quickTimeMetadataCreationDate] {
-            let item = AVMutableMetadataItem(); item.identifier = id; item.value = iso as NSString; meta.append(item)
-        }
-        export.metadata = meta
-        let tmp = url.deletingLastPathComponent().appendingPathComponent(".tttmp_" + UUID().uuidString).appendingPathExtension("mp4")
-        export.outputURL = tmp; export.outputFileType = .mp4
-        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in export.exportAsynchronously { c.resume() } }
-        guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return }
-        _ = try? FileManager.default.replaceItemAt(url, withItemAt: tmp)
     }
 
     // MARK: - Helpers

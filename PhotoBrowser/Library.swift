@@ -148,6 +148,54 @@ final class Library {
         UserDefaults.standard.set(lastTikTokHandleByFolder, forKey: "photoBrowser.lastTikTokHandle")
     }
 
+    /// Files TikTok videos that finished downloading in the background (in the app inbox) onto
+    /// the actual drive folder: moves each into place, stamps its capture date, attaches its
+    /// caption, and updates the profile record's count/dedup set. Runs in the foreground (drive
+    /// mounted, security scope active). Safe to call repeatedly — it consumes the pending queue.
+    func processPendingTikTok() {
+        guard rootURL != nil else { return }     // need the drive mounted + security scope to file onto it
+        let pending = BackgroundDownloader.loadPending()
+        guard !pending.isEmpty else { return }
+        BackgroundDownloader.shared.removeProcessed(pending.count)
+        let fm = FileManager.default
+        var captionUpdates: [String: String] = [:]
+        var idsByFolder: [String: [String]] = [:]
+        var requeue: [[String: Any]] = []        // entries we couldn't file yet (drive busy) — retry later
+        var changed = false
+        for rec in pending {
+            guard let inbox = rec["inbox"] as? String, let dest = rec["dest"] as? String else { continue }
+            guard fm.fileExists(atPath: inbox) else { continue }     // inbox file gone (already filed) — drop
+            let inboxURL = URL(fileURLWithPath: inbox), destURL = URL(fileURLWithPath: dest)
+            try? fm.createDirectory(at: destURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if fm.fileExists(atPath: dest) {
+                try? fm.removeItem(at: inboxURL)                     // already have it — drop the dupe
+            } else if (try? fm.moveItem(at: inboxURL, to: destURL)) == nil {
+                _ = try? fm.copyItem(at: inboxURL, to: destURL)
+                if fm.fileExists(atPath: dest) { try? fm.removeItem(at: inboxURL) }
+            }
+            guard fm.fileExists(atPath: dest) else { requeue.append(rec); continue }   // couldn't file — keep for retry
+            if let ct = rec["createTime"] as? Double, ct > 0 {
+                let date = Date(timeIntervalSince1970: ct)
+                try? fm.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: dest)
+            }
+            if let caption = rec["caption"] as? String, !caption.isEmpty { captionUpdates[dest] = caption }
+            if let folder = rec["folder"] as? String, let id = rec["id"] as? String { idsByFolder[folder, default: []].append(id) }
+            changed = true
+        }
+        BackgroundDownloader.shared.requeue(requeue)
+        setCaptions(captionUpdates)
+        for (folder, ids) in idsByFolder {
+            guard var info = tiktokFolders[folder] else { continue }
+            let fresh = ids.filter { !info.downloaded.contains($0) }
+            info.downloaded.append(contentsOf: fresh)
+            info.videos += fresh.count
+            info.lastUpdated = Date().timeIntervalSince1970
+            tiktokFolders[folder] = info
+        }
+        if !idsByFolder.isEmpty { persistTikTokFolders() }
+        if changed { contentDidChange() }
+    }
+
     /// Grid thumbnail minimum size (points); pinch-to-zoom adjusts it ±30%.
     var thumbSize: Double = (UserDefaults.standard.object(forKey: "photoBrowser.thumbSize") as? Double) ?? 110
     func setThumbSize(_ value: Double) {
@@ -1241,6 +1289,8 @@ final class Library {
         }
         migrateInstagramPersonFolders()   // reshape before indexing so the index is current
         restorePersonFolderCovers()       // re-seed person-folder thumbnails lost to the first migration
+        BackgroundDownloader.shared.activate()   // reconnect to the background session
+        processPendingTikTok()            // file anything that finished while we were closed
         buildIndex()
     }
 
@@ -1255,6 +1305,8 @@ final class Library {
         rootName = url.lastPathComponent
         migrateInstagramPersonFolders()   // reshape before indexing so the index is current
         restorePersonFolderCovers()       // re-seed person-folder thumbnails lost to the first migration
+        BackgroundDownloader.shared.activate()   // reconnect to the background session
+        processPendingTikTok()            // file anything that finished while we were closed
         buildIndex()
     }
 
