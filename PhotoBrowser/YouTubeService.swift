@@ -42,42 +42,42 @@ enum YouTubeService {
         return URLSession(configuration: cfg)
     }()
 
-    // MARK: - Resolve (Piped)
+    private struct VStream: Sendable { let url: String; let height: Int; let codec: String; let videoOnly: Bool }
+    private struct AStream: Sendable { let url: String; let bitrate: Int; let codec: String }
+
+    // MARK: - Resolve (Piped, then Invidious; live instance lists)
 
     /// Resolves the best stream set for `url`, preferring renditions no taller than `maxHeight`.
+    /// Tries Piped first (its URLs are proxied, so they download from any IP), then Invidious with
+    /// `local=true` (also proxied). Both instance lists are fetched live so dead hosts don't matter.
     nonisolated static func resolve(url: String, maxHeight: Int) async -> Resolved? {
         guard let id = videoID(from: url) else { return nil }
-        var data: Data?
-        for base in instances {
-            if let d = await get("\(base)/streams/\(id)") { data = d; break }
-        }
-        guard let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        if let r = await race(await pipedBases(), make: { "\($0)/streams/\(id)" },
+                              parse: { parsePiped($0, maxHeight: maxHeight) }) { return r }
+        return await race(await invidiousBases(), make: { "\($0)/api/v1/videos/\(id)?local=true" },
+                          parse: { parseInvidious($0, maxHeight: maxHeight) })
+    }
 
-        let title = (json["title"] as? String) ?? "YouTube video"
-        let description = stripHTML((json["description"] as? String) ?? "")
-        let date = parseDate(uploadedMs: json["uploaded"], uploadDate: json["uploadDate"] as? String)
+    /// Hits every candidate instance concurrently and returns the first that resolves (cancelling
+    /// the rest), so one slow/dead host can't stall the whole thing.
+    nonisolated private static func race(_ bases: [String], make: @escaping @Sendable (String) -> String,
+                                         parse: @escaping @Sendable (Data) -> Resolved?) async -> Resolved? {
+        await withTaskGroup(of: Resolved?.self) { group in
+            for base in bases { group.addTask { (await get(make(base))).flatMap(parse) } }
+            for await r in group where r != nil { group.cancelAll(); return r }
+            return nil
+        }
+    }
 
-        let vstreams = (json["videoStreams"] as? [[String: Any]]) ?? []
-        let astreams = (json["audioStreams"] as? [[String: Any]]) ?? []
-        struct V { let url: String; let height: Int; let codec: String; let videoOnly: Bool }
-        let videos: [V] = vstreams.compactMap { s in
-            guard let u = s["url"] as? String, !u.isEmpty else { return nil }
-            let h = (s["height"] as? Int).flatMap { $0 > 0 ? $0 : nil } ?? heightFromQuality(s["quality"] as? String)
-            let codec = ((s["codec"] as? String) ?? (s["format"] as? String) ?? "").lowercased()
-            return V(url: u, height: h, codec: codec, videoOnly: (s["videoOnly"] as? Bool) ?? true)
-        }
-        struct A { let url: String; let bitrate: Int; let codec: String }
-        let audios: [A] = astreams.compactMap { s in
-            guard let u = s["url"] as? String, !u.isEmpty else { return nil }
-            return A(url: u, bitrate: (s["bitrate"] as? Int) ?? 0, codec: ((s["codec"] as? String) ?? (s["mimeType"] as? String) ?? "").lowercased())
-        }
+    /// Best stream set from candidate video/audio lists: prefer the tallest transcodable rendition
+    /// when FFmpegKit is present, else the best H.264 video-only + audio, else a progressive stream.
+    nonisolated private static func select(videos: [VStream], audios: [AStream], maxHeight: Int,
+                                           title: String, description: String, date: Date) -> Resolved? {
         let isAVC: (String) -> Bool = { $0.hasPrefix("avc") || $0.contains("avc1") || $0.contains("h264") }
         let bestAudio = audios.filter { $0.codec.contains("mp4a") || $0.codec.contains("aac") }.max { $0.bitrate < $1.bitrate }
             ?? audios.max { $0.bitrate < $1.bitrate }
-
         let compat = videos.filter { $0.videoOnly && isAVC($0.codec) && $0.height <= maxHeight }.max { $0.height < $1.height }
 
-        // With a transcoder, take the tallest rendition of any codec (VP9/AV1 → HEVC).
         if VideoTranscoder.isAvailable, let audio = bestAudio {
             let anyVO = videos.filter { $0.videoOnly && $0.height <= maxHeight }.max { $0.height < $1.height }
             if let anyVO, anyVO.height > (compat?.height ?? 0) {
@@ -85,17 +85,93 @@ enum YouTubeService {
                                 audioURL: audio.url, transcode: !isAVC(anyVO.codec), quality: "\(anyVO.height)p \(anyVO.codec)")
             }
         }
-        // Best H.264 video-only + audio (AVFoundation mux).
         if let compat, let audio = bestAudio {
             return Resolved(title: title, description: description, date: date, videoURL: compat.url,
                             audioURL: audio.url, transcode: false, quality: "\(compat.height)p avc1")
         }
-        // Progressive single stream (≤720p, already has audio).
         if let prog = videos.filter({ !$0.videoOnly && $0.height <= maxHeight }).max(by: { $0.height < $1.height }) {
             return Resolved(title: title, description: description, date: date, videoURL: prog.url,
                             audioURL: nil, transcode: false, quality: "\(prog.height)p progressive")
         }
         return nil
+    }
+
+    nonisolated private static func parsePiped(_ data: Data, maxHeight: Int) -> Resolved? {
+        guard let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              j["error"] == nil else { return nil }
+        let videos: [VStream] = ((j["videoStreams"] as? [[String: Any]]) ?? []).compactMap { s in
+            guard let u = s["url"] as? String, !u.isEmpty else { return nil }
+            let h = (s["height"] as? Int).flatMap { $0 > 0 ? $0 : nil } ?? heightFromQuality(s["quality"] as? String)
+            return VStream(url: u, height: h, codec: ((s["codec"] as? String) ?? (s["format"] as? String) ?? "").lowercased(),
+                           videoOnly: (s["videoOnly"] as? Bool) ?? true)
+        }
+        let audios: [AStream] = ((j["audioStreams"] as? [[String: Any]]) ?? []).compactMap { s in
+            guard let u = s["url"] as? String, !u.isEmpty else { return nil }
+            return AStream(url: u, bitrate: (s["bitrate"] as? Int) ?? 0,
+                           codec: ((s["codec"] as? String) ?? (s["mimeType"] as? String) ?? "").lowercased())
+        }
+        guard !videos.isEmpty else { return nil }
+        return select(videos: videos, audios: audios, maxHeight: maxHeight,
+                      title: (j["title"] as? String) ?? "YouTube video",
+                      description: stripHTML((j["description"] as? String) ?? ""),
+                      date: parseDate(uploadedMs: j["uploaded"], uploadDate: j["uploadDate"] as? String))
+    }
+
+    nonisolated private static func parseInvidious(_ data: Data, maxHeight: Int) -> Resolved? {
+        guard let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              j["error"] == nil else { return nil }
+        func height(_ s: [String: Any]) -> Int {
+            if let res = s["resolution"] as? String, let h = Int(res.split(separator: "x").last ?? "") { return h }
+            return heightFromQuality(s["qualityLabel"] as? String)
+        }
+        let adaptive = (j["adaptiveFormats"] as? [[String: Any]]) ?? []
+        let videos: [VStream] = adaptive.compactMap { s in
+            guard ((s["type"] as? String) ?? "").hasPrefix("video/"), let u = s["url"] as? String, !u.isEmpty else { return nil }
+            let codec = ((s["encoding"] as? String) ?? (s["type"] as? String) ?? "").lowercased()
+            return VStream(url: u, height: height(s), codec: codec, videoOnly: true)
+        }
+        let audios: [AStream] = adaptive.compactMap { s in
+            guard ((s["type"] as? String) ?? "").hasPrefix("audio/"), let u = s["url"] as? String, !u.isEmpty else { return nil }
+            let br = (s["bitrate"] as? Int) ?? Int((s["bitrate"] as? String) ?? "") ?? 0
+            return AStream(url: u, bitrate: br, codec: ((s["encoding"] as? String) ?? (s["type"] as? String) ?? "").lowercased())
+        }
+        // Progressive (formatStreams) as a fallback.
+        let progressives: [VStream] = ((j["formatStreams"] as? [[String: Any]]) ?? []).compactMap { s in
+            guard let u = s["url"] as? String, !u.isEmpty else { return nil }
+            return VStream(url: u, height: height(s), codec: "avc1", videoOnly: false)
+        }
+        guard !videos.isEmpty || !progressives.isEmpty else { return nil }
+        let pub = (j["published"] as? Int) ?? (j["published"] as? NSNumber)?.intValue
+        return select(videos: videos + progressives, audios: audios, maxHeight: maxHeight,
+                      title: (j["title"] as? String) ?? "YouTube video",
+                      description: stripHTML((j["description"] as? String) ?? ""),
+                      date: (pub.map { Date(timeIntervalSince1970: Double($0)) }) ?? Date())
+    }
+
+    /// Live Piped API hosts (falls back to the hardcoded list if the directory is unreachable).
+    nonisolated private static func pipedBases() async -> [String] {
+        if let d = await get("https://piped-instances.kavin.rocks/"),
+           let arr = try? JSONSerialization.jsonObject(with: d) as? [[String: Any]] {
+            let live = arr.compactMap { $0["api_url"] as? String }.filter { $0.hasPrefix("http") }
+            if !live.isEmpty { return Array(live.prefix(12)) }
+        }
+        return instances
+    }
+
+    /// Live Invidious API hosts that expose the public API (falls back to a small hardcoded set).
+    nonisolated private static func invidiousBases() async -> [String] {
+        let fallback = ["https://invidious.nerdvpn.de", "https://inv.nadeko.net", "https://yewtu.be", "https://invidious.f5.si"]
+        if let d = await get("https://api.invidious.io/instances.json?sort_by=health"),
+           let arr = try? JSONSerialization.jsonObject(with: d) as? [[Any]] {
+            let live = arr.compactMap { el -> String? in
+                guard el.count >= 2, let info = el[1] as? [String: Any],
+                      (info["api"] as? Bool) == true, (info["type"] as? String) == "https",
+                      let uri = info["uri"] as? String else { return nil }
+                return uri
+            }
+            if !live.isEmpty { return Array(live.prefix(8)) }
+        }
+        return fallback
     }
 
     // MARK: - Download + mux
@@ -174,7 +250,7 @@ enum YouTubeService {
         var req = URLRequest(url: url)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.timeoutInterval = 30
+        req.timeoutInterval = 15
         guard let (data, resp) = try? await session.data(for: req),
               (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true else { return nil }
         return data
