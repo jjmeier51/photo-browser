@@ -48,7 +48,7 @@ struct TikTokImportView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Label(remaining > 0 ? "\(remaining) of \(queued) still downloading…" : "All \(queued) downloaded.",
                                   systemImage: remaining > 0 ? "arrow.down.circle" : "checkmark.circle.fill")
-                                .foregroundStyle(remaining > 0 ? .primary : .green)
+                                .foregroundStyle(remaining > 0 ? Color.primary : Color.green)
                             Text("Downloads continue in the background — you can close the app. New videos appear in the folder as they finish.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
