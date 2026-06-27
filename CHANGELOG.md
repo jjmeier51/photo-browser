@@ -4,6 +4,9 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-06-25 (later)
 
+- **Screenshots saved at 2× resolution** — capturing a still from a video now upscales the
+  saved frame to double its dimensions (high-quality Lanczos), preserving HDR. The bulk
+  every-frame export is unchanged.
 - **Caches & labels survive a drive reconnect** — external drives remount under a new
   `…/userfsd/<UUID>/…` path each time they're replugged, which changed every file's absolute
   path and silently invalidated all per-file caches (thumbnails, capture dates, specs,

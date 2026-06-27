@@ -891,7 +891,8 @@ enum FileActions {
     /// 10-bit HDR HEIC when the frame is HDR, otherwise a standard HEIC.
     static func encodeFrame(_ pixelBuffer: CVPixelBuffer,
                             transform: CGAffineTransform,
-                            properties: [String: Any]) -> Data? {
+                            properties: [String: Any],
+                            scale: CGFloat = 1) -> Data? {
         var ci = CIImage(cvImageBuffer: pixelBuffer)
         if !transform.isIdentity {
             // CIImage is Y-up but the video transform is Y-down, so the rotation
@@ -907,9 +908,10 @@ enum FileActions {
             ci = ci.settingProperties(ci.properties.merging(properties) { _, new in new })
         }
 
-        let cs = ci.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+        let cs = ci.colorSpace ?? CGColorSpaceCreateDeviceRGB()    // capture before any rescale
         let name = (cs.name as String?) ?? ""
         let isHDR = name.contains("2100") || name.contains("2020") || name.contains("HLG") || name.contains("PQ")
+        ci = upscaled(ci, by: scale)
 
         var data: Data?
         if isHDR {
@@ -940,13 +942,14 @@ enum FileActions {
                           transform: CGAffineTransform = .identity,
                           properties: [String: Any] = [:],
                           in folder: URL) -> URL? {
-        guard let data = encodeFrame(pixelBuffer, transform: transform, properties: properties) else { return nil }
+        // Save screenshots at 2× the source resolution (high-quality Lanczos upscale).
+        guard let data = encodeFrame(pixelBuffer, transform: transform, properties: properties, scale: 2) else { return nil }
         return writeScreenshot(data, in: folder)
     }
 
     /// CGImage variant — used by the SDR generator fallback.
     static func saveFrame(cgImage: CGImage, properties: [String: Any] = [:], in folder: URL) -> URL? {
-        guard let data = encodeCGImage(cgImage, properties: properties) else { return nil }
+        guard let data = encodeCGImage(cgImage, properties: properties, scale: 2) else { return nil }
         return writeScreenshot(data, in: folder)
     }
 
@@ -1131,16 +1134,30 @@ enum FileActions {
     }
 
     /// Encodes a (upright) CGImage frame to a metadata-embedded HEIC, JPEG fallback.
-    static func encodeCGImage(_ image: CGImage, properties: [String: Any]) -> Data? {
+    static func encodeCGImage(_ image: CGImage, properties: [String: Any], scale: CGFloat = 1) -> Data? {
         var ci = CIImage(cgImage: image)
         if !properties.isEmpty {
             ci = ci.settingProperties(ci.properties.merging(properties) { _, new in new })
         }
+        ci = upscaled(ci, by: scale)
         let cs = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
         if let data = ciContext.heifRepresentation(of: ci, format: .RGBA8, colorSpace: cs, options: [:]) {
             return data
         }
+        if let cg = ciContext.createCGImage(ci, from: ci.extent) {
+            return UIImage(cgImage: cg).jpegData(compressionQuality: 0.95)
+        }
         return UIImage(cgImage: image).jpegData(compressionQuality: 0.95)
+    }
+
+    /// High-quality (Lanczos) rescale of a CIImage by `scale`, preserving its colorspace and
+    /// extent shape. Returns the image unchanged for scale ≤ 1. Used to double saved screenshots.
+    private static func upscaled(_ ci: CIImage, by scale: CGFloat) -> CIImage {
+        guard scale > 1, ci.extent.width > 0, ci.extent.height > 0, ci.extent.isFinite else { return ci }
+        let e = ci.extent
+        return ci.clampedToExtent()
+            .applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1.0])
+            .cropped(to: CGRect(x: e.origin.x * scale, y: e.origin.y * scale, width: e.width * scale, height: e.height * scale))
     }
 
 }
