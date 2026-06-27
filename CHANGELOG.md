@@ -4,6 +4,14 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-06-25 (later)
 
+- **Caches & labels survive a drive reconnect** — external drives remount under a new
+  `…/userfsd/<UUID>/…` path each time they're replugged, which changed every file's absolute
+  path and silently invalidated all per-file caches (thumbnails, capture dates, specs,
+  durations) — the whole library regenerated on every reconnect. Per-file cache keys now drop
+  the volatile mount-UUID segment, so caches persist across reconnects. The same path change
+  also orphaned Favorites / To AI / captions / covers / Instagram·TikTok records / birthdays /
+  likes; those are now re-keyed once when the same drive folder comes back under a new mount.
+
 - **Download YouTube video here** — a folder-menu action that takes a YouTube link (auto-filled
   from the clipboard) and downloads it into the current folder at the highest quality the device
   can assemble. YouTube serves >720p as separate video+audio (DASH), so — like yt-dlp — it

@@ -146,7 +146,7 @@ struct EntryCell: View {
     }()
 
     private static func loadDuration(_ entry: Entry) async -> String? {
-        let key = "\(entry.url.path)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)" as NSString
+        let key = "\(entry.url.stableCacheID)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)" as NSString
         if let cached = durationCache.object(forKey: key) { return cached as String }
         let asset = AVURLAsset(url: entry.url)
         guard let d = try? await asset.load(.duration) else { return nil }

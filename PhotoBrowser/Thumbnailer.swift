@@ -112,7 +112,7 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
     }
 
     private func cacheKey(for entry: Entry) -> String {
-        let raw = "\(entry.url.path)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)"
+        let raw = "\(entry.url.stableCacheID)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)"
         let digest = SHA256.hash(data: Data(raw.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }

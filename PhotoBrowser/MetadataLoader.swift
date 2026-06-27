@@ -44,7 +44,7 @@ enum MetadataLoader {
     }
 
     private static func cacheKey(for entry: Entry) -> NSString {
-        "\(entry.url.path)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)" as NSString
+        "\(entry.url.stableCacheID)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)" as NSString
     }
 
     // MARK: - Persistent capture-date cache
@@ -123,7 +123,7 @@ enum MetadataLoader {
     static func flushOCRStore() { ocrStore.flush() }
 
     private static func storeKey(for entry: Entry) -> String {
-        "\(entry.url.path)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)"
+        "\(entry.url.stableCacheID)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)"
     }
 
     /// Cache-only recognized text for search — nil if the photo hasn't been indexed

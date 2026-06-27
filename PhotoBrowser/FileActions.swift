@@ -988,7 +988,7 @@ enum FileActions {
     static func videoExportKey(for url: URL) -> String {
         let rv = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         let mtime = Int((rv?.contentModificationDate ?? .distantPast).timeIntervalSince1970)
-        return "\(url.path)|\(mtime)|\(rv?.fileSize ?? 0)"
+        return "\(url.stableCacheID)|\(mtime)|\(rv?.fileSize ?? 0)"
     }
 
     /// Exports *every* frame of a video — one HEIC per source frame (60fps → 60/s) —

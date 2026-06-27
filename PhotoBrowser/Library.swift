@@ -1310,6 +1310,7 @@ final class Library {
         if let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
             UserDefaults.standard.set(data, forKey: bookmarkKey)
         }
+        rekeyRootIfRemounted(to: url.path)   // carry labels/captions across a drive reconnect (new mount UUID)
         migrateInstagramPersonFolders()   // reshape before indexing so the index is current
         restorePersonFolderCovers()       // re-seed person-folder thumbnails lost to the first migration
         BackgroundDownloader.shared.activate()   // reconnect to the background session
@@ -1323,14 +1324,33 @@ final class Library {
         guard let url = try? URL(resolvingBookmarkData: data, options: [],
                                  relativeTo: nil, bookmarkDataIsStale: &stale) else { return }
         _ = url.startAccessingSecurityScopedResource()
+        if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+            UserDefaults.standard.set(fresh, forKey: bookmarkKey)   // refresh the bookmark after a remount
+        }
         activeRoot = url
         rootURL = url
         rootName = url.lastPathComponent
+        rekeyRootIfRemounted(to: url.path)   // carry labels/captions across a drive reconnect (new mount UUID)
         migrateInstagramPersonFolders()   // reshape before indexing so the index is current
         restorePersonFolderCovers()       // re-seed person-folder thumbnails lost to the first migration
         BackgroundDownloader.shared.activate()   // reconnect to the background session
         processPendingTikTok()            // file anything that finished while we were closed
         buildIndex()
+    }
+
+    /// When an external drive is replugged it remounts under a new `…/userfsd/<UUID>/…` path, so
+    /// every absolute-path key (Favorites, To AI, captions, folder covers, Instagram/TikTok records,
+    /// birthdays, likes, …) would silently orphan. Detect a remount of the *same* drive folder —
+    /// identical drive-relative path, different mount UUID — and re-key all of that data from the
+    /// old root prefix to the new one, once. A genuinely different folder is left untouched.
+    func rekeyRootIfRemounted(to newRoot: String) {
+        let key = "photoBrowser.lastRootPath"
+        let oldRoot = UserDefaults.standard.string(forKey: key)
+        UserDefaults.standard.set(newRoot, forKey: key)
+        guard let oldRoot, oldRoot != newRoot,
+              URL(fileURLWithPath: oldRoot).stableCacheID == URL(fileURLWithPath: newRoot).stableCacheID
+        else { return }
+        applyRemap { p in (p == oldRoot || p.hasPrefix(oldRoot + "/")) ? newRoot + p.dropFirst(oldRoot.count) : p }
     }
 
     func goHome() { path.removeAll() }

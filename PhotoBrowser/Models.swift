@@ -43,6 +43,22 @@ struct Entry: Identifiable, Hashable, Sendable {
     }
 }
 
+extension URL {
+    /// A per-file identity that survives external-drive reconnects. External volumes mount under
+    /// `…/com.apple.filesystems.userfsd/<UUID>/…`, and that `<UUID>` changes every time the drive is
+    /// replugged — so the absolute path changes and every cache keyed on it (thumbnails, capture
+    /// dates, media specs, durations) misses, regenerating the whole library on each reconnect.
+    /// Dropping the mount-UUID segment yields a stable, drive-relative key. Non-external paths
+    /// (no marker) fall through to the full path unchanged.
+    var stableCacheID: String {
+        let p = path
+        guard let r = p.range(of: "/com.apple.filesystems.userfsd/") else { return p }
+        let after = p[r.upperBound...]                          // "<UUID>/rest…"
+        guard let slash = after.firstIndex(of: "/") else { return String(after) }
+        return String(after[after.index(after: slash)...])      // "rest…" (drive-relative)
+    }
+}
+
 /// Content-type filter for the folder view.
 enum TypeFilter: String, CaseIterable, Identifiable {
     case all        = "All"
