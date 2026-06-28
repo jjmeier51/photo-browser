@@ -1487,6 +1487,25 @@ final class Library {
 
     // MARK: - Listing a single directory (non-recursive, off the main thread)
 
+    /// Just the immediate **subfolders** of `folder`, A–Z — for the Move/Copy/Cover pickers.
+    /// Reuses an already-loaded full listing when we have one; otherwise it enumerates with the
+    /// directory flag prefetched and *skips statting files entirely* (size/date/type), which is
+    /// the slow part on an external drive — so the picker shows folder names near-instantly.
+    func subfolders(of folder: URL) async -> [Entry] {
+        if let cached = cachedListing(of: folder) { return cached.filter(\.isFolder) }
+        return await Self.scanSubfolders(of: folder)
+    }
+
+    nonisolated static func scanSubfolders(of folder: URL) async -> [Entry] {
+        await Task.detached(priority: .userInitiated) {
+            let urls = (try? FileManager.default.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+            return urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
+                .map { Entry(url: $0, name: $0.lastPathComponent, kind: .folder, size: 0, modified: .distantPast) }
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }.value
+    }
+
     nonisolated func listing(of folder: URL, sort: SortKey) async -> [Entry] {
         // Enumerate names only (fast), then read each file's size/date/type concurrently.
         // On a slow external/file-provider drive each stat blocks, so overlapping them is

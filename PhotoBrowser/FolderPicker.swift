@@ -64,7 +64,7 @@ struct FolderPicker: View {
                 }
             }
             .task(id: current) {
-                folders = await library.listing(of: current, sort: .nameAsc).filter { $0.isFolder }
+                folders = await library.subfolders(of: current)
             }
         }
     }
