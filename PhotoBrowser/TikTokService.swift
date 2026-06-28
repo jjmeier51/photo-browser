@@ -8,6 +8,7 @@ struct TTFolderInfo: Codable, Sendable {
     var lastUpdated: Double           // unix time of the last successful run
     var downloaded: [String]          // video ids already pulled (dedup)
     var videos: Int
+    var newestDate: Double?           // post date of the newest video seen — the incremental cutoff
 }
 
 /// Resolves a whole TikTok profile's own videos — like ssstik/snaptik, but for the entire
@@ -49,13 +50,14 @@ enum TikTokService {
     /// profile. `onAvatar` fires once with the profile picture. Honors task cancellation, so it
     /// stops cleanly when its background-task window expires.
     nonisolated static func enumerateStreaming(
-        username: String, alreadyDownloaded: Set<String>,
+        username: String, alreadyDownloaded: Set<String>, since: Date? = nil,
         onAvatar: @escaping @Sendable (Data) -> Void,
         onResolved: @escaping @Sendable (ResolvedVideo) -> Void,
         progress: @escaping @Sendable (Progress) -> Void
-    ) async -> (authorId: String, nickname: String, totalFound: Int, resolved: Int, allStats: [String: Int], note: String?) {
-        progress(Progress(phase: "Finding @\(username)’s videos…", fraction: 0, done: 0, total: 0))
-        let listing = await listAllVideos(username: username, progress: progress)
+    ) async -> (authorId: String, nickname: String, totalFound: Int, resolved: Int, allStats: [String: Int], newest: Double, note: String?) {
+        progress(Progress(phase: since == nil ? "Finding @\(username)’s videos…" : "Checking @\(username) for new videos…",
+                          fraction: 0, done: 0, total: 0))
+        let listing = await listAllVideos(username: username, since: since, progress: progress)
         if !listing.avatar.isEmpty, let data = await downloadData(absolute(listing.avatar)) { onAvatar(data) }
 
         // Like counts for *every* listed video (id → likes) — lets the caller refresh the
@@ -66,9 +68,9 @@ enum TikTokService {
         let pending = listing.videos.filter { !alreadyDownloaded.contains($0.id) }
         guard !pending.isEmpty else {
             let note = listing.videos.isEmpty
-                ? "Couldn’t find any videos — TikTok or the resolver may be blocking, or the handle is wrong."
+                ? (since != nil ? "No new videos." : "Couldn’t find any videos — TikTok or the resolver may be blocking, or the handle is wrong.")
                 : "No new videos."
-            return (listing.authorId, listing.nickname, listing.videos.count, 0, allStats, note)
+            return (listing.authorId, listing.nickname, listing.videos.count, 0, allStats, listing.newest, note)
         }
 
         var resolved = 0
@@ -85,18 +87,20 @@ enum TikTokService {
             onResolved(ResolvedVideo(id: v.id, url: absolute(best), createTime: v.createTime, desc: v.desc, likes: v.likes))
             resolved += 1
         }
-        return (listing.authorId, listing.nickname, listing.videos.count, resolved, allStats,
+        return (listing.authorId, listing.nickname, listing.videos.count, resolved, allStats, listing.newest,
                 resolved == 0 ? "Couldn’t resolve any download links (the resolver may be rate-limiting — try again)." : nil)
     }
 
     // MARK: - Listing (tikwm user/posts, paginated)
 
-    nonisolated private static func listAllVideos(username: String, progress: @escaping @Sendable (Progress) -> Void)
-        async -> (videos: [Video], avatar: String, authorId: String, nickname: String) {
+    nonisolated private static func listAllVideos(username: String, since: Date?, progress: @escaping @Sendable (Progress) -> Void)
+        async -> (videos: [Video], avatar: String, authorId: String, nickname: String, newest: Double) {
         var all: [Video] = []
         var seen = Set<String>()
         var avatar = "", authorId = "", nickname = ""
+        var newest: Double = 0
         var cursor = "0"
+        let cutoff = since?.timeIntervalSince1970 ?? 0
         for _ in 0..<60 {     // safety cap: 60 pages × 35 ≈ 2100 videos
             guard let data = await apiGet("/api/user/posts",
                                           query: ["unique_id": username, "count": "35", "cursor": cursor, "hd": "1"]),
@@ -104,29 +108,37 @@ enum TikTokService {
                   intValue(json["code"]) == 0,
                   let d = json["data"] as? [String: Any] else { break }
             let vids = (d["videos"] as? [[String: Any]]) ?? []
+            var reachedOld = false
             for v in vids {
-                guard let id = idString(v["video_id"]) ?? idString(v["aweme_id"]) ?? idString(v["id"]),
-                      seen.insert(id).inserted else { continue }
-                let hd = (v["hdplay"] as? String) ?? ""
-                let sd = (v["play"] as? String) ?? (v["wmplay"] as? String) ?? ""
-                guard !(hd.isEmpty && sd.isEmpty) else { continue }
-                let ct = Date(timeIntervalSince1970: Double(intValue(v["create_time"]) ?? 0))
-                let likes = intValue(v["digg_count"]) ?? 0          // tikwm: likes (hearts)
-                all.append(Video(id: id, hd: hd, sd: sd, createTime: ct, desc: (v["title"] as? String) ?? "", likes: likes))
+                guard let id = idString(v["video_id"]) ?? idString(v["aweme_id"]) ?? idString(v["id"]) else { continue }
                 if let author = v["author"] as? [String: Any] {
                     if avatar.isEmpty { avatar = (author["avatar"] as? String) ?? "" }
                     if authorId.isEmpty { authorId = idString(author["id"]) ?? "" }
                     if nickname.isEmpty { nickname = (author["nickname"] as? String) ?? "" }
                 }
+                let ctSecs = Double(intValue(v["create_time"]) ?? 0)
+                newest = max(newest, ctSecs)
+                // Posts come newest-first: once we hit one at/older than the cutoff, stop — the
+                // rest of the profile is older still (incremental "only new videos" check).
+                if cutoff > 0, ctSecs <= cutoff { reachedOld = true; break }
+                guard seen.insert(id).inserted else { continue }
+                let hd = (v["hdplay"] as? String) ?? ""
+                let sd = (v["play"] as? String) ?? (v["wmplay"] as? String) ?? ""
+                guard !(hd.isEmpty && sd.isEmpty) else { continue }
+                let likes = intValue(v["digg_count"]) ?? 0          // tikwm: likes (hearts)
+                all.append(Video(id: id, hd: hd, sd: sd, createTime: Date(timeIntervalSince1970: ctSecs),
+                                 desc: (v["title"] as? String) ?? "", likes: likes))
             }
-            progress(Progress(phase: "Found \(all.count) videos…", fraction: 0, done: 0, total: 0))
+            progress(Progress(phase: cutoff > 0 ? "Found \(all.count) new…" : "Found \(all.count) videos…",
+                              fraction: 0, done: 0, total: 0))
+            if reachedOld { break }
             let hasMore = (d["hasMore"] as? Bool) ?? (intValue(d["hasMore"]) == 1)
             let next = idString(d["cursor"]) ?? ""
             if !hasMore || next.isEmpty || next == cursor { break }
             cursor = next
             try? await Task.sleep(nanoseconds: 1_100_000_000)     // tikwm rate-limits ~1 req/sec
         }
-        return (all, avatar, authorId, nickname)
+        return (all, avatar, authorId, nickname, newest)
     }
 
     /// The HD (watermark-free) URL for a single video, via the resolver's single-video endpoint.

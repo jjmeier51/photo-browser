@@ -95,6 +95,9 @@ struct TikTokImportView: View {
         let parent = targetFolder
         let prior = library.tiktokInfo(for: dest)
         let already = Set(prior?.downloaded ?? [])
+        // Already downloaded this profile? Only check for videos newer than the most recent one
+        // we have — the resolver stops paging once it reaches older posts.
+        let since = prior?.newestDate.map { Date(timeIntervalSince1970: $0) }
         batchToken += 1                                          // start the monitor loop
 
         // A background-task window so link resolution keeps going for a few minutes after the app
@@ -104,7 +107,7 @@ struct TikTokImportView: View {
         Task {
             let destPath = dest.path
             let result = await TikTokService.enumerateStreaming(
-                username: user, alreadyDownloaded: already,
+                username: user, alreadyDownloaded: already, since: since,
                 onAvatar: { data in
                     Task { @MainActor in
                         guard let img = UIImage(data: data) else { return }
@@ -128,7 +131,8 @@ struct TikTokImportView: View {
                             try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
                             let info = TTFolderInfo(handle: user, secUid: prior?.secUid ?? "",
                                                     lastUpdated: Date().timeIntervalSince1970,
-                                                    downloaded: prior?.downloaded ?? [], videos: prior?.videos ?? 0)
+                                                    downloaded: prior?.downloaded ?? [], videos: prior?.videos ?? 0,
+                                                    newestDate: prior?.newestDate)
                             library.setTikTokInfo(info, for: dest)
                             library.setLastTikTokHandle(user, for: parent)
                             library.contentDidChange()           // surface the new @handle bubble
@@ -140,9 +144,11 @@ struct TikTokImportView: View {
 
             // Refresh like counts on already-downloaded videos too (not just the new ones).
             library.applyTikTokLikes(result.allStats, in: dest)
-            // Record the resolved author id (kept for future use) without disturbing counts.
-            if !result.authorId.isEmpty, var info = library.tiktokInfo(for: dest), info.secUid.isEmpty {
-                info.secUid = result.authorId
+            // Record the resolved author id and advance the incremental cutoff to the newest post.
+            if var info = library.tiktokInfo(for: dest) {
+                if info.secUid.isEmpty, !result.authorId.isEmpty { info.secUid = result.authorId }
+                let newest = max(info.newestDate ?? 0, result.newest)
+                if newest > 0 { info.newestDate = newest }
                 library.setTikTokInfo(info, for: dest)
             }
             resolving = false
