@@ -1003,6 +1003,7 @@ enum FileActions {
     /// (skipping frames already on disk). `onProgress` is called off the main thread.
     static func exportAllFrames(of url: URL,
                                 folderName: String,
+                                requestedFPS: Double = 0,
                                 onProgress: @escaping @Sendable (Double) -> Void = { _ in })
     async -> (folder: URL?, count: Int, firstFrame: URL?) {
         let name = folderName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1012,7 +1013,10 @@ enum FileActions {
         let isHDR = ((try? await track.load(.mediaCharacteristics))?.contains(.containsHDRVideo)) ?? false
         let props = await MetadataLoader.exifProperties(forVideo: url)
         let duration = (try? await asset.load(.duration))?.seconds ?? 0
-        let fps = (try? await track.load(.nominalFrameRate)).map(Double.init).flatMap { $0 > 0 ? $0 : nil } ?? 30
+        let nativeFPS = (try? await track.load(.nominalFrameRate)).map(Double.init).flatMap { $0 > 0 ? $0 : nil } ?? 30
+        // Sample at the requested rate (never above native — you can't export more than every
+        // frame); 0 means "every frame".
+        let fps = requestedFPS > 0 ? min(requestedFPS, nativeFPS) : nativeFPS
         // Every frame: one output per source frame (60fps → 60/s). The sequential
         // reader below decodes them in order, so this stays memory-light even for
         // long, high-fps clips. `fps` only sizes `total`/the time grid; the reader

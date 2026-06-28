@@ -60,13 +60,9 @@ struct FolderView: View {
     @State private var moveConflict: MoveConflict?
     struct MoveConflict: Identifiable { let id = UUID(); let dest: URL; let items: [Entry]; var isCopy = false }
     @State private var showCopyPicker = false
-    @State private var exporting = false
-    @State private var exportProgress: Double = 0
     @State private var searchResults: [Entry] = []
     @State private var searching = false
     @State private var exportTarget: Entry?
-    @State private var exportName = ""
-    @State private var showExportPrompt = false
     @State private var showAIOnly = false
     @State private var aiEntries: [Entry] = []
     @State private var labelKind: LabelKind = .all
@@ -598,9 +594,8 @@ struct FolderView: View {
             }
             if entry.kind == .video {
                 Button {
-                    exportTarget = entry
-                    exportName = ""
-                    showExportPrompt = true
+                    let e = entry
+                    DispatchQueue.main.async { exportTarget = e }   // defer so the menu dismissal doesn't swallow the sheet
                 } label: {
                     Label("Export all frames", systemImage: "square.stack.3d.down.right")
                 }
@@ -747,12 +742,8 @@ struct FolderView: View {
             } message: {
                 Text("Finds items in this folder that are still in your iPhone Photos (exact matches) and removes the iPhone copies — the drive copies stay. iOS will ask you to confirm the deletion.")
             }
-            .alert("Export All Frames", isPresented: $showExportPrompt) {
-                TextField("Folder name", text: $exportName)
-                Button("Export") { if let t = exportTarget { exportFrames(t, name: exportName) } }
-                Button("Cancel", role: .cancel) { exportTarget = nil }
-            } message: {
-                Text("Saves every frame into a new folder beside the video. Leave blank to use the video’s name.")
+            .sheet(item: $exportTarget) { e in
+                ExportFramesSheet(entry: e) { name, fps in library.startFrameExport(of: e, name: name, fps: fps) }
             }
             .alert("Rename Folder",
                    isPresented: Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })) {
@@ -841,7 +832,6 @@ struct FolderView: View {
                     .padding(.leading, 16).padding(.bottom, 16)
                 }
             }
-            .overlay { if exporting { exportingOverlay } }
             .overlay { if editProcessing { editingOverlay } }
             .overlay { if makingLive { makingLiveOverlay } }
             .overlay { if importing { importingOverlay } }
@@ -1098,22 +1088,6 @@ struct FolderView: View {
         )
     }
 
-    @ViewBuilder private var exportingOverlay: some View {
-        VStack(spacing: 12) {
-            Text("Exporting frames…").font(.subheadline.weight(.medium))
-            ProgressView(value: exportProgress)
-                .progressViewStyle(.linear)
-                .frame(width: 220)
-            Text("\(Int(exportProgress * 100))%")
-                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            Text("You can leave this screen — it keeps going in the background.")
-                .font(.caption2).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .padding(24)
-        .frame(maxWidth: 280)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-    }
 
     @ViewBuilder private var emptyOverlay: some View {
         if filtered.isEmpty {
@@ -1990,33 +1964,6 @@ struct FolderView: View {
             if !skip.isEmpty { msg += " Skipped \(skip.count) duplicate name(s)." }
             resultMessage = msg
             if dest.standardizedFileURL == url.standardizedFileURL { await reload() }
-        }
-    }
-
-    private func exportFrames(_ entry: Entry, name: String) {
-        exporting = true
-        exportProgress = 0
-        let bg = BackgroundTaskHolder()
-        bg.begin(name: "Export All Frames")   // keep running if the app is backgrounded
-        Task {
-            let (folder, count, firstFrame) = await FileActions.exportAllFrames(of: entry.url, folderName: name) { p in
-                Task { @MainActor in exportProgress = p }
-            }
-            exporting = false
-            bg.end()
-            // Remember it as a frames folder (enables "Start Clean Up") and seed its
-            // cover with the first frame.
-            if count > 0, let folder {
-                library.markFramesFolder(folder)
-                if let firstFrame, let cover = UIImage(contentsOfFile: firstFrame.path) {
-                    library.setCover(cover, for: folder)
-                }
-            }
-            let frameWord = count == 1 ? "frame" : "frames"
-            resultMessage = count > 0
-                ? "Exported \(count) \(frameWord) to “\(folder?.lastPathComponent ?? "Frames")”."
-                : "Couldn’t export frames."
-            await reload()
         }
     }
 

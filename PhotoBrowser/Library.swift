@@ -533,6 +533,42 @@ final class Library {
     }
     func isFramesFolder(_ url: URL) -> Bool { framesFolders.contains(url.path) }
 
+    // MARK: - Frame export (app-wide, so it keeps running while you browse other folders)
+
+    var frameExportRunning = false
+    var frameExportProgress: Double = 0
+    var frameExportLabel = ""
+    var frameExportResult: String?          // completion message → shown as a popup, cleared on dismiss
+    @ObservationIgnored private var frameExportTask: Task<Void, Never>?
+
+    /// Exports every (or every Nth) frame of `entry` into a folder beside it, app-wide so the user
+    /// can navigate to other folders / view media while it runs. Progress + a completion popup are
+    /// surfaced globally (see ContentView). `fps` of 0 means every frame.
+    func startFrameExport(of entry: Entry, name: String, fps: Double) {
+        guard !frameExportRunning else { return }     // one export at a time
+        frameExportRunning = true
+        frameExportProgress = 0
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        frameExportLabel = trimmed.isEmpty ? (entry.url.deletingPathExtension().lastPathComponent + " Frames") : trimmed
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Export All Frames")
+        frameExportTask = Task {
+            let (folder, count, firstFrame) = await FileActions.exportAllFrames(
+                of: entry.url, folderName: name, requestedFPS: fps) { p in
+                Task { @MainActor in self.frameExportProgress = p }
+            }
+            if count > 0, let folder {
+                markFramesFolder(folder)
+                if let firstFrame, let cover = UIImage(contentsOfFile: firstFrame.path) { setCover(cover, for: folder) }
+            }
+            frameExportResult = count > 0
+                ? "Exported \(count) frame\(count == 1 ? "" : "s") to “\(folder?.lastPathComponent ?? "Frames")”."
+                : "Couldn’t export frames."
+            frameExportRunning = false
+            contentDidChange()
+            bg.end()
+        }
+    }
+
     /// Clean-up review state per folder: the set of item paths already decided on
     /// (kept or deleted). The queue on (re-)open is simply "viewable items not in
     /// this set", so it resumes correctly every run regardless of order.
