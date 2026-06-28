@@ -1816,9 +1816,12 @@ struct FolderView: View {
 
     private func reload() async {
         // Paint a cached listing instantly so re-opening a folder is snappy; we still
-        // re-read from disk below and update if anything changed.
+        // re-read from disk below and update if anything changed. On a cold launch the root
+        // falls back to a persisted snapshot so the homepage appears immediately.
         if let cached = library.cachedListing(of: url), !cached.isEmpty {
             entries = cached; liveImageURLs = Self.detectLivePairs(in: cached); loaded = true
+        } else if isRoot, let saved = library.persistedRootListing(), !saved.isEmpty {
+            entries = saved; liveImageURLs = Self.detectLivePairs(in: saved); loaded = true
         } else {
             loaded = false
         }

@@ -2,7 +2,7 @@ import Foundation
 import UniformTypeIdentifiers
 
 /// What a directory entry is. `other` covers anything not specifically handled.
-enum FileKind: String, Sendable {
+enum FileKind: String, Sendable, Codable {
     case folder, image, video, pdf, other
 
     var sortRank: Int {
@@ -27,7 +27,7 @@ enum FileKind: String, Sendable {
 }
 
 /// One item in a folder — a subfolder or a file.
-struct Entry: Identifiable, Hashable, Sendable {
+struct Entry: Identifiable, Hashable, Sendable, Codable {
     let url: URL
     let name: String
     let kind: FileKind

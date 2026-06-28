@@ -80,6 +80,37 @@ final class Library {
         if listingCache[folder.path] == nil { listingOrder.append(folder.path) }
         listingCache[folder.path] = entries
         while listingOrder.count > 60 { listingCache.removeValue(forKey: listingOrder.removeFirst()) }
+        if folder.path == (activeRoot?.path ?? rootURL?.path) { persistRootListing(entries) }   // homepage
+    }
+
+    /// Persisted snapshot of the **root** listing, so a cold launch paints the homepage instantly
+    /// (then refreshes from disk). Keyed by the drive-relative root so a reconnect still matches.
+    private struct RootListing: Codable { let rootStable: String; let rootPath: String; let entries: [Entry] }
+    @ObservationIgnored private lazy var rootListingFile: URL = {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("rootListing.json")
+    }()
+    private func persistRootListing(_ entries: [Entry]) {
+        guard let root = (activeRoot ?? rootURL) else { return }
+        let snapshot = RootListing(rootStable: root.stableCacheID, rootPath: root.path, entries: entries)
+        Task.detached(priority: .utility) { [file = rootListingFile] in
+            if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: file) }
+        }
+    }
+    func persistedRootListing() -> [Entry]? {
+        guard let root = (activeRoot ?? rootURL),
+              let data = try? Data(contentsOf: rootListingFile),
+              let snapshot = try? JSONDecoder().decode(RootListing.self, from: data),
+              snapshot.rootStable == root.stableCacheID else { return nil }
+        if snapshot.rootPath == root.path { return snapshot.entries }
+        // Reconnected under a new mount path — remap the entries onto the current root.
+        let old = snapshot.rootPath, new = root.path
+        return snapshot.entries.map { e in
+            let p = e.url.path
+            guard p.hasPrefix(old) else { return e }
+            return Entry(url: URL(fileURLWithPath: new + p.dropFirst(old.count)),
+                         name: e.name, kind: e.kind, size: e.size, modified: e.modified)
+        }
     }
 
     /// The last folder a Move/Copy sent items to, so the picker can default there.
@@ -1251,6 +1282,17 @@ final class Library {
 
     // MARK: - Full index (fast search / Library)
 
+    /// Defers the whole-drive index build (used by search / Library) a moment so it doesn't
+    /// contend for drive I/O with the homepage's first listing + thumbnail prefetch on launch.
+    func scheduleIndexBuild() {
+        guard rootURL != nil else { return }
+        indexing = true                 // show index-dependent views a loading state during the wait
+        Task {
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            buildIndex()
+        }
+    }
+
     func buildIndex() {
         guard let root = rootURL else { return }
         indexing = true
@@ -1351,7 +1393,7 @@ final class Library {
         restorePersonFolderCovers()       // re-seed person-folder thumbnails lost to the first migration
         BackgroundDownloader.shared.activate()   // reconnect to the background session
         processPendingTikTok()            // file anything that finished while we were closed
-        buildIndex()
+        scheduleIndexBuild()
     }
 
     func restoreLastFolder() {
@@ -1371,7 +1413,7 @@ final class Library {
         restorePersonFolderCovers()       // re-seed person-folder thumbnails lost to the first migration
         BackgroundDownloader.shared.activate()   // reconnect to the background session
         processPendingTikTok()            // file anything that finished while we were closed
-        buildIndex()
+        scheduleIndexBuild()
     }
 
     /// When an external drive is replugged it remounts under a new `…/userfsd/<UUID>/…` path, so
