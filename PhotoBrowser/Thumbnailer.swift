@@ -1,6 +1,5 @@
 import UIKit
 import ImageIO
-import AVFoundation
 import QuickLookThumbnailing
 import CryptoKit
 
@@ -8,11 +7,11 @@ import CryptoKit
 /// de-duplication of concurrent requests, so scrolling big folders stays fast and never
 /// does the same work twice.
 ///
-/// **Generators are chosen for speed:** photos use **ImageIO** (`CGImageSourceCreateThumbnail…`)
-/// and videos use **AVAssetImageGenerator** — both run in-process. QuickLook is reserved for
-/// PDFs / other types. The old all-QuickLook path routed *every* tile through an out-of-process
-/// XPC service, which is fine for a handful but crawls across the thousands of items in a big
-/// folder; the in-process generators are dramatically faster for bulk thumbnailing.
+/// **Photos use ImageIO** (`CGImageSourceCreateThumbnailAtIndex`), which is in-process and far
+/// faster than QuickLook for bulk thumbnailing. **Videos and everything else use QuickLook** —
+/// it's the robust, well-optimized path for posters (AVAssetImageGenerator is slow per-asset,
+/// especially for non-faststart files). Results are cached to disk so re-opening a folder is
+/// instant.
 ///
 /// `nonisolated` matters: under the project's default-MainActor isolation an unmarked class is
 /// MainActor-bound, which silently moved the disk-cache reads, JPEG decode/encode and cache
@@ -38,16 +37,13 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
 
     /// Warms the cache for a folder's items ahead of scroll, so tiles pop in instead of
     /// generating on demand. Fire-and-forget, bounded to the core count, off the main thread;
-    /// in-flight de-duplication means a tile that scrolls into view reuses this work rather
-    /// than starting its own. The cache key ignores the requested size, so prefetching at the
-    /// grid size also satisfies larger requests.
+    /// in-flight de-duplication means a tile that scrolls into view reuses this work rather than
+    /// starting its own. The cache key ignores the requested size, so prefetching at the grid
+    /// size also satisfies larger requests. Scales to the whole folder (no fixed cap).
     func prefetch(_ entries: [Entry], size: CGSize, scale: CGFloat) {
         let batch = entries.filter { $0.kind == .image || $0.kind == .video || $0.kind == .pdf }
         guard !batch.isEmpty else { return }
-        // Scales to the whole folder (no fixed cap); concurrency is bounded to the core count so it
-        // warms aggressively without flooding the decoders. Cached + in-flight de-duped, so it's
-        // cheap and never repeats work a visible tile already did.
-        Task.detached(priority: .background) { [weak self] in
+        Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
             await withTaskGroup(of: Void.self) { group in
                 var idx = 0
@@ -55,8 +51,7 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
                 func next() {
                     guard idx < batch.count else { return }
                     let e = batch[idx]; idx += 1
-                    // Prefetch is .background so it yields to the tiles you're actually looking at.
-                    group.addTask { _ = await self.thumbnail(for: e, size: size, scale: scale, priority: .background) }
+                    group.addTask { _ = await self.thumbnail(for: e, size: size, scale: scale) }
                 }
                 for _ in 0..<min(maxConcurrent, batch.count) { next() }
                 while await group.next() != nil { next() }
@@ -64,7 +59,7 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         }
     }
 
-    func thumbnail(for entry: Entry, size: CGSize, scale: CGFloat, priority: TaskPriority = .utility) async -> UIImage? {
+    func thumbnail(for entry: Entry, size: CGSize, scale: CGFloat) async -> UIImage? {
         let key = cacheKey(for: entry)
         if let cached = memory.object(forKey: key as NSString) { return cached }
 
@@ -75,8 +70,8 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
             task = existing
         } else {
             let kind = entry.kind
-            task = Task.detached(priority: priority) { [weak self] in
-                await self?.produce(key: key, url: entry.url, kind: kind, size: size, scale: scale, priority: priority) ?? nil
+            task = Task.detached(priority: .utility) { [weak self] in
+                await self?.produce(key: key, url: entry.url, kind: kind, size: size, scale: scale) ?? nil
             }
             inFlight[key] = task
         }
@@ -87,17 +82,17 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         return image
     }
 
-    private func produce(key: String, url: URL, kind: FileKind, size: CGSize, scale: CGFloat, priority: TaskPriority) async -> UIImage? {
+    private func produce(key: String, url: URL, kind: FileKind, size: CGSize, scale: CGFloat) async -> UIImage? {
         let nsKey = key as NSString
         let diskURL = diskDir.appendingPathComponent(key).appendingPathExtension("jpg")
         if let data = try? Data(contentsOf: diskURL), let raw = UIImage(data: data) {
-            // Force the JPEG decode here, off-main — UIImage(data:) defers it to
-            // first render, which shows up as scroll hitches on the main thread.
+            // Force the JPEG decode here, off-main — UIImage(data:) defers it to first render,
+            // which shows up as scroll hitches on the main thread.
             let img = raw.preparingForDisplay() ?? raw
             memory.setObject(img, forKey: nsKey, cost: cost(of: img))
             return img
         }
-        guard let img = await generate(url: url, kind: kind, size: size, scale: scale, priority: priority) else { return nil }
+        guard let img = await generate(url: url, kind: kind, size: size, scale: scale) else { return nil }
         memory.setObject(img, forKey: nsKey, cost: cost(of: img))
         if let data = img.jpegData(compressionQuality: 0.8) {
             try? data.write(to: diskURL, options: .atomic)
@@ -110,37 +105,15 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         Int(image.size.width * image.scale * image.size.height * image.scale) * 4
     }
 
-    private func generate(url: URL, kind: FileKind, size: CGSize, scale: CGFloat, priority: TaskPriority) async -> UIImage? {
-        let maxPixel = max(size.width, size.height) * scale
-        // Try the fast in-process generator, but time-boxed so a slow/hanging file can't leave the
-        // tile blank — we always fall back to QuickLook (which handles any type robustly).
-        if kind == .image || kind == .video {
-            let fast = await race(seconds: 5, priority: priority) {
-                kind == .image ? self.imageThumbnail(url: url, maxPixel: maxPixel)
-                               : await self.videoThumbnail(url: url, maxPixel: maxPixel)
-            }
-            if let fast { return fast }
+    private func generate(url: URL, kind: FileKind, size: CGSize, scale: CGFloat) async -> UIImage? {
+        if kind == .image {
+            let maxPixel = max(size.width, size.height) * scale
+            if let img = imageThumbnail(url: url, maxPixel: maxPixel) { return img }
         }
-        return await quickLook(url: url, size: size, scale: scale)   // guaranteed fallback (+ PDFs / other)
+        return await quickLook(url: url, size: size, scale: scale)   // videos, PDFs, and image fallback
     }
 
-    /// Runs `op`, returning its result — or nil if it doesn't finish within `seconds`. Unlike a
-    /// task group (which waits for every child), this resumes on whichever finishes first, so a
-    /// genuinely hung generator can't block the tile; the abandoned work is simply ignored.
-    private func race(seconds: Double, priority: TaskPriority, _ op: @escaping @Sendable () async -> UIImage?) async -> UIImage? {
-        final class Once: @unchecked Sendable { let lock = NSLock(); var done = false
-            func claim() -> Bool { lock.lock(); defer { lock.unlock() }; if done { return false }; done = true; return true } }
-        let once = Once()
-        return await withCheckedContinuation { (cont: CheckedContinuation<UIImage?, Never>) in
-            Task.detached(priority: priority) { let r = await op(); if once.claim() { cont.resume(returning: r) } }
-            Task.detached(priority: .background) {
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                if once.claim() { cont.resume(returning: nil) }
-            }
-        }
-    }
-
-    /// Fast in-process photo thumbnail via ImageIO (honors EXIF orientation, decodes immediately).
+    /// Fast in-process photo thumbnail via ImageIO (honors EXIF orientation, decoded immediately).
     private func imageThumbnail(url: URL, maxPixel: CGFloat) -> UIImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let opts: [CFString: Any] = [
@@ -151,19 +124,6 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
         return UIImage(cgImage: cg)
-    }
-
-    /// Fast in-process video poster via AVAssetImageGenerator (nearest keyframe, oriented).
-    private func videoThumbnail(url: URL, maxPixel: CGFloat) async -> UIImage? {
-        let gen = AVAssetImageGenerator(asset: AVURLAsset(url: url))
-        gen.appliesPreferredTrackTransform = true
-        gen.maximumSize = CGSize(width: maxPixel, height: maxPixel)
-        gen.requestedTimeToleranceBefore = .positiveInfinity     // any nearby frame → no precise seek
-        gen.requestedTimeToleranceAfter = .positiveInfinity
-        for t in [CMTime(seconds: 0.3, preferredTimescale: 600), .zero] {
-            if let result = try? await gen.image(at: t) { return UIImage(cgImage: result.image) }
-        }
-        return nil
     }
 
     private func quickLook(url: URL, size: CGSize, scale: CGFloat) async -> UIImage? {
