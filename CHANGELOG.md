@@ -2,6 +2,24 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-06-26 — performance pass
+
+- **Navy→black background** replaces the orange gradient app-wide.
+- **Faster homepage** — the root listing is persisted and painted instantly on cold launch
+  (then refreshed), and the whole-drive search index now builds ~1.8s later so it doesn't
+  fight the homepage for SSD I/O on launch.
+- **Faster Move/Copy/Use-As-Album-Cover pickers** — they now list immediate subfolders via a
+  lightweight scan (no statting every media file) and reuse cached listings.
+- **Export All Frames** — now app-wide: keeps running while you browse other folders and view
+  media, with a non-blocking progress pill and a completion popup. New FPS picker (every frame
+  / half / quarter). (Frame decode/encode itself is still sequential.)
+- **TikTok "Get New" is incremental** — for an already-downloaded profile it only checks for
+  videos newer than the most recent one you have (stops paging at the cutoff).
+- **Instagram "Get All New Stories"** — sweeps profiles concurrently (bounded), skips redundant
+  profile-pic fetches, and adds opt-in "upscale videos to 1080p" / "double photo resolution"
+  passes (dates preserved; videos keep HDR).
+- **Caches survive reconnects** (already shipped) plus the listing cache above.
+
 ## 2026-06-25 (later)
 
 - **Screenshots saved at 2× resolution** — capturing a still from a video now upscales the
