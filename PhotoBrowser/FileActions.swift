@@ -1157,7 +1157,7 @@ enum FileActions {
     /// High-quality (Lanczos) rescale of a CIImage by `scale`, preserving its colorspace and
     /// extent shape. Returns the image unchanged for scale ≤ 1. Used to double saved screenshots.
     private static func upscaled(_ ci: CIImage, by scale: CGFloat) -> CIImage {
-        guard scale > 1, ci.extent.width > 0, ci.extent.height > 0, ci.extent.isFinite else { return ci }
+        guard scale > 1, ci.extent.width > 0, ci.extent.height > 0, !ci.extent.isInfinite else { return ci }
         let e = ci.extent
         return ci.clampedToExtent()
             .applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1.0])
