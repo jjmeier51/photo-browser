@@ -113,12 +113,13 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         let maxPixel = max(size.width, size.height) * scale
         switch kind {
         case .image:
-            return imageThumbnail(url: url, maxPixel: maxPixel) ?? (await quickLook(url: url, size: size, scale: scale))
+            if let img = imageThumbnail(url: url, maxPixel: maxPixel) { return img }
         case .video:
-            return (await videoThumbnail(url: url, maxPixel: maxPixel)) ?? (await quickLook(url: url, size: size, scale: scale))
+            if let img = await videoThumbnail(url: url, maxPixel: maxPixel) { return img }
         default:
-            return await quickLook(url: url, size: size, scale: scale)
+            break
         }
+        return await quickLook(url: url, size: size, scale: scale)   // fallback (and PDFs / other types)
     }
 
     /// Fast in-process photo thumbnail via ImageIO (honors EXIF orientation, decodes immediately).
