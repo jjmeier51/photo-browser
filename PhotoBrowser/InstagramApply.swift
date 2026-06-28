@@ -60,6 +60,17 @@ enum InstagramApply {
         }
     }
 
+    /// Doubles the pixel dimensions of every downloaded **photo** in place (Lanczos), preserving
+    /// EXIF/capture-date. Reports (done, total). Best-effort.
+    static func upscalePhotos2x(_ files: [String], progress: @escaping (Int, Int) -> Void) async {
+        let photos = files.filter { classify(url: URL(fileURLWithPath: $0), isDirectory: false) == .image }
+        guard !photos.isEmpty else { return }
+        for (i, path) in photos.enumerated() {
+            await Task.detached(priority: .utility) { _ = MediaEditing.upscalePhotoInPlace(url: URL(fileURLWithPath: path), scale: 2) }.value
+            progress(i + 1, photos.count)
+        }
+    }
+
     /// A thumbnail of the first photo/video in `dir` (for a highlight-bubble cover).
     static func firstItemThumbnail(in dir: URL) async -> UIImage? {
         let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []

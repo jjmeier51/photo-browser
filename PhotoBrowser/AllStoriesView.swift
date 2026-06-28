@@ -30,6 +30,17 @@ struct AllStoriesView: View {
     @State private var overallTotal = 0
     @State private var currentFraction = 0.0
     @State private var results: [StorySummary] = []
+    @State private var upscaleVideos = false
+    @State private var upscalePhotos = false
+
+    /// Per-profile network outcome, applied to `Library` on the main actor after the concurrent fetch.
+    private struct ProfileOutcome: Sendable {
+        let url: URL; let info: IGFolderInfo; let userID: String
+        let photos: Int; let videos: Int
+        let captions: [String: String]; let postedBy: [String: String]
+        let newIDs: [String]; let files: [String]; let copied: [String]
+        let picData: Data?
+    }
 
     /// Profile folders this sweep will cover (tracked Instagram folders still on disk).
     private var trackedCount: Int { library.instagramFolders.count }
@@ -91,6 +102,14 @@ struct AllStoriesView: View {
                     }
                 } else {
                     Section {
+                        Toggle("Upscale videos to 1080p", isOn: $upscaleVideos)
+                        Toggle("Double photo resolution (2×)", isOn: $upscalePhotos)
+                    } header: {
+                        Text("Enhance new stories (optional)")
+                    } footer: {
+                        Text("Applied to newly-downloaded stories, in place — capture dates are kept (videos keep HDR; photo HDR gain maps aren’t carried).")
+                    }
+                    Section {
                         Button { start() } label: {
                             Label("Get All New Stories", systemImage: "sparkles.rectangle.stack")
                         }
@@ -138,61 +157,72 @@ struct AllStoriesView: View {
             let bg = BackgroundTaskHolder(); bg.begin(name: "Instagram Stories")
 
             // Snapshot the tracked Instagram folders that still exist on disk, A–Z by handle.
-            let folders: [(url: URL, info: IGFolderInfo)] = library.instagramFolders.compactMap { path, info in
+            // `hasCover` lets us skip the profile-pic refetch on re-runs (one fewer request each).
+            let folders: [(url: URL, info: IGFolderInfo, hasCover: Bool)] = library.instagramFolders.compactMap { path, info in
                 var isDir: ObjCBool = false
                 guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else { return nil }
-                return (url: URL(fileURLWithPath: path), info: info)
+                let url = URL(fileURLWithPath: path)
+                return (url, info, library.coverURL(for: url) != nil)
             }.sorted { $0.info.handle.localizedCaseInsensitiveCompare($1.info.handle) == .orderedAscending }
             overallTotal = folders.count
 
             // Shared temp folder: clear + replace once it ages past 24h, otherwise append.
             let now = Date().timeIntervalSince1970
             let tempFolder = library.prepareTodaysStoriesFolder(root: root)
+            let tempPath = tempFolder.path
 
             var summary: [StorySummary] = []
-            for (i, entry) in folders.enumerated() {
-                statusLine = "@\(entry.info.handle) (\(i + 1) of \(folders.count))…"
-                currentFraction = 0
-                // Older records may predate stored user ids — resolve via the profile.
-                var userID = entry.info.userID
-                if userID.isEmpty {
-                    userID = await InstagramService.fetchProfile(handle: entry.info.handle, creds: creds)?.userID ?? ""
-                }
-                overallDone = i
-                guard !userID.isEmpty else { continue }
+            var newVideoFiles: [String] = []
+            var newPhotoFiles: [String] = []
+            var done = 0
 
-                // Refresh the folder cover to the user's highest-resolution profile photo.
-                if let picData = await InstagramService.fetchProfilePic(
-                    userID: userID, handle: entry.info.handle, creds: creds, fallback: ""),
-                   let img = UIImage(data: picData) {
-                    library.setCover(img, for: entry.url)
+            // Sweep the profiles concurrently (bounded) — each is independent. Kept modest to
+            // avoid tripping Instagram's rate limiting.
+            await withTaskGroup(of: ProfileOutcome?.self) { group in
+                var idx = 0
+                let maxConcurrent = 3
+                func addNext() {
+                    guard idx < folders.count else { return }
+                    let f = folders[idx]; idx += 1
+                    group.addTask { await Self.fetchStories(folder: f, creds: creds, tempPath: tempPath) }
                 }
-
-                let storiesFolder = entry.url.appendingPathComponent("Stories", isDirectory: true)
-                let already = Set(entry.info.downloaded)
-                let r = await InstagramService.runStories(
-                    handle: entry.info.handle, userID: userID, into: storiesFolder,
-                    already: already, creds: creds) { p in
-                        Task { @MainActor in currentFraction = p.fraction }
+                for _ in 0..<min(maxConcurrent, folders.count) { addNext() }
+                while let outcome = await group.next() {
+                    done += 1; overallDone = done
+                    statusLine = "Checked \(done) of \(folders.count)…"
+                    if let o = outcome, o.photos + o.videos > 0 {
+                        if let picData = o.picData, let img = UIImage(data: picData) { library.setCover(img, for: o.url) }
+                        library.setCaptions(o.captions)
+                        library.setPostedBy(o.postedBy)
+                        var updated = o.info
+                        updated.userID = o.userID
+                        updated.downloaded = Array(Set(o.info.downloaded).union(o.newIDs))
+                        updated.lastUpdated = now
+                        updated.photos += o.photos
+                        updated.videos += o.videos
+                        library.setInstagramInfo(updated, for: o.url)
+                        library.setStoryLinks(o.copied, to: o.url.appendingPathComponent("Stories", isDirectory: true))
+                        summary.append(StorySummary(handle: o.info.handle, count: o.photos + o.videos))
+                        for f in o.files {
+                            switch classify(url: URL(fileURLWithPath: f), isDirectory: false) {
+                            case .video: newVideoFiles.append(f)
+                            case .image: newPhotoFiles.append(f)
+                            default: break
+                            }
+                        }
                     }
-
-                let n = r.photos + r.videos
-                if n > 0 {
-                    library.setCaptions(r.captions)
-                    library.setPostedBy(r.postedBy)
-                    var updated = entry.info
-                    updated.userID = userID
-                    updated.downloaded = Array(already.union(r.newIDs))
-                    updated.lastUpdated = now
-                    updated.photos += r.photos
-                    updated.videos += r.videos
-                    library.setInstagramInfo(updated, for: entry.url)
-                    let copied = await InstagramService.copyToTemp(r.files, handle: entry.info.handle, into: tempFolder)
-                    library.setStoryLinks(copied, to: storiesFolder)     // link back to this person's Stories
-                    summary.append(StorySummary(handle: entry.info.handle, count: n))
+                    addNext()
                 }
             }
             overallDone = folders.count
+
+            // Optional enhancement passes over the new stories (in place, dates preserved).
+            if upscaleVideos, !newVideoFiles.isEmpty {
+                await InstagramApply.upscaleVideosTo1080(newVideoFiles) { d, t in statusLine = "Upscaling videos to 1080p — \(d) of \(t)…" }
+            }
+            if upscalePhotos, !newPhotoFiles.isEmpty {
+                await InstagramApply.upscalePhotos2x(newPhotoFiles) { d, t in statusLine = "Doubling photo resolution — \(d) of \(t)…" }
+            }
 
             // Drop the shared folder if this run left it empty (nothing new to show).
             if let contents = try? FileManager.default.contentsOfDirectory(atPath: tempFolder.path), contents.isEmpty {
@@ -204,6 +234,29 @@ struct AllStoriesView: View {
             library.contentDidChange()
             onFinished()
         }
+    }
+
+    /// One profile's story fetch — pure network/file work, off the main actor; results are applied
+    /// to `Library` by the caller. Skips the profile-pic request when the folder already has a cover.
+    nonisolated private static func fetchStories(
+        folder: (url: URL, info: IGFolderInfo, hasCover: Bool),
+        creds: InstagramService.Credentials, tempPath: String) async -> ProfileOutcome? {
+        var userID = folder.info.userID
+        if userID.isEmpty { userID = await InstagramService.fetchProfile(handle: folder.info.handle, creds: creds)?.userID ?? "" }
+        guard !userID.isEmpty else { return nil }
+        let picData = folder.hasCover ? nil
+            : await InstagramService.fetchProfilePic(userID: userID, handle: folder.info.handle, creds: creds, fallback: "")
+        let storiesFolder = folder.url.appendingPathComponent("Stories", isDirectory: true)
+        let r = await InstagramService.runStories(handle: folder.info.handle, userID: userID, into: storiesFolder,
+                                                  already: Set(folder.info.downloaded), creds: creds) { _ in }
+        guard r.photos + r.videos > 0 else {
+            return ProfileOutcome(url: folder.url, info: folder.info, userID: userID, photos: 0, videos: 0,
+                                  captions: [:], postedBy: [:], newIDs: [], files: [], copied: [], picData: picData)
+        }
+        let copied = await InstagramService.copyToTemp(r.files, handle: folder.info.handle, into: URL(fileURLWithPath: tempPath))
+        return ProfileOutcome(url: folder.url, info: folder.info, userID: userID, photos: r.photos, videos: r.videos,
+                              captions: r.captions, postedBy: r.postedBy, newIDs: r.newIDs, files: r.files,
+                              copied: copied, picData: picData)
     }
 }
 

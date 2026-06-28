@@ -372,6 +372,47 @@ enum MediaEditing {
         return replaceInPlace(original: url, temp: tmp)
     }
 
+    /// Doubles a photo's pixel dimensions with a high-quality (Lanczos) upscale, re-encoding in
+    /// place while preserving its metadata (EXIF capture date, GPS, …). Writes to a sibling temp
+    /// file and **verifies it decodes before replacing the original**, so a bad encode never
+    /// corrupts the photo. SDR pixels only — an HDR gain map isn't carried (most story photos are
+    /// SDR); the base image + all metadata are kept. Returns true on success, false (no-op) otherwise.
+    static func upscalePhotoInPlace(url: URL, scale: CGFloat = 2) -> Bool {
+        guard scale > 1, let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let full = loadFullCGImage(src) else { return false }
+        let targetW = Int((CGFloat(full.width) * scale).rounded())
+        let targetH = Int((CGFloat(full.height) * scale).rounded())
+        guard targetW > 1, targetH > 1 else { return false }
+
+        let ci = CIImage(cgImage: full).clampedToExtent()
+            .applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1.0])
+            .cropped(to: CGRect(x: 0, y: 0, width: targetW, height: targetH))
+        let ctx = CIContext(options: nil)
+        guard let scaled = ctx.createCGImage(ci, from: ci.extent) else { return false }
+
+        var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        props[kCGImagePropertyPixelWidth] = targetW
+        props[kCGImagePropertyPixelHeight] = targetH
+
+        let folder = url.deletingLastPathComponent()
+        let tmp = folder.appendingPathComponent(".\(UUID().uuidString).up")
+        let type = CGImageSourceGetType(src) ?? (UTType.heic.identifier as CFString)
+        func encode(_ t: CFString) -> Bool {
+            guard let dst = CGImageDestinationCreateWithURL(tmp as CFURL, t, 1, nil) else { return false }
+            CGImageDestinationAddImage(dst, scaled, props as CFDictionary)
+            return CGImageDestinationFinalize(dst)
+        }
+        if !encode(type) {
+            try? FileManager.default.removeItem(at: tmp)
+            guard encode(UTType.jpeg.identifier as CFString) else { try? FileManager.default.removeItem(at: tmp); return false }
+        }
+        // Verify the re-encode is a readable image before swapping it in.
+        guard CGImageSourceCreateWithURL(tmp as CFURL, nil).flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }) != nil else {
+            try? FileManager.default.removeItem(at: tmp); return false
+        }
+        return replaceInPlace(original: url, temp: tmp)
+    }
+
     /// Full-resolution, upright CGImage from an open image source.
     private static func loadFullCGImage(_ src: CGImageSource) -> CGImage? {
         let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
