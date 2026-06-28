@@ -4,6 +4,10 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-06-26
 
+- **Much faster thumbnails in large folders** — photos now thumbnail via **ImageIO** and videos
+  via **AVAssetImageGenerator**, both in-process, instead of routing every tile through
+  QuickLook's out-of-process XPC service (fine for a few, a bottleneck for thousands). Prefetch
+  also fans out across all CPU cores and warms more of the folder. QuickLook is kept for PDFs.
 - **Export All Frames now saves each frame at 1.5× resolution** (high-quality Lanczos).
 - **"AI Upscale" for a single photo** (context menu) — gentle denoise + subtle sharpen + a
   1.5× resolution bump, in place, EXIF/capture-date preserved (verify-before-replace).
