@@ -2,6 +2,12 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-06-26
+
+- **Export All Frames now saves each frame at 1.5× resolution** (high-quality Lanczos).
+- **"AI Upscale" for a single photo** (context menu) — gentle denoise + subtle sharpen + a
+  1.5× resolution bump, in place, EXIF/capture-date preserved (verify-before-replace).
+
 ## 2026-06-26 — performance pass
 
 - **Navy→black background** replaces the orange gradient app-wide.

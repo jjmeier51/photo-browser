@@ -413,6 +413,51 @@ enum MediaEditing {
         return replaceInPlace(original: url, temp: tmp)
     }
 
+    /// "AI Upscale" for a single photo: a light Core Image enhancement — gentle noise reduction,
+    /// a subtle unsharp mask, and a slight (1.5×) Lanczos resolution bump — re-encoded in place
+    /// while preserving metadata (EXIF capture date, GPS, …). Writes to a temp file and verifies
+    /// it decodes before replacing the original, so it can't corrupt the photo. SDR pixels only
+    /// (an HDR gain map isn't carried). Returns true on success.
+    static func enhancePhotoInPlace(url: URL, scale: CGFloat = 1.5) -> Bool {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let full = loadFullCGImage(src) else { return false }
+        let s = max(1, scale)
+        let targetW = Int((CGFloat(full.width) * s).rounded())
+        let targetH = Int((CGFloat(full.height) * s).rounded())
+        guard targetW > 1, targetH > 1 else { return false }
+
+        var ci = CIImage(cgImage: full).clampedToExtent()
+        if s > 1 {
+            ci = ci.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: s, kCIInputAspectRatioKey: 1.0])
+        }
+        ci = ci.applyingFilter("CINoiseReduction", parameters: ["inputNoiseLevel": 0.012, "inputSharpness": 0.4])
+                .applyingFilter("CIUnsharpMask", parameters: [kCIInputRadiusKey: 2.0, kCIInputIntensityKey: 0.5])
+                .cropped(to: CGRect(x: 0, y: 0, width: targetW, height: targetH))
+        let ctx = CIContext(options: nil)
+        guard let out = ctx.createCGImage(ci, from: ci.extent) else { return false }
+
+        var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        props[kCGImagePropertyPixelWidth] = targetW
+        props[kCGImagePropertyPixelHeight] = targetH
+
+        let folder = url.deletingLastPathComponent()
+        let tmp = folder.appendingPathComponent(".\(UUID().uuidString).up")
+        let type = CGImageSourceGetType(src) ?? (UTType.heic.identifier as CFString)
+        func encode(_ t: CFString) -> Bool {
+            guard let dst = CGImageDestinationCreateWithURL(tmp as CFURL, t, 1, nil) else { return false }
+            CGImageDestinationAddImage(dst, out, props as CFDictionary)
+            return CGImageDestinationFinalize(dst)
+        }
+        if !encode(type) {
+            try? FileManager.default.removeItem(at: tmp)
+            guard encode(UTType.jpeg.identifier as CFString) else { try? FileManager.default.removeItem(at: tmp); return false }
+        }
+        guard CGImageSourceCreateWithURL(tmp as CFURL, nil).flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }) != nil else {
+            try? FileManager.default.removeItem(at: tmp); return false
+        }
+        return replaceInPlace(original: url, temp: tmp)
+    }
+
     /// Full-resolution, upright CGImage from an open image source.
     private static func loadFullCGImage(_ src: CGImageSource) -> CGImage? {
         let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]

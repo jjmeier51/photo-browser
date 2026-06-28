@@ -1099,7 +1099,7 @@ enum FileActions {
                             let dest = dir.appendingPathComponent("\(safeName) \(frameIndex).heic")
                             if !FileManager.default.fileExists(atPath: dest.path),
                                let pb = CMSampleBufferGetImageBuffer(sample),
-                               let data = encodeFrame(pb, transform: transform, properties: props) {
+                               let data = encodeFrame(pb, transform: transform, properties: props, scale: 1.5) {  // 1.5× each frame
                                 try? data.write(to: dest)
                                 written += 1
                             }

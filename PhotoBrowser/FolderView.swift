@@ -568,6 +568,9 @@ struct FolderView: View {
                     Button { aiEditEntry = entry } label: {
                         Label("Edit with AI", systemImage: "wand.and.stars")
                     }
+                    Button { aiUpscale(entry) } label: {
+                        Label("AI Upscale", systemImage: "wand.and.rays")
+                    }
                 }
                 Button { metadataTargets = [entry.url]; showMetadataEditor = true } label: {
                     Label("Edit Metadata", systemImage: "calendar.badge.clock")
@@ -1731,6 +1734,23 @@ struct FolderView: View {
             if skipped > 0 { msg += " \(skipped) already ≥\(label)." }
             if failed > 0 { msg += " \(failed) couldn’t be processed." }
             resultMessage = msg
+            library.contentDidChange()
+            await reload()
+        }
+    }
+
+    /// "AI Upscale" a single photo in place: light denoise + sharpen + a 1.5× resolution bump,
+    /// metadata preserved. Shows the shared processing overlay; reloads when done.
+    private func aiUpscale(_ entry: Entry) {
+        editLabel = "AI Upscaling…"; editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder(); bg.begin(name: "AI Upscale")
+        Task {
+            let ok = await Task.detached(priority: .userInitiated) {
+                MediaEditing.enhancePhotoInPlace(url: entry.url, scale: 1.5)
+            }.value
+            editProgress = 1
+            editProcessing = false; bg.end()
+            resultMessage = ok ? "Upscaled “\(entry.name)”." : "Couldn’t upscale “\(entry.name)”."
             library.contentDidChange()
             await reload()
         }
