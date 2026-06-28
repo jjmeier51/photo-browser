@@ -42,10 +42,12 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
     /// than starting its own. The cache key ignores the requested size, so prefetching at the
     /// grid size also satisfies larger requests.
     func prefetch(_ entries: [Entry], size: CGSize, scale: CGFloat) {
-        let items = entries.filter { $0.kind == .image || $0.kind == .video || $0.kind == .pdf }
-        guard !items.isEmpty else { return }
-        let batch = Array(items.prefix(2500))          // cap so an enormous folder can't runaway
-        Task.detached(priority: .utility) { [weak self] in
+        let batch = entries.filter { $0.kind == .image || $0.kind == .video || $0.kind == .pdf }
+        guard !batch.isEmpty else { return }
+        // Scales to the whole folder (no fixed cap); concurrency is bounded to the core count so it
+        // warms aggressively without flooding the decoders. Cached + in-flight de-duped, so it's
+        // cheap and never repeats work a visible tile already did.
+        Task.detached(priority: .background) { [weak self] in
             guard let self else { return }
             await withTaskGroup(of: Void.self) { group in
                 var idx = 0
@@ -53,7 +55,8 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
                 func next() {
                     guard idx < batch.count else { return }
                     let e = batch[idx]; idx += 1
-                    group.addTask { _ = await self.thumbnail(for: e, size: size, scale: scale) }
+                    // Prefetch is .background so it yields to the tiles you're actually looking at.
+                    group.addTask { _ = await self.thumbnail(for: e, size: size, scale: scale, priority: .background) }
                 }
                 for _ in 0..<min(maxConcurrent, batch.count) { next() }
                 while await group.next() != nil { next() }
@@ -61,7 +64,7 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         }
     }
 
-    func thumbnail(for entry: Entry, size: CGSize, scale: CGFloat) async -> UIImage? {
+    func thumbnail(for entry: Entry, size: CGSize, scale: CGFloat, priority: TaskPriority = .utility) async -> UIImage? {
         let key = cacheKey(for: entry)
         if let cached = memory.object(forKey: key as NSString) { return cached }
 
@@ -71,11 +74,9 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         if let existing = inFlight[key] {
             task = existing
         } else {
-            // Detached + low priority so thumbnail work runs OFF the main thread
-            // and yields to foreground work (e.g. opening the full-screen viewer).
             let kind = entry.kind
-            task = Task.detached(priority: .utility) { [weak self] in
-                await self?.produce(key: key, url: entry.url, kind: kind, size: size, scale: scale) ?? nil
+            task = Task.detached(priority: priority) { [weak self] in
+                await self?.produce(key: key, url: entry.url, kind: kind, size: size, scale: scale, priority: priority) ?? nil
             }
             inFlight[key] = task
         }
@@ -86,7 +87,7 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         return image
     }
 
-    private func produce(key: String, url: URL, kind: FileKind, size: CGSize, scale: CGFloat) async -> UIImage? {
+    private func produce(key: String, url: URL, kind: FileKind, size: CGSize, scale: CGFloat, priority: TaskPriority) async -> UIImage? {
         let nsKey = key as NSString
         let diskURL = diskDir.appendingPathComponent(key).appendingPathExtension("jpg")
         if let data = try? Data(contentsOf: diskURL), let raw = UIImage(data: data) {
@@ -96,7 +97,7 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
             memory.setObject(img, forKey: nsKey, cost: cost(of: img))
             return img
         }
-        guard let img = await generate(url: url, kind: kind, size: size, scale: scale) else { return nil }
+        guard let img = await generate(url: url, kind: kind, size: size, scale: scale, priority: priority) else { return nil }
         memory.setObject(img, forKey: nsKey, cost: cost(of: img))
         if let data = img.jpegData(compressionQuality: 0.8) {
             try? data.write(to: diskURL, options: .atomic)
@@ -109,17 +110,34 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         Int(image.size.width * image.scale * image.size.height * image.scale) * 4
     }
 
-    private func generate(url: URL, kind: FileKind, size: CGSize, scale: CGFloat) async -> UIImage? {
+    private func generate(url: URL, kind: FileKind, size: CGSize, scale: CGFloat, priority: TaskPriority) async -> UIImage? {
         let maxPixel = max(size.width, size.height) * scale
-        switch kind {
-        case .image:
-            if let img = imageThumbnail(url: url, maxPixel: maxPixel) { return img }
-        case .video:
-            if let img = await videoThumbnail(url: url, maxPixel: maxPixel) { return img }
-        default:
-            break
+        // Try the fast in-process generator, but time-boxed so a slow/hanging file can't leave the
+        // tile blank — we always fall back to QuickLook (which handles any type robustly).
+        if kind == .image || kind == .video {
+            let fast = await race(seconds: 5, priority: priority) {
+                kind == .image ? self.imageThumbnail(url: url, maxPixel: maxPixel)
+                               : await self.videoThumbnail(url: url, maxPixel: maxPixel)
+            }
+            if let fast { return fast }
         }
-        return await quickLook(url: url, size: size, scale: scale)   // fallback (and PDFs / other types)
+        return await quickLook(url: url, size: size, scale: scale)   // guaranteed fallback (+ PDFs / other)
+    }
+
+    /// Runs `op`, returning its result — or nil if it doesn't finish within `seconds`. Unlike a
+    /// task group (which waits for every child), this resumes on whichever finishes first, so a
+    /// genuinely hung generator can't block the tile; the abandoned work is simply ignored.
+    private func race(seconds: Double, priority: TaskPriority, _ op: @escaping @Sendable () async -> UIImage?) async -> UIImage? {
+        final class Once: @unchecked Sendable { let lock = NSLock(); var done = false
+            func claim() -> Bool { lock.lock(); defer { lock.unlock() }; if done { return false }; done = true; return true } }
+        let once = Once()
+        return await withCheckedContinuation { (cont: CheckedContinuation<UIImage?, Never>) in
+            Task.detached(priority: priority) { let r = await op(); if once.claim() { cont.resume(returning: r) } }
+            Task.detached(priority: .background) {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                if once.claim() { cont.resume(returning: nil) }
+            }
+        }
     }
 
     /// Fast in-process photo thumbnail via ImageIO (honors EXIF orientation, decodes immediately).
