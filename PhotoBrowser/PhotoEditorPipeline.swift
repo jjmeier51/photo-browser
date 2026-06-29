@@ -36,7 +36,7 @@ enum EditPipeline {
     /// `hdr` routes the reshape warp through a 16-bit float wide-gamut raster so HDR headroom survives
     /// (set it on the HDR save path; the SDR preview/export leave it false for speed).
     static func render(_ source: CIImage, recipe r: EditRecipe, mask: CIImage? = nil,
-                       landmarks: BodyLandmarks? = nil, hdr: Bool = false) -> CIImage {
+                       landmarks: EditLandmarks? = nil, hdr: Bool = false) -> CIImage {
         var img = source
         img = cutout(img, r, mask: mask)        // background replacement first, so later edits apply to it
         img = bodyStage(img, r, landmarks: landmarks, hdr: hdr)   // body shaping on the composited subject
@@ -52,8 +52,8 @@ enum EditPipeline {
     // MARK: Body shaping
 
     private static func bodyStage(_ image: CIImage, _ r: EditRecipe,
-                                  landmarks: BodyLandmarks?, hdr: Bool) -> CIImage {
-        guard !r.body.isZero, let lm = landmarks else { return image }
+                                  landmarks: EditLandmarks?, hdr: Bool) -> CIImage {
+        guard !r.body.isZero, let lm = landmarks, !lm.isEmpty else { return image }
         let aspect = image.extent.height > 0 ? image.extent.width / image.extent.height : 1
         guard let field = BodyWarp.field(for: r.body, landmarks: lm, imageAspect: aspect) else { return image }
         return ReshapeWarp.apply(image, field: field, hdr: hdr)

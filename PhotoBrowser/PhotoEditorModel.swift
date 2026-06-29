@@ -82,16 +82,45 @@ struct ReshapeField: Codable, Equatable {
     var isZero: Bool { !dx.contains { $0 != 0 } && !dy.contains { $0 != 0 } }
 }
 
-/// Body-shaping slider amounts (Hypic-style). The warp is generated from Vision body landmarks at
-/// render time; only these amounts live in the recipe so it stays light and re-editable. Each is
-/// bipolar (−1…1): positive = slimmer / narrower hips / longer legs / taller / bigger head.
+/// Body- and face-shaping slider amounts (Hypic-style). The warp is generated from Vision body/face
+/// landmarks at render time; only these amounts live in the recipe so it stays light and re-editable.
+/// Each is bipolar (−1…1): positive generally = bigger / longer / slimmer in the natural direction.
 struct BodyShape: Codable, Equatable {
+    // Body (needs body-pose landmarks)
     var slim = 0.0
+    var waist = 0.0
     var hips = 0.0
+    var butt = 0.0
     var legs = 0.0
     var height = 0.0
+    var arms = 0.0
+    var breasts = 0.0
+    var ankles = 0.0
+    var neck = 0.0
+    // Face (needs face landmarks)
     var head = 0.0
-    var isZero: Bool { slim == 0 && hips == 0 && legs == 0 && height == 0 && head == 0 }
+    var forehead = 0.0
+    var eyes = 0.0
+    var nose = 0.0
+    var ears = 0.0
+    var chin = 0.0
+    var lips = 0.0
+    var smile = 0.0
+
+    var isZero: Bool {
+        slim == 0 && waist == 0 && hips == 0 && butt == 0 && legs == 0 && height == 0 && arms == 0 &&
+        breasts == 0 && ankles == 0 && neck == 0 && head == 0 && forehead == 0 && eyes == 0 &&
+        nose == 0 && ears == 0 && chin == 0 && lips == 0 && smile == 0
+    }
+    /// True if any body-region slider is engaged (vs. face-only edits).
+    var hasBodyEdit: Bool {
+        slim != 0 || waist != 0 || hips != 0 || butt != 0 || legs != 0 || height != 0 ||
+        arms != 0 || breasts != 0 || ankles != 0 || neck != 0
+    }
+    var hasFaceEdit: Bool {
+        head != 0 || forehead != 0 || eyes != 0 || nose != 0 || ears != 0 || chin != 0 ||
+        lips != 0 || smile != 0
+    }
 }
 
 /// What to do with the background once the subject is masked out (`FR-CUT-01`). The actual subject mask

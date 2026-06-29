@@ -59,9 +59,10 @@ struct PhotoEditorView: View {
     @State private var cutoutMask: CIImage?                  // subject mask (proxy space) for background removal
     @State private var cutoutDetecting = false
     @State private var cutoutNoSubject = false
-    @State private var bodyLandmarks: BodyLandmarks?         // detected pose, drives body-shaping warps
+    @State private var editLandmarks: EditLandmarks?        // detected body + face, drives shaping warps
     @State private var bodyDetecting = false
     @State private var bodyNoPerson = false
+    @State private var selectedBody = "slim"                // active body/face control chip
 
     var body: some View {
         ZStack {
@@ -103,15 +104,15 @@ struct PhotoEditorView: View {
         }
     }
 
-    /// Detects body landmarks once (off-main) the first time the Body tab is opened.
+    /// Detects body + face landmarks once (off-main) the first time the Body tab is opened.
     private func detectBodyIfNeeded() {
-        guard bodyLandmarks == nil, !bodyDetecting, let proxy else { return }
+        guard editLandmarks == nil, !bodyDetecting, let proxy else { return }
         bodyDetecting = true; bodyNoPerson = false
         Task.detached(priority: .userInitiated) {
-            let lm = BodyPose.detect(in: proxy)
+            let lm = EditLandmarks(body: BodyPose.detect(in: proxy), face: FaceDetect.detect(in: proxy))
             await MainActor.run {
-                bodyLandmarks = lm
-                bodyNoPerson = (lm == nil)
+                editLandmarks = lm.isEmpty ? nil : lm
+                bodyNoPerson = lm.isEmpty
                 bodyDetecting = false
             }
         }
@@ -547,8 +548,44 @@ struct PhotoEditorView: View {
 
     // MARK: Body panel
 
+    private struct BodyControl: Identifiable {
+        let id: String
+        let name: String
+        let systemImage: String
+        let keyPath: WritableKeyPath<BodyShape, Double>
+        let isFace: Bool
+    }
+
+    private static let bodyControls: [BodyControl] = [
+        .init(id: "slim",     name: "Slim",     systemImage: "arrow.left.and.right",        keyPath: \.slim,     isFace: false),
+        .init(id: "waist",    name: "Waist",    systemImage: "arrow.right.and.line.vertical.and.arrow.left", keyPath: \.waist, isFace: false),
+        .init(id: "hips",     name: "Hips",     systemImage: "oval.portrait",               keyPath: \.hips,     isFace: false),
+        .init(id: "butt",     name: "Butt",     systemImage: "oval.fill",                   keyPath: \.butt,     isFace: false),
+        .init(id: "breasts",  name: "Chest",    systemImage: "heart",                       keyPath: \.breasts,  isFace: false),
+        .init(id: "legs",     name: "Legs",     systemImage: "figure.walk",                 keyPath: \.legs,     isFace: false),
+        .init(id: "height",   name: "Height",   systemImage: "arrow.up.and.down",           keyPath: \.height,   isFace: false),
+        .init(id: "arms",     name: "Arms",     systemImage: "figure.arms.open",            keyPath: \.arms,     isFace: false),
+        .init(id: "ankles",   name: "Ankles",   systemImage: "shoeprints.fill",             keyPath: \.ankles,   isFace: false),
+        .init(id: "neck",     name: "Neck",     systemImage: "person.bust",                 keyPath: \.neck,     isFace: false),
+        .init(id: "head",     name: "Head",     systemImage: "circle.dashed",               keyPath: \.head,     isFace: true),
+        .init(id: "forehead", name: "Forehead", systemImage: "rectangle.tophalf.filled",    keyPath: \.forehead, isFace: true),
+        .init(id: "eyes",     name: "Eyes",     systemImage: "eye",                         keyPath: \.eyes,     isFace: true),
+        .init(id: "nose",     name: "Nose",     systemImage: "triangle",                    keyPath: \.nose,     isFace: true),
+        .init(id: "ears",     name: "Ears",     systemImage: "ear",                         keyPath: \.ears,     isFace: true),
+        .init(id: "chin",     name: "Chin",     systemImage: "mouth",                       keyPath: \.chin,     isFace: true),
+        .init(id: "lips",     name: "Lips",     systemImage: "mouth.fill",                  keyPath: \.lips,     isFace: true),
+        .init(id: "smile",    name: "Smile",    systemImage: "face.smiling",                keyPath: \.smile,    isFace: true),
+    ]
+
+    /// Only show chips whose landmark set was detected (body chips need a body, face chips need a face).
+    private var availableBodyControls: [BodyControl] {
+        let hasBody = editLandmarks?.body != nil
+        let hasFace = editLandmarks?.face != nil
+        return Self.bodyControls.filter { $0.isFace ? hasFace : hasBody }
+    }
+
     private var bodyPanel: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 12) {
             if bodyDetecting {
                 HStack(spacing: 8) {
                     ProgressView().tint(.white)
@@ -558,30 +595,51 @@ struct PhotoEditorView: View {
                 Text("No person found in this photo.")
                     .font(.subheadline).foregroundStyle(.secondary)
             } else {
-                bodySlider("Slim", "arrow.left.and.right", \.slim)
-                bodySlider("Hips", "oval.portrait", \.hips)
-                bodySlider("Legs", "figure.walk", \.legs)
-                bodySlider("Height", "arrow.up.and.down", \.height)
-                bodySlider("Head", "face.smiling", \.head)
+                let controls = availableBodyControls
+                if let sel = controls.first(where: { $0.id == selectedBody }) ?? controls.first {
+                    HStack {
+                        Text(sel.name).font(.subheadline.weight(.medium))
+                        Spacer()
+                        Text("\(Int((recipe.body[keyPath: sel.keyPath] * 100).rounded()))")
+                            .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal)
+                    Slider(value: bodyBinding(sel.keyPath), in: -1...1) { editing in
+                        reshaping = editing                  // lighter proxy while dragging the warp
+                        if editing { snapshot() } else { scheduleRender() }
+                    }
+                    .tint(.white)
+                    .padding(.horizontal)
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 14) {
+                        ForEach(controls) { c in bodyChip(c) }
+                    }
+                    .padding(.horizontal)
+                }
             }
         }
     }
 
-    private func bodySlider(_ name: String, _ systemImage: String,
-                            _ keyPath: WritableKeyPath<BodyShape, Double>) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: systemImage).font(.system(size: 14)).frame(width: 22)
-            Text(name).font(.subheadline).frame(width: 56, alignment: .leading)
-            Slider(value: bodyBinding(keyPath), in: -1...1) { editing in
-                reshaping = editing                  // use the lighter proxy while dragging the warp
-                if editing { snapshot() } else { scheduleRender() }
+    private func bodyChip(_ c: BodyControl) -> some View {
+        let isSel = selectedBody == c.id
+        let edited = recipe.body[keyPath: c.keyPath] != 0
+        return Button { selectedBody = c.id } label: {
+            VStack(spacing: 6) {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: c.systemImage)
+                        .font(.system(size: 18))
+                        .frame(width: 50, height: 50)
+                        .background(Circle().fill(isSel ? Color.white.opacity(0.22) : Color.white.opacity(0.08)))
+                        .overlay(Circle().stroke(isSel ? Color.white : .clear, lineWidth: 1.5))
+                    if edited {
+                        Circle().fill(Color.yellow).frame(width: 9, height: 9).offset(x: 1, y: -1)
+                    }
+                }
+                Text(c.name).font(.caption2)
             }
-            .tint(.white)
-            Text("\(Int((recipe.body[keyPath: keyPath] * 100).rounded()))")
-                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                .frame(width: 32, alignment: .trailing)
+            .foregroundStyle(isSel ? Color.white : Color.secondary)
         }
-        .padding(.horizontal)
     }
 
     private func bodyBinding(_ keyPath: WritableKeyPath<BodyShape, Double>) -> Binding<Double> {
@@ -744,7 +802,7 @@ struct PhotoEditorView: View {
         let src = reshaping ? (fastProxy ?? proxy) : proxy
         let r = renderRecipe
         let mask = cutoutMask
-        let landmarks = bodyLandmarks
+        let landmarks = editLandmarks
         Task.detached(priority: .userInitiated) {
             let img = PhotoEditorIO.renderUIImage(src, recipe: r, mask: mask, landmarks: landmarks)
             await MainActor.run {
