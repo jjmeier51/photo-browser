@@ -33,36 +33,45 @@ struct ContentView: View {
                         .id(url)            // fresh identity per folder, so a path *replace* (e.g. "Open Stories") reloads the listing
                 }
             }
-            // A non-blocking, app-wide frame-export progress pill — so the export keeps running
-            // while you browse other folders and view media.
-            if library.frameExportRunning {
-                VStack {
+            // Non-blocking, app-wide progress pills for background jobs (frame export, Instagram
+            // downloads, …) — so they keep running while you browse and view media.
+            if !library.activities.isEmpty {
+                VStack(spacing: 8) {
                     Spacer()
-                    HStack(spacing: 10) {
-                        ProgressView().controlSize(.small).tint(.white)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("Exporting frames — \(Int(library.frameExportProgress * 100))%")
-                                .font(.caption.weight(.semibold))
-                            Text(library.frameExportLabel).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    ForEach(library.activities) { activity in
+                        HStack(spacing: 10) {
+                            ProgressView().controlSize(.small).tint(.white)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(pillTitle(activity)).font(.caption.weight(.semibold))
+                                if !activity.status.isEmpty {
+                                    Text(activity.status).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                            }
+                            if activity.fraction >= 0 {
+                                ProgressView(value: activity.fraction).progressViewStyle(.linear).frame(width: 70)
+                            }
                         }
-                        ProgressView(value: library.frameExportProgress).progressViewStyle(.linear).frame(width: 80)
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .allowsHitTesting(false)         // never intercepts taps
                     }
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding(.bottom, 30)
-                    .allowsHitTesting(false)         // never intercepts taps
                 }
+                .padding(.bottom, 30)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.default, value: library.frameExportRunning)
-        .alert("Export All Frames", isPresented: Binding(
-            get: { library.frameExportResult != nil },
-            set: { if !$0 { library.frameExportResult = nil } })) {
-            Button("OK", role: .cancel) { library.frameExportResult = nil }
+        .animation(.default, value: library.activities.count)
+        .alert("Done", isPresented: Binding(
+            get: { !library.activityResults.isEmpty },
+            set: { if !$0 { library.dismissActivityResult() } })) {
+            Button("OK", role: .cancel) { library.dismissActivityResult() }
         } message: {
-            Text(library.frameExportResult ?? "")
+            Text(library.activityResults.first ?? "")
         }
+    }
+
+    private func pillTitle(_ a: Library.Activity) -> String {
+        a.fraction >= 0 ? "\(a.title) — \(Int(a.fraction * 100))%" : a.title
     }
 }
 

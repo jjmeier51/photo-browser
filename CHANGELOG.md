@@ -4,6 +4,10 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-06-26
 
+- **Instagram downloads run in the background** — "Download Instagram Profile" / "Get New Posts"
+  and "Get All New Stories" now launch and dismiss, running as app-wide background activities
+  (progress pill + completion popup, like Export All Frames), so you can keep using the app
+  while they run. Generalized the frame-export progress into a shared multi-job activity system.
 - **Much faster thumbnails in large folders** — photos now thumbnail via **ImageIO** and videos
   via **AVAssetImageGenerator**, both in-process, instead of routing every tile through
   QuickLook's out-of-process XPC service (fine for a few, a bottleneck for thousands). Prefetch

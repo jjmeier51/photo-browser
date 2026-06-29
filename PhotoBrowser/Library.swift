@@ -564,37 +564,56 @@ final class Library {
     }
     func isFramesFolder(_ url: URL) -> Bool { framesFolders.contains(url.path) }
 
-    // MARK: - Frame export (app-wide, so it keeps running while you browse other folders)
+    // MARK: - Background activities (long jobs the user can navigate away from)
 
-    var frameExportRunning = false
-    var frameExportProgress: Double = 0
-    var frameExportLabel = ""
-    var frameExportResult: String?          // completion message → shown as a popup, cleared on dismiss
-    @ObservationIgnored private var frameExportTask: Task<Void, Never>?
+    /// A running background job — shown as a progress pill app-wide (see ContentView) so the user
+    /// can keep browsing while frame exports / Instagram downloads run. Multiple can run at once.
+    struct Activity: Identifiable, Sendable {
+        let id = UUID()
+        var title: String
+        var status: String = ""
+        var fraction: Double = 0          // 0…1, or <0 for indeterminate (spinner only)
+    }
+    var activities: [Activity] = []
+    var activityResults: [String] = []    // completion messages → shown as popups, oldest first
+
+    @discardableResult
+    func beginActivity(_ title: String, indeterminate: Bool = false) -> UUID {
+        let a = Activity(title: title, fraction: indeterminate ? -1 : 0)
+        activities.append(a)
+        return a.id
+    }
+    func setActivity(_ id: UUID, status: String? = nil, fraction: Double? = nil) {
+        guard let i = activities.firstIndex(where: { $0.id == id }) else { return }
+        if let status { activities[i].status = status }
+        if let fraction { activities[i].fraction = fraction }
+    }
+    func endActivity(_ id: UUID, result: String? = nil) {
+        activities.removeAll { $0.id == id }
+        if let result { activityResults.append(result) }
+    }
+    func dismissActivityResult() { if !activityResults.isEmpty { activityResults.removeFirst() } }
 
     /// Exports every (or every Nth) frame of `entry` into a folder beside it, app-wide so the user
-    /// can navigate to other folders / view media while it runs. Progress + a completion popup are
-    /// surfaced globally (see ContentView). `fps` of 0 means every frame.
+    /// can navigate around while it runs. `fps` of 0 means every frame.
     func startFrameExport(of entry: Entry, name: String, fps: Double) {
-        guard !frameExportRunning else { return }     // one export at a time
-        frameExportRunning = true
-        frameExportProgress = 0
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        frameExportLabel = trimmed.isEmpty ? (entry.url.deletingPathExtension().lastPathComponent + " Frames") : trimmed
+        let label = trimmed.isEmpty ? (entry.url.deletingPathExtension().lastPathComponent + " Frames") : trimmed
+        let id = beginActivity("Exporting frames")
+        setActivity(id, status: label)
         let bg = BackgroundTaskHolder(); bg.begin(name: "Export All Frames")
-        frameExportTask = Task {
+        Task {
             let (folder, count, firstFrame) = await FileActions.exportAllFrames(
                 of: entry.url, folderName: name, requestedFPS: fps) { p in
-                Task { @MainActor in self.frameExportProgress = p }
+                Task { @MainActor in self.setActivity(id, fraction: p) }
             }
             if count > 0, let folder {
                 markFramesFolder(folder)
                 if let firstFrame, let cover = UIImage(contentsOfFile: firstFrame.path) { setCover(cover, for: folder) }
             }
-            frameExportResult = count > 0
+            endActivity(id, result: count > 0
                 ? "Exported \(count) frame\(count == 1 ? "" : "s") to “\(folder?.lastPathComponent ?? "Frames")”."
-                : "Couldn’t export frames."
-            frameExportRunning = false
+                : "Couldn’t export frames.")
             contentDidChange()
             bg.end()
         }

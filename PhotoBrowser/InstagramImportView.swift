@@ -16,14 +16,10 @@ struct InstagramImportView: View {
     let onFinished: () -> Void
 
     @State private var handle = ""
-    @State private var running = false
     @State private var loggedIn = false
     @State private var showLogin = false
-    @State private var progress = InstagramService.Progress(phase: "", fraction: 0, done: 0, total: 0)
-    @State private var result: InstagramService.DownloadResult?
     @State private var skipTagged = false
     @State private var upscale1080 = false
-    @State private var upscaleLine = ""
 
     private var isUpdate: Bool { existing != nil }
 
@@ -42,7 +38,7 @@ struct InstagramImportView: View {
                     Section {
                         TextField("instagram handle (e.g. nasa)", text: $handle)
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
-                            .keyboardType(.URL).disabled(running)
+                            .keyboardType(.URL)
                     } header: {
                         Text("Instagram profile")
                     } footer: {
@@ -60,42 +56,24 @@ struct InstagramImportView: View {
                     }
                 }
 
-                if !running && result == nil {
-                    Section("Options") {
-                        Toggle("Skip tagged photos & videos", isOn: $skipTagged)
-                        Toggle("Upscale videos to 1080p", isOn: $upscale1080)
-                    }
-                }
-
-                if running {
-                    Section {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ProgressView(value: progress.total > 0 ? progress.fraction : 0)
-                            Text(progressLine).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            Text("Keep the app open. It keeps going briefly if you switch away, but iOS can’t guarantee long background time.")
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                if let result {
-                    Section {
-                        Label(summary(result), systemImage: result.photos + result.videos > 0 ? "checkmark.circle" : "exclamationmark.triangle")
-                            .foregroundStyle(result.photos + result.videos > 0 ? .green : .orange)
-                        if let note = result.note { Text(note).font(.caption).foregroundStyle(.secondary) }
-                    }
+                Section {
+                    Toggle("Skip tagged photos & videos", isOn: $skipTagged)
+                    Toggle("Upscale videos to 1080p", isOn: $upscale1080)
+                } header: {
+                    Text("Options")
+                } footer: {
+                    Text("The download runs in the background — you can keep using the app and watch its progress at the bottom of the screen.")
                 }
             }
             .navigationTitle(forceFull ? "Re-download Profile" : (isUpdate ? "Get New Posts" : "Add from Instagram"))
             .navigationBarTitleDisplayMode(.inline)
-            .interactiveDismissDisabled(running)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(result != nil ? "Done" : "Cancel") { dismiss() }.disabled(running)
+                    Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(forceFull ? "Re-download" : (isUpdate ? "Get New" : "Download")) { start() }
-                        .disabled(running || !loggedIn || (!isUpdate && sanitizedHandle.isEmpty))
+                        .disabled(!loggedIn || (!isUpdate && sanitizedHandle.isEmpty))
                 }
             }
             .sheet(isPresented: $showLogin) {
@@ -106,9 +84,6 @@ struct InstagramImportView: View {
                 if let existing { handle = existing.handle }
                 else if handle.isEmpty { handle = library.lastIGHandle(for: targetFolder) ?? "" }   // prefill last used
             }
-            // Keep the screen awake while a (potentially long) download runs.
-            .onChange(of: running) { _, isRunning in UIApplication.shared.isIdleTimerDisabled = isRunning }
-            .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         }
     }
 
@@ -120,68 +95,54 @@ struct InstagramImportView: View {
         return h.replacingOccurrences(of: "@", with: "")
     }
 
-    private var progressLine: String {
-        if !upscaleLine.isEmpty { return upscaleLine }
-        if progress.total > 0 { return "Downloading \(progress.done) of \(progress.total)…" }
-        return progress.phase
-    }
-
-    private func summary(_ r: InstagramService.DownloadResult) -> String {
-        let n = r.photos + r.videos
-        guard n > 0 else { return "Nothing downloaded." }
-        var s = "Downloaded \(r.photos) photo\(r.photos == 1 ? "" : "s") and \(r.videos) video\(r.videos == 1 ? "" : "s")"
-        if r.failed > 0 { s += "; \(r.failed) failed" }
-        return s + "."
-    }
-
     private func start() {
+        let h = isUpdate ? (existing?.handle ?? "") : sanitizedHandle
+        guard !h.isEmpty else { return }
+        let target = targetFolder, isUpd = isUpdate, force = forceFull, skipT = skipTagged, up = upscale1080, ex = existing
+        let finish = onFinished
+        if !isUpd { library.setLastIGHandle(h, for: target) }      // remember it for next time
+        let id = library.beginActivity(forceFull ? "Re-downloading @\(h)" : (isUpd ? "@\(h) — new posts" : "Downloading @\(h)"),
+                                       indeterminate: true)
+        library.setActivity(id, status: "Starting…")
+        dismiss()        // let the user navigate; the download runs in the background
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Instagram Download")
         Task {
-            guard let creds = await InstagramAuth.credentials() else { showLogin = true; return }
-            let h = isUpdate ? (existing?.handle ?? "") : sanitizedHandle
-            guard !h.isEmpty else { return }
-            running = true; result = nil
-            let bg = BackgroundTaskHolder(); bg.begin(name: "Instagram Download")
-
-            let dest: URL
-            if isUpdate {
-                dest = targetFolder                                    // current folder is the profile folder
-            } else {
-                let sub = targetFolder.appendingPathComponent(h, isDirectory: true)
-                try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
-                dest = sub
-                library.setLastIGHandle(h, for: targetFolder)          // remember it for next time
+            guard let creds = await InstagramAuth.credentials() else {
+                library.endActivity(id, result: "Couldn’t start — not logged in to Instagram."); bg.end(); return
             }
-            // Resume incrementally if this profile folder already exists (even when
-            // re-run from the parent), so we only fetch new posts — unless this is a
-            // full re-download, which ignores the dedup set and replaces files.
-            let prior = isUpdate ? existing : library.instagramInfo(for: dest)
-            let already = forceFull ? [] : Set(prior?.downloaded ?? [])
+            let dest: URL
+            if isUpd { dest = target }
+            else {
+                dest = target.appendingPathComponent(h, isDirectory: true)
+                try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+            }
+            let prior = isUpd ? ex : library.instagramInfo(for: dest)
+            let already = force ? [] : Set(prior?.downloaded ?? [])
 
             let r = await InstagramService.run(handle: h, into: dest, alreadyDownloaded: already, creds: creds,
-                                               replaceExisting: forceFull, includeTagged: !skipTagged) { p in
-                Task { @MainActor in progress = p }
-            }
-
-            // Apply the app-side metadata (captions, "posted by", cover, highlight
-            // bubbles, and the tracking record) exactly like the bulk import.
-            await InstagramApply.apply(r, to: dest, already: already, prior: prior,
-                                       forceFull: forceFull, library: library)
-            if r.profile == nil, !isUpdate {
-                // Profile never loaded — drop the empty folder we created.
-                if let contents = try? FileManager.default.contentsOfDirectory(atPath: dest.path), contents.isEmpty {
-                    try? FileManager.default.removeItem(at: dest)
+                                               replaceExisting: force, includeTagged: !skipT) { p in
+                Task { @MainActor in
+                    library.setActivity(id, status: p.total > 0 ? "Downloading \(p.done) of \(p.total)…" : p.phase,
+                                        fraction: p.total > 0 ? p.fraction : nil)
                 }
             }
-            // Optionally upscale every downloaded video to 1080p (in place, metadata kept).
-            if upscale1080 {
-                await InstagramApply.upscaleVideosTo1080(r.files) { done, total in
-                    upscaleLine = "Upscaling videos to 1080p — \(done) of \(total)…"
-                }
+            await InstagramApply.apply(r, to: dest, already: already, prior: prior, forceFull: force, library: library)
+            if r.profile == nil, !isUpd,
+               let contents = try? FileManager.default.contentsOfDirectory(atPath: dest.path), contents.isEmpty {
+                try? FileManager.default.removeItem(at: dest)        // profile never loaded — drop the empty folder
+            }
+            if up {
+                await InstagramApply.upscaleVideosTo1080(r.files) { d, t in library.setActivity(id, status: "Upscaling videos — \(d) of \(t)…") }
             }
 
-            running = false; bg.end()
-            result = r
-            if r.photos + r.videos > 0 { library.contentDidChange(); onFinished() }
+            let n = r.photos + r.videos
+            let msg: String
+            if r.profile == nil { msg = "Couldn’t open @\(h) — check the handle and that you’re logged in." }
+            else if n == 0 { msg = r.note ?? "No new posts for @\(h)." }
+            else { msg = "@\(h): downloaded \(r.photos) photo\(r.photos == 1 ? "" : "s") and \(r.videos) video\(r.videos == 1 ? "" : "s")." }
+            library.endActivity(id, result: msg)
+            if n > 0 { library.contentDidChange(); finish() }
+            bg.end()
         }
     }
 }
