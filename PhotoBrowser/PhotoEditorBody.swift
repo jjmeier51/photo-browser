@@ -41,6 +41,16 @@ struct FaceLandmarks: Sendable, Equatable {
     var center: CGPoint?
     var width: Double = 0.2
     var height: Double = 0.25
+    // Region polygons (normalized, top-left) for makeup overlays.
+    var outerLips: [CGPoint] = []
+    var innerLips: [CGPoint] = []
+    var leftEyePoly: [CGPoint] = []
+    var rightEyePoly: [CGPoint] = []
+    var leftBrowPoly: [CGPoint] = []
+    var rightBrowPoly: [CGPoint] = []
+    var contour: [CGPoint] = []
+    var cheekL: CGPoint?
+    var cheekR: CGPoint?
 }
 
 /// Combined landmark set passed to the renderer (either part may be nil).
@@ -101,6 +111,7 @@ enum FaceDetect {
         let leftEyeP = pts(lms.leftEye), rightEyeP = pts(lms.rightEye)
         f.leftEye = centroid(leftEyeP); f.rightEye = centroid(rightEyeP)
         f.eyeRadius = max(radius(leftEyeP, f.leftEye), radius(rightEyeP, f.rightEye))
+        f.leftEyePoly = leftEyeP; f.rightEyePoly = rightEyeP
 
         let noseP = pts(lms.nose)
         f.nose = centroid(noseP); f.noseRadius = radius(noseP, f.nose)
@@ -109,14 +120,25 @@ enum FaceDetect {
         f.mouth = centroid(lipsP); f.mouthRadius = radius(lipsP, f.mouth)
         f.mouthLeft = lipsP.min(by: { $0.x < $1.x })
         f.mouthRight = lipsP.max(by: { $0.x < $1.x })
+        f.outerLips = lipsP; f.innerLips = pts(lms.innerLips)
 
         let contour = pts(lms.faceContour)
         f.chin = contour.max(by: { $0.y < $1.y })             // lowest point (top-left → max y)
         f.faceLeft = contour.min(by: { $0.x < $1.x })
         f.faceRight = contour.max(by: { $0.x < $1.x })
+        f.contour = contour
 
-        let brows = pts(lms.leftEyebrow) + pts(lms.rightEyebrow)
+        f.leftBrowPoly = pts(lms.leftEyebrow); f.rightBrowPoly = pts(lms.rightEyebrow)
+        let brows = f.leftBrowPoly + f.rightBrowPoly
         if let by = centroid(brows)?.y { f.browY = Double(by) }
+
+        // Cheeks: between each eye and the nearer mouth corner (a natural blush placement).
+        func mid(_ a: CGPoint?, _ b: CGPoint?) -> CGPoint? {
+            guard let a, let b else { return nil }
+            return CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+        }
+        f.cheekL = mid(f.leftEye, f.mouthLeft)
+        f.cheekR = mid(f.rightEye, f.mouthRight)
 
         // Face box from the observation (normalized, bottom-left → top-left).
         let bb = obs.boundingBox

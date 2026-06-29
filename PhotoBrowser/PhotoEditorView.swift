@@ -17,7 +17,7 @@ struct PhotoEditorView: View {
     let entry: Entry
 
     private enum Tab: String, CaseIterable, Identifiable {
-        case adjust, filters, crop, reshape, body, cutout
+        case adjust, filters, crop, reshape, body, makeup, cutout
         var id: String { rawValue }
         var title: String { self == .cutout ? "Cut Out" : rawValue.capitalized }
         var icon: String {
@@ -27,6 +27,7 @@ struct PhotoEditorView: View {
             case .crop:    return "crop.rotate"
             case .reshape: return "hand.draw"
             case .body:    return "figure.stand"
+            case .makeup:  return "paintbrush.pointed.fill"
             case .cutout:  return "person.and.background.dotted"
             }
         }
@@ -63,6 +64,7 @@ struct PhotoEditorView: View {
     @State private var bodyDetecting = false
     @State private var bodyNoPerson = false
     @State private var selectedBody = "slim"                // active body/face control chip
+    @State private var selectedMakeup = "looks"             // active makeup category chip
 
     var body: some View {
         ZStack {
@@ -78,6 +80,7 @@ struct PhotoEditorView: View {
         .onChange(of: tab) {
             if tab == .cutout { detectSubjectIfNeeded() }
             if tab == .body { detectBodyIfNeeded(); detectSubjectIfNeeded() }   // mask confines the warp
+            if tab == .makeup { detectBodyIfNeeded() }   // makeup needs face landmarks
             scheduleRender()                      // crop tab shows the uncropped frame; others bake the crop
         }
         .confirmationDialog("Save Photo", isPresented: $showSaveOptions, titleVisibility: .visible) {
@@ -230,6 +233,7 @@ struct PhotoEditorView: View {
             case .crop:    cropPanel
             case .reshape: reshapePanel
             case .body:    bodyPanel
+            case .makeup:  makeupPanel
             case .cutout:  cutoutPanel
             }
             tabBar
@@ -240,19 +244,21 @@ struct PhotoEditorView: View {
     }
 
     private var tabBar: some View {
-        HStack {
-            ForEach(Tab.allCases) { t in
-                Button { tab = t } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: t.icon).font(.system(size: 18))
-                        Text(t.title).font(.caption2)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 22) {
+                ForEach(Tab.allCases) { t in
+                    Button { tab = t } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: t.icon).font(.system(size: 18))
+                            Text(t.title).font(.caption2)
+                        }
+                        .frame(minWidth: 44)
+                        .foregroundStyle(tab == t ? Color.white : Color.secondary)
                     }
-                    .frame(maxWidth: .infinity)
-                    .foregroundStyle(tab == t ? Color.white : Color.secondary)
                 }
             }
+            .padding(.horizontal)
         }
-        .padding(.horizontal)
         .padding(.top, 4)
     }
 
@@ -649,6 +655,184 @@ struct PhotoEditorView: View {
     private func bodyBinding(_ keyPath: WritableKeyPath<BodyShape, Double>) -> Binding<Double> {
         Binding(get: { recipe.body[keyPath: keyPath] },
                 set: { recipe.body[keyPath: keyPath] = $0; scheduleRender() })
+    }
+
+    // MARK: Makeup panel
+
+    private struct MakeupCat: Identifiable {
+        let id: String; let name: String; let systemImage: String
+    }
+    private static let makeupCats: [MakeupCat] = [
+        .init(id: "looks",    name: "Looks",     systemImage: "sparkles"),
+        .init(id: "lips",     name: "Lips",      systemImage: "mouth.fill"),
+        .init(id: "blush",    name: "Blush",     systemImage: "circle.fill"),
+        .init(id: "shadow",   name: "Shadow",    systemImage: "eye.fill"),
+        .init(id: "liner",    name: "Liner",     systemImage: "pencil.tip"),
+        .init(id: "lashes",   name: "Lashes",    systemImage: "eye"),
+        .init(id: "brows",    name: "Brows",     systemImage: "eyebrow"),
+        .init(id: "freckles", name: "Freckles",  systemImage: "circle.dotted"),
+    ]
+    private static let lipColors = [
+        MakeupColor(0.80, 0.12, 0.24), MakeupColor(0.88, 0.34, 0.40), MakeupColor(0.91, 0.47, 0.40),
+        MakeupColor(0.72, 0.42, 0.40), MakeupColor(0.56, 0.10, 0.28), MakeupColor(0.46, 0.13, 0.30),
+    ]
+    private static let blushColors = [
+        MakeupColor(0.94, 0.42, 0.46), MakeupColor(0.96, 0.56, 0.45),
+        MakeupColor(0.90, 0.50, 0.56), MakeupColor(0.86, 0.34, 0.34),
+    ]
+    private static let shadowColors = [
+        MakeupColor(0.52, 0.30, 0.42), MakeupColor(0.45, 0.30, 0.20), MakeupColor(0.62, 0.46, 0.26),
+        MakeupColor(0.40, 0.20, 0.36), MakeupColor(0.36, 0.36, 0.41),
+    ]
+    private struct MakeupLook: Identifiable { let id: String; let recipe: MakeupRecipe }
+    private static let makeupLooks: [MakeupLook] = [
+        MakeupLook(id: "Natural", recipe: { var m = MakeupRecipe(); m.lips = 0.30; m.lipsColor = MakeupColor(0.84, 0.46, 0.42)
+            m.blush = 0.30; m.brows = 0.20; return m }()),
+        MakeupLook(id: "Glam", recipe: { var m = MakeupRecipe(); m.lips = 0.55; m.eyeshadow = 0.45; m.eyeliner = 0.7
+            m.lashes = 0.5; m.blush = 0.35; m.brows = 0.3; return m }()),
+        MakeupLook(id: "Bold", recipe: { var m = MakeupRecipe(); m.lips = 0.7; m.lipsColor = MakeupColor(0.78, 0.08, 0.20)
+            m.eyeliner = 0.6; m.brows = 0.3; return m }()),
+        MakeupLook(id: "Sweet", recipe: { var m = MakeupRecipe(); m.lips = 0.4; m.lipsColor = MakeupColor(0.90, 0.45, 0.50)
+            m.blush = 0.5; m.blushColor = MakeupColor(0.96, 0.56, 0.55); m.freckles = 2; return m }()),
+        MakeupLook(id: "Smoky", recipe: { var m = MakeupRecipe(); m.eyeshadow = 0.6; m.eyeshadowColor = MakeupColor(0.36, 0.34, 0.40)
+            m.eyeliner = 0.8; m.lashes = 0.7; m.lips = 0.35; m.lipsColor = MakeupColor(0.70, 0.42, 0.40); return m }()),
+    ]
+
+    private var makeupPanel: some View {
+        VStack(spacing: 12) {
+            if bodyDetecting {
+                HStack(spacing: 8) {
+                    ProgressView().tint(.white)
+                    Text("Finding face…").font(.subheadline).foregroundStyle(.secondary)
+                }
+            } else if editLandmarks?.face == nil {
+                Text("No face found in this photo.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                makeupControls(for: selectedMakeup)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 14) {
+                        ForEach(Self.makeupCats) { c in makeupCatChip(c) }
+                    }
+                    .padding(.horizontal)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func makeupControls(for cat: String) -> some View {
+        switch cat {
+        case "lips":     makeupItem("Lips", \.lips, color: \.lipsColor, palette: Self.lipColors)
+        case "blush":    makeupItem("Blush", \.blush, color: \.blushColor, palette: Self.blushColors)
+        case "shadow":   makeupItem("Eyeshadow", \.eyeshadow, color: \.eyeshadowColor, palette: Self.shadowColors)
+        case "liner":    makeupSlider("Eyeliner", \.eyeliner)
+        case "lashes":   makeupSlider("Lashes", \.lashes)
+        case "brows":    makeupSlider("Brows", \.brows)
+        case "freckles": freckleControls
+        default:         looksControls
+        }
+    }
+
+    private var looksControls: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                Button { commit { recipe.makeup = MakeupRecipe() } } label: { lookLabel("None", on: recipe.makeup.isZero) }
+                ForEach(Self.makeupLooks) { look in
+                    Button { commit { recipe.makeup = look.recipe } } label: {
+                        lookLabel(look.id, on: recipe.makeup == look.recipe)
+                    }
+                }
+            }
+            .padding(.horizontal)
+        }
+    }
+
+    private func lookLabel(_ name: String, on: Bool) -> some View {
+        Text(name)
+            .font(.subheadline.weight(.medium))
+            .padding(.horizontal, 16).padding(.vertical, 9)
+            .background(Capsule().fill(on ? Color.white.opacity(0.22) : Color.white.opacity(0.08)))
+            .overlay(Capsule().stroke(on ? Color.white : .clear, lineWidth: 1.5))
+            .foregroundStyle(on ? Color.white : Color.secondary)
+    }
+
+    private var freckleControls: some View {
+        VStack(spacing: 8) {
+            Text("Freckles — none to lots").font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                ForEach(0...5, id: \.self) { lvl in
+                    Button { commit { recipe.makeup.freckles = lvl } } label: {
+                        Text(lvl == 0 ? "None" : "\(lvl)")
+                            .font(.subheadline).frame(width: 46, height: 38)
+                            .background(RoundedRectangle(cornerRadius: 9)
+                                .fill(recipe.makeup.freckles == lvl ? Color.white.opacity(0.22) : Color.white.opacity(0.08)))
+                            .overlay(RoundedRectangle(cornerRadius: 9)
+                                .stroke(recipe.makeup.freckles == lvl ? Color.white : .clear, lineWidth: 1.5))
+                            .foregroundStyle(recipe.makeup.freckles == lvl ? Color.white : Color.secondary)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal)
+    }
+
+    private func makeupItem(_ name: String, _ intensity: WritableKeyPath<MakeupRecipe, Double>,
+                            color: WritableKeyPath<MakeupRecipe, MakeupColor>, palette: [MakeupColor]) -> some View {
+        VStack(spacing: 10) {
+            makeupSlider(name, intensity)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    ForEach(palette.indices, id: \.self) { i in
+                        let c = palette[i]
+                        let sel = recipe.makeup[keyPath: color] == c
+                        Button { commit { recipe.makeup[keyPath: color] = c } } label: {
+                            Circle().fill(Color(red: c.r, green: c.g, blue: c.b))
+                                .frame(width: 30, height: 30)
+                                .overlay(Circle().stroke(sel ? Color.white : Color.white.opacity(0.3),
+                                                         lineWidth: sel ? 2.5 : 1))
+                        }
+                    }
+                }
+                .padding(.horizontal)
+            }
+        }
+    }
+
+    private func makeupSlider(_ name: String, _ keyPath: WritableKeyPath<MakeupRecipe, Double>) -> some View {
+        VStack(spacing: 4) {
+            HStack {
+                Text(name).font(.subheadline.weight(.medium))
+                Spacer()
+                Text("\(Int((recipe.makeup[keyPath: keyPath] * 100).rounded()))")
+                    .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            Slider(value: makeupBinding(keyPath), in: 0...1) { editing in
+                reshaping = editing                  // lighter proxy while scrubbing the overlay
+                if editing { snapshot() } else { scheduleRender() }
+            }
+            .tint(.white)
+        }
+        .padding(.horizontal)
+    }
+
+    private func makeupCatChip(_ c: MakeupCat) -> some View {
+        let isSel = selectedMakeup == c.id
+        return Button { selectedMakeup = c.id } label: {
+            VStack(spacing: 6) {
+                Image(systemName: c.systemImage).font(.system(size: 17))
+                    .frame(width: 48, height: 48)
+                    .background(Circle().fill(isSel ? Color.white.opacity(0.22) : Color.white.opacity(0.08)))
+                    .overlay(Circle().stroke(isSel ? Color.white : .clear, lineWidth: 1.5))
+                Text(c.name).font(.caption2)
+            }
+            .foregroundStyle(isSel ? Color.white : Color.secondary)
+        }
+    }
+
+    private func makeupBinding(_ keyPath: WritableKeyPath<MakeupRecipe, Double>) -> Binding<Double> {
+        Binding(get: { recipe.makeup[keyPath: keyPath] },
+                set: { recipe.makeup[keyPath: keyPath] = $0; scheduleRender() })
     }
 
     // MARK: Reshape panel

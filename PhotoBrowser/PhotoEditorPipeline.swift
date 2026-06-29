@@ -39,6 +39,7 @@ enum EditPipeline {
                        landmarks: EditLandmarks? = nil, hdr: Bool = false, fast: Bool = false) -> CIImage {
         var img = source
         img = cutout(img, r, mask: mask)        // background replacement first, so later edits apply to it
+        img = makeupStage(img, r, landmarks: landmarks)   // makeup before warps, so it tracks the face
         img = bodyStage(img, r, landmarks: landmarks, mask: mask, hdr: hdr, fast: fast)   // shape only the subject
         img = geometry(img, r)
         img = toneColor(img, r)
@@ -47,6 +48,13 @@ enum EditPipeline {
         img = effects(img, r)
         img = reshapeStage(img, r, hdr: hdr, fast: fast)
         return img.cropped(to: img.extent)      // settle the extent
+    }
+
+    // MARK: Makeup
+
+    private static func makeupStage(_ image: CIImage, _ r: EditRecipe, landmarks: EditLandmarks?) -> CIImage {
+        guard !r.makeup.isZero, let face = landmarks?.face else { return image }
+        return MakeupRenderer.apply(image, makeup: r.makeup, face: face)
     }
 
     // MARK: Body shaping

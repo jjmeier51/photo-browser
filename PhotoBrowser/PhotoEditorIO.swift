@@ -98,7 +98,7 @@ enum PhotoEditorIO {
         // The subject mask is needed for the cut-out and to confine body shaping to the subject.
         let needsMask = recipe.cutout != nil || !recipe.body.isZero
         let mask = needsMask ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
-        let landmarks = detectLandmarks(for: recipe.body, in: loaded.image)
+        let landmarks = detectLandmarks(for: recipe, in: loaded.image)
         let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask, landmarks: landmarks), upscale)
         guard !rendered.extent.isInfinite, !rendered.extent.isNull,
               let cg = context.createCGImage(rendered, from: rendered.extent) else { return false }
@@ -130,11 +130,14 @@ enum PhotoEditorIO {
         return true
     }
 
-    /// Detects whichever landmark sets the body-shaping recipe needs (off-main). Resolution-independent.
-    static func detectLandmarks(for body: BodyShape, in image: CIImage) -> EditLandmarks? {
-        guard !body.isZero else { return nil }
-        let lm = EditLandmarks(body: body.hasBodyEdit ? BodyPose.detect(in: image) : nil,
-                               face: body.hasFaceEdit ? FaceDetect.detect(in: image) : nil)
+    /// Detects whichever landmark sets the recipe needs (body shaping and/or makeup). Off-main,
+    /// resolution-independent.
+    static func detectLandmarks(for recipe: EditRecipe, in image: CIImage) -> EditLandmarks? {
+        let needBody = recipe.body.hasBodyEdit
+        let needFace = recipe.body.hasFaceEdit || !recipe.makeup.isZero
+        guard needBody || needFace else { return nil }
+        let lm = EditLandmarks(body: needBody ? BodyPose.detect(in: image) : nil,
+                               face: needFace ? FaceDetect.detect(in: image) : nil)
         return lm.isEmpty ? nil : lm
     }
 
@@ -175,7 +178,7 @@ enum PhotoEditorIO {
         guard let loaded = loadHDR(url: sourceURL) else { return false }
         let needsMask = recipe.cutout != nil || !recipe.body.isZero
         let mask = needsMask ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
-        let landmarks = detectLandmarks(for: recipe.body, in: loaded.image)
+        let landmarks = detectLandmarks(for: recipe, in: loaded.image)
         let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask,
                                                     landmarks: landmarks, hdr: true), upscale)
         guard !rendered.extent.isInfinite, !rendered.extent.isNull else { return false }

@@ -53,6 +53,9 @@ struct EditRecipe: Codable, Equatable {
     // MARK: Body shaping (warp driven by Vision body landmarks, supplied at render time)
     var body = BodyShape()
 
+    // MARK: Makeup (face-landmark-driven overlays, supplied at render time)
+    var makeup = MakeupRecipe()
+
     /// True when nothing has been changed (used to gate the Save button / "no edits").
     var isIdentity: Bool { self == EditRecipe() }
 
@@ -120,6 +123,32 @@ struct BodyShape: Codable, Equatable {
     var hasFaceEdit: Bool {
         head != 0 || forehead != 0 || eyes != 0 || nose != 0 || ears != 0 || chin != 0 ||
         lips != 0 || smile != 0
+    }
+}
+
+/// A makeup color (linear-ish sRGB components 0…1), stored in the recipe.
+struct MakeupColor: Codable, Equatable {
+    var r: Double, g: Double, b: Double
+    init(_ r: Double, _ g: Double, _ b: Double) { self.r = r; self.g = g; self.b = b }
+}
+
+/// Face makeup amounts + colors. Overlays are drawn from face landmarks at render time; the recipe only
+/// stores intensities (0…1), colors, and the freckle density level (0…5). Templated "looks" just set a
+/// bundle of these. All bipolar-free (additive) — 0 means that element is off.
+struct MakeupRecipe: Codable, Equatable {
+    var lips = 0.0
+    var lipsColor = MakeupColor(0.80, 0.12, 0.24)       // classic red
+    var blush = 0.0
+    var blushColor = MakeupColor(0.94, 0.42, 0.46)      // warm pink
+    var eyeshadow = 0.0
+    var eyeshadowColor = MakeupColor(0.52, 0.30, 0.42)  // mauve
+    var eyeliner = 0.0
+    var lashes = 0.0
+    var brows = 0.0
+    var freckles = 0                                    // 0…5 density
+
+    var isZero: Bool {
+        lips == 0 && blush == 0 && eyeshadow == 0 && eyeliner == 0 && lashes == 0 && brows == 0 && freckles == 0
     }
 }
 
