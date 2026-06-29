@@ -50,7 +50,7 @@ enum PhotoEditorIO {
     /// Renders a (proxy or full) CIImage through `recipe` and turns it into a `UIImage` for display.
     static func renderUIImage(_ source: CIImage, recipe: EditRecipe) -> UIImage? {
         let out = EditPipeline.render(source, recipe: recipe)
-        guard out.extent.isFinite, !out.extent.isInfinite,
+        guard !out.extent.isInfinite, !out.extent.isNull,
               let cg = context.createCGImage(out, from: out.extent) else { return nil }
         return UIImage(cgImage: cg)
     }
@@ -61,7 +61,7 @@ enum PhotoEditorIO {
                      format: ExportFormat = .heic, quality: Double = 0.92) -> Bool {
         guard let loaded = load(url: sourceURL) else { return false }
         let rendered = EditPipeline.render(loaded.image, recipe: recipe)
-        guard rendered.extent.isFinite, !rendered.extent.isInfinite,
+        guard !rendered.extent.isInfinite, !rendered.extent.isNull,
               let cg = context.createCGImage(rendered, from: rendered.extent) else { return false }
 
         // Copy the original properties; the pixels are now upright + edited, so reset orientation
@@ -108,7 +108,7 @@ enum PhotoEditorIO {
 
     /// Mean luminance (0…1) of `image`, used by the one-tap Auto to decide how to nudge exposure.
     static func averageLuma(of image: CIImage) -> Double {
-        guard image.extent.isFinite, !image.extent.isInfinite else { return 0.5 }
+        guard !image.extent.isInfinite, !image.extent.isNull else { return 0.5 }
         let avg = image.applyingFilter("CIAreaAverage",
                                        parameters: [kCIInputExtentKey: CIVector(cgRect: image.extent)])
         var px = [UInt8](repeating: 0, count: 4)
