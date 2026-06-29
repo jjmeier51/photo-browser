@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreImage
+import UIKit
 
 /// The full-screen photo editor (Hypic/Facetune-style) built on the non-destructive `EditRecipe`
 /// backbone (PRD Phase 1). A downscaled **proxy** of the source drives a live preview at interactive
@@ -31,6 +32,8 @@ struct PhotoEditorView: View {
 
     // Source proxy + rendered preview
     @State private var proxy: CIImage?
+    @State private var fastProxy: CIImage?      // smaller proxy for high-FPS preview during reshape drags
+    @State private var reshaping = false        // true while a reshape stroke is in progress
     @State private var preview: UIImage?
     @State private var originalThumb: UIImage?
     @State private var filterThumbs: [String: UIImage] = [:]
@@ -90,25 +93,29 @@ struct PhotoEditorView: View {
     private var previewArea: some View {
         ZStack {
             if let preview {
-                ZStack {
-                    Image(uiImage: preview)
-                        .resizable()
-                        .scaledToFit()
-                        .animation(.easeOut(duration: 0.12), value: preview)
-                    if tab == .crop {
-                        CropOverlay(box: cropBoxBinding,
-                                    imageSize: preview.size,
-                                    normalizedRatio: cropConstraint,
-                                    onBegin: { snapshot() })
+                if tab == .reshape {
+                    // Pinch-zoom + two-finger pan (UIScrollView) with a one-finger reshape brush.
+                    ReshapeCanvas(image: preview,
+                                  brushRadius: reshapeRadius,
+                                  onBegin: { reshaping = true; snapshot() },
+                                  onPush: { p, d in applyReshape(at: p, delta: d) },
+                                  onEnd: { reshaping = false; scheduleRender() })
+                        .padding(10)
+                } else {
+                    ZStack {
+                        Image(uiImage: preview)
+                            .resizable()
+                            .scaledToFit()
+                            .animation(.easeOut(duration: 0.12), value: preview)
+                        if tab == .crop {
+                            CropOverlay(box: cropBoxBinding,
+                                        imageSize: preview.size,
+                                        normalizedRatio: cropConstraint,
+                                        onBegin: { snapshot() })
+                        }
                     }
-                    if tab == .reshape {
-                        ReshapeOverlay(radius: reshapeRadius,
-                                       imageSize: preview.size,
-                                       onBegin: { snapshot() },
-                                       onPush: { p, d in applyReshape(at: p, delta: d) })
-                    }
+                    .padding(10)
                 }
-                .padding(10)
             } else if loadFailed {
                 ContentUnavailableView("Couldn't open this photo", systemImage: "exclamationmark.triangle")
             } else {
@@ -545,9 +552,10 @@ struct PhotoEditorView: View {
         guard let proxy else { return }
         if rendering { renderPending = true; return }
         rendering = true
+        let src = reshaping ? (fastProxy ?? proxy) : proxy
         let r = renderRecipe
         Task.detached(priority: .userInitiated) {
-            let img = PhotoEditorIO.renderUIImage(proxy, recipe: r)
+            let img = PhotoEditorIO.renderUIImage(src, recipe: r)
             await MainActor.run {
                 rendering = false
                 if let img { preview = img }
@@ -562,6 +570,7 @@ struct PhotoEditorView: View {
         guard let loaded else { loadFailed = true; return }
         let p = PhotoEditorIO.proxy(loaded.image, maxDimension: 1600)
         proxy = p
+        fastProxy = PhotoEditorIO.proxy(p, maxDimension: 1000)   // lighter render while actively reshaping
         scheduleRender()
         // Build the filter strip + the "Original" tile off-main.
         let thumbs = await Task.detached(priority: .utility) { () -> (UIImage?, [String: UIImage]) in
@@ -740,56 +749,165 @@ private struct CropOverlay: View {
     }
 }
 
-/// Transparent gesture layer for the reshape brush. Reports the touch point and the incremental drag
-/// delta — both normalized to the fitted image rect (top-down) — and draws a brush ring for feedback.
-private struct ReshapeOverlay: View {
-    let radius: CGFloat               // brush radius as a fraction of image width
-    let imageSize: CGSize
+/// Zoomable canvas for the reshape brush. A `UIScrollView` provides pinch-to-zoom and two-finger pan
+/// (its built-in pan is set to require two fingers), leaving one-finger drags for the brush — so the
+/// user can zoom in and still reshape without gesture conflicts. The brush reports the touch point and
+/// incremental delta normalized to the (unzoomed) image, plus a zoom-aware ring for feedback. Touches
+/// are read in the image view's own coordinate space, so the normalization stays correct at any zoom.
+private struct ReshapeCanvas: UIViewRepresentable {
+    let image: UIImage
+    let brushRadius: CGFloat                    // fraction of image width
     let onBegin: () -> Void
-    let onPush: (CGPoint, CGSize) -> Void
+    let onPush: (CGPoint, CGSize) -> Void       // normalized point (top-down) + normalized delta
+    let onEnd: () -> Void
 
-    @State private var last: CGPoint?
-    @State private var ring: CGPoint?
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    var body: some View {
-        GeometryReader { geo in
-            let frame = fittedRect(in: geo.size)
-            ZStack {
-                Color.white.opacity(0.001)
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { v in
-                                if last == nil { last = v.location; onBegin() }
-                                let prev = last ?? v.location
-                                last = v.location
-                                ring = v.location
-                                guard frame.width > 0, frame.height > 0 else { return }
-                                let p = CGPoint(x: clamp01((v.location.x - frame.minX) / frame.width),
-                                                y: clamp01((v.location.y - frame.minY) / frame.height))
-                                let d = CGSize(width: (v.location.x - prev.x) / frame.width,
-                                               height: (v.location.y - prev.y) / frame.height)
-                                onPush(p, d)
-                            }
-                            .onEnded { _ in last = nil; ring = nil }
-                    )
-                if let ring {
-                    Circle().stroke(Color.white.opacity(0.85), lineWidth: 1.5)
-                        .frame(width: radius * frame.width * 2, height: radius * frame.width * 2)
-                        .position(ring)
-                        .allowsHitTesting(false)
-                }
-            }
-        }
+    func makeUIView(context: Context) -> ReshapeScrollView {
+        let sv = ReshapeScrollView()
+        sv.delegate = context.coordinator
+        sv.backgroundColor = .clear
+        sv.contentInsetAdjustmentBehavior = .never
+        sv.showsVerticalScrollIndicator = false
+        sv.showsHorizontalScrollIndicator = false
+        sv.bouncesZoom = true
+        sv.panGestureRecognizer.minimumNumberOfTouches = 2   // one finger stays free for the brush
+        sv.imageView.contentMode = .scaleAspectFit
+        sv.imageView.isUserInteractionEnabled = true
+        sv.addSubview(sv.imageView)
+        sv.setImage(image)
+        context.coordinator.scroll = sv
+
+        let brush = UIPanGestureRecognizer(target: context.coordinator,
+                                           action: #selector(Coordinator.handleBrush(_:)))
+        brush.maximumNumberOfTouches = 1
+        brush.delegate = context.coordinator
+        sv.imageView.addGestureRecognizer(brush)
+
+        let doubleTap = UITapGestureRecognizer(target: context.coordinator,
+                                               action: #selector(Coordinator.handleDoubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        sv.addGestureRecognizer(doubleTap)
+
+        return sv
     }
 
-    private func clamp01(_ v: CGFloat) -> CGFloat { min(max(v, 0), 1) }
+    func updateUIView(_ sv: ReshapeScrollView, context: Context) {
+        context.coordinator.parent = self
+        if sv.imageView.image !== image { sv.setImage(image) }
+    }
 
-    private func fittedRect(in bounds: CGSize) -> CGRect {
-        guard imageSize.width > 0, imageSize.height > 0, bounds.width > 0, bounds.height > 0
-        else { return CGRect(origin: .zero, size: bounds) }
-        let s = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
-        let w = imageSize.width * s, h = imageSize.height * s
-        return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
+    final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
+        var parent: ReshapeCanvas
+        weak var scroll: ReshapeScrollView?
+        private var last: CGPoint?
+        private let ring = CAShapeLayer()
+
+        init(_ parent: ReshapeCanvas) {
+            self.parent = parent
+            super.init()
+            ring.fillColor = UIColor.clear.cgColor
+            ring.strokeColor = UIColor.white.withAlphaComponent(0.85).cgColor
+            ring.lineWidth = 1.5
+            ring.isHidden = true
+        }
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            (scrollView as? ReshapeScrollView)?.imageView
+        }
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            (scrollView as? ReshapeScrollView)?.centerContent()
+        }
+        // The brush coexists with the scroll view's pinch/pan recognizers.
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+
+        @objc func handleBrush(_ g: UIPanGestureRecognizer) {
+            guard let iv = scroll?.imageView else { return }
+            let size = iv.bounds.size
+            guard size.width > 0, size.height > 0 else { return }
+            let loc = g.location(in: iv)
+            switch g.state {
+            case .began:
+                last = loc
+                parent.onBegin()
+                if ring.superlayer == nil { iv.layer.addSublayer(ring) }
+                updateRing(at: loc, in: size); ring.isHidden = false
+            case .changed:
+                let prev = last ?? loc
+                last = loc
+                let p = CGPoint(x: clamp01(loc.x / size.width), y: clamp01(loc.y / size.height))
+                let d = CGSize(width: (loc.x - prev.x) / size.width, height: (loc.y - prev.y) / size.height)
+                parent.onPush(p, d)
+                updateRing(at: loc, in: size)
+            case .ended, .cancelled, .failed:
+                last = nil; ring.isHidden = true; parent.onEnd()
+            default: break
+            }
+        }
+
+        @objc func handleDoubleTap(_ g: UITapGestureRecognizer) {
+            guard let sv = scroll else { return }
+            if sv.zoomScale > sv.minimumZoomScale + 0.01 {
+                sv.setZoomScale(sv.minimumZoomScale, animated: true)
+            } else {
+                let p = g.location(in: sv.imageView)
+                let scale = min(sv.maximumZoomScale, 2.5)
+                let w = sv.bounds.width / scale, h = sv.bounds.height / scale
+                sv.zoom(to: CGRect(x: p.x - w / 2, y: p.y - h / 2, width: w, height: h), animated: true)
+            }
+        }
+
+        private func updateRing(at loc: CGPoint, in size: CGSize) {
+            ring.path = UIBezierPath(arcCenter: loc, radius: parent.brushRadius * size.width,
+                                     startAngle: 0, endAngle: .pi * 2, clockwise: true).cgPath
+            if let z = scroll?.zoomScale, z > 0 { ring.lineWidth = 1.5 / z }   // ~constant on-screen width
+        }
+
+        private func clamp01(_ v: CGFloat) -> CGFloat { min(max(v, 0), 1) }
+    }
+}
+
+/// A centering scroll view for `ReshapeCanvas`. It fits the image to the view at zoom 1 and reconfigures
+/// only when the image **aspect** changes — so swapping in a different-resolution render of the same
+/// photo (the fast vs. full reshape proxy) keeps the current zoom instead of snapping back.
+private final class ReshapeScrollView: UIScrollView {
+    let imageView = UIImageView()
+    private var aspect: CGFloat = 0
+    private var fitSize: CGSize = .zero
+    private var configured = false
+    private var lastBounds: CGSize = .zero
+
+    func setImage(_ image: UIImage) {
+        imageView.image = image
+        let a = image.size.height > 0 ? image.size.width / image.size.height : 0
+        if abs(a - aspect) > 0.0001 { aspect = a; configured = false; setNeedsLayout() }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard aspect > 0, bounds.width > 0, bounds.height > 0 else { return }
+        if !configured || lastBounds != bounds.size {
+            configure(); configured = true; lastBounds = bounds.size
+        }
+        centerContent()
+    }
+
+    private func configure() {
+        var w = bounds.width, h = bounds.width / aspect
+        if h > bounds.height { h = bounds.height; w = bounds.height * aspect }
+        fitSize = CGSize(width: w, height: h)
+        zoomScale = 1
+        minimumZoomScale = 1
+        maximumZoomScale = 6
+        imageView.frame = CGRect(origin: .zero, size: fitSize)
+        contentSize = fitSize
+    }
+
+    func centerContent() {
+        let ox = max(0, (bounds.width - imageView.frame.width) / 2)
+        let oy = max(0, (bounds.height - imageView.frame.height) / 2)
+        imageView.center = CGPoint(x: imageView.frame.width / 2 + ox,
+                                   y: imageView.frame.height / 2 + oy)
     }
 }
