@@ -16,7 +16,7 @@ struct PhotoEditorView: View {
     let entry: Entry
 
     private enum Tab: String, CaseIterable, Identifiable {
-        case adjust, filters, crop
+        case adjust, filters, crop, reshape
         var id: String { rawValue }
         var title: String { rawValue.capitalized }
         var icon: String {
@@ -24,6 +24,7 @@ struct PhotoEditorView: View {
             case .adjust:  return "slider.horizontal.3"
             case .filters: return "camera.filters"
             case .crop:    return "crop.rotate"
+            case .reshape: return "hand.draw"
             }
         }
     }
@@ -34,7 +35,8 @@ struct PhotoEditorView: View {
     @State private var originalThumb: UIImage?
     @State private var filterThumbs: [String: UIImage] = [:]
     @State private var loadFailed = false
-    @State private var renderGen = 0
+    @State private var rendering = false
+    @State private var renderPending = false
 
     // Edit state + history
     @State private var recipe = EditRecipe()
@@ -44,6 +46,8 @@ struct PhotoEditorView: View {
     @State private var tab: Tab = .adjust
     @State private var selected: Adjustment = Adjustment.all[0]
     @State private var cropAspect: EditAspect = .freeform   // which crop chip is active (drag constraint)
+    @State private var reshapeRadius: CGFloat = 0.18         // brush radius, fraction of image width
+    @State private var reshapeStrength: CGFloat = 0.45       // 0…1, how much a drag pushes pixels
 
     var body: some View {
         ZStack {
@@ -97,6 +101,12 @@ struct PhotoEditorView: View {
                                     normalizedRatio: cropConstraint,
                                     onBegin: { snapshot() })
                     }
+                    if tab == .reshape {
+                        ReshapeOverlay(radius: reshapeRadius,
+                                       imageSize: preview.size,
+                                       onBegin: { snapshot() },
+                                       onPush: { p, d in applyReshape(at: p, delta: d) })
+                    }
                 }
                 .padding(10)
             } else if loadFailed {
@@ -116,6 +126,7 @@ struct PhotoEditorView: View {
             case .adjust:  adjustPanel
             case .filters: filterPanel
             case .crop:    cropPanel
+            case .reshape: reshapePanel
             }
             tabBar
         }
@@ -382,6 +393,73 @@ struct PhotoEditorView: View {
         return CGRect(x: (1 - w) / 2, y: (1 - h) / 2, width: w, height: h)
     }
 
+    // MARK: Reshape panel
+
+    private var reshapePanel: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Text("Drag on the photo to push pixels").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button { commit { recipe.reshape = nil } } label: {
+                    Label("Reset", systemImage: "arrow.counterclockwise")
+                }
+                .font(.caption).tint(.white)
+                .disabled(recipe.reshape == nil)
+            }
+            .padding(.horizontal)
+
+            labeledSlider("Size", systemImage: "circle.dashed",
+                          value: $reshapeRadius, range: 0.06...0.4)
+            labeledSlider("Strength", systemImage: "scribble.variable",
+                          value: $reshapeStrength, range: 0.1...1.0)
+        }
+    }
+
+    private func labeledSlider(_ title: String, systemImage: String,
+                               value: Binding<CGFloat>, range: ClosedRange<CGFloat>) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage).font(.system(size: 15)).frame(width: 22)
+            Text(title).font(.subheadline).frame(width: 70, alignment: .leading)
+            Slider(value: Binding(get: { Double(value.wrappedValue) },
+                                  set: { value.wrappedValue = CGFloat($0) }),
+                   in: Double(range.lowerBound)...Double(range.upperBound))
+                .tint(.white)
+        }
+        .padding(.horizontal)
+    }
+
+    /// Accumulates a push at normalized point `p` (top-down) in normalized drag direction `delta` into
+    /// the reshape mesh, with a smooth round-brush falloff, then re-renders.
+    private func applyReshape(at p: CGPoint, delta: CGSize) {
+        guard let aspect = previewImageRatio else { return }
+        var f = recipe.reshape ?? ReshapeField()
+        let cols = f.cols, rows = f.rows
+        let r = Double(reshapeRadius)
+        let strength = Double(reshapeStrength)
+        let dxn = Double(delta.width), dyn = Double(delta.height)
+        guard r > 0, (dxn != 0 || dyn != 0) else { return }
+
+        for j in 1..<(rows - 1) {
+            for i in 1..<(cols - 1) {
+                let vu = Double(i) / Double(cols - 1)
+                let vv = Double(j) / Double(rows - 1)
+                let ax = vu - Double(p.x)
+                let ay = (vv - Double(p.y)) / Double(aspect)   // aspect-correct → round brush in pixels
+                let dist = (ax * ax + ay * ay).squareRoot()
+                guard dist < r else { continue }
+                let t = 1 - dist / r
+                let fall = t * t * (3 - 2 * t)                  // smoothstep
+                let idx = j * cols + i
+                f.dx[idx] = clampDisp(f.dx[idx] + dxn * strength * fall)
+                f.dy[idx] = clampDisp(f.dy[idx] + dyn * strength * fall)
+            }
+        }
+        recipe.reshape = f.isZero ? nil : f
+        scheduleRender()
+    }
+
+    private func clampDisp(_ v: Double) -> Double { max(-0.3, min(0.3, v)) }
+
     // MARK: - Bindings
 
     private func sliderBinding(for a: Adjustment) -> Binding<Double> {
@@ -460,16 +538,20 @@ struct PhotoEditorView: View {
         var r = recipe; r.cropRect = nil; return r
     }
 
-    /// Renders the current recipe over the proxy off-main; only the latest render wins (`renderGen`).
+    /// Renders the current recipe over the proxy off-main. Single-flight: at most one render runs at a
+    /// time and the newest state always renders last, so rapid input (reshape/crop drags, slider scrubs)
+    /// coalesces instead of spawning a backlog of full rasterizations.
     private func scheduleRender() {
         guard let proxy else { return }
-        renderGen += 1
-        let gen = renderGen
+        if rendering { renderPending = true; return }
+        rendering = true
         let r = renderRecipe
         Task.detached(priority: .userInitiated) {
             let img = PhotoEditorIO.renderUIImage(proxy, recipe: r)
             await MainActor.run {
-                if gen == renderGen, let img { preview = img }
+                rendering = false
+                if let img { preview = img }
+                if renderPending { renderPending = false; scheduleRender() }
             }
         }
     }
@@ -655,5 +737,59 @@ private struct CropOverlay: View {
         }
         let nmx = fx + sx * w, nmy = fy + sy * h
         return CGRect(x: min(fx, nmx), y: min(fy, nmy), width: w, height: h)
+    }
+}
+
+/// Transparent gesture layer for the reshape brush. Reports the touch point and the incremental drag
+/// delta — both normalized to the fitted image rect (top-down) — and draws a brush ring for feedback.
+private struct ReshapeOverlay: View {
+    let radius: CGFloat               // brush radius as a fraction of image width
+    let imageSize: CGSize
+    let onBegin: () -> Void
+    let onPush: (CGPoint, CGSize) -> Void
+
+    @State private var last: CGPoint?
+    @State private var ring: CGPoint?
+
+    var body: some View {
+        GeometryReader { geo in
+            let frame = fittedRect(in: geo.size)
+            ZStack {
+                Color.white.opacity(0.001)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { v in
+                                if last == nil { last = v.location; onBegin() }
+                                let prev = last ?? v.location
+                                last = v.location
+                                ring = v.location
+                                guard frame.width > 0, frame.height > 0 else { return }
+                                let p = CGPoint(x: clamp01((v.location.x - frame.minX) / frame.width),
+                                                y: clamp01((v.location.y - frame.minY) / frame.height))
+                                let d = CGSize(width: (v.location.x - prev.x) / frame.width,
+                                               height: (v.location.y - prev.y) / frame.height)
+                                onPush(p, d)
+                            }
+                            .onEnded { _ in last = nil; ring = nil }
+                    )
+                if let ring {
+                    Circle().stroke(Color.white.opacity(0.85), lineWidth: 1.5)
+                        .frame(width: radius * frame.width * 2, height: radius * frame.width * 2)
+                        .position(ring)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+    }
+
+    private func clamp01(_ v: CGFloat) -> CGFloat { min(max(v, 0), 1) }
+
+    private func fittedRect(in bounds: CGSize) -> CGRect {
+        guard imageSize.width > 0, imageSize.height > 0, bounds.width > 0, bounds.height > 0
+        else { return CGRect(origin: .zero, size: bounds) }
+        let s = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
+        let w = imageSize.width * s, h = imageSize.height * s
+        return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
     }
 }

@@ -37,7 +37,15 @@ enum EditPipeline {
         img = filter(img, r)
         img = detail(img, r)
         img = effects(img, r)
+        img = reshapeStage(img, r)
         return img.cropped(to: img.extent)      // settle the extent
+    }
+
+    // MARK: Reshape
+
+    private static func reshapeStage(_ image: CIImage, _ r: EditRecipe) -> CIImage {
+        guard let field = r.reshape, !field.isZero else { return image }
+        return ReshapeWarp.apply(image, field: field)
     }
 
     // MARK: Geometry

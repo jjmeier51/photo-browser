@@ -44,6 +44,9 @@ struct EditRecipe: Codable, Equatable {
     var filterID: String?              // see EditFilter.all; nil = none
     var filterIntensity = 1.0          // 0…1
 
+    // MARK: Reshape (manual liquify; applied last, per PRD §8 order)
+    var reshape: ReshapeField?         // nil = no warp
+
     /// True when nothing has been changed (used to gate the Save button / "no edits").
     var isIdentity: Bool { self == EditRecipe() }
 
@@ -51,6 +54,26 @@ struct EditRecipe: Codable, Equatable {
     var hasGeometry: Bool {
         rotationQuarters != 0 || flipH || flipV || straighten != 0 || cropRect != nil
     }
+}
+
+/// A serializable displacement mesh for manual reshape/liquify (`FR-RESH-01`). A regular `cols`×`rows`
+/// grid of control points carries a normalized push offset (`dx` in image-width units, `dy` in
+/// image-height units, top-down). The renderer warps the image by this mesh (`ReshapeWarp`); a fresh
+/// field is all-zero (identity). Stored as flat arrays so it stays trivially `Codable`.
+struct ReshapeField: Codable, Equatable {
+    var cols: Int
+    var rows: Int
+    var dx: [Double]
+    var dy: [Double]
+
+    init(cols: Int = 25, rows: Int = 25) {
+        self.cols = max(3, cols)
+        self.rows = max(3, rows)
+        dx = Array(repeating: 0, count: self.cols * self.rows)
+        dy = Array(repeating: 0, count: self.cols * self.rows)
+    }
+
+    var isZero: Bool { !dx.contains { $0 != 0 } && !dy.contains { $0 != 0 } }
 }
 
 /// Crop aspect options offered in the editor (PRD FR-CROP-01). This is a **UI-only** enum (the actual
