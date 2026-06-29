@@ -35,6 +35,8 @@ struct PhotoEditorView: View {
     @State private var fastProxy: CIImage?      // smaller proxy for high-FPS preview during reshape drags
     @State private var reshaping = false        // true while a reshape stroke is in progress
     @State private var preview: UIImage?
+    @State private var originalPreview: UIImage?    // unedited proxy, for the hold-to-compare overlay
+    @State private var showOriginal = false
     @State private var originalThumb: UIImage?
     @State private var filterThumbs: [String: UIImage] = [:]
     @State private var loadFailed = false
@@ -72,6 +74,7 @@ struct PhotoEditorView: View {
         HStack(spacing: 18) {
             Button("Cancel") { dismiss() }
             Spacer()
+            compareButton
             Button { undo() } label: { Image(systemName: "arrow.uturn.backward") }
                 .disabled(undoStack.isEmpty)
             Button { redo() } label: { Image(systemName: "arrow.uturn.forward") }
@@ -86,6 +89,23 @@ struct PhotoEditorView: View {
         .tint(.white)
         .padding(.horizontal)
         .padding(.vertical, 12)
+    }
+
+    /// Press and hold to peek at the unedited original (disabled when there are no edits to compare).
+    private var compareButton: some View {
+        Image(systemName: showOriginal ? "rectangle.fill.on.rectangle.fill" : "rectangle.on.rectangle")
+            .font(.body)
+            .foregroundStyle(recipe.isIdentity ? Color.secondary : Color.white)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard !recipe.isIdentity, originalPreview != nil else { return }
+                        if !showOriginal { withAnimation(.easeOut(duration: 0.1)) { showOriginal = true } }
+                    }
+                    .onEnded { _ in withAnimation(.easeOut(duration: 0.1)) { showOriginal = false } }
+            )
+            .accessibilityLabel("Hold to compare with original")
     }
 
     // MARK: - Preview
@@ -120,6 +140,25 @@ struct PhotoEditorView: View {
                 ContentUnavailableView("Couldn't open this photo", systemImage: "exclamationmark.triangle")
             } else {
                 ProgressView().tint(.white)
+            }
+
+            // Hold-to-compare: the unedited original covers the edited preview while the button is held.
+            if showOriginal, let originalPreview {
+                Image(uiImage: originalPreview)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black)
+                    .overlay(alignment: .top) {
+                        Text("Original")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10).padding(.vertical, 4)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .padding(.top, 8)
+                    }
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -572,6 +611,9 @@ struct PhotoEditorView: View {
         proxy = p
         fastProxy = PhotoEditorIO.proxy(p, maxDimension: 1000)   // lighter render while actively reshaping
         scheduleRender()
+        originalPreview = await Task.detached(priority: .utility) {
+            PhotoEditorIO.renderUIImage(p, recipe: EditRecipe())   // unedited proxy for compare
+        }.value
         // Build the filter strip + the "Original" tile off-main.
         let thumbs = await Task.detached(priority: .utility) { () -> (UIImage?, [String: UIImage]) in
             let small = PhotoEditorIO.proxy(p, maxDimension: 200)
@@ -881,7 +923,10 @@ private final class ReshapeScrollView: UIScrollView {
     func setImage(_ image: UIImage) {
         imageView.image = image
         let a = image.size.height > 0 ? image.size.width / image.size.height : 0
-        if abs(a - aspect) > 0.0001 { aspect = a; configured = false; setNeedsLayout() }
+        // Only re-fit (which resets zoom) on a *real* aspect change. The fast vs. full reshape proxy
+        // differ by a hair from integer pixel rounding; a tight threshold would re-fit mid-stroke and
+        // kick the user back to fit. A genuine change (rotate/crop) moves the aspect far more than this.
+        if abs(a - aspect) > 0.02 { aspect = a; configured = false; setNeedsLayout() }
     }
 
     override func layoutSubviews() {
