@@ -112,6 +112,7 @@ struct FolderView: View {
     @State private var showTaylorCrossRef = false
     @State private var importing = false
     @State private var editEntry: Entry?
+    @State private var studioEntry: Entry?
     @State private var resizeEntry: Entry?
     @State private var aiEditEntry: Entry?
     @State private var editProcessing = false
@@ -562,6 +563,9 @@ struct FolderView: View {
                     Label("Crop & Rotate", systemImage: "crop.rotate")
                 }
                 if entry.kind == .image {
+                    Button { studioEntry = entry } label: {
+                        Label("Edit Photo", systemImage: "slider.horizontal.3")
+                    }
                     Button { resizeEntry = entry } label: {
                         Label("Resize / Extend", systemImage: "aspectratio")
                     }
@@ -770,6 +774,7 @@ struct FolderView: View {
                     .ignoresSafeArea()
             }
             .fullScreenCover(item: $editEntry) { e in MediaEditorView(entry: e) }
+            .fullScreenCover(item: $studioEntry) { e in PhotoEditorView(entry: e) }
             .fullScreenCover(item: $resizeEntry) { e in ResizeEditorView(entry: e) }
             .sheet(item: $aiEditEntry) { e in AIEditView(entry: e) }
             .fullScreenCover(isPresented: $showPeople) { PeopleView(folder: url) }
