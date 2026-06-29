@@ -290,6 +290,7 @@ enum InstagramService {
         var jobs: [Job] = []
         var maxID: String?
         var pages = 0
+        var consecutiveSeen = 0          // run of already-downloaded posts
         loop: while pages < 400 {
             pages += 1
             var s = "https://i.instagram.com/api/v1/\(base)?count=33"
@@ -300,7 +301,16 @@ enum InstagramService {
             let items = json["items"] as? [[String: Any]] ?? []
             for item in items {
                 guard let code = item["code"] as? String else { continue }
-                if already.contains(code) { break loop }
+                if already.contains(code) {
+                    // Don't stop at the *first* already-downloaded post: Instagram pins up to ~3
+                    // (already-downloaded) posts above newer ones, so a new post can sit below them.
+                    // Skip seen posts and only stop after a long run — past the pins and well into the
+                    // already-downloaded timeline.
+                    consecutiveSeen += 1
+                    if consecutiveSeen >= 12 { break loop }
+                    continue
+                }
+                consecutiveSeen = 0
                 // The user feed omits the DASH manifest (only progressive video_versions),
                 // so the high-res VP9/AV1/HDR renditions are invisible. Fetch the media-info
                 // endpoint to get them — only when a transcoder is present to use them.

@@ -130,15 +130,11 @@ struct AllStoriesView: View {
             }
             .sheet(isPresented: $showLogin) {
                 InstagramLoginView {
-                    Task {
-                        loggedIn = await InstagramAuth.isLoggedIn()
-                        if loggedIn { start() }                 // tap-through: log in then run
-                    }
+                    Task { loggedIn = await InstagramAuth.isLoggedIn() }
                 }
             }
             .task {
-                loggedIn = await InstagramAuth.isLoggedIn()
-                if loggedIn && trackedCount > 0 { start() }     // auto-run when ready
+                loggedIn = await InstagramAuth.isLoggedIn()     // show the options screen; the user taps to run
             }
             // Keep the screen awake while the (potentially long) sweep runs.
             .onChange(of: running) { _, isRunning in UIApplication.shared.isIdleTimerDisabled = isRunning }
@@ -157,11 +153,16 @@ struct AllStoriesView: View {
             let bg = BackgroundTaskHolder(); bg.begin(name: "Instagram Stories")
 
             // Snapshot the tracked Instagram folders that still exist on disk, A–Z by handle.
+            // Include every tracked profile whose @handle folder exists *or* whose parent (person)
+            // folder does — so "Set Handles" profiles (mapped but never downloaded) are checked too,
+            // and the Stories folder is created on demand. Only truly-orphaned paths are skipped.
             // `hasCover` lets us skip the profile-pic refetch on re-runs (one fewer request each).
+            let fm = FileManager.default
             let folders: [(url: URL, info: IGFolderInfo, hasCover: Bool)] = library.instagramFolders.compactMap { path, info in
-                var isDir: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else { return nil }
                 let url = URL(fileURLWithPath: path)
+                var isDir: ObjCBool = false
+                let folderExists = fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+                guard folderExists || fm.fileExists(atPath: url.deletingLastPathComponent().path) else { return nil }
                 return (url, info, library.coverURL(for: url) != nil)
             }.sorted { $0.info.handle.localizedCaseInsensitiveCompare($1.info.handle) == .orderedAscending }
             overallTotal = folders.count
@@ -247,6 +248,7 @@ struct AllStoriesView: View {
         let picData = folder.hasCover ? nil
             : await InstagramService.fetchProfilePic(userID: userID, handle: folder.info.handle, creds: creds, fallback: "")
         let storiesFolder = folder.url.appendingPathComponent("Stories", isDirectory: true)
+        try? FileManager.default.createDirectory(at: storiesFolder, withIntermediateDirectories: true)   // create @handle/Stories on demand
         let r = await InstagramService.runStories(handle: folder.info.handle, userID: userID, into: storiesFolder,
                                                   already: Set(folder.info.downloaded), creds: creds) { _ in }
         guard r.photos + r.videos > 0 else {
