@@ -161,8 +161,10 @@ enum EditPipeline {
         guard let f = EditFilter.by(id: r.filterID), r.filterIntensity > 0 else { return image }
         let looked = f.make(image).cropped(to: image.extent)
         if r.filterIntensity >= 1 { return looked }
-        return looked.applyingFilter("CIDissolveTransition", parameters: [
-            kCIInputBackgroundImageKey: image,
+        // Cross-dissolve from the original (time 0) toward the filtered look (time 1) by intensity.
+        // CIDissolveTransition's blend target is `inputTargetImage` — there is no inputBackgroundImage.
+        return image.applyingFilter("CIDissolveTransition", parameters: [
+            kCIInputTargetImageKey: looked,
             kCIInputTimeKey: r.filterIntensity,
         ]).cropped(to: image.extent)
     }
@@ -200,10 +202,14 @@ enum EditPipeline {
                 .cropped(to: img.extent)
                 .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0, kCIInputBrightnessKey: 0, kCIInputContrastKey: 1])
             if let noise {
-                img = noise.applyingFilter("CISourceOverCompositing", parameters: [
+                // Composite the grain over the image, then dissolve from the clean image toward the
+                // grainy one by the grain amount. (Target image is `inputTargetImage`, not background.)
+                let grainy = noise.applyingFilter("CISourceOverCompositing", parameters: [
                     kCIInputBackgroundImageKey: img,
-                ]).applyingFilter("CIDissolveTransition", parameters: [
-                    kCIInputBackgroundImageKey: img, kCIInputTimeKey: min(0.18, r.grain * 0.18),
+                ]).cropped(to: img.extent)
+                img = img.applyingFilter("CIDissolveTransition", parameters: [
+                    kCIInputTargetImageKey: grainy,
+                    kCIInputTimeKey: min(0.18, r.grain * 0.18),
                 ]).cropped(to: img.extent)
             }
         }
