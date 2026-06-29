@@ -36,29 +36,29 @@ enum EditPipeline {
     /// `hdr` routes the reshape warp through a 16-bit float wide-gamut raster so HDR headroom survives
     /// (set it on the HDR save path; the SDR preview/export leave it false for speed).
     static func render(_ source: CIImage, recipe r: EditRecipe, mask: CIImage? = nil,
-                       landmarks: EditLandmarks? = nil, hdr: Bool = false) -> CIImage {
+                       landmarks: EditLandmarks? = nil, hdr: Bool = false, fast: Bool = false) -> CIImage {
         var img = source
         img = cutout(img, r, mask: mask)        // background replacement first, so later edits apply to it
-        img = bodyStage(img, r, landmarks: landmarks, mask: mask, hdr: hdr)   // shape only the subject
+        img = bodyStage(img, r, landmarks: landmarks, mask: mask, hdr: hdr, fast: fast)   // shape only the subject
         img = geometry(img, r)
         img = toneColor(img, r)
         img = filter(img, r)
         img = detail(img, r)
         img = effects(img, r)
-        img = reshapeStage(img, r, hdr: hdr)
+        img = reshapeStage(img, r, hdr: hdr, fast: fast)
         return img.cropped(to: img.extent)      // settle the extent
     }
 
     // MARK: Body shaping
 
     private static func bodyStage(_ image: CIImage, _ r: EditRecipe,
-                                  landmarks: EditLandmarks?, mask: CIImage?, hdr: Bool) -> CIImage {
+                                  landmarks: EditLandmarks?, mask: CIImage?, hdr: Bool, fast: Bool) -> CIImage {
         guard !r.body.isZero, let lm = landmarks, !lm.isEmpty else { return image }
         let aspect = image.extent.height > 0 ? image.extent.width / image.extent.height : 1
         guard var field = BodyWarp.field(for: r.body, landmarks: lm, imageAspect: aspect) else { return image }
         // Confine the warp to the subject so the background stays untouched.
         if let mask { field = BodyWarp.modulate(field, byMask: mask, context: PhotoEditorIO.context) }
-        return ReshapeWarp.apply(image, field: field, hdr: hdr)
+        return ReshapeWarp.apply(image, field: field, hdr: hdr, fast: fast)
     }
 
     // MARK: Cutout (background removal)
@@ -101,9 +101,9 @@ enum EditPipeline {
 
     // MARK: Reshape
 
-    private static func reshapeStage(_ image: CIImage, _ r: EditRecipe, hdr: Bool) -> CIImage {
+    private static func reshapeStage(_ image: CIImage, _ r: EditRecipe, hdr: Bool, fast: Bool) -> CIImage {
         guard let field = r.reshape, !field.isZero else { return image }
-        return ReshapeWarp.apply(image, field: field, hdr: hdr)
+        return ReshapeWarp.apply(image, field: field, hdr: hdr, fast: fast)
     }
 
     // MARK: Geometry

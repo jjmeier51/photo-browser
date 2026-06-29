@@ -180,7 +180,9 @@ struct PhotoEditorView: View {
                         Image(uiImage: preview)
                             .resizable()
                             .scaledToFit()
-                            .animation(.easeOut(duration: 0.12), value: preview)
+                            // No crossfade while dragging a warp — instant frames track the finger
+                            // smoothly instead of trailing behind a 0.12s fade.
+                            .animation(reshaping ? nil : .easeOut(duration: 0.12), value: preview)
                         if tab == .crop {
                             CropOverlay(box: cropBoxBinding,
                                         imageSize: preview.size,
@@ -804,8 +806,9 @@ struct PhotoEditorView: View {
         let r = renderRecipe
         let mask = cutoutMask
         let landmarks = editLandmarks
+        let fast = reshaping
         Task.detached(priority: .userInitiated) {
-            let img = PhotoEditorIO.renderUIImage(src, recipe: r, mask: mask, landmarks: landmarks)
+            let img = PhotoEditorIO.renderUIImage(src, recipe: r, mask: mask, landmarks: landmarks, fast: fast)
             await MainActor.run {
                 rendering = false
                 if let img { preview = img }
@@ -820,7 +823,7 @@ struct PhotoEditorView: View {
         guard let loaded else { loadFailed = true; return }
         let p = PhotoEditorIO.proxy(loaded.image, maxDimension: 1600)
         proxy = p
-        fastProxy = PhotoEditorIO.proxy(p, maxDimension: 1000)   // lighter render while actively reshaping
+        fastProxy = PhotoEditorIO.proxy(p, maxDimension: 820)    // lighter render → higher FPS while dragging a warp
         scheduleRender()
         originalPreview = await Task.detached(priority: .utility) {
             PhotoEditorIO.renderUIImage(p, recipe: EditRecipe())   // unedited proxy for compare

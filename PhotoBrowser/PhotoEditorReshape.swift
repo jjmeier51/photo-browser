@@ -16,7 +16,7 @@ enum ReshapeWarp {
     /// Warps `image` by `field`. Works entirely in the rasterized bitmap's bottom-left pixel space.
     /// When `hdr` is set, the raster is 16-bit float in extended-linear Display P3 so HDR headroom and
     /// wide gamut survive the warp (an 8-bit raster would silently flatten HDR to SDR).
-    static func apply(_ image: CIImage, field: ReshapeField, hdr: Bool = false) -> CIImage {
+    static func apply(_ image: CIImage, field: ReshapeField, hdr: Bool = false, fast: Bool = false) -> CIImage {
         let e = image.extent
         guard !e.isInfinite, !e.isNull, e.width >= 2, e.height >= 2 else { return image }
 
@@ -50,7 +50,7 @@ enum ReshapeWarp {
         guard let ctx = CGContext(data: nil, width: cg.width, height: cg.height,
                                   bitsPerComponent: bitsPerComponent, bytesPerRow: 0, space: space,
                                   bitmapInfo: bitmapInfo) else { return image }
-        ctx.interpolationQuality = .high
+        ctx.interpolationQuality = fast ? .medium : .high   // cheaper resample while dragging; crisp on save
         ctx.setShouldAntialias(false)      // sharp triangle edges → adjacent cells meet with no seam
 
         // Source vertex in bottom-left pixels; v runs top→bottom so y is flipped.

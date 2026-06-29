@@ -73,9 +73,9 @@ enum PhotoEditorIO {
 
     /// Renders a (proxy or full) CIImage through `recipe` and turns it into a `UIImage` for display.
     /// Pass `mask` (subject mask) when `recipe.cutout` is set and `landmarks` when body shaping is used.
-    static func renderUIImage(_ source: CIImage, recipe: EditRecipe,
-                              mask: CIImage? = nil, landmarks: EditLandmarks? = nil) -> UIImage? {
-        let out = EditPipeline.render(source, recipe: recipe, mask: mask, landmarks: landmarks)
+    static func renderUIImage(_ source: CIImage, recipe: EditRecipe, mask: CIImage? = nil,
+                              landmarks: EditLandmarks? = nil, fast: Bool = false) -> UIImage? {
+        let out = EditPipeline.render(source, recipe: recipe, mask: mask, landmarks: landmarks, fast: fast)
         guard !out.extent.isInfinite, !out.extent.isNull,
               let cg = context.createCGImage(out, from: out.extent) else { return nil }
         return UIImage(cgImage: cg)
