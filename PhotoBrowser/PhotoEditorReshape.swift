@@ -14,10 +14,32 @@ import CoreGraphics
 /// is run off the main actor for full-res export.
 enum ReshapeWarp {
     /// Warps `image` by `field`. Works entirely in the rasterized bitmap's bottom-left pixel space.
-    static func apply(_ image: CIImage, field: ReshapeField) -> CIImage {
+    /// When `hdr` is set, the raster is 16-bit float in extended-linear Display P3 so HDR headroom and
+    /// wide gamut survive the warp (an 8-bit raster would silently flatten HDR to SDR).
+    static func apply(_ image: CIImage, field: ReshapeField, hdr: Bool = false) -> CIImage {
         let e = image.extent
-        guard !e.isInfinite, !e.isNull, e.width >= 2, e.height >= 2,
-              let cg = PhotoEditorIO.context.createCGImage(image, from: e) else { return image }
+        guard !e.isInfinite, !e.isNull, e.width >= 2, e.height >= 2 else { return image }
+
+        // Choose the raster precision/space: float wide-gamut for HDR, 8-bit device RGB otherwise.
+        let space: CGColorSpace
+        let bitsPerComponent: Int
+        let bitmapInfo: UInt32
+        let ciFormat: CIFormat
+        if hdr, let ext = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3) {
+            space = ext
+            bitsPerComponent = 16
+            bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+                | CGBitmapInfo.floatComponents.rawValue | CGBitmapInfo.byteOrder16Little.rawValue
+            ciFormat = .RGBAh
+        } else {
+            space = CGColorSpaceCreateDeviceRGB()
+            bitsPerComponent = 8
+            bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+            ciFormat = .RGBA8
+        }
+
+        guard let cg = PhotoEditorIO.context.createCGImage(image, from: e, format: ciFormat, colorSpace: space)
+        else { return image }
 
         let W = CGFloat(cg.width), H = CGFloat(cg.height)
         let cols = field.cols, rows = field.rows
@@ -25,10 +47,9 @@ enum ReshapeWarp {
               field.dx.count == cols * rows, field.dy.count == cols * rows else { return image }
 
         // A raw bitmap context draws a CGImage upright in bottom-left coordinates (no UIKit flip).
-        let space = CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(data: nil, width: cg.width, height: cg.height,
-                                  bitsPerComponent: 8, bytesPerRow: 0, space: space,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return image }
+                                  bitsPerComponent: bitsPerComponent, bytesPerRow: 0, space: space,
+                                  bitmapInfo: bitmapInfo) else { return image }
         ctx.interpolationQuality = .high
         ctx.setShouldAntialias(false)      // sharp triangle edges → adjacent cells meet with no seam
 

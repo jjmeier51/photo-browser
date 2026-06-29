@@ -29,6 +29,30 @@ enum PhotoEditorIO {
         }
     }
 
+    /// Optional output upscaling applied at save time. `x2` adds light denoise + sharpening (the app's
+    /// "AI Upscale" recipe) on top of the high-quality Lanczos resample.
+    enum Upscale { case none, x1_5, x2 }
+
+    static func upscaled(_ image: CIImage, _ option: Upscale) -> CIImage {
+        switch option {
+        case .none:
+            return image
+        case .x1_5:
+            return lanczos(image, 1.5)
+        case .x2:
+            let scaled = lanczos(image, 2.0)
+            return scaled
+                .applyingFilter("CINoiseReduction", parameters: ["inputNoiseLevel": 0.012, "inputSharpness": 0.4])
+                .applyingFilter("CIUnsharpMask", parameters: [kCIInputRadiusKey: 2.0, kCIInputIntensityKey: 0.5])
+                .cropped(to: scaled.extent)
+        }
+    }
+
+    private static func lanczos(_ image: CIImage, _ scale: CGFloat) -> CIImage {
+        image.applyingFilter("CILanczosScaleTransform",
+                             parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1.0])
+    }
+
     /// Loads the source upright (EXIF orientation applied to the pixels) along with its full
     /// properties dictionary and the original orientation tag.
     static func load(url: URL) -> (image: CIImage, properties: [CFString: Any], orientation: Int32)? {
@@ -60,17 +84,18 @@ enum PhotoEditorIO {
     /// at `sourceURL` is never touched), preserving all metadata + the capture date. Off-main safe.
     /// When `recipe.cutout` is set, the subject mask is computed here at full resolution.
     static func save(recipe: EditRecipe, sourceURL: URL, to destURL: URL,
-                     format: ExportFormat = .heic, quality: Double = 0.92) -> Bool {
+                     format: ExportFormat = .heic, quality: Double = 0.92,
+                     upscale: Upscale = .none) -> Bool {
         // HDR retention: when the source carries HDR (gain map / PQ-HLG / RAW) and we aren't forced to
         // PNG (transparent cut-out), write a 10-bit HDR HEIC keeping the headroom. Falls back to SDR.
         if format != .png, isHDRSource(sourceURL),
-           saveHDR(recipe: recipe, sourceURL: sourceURL, to: destURL) {
+           saveHDR(recipe: recipe, sourceURL: sourceURL, to: destURL, upscale: upscale) {
             return true
         }
 
         guard let loaded = load(url: sourceURL) else { return false }
         let mask = recipe.cutout != nil ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
-        let rendered = EditPipeline.render(loaded.image, recipe: recipe, mask: mask)
+        let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask), upscale)
         guard !rendered.extent.isInfinite, !rendered.extent.isNull,
               let cg = context.createCGImage(rendered, from: rendered.extent) else { return false }
 
@@ -133,10 +158,11 @@ enum PhotoEditorIO {
 
     /// Renders the edit on the HDR-expanded source and writes a 10-bit HDR HEIC, carrying the original
     /// metadata + capture date. Returns false so the caller can fall back to the standard SDR path.
-    private static func saveHDR(recipe: EditRecipe, sourceURL: URL, to destURL: URL) -> Bool {
+    private static func saveHDR(recipe: EditRecipe, sourceURL: URL, to destURL: URL,
+                                upscale: Upscale = .none) -> Bool {
         guard let loaded = loadHDR(url: sourceURL) else { return false }
         let mask = recipe.cutout != nil ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
-        let rendered = EditPipeline.render(loaded.image, recipe: recipe, mask: mask)
+        let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask, hdr: true), upscale)
         guard !rendered.extent.isInfinite, !rendered.extent.isNull else { return false }
 
         var props = loaded.properties

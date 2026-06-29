@@ -38,6 +38,7 @@ struct PhotoEditorView: View {
     @State private var preview: UIImage?
     @State private var originalPreview: UIImage?    // unedited proxy, for the hold-to-compare overlay
     @State private var showOriginal = false
+    @State private var showSaveOptions = false
     @State private var originalThumb: UIImage?
     @State private var filterThumbs: [String: UIImage] = [:]
     @State private var loadFailed = false
@@ -73,6 +74,14 @@ struct PhotoEditorView: View {
             if tab == .cutout { detectSubjectIfNeeded() }
             scheduleRender()                      // crop tab shows the uncropped frame; others bake the crop
         }
+        .confirmationDialog("Save Photo", isPresented: $showSaveOptions, titleVisibility: .visible) {
+            Button("Save") { performSave(.none) }
+            Button("Save at 1.5×") { performSave(.x1_5) }
+            Button("Save at 2× (AI Upscale)") { performSave(.x2) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Upscale the saved photo?")
+        }
     }
 
     /// Computes the subject mask once (off-main) the first time the Cut Out tab is opened.
@@ -103,7 +112,7 @@ struct PhotoEditorView: View {
             Button { reset() } label: { Image(systemName: "arrow.counterclockwise") }
                 .disabled(recipe.isIdentity)
             Spacer()
-            Button { save() } label: { Text("Save").fontWeight(.semibold) }
+            Button { showSaveOptions = true } label: { Text("Save").fontWeight(.semibold) }
                 .disabled(recipe.isIdentity)
         }
         .font(.body)
@@ -709,11 +718,12 @@ struct PhotoEditorView: View {
 
     // MARK: - Save
 
-    private func save() {
+    private func performSave(_ upscale: PhotoEditorIO.Upscale) {
         guard !recipe.isIdentity else { dismiss(); return }
         let r = recipe
         let src = entry.url
-        let id = library.beginActivity("Saving edited photo…", indeterminate: true)
+        let title = upscale == .none ? "Saving edited photo…" : "Saving & upscaling photo…"
+        let id = library.beginActivity(title, indeterminate: true)
         dismiss()
         Task.detached(priority: .userInitiated) {
             // A transparent cut-out needs an alpha-capable format (PNG). HDR sources save as 10-bit
@@ -727,7 +737,7 @@ struct PhotoEditorView: View {
                 fmt = PhotoEditorIO.format(forSource: src)
             }
             let dest = PhotoEditorIO.editedDestination(for: src, format: fmt)
-            let ok = PhotoEditorIO.save(recipe: r, sourceURL: src, to: dest, format: fmt)
+            let ok = PhotoEditorIO.save(recipe: r, sourceURL: src, to: dest, format: fmt, upscale: upscale)
             await MainActor.run {
                 library.endActivity(id, result: ok ? "Saved edited photo" : "Couldn’t save the edit")
                 if ok { library.contentDidChange() }

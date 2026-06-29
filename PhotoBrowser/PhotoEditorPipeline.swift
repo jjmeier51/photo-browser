@@ -33,7 +33,9 @@ enum EditPipeline {
     /// `mask` is the optional subject mask (in `source` pixel space) for background removal; supply it
     /// whenever `recipe.cutout` is set. It is scaled to the working image, so a proxy-resolution mask
     /// can drive both the proxy preview and a downscaled render.
-    static func render(_ source: CIImage, recipe r: EditRecipe, mask: CIImage? = nil) -> CIImage {
+    /// `hdr` routes the reshape warp through a 16-bit float wide-gamut raster so HDR headroom survives
+    /// (set it on the HDR save path; the SDR preview/export leave it false for speed).
+    static func render(_ source: CIImage, recipe r: EditRecipe, mask: CIImage? = nil, hdr: Bool = false) -> CIImage {
         var img = source
         img = cutout(img, r, mask: mask)        // background replacement first, so later edits apply to it
         img = geometry(img, r)
@@ -41,7 +43,7 @@ enum EditPipeline {
         img = filter(img, r)
         img = detail(img, r)
         img = effects(img, r)
-        img = reshapeStage(img, r)
+        img = reshapeStage(img, r, hdr: hdr)
         return img.cropped(to: img.extent)      // settle the extent
     }
 
@@ -85,9 +87,9 @@ enum EditPipeline {
 
     // MARK: Reshape
 
-    private static func reshapeStage(_ image: CIImage, _ r: EditRecipe) -> CIImage {
+    private static func reshapeStage(_ image: CIImage, _ r: EditRecipe, hdr: Bool) -> CIImage {
         guard let field = r.reshape, !field.isZero else { return image }
-        return ReshapeWarp.apply(image, field: field)
+        return ReshapeWarp.apply(image, field: field, hdr: hdr)
     }
 
     // MARK: Geometry
