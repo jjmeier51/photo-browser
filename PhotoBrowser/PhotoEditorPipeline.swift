@@ -39,7 +39,7 @@ enum EditPipeline {
                        landmarks: EditLandmarks? = nil, hdr: Bool = false) -> CIImage {
         var img = source
         img = cutout(img, r, mask: mask)        // background replacement first, so later edits apply to it
-        img = bodyStage(img, r, landmarks: landmarks, hdr: hdr)   // body shaping on the composited subject
+        img = bodyStage(img, r, landmarks: landmarks, mask: mask, hdr: hdr)   // shape only the subject
         img = geometry(img, r)
         img = toneColor(img, r)
         img = filter(img, r)
@@ -52,10 +52,12 @@ enum EditPipeline {
     // MARK: Body shaping
 
     private static func bodyStage(_ image: CIImage, _ r: EditRecipe,
-                                  landmarks: EditLandmarks?, hdr: Bool) -> CIImage {
+                                  landmarks: EditLandmarks?, mask: CIImage?, hdr: Bool) -> CIImage {
         guard !r.body.isZero, let lm = landmarks, !lm.isEmpty else { return image }
         let aspect = image.extent.height > 0 ? image.extent.width / image.extent.height : 1
-        guard let field = BodyWarp.field(for: r.body, landmarks: lm, imageAspect: aspect) else { return image }
+        guard var field = BodyWarp.field(for: r.body, landmarks: lm, imageAspect: aspect) else { return image }
+        // Confine the warp to the subject so the background stays untouched.
+        if let mask { field = BodyWarp.modulate(field, byMask: mask, context: PhotoEditorIO.context) }
         return ReshapeWarp.apply(image, field: field, hdr: hdr)
     }
 

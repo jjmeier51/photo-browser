@@ -251,6 +251,34 @@ enum BodyWarp {
         return f.isZero ? nil : f
     }
 
+    /// Multiplies the displacement at each grid vertex by the subject mask coverage there, so background
+    /// vertices (mask ≈ 0) stay put and only the subject is warped. The mask is box-averaged down to the
+    /// grid resolution for a smooth, ~one-cell transition at the silhouette.
+    static func modulate(_ field: ReshapeField, byMask mask: CIImage, context: CIContext) -> ReshapeField {
+        let cols = field.cols, rows = field.rows
+        let e = mask.extent
+        guard !e.isInfinite, !e.isNull, e.width > 1, e.height > 1 else { return field }
+        let sx = CGFloat(cols) / e.width, sy = CGFloat(rows) / e.height
+        let small = mask.transformed(by: CGAffineTransform(scaleX: sx, y: sy))
+        let recentered = small.transformed(by: CGAffineTransform(translationX: -small.extent.minX,
+                                                                 y: -small.extent.minY))
+        guard let cg = context.createCGImage(recentered,
+                                             from: CGRect(x: 0, y: 0, width: CGFloat(cols), height: CGFloat(rows)),
+                                             format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()),
+              let data = cg.dataProvider?.data, let ptr = CFDataGetBytePtr(data) else { return field }
+        let bpr = cg.bytesPerRow
+        var f = field
+        for j in 0..<rows {
+            for i in 0..<cols {
+                let m = Double(ptr[j * bpr + i * 4]) / 255.0   // createCGImage is top-left; R = mask coverage
+                let idx = j * cols + i
+                f.dx[idx] *= m
+                f.dy[idx] *= m
+            }
+        }
+        return f
+    }
+
     // MARK: Helpers
 
     /// Radial falloff around `c` within `r`; returns the (x, y) offsets toward the vertex and the falloff

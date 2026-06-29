@@ -77,7 +77,7 @@ struct PhotoEditorView: View {
         .task { await load() }
         .onChange(of: tab) {
             if tab == .cutout { detectSubjectIfNeeded() }
-            if tab == .body { detectBodyIfNeeded() }
+            if tab == .body { detectBodyIfNeeded(); detectSubjectIfNeeded() }   // mask confines the warp
             scheduleRender()                      // crop tab shows the uncropped frame; others bake the crop
         }
         .confirmationDialog("Save Photo", isPresented: $showSaveOptions, titleVisibility: .visible) {
@@ -100,6 +100,7 @@ struct PhotoEditorView: View {
                 cutoutMask = mask
                 cutoutNoSubject = (mask == nil)
                 cutoutDetecting = false
+                scheduleRender()             // re-render once the mask is ready (confines body shaping)
             }
         }
     }
