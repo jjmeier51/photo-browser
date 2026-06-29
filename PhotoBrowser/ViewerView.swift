@@ -8,7 +8,7 @@ import AVFoundation
 /// - swipe left/right = next/previous, swipe down = exit, swipe up = info
 /// - photos: pinch & double-tap zoom; videos: zoom + scrubber
 struct ViewerView: View {
-    let items: [Entry]
+    @State private var items: [Entry]      // mutable so Delete/Move can drop the current item and advance
     let slideshow: Bool
     @State private var index: Int
     @State private var isZoomed = false
@@ -20,13 +20,18 @@ struct ViewerView: View {
     @State private var croppedCover: UIImage?
     @State private var showCoverFolderPicker = false
     @State private var showEditor = false
+    @State private var showStudio = false
     @State private var showResize = false
     @State private var showAIEdit = false
+    @State private var showMovePicker = false
+    @State private var showCopyPicker = false
+    @State private var confirmDelete = false
+    @State private var actionNote: String?
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
 
     init(items: [Entry], startIndex: Int, slideshow: Bool = false) {
-        self.items = items
+        _items = State(initialValue: items)
         self.slideshow = slideshow
         _index = State(initialValue: startIndex)
         _chromeHidden = State(initialValue: slideshow)
@@ -53,10 +58,11 @@ struct ViewerView: View {
                          onToggleChrome: { chromeHidden.toggle() },
                          onPrev: { go(-1) },
                          onNext: { go(1) })
-                    .id(index)
+                    .id(item.url)      // keyed on the entry, so removing the current item refreshes the page
             }
 
             topChrome
+            if let actionNote { toast(actionNote) }
         }
         .statusBarHidden(true)
         .onChange(of: index) { isZoomed = false; if !slideshow { chromeHidden = false } }
@@ -70,6 +76,21 @@ struct ViewerView: View {
         }
         .fullScreenCover(isPresented: $showEditor) {
             if let current { MediaEditorView(entry: current) }
+        }
+        .fullScreenCover(isPresented: $showStudio) {
+            if let current { PhotoEditorView(entry: current) }
+        }
+        .sheet(isPresented: $showMovePicker) {
+            FolderPicker(root: coverPickerRoot, confirmTitle: "Move Here") { dest in moveCurrent(to: dest) }
+        }
+        .sheet(isPresented: $showCopyPicker) {
+            FolderPicker(root: coverPickerRoot, confirmTitle: "Copy Here") { dest in copyCurrent(to: dest) }
+        }
+        .confirmationDialog("Delete this item?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) { deleteCurrent() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(current?.name ?? "")
         }
         .fullScreenCover(isPresented: $showResize) {
             if let current { ResizeEditorView(entry: current) }
@@ -93,7 +114,7 @@ struct ViewerView: View {
         }
         // Show the real capture date (EXIF / video creation) — for exported video
         // frames this is the video's date, not the file's creation/modified time.
-        .task(id: index) {
+        .task(id: current?.url) {
             headerDate = nil
             if let current { headerDate = await MetadataLoader.captureDate(for: current) }
         }
@@ -113,7 +134,9 @@ struct ViewerView: View {
     }
 
     private var coverPickerRoot: URL {
-        library.rootURL ?? current?.url.deletingLastPathComponent() ?? items[0].url
+        library.rootURL ?? current?.url.deletingLastPathComponent()
+            ?? items.first?.url.deletingLastPathComponent()
+            ?? URL(fileURLWithPath: NSHomeDirectory())
     }
 
     private func useAsAlbumCover() { coverEntry = current }
@@ -122,6 +145,81 @@ struct ViewerView: View {
         let next = index + delta
         guard next >= 0, next < items.count else { return }
         index = next
+    }
+
+    // MARK: - Item actions (Duplicate / Copy / Move / Delete)
+
+    private func duplicateCurrent() {
+        guard let current else { return }
+        let n = FileActions.duplicate([current])
+        library.contentDidChange()
+        note(n > 0 ? "Duplicated" : "Couldn’t duplicate")
+    }
+
+    private func copyCurrent(to dest: URL) {
+        guard let current else { return }
+        let src = current.url
+        Task {
+            let outcome = await FileActions.copyItems([src], to: dest, skipCollisions: false) { _ in }
+            if !outcome.copied.isEmpty { library.setLastTransferDestination(dest) }
+            library.contentDidChange()   // a copy into the visible folder should appear
+            note(outcome.copied.isEmpty ? "Couldn’t copy" : "Copied")
+        }
+    }
+
+    private func moveCurrent(to dest: URL) {
+        guard let current else { return }
+        let src = current.url
+        Task {
+            let outcome = await FileActions.moveItems([src], to: dest, renameOnCollision: true) { _ in }
+            guard !outcome.moved.isEmpty else { note("Couldn’t move"); return }
+            library.itemsMoved(outcome.moved)            // labels/captions follow the file
+            library.setLastTransferDestination(dest)
+            library.contentDidChange()
+            note("Moved")
+            removeCurrentAndAdvance()
+        }
+    }
+
+    private func deleteCurrent() {
+        guard let current else { return }
+        let assetIDs = library.origin(for: current.url).map { [$0] } ?? []
+        FileActions.delete([current])
+        library.clearOrigins([current.url])
+        library.contentDidChange()
+        if !assetIDs.isEmpty { Task { await FileActions.deletePhotosAssets(assetIDs) } }
+        removeCurrentAndAdvance()
+    }
+
+    /// Drops the current item from the strip after it left the folder (delete/move) and shows the
+    /// next one; closes the viewer when nothing remains. The page is keyed on the entry URL, so it
+    /// refreshes even though `index` may be unchanged.
+    private func removeCurrentAndAdvance() {
+        guard items.indices.contains(index) else { dismiss(); return }
+        items.remove(at: index)
+        isZoomed = false
+        if items.isEmpty { dismiss(); return }
+        if index >= items.count { index = items.count - 1 }
+    }
+
+    /// A brief auto-dismissing status line at the bottom (Duplicate/Copy/Move feedback).
+    private func note(_ text: String) {
+        actionNote = text
+        Task { try? await Task.sleep(nanoseconds: 1_600_000_000); if actionNote == text { actionNote = nil } }
+    }
+
+    private func toast(_ text: String) -> some View {
+        VStack {
+            Spacer()
+            Text(text)
+                .font(.subheadline.weight(.medium)).foregroundStyle(.white)
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .background(.black.opacity(0.6), in: Capsule())
+                .padding(.bottom, 60)
+        }
+        .frame(maxWidth: .infinity)
+        .allowsHitTesting(false)
+        .transition(.opacity)
     }
 
     // Close button + centered title/date; both hidden while zoomed in.
@@ -137,6 +235,11 @@ struct ViewerView: View {
                     }
                     Spacer()
                     Menu {
+                        if current?.kind == .image {
+                            Button { showStudio = true } label: {
+                                Label("Edit Photo", systemImage: "slider.horizontal.3")
+                            }
+                        }
                         Button { showEditor = true } label: {
                             Label("Crop & Rotate", systemImage: "crop.rotate")
                         }
@@ -150,6 +253,19 @@ struct ViewerView: View {
                         }
                         Button { useAsAlbumCover() } label: {
                             Label("Use as Album Cover", systemImage: "rectangle.center.inset.filled.badge.plus")
+                        }
+                        Divider()
+                        Button { duplicateCurrent() } label: {
+                            Label("Duplicate", systemImage: "plus.square.on.square")
+                        }
+                        Button { showCopyPicker = true } label: {
+                            Label("Copy to Folder…", systemImage: "doc.on.doc")
+                        }
+                        Button { showMovePicker = true } label: {
+                            Label("Move to Folder…", systemImage: "folder")
+                        }
+                        Button(role: .destructive) { confirmDelete = true } label: {
+                            Label("Delete", systemImage: "trash")
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")

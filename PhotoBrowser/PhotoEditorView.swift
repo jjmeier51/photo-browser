@@ -43,6 +43,7 @@ struct PhotoEditorView: View {
 
     @State private var tab: Tab = .adjust
     @State private var selected: Adjustment = Adjustment.all[0]
+    @State private var cropAspect: EditAspect = .freeform   // which crop chip is active (drag constraint)
 
     var body: some View {
         ZStack {
@@ -55,6 +56,7 @@ struct PhotoEditorView: View {
         }
         .preferredColorScheme(.dark)
         .task { await load() }
+        .onChange(of: tab) { scheduleRender() }   // crop tab shows the uncropped frame; others bake the crop
     }
 
     // MARK: - Top bar
@@ -84,11 +86,19 @@ struct PhotoEditorView: View {
     private var previewArea: some View {
         ZStack {
             if let preview {
-                Image(uiImage: preview)
-                    .resizable()
-                    .scaledToFit()
-                    .padding(10)
-                    .animation(.easeOut(duration: 0.12), value: preview)
+                ZStack {
+                    Image(uiImage: preview)
+                        .resizable()
+                        .scaledToFit()
+                        .animation(.easeOut(duration: 0.12), value: preview)
+                    if tab == .crop {
+                        CropOverlay(box: cropBoxBinding,
+                                    imageSize: preview.size,
+                                    normalizedRatio: cropConstraint,
+                                    onBegin: { snapshot() })
+                    }
+                }
+                .padding(10)
             } else if loadFailed {
                 ContentUnavailableView("Couldn't open this photo", systemImage: "exclamationmark.triangle")
             } else {
@@ -299,10 +309,10 @@ struct PhotoEditorView: View {
     }
 
     private func aspectChip(_ asp: EditAspect) -> some View {
-        let isSel = recipe.aspect == asp
-        return Button { commit { recipe.aspect = asp } } label: {
+        let isSel = cropAspect == asp
+        return Button { applyAspect(asp) } label: {
             VStack(spacing: 6) {
-                Image(systemName: "aspectratio").font(.system(size: 18))
+                Image(systemName: asp.systemImage).font(.system(size: 18))
                     .frame(width: 50, height: 50)
                     .background(Circle().fill(isSel ? Color.white.opacity(0.22) : Color.white.opacity(0.08)))
                     .overlay(Circle().stroke(isSel ? Color.white : .clear, lineWidth: 1.5))
@@ -310,6 +320,66 @@ struct PhotoEditorView: View {
             }
             .foregroundStyle(isSel ? Color.white : Color.secondary)
         }
+    }
+
+    /// Selects a crop aspect: Original clears the crop, fixed ratios set a centered box of that ratio,
+    /// Freeform keeps the current box but lets the user drag any rectangle. The interactive box on the
+    /// preview then edits `recipe.cropRect` directly.
+    private func applyAspect(_ asp: EditAspect) {
+        commit {
+            cropAspect = asp
+            switch asp {
+            case .original:
+                recipe.cropRect = nil
+            case .freeform:
+                break                      // keep current crop; box stays draggable
+            default:
+                if let r = asp.fixedRatio, let box = centeredBox(pixelRatio: r) {
+                    recipe.cropRect = box
+                }
+            }
+        }
+    }
+
+    // MARK: - Crop helpers
+
+    /// Live binding for the crop overlay. `nil` (no crop) reads as the full frame; a full-frame write
+    /// collapses back to `nil` so an untouched crop doesn't count as an edit.
+    private var cropBoxBinding: Binding<CGRect> {
+        Binding(
+            get: { recipe.cropRect ?? CGRect(x: 0, y: 0, width: 1, height: 1) },
+            set: { recipe.cropRect = isFullRect($0) ? nil : $0 }
+        )
+    }
+
+    private func isFullRect(_ r: CGRect) -> Bool {
+        r.minX <= 0.001 && r.minY <= 0.001 && r.maxX >= 0.999 && r.maxY >= 0.999
+    }
+
+    /// Image ratio of the (post-geometry) preview, used to map pixel aspect ratios into the normalized
+    /// crop space. The crop box is normalized to the *image*, so a pixel ratio R becomes R / imageRatio.
+    private var previewImageRatio: CGFloat? {
+        guard let sz = preview?.size, sz.width > 0, sz.height > 0 else { return nil }
+        return sz.width / sz.height
+    }
+
+    /// The normalized w/h the crop box must keep for the active chip (nil = unconstrained Freeform).
+    private var cropConstraint: CGFloat? {
+        guard let rImg = previewImageRatio else { return nil }
+        switch cropAspect {
+        case .freeform: return nil
+        case .original: return 1            // normalized 1:1 keeps the image's own ratio
+        default:        return (cropAspect.fixedRatio ?? 1) / rImg
+        }
+    }
+
+    /// A centered, maximal normalized crop rect for a target **pixel** ratio.
+    private func centeredBox(pixelRatio R: CGFloat) -> CGRect? {
+        guard let rImg = previewImageRatio else { return nil }
+        let nr = R / rImg                   // normalized width/height
+        var w: CGFloat, h: CGFloat
+        if nr >= 1 { w = 1; h = 1 / nr } else { h = 1; w = nr }
+        return CGRect(x: (1 - w) / 2, y: (1 - h) / 2, width: w, height: h)
     }
 
     // MARK: - Bindings
@@ -383,12 +453,19 @@ struct PhotoEditorView: View {
 
     // MARK: - Rendering
 
+    /// In the Crop tab the preview shows the full (uncropped) frame so the crop box can be dragged over
+    /// it; everywhere else the live crop is baked in. Geometry (rotate/flip/straighten) always applies.
+    private var renderRecipe: EditRecipe {
+        guard tab == .crop else { return recipe }
+        var r = recipe; r.cropRect = nil; return r
+    }
+
     /// Renders the current recipe over the proxy off-main; only the latest render wins (`renderGen`).
     private func scheduleRender() {
         guard let proxy else { return }
         renderGen += 1
         let gen = renderGen
-        let r = recipe
+        let r = renderRecipe
         Task.detached(priority: .userInitiated) {
             let img = PhotoEditorIO.renderUIImage(proxy, recipe: r)
             await MainActor.run {
@@ -436,5 +513,147 @@ struct PhotoEditorView: View {
                 if ok { library.contentDidChange() }
             }
         }
+    }
+}
+
+/// Interactive crop rectangle drawn over the (uncropped) preview. Edits a normalized **top-left** rect
+/// (`box`, 0…1 within the image). Drag the interior to move, drag a corner to resize; when
+/// `normalizedRatio` is set the box keeps that width/height (fixed-ratio chips), otherwise it's free.
+private struct CropOverlay: View {
+    @Binding var box: CGRect
+    let imageSize: CGSize
+    let normalizedRatio: CGFloat?
+    let onBegin: () -> Void
+
+    private enum Corner: CaseIterable { case topLeft, topRight, bottomLeft, bottomRight }
+    @State private var startBox: CGRect?
+
+    var body: some View {
+        GeometryReader { geo in
+            let frame = fittedRect(in: geo.size)
+            let r = viewRect(in: frame)
+            ZStack(alignment: .topLeading) {
+                Path { p in
+                    p.addRect(CGRect(origin: .zero, size: geo.size))
+                    p.addRect(r)
+                }
+                .fill(Color.black.opacity(0.5), style: FillStyle(eoFill: true))
+                .allowsHitTesting(false)
+
+                Rectangle().stroke(Color.white, lineWidth: 1)
+                    .frame(width: r.width, height: r.height).position(x: r.midX, y: r.midY)
+                    .allowsHitTesting(false)
+                gridLines(r).allowsHitTesting(false)
+
+                Color.white.opacity(0.001)
+                    .frame(width: r.width, height: r.height).position(x: r.midX, y: r.midY)
+                    .gesture(moveGesture(frame: frame))
+
+                ForEach(Corner.allCases, id: \.self) { c in
+                    cornerHandle.position(point(of: c, in: r))
+                        .gesture(resizeGesture(c, frame: frame))
+                }
+            }
+        }
+    }
+
+    private var cornerHandle: some View {
+        ZStack {
+            Color.clear.frame(width: 44, height: 44).contentShape(Rectangle())
+            RoundedRectangle(cornerRadius: 2).fill(Color.white)
+                .frame(width: 18, height: 18).shadow(radius: 1)
+        }
+    }
+
+    private func gridLines(_ r: CGRect) -> some View {
+        Path { p in
+            for i in 1...2 {
+                let x = r.minX + r.width * CGFloat(i) / 3
+                p.move(to: CGPoint(x: x, y: r.minY)); p.addLine(to: CGPoint(x: x, y: r.maxY))
+                let y = r.minY + r.height * CGFloat(i) / 3
+                p.move(to: CGPoint(x: r.minX, y: y)); p.addLine(to: CGPoint(x: r.maxX, y: y))
+            }
+        }
+        .stroke(Color.white.opacity(0.4), lineWidth: 0.5)
+    }
+
+    // MARK: Coordinate mapping
+
+    private func fittedRect(in bounds: CGSize) -> CGRect {
+        guard imageSize.width > 0, imageSize.height > 0, bounds.width > 0, bounds.height > 0
+        else { return CGRect(origin: .zero, size: bounds) }
+        let s = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
+        let w = imageSize.width * s, h = imageSize.height * s
+        return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
+    }
+
+    private func viewRect(in frame: CGRect) -> CGRect {
+        CGRect(x: frame.minX + box.minX * frame.width,
+               y: frame.minY + box.minY * frame.height,
+               width: box.width * frame.width, height: box.height * frame.height)
+    }
+
+    private func point(of c: Corner, in r: CGRect) -> CGPoint {
+        switch c {
+        case .topLeft:     return CGPoint(x: r.minX, y: r.minY)
+        case .topRight:    return CGPoint(x: r.maxX, y: r.minY)
+        case .bottomLeft:  return CGPoint(x: r.minX, y: r.maxY)
+        case .bottomRight: return CGPoint(x: r.maxX, y: r.maxY)
+        }
+    }
+
+    // MARK: Gestures
+
+    private func moveGesture(frame: CGRect) -> some Gesture {
+        DragGesture()
+            .onChanged { v in
+                if startBox == nil { startBox = box; onBegin() }
+                guard let s = startBox, frame.width > 0, frame.height > 0 else { return }
+                let dx = v.translation.width / frame.width
+                let dy = v.translation.height / frame.height
+                var nb = s
+                nb.origin.x = min(max(s.minX + dx, 0), 1 - s.width)
+                nb.origin.y = min(max(s.minY + dy, 0), 1 - s.height)
+                box = nb
+            }
+            .onEnded { _ in startBox = nil }
+    }
+
+    private func resizeGesture(_ c: Corner, frame: CGRect) -> some Gesture {
+        DragGesture()
+            .onChanged { v in
+                if startBox == nil { startBox = box; onBegin() }
+                guard let s = startBox, frame.width > 0, frame.height > 0 else { return }
+                let dx = v.translation.width / frame.width
+                let dy = v.translation.height / frame.height
+                box = resized(corner: c, start: s, dx: dx, dy: dy)
+            }
+            .onEnded { _ in startBox = nil }
+    }
+
+    /// Resizes by moving `corner` while its opposite corner stays fixed; keeps `normalizedRatio` when set.
+    private func resized(corner c: Corner, start s: CGRect, dx: CGFloat, dy: CGFloat) -> CGRect {
+        let minS: CGFloat = 0.08
+        let fx: CGFloat, fy: CGFloat, sx: CGFloat, sy: CGFloat, mStartX: CGFloat, mStartY: CGFloat
+        switch c {
+        case .topLeft:     fx = s.maxX; fy = s.maxY; sx = -1; sy = -1; mStartX = s.minX; mStartY = s.minY
+        case .topRight:    fx = s.minX; fy = s.maxY; sx =  1; sy = -1; mStartX = s.maxX; mStartY = s.minY
+        case .bottomLeft:  fx = s.maxX; fy = s.minY; sx = -1; sy =  1; mStartX = s.minX; mStartY = s.maxY
+        case .bottomRight: fx = s.minX; fy = s.minY; sx =  1; sy =  1; mStartX = s.maxX; mStartY = s.maxY
+        }
+        let mx = min(max(mStartX + dx, 0), 1)
+        let my = min(max(mStartY + dy, 0), 1)
+        let roomX = sx > 0 ? 1 - fx : fx
+        let roomY = sy > 0 ? 1 - fy : fy
+        var w = min(max(abs(mx - fx), minS), roomX)
+        var h = min(max(abs(my - fy), minS), roomY)
+        if let nr = normalizedRatio {
+            if w / h > nr { w = h * nr } else { h = w / nr }
+            if w > roomX { w = roomX; h = w / nr }
+            if h > roomY { h = roomY; w = h * nr }
+            w = max(w, minS); h = max(h, minS)
+        }
+        let nmx = fx + sx * w, nmy = fy + sy * h
+        return CGRect(x: min(fx, nmx), y: min(fy, nmy), width: w, height: h)
     }
 }

@@ -60,8 +60,8 @@ enum EditPipeline {
             img = recenter(img.cropped(to: CGRect(x: c.x - inner.width / 2, y: c.y - inner.height / 2,
                                                   width: inner.width, height: inner.height)))
         }
-        if let ratio = r.aspect.ratio {
-            img = recenter(centerCrop(img, ratio: ratio))
+        if let cr = r.cropRect, !isFullCrop(cr) {
+            img = recenter(applyCrop(img, normalizedTopLeft: cr))
         }
         return img
     }
@@ -70,11 +70,21 @@ enum EditPipeline {
         img.transformed(by: CGAffineTransform(translationX: -img.extent.origin.x, y: -img.extent.origin.y))
     }
 
-    private static func centerCrop(_ img: CIImage, ratio: CGFloat) -> CIImage {
+    /// A `cropRect` covering essentially the whole frame is treated as no crop.
+    private static func isFullCrop(_ r: CGRect) -> Bool {
+        r.minX <= 0.001 && r.minY <= 0.001 && r.maxX >= 0.999 && r.maxY >= 0.999
+    }
+
+    /// Crops `img` (origin at 0,0) to a normalized **top-left** rect, converting to Core Image's
+    /// bottom-left extent coordinates. Clamped so a stray rect can't produce an empty/!finite extent.
+    private static func applyCrop(_ img: CIImage, normalizedTopLeft cr: CGRect) -> CIImage {
         let e = img.extent
-        var w = e.width, h = e.height
-        if w / h > ratio { w = h * ratio } else { h = w / ratio }
-        return img.cropped(to: CGRect(x: e.midX - w / 2, y: e.midY - h / 2, width: w, height: h))
+        let x = min(max(cr.minX, 0), 1), y = min(max(cr.minY, 0), 1)
+        let w = min(max(cr.width, 0.02), 1 - x), h = min(max(cr.height, 0.02), 1 - y)
+        let rect = CGRect(x: e.minX + x * e.width,
+                          y: e.minY + (1 - y - h) * e.height,   // flip top-left → bottom-left
+                          width: w * e.width, height: h * e.height)
+        return img.cropped(to: rect)
     }
 
     /// Largest axis-aligned rectangle (same aspect as w×h) that fits inside a w×h rectangle rotated

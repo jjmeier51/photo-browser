@@ -16,7 +16,10 @@ struct EditRecipe: Codable, Equatable {
     var flipH = false
     var flipV = false
     var straighten: Double = 0          // degrees, −45…45 (auto-cropped to valid bounds)
-    var aspect: EditAspect = .original
+    /// The crop window as a normalized **top-left** rect (x,y,w,h in 0…1) within the image *after*
+    /// rotate/flip/straighten. `nil` means the full frame (no crop). Fixed-ratio chips set a centered
+    /// rect of that ratio; Freeform lets the user drag an arbitrary rect.
+    var cropRect: CGRect?
 
     // MARK: Light & color  (neutral 0, range −1…1)
     var exposure = 0.0                  // Exposure / Brightness
@@ -46,17 +49,20 @@ struct EditRecipe: Codable, Equatable {
 
     /// True when the geometry is untouched (preview can skip the geometry pass).
     var hasGeometry: Bool {
-        rotationQuarters != 0 || flipH || flipV || straighten != 0 || aspect != .original
+        rotationQuarters != 0 || flipH || flipV || straighten != 0 || cropRect != nil
     }
 }
 
-/// Crop aspect ratios offered in the editor (PRD FR-CROP-01). Named `EditAspect` to avoid
-/// colliding with the legacy `CropAspect` in `MediaEditor.swift` (the crop-&-rotate tool).
-enum EditAspect: String, Codable, CaseIterable, Identifiable {
-    case original, r1x1, r4x5, r3x2, r16x9
+/// Crop aspect options offered in the editor (PRD FR-CROP-01). This is a **UI-only** enum (the actual
+/// crop lives in `EditRecipe.cropRect`); it controls which chip is highlighted and how an interactive
+/// drag is constrained. Named `EditAspect` to avoid colliding with the legacy `CropAspect` in
+/// `MediaEditor.swift` (the crop-&-rotate tool).
+enum EditAspect: String, CaseIterable, Identifiable {
+    case freeform, original, r1x1, r4x5, r3x2, r16x9
     var id: String { rawValue }
     var label: String {
         switch self {
+        case .freeform: return "Freeform"
         case .original: return "Original"
         case .r1x1:     return "1:1"
         case .r4x5:     return "4:5"
@@ -64,14 +70,22 @@ enum EditAspect: String, Codable, CaseIterable, Identifiable {
         case .r16x9:    return "16:9"
         }
     }
-    /// width / height, or nil to keep the source aspect.
-    var ratio: CGFloat? {
+    var systemImage: String {
         switch self {
-        case .original: return nil
-        case .r1x1:     return 1
-        case .r4x5:     return 4.0 / 5.0
-        case .r3x2:     return 3.0 / 2.0
-        case .r16x9:    return 16.0 / 9.0
+        case .freeform: return "crop"
+        case .original: return "rectangle"
+        default:        return "aspectratio"
+        }
+    }
+    /// Fixed width / height the crop box must keep, or nil when unconstrained (Freeform) or when the
+    /// constraint is the image's own ratio (Original — supplied at drag time).
+    var fixedRatio: CGFloat? {
+        switch self {
+        case .r1x1:  return 1
+        case .r4x5:  return 4.0 / 5.0
+        case .r3x2:  return 3.0 / 2.0
+        case .r16x9: return 16.0 / 9.0
+        default:     return nil
         }
     }
 }
