@@ -716,8 +716,16 @@ struct PhotoEditorView: View {
         let id = library.beginActivity("Saving edited photo…", indeterminate: true)
         dismiss()
         Task.detached(priority: .userInitiated) {
-            // A transparent cut-out needs an alpha-capable format (PNG); otherwise match the source.
-            let fmt: PhotoEditorIO.ExportFormat = r.cutout == .transparent ? .png : PhotoEditorIO.format(forSource: src)
+            // A transparent cut-out needs an alpha-capable format (PNG). HDR sources save as 10-bit
+            // HEIC to keep the headroom. Otherwise match the source.
+            let fmt: PhotoEditorIO.ExportFormat
+            if r.cutout == .transparent {
+                fmt = .png
+            } else if PhotoEditorIO.isHDRSource(src) {
+                fmt = .heic
+            } else {
+                fmt = PhotoEditorIO.format(forSource: src)
+            }
             let dest = PhotoEditorIO.editedDestination(for: src, format: fmt)
             let ok = PhotoEditorIO.save(recipe: r, sourceURL: src, to: dest, format: fmt)
             await MainActor.run {

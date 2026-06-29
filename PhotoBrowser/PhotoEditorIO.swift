@@ -61,6 +61,13 @@ enum PhotoEditorIO {
     /// When `recipe.cutout` is set, the subject mask is computed here at full resolution.
     static func save(recipe: EditRecipe, sourceURL: URL, to destURL: URL,
                      format: ExportFormat = .heic, quality: Double = 0.92) -> Bool {
+        // HDR retention: when the source carries HDR (gain map / PQ-HLG / RAW) and we aren't forced to
+        // PNG (transparent cut-out), write a 10-bit HDR HEIC keeping the headroom. Falls back to SDR.
+        if format != .png, isHDRSource(sourceURL),
+           saveHDR(recipe: recipe, sourceURL: sourceURL, to: destURL) {
+            return true
+        }
+
         guard let loaded = load(url: sourceURL) else { return false }
         let mask = recipe.cutout != nil ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
         let rendered = EditPipeline.render(loaded.image, recipe: recipe, mask: mask)
@@ -90,14 +97,85 @@ enum PhotoEditorIO {
         do { try FileManager.default.moveItem(at: tmp, to: destURL) }
         catch { try? FileManager.default.removeItem(at: tmp); return false }
 
-        // Keep the browser's timeline stable: copy the original's file creation/modification dates.
-        if let a = try? FileManager.default.attributesOfItem(atPath: sourceURL.path) {
-            var set: [FileAttributeKey: Any] = [:]
-            if let c = a[.creationDate] { set[.creationDate] = c }
-            if let m = a[.modificationDate] { set[.modificationDate] = m }
-            if !set.isEmpty { try? FileManager.default.setAttributes(set, ofItemAtPath: destURL.path) }
-        }
+        copyFileDates(from: sourceURL, to: destURL)   // keep the browser's timeline stable
         return true
+    }
+
+    // MARK: - HDR
+
+    /// True when the file carries HDR worth preserving: an Apple/ISO HDR gain map, a PQ/HLG (BT.2100)
+    /// profile, or a RAW file (whose scene data exceeds 8-bit). Such sources take the 10-bit save path.
+    static func isHDRSource(_ url: URL) -> Bool {
+        if let type = UTType(filenameExtension: url.pathExtension.lowercased()), type.conforms(to: .rawImage) {
+            return true
+        }
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return false }
+        if CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, kCGImageAuxiliaryDataTypeHDRGainMap) != nil { return true }
+        if #available(iOS 18.0, *),
+           CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, kCGImageAuxiliaryDataTypeISOGainMap) != nil { return true }
+        if let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
+            let name = ((props[kCGImagePropertyProfileName] as? String) ?? "").uppercased()
+            if name.contains("PQ") || name.contains("HLG") || name.contains("2100") || name.contains("2020") {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Loads the source **expanded to HDR** (gain map applied, extended range), upright, with its props.
+    private static func loadHDR(url: URL) -> (image: CIImage, properties: [CFString: Any])? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let ci = CIImage(contentsOf: url, options: [.expandToHDR: true]) else { return nil }
+        let props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        let orientation = Int32((props[kCGImagePropertyOrientation] as? UInt32) ?? 1)
+        return (ci.oriented(forExifOrientation: orientation), props)
+    }
+
+    /// Renders the edit on the HDR-expanded source and writes a 10-bit HDR HEIC, carrying the original
+    /// metadata + capture date. Returns false so the caller can fall back to the standard SDR path.
+    private static func saveHDR(recipe: EditRecipe, sourceURL: URL, to destURL: URL) -> Bool {
+        guard let loaded = loadHDR(url: sourceURL) else { return false }
+        let mask = recipe.cutout != nil ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
+        let rendered = EditPipeline.render(loaded.image, recipe: recipe, mask: mask)
+        guard !rendered.extent.isInfinite, !rendered.extent.isNull else { return false }
+
+        var props = loaded.properties
+        props[kCGImagePropertyOrientation] = 1
+        props[kCGImagePropertyPixelWidth] = Int(rendered.extent.width.rounded())
+        props[kCGImagePropertyPixelHeight] = Int(rendered.extent.height.rounded())
+        if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+            tiff[kCGImagePropertyTIFFOrientation] = 1
+            props[kCGImagePropertyTIFFDictionary] = tiff
+        }
+        // CIImage properties are string-keyed; embed them so EXIF/GPS/dates survive the HDR encode.
+        let stringProps = Dictionary(props.map { ($0.key as String, $0.value) }, uniquingKeysWith: { a, _ in a })
+        let withMeta = rendered.settingProperties(stringProps)
+
+        // A PQ-encoded wide-gamut space holds the headroom for the 10-bit HEIC.
+        let outSpace = CGColorSpace(name: CGColorSpace.displayP3_PQ) ?? loaded.image.colorSpace
+            ?? CGColorSpaceCreateDeviceRGB()
+        guard let data = try? context.heif10Representation(of: withMeta, colorSpace: outSpace, options: [:])
+        else { return false }
+
+        let tmp = destURL.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).edit")
+        do { try data.write(to: tmp) } catch { return false }
+        guard CGImageSourceCreateWithURL(tmp as CFURL, nil) != nil else {
+            try? FileManager.default.removeItem(at: tmp); return false
+        }
+        try? FileManager.default.removeItem(at: destURL)
+        do { try FileManager.default.moveItem(at: tmp, to: destURL) }
+        catch { try? FileManager.default.removeItem(at: tmp); return false }
+        copyFileDates(from: sourceURL, to: destURL)
+        return true
+    }
+
+    /// Copies the original's file creation/modification dates onto the edited file.
+    private static func copyFileDates(from sourceURL: URL, to destURL: URL) {
+        guard let a = try? FileManager.default.attributesOfItem(atPath: sourceURL.path) else { return }
+        var set: [FileAttributeKey: Any] = [:]
+        if let c = a[.creationDate] { set[.creationDate] = c }
+        if let m = a[.modificationDate] { set[.modificationDate] = m }
+        if !set.isEmpty { try? FileManager.default.setAttributes(set, ofItemAtPath: destURL.path) }
     }
 
     /// Picks an export format matching the source so an edited JPEG stays a JPEG, etc. (HEIC default).
