@@ -72,9 +72,10 @@ enum PhotoEditorIO {
     }
 
     /// Renders a (proxy or full) CIImage through `recipe` and turns it into a `UIImage` for display.
-    /// Pass `mask` (the subject mask) when `recipe.cutout` is set.
-    static func renderUIImage(_ source: CIImage, recipe: EditRecipe, mask: CIImage? = nil) -> UIImage? {
-        let out = EditPipeline.render(source, recipe: recipe, mask: mask)
+    /// Pass `mask` (subject mask) when `recipe.cutout` is set and `landmarks` when body shaping is used.
+    static func renderUIImage(_ source: CIImage, recipe: EditRecipe,
+                              mask: CIImage? = nil, landmarks: BodyLandmarks? = nil) -> UIImage? {
+        let out = EditPipeline.render(source, recipe: recipe, mask: mask, landmarks: landmarks)
         guard !out.extent.isInfinite, !out.extent.isNull,
               let cg = context.createCGImage(out, from: out.extent) else { return nil }
         return UIImage(cgImage: cg)
@@ -95,7 +96,8 @@ enum PhotoEditorIO {
 
         guard let loaded = load(url: sourceURL) else { return false }
         let mask = recipe.cutout != nil ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
-        let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask), upscale)
+        let landmarks = recipe.body.isZero ? nil : BodyPose.detect(in: loaded.image)
+        let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask, landmarks: landmarks), upscale)
         guard !rendered.extent.isInfinite, !rendered.extent.isNull,
               let cg = context.createCGImage(rendered, from: rendered.extent) else { return false }
 
@@ -162,7 +164,9 @@ enum PhotoEditorIO {
                                 upscale: Upscale = .none) -> Bool {
         guard let loaded = loadHDR(url: sourceURL) else { return false }
         let mask = recipe.cutout != nil ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
-        let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask, hdr: true), upscale)
+        let landmarks = recipe.body.isZero ? nil : BodyPose.detect(in: loaded.image)
+        let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask,
+                                                    landmarks: landmarks, hdr: true), upscale)
         guard !rendered.extent.isInfinite, !rendered.extent.isNull else { return false }
 
         var props = loaded.properties

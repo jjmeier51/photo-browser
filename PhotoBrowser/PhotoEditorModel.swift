@@ -50,6 +50,9 @@ struct EditRecipe: Codable, Equatable {
     // MARK: Cutout (on-device background removal; needs the subject mask supplied at render time)
     var cutout: CutoutBackground?      // nil = background untouched
 
+    // MARK: Body shaping (warp driven by Vision body landmarks, supplied at render time)
+    var body = BodyShape()
+
     /// True when nothing has been changed (used to gate the Save button / "no edits").
     var isIdentity: Bool { self == EditRecipe() }
 
@@ -77,6 +80,18 @@ struct ReshapeField: Codable, Equatable {
     }
 
     var isZero: Bool { !dx.contains { $0 != 0 } && !dy.contains { $0 != 0 } }
+}
+
+/// Body-shaping slider amounts (Hypic-style). The warp is generated from Vision body landmarks at
+/// render time; only these amounts live in the recipe so it stays light and re-editable. Each is
+/// bipolar (−1…1): positive = slimmer / narrower hips / longer legs / taller / bigger head.
+struct BodyShape: Codable, Equatable {
+    var slim = 0.0
+    var hips = 0.0
+    var legs = 0.0
+    var height = 0.0
+    var head = 0.0
+    var isZero: Bool { slim == 0 && hips == 0 && legs == 0 && height == 0 && head == 0 }
 }
 
 /// What to do with the background once the subject is masked out (`FR-CUT-01`). The actual subject mask

@@ -17,7 +17,7 @@ struct PhotoEditorView: View {
     let entry: Entry
 
     private enum Tab: String, CaseIterable, Identifiable {
-        case adjust, filters, crop, reshape, cutout
+        case adjust, filters, crop, reshape, body, cutout
         var id: String { rawValue }
         var title: String { self == .cutout ? "Cut Out" : rawValue.capitalized }
         var icon: String {
@@ -26,6 +26,7 @@ struct PhotoEditorView: View {
             case .filters: return "camera.filters"
             case .crop:    return "crop.rotate"
             case .reshape: return "hand.draw"
+            case .body:    return "figure.stand"
             case .cutout:  return "person.and.background.dotted"
             }
         }
@@ -58,6 +59,9 @@ struct PhotoEditorView: View {
     @State private var cutoutMask: CIImage?                  // subject mask (proxy space) for background removal
     @State private var cutoutDetecting = false
     @State private var cutoutNoSubject = false
+    @State private var bodyLandmarks: BodyLandmarks?         // detected pose, drives body-shaping warps
+    @State private var bodyDetecting = false
+    @State private var bodyNoPerson = false
 
     var body: some View {
         ZStack {
@@ -72,6 +76,7 @@ struct PhotoEditorView: View {
         .task { await load() }
         .onChange(of: tab) {
             if tab == .cutout { detectSubjectIfNeeded() }
+            if tab == .body { detectBodyIfNeeded() }
             scheduleRender()                      // crop tab shows the uncropped frame; others bake the crop
         }
         .confirmationDialog("Save Photo", isPresented: $showSaveOptions, titleVisibility: .visible) {
@@ -94,6 +99,20 @@ struct PhotoEditorView: View {
                 cutoutMask = mask
                 cutoutNoSubject = (mask == nil)
                 cutoutDetecting = false
+            }
+        }
+    }
+
+    /// Detects body landmarks once (off-main) the first time the Body tab is opened.
+    private func detectBodyIfNeeded() {
+        guard bodyLandmarks == nil, !bodyDetecting, let proxy else { return }
+        bodyDetecting = true; bodyNoPerson = false
+        Task.detached(priority: .userInitiated) {
+            let lm = BodyPose.detect(in: proxy)
+            await MainActor.run {
+                bodyLandmarks = lm
+                bodyNoPerson = (lm == nil)
+                bodyDetecting = false
             }
         }
     }
@@ -206,6 +225,7 @@ struct PhotoEditorView: View {
             case .filters: filterPanel
             case .crop:    cropPanel
             case .reshape: reshapePanel
+            case .body:    bodyPanel
             case .cutout:  cutoutPanel
             }
             tabBar
@@ -525,6 +545,50 @@ struct PhotoEditorView: View {
         }
     }
 
+    // MARK: Body panel
+
+    private var bodyPanel: some View {
+        VStack(spacing: 8) {
+            if bodyDetecting {
+                HStack(spacing: 8) {
+                    ProgressView().tint(.white)
+                    Text("Finding person…").font(.subheadline).foregroundStyle(.secondary)
+                }
+            } else if bodyNoPerson {
+                Text("No person found in this photo.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                bodySlider("Slim", "arrow.left.and.right", \.slim)
+                bodySlider("Hips", "oval.portrait", \.hips)
+                bodySlider("Legs", "figure.walk", \.legs)
+                bodySlider("Height", "arrow.up.and.down", \.height)
+                bodySlider("Head", "face.smiling", \.head)
+            }
+        }
+    }
+
+    private func bodySlider(_ name: String, _ systemImage: String,
+                            _ keyPath: WritableKeyPath<BodyShape, Double>) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage).font(.system(size: 14)).frame(width: 22)
+            Text(name).font(.subheadline).frame(width: 56, alignment: .leading)
+            Slider(value: bodyBinding(keyPath), in: -1...1) { editing in
+                reshaping = editing                  // use the lighter proxy while dragging the warp
+                if editing { snapshot() } else { scheduleRender() }
+            }
+            .tint(.white)
+            Text("\(Int((recipe.body[keyPath: keyPath] * 100).rounded()))")
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                .frame(width: 32, alignment: .trailing)
+        }
+        .padding(.horizontal)
+    }
+
+    private func bodyBinding(_ keyPath: WritableKeyPath<BodyShape, Double>) -> Binding<Double> {
+        Binding(get: { recipe.body[keyPath: keyPath] },
+                set: { recipe.body[keyPath: keyPath] = $0; scheduleRender() })
+    }
+
     // MARK: Reshape panel
 
     private var reshapePanel: some View {
@@ -680,8 +744,9 @@ struct PhotoEditorView: View {
         let src = reshaping ? (fastProxy ?? proxy) : proxy
         let r = renderRecipe
         let mask = cutoutMask
+        let landmarks = bodyLandmarks
         Task.detached(priority: .userInitiated) {
-            let img = PhotoEditorIO.renderUIImage(src, recipe: r, mask: mask)
+            let img = PhotoEditorIO.renderUIImage(src, recipe: r, mask: mask, landmarks: landmarks)
             await MainActor.run {
                 rendering = false
                 if let img { preview = img }
