@@ -47,6 +47,9 @@ struct EditRecipe: Codable, Equatable {
     // MARK: Reshape (manual liquify; applied last, per PRD §8 order)
     var reshape: ReshapeField?         // nil = no warp
 
+    // MARK: Cutout (on-device background removal; needs the subject mask supplied at render time)
+    var cutout: CutoutBackground?      // nil = background untouched
+
     /// True when nothing has been changed (used to gate the Save button / "no edits").
     var isIdentity: Bool { self == EditRecipe() }
 
@@ -74,6 +77,30 @@ struct ReshapeField: Codable, Equatable {
     }
 
     var isZero: Bool { !dx.contains { $0 != 0 } && !dy.contains { $0 != 0 } }
+}
+
+/// What to do with the background once the subject is masked out (`FR-CUT-01`). The actual subject mask
+/// is computed on-device (Vision) and supplied to the renderer separately — only this lightweight choice
+/// lives in the recipe.
+enum CutoutBackground: String, Codable, CaseIterable, Identifiable {
+    case transparent, blur, white, black
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .transparent: return "Transparent"
+        case .blur:        return "Blur"
+        case .white:       return "White"
+        case .black:       return "Black"
+        }
+    }
+    var systemImage: String {
+        switch self {
+        case .transparent: return "square.dashed"
+        case .blur:        return "drop.fill"
+        case .white:       return "square.fill"
+        case .black:       return "square.fill"
+        }
+    }
 }
 
 /// Crop aspect options offered in the editor (PRD FR-CROP-01). This is a **UI-only** enum (the actual

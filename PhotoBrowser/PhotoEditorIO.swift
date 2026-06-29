@@ -48,8 +48,9 @@ enum PhotoEditorIO {
     }
 
     /// Renders a (proxy or full) CIImage through `recipe` and turns it into a `UIImage` for display.
-    static func renderUIImage(_ source: CIImage, recipe: EditRecipe) -> UIImage? {
-        let out = EditPipeline.render(source, recipe: recipe)
+    /// Pass `mask` (the subject mask) when `recipe.cutout` is set.
+    static func renderUIImage(_ source: CIImage, recipe: EditRecipe, mask: CIImage? = nil) -> UIImage? {
+        let out = EditPipeline.render(source, recipe: recipe, mask: mask)
         guard !out.extent.isInfinite, !out.extent.isNull,
               let cg = context.createCGImage(out, from: out.extent) else { return nil }
         return UIImage(cgImage: cg)
@@ -57,10 +58,12 @@ enum PhotoEditorIO {
 
     /// Renders the edit at **full resolution** and writes it to `destURL` (a new file — the original
     /// at `sourceURL` is never touched), preserving all metadata + the capture date. Off-main safe.
+    /// When `recipe.cutout` is set, the subject mask is computed here at full resolution.
     static func save(recipe: EditRecipe, sourceURL: URL, to destURL: URL,
                      format: ExportFormat = .heic, quality: Double = 0.92) -> Bool {
         guard let loaded = load(url: sourceURL) else { return false }
-        let rendered = EditPipeline.render(loaded.image, recipe: recipe)
+        let mask = recipe.cutout != nil ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
+        let rendered = EditPipeline.render(loaded.image, recipe: recipe, mask: mask)
         guard !rendered.extent.isInfinite, !rendered.extent.isNull,
               let cg = context.createCGImage(rendered, from: rendered.extent) else { return false }
 

@@ -17,15 +17,16 @@ struct PhotoEditorView: View {
     let entry: Entry
 
     private enum Tab: String, CaseIterable, Identifiable {
-        case adjust, filters, crop, reshape
+        case adjust, filters, crop, reshape, cutout
         var id: String { rawValue }
-        var title: String { rawValue.capitalized }
+        var title: String { self == .cutout ? "Cut Out" : rawValue.capitalized }
         var icon: String {
             switch self {
             case .adjust:  return "slider.horizontal.3"
             case .filters: return "camera.filters"
             case .crop:    return "crop.rotate"
             case .reshape: return "hand.draw"
+            case .cutout:  return "person.and.background.dotted"
             }
         }
     }
@@ -53,6 +54,9 @@ struct PhotoEditorView: View {
     @State private var cropAspect: EditAspect = .freeform   // which crop chip is active (drag constraint)
     @State private var reshapeRadius: CGFloat = 0.18         // brush radius, fraction of image width
     @State private var reshapeStrength: CGFloat = 0.45       // 0…1, how much a drag pushes pixels
+    @State private var cutoutMask: CIImage?                  // subject mask (proxy space) for background removal
+    @State private var cutoutDetecting = false
+    @State private var cutoutNoSubject = false
 
     var body: some View {
         ZStack {
@@ -65,7 +69,24 @@ struct PhotoEditorView: View {
         }
         .preferredColorScheme(.dark)
         .task { await load() }
-        .onChange(of: tab) { scheduleRender() }   // crop tab shows the uncropped frame; others bake the crop
+        .onChange(of: tab) {
+            if tab == .cutout { detectSubjectIfNeeded() }
+            scheduleRender()                      // crop tab shows the uncropped frame; others bake the crop
+        }
+    }
+
+    /// Computes the subject mask once (off-main) the first time the Cut Out tab is opened.
+    private func detectSubjectIfNeeded() {
+        guard cutoutMask == nil, !cutoutDetecting, let proxy else { return }
+        cutoutDetecting = true; cutoutNoSubject = false
+        Task.detached(priority: .userInitiated) {
+            let mask = PhotoEditorCutout.subjectMask(for: proxy)
+            await MainActor.run {
+                cutoutMask = mask
+                cutoutNoSubject = (mask == nil)
+                cutoutDetecting = false
+            }
+        }
     }
 
     // MARK: - Top bar
@@ -123,6 +144,9 @@ struct PhotoEditorView: View {
                         .padding(10)
                 } else {
                     ZStack {
+                        if recipe.cutout == .transparent {
+                            CheckerboardView()                 // so removed areas read as transparent
+                        }
                         Image(uiImage: preview)
                             .resizable()
                             .scaledToFit()
@@ -173,6 +197,7 @@ struct PhotoEditorView: View {
             case .filters: filterPanel
             case .crop:    cropPanel
             case .reshape: reshapePanel
+            case .cutout:  cutoutPanel
             }
             tabBar
         }
@@ -439,6 +464,58 @@ struct PhotoEditorView: View {
         return CGRect(x: (1 - w) / 2, y: (1 - h) / 2, width: w, height: h)
     }
 
+    // MARK: Cut-out panel
+
+    private var cutoutPanel: some View {
+        VStack(spacing: 12) {
+            if cutoutDetecting {
+                HStack(spacing: 8) {
+                    ProgressView().tint(.white)
+                    Text("Finding subject…").font(.subheadline).foregroundStyle(.secondary)
+                }
+            } else if cutoutNoSubject {
+                Text("No subject found in this photo.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                Text("Replace the background").font(.caption).foregroundStyle(.secondary)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 14) {
+                        cutoutChip(nil, label: "Original", systemImage: "photo")
+                        ForEach(CutoutBackground.allCases) { bg in
+                            cutoutChip(bg, label: bg.label, systemImage: bg.systemImage)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+            }
+        }
+    }
+
+    private func cutoutChip(_ bg: CutoutBackground?, label: String, systemImage: String) -> some View {
+        let isSel = recipe.cutout == bg
+        return Button { commit { recipe.cutout = bg } } label: {
+            VStack(spacing: 6) {
+                Image(systemName: systemImage).font(.system(size: 18))
+                    .foregroundStyle(bg == .white ? .black : .white)
+                    .frame(width: 52, height: 52)
+                    .background(Circle().fill(swatchFill(bg, selected: isSel)))
+                    .overlay(Circle().stroke(isSel ? Color.white : Color.white.opacity(0.15),
+                                             lineWidth: isSel ? 2 : 1))
+                Text(label).font(.caption2)
+            }
+            .foregroundStyle(isSel ? Color.white : Color.secondary)
+        }
+    }
+
+    private func swatchFill(_ bg: CutoutBackground?, selected: Bool) -> Color {
+        guard let bg else { return Color.white.opacity(selected ? 0.22 : 0.08) }
+        switch bg {
+        case .white: return .white
+        case .black: return .black
+        default:     return Color.white.opacity(selected ? 0.22 : 0.08)
+        }
+    }
+
     // MARK: Reshape panel
 
     private var reshapePanel: some View {
@@ -593,8 +670,9 @@ struct PhotoEditorView: View {
         rendering = true
         let src = reshaping ? (fastProxy ?? proxy) : proxy
         let r = renderRecipe
+        let mask = cutoutMask
         Task.detached(priority: .userInitiated) {
-            let img = PhotoEditorIO.renderUIImage(src, recipe: r)
+            let img = PhotoEditorIO.renderUIImage(src, recipe: r, mask: mask)
             await MainActor.run {
                 rendering = false
                 if let img { preview = img }
@@ -638,7 +716,8 @@ struct PhotoEditorView: View {
         let id = library.beginActivity("Saving edited photo…", indeterminate: true)
         dismiss()
         Task.detached(priority: .userInitiated) {
-            let fmt = PhotoEditorIO.format(forSource: src)
+            // A transparent cut-out needs an alpha-capable format (PNG); otherwise match the source.
+            let fmt: PhotoEditorIO.ExportFormat = r.cutout == .transparent ? .png : PhotoEditorIO.format(forSource: src)
             let dest = PhotoEditorIO.editedDestination(for: src, format: fmt)
             let ok = PhotoEditorIO.save(recipe: r, sourceURL: src, to: dest, format: fmt)
             await MainActor.run {
@@ -954,5 +1033,23 @@ private final class ReshapeScrollView: UIScrollView {
         let oy = max(0, (bounds.height - imageView.frame.height) / 2)
         imageView.center = CGPoint(x: imageView.frame.width / 2 + ox,
                                    y: imageView.frame.height / 2 + oy)
+    }
+}
+
+/// A neutral checkerboard backdrop shown behind a transparent cut-out so the removed area reads as
+/// "see-through" rather than black.
+private struct CheckerboardView: View {
+    var body: some View {
+        Canvas { ctx, size in
+            let s: CGFloat = 14
+            let cols = Int(size.width / s) + 1, rows = Int(size.height / s) + 1
+            for row in 0..<rows {
+                for col in 0..<cols where (row + col) % 2 == 0 {
+                    let rect = CGRect(x: CGFloat(col) * s, y: CGFloat(row) * s, width: s, height: s)
+                    ctx.fill(Path(rect), with: .color(.white.opacity(0.18)))
+                }
+            }
+        }
+        .background(Color.white.opacity(0.06))
     }
 }

@@ -30,8 +30,12 @@ struct EditFilter: Identifiable {
 /// order **geometry → tone/color → filter → detail → effects** so results are deterministic and the
 /// preview proxy and the full-res export render identically.
 enum EditPipeline {
-    static func render(_ source: CIImage, recipe r: EditRecipe) -> CIImage {
+    /// `mask` is the optional subject mask (in `source` pixel space) for background removal; supply it
+    /// whenever `recipe.cutout` is set. It is scaled to the working image, so a proxy-resolution mask
+    /// can drive both the proxy preview and a downscaled render.
+    static func render(_ source: CIImage, recipe r: EditRecipe, mask: CIImage? = nil) -> CIImage {
         var img = source
+        img = cutout(img, r, mask: mask)        // background replacement first, so later edits apply to it
         img = geometry(img, r)
         img = toneColor(img, r)
         img = filter(img, r)
@@ -39,6 +43,44 @@ enum EditPipeline {
         img = effects(img, r)
         img = reshapeStage(img, r)
         return img.cropped(to: img.extent)      // settle the extent
+    }
+
+    // MARK: Cutout (background removal)
+
+    private static func cutout(_ image: CIImage, _ r: EditRecipe, mask: CIImage?) -> CIImage {
+        guard let bg = r.cutout, let raw = mask,
+              raw.extent.width > 0, raw.extent.height > 0 else { return image }
+        // Scale + align the mask to the working image, then soften the edge a touch.
+        let sx = image.extent.width / raw.extent.width
+        let sy = image.extent.height / raw.extent.height
+        var m = raw.transformed(by: CGAffineTransform(scaleX: sx, y: sy))
+        m = m.transformed(by: CGAffineTransform(translationX: image.extent.minX - m.extent.minX,
+                                                y: image.extent.minY - m.extent.minY))
+        m = m.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 1.5]).cropped(to: image.extent)
+
+        switch bg {
+        case .transparent:
+            // No background image → CIBlendWithMask defaults to transparent where the mask is black.
+            return image.applyingFilter("CIBlendWithMask",
+                                        parameters: [kCIInputMaskImageKey: m]).cropped(to: image.extent)
+        case .blur:
+            let back = image.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 18])
+                .cropped(to: image.extent)
+            return blend(image, over: back, mask: m)
+        case .white:
+            return blend(image, over: solid(.init(red: 1, green: 1, blue: 1), image.extent), mask: m)
+        case .black:
+            return blend(image, over: solid(.init(red: 0, green: 0, blue: 0), image.extent), mask: m)
+        }
+    }
+
+    private static func blend(_ fg: CIImage, over bg: CIImage, mask: CIImage) -> CIImage {
+        fg.applyingFilter("CIBlendWithMask", parameters: [
+            kCIInputBackgroundImageKey: bg, kCIInputMaskImageKey: mask,
+        ]).cropped(to: fg.extent)
+    }
+    private static func solid(_ color: CIColor, _ extent: CGRect) -> CIImage {
+        CIImage(color: color).cropped(to: extent)
     }
 
     // MARK: Reshape
