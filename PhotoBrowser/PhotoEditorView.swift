@@ -557,6 +557,7 @@ struct PhotoEditorView: View {
         let systemImage: String
         let keyPath: WritableKeyPath<BodyShape, Double>
         let isFace: Bool
+        var range: ClosedRange<Double> = -1 ... 1
     }
 
     private static let bodyControls: [BodyControl] = [
@@ -564,12 +565,12 @@ struct PhotoEditorView: View {
         .init(id: "waist",    name: "Waist",    systemImage: "arrow.right.and.line.vertical.and.arrow.left", keyPath: \.waist, isFace: false),
         .init(id: "hips",     name: "Hips",     systemImage: "oval.portrait",               keyPath: \.hips,     isFace: false),
         .init(id: "butt",     name: "Butt",     systemImage: "oval.fill",                   keyPath: \.butt,     isFace: false),
-        .init(id: "breasts",  name: "Chest",    systemImage: "heart",                       keyPath: \.breasts,  isFace: false),
+        .init(id: "breasts",  name: "Breasts",  systemImage: "heart",                       keyPath: \.breasts,  isFace: false),
         .init(id: "legs",     name: "Legs",     systemImage: "figure.walk",                 keyPath: \.legs,     isFace: false),
         .init(id: "height",   name: "Height",   systemImage: "arrow.up.and.down",           keyPath: \.height,   isFace: false),
         .init(id: "arms",     name: "Arms",     systemImage: "figure.arms.open",            keyPath: \.arms,     isFace: false),
         .init(id: "ankles",   name: "Ankles",   systemImage: "shoeprints.fill",             keyPath: \.ankles,   isFace: false),
-        .init(id: "neck",     name: "Neck",     systemImage: "person.bust",                 keyPath: \.neck,     isFace: false),
+        .init(id: "neck",     name: "Neck",     systemImage: "person.bust",                 keyPath: \.neck,     isFace: false, range: 0 ... 1),
         .init(id: "head",     name: "Head",     systemImage: "circle.dashed",               keyPath: \.head,     isFace: true),
         .init(id: "forehead", name: "Forehead", systemImage: "rectangle.tophalf.filled",    keyPath: \.forehead, isFace: true),
         .init(id: "eyes",     name: "Eyes",     systemImage: "eye",                         keyPath: \.eyes,     isFace: true),
@@ -607,7 +608,7 @@ struct PhotoEditorView: View {
                             .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
                     }
                     .padding(.horizontal)
-                    Slider(value: bodyBinding(sel.keyPath), in: -1...1) { editing in
+                    Slider(value: bodyBinding(sel.keyPath), in: sel.range) { editing in
                         reshaping = editing                  // lighter proxy while dragging the warp
                         if editing { snapshot() } else { scheduleRender() }
                     }

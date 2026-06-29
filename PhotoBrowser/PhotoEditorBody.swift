@@ -9,6 +9,10 @@ struct BodyLandmarks: Sendable, Equatable {
     var nose: CGPoint?
     var shoulderL: CGPoint?
     var shoulderR: CGPoint?
+    var elbowL: CGPoint?
+    var elbowR: CGPoint?
+    var wristL: CGPoint?
+    var wristR: CGPoint?
     var hipL: CGPoint?
     var hipR: CGPoint?
     var kneeL: CGPoint?
@@ -59,6 +63,8 @@ enum BodyPose {
         var lm = BodyLandmarks()
         lm.nose = point(.nose)
         lm.shoulderL = point(.leftShoulder); lm.shoulderR = point(.rightShoulder)
+        lm.elbowL = point(.leftElbow); lm.elbowR = point(.rightElbow)
+        lm.wristL = point(.leftWrist); lm.wristR = point(.rightWrist)
         lm.hipL = point(.leftHip); lm.hipR = point(.rightHip)
         lm.kneeL = point(.leftKnee); lm.kneeR = point(.rightKnee)
         lm.ankleL = point(.leftAnkle); lm.ankleR = point(.rightAnkle)
@@ -138,9 +144,14 @@ enum BodyWarp {
         let cx = b.flatMap(centerX)
         let shoulderY = b.flatMap { avgY($0.shoulderL, $0.shoulderR) }
         let hipY = b.flatMap { avgY($0.hipL, $0.hipR) }
-        let ankleY = b.flatMap { avgY($0.ankleL, $0.ankleR) ?? avgY($0.kneeL, $0.kneeR) }
-        let halfW = b.map(bodyHalfWidth) ?? 0.2
         let topY = b?.nose.map { Double($0.y) } ?? shoulderY ?? 0.1
+
+        // Limb polylines (only valid if a mid/end joint exists, so a stray slider can't warp the torso).
+        let armL = limb(b?.shoulderL, b?.elbowL, b?.wristL)
+        let armR = limb(b?.shoulderR, b?.elbowR, b?.wristR)
+        let legL = limb(b?.hipL, b?.kneeL, b?.ankleL)
+        let legR = limb(b?.hipR, b?.kneeR, b?.ankleR)
+        let mouthCX = fc?.mouth.map { Double($0.x) }
 
         for j in 1..<(rows - 1) {
             for i in 1..<(cols - 1) {
@@ -148,53 +159,56 @@ enum BodyWarp {
                 let v = Double(j) / Double(rows - 1)
                 var dx = 0.0, dy = 0.0
 
-                // ----- Body -----
+                // ----- Body (torso: tight vertical bands; the subject mask isolates left↔right) -----
                 if let cX = cx, let sY = shoulderY, let hY = hipY {
-                    let torso = max(0.05, hY - sY)
+                    let torso = max(0.06, hY - sY)
                     if s.slim != 0 {
-                        dx -= s.slim * 0.26 * (u - cX) * gaussian(v, sY + torso * 0.55, torso * 0.9)
+                        dx -= s.slim * 0.24 * (u - cX) * gaussian(v, sY + torso * 0.5, torso * 0.5)
                     }
                     if s.waist != 0 {
-                        dx -= s.waist * 0.26 * (u - cX) * gaussian(v, sY + torso * 0.72, torso * 0.45)
+                        dx -= s.waist * 0.30 * (u - cX) * gaussian(v, sY + torso * 0.72, torso * 0.15)
                     }
-                    if s.breasts != 0 {
-                        let f2 = gaussian(v, sY + torso * 0.18, torso * 0.35)
-                        dx += s.breasts * 0.18 * (u - cX) * f2
-                        dy += s.breasts * 0.05 * f2
-                    }
-                    if s.arms != 0 {
-                        // Narrow the lateral regions beside the torso (where arms hang).
-                        let band = gaussian(v, sY + torso * 0.45, torso * 0.7)
-                        if abs(u - cX) > halfW {
-                            dx -= s.arms * 0.18 * sign(u - cX) * band
-                        }
+                    if s.breasts != 0, v > sY {
+                        // A localized fuller, rounder bulge just below the shoulders.
+                        let f2 = gaussian(v, sY + torso * 0.22, torso * 0.13)
+                        dx += s.breasts * 0.22 * (u - cX) * f2
+                        dy += s.breasts * 0.10 * f2
                     }
                 }
                 if let cX = cx, let hY = hipY {
-                    if s.hips != 0 { dx -= s.hips * 0.22 * (u - cX) * gaussian(v, hY, 0.09) }
+                    if s.hips != 0 { dx -= s.hips * 0.26 * (u - cX) * gaussian(v, hY, 0.06) }
                     if s.butt != 0 {
-                        let f2 = gaussian(v, hY + 0.05, 0.08)
-                        dx += s.butt * 0.18 * (u - cX) * f2
-                        dy += s.butt * 0.05 * f2
-                    }
-                }
-                if s.legs != 0, let hY = hipY {
-                    let endY = ankleY ?? 1.0
-                    if v > hY { dy += s.legs * 0.18 * min(1.0, (v - hY) / max(0.05, endY - hY)) }
-                }
-                if s.height != 0, v > topY { dy += s.height * 0.13 * (v - topY) }
-                if s.ankles != 0, let b {
-                    for a in [b.ankleL, b.ankleR] {
-                        if let a {
-                            let fall = gaussian(v, Double(a.y), 0.05) * gaussian(u, Double(a.x), 0.06)
-                            dx -= s.ankles * 0.22 * (u - Double(a.x)) * fall
-                        }
+                        let f2 = gaussian(v, hY + 0.04, 0.06)
+                        dx += s.butt * 0.20 * (u - cX) * f2
+                        dy += s.butt * 0.06 * f2
                     }
                 }
                 if s.neck != 0, let cX = cx, let sY = shoulderY {
-                    let chinY = fc?.chin.map { Double($0.y) } ?? (sY - 0.06)
-                    let neckY = (chinY + sY) / 2
-                    dx -= s.neck * 0.16 * (u - cX) * gaussian(v, neckY, max(0.03, (sY - chinY) * 0.8))
+                    // Skinnier only (slider is 0…1). Tight band between chin and shoulders.
+                    let chinY = fc?.chin.map { Double($0.y) } ?? (sY - 0.08)
+                    let gap = max(0.05, sY - chinY)
+                    dx -= s.neck * 0.24 * (u - cX) * gaussian(v, chinY + gap * 0.5, gap * 0.18)
+                }
+                if s.height != 0, v > topY { dy += s.height * 0.13 * (v - topY) }
+
+                // ----- Limbs (slim toward the limb axis, confined to a tube around it) -----
+                if s.arms != 0 {
+                    for poly in [armL, armR] {
+                        let (px, py, w) = slimPush(u, v, poly, 0.14, asp)
+                        dx += s.arms * 0.55 * px * w; dy += s.arms * 0.55 * py * w
+                    }
+                }
+                if s.legs != 0 {
+                    for poly in [legL, legR] {
+                        let (px, py, w) = slimPush(u, v, poly, 0.16, asp)
+                        dx += s.legs * 0.5 * px * w; dy += s.legs * 0.5 * py * w
+                    }
+                }
+                if s.ankles != 0, let b {
+                    for a in [b.ankleL, b.ankleR] where a != nil {
+                        let fall = gaussian(v, Double(a!.y), 0.045) * gaussian(u, Double(a!.x), 0.06)
+                        dx -= s.ankles * 0.30 * (u - Double(a!.x)) * fall
+                    }
                 }
 
                 // ----- Face -----
@@ -234,8 +248,10 @@ enum BodyWarp {
                     }
                     if s.smile != 0 {
                         for corner in [fc.mouthLeft, fc.mouthRight] where corner != nil {
-                            let fall = gaussian(v, Double(corner!.y), 0.04) * gaussian(u, Double(corner!.x), 0.05)
-                            dy -= s.smile * 0.07 * fall            // lift the corners
+                            let cx2 = Double(corner!.x), cy2 = Double(corner!.y)
+                            let fall = gaussian(v, cy2, 0.05) * gaussian(u, cx2, 0.06)
+                            dy -= s.smile * 0.13 * fall                               // lift the corners
+                            if let mcx = mouthCX { dx += s.smile * 0.07 * sign(cx2 - mcx) * fall }  // and out
                         }
                     }
                     if s.forehead != 0, let by = fc.browY, let top = fc.faceTop, by > top {
@@ -300,12 +316,42 @@ enum BodyWarp {
         let ys = [a, b].compactMap { $0.map { Double($0.y) } }
         return ys.isEmpty ? nil : ys.reduce(0, +) / Double(ys.count)
     }
-    private static func bodyHalfWidth(_ lm: BodyLandmarks) -> Double {
-        var w = 0.18
-        if let l = lm.shoulderL, let r = lm.shoulderR { w = max(w, abs(Double(l.x - r.x)) / 2 + 0.04) }
-        if let l = lm.hipL, let r = lm.hipR { w = max(w, abs(Double(l.x - r.x)) / 2 + 0.04) }
-        return min(w, 0.42)
+    /// A limb polyline in normalized points. Requires a mid/end joint (elbow/knee/wrist/ankle) beyond the
+    /// root so that — with no limb detected — the slider has no anchor and simply does nothing (rather
+    /// than warping the torso). Returns [] when there aren't ≥2 usable points.
+    private static func limb(_ root: CGPoint?, _ mid: CGPoint?, _ end: CGPoint?) -> [(Double, Double)] {
+        guard mid != nil || end != nil else { return [] }
+        let p = [root, mid, end].compactMap { $0.map { (Double($0.x), Double($0.y)) } }
+        return p.count >= 2 ? p : []
     }
+
+    /// Slim toward a limb axis: the push that moves vertex (u,v) toward the nearest point on `poly`,
+    /// within a tube of radius `r` (round in pixels via `aspect`). Returns normalized (dx, dy, weight).
+    private static func slimPush(_ u: Double, _ v: Double, _ poly: [(Double, Double)],
+                                 _ r: Double, _ aspect: Double) -> (Double, Double, Double) {
+        guard poly.count >= 2 else { return (0, 0, 0) }
+        let pIso = (u, v / aspect)
+        var best = (0.0, 0.0), bestD = Double.infinity
+        for k in 0..<(poly.count - 1) {
+            let a = (poly[k].0, poly[k].1 / aspect)
+            let bnd = (poly[k + 1].0, poly[k + 1].1 / aspect)
+            let n = nearestOnSegment(pIso, a, bnd)
+            let d = hypot(pIso.0 - n.0, pIso.1 - n.1)
+            if d < bestD { bestD = d; best = n }
+        }
+        guard bestD < r else { return (0, 0, 0) }
+        return (best.0 - pIso.0, (best.1 - pIso.1) * aspect, smoothstep(1 - bestD / r))
+    }
+
+    private static func nearestOnSegment(_ p: (Double, Double), _ a: (Double, Double),
+                                         _ b: (Double, Double)) -> (Double, Double) {
+        let abx = b.0 - a.0, aby = b.1 - a.1
+        let denom = abx * abx + aby * aby
+        if denom < 1e-9 { return a }
+        let t = min(1, max(0, ((p.0 - a.0) * abx + (p.1 - a.1) * aby) / denom))
+        return (a.0 + t * abx, a.1 + t * aby)
+    }
+
     private static func gaussian(_ x: Double, _ center: Double, _ sigma: Double) -> Double {
         let d = (x - center) / max(0.0001, sigma)
         return exp(-0.5 * d * d)
