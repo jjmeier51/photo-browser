@@ -48,6 +48,17 @@ enum SkinRecolor {
                                                         y: e.minY - scaled.extent.minY))
     }
 
+    /// A soft mask (white = skin) from the skin-colour cube, for confining face effects (e.g. freckles) to
+    /// skin so they don't land on hair, lips, eyes or the background. Same extent as `image`.
+    static func skinMaskImage(for image: CIImage) -> CIImage? {
+        let e = image.extent
+        guard e.width >= 8, e.height >= 8, let cube = skinCubeFilter() else { return nil }
+        cube.setValue(image, forKey: kCIInputImageKey)
+        let raw = (cube.outputImage ?? image).cropped(to: e)
+        return raw.applyingFilter("CIGaussianBlur",
+                                  parameters: [kCIInputRadiusKey: max(1.0, Double(e.width) * 0.0025)]).cropped(to: e)
+    }
+
     // MARK: Skin-colour LUT
 
     private static let cubeDimension = 24

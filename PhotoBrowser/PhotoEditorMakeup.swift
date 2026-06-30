@@ -26,16 +26,18 @@ enum MakeupRenderer {
             out = composite({ drawSharp($0, size: size, makeup: m, face: face) },
                             over: out, extent: e, feather: max(1, Double(e.width) * 0.0016))
         }
-        // Freckle pass — drawn crisp (no extra blur) so the tiny specks stay defined, not washed out.
+        // Freckle pass — drawn crisp (no extra blur) and confined to a skin mask so the specks land only on
+        // skin (off hair, lips, eyes and background) even on a face that's partly occluded by hair.
         if m.freckles > 0 {
+            let skin = SkinRecolor.skinMaskImage(for: image)
             out = composite({ drawFreckles($0, size: size, makeup: m, face: face) },
-                            over: out, extent: e, feather: 0)
+                            over: out, extent: e, feather: 0, mask: skin)
         }
         return out
     }
 
     private static func composite(_ drawing: (CGContext) -> Void, over base: CIImage,
-                                  extent e: CGRect, feather: Double) -> CIImage {
+                                  extent e: CGRect, feather: Double, mask: CIImage? = nil) -> CIImage {
         let size = CGSize(width: e.width, height: e.height)
         let fmt = UIGraphicsImageRendererFormat.default(); fmt.scale = 1; fmt.opaque = false
         fmt.preferredRange = .standard   // plain sRGB overlay — no extended/wide-gamut values to skew an HDR base
@@ -49,6 +51,12 @@ enum MakeupRenderer {
                 .cropped(to: CGRect(origin: .zero, size: size))
         }
         overlay = overlay.transformed(by: CGAffineTransform(translationX: e.minX, y: e.minY))
+        if let mask {
+            // Keep the overlay only where the mask is white (skin); transparent elsewhere.
+            let clear = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 0)).cropped(to: e)
+            overlay = overlay.applyingFilter("CIBlendWithMask", parameters: [
+                kCIInputBackgroundImageKey: clear, kCIInputMaskImageKey: mask]).cropped(to: e)
+        }
         return overlay.applyingFilter("CISourceOverCompositing",
                                       parameters: [kCIInputBackgroundImageKey: base]).cropped(to: e)
     }
