@@ -252,24 +252,21 @@ enum BodyWarp {
                 if s.breasts != 0, let cX = cx {
                     for c in breastCenters {
                         let (rx, ry, fall) = radial(u, v, c, breastRadius, asp)
-                        // Weight: full below the breast centre, but strongly damped *above* it so the
-                        // upper chest / clavicle isn't enlarged (`ry > 0` = below the centre, top-left coords).
+                        // Damp above the breast centre so the upper chest / clavicle isn't enlarged
+                        // (`ry > 0` = below the centre, top-left coords).
                         let w = (ry > 0 ? 1.0 : 0.25) * fall
-                        dx += s.breasts * 0.30 * rx * w                       // fuller / larger
-                        dy += s.breasts * 0.26 * ry * w
-                        dx += s.breasts * 0.12 * (cX - Double(c.x)) * w       // pull toward centre (cleavage)
-                        // Push the *outer* edge out a touch more, faded past the torso (henv) so the arms
-                        // and armpits aren't dragged.
-                        let outward = Double(c.x) > cX ? 1.0 : -1.0
-                        if rx * outward > 0 { dx += s.breasts * 0.07 * outward * w * henv }
-                    }
-                    // Central chest fill, kept below the clavicle and expanding mostly downward.
-                    if let sY = shoulderY, let hY = hipY {
-                        let chestY = sY + (hY - sY) * 0.30
-                        let (rx2, ry2, f2) = radial(u, v, CGPoint(x: cX, y: chestY), breastRadius * 0.8, asp)
-                        let w2 = (ry2 > 0 ? 1.0 : 0.25) * f2
-                        dx += s.breasts * 0.06 * rx2 * w2
-                        dy += s.breasts * 0.10 * ry2 * w2
+                        let innerDir = cX > Double(c.x) ? 1.0 : -1.0     // direction toward the other breast (axis)
+                        let sideN = (rx * innerDir) / breastRadius       // >0 on the inner half, <0 on the outer
+                        if sideN > 0 {
+                            // Inner mass moves toward the other breast → fuller centre / cleavage. Grows from
+                            // ~0 at the centre line to its max at the inner edge, so the peak isn't pulled out.
+                            dx += s.breasts * 0.34 * innerDir * sideN * w
+                        } else {
+                            // Outer mass eases outward a touch (faded past the torso so arms/armpits stay).
+                            dx += s.breasts * 0.14 * (-innerDir) * (-sideN) * w * henv
+                        }
+                        // Bottom of the breast sags slightly downward for a natural, full look.
+                        dy += s.breasts * 0.22 * max(0, ry) * fall
                     }
                 }
                 if s.butt != 0 {
