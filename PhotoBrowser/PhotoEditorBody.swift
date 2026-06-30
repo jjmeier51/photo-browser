@@ -227,6 +227,19 @@ enum BodyWarp {
                         // dragging the whole torso.
                         dx -= s.waist * 0.30 * (u - cX) * gaussian(v, sY + torso * 0.72, torso * 0.14) * henv
                     }
+                    if s.torso != 0 {
+                        // Shorten the torso: compress the chest→hip band vertically toward its centre, so the
+                        // waist moves up toward the chest. The displacement is zero at the band centre *and*
+                        // tapers to zero at both ends, so the head, hips/legs and background stay put (no
+                        // seam, nothing stretched). Confined to the torso column (henv) so the arms aren't
+                        // dragged. Compression (not stretch) keeps the area's resolution/clarity intact.
+                        let topB = sY + torso * 0.15            // upper chest
+                        let botB = hY                           // hip line
+                        let cB = (topB + botB) / 2
+                        let halfB = max(0.04, (botB - topB) / 2)
+                        let w = smoothWindow(v, cB, halfB)
+                        dy -= s.torso * 0.34 * (v - cB) * w * henv
+                    }
                 }
                 if s.hips != 0, let cX = cx, let hY = hipY {
                     dx -= s.hips * 0.28 * (u - cX) * gaussian(v, hY, 0.06) * henv
@@ -455,6 +468,12 @@ enum BodyWarp {
     }
     private static func smoothstep(_ t: Double) -> Double {
         let c = min(1, max(0, t)); return c * c * (3 - 2 * c)
+    }
+    /// A smooth bump: 1 at `center`, tapering to 0 at `±half` (and beyond). Used to confine a vertical
+    /// compression to a band with no hard seam at its edges.
+    private static func smoothWindow(_ v: Double, _ center: Double, _ half: Double) -> Double {
+        let d = abs(v - center)
+        return d >= half ? 0 : smoothstep(1 - d / half)
     }
     private static func sign(_ v: Double) -> Double { v >= 0 ? 1 : -1 }
     private static func clamp(_ v: Double) -> Double { max(-0.3, min(0.3, v)) }

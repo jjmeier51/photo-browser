@@ -636,6 +636,7 @@ struct PhotoEditorView: View {
         .init(id: "ankles",   name: "Ankles",   systemImage: "shoeprints.fill",             keyPath: \.ankles,   isFace: false),
         .init(id: "feet",     name: "Feet",     systemImage: "shoe.fill",                   keyPath: \.feet,     isFace: false, range: 0 ... 1),
         .init(id: "neck",     name: "Neck",     systemImage: "person.bust",                 keyPath: \.neck,     isFace: false, range: 0 ... 1),
+        .init(id: "torso",    name: "Torso",    systemImage: "arrow.down.right.and.arrow.up.left", keyPath: \.torso, isFace: false, range: 0 ... 1),
         .init(id: "head",     name: "Head",     systemImage: "circle.dashed",               keyPath: \.head,     isFace: true),
         .init(id: "forehead", name: "Forehead", systemImage: "rectangle.tophalf.filled",    keyPath: \.forehead, isFace: true),
         .init(id: "eyes",     name: "Eyes",     systemImage: "eye",                         keyPath: \.eyes,     isFace: true),

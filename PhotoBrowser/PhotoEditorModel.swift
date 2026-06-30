@@ -106,6 +106,7 @@ struct BodyShape: Codable, Equatable {
     var ankles = 0.0
     var feet = 0.0
     var neck = 0.0
+    var torso = 0.0     // shorten the torso (bring the waist up toward the chest); 0…1
     // Face (needs face landmarks)
     var head = 0.0
     var forehead = 0.0
@@ -118,13 +119,13 @@ struct BodyShape: Codable, Equatable {
 
     var isZero: Bool {
         slim == 0 && waist == 0 && hips == 0 && butt == 0 && legs == 0 && height == 0 && arms == 0 &&
-        breasts == 0 && ankles == 0 && feet == 0 && neck == 0 && head == 0 && forehead == 0 && eyes == 0 &&
-        nose == 0 && ears == 0 && chin == 0 && lips == 0 && smile == 0
+        breasts == 0 && ankles == 0 && feet == 0 && neck == 0 && torso == 0 && head == 0 &&
+        forehead == 0 && eyes == 0 && nose == 0 && ears == 0 && chin == 0 && lips == 0 && smile == 0
     }
     /// True if any body-region slider is engaged (vs. face-only edits).
     var hasBodyEdit: Bool {
         slim != 0 || waist != 0 || hips != 0 || butt != 0 || legs != 0 || height != 0 ||
-        arms != 0 || breasts != 0 || ankles != 0 || feet != 0 || neck != 0
+        arms != 0 || breasts != 0 || ankles != 0 || feet != 0 || neck != 0 || torso != 0
     }
     var hasFaceEdit: Bool {
         head != 0 || forehead != 0 || eyes != 0 || nose != 0 || ears != 0 || chin != 0 ||
