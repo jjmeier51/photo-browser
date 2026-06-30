@@ -15,38 +15,26 @@ enum MakeupRenderer {
         guard !m.isZero, !e.isInfinite, !e.isNull, e.width >= 8, e.height >= 8 else { return image }
         let size = CGSize(width: e.width, height: e.height)
         var out = image
-        // A face clip (ellipse from the face box) so nothing can bleed onto hair/neck/background.
-        let clip = faceClip(face, size: size)
         // Soft pass — blush + eyeshadow, lightly feathered. (A heavy blur here is what produced the
         // earlier "big splotch", so the feather is kept modest.)
         if m.blush > 0 || m.eyeshadow > 0 {
             out = composite({ drawSoft($0, size: size, makeup: m, face: face) },
-                            over: out, extent: e, feather: Double(e.width) * 0.006, clip: clip)
+                            over: out, extent: e, feather: Double(e.width) * 0.006)
         }
         // Sharp pass — lips, liner, lashes, brows, freckles with only a light feather.
         if m.lips > 0 || m.eyeliner > 0 || m.lashes > 0 || m.brows > 0 || m.freckles > 0 {
             out = composite({ drawSharp($0, size: size, makeup: m, face: face) },
-                            over: out, extent: e, feather: max(1, Double(e.width) * 0.0016), clip: clip)
+                            over: out, extent: e, feather: max(1, Double(e.width) * 0.0016))
         }
         return out
     }
 
-    /// An ellipse roughly covering the face, used to clip overlays so makeup stays on the face.
-    private static func faceClip(_ f: FaceLandmarks, size: CGSize) -> CGRect? {
-        guard let c = f.center else { return nil }
-        let rx = CGFloat(max(0.10, f.width * 0.72)) * size.width
-        let ry = CGFloat(max(0.12, f.height * 0.82)) * size.height
-        return CGRect(x: c.x * size.width - rx, y: c.y * size.height - ry, width: rx * 2, height: ry * 2)
-    }
-
     private static func composite(_ drawing: (CGContext) -> Void, over base: CIImage,
-                                  extent e: CGRect, feather: Double, clip: CGRect?) -> CIImage {
+                                  extent e: CGRect, feather: Double) -> CIImage {
         let size = CGSize(width: e.width, height: e.height)
         let fmt = UIGraphicsImageRendererFormat.default(); fmt.scale = 1; fmt.opaque = false
         let img = UIGraphicsImageRenderer(size: size, format: fmt).image { rctx in
-            let ctx = rctx.cgContext
-            if let clip { ctx.addEllipse(in: clip); ctx.clip() }   // keep makeup on the face
-            drawing(ctx)
+            drawing(rctx.cgContext)
         }
         guard let cg = img.cgImage else { return base }
         var overlay = CIImage(cgImage: cg)
@@ -71,15 +59,15 @@ enum MakeupRenderer {
         if m.eyeshadow > 0 {
             for poly in [f.leftEyePoly, f.rightEyePoly] where poly.count >= 3 {
                 let bb = bbox(poly.map(px))
-                let cxp = bb.midX, cyp = bb.minY - bb.height * 0.1
-                let rx = bb.width * 0.7, ry = bb.height * 0.9
-                ctx.setFillColor(col(m.eyeshadowColor, m.eyeshadow * 0.6))
+                let cxp = bb.midX, cyp = bb.minY - bb.height * 0.15
+                let rx = bb.width * 0.8, ry = bb.height * 1.1
+                ctx.setFillColor(col(m.eyeshadowColor, m.eyeshadow * 0.75))
                 ctx.fillEllipse(in: CGRect(x: cxp - rx, y: cyp - ry, width: rx * 2, height: ry * 2))
             }
         }
         if m.blush > 0 {
             for cheek in [f.cheekL, f.cheekR] where cheek != nil {
-                radial(ctx, center: px(cheek!), radius: max(8, W * 0.06), color: col(m.blushColor, m.blush * 0.5))
+                radial(ctx, center: px(cheek!), radius: max(8, W * 0.07), color: col(m.blushColor, m.blush * 0.62))
             }
         }
     }
@@ -129,28 +117,33 @@ enum MakeupRenderer {
             ctx.fillPath(using: .evenOdd)
         }
         // Freckles — dense scatter across the whole face; level 5 visibly covers it.
-        if m.freckles > 0, let l = f.faceLeft, let r = f.faceRight {
-            let counts = [0, 60, 140, 260, 420, 650]
+        // Freckles — many small brown specks distributed across the whole face ellipse (the Vision
+        // faceContour is only the jaw, so use the face box ellipse for coverage, not a contour test).
+        if m.freckles > 0, let center = f.center {
+            let counts = [0, 120, 260, 450, 700, 1000]
             let n = counts[min(5, max(0, m.freckles))]
-            let top = (f.faceTop ?? Double(f.leftEye?.y ?? 0.30)) + 0.02
-            let bot = (f.chin.map { Double($0.y) } ?? Double(f.mouth?.y ?? 0.75)) - 0.01
-            let zone = CGRect(x: Double(l.x) * Double(W), y: top * Double(H),
-                              width: max(1, Double(r.x - l.x)) * Double(W), height: max(1, (bot - top)) * Double(H))
-            let contourPx = f.contour.map(px)
+            let fcx = center.x * W, fcy = center.y * H
+            let frx = CGFloat(max(0.08, f.width)) * W * 0.52
+            let fry = CGFloat(max(0.10, f.height)) * H * 0.6
             let eyes = [f.leftEye, f.rightEye].compactMap { $0 }.map(px)
             let lipsPx = f.outerLips.map(px)
+            let eyeExclude = max(W * 0.04, CGFloat(f.eyeRadius) * W * 1.8)
             var rng = LCG(seed: 0x9E3779B97F4A7C15)
             var placed = 0, tries = 0
-            ctx.setFillColor(col(MakeupColor(0.45, 0.27, 0.15), 0.6))
-            while placed < n && tries < n * 10 {
+            while placed < n && tries < n * 14 {
                 tries += 1
-                let p = CGPoint(x: zone.minX + CGFloat(rng.next()) * zone.width,
-                                y: zone.minY + CGFloat(rng.next()) * zone.height)
-                if !contourPx.isEmpty, !pointInPolygon(p, contourPx) { continue }
-                if eyes.contains(where: { hypot($0.x - p.x, $0.y - p.y) < W * 0.045 }) { continue }
+                // Uniform sample inside the face ellipse (polar with sqrt for even area density).
+                let ang = rng.next() * 2 * Double.pi
+                let rad = rng.next().squareRoot()
+                let p = CGPoint(x: fcx + CGFloat(cos(ang) * rad) * frx,
+                                y: fcy + CGFloat(sin(ang) * rad) * fry)
+                if eyes.contains(where: { hypot($0.x - p.x, $0.y - p.y) < eyeExclude }) { continue }
                 if !lipsPx.isEmpty, pointInPolygon(p, lipsPx) { continue }
-                let rad = W * 0.0045 * CGFloat(0.6 + rng.next() * 0.8)
-                ctx.fillEllipse(in: CGRect(x: p.x - rad, y: p.y - rad, width: rad * 2, height: rad * 2))
+                let dot = W * 0.0020 * CGFloat(0.7 + rng.next() * 0.7)
+                let shade = 0.42 + rng.next() * 0.12
+                ctx.setFillColor(UIColor(red: CGFloat(shade), green: CGFloat(shade * 0.58),
+                                         blue: CGFloat(shade * 0.34), alpha: 0.62).cgColor)
+                ctx.fillEllipse(in: CGRect(x: p.x - dot, y: p.y - dot, width: dot * 2, height: dot * 2))
                 placed += 1
             }
         }

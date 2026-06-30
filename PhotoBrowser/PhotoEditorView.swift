@@ -729,10 +729,10 @@ struct PhotoEditorView: View {
     ]
     private struct MakeupLook: Identifiable { let id: String; let recipe: MakeupRecipe }
     private static let makeupLooks: [MakeupLook] = [
-        MakeupLook(id: "Natural", recipe: { var m = MakeupRecipe(); m.lips = 0.30; m.lipsColor = MakeupColor(0.84, 0.46, 0.42)
-            m.blush = 0.30; m.brows = 0.20; return m }()),
-        MakeupLook(id: "Glam", recipe: { var m = MakeupRecipe(); m.lips = 0.55; m.eyeshadow = 0.45; m.eyeliner = 0.7
-            m.lashes = 0.5; m.blush = 0.35; m.brows = 0.3; return m }()),
+        MakeupLook(id: "Natural", recipe: { var m = MakeupRecipe(); m.lips = 0.45; m.lipsColor = MakeupColor(0.84, 0.46, 0.42)
+            m.blush = 0.45; m.brows = 0.30; return m }()),
+        MakeupLook(id: "Glam", recipe: { var m = MakeupRecipe(); m.lips = 0.7; m.eyeshadow = 0.6; m.eyeliner = 0.85
+            m.lashes = 0.6; m.blush = 0.45; m.brows = 0.35; return m }()),
         MakeupLook(id: "Bold", recipe: { var m = MakeupRecipe(); m.lips = 0.7; m.lipsColor = MakeupColor(0.78, 0.08, 0.20)
             m.eyeliner = 0.6; m.brows = 0.3; return m }()),
         MakeupLook(id: "Sweet", recipe: { var m = MakeupRecipe(); m.lips = 0.4; m.lipsColor = MakeupColor(0.90, 0.45, 0.50)

@@ -210,21 +210,21 @@ enum BodyWarp {
                 if let cX = cx, let sY = shoulderY, let hY = hipY {
                     let torso = max(0.06, hY - sY)
                     if s.slim != 0 {
-                        dx -= s.slim * 0.24 * (u - cX) * gaussian(v, sY + torso * 0.5, torso * 0.5) * henv
+                        dx -= s.slim * 0.28 * (u - cX) * gaussian(v, sY + torso * 0.5, torso * 0.5) * henv
                     }
                     if s.waist != 0 {
-                        dx -= s.waist * 0.30 * (u - cX) * gaussian(v, sY + torso * 0.72, torso * 0.15) * henv
+                        dx -= s.waist * 0.40 * (u - cX) * gaussian(v, sY + torso * 0.72, torso * 0.18) * henv
                     }
                 }
                 if s.hips != 0, let cX = cx, let hY = hipY {
-                    dx -= s.hips * 0.26 * (u - cX) * gaussian(v, hY, 0.06) * henv
+                    dx -= s.hips * 0.36 * (u - cX) * gaussian(v, hY, 0.08) * henv
                 }
                 // Breasts / Butt — localized round, protruding bulges (no vertical band shift).
                 if s.breasts != 0 {
                     for c in breastCenters {
                         let (rx, ry, fall) = radial(u, v, c, breastRadius, asp)
-                        dx += s.breasts * 0.13 * rx * fall
-                        dy += s.breasts * 0.13 * ry * fall
+                        dx += s.breasts * 0.18 * rx * fall
+                        dy += s.breasts * 0.17 * ry * fall
                     }
                 }
                 if s.butt != 0 {
@@ -240,7 +240,7 @@ enum BodyWarp {
                     let gap = max(0.05, sY - chinY)
                     dx -= s.neck * 0.24 * (u - cX) * gaussian(v, chinY + gap * 0.5, gap * 0.18)
                 }
-                if s.height != 0, v > topY { dy += s.height * 0.13 * (v - topY) * henv }
+                if s.height != 0, v > topY { dy += s.height * 0.10 * (v - topY) * henv }
 
                 // ----- Limbs (slim toward the limb axis, confined to a tube around it) -----
                 if s.arms != 0 {
@@ -426,10 +426,10 @@ enum BodyWarp {
     private static func sign(_ v: Double) -> Double { v >= 0 ? 1 : -1 }
     private static func clamp(_ v: Double) -> Double { max(-0.3, min(0.3, v)) }
 
-    /// 1 within the torso column, smoothly → 0 just past its edge (so waist/hips squeezes don't reach
-    /// the arms hanging beside the body).
+    /// Full strength out to the torso edge (so waist/hips actually move the body's sides), then fades
+    /// past it to spare the arms hanging just beyond.
     private static func bodyWindow(_ d: Double, _ half: Double) -> Double {
-        let inner = half * 0.7, outer = half * 1.05
+        let inner = half * 0.98, outer = half * 1.35
         if d <= inner { return 1 }
         if d >= outer { return 0 }
         return 1 - smoothstep((d - inner) / (outer - inner))
