@@ -110,6 +110,7 @@ enum EditPipeline {
                        hdr: Bool = false, fast: Bool = false) -> CIImage {
         var img = source
         img = cutout(img, r, mask: mask)        // background replacement first, so later edits apply to it
+        img = hairStage(img, r, mask: mask, landmarks: landmarks)   // recolor hair before warps
         img = makeupStage(img, r, landmarks: landmarks)   // makeup before warps, so it tracks the face
         img = bodyStage(img, r, landmarks: landmarks, mask: mask, hdr: hdr, fast: fast)   // shape only the subject
         img = geometry(img, r)
@@ -144,6 +145,14 @@ enum EditPipeline {
                                         parameters: [kCIInputBackgroundImageKey: img]).cropped(to: e)
         }
         return img
+    }
+
+    // MARK: Hair
+
+    private static func hairStage(_ image: CIImage, _ r: EditRecipe,
+                                  mask: CIImage?, landmarks: EditLandmarks?) -> CIImage {
+        guard let color = r.hairColor, let face = landmarks?.face, let mask else { return image }
+        return HairRecolor.apply(image, color: color, strength: r.hairStrength, face: face, subjectMask: mask)
     }
 
     // MARK: Makeup

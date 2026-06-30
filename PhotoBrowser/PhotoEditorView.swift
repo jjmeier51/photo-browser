@@ -18,7 +18,7 @@ struct PhotoEditorView: View {
     let entry: Entry
 
     private enum Tab: String, CaseIterable, Identifiable {
-        case adjust, filters, crop, reshape, body, makeup, cutout, stickers
+        case adjust, filters, crop, reshape, body, makeup, hair, cutout, stickers
         var id: String { rawValue }
         var title: String { self == .cutout ? "Cut Out" : rawValue.capitalized }
         var icon: String {
@@ -29,6 +29,7 @@ struct PhotoEditorView: View {
             case .reshape:  return "hand.draw"
             case .body:     return "figure.stand"
             case .makeup:   return "paintbrush.pointed.fill"
+            case .hair:     return "comb.fill"
             case .cutout:   return "person.and.background.dotted"
             case .stickers: return "photo.badge.plus"
             }
@@ -87,6 +88,7 @@ struct PhotoEditorView: View {
             if tab == .cutout { detectSubjectIfNeeded() }
             if tab == .body { detectBodyIfNeeded(); detectSubjectIfNeeded() }   // mask confines the warp
             if tab == .makeup { detectBodyIfNeeded() }   // makeup needs face landmarks
+            if tab == .hair { detectBodyIfNeeded(); detectSubjectIfNeeded() }   // hair needs face + subject mask
             scheduleRender()                      // crop tab shows the uncropped frame; others bake the crop
         }
         .confirmationDialog("Save Photo", isPresented: $showSaveOptions, titleVisibility: .visible) {
@@ -193,7 +195,7 @@ struct PhotoEditorView: View {
                                   onPush: { p, d in applyReshape(at: p, delta: d) },
                                   onEnd: { reshaping = false; scheduleRender() })
                         .padding(10)
-                } else if tab == .body || tab == .makeup {
+                } else if tab == .body || tab == .makeup || tab == .hair {
                     // Pinch-zoom + pan so the user can zoom into a face/body area while adjusting.
                     ZoomablePreview(image: preview).padding(10)
                 } else if tab == .stickers {
@@ -261,6 +263,7 @@ struct PhotoEditorView: View {
             case .reshape: reshapePanel
             case .body:     bodyPanel
             case .makeup:   makeupPanel
+            case .hair:     hairPanel
             case .cutout:   cutoutPanel
             case .stickers: stickerPanel
             }
@@ -903,6 +906,70 @@ struct PhotoEditorView: View {
     private func makeupBinding(_ keyPath: WritableKeyPath<MakeupRecipe, Double>) -> Binding<Double> {
         Binding(get: { recipe.makeup[keyPath: keyPath] },
                 set: { recipe.makeup[keyPath: keyPath] = $0; scheduleRender() })
+    }
+
+    // MARK: Hair panel
+
+    private static let hairColors: [(name: String, color: MakeupColor)] = [
+        ("Black", MakeupColor(0.08, 0.07, 0.07)), ("Dark Brown", MakeupColor(0.22, 0.14, 0.09)),
+        ("Brown", MakeupColor(0.36, 0.23, 0.14)), ("Auburn", MakeupColor(0.40, 0.16, 0.10)),
+        ("Ginger", MakeupColor(0.66, 0.30, 0.12)), ("Red", MakeupColor(0.62, 0.12, 0.12)),
+        ("Blonde", MakeupColor(0.78, 0.62, 0.36)), ("Platinum", MakeupColor(0.86, 0.82, 0.72)),
+        ("Silver", MakeupColor(0.70, 0.72, 0.75)), ("Rose Gold", MakeupColor(0.84, 0.55, 0.52)),
+        ("Pink", MakeupColor(0.88, 0.36, 0.60)), ("Purple", MakeupColor(0.48, 0.24, 0.66)),
+        ("Blue", MakeupColor(0.22, 0.40, 0.78)), ("Teal", MakeupColor(0.16, 0.56, 0.56)),
+        ("Green", MakeupColor(0.24, 0.56, 0.30)),
+    ]
+
+    private var hairPanel: some View {
+        VStack(spacing: 12) {
+            if bodyDetecting || cutoutDetecting {
+                HStack(spacing: 8) {
+                    ProgressView().tint(.white)
+                    Text("Finding hair…").font(.subheadline).foregroundStyle(.secondary)
+                }
+            } else if editLandmarks?.face == nil {
+                Text("No face found in this photo.").font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                if recipe.hairColor != nil {
+                    HStack {
+                        Text("Strength").font(.subheadline.weight(.medium))
+                        Spacer()
+                        Text("\(Int((recipe.hairStrength * 100).rounded()))")
+                            .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal)
+                    Slider(value: Binding(get: { recipe.hairStrength },
+                                          set: { recipe.hairStrength = $0; scheduleRender() }), in: 0.2...1) { editing in
+                        if editing { snapshot() }
+                    }
+                    .tint(.white).padding(.horizontal)
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        Button { commit { recipe.hairColor = nil } } label: { hairSwatch(nil, name: "None") }
+                        ForEach(Self.hairColors.indices, id: \.self) { i in
+                            let h = Self.hairColors[i]
+                            Button { commit { recipe.hairColor = h.color } } label: { hairSwatch(h.color, name: h.name) }
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+            }
+        }
+    }
+
+    private func hairSwatch(_ color: MakeupColor?, name: String) -> some View {
+        let sel = recipe.hairColor == color
+        return VStack(spacing: 5) {
+            Group {
+                if let color { Circle().fill(Color(red: color.r, green: color.g, blue: color.b)) }
+                else { Image(systemName: "slash.circle").foregroundStyle(.secondary) }
+            }
+            .frame(width: 34, height: 34)
+            .overlay(Circle().stroke(sel ? Color.white : Color.white.opacity(0.3), lineWidth: sel ? 2.5 : 1))
+            Text(name).font(.caption2).foregroundStyle(sel ? Color.white : Color.secondary)
+        }
     }
 
     // MARK: Sticker panel
