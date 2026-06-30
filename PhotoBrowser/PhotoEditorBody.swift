@@ -186,17 +186,22 @@ enum BodyWarp {
             let chestY = sY + (hY - sY) * 0.26
             breastCenters = [CGPoint(x: cX - cw, y: chestY), CGPoint(x: cX + cw, y: chestY)]
         }
-        var buttCenters: [CGPoint] = []
-        for hip in [b?.hipL, b?.hipR] where hip != nil {
-            buttCenters.append(CGPoint(x: hip!.x, y: hip!.y + 0.05))
-        }
-        let breastRadius = max(0.06, (shoulderHalf ?? 0.13) * 0.7)
-        let buttRadius = max(0.06, (shoulderHalf ?? 0.13) * 0.85)
-        // Half-width of the torso column; broad squeezes are confined inside it (so arms/background stay).
+        // Half-width of the hip line — sizes the torso column window *and* the butt bulge.
         let hipHalf = b.flatMap { lm -> Double? in
             guard let l = lm.hipL, let r = lm.hipR else { return nil }
             return abs(Double(l.x - r.x)) / 2
         }
+        var buttCenters: [CGPoint] = []
+        for hip in [b?.hipL, b?.hipR] where hip != nil {
+            buttCenters.append(CGPoint(x: hip!.x, y: hip!.y + 0.06))
+        }
+        // A centre-axis point just below the hips so a straight-on (front/back) shot still rounds out —
+        // not only side views, where the old protrusion term used to carry the effect.
+        if let cX = cx, let hY = hipY, !buttCenters.isEmpty {
+            buttCenters.append(CGPoint(x: cX, y: hY + 0.07))
+        }
+        let breastRadius = max(0.06, (shoulderHalf ?? 0.13) * 0.7)
+        let buttRadius = max(0.09, (hipHalf ?? shoulderHalf ?? 0.14) * 1.15)
         let torsoHalf = max(0.12, max(shoulderHalf ?? 0.18, hipHalf ?? 0.18))
         // Facing direction (for side-view butt protrusion): how far the nose sits from the body axis,
         // and which way the back faces (away from the nose).
@@ -243,8 +248,9 @@ enum BodyWarp {
                     for c in buttCenters {
                         let bc = CGPoint(x: c.x + CGFloat(backShift), y: c.y)
                         let (rx, ry, fall) = radial(u, v, bc, buttRadius, asp)
-                        dx += s.butt * 0.26 * rx * fall                       // rounder / fuller / protruding
-                        dy += s.butt * 0.20 * ry * fall
+                        dx += s.butt * 0.40 * rx * fall                       // wider / rounder
+                        // Fuller toward the bottom: push the lower half down more for a rounder, lower butt.
+                        dy += s.butt * (ry > 0 ? 0.42 : 0.26) * ry * fall
                     }
                 }
                 if s.neck != 0, let cX = cx, let sY = shoulderY {
