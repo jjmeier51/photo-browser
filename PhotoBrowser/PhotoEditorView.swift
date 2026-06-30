@@ -2,6 +2,7 @@ import SwiftUI
 import CoreImage
 import UIKit
 import PhotosUI
+import UniformTypeIdentifiers
 
 /// The full-screen photo editor (Hypic/Facetune-style) built on the non-destructive `EditRecipe`
 /// backbone (PRD Phase 1). A downscaled **proxy** of the source drives a live preview at interactive
@@ -73,6 +74,7 @@ struct PhotoEditorView: View {
     @State private var selectedSticker: UUID?
     @State private var stickerPickerItem: PhotosPickerItem?
     @State private var showStickerPicker = false
+    @State private var showStickerFiles = false
     @State private var retouchStrokes: [RetouchStroke] = []   // object-removal brush strokes
     @State private var editProxy: CIImage?                    // proxy with object removal baked in (render source)
     @State private var retouchBrush: CGFloat = 0.05
@@ -105,6 +107,8 @@ struct PhotoEditorView: View {
             Text("Upscale the saved photo?")
         }
         .photosPicker(isPresented: $showStickerPicker, selection: $stickerPickerItem, matching: .images)
+        .fileImporter(isPresented: $showStickerFiles, allowedContentTypes: [.image],
+                      allowsMultipleSelection: true) { result in addStickerFromFiles(result) }
         .onChange(of: stickerPickerItem) { _, item in
             guard let item else { return }
             Task {
@@ -998,26 +1002,30 @@ struct PhotoEditorView: View {
 
     private var stickerPanel: some View {
         VStack(spacing: 12) {
-            Button { showStickerPicker = true } label: {
+            Menu {
+                Button { showStickerPicker = true } label: { Label("From Photos", systemImage: "photo.on.rectangle") }
+                Button { showStickerFiles = true } label: { Label("From Files / Drive", systemImage: "folder") }
+            } label: {
                 Label("Add Sticker", systemImage: "plus.circle.fill").font(.subheadline.weight(.medium))
             }
             .tint(.white)
 
             if stickers.isEmpty {
-                Text("Add an image, then drag to move and pinch to resize. Cut out its subject to drop just the person on top.")
+                Text("Add an image (from Photos or your in-app folders), then drag to move and pinch to resize. Cut out its subject to drop just the person on top.")
                     .font(.caption).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center).padding(.horizontal)
-            } else if let idx = stickers.firstIndex(where: { $0.id == selectedSticker }) {
+            } else if let sel = stickers.first(where: { $0.id == selectedSticker }) {
                 HStack(spacing: 16) {
                     Toggle(isOn: Binding(
-                        get: { stickers[idx].cutout },
-                        set: { toggleStickerCutout(idx, on: $0) })) {
+                        get: { sel.cutout },
+                        set: { toggleStickerCutout(id: sel.id, on: $0) })) {
                         Label("Cut out", systemImage: "person.crop.circle.badge.checkmark").font(.subheadline)
                     }
                     .tint(.white).fixedSize()
                     Spacer()
                     Button(role: .destructive) {
-                        snapshot(); stickers.remove(at: idx); selectedSticker = stickers.last?.id
+                        stickers.removeAll { $0.id == sel.id }
+                        selectedSticker = stickers.last?.id
                     } label: { Label("Delete", systemImage: "trash").font(.subheadline) }
                 }
                 .padding(.horizontal)
@@ -1027,22 +1035,32 @@ struct PhotoEditorView: View {
         }
     }
 
-    private func toggleStickerCutout(_ idx: Int, on: Bool) {
-        guard stickers.indices.contains(idx) else { return }
-        snapshot()
-        stickers[idx].cutout = on
+    private func toggleStickerCutout(id: UUID, on: Bool) {
+        guard let i = stickers.firstIndex(where: { $0.id == id }) else { return }
+        stickers[i].cutout = on
         if on {
-            let original = stickers[idx].original
-            let id = stickers[idx].id
+            let original = stickers[i].original
             Task.detached(priority: .userInitiated) {
                 let cut = StickerImaging.cutout(original)
                 await MainActor.run {
-                    if let cut, let i = stickers.firstIndex(where: { $0.id == id }) { stickers[i].image = cut }
+                    if let cut, let j = stickers.firstIndex(where: { $0.id == id }) { stickers[j].image = cut }
                 }
             }
         } else {
-            stickers[idx].image = stickers[idx].original
+            stickers[i].image = stickers[i].original
         }
+    }
+
+    private func addStickerFromFiles(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result else { return }
+        for url in urls {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            if let data = try? Data(contentsOf: url), let img = UIImage(data: data) {
+                stickers.append(StickerItem(data: data, image: img, original: img))
+            }
+        }
+        selectedSticker = stickers.last?.id
     }
 
     /// Converts the placed stickers into render-pipeline stickers (full-res compositing). The sticker is
@@ -1730,14 +1748,20 @@ private struct StickerOverlay: View {
     var body: some View {
         GeometryReader { geo in
             let frame = fittedRect(in: geo.size)
-            ForEach($stickers) { $sticker in
-                stickerView($sticker, frame: frame)
+            // Iterate by value (not $binding): a binding to a deleted index would crash on next access.
+            ForEach(stickers) { s in
+                stickerView(s, frame: frame)
             }
         }
     }
 
-    private func stickerView(_ sticker: Binding<PhotoEditorView.StickerItem>, frame: CGRect) -> some View {
-        let s = sticker.wrappedValue
+    /// Mutates the sticker with `id` in place if it still exists (safe if it was deleted mid-gesture).
+    private func update(_ id: UUID, _ change: (inout PhotoEditorView.StickerItem) -> Void) {
+        guard let i = stickers.firstIndex(where: { $0.id == id }) else { return }
+        change(&stickers[i])
+    }
+
+    private func stickerView(_ s: PhotoEditorView.StickerItem, frame: CGRect) -> some View {
         let aspect = s.image.size.height > 0 ? s.image.size.width / s.image.size.height : 1
         let w = max(20, s.scale * frame.width)
         let pos = CGPoint(x: frame.minX + s.center.x * frame.width,
@@ -1756,9 +1780,9 @@ private struct StickerOverlay: View {
                         if dragStart == nil { dragStart = s.center }
                         let start = dragStart ?? s.center
                         guard frame.width > 0, frame.height > 0 else { return }
-                        sticker.wrappedValue.center = CGPoint(
+                        update(s.id) { $0.center = CGPoint(
                             x: clamp01(start.x + v.translation.width / frame.width),
-                            y: clamp01(start.y + v.translation.height / frame.height))
+                            y: clamp01(start.y + v.translation.height / frame.height)) }
                     }
                     .onEnded { _ in dragStart = nil }
             )
@@ -1767,7 +1791,7 @@ private struct StickerOverlay: View {
                     .onChanged { v in
                         selected = s.id
                         if baseScale == nil { baseScale = s.scale }
-                        sticker.wrappedValue.scale = min(2.5, max(0.05, (baseScale ?? s.scale) * v.magnification))
+                        update(s.id) { $0.scale = min(2.5, max(0.05, (baseScale ?? s.scale) * v.magnification)) }
                     }
                     .onEnded { _ in baseScale = nil }
             )
@@ -1776,7 +1800,7 @@ private struct StickerOverlay: View {
                     .onChanged { v in
                         selected = s.id
                         if baseRotation == nil { baseRotation = s.rotation }
-                        sticker.wrappedValue.rotation = (baseRotation ?? s.rotation) + v.rotation
+                        update(s.id) { $0.rotation = (baseRotation ?? s.rotation) + v.rotation }
                     }
                     .onEnded { _ in baseRotation = nil }
             )
