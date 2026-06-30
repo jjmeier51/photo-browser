@@ -233,11 +233,16 @@ enum BodyWarp {
                     }
                 }
                 if s.butt != 0 {
+                    // Bias the bulge centre toward the back *only* in a side view, so the radial expansion
+                    // (which tapers smoothly to zero at its edge) protrudes outward there. A uniform lateral
+                    // push here tore a block out of the silhouette against the mask — the centre shift keeps
+                    // it a clean, rounded bulge in back/front *and* side views.
+                    let backShift = backDir * sideness * buttRadius * 0.45
                     for c in buttCenters {
-                        let (rx, ry, fall) = radial(u, v, c, buttRadius, asp)
-                        dx += s.butt * 0.24 * rx * fall                       // rounder / fuller
-                        dy += s.butt * 0.18 * ry * fall
-                        dx += s.butt * 0.18 * backDir * sideness * fall       // protrude toward the back (side view)
+                        let bc = CGPoint(x: c.x + CGFloat(backShift), y: c.y)
+                        let (rx, ry, fall) = radial(u, v, bc, buttRadius, asp)
+                        dx += s.butt * 0.26 * rx * fall                       // rounder / fuller / protruding
+                        dy += s.butt * 0.20 * ry * fall
                     }
                 }
                 if s.neck != 0, let cX = cx, let sY = shoulderY {

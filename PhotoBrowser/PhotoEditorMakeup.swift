@@ -33,6 +33,7 @@ enum MakeupRenderer {
                                   extent e: CGRect, feather: Double) -> CIImage {
         let size = CGSize(width: e.width, height: e.height)
         let fmt = UIGraphicsImageRendererFormat.default(); fmt.scale = 1; fmt.opaque = false
+        fmt.preferredRange = .standard   // plain sRGB overlay — no extended/wide-gamut values to skew an HDR base
         let img = UIGraphicsImageRenderer(size: size, format: fmt).image { rctx in
             drawing(rctx.cgContext)
         }

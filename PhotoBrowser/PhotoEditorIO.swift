@@ -188,9 +188,14 @@ enum PhotoEditorIO {
                                 retouch: [RetouchStroke] = []) -> Bool {
         guard let loaded = loadHDR(url: sourceURL) else { return false }
         let source = inpaintIfNeeded(loaded.image, retouch)
+        // Vision (subject mask + face/body landmarks) expects standard-range pixels. The HDR-expanded
+        // source carries extended-range values (>1.0) that degrade face detection — which scatters makeup
+        // overlays across the frame and reads as a blown-out, oversaturated result. Detect on a clamped
+        // SDR copy, but render on the real HDR `source` so the headroom survives in the output.
+        let visionSrc = source.applyingFilter("CIColorClamp").cropped(to: source.extent)
         let needsMask = recipe.cutout != nil || !recipe.body.isZero || (recipe.filterBackgroundOnly && recipe.filterID != nil) || recipe.hairColor != nil
-        let mask = needsMask ? PhotoEditorCutout.subjectMask(for: source) : nil
-        let landmarks = detectLandmarks(for: recipe, in: source)
+        let mask = needsMask ? PhotoEditorCutout.subjectMask(for: visionSrc) : nil
+        let landmarks = detectLandmarks(for: recipe, in: visionSrc)
         let rendered = upscaled(EditPipeline.render(source, recipe: recipe, mask: mask,
                                                     landmarks: landmarks, stickers: stickers, hdr: true), upscale)
         guard !rendered.extent.isInfinite, !rendered.extent.isNull else { return false }
