@@ -130,7 +130,7 @@ enum AIExtend {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 120
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        applyAPIHeaders(&req)
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.httpBody = multipart(fields: fields, files: files, boundary: boundary)
 
@@ -157,7 +157,7 @@ enum AIExtend {
         for _ in 0..<80 {                                   // ~4 minutes at 3s
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             var req = URLRequest(url: url)
-            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            applyAPIHeaders(&req)
             guard let (data, _) = try? await URLSession.shared.data(for: req),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             if let images = json["images"] as? [String], !images.isEmpty { return images.compactMap { URL(string: $0) } }
@@ -315,11 +315,32 @@ enum AIExtend {
         return dest
     }
 
+    /// Standard headers for Astria's API. `Accept: application/json` + a real `User-Agent` are what stop
+    /// Astria's Cloudflare layer from serving a "Just a moment…" bot-challenge HTML page instead of the
+    /// JSON response (a request with no UA / no Accept reads as an automated bot to Cloudflare).
+    private nonisolated static func applyAPIHeaders(_ req: inout URLRequest) {
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        if req.value(forHTTPHeaderField: "User-Agent") == nil {
+            req.setValue("PhotoBrowser/1.0 (iOS; Astria client)", forHTTPHeaderField: "User-Agent")
+        }
+    }
+
     private nonisolated static func message(from data: Data) -> String {
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             if let m = json["message"] as? String { return m }
             if let errors = json["errors"] as? [String], let m = errors.first { return m }
             if let e = json["error"] as? String { return e }
+        }
+        // A Cloudflare bot-challenge (or any HTML) came back instead of JSON — don't dump raw HTML at the user.
+        let text = (String(data: data.prefix(4000), encoding: .utf8) ?? "").lowercased()
+        if text.contains("just a moment") || text.contains("cf-browser-verification")
+            || text.contains("/cdn-cgi/") || text.contains("cloudflare")
+            || text.hasPrefix("<!doctype") || text.hasPrefix("<html") {
+            return "Astria's service blocked the request at its Cloudflare bot check (it returned a "
+                + "\"Just a moment…\" page instead of a result). This is usually temporary — wait a minute "
+                + "and try again. If it persists, it may be rate-limiting on Astria's side, a network/VPN "
+                + "being challenged, or an invalid API key (check Settings)."
         }
         return String(data: data.prefix(300), encoding: .utf8) ?? "The provider rejected the request."
     }
