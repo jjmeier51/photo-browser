@@ -252,16 +252,24 @@ enum BodyWarp {
                 if s.breasts != 0, let cX = cx {
                     for c in breastCenters {
                         let (rx, ry, fall) = radial(u, v, c, breastRadius, asp)
-                        dx += s.breasts * 0.30 * rx * fall                    // fuller / larger
-                        dy += s.breasts * 0.26 * ry * fall
-                        dx += s.breasts * 0.12 * (cX - Double(c.x)) * fall    // pull toward centre (busty / cleavage)
+                        // Weight: full below the breast centre, but strongly damped *above* it so the
+                        // upper chest / clavicle isn't enlarged (`ry > 0` = below the centre, top-left coords).
+                        let w = (ry > 0 ? 1.0 : 0.25) * fall
+                        dx += s.breasts * 0.30 * rx * w                       // fuller / larger
+                        dy += s.breasts * 0.26 * ry * w
+                        dx += s.breasts * 0.12 * (cX - Double(c.x)) * w       // pull toward centre (cleavage)
+                        // Push the *outer* edge out a touch more, faded past the torso (henv) so the arms
+                        // and armpits aren't dragged.
+                        let outward = Double(c.x) > cX ? 1.0 : -1.0
+                        if rx * outward > 0 { dx += s.breasts * 0.07 * outward * w * henv }
                     }
-                    // Extra fullness in the centre of the chest, between the breasts.
+                    // Central chest fill, kept below the clavicle and expanding mostly downward.
                     if let sY = shoulderY, let hY = hipY {
-                        let chestY = sY + (hY - sY) * 0.26
-                        let (rx2, ry2, f2) = radial(u, v, CGPoint(x: cX, y: chestY), breastRadius * 0.9, asp)
-                        dx += s.breasts * 0.08 * rx2 * f2
-                        dy += s.breasts * 0.12 * ry2 * f2
+                        let chestY = sY + (hY - sY) * 0.30
+                        let (rx2, ry2, f2) = radial(u, v, CGPoint(x: cX, y: chestY), breastRadius * 0.8, asp)
+                        let w2 = (ry2 > 0 ? 1.0 : 0.25) * f2
+                        dx += s.breasts * 0.06 * rx2 * w2
+                        dy += s.breasts * 0.10 * ry2 * w2
                     }
                 }
                 if s.butt != 0 {
