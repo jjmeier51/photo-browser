@@ -191,23 +191,27 @@ enum BodyWarp {
             guard let l = lm.hipL, let r = lm.hipR else { return nil }
             return abs(Double(l.x - r.x)) / 2
         }
-        var buttCenters: [CGPoint] = []
-        for hip in [b?.hipL, b?.hipR] where hip != nil {
-            buttCenters.append(CGPoint(x: hip!.x, y: hip!.y + 0.06))
-        }
-        // A centre-axis point just below the hips so a straight-on (front/back) shot still rounds out —
-        // not only side views, where the old protrusion term used to carry the effect.
-        if let cX = cx, let hY = hipY, !buttCenters.isEmpty {
-            buttCenters.append(CGPoint(x: cX, y: hY + 0.07))
-        }
         let breastRadius = max(0.06, (shoulderHalf ?? 0.13) * 0.7)
-        let buttRadius = max(0.09, (hipHalf ?? shoulderHalf ?? 0.14) * 1.15)
+        let buttRadius = max(0.11, (hipHalf ?? shoulderHalf ?? 0.14) * 1.15)
         let torsoHalf = max(0.12, max(shoulderHalf ?? 0.18, hipHalf ?? 0.18))
-        // Facing direction (for side-view butt protrusion): how far the nose sits from the body axis,
+        // Facing direction: how far the nose sits from the body axis (sideness 0 = front/back, 1 = profile)
         // and which way the back faces (away from the nose).
         let noseX = (b?.nose ?? fc?.nose).map { Double($0.x) }
         let sideness: Double = (cx != nil && noseX != nil) ? min(1, abs(noseX! - cx!) / max(0.05, torsoHalf)) : 0
         let backDir: Double = (cx != nil && noseX != nil) ? (cx! > noseX! ? 1 : -1) : 0
+        // Butt bulge centres. In a front/back view the butt sits just *below* the hip; in a side view it
+        // sits *behind* the hip (toward the back) at hip level — placing it below the hip on a profile shot
+        // grabs the thigh, so the downward drop fades out as the view turns and a backward shift takes over.
+        var buttCenters: [CGPoint] = []
+        let buttDrop = 0.06 * (1 - sideness)             // below-hip (front) → at-hip (side)
+        let backOff = backDir * sideness * 0.11          // behind the hip in a side view
+        for hip in [b?.hipL, b?.hipR] where hip != nil {
+            buttCenters.append(CGPoint(x: hip!.x + CGFloat(backOff), y: hip!.y + CGFloat(buttDrop)))
+        }
+        // Centre-axis fill only for straight-on shots (both hips visible, no thigh confusion).
+        if sideness < 0.4, let cX = cx, let hY = hipY, !buttCenters.isEmpty {
+            buttCenters.append(CGPoint(x: cX, y: hY + 0.07))
+        }
 
         for j in 1..<(rows - 1) {
             for i in 1..<(cols - 1) {
@@ -245,25 +249,31 @@ enum BodyWarp {
                     dx -= s.hips * 0.28 * (u - cX) * gaussian(v, hY, 0.06) * henv
                 }
                 // Breasts / Butt — localized round, protruding bulges (no vertical band shift).
-                if s.breasts != 0 {
+                if s.breasts != 0, let cX = cx {
                     for c in breastCenters {
                         let (rx, ry, fall) = radial(u, v, c, breastRadius, asp)
-                        dx += s.breasts * 0.22 * rx * fall
-                        dy += s.breasts * 0.20 * ry * fall
+                        dx += s.breasts * 0.30 * rx * fall                    // fuller / larger
+                        dy += s.breasts * 0.26 * ry * fall
+                        dx += s.breasts * 0.12 * (cX - Double(c.x)) * fall    // pull toward centre (busty / cleavage)
+                    }
+                    // Extra fullness in the centre of the chest, between the breasts.
+                    if let sY = shoulderY, let hY = hipY {
+                        let chestY = sY + (hY - sY) * 0.26
+                        let (rx2, ry2, f2) = radial(u, v, CGPoint(x: cX, y: chestY), breastRadius * 0.9, asp)
+                        dx += s.breasts * 0.08 * rx2 * f2
+                        dy += s.breasts * 0.12 * ry2 * f2
                     }
                 }
                 if s.butt != 0 {
-                    // Bias the bulge centre toward the back *only* in a side view, so the radial expansion
-                    // (which tapers smoothly to zero at its edge) protrudes outward there. A uniform lateral
-                    // push here tore a block out of the silhouette against the mask — the centre shift keeps
-                    // it a clean, rounded bulge in back/front *and* side views.
-                    let backShift = backDir * sideness * buttRadius * 0.45
+                    // The bulge centres are already placed correctly for the view (below the hip head-on,
+                    // behind it in profile), so this is a clean radial expansion that tapers to zero at its
+                    // edge (no silhouette tearing). The downward fullness is dropped as the view turns to
+                    // profile so the protrusion stays on the butt and doesn't thicken the thigh.
+                    let down = 0.42 * (1 - sideness * 0.7)
                     for c in buttCenters {
-                        let bc = CGPoint(x: c.x + CGFloat(backShift), y: c.y)
-                        let (rx, ry, fall) = radial(u, v, bc, buttRadius, asp)
-                        dx += s.butt * 0.40 * rx * fall                       // wider / rounder
-                        // Fuller toward the bottom: push the lower half down more for a rounder, lower butt.
-                        dy += s.butt * (ry > 0 ? 0.42 : 0.26) * ry * fall
+                        let (rx, ry, fall) = radial(u, v, c, buttRadius, asp)
+                        dx += s.butt * 0.42 * rx * fall                       // wider / rounder / protruding
+                        dy += s.butt * (ry > 0 ? down : 0.26) * ry * fall
                     }
                 }
                 if s.neck != 0, let cX = cx, let sY = shoulderY {

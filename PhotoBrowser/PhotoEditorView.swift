@@ -19,7 +19,7 @@ struct PhotoEditorView: View {
     let entry: Entry
 
     private enum Tab: String, CaseIterable, Identifiable {
-        case adjust, filters, crop, reshape, retouch, smooth, paint, teeth, body, makeup, skin, cutout, stickers
+        case adjust, filters, crop, reshape, retouch, smooth, paint, teeth, body, makeup, skin, cutout, stickers, text
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -43,6 +43,7 @@ struct PhotoEditorView: View {
             case .skin:     return "sun.max.fill"
             case .cutout:   return "person.and.background.dotted"
             case .stickers: return "photo.badge.plus"
+            case .text:     return "textformat"
             }
         }
     }
@@ -81,6 +82,8 @@ struct PhotoEditorView: View {
     @State private var selectedMakeup = "looks"             // active makeup category chip
     @State private var stickers: [StickerItem] = []
     @State private var selectedSticker: UUID?
+    @State private var texts: [TextOverlayItem] = []
+    @State private var selectedText: UUID?
     @State private var stickerPickerItem: PhotosPickerItem?
     @State private var showStickerPicker = false
     @State private var showStickerFiles = false
@@ -90,9 +93,9 @@ struct PhotoEditorView: View {
     @State private var retouchBusy = false
 
     // Brush tools (smooth / paint / teeth). Sizes are fractions of image width; intensities are 0…1.
-    @State private var smoothSize: CGFloat = 0.12
+    @State private var smoothSize: CGFloat = 0.06
     @State private var smoothIntensity: CGFloat = 0.7
-    @State private var paintSize: CGFloat = 0.08
+    @State private var paintSize: CGFloat = 0.06
     @State private var paintOpacity: CGFloat = 0.85
     @State private var paintColor: Color = .red
     @State private var paintErasing = false
@@ -235,9 +238,9 @@ struct PhotoEditorView: View {
                                 onStroke: { pts, r in applyRetouchStroke(pts, radius: r) })
                         .padding(10)
                 } else if tab == .smooth || tab == .paint || tab == .teeth {
-                    // One-finger brush for smooth / paint / teeth-whiten, with live stroke feedback.
+                    // One-finger brush for smooth / paint / teeth-whiten, with a persistent size ring.
                     BrushCanvas(image: preview, brushRadius: activeBrushRadius,
-                                strokeColor: activeStrokeColor,
+                                strokeColor: activeStrokeColor, showSizeRing: true,
                                 onStroke: { pts, r in addBrushStroke(points: pts, radius: r) })
                         .padding(10)
                 } else if tab == .body || tab == .makeup {
@@ -247,6 +250,12 @@ struct PhotoEditorView: View {
                     ZStack {
                         Image(uiImage: preview).resizable().scaledToFit()
                         StickerOverlay(stickers: $stickers, selected: $selectedSticker, imageSize: preview.size)
+                    }
+                    .padding(10)
+                } else if tab == .text {
+                    ZStack {
+                        Image(uiImage: preview).resizable().scaledToFit()
+                        TextOverlay(texts: $texts, selected: $selectedText, imageSize: preview.size)
                     }
                     .padding(10)
                 } else {
@@ -315,6 +324,7 @@ struct PhotoEditorView: View {
             case .skin:     skinPanel
             case .cutout:   cutoutPanel
             case .stickers: stickerPanel
+            case .text:     textPanel
             }
             tabBar
         }
@@ -1031,8 +1041,8 @@ struct PhotoEditorView: View {
     private var smoothPanel: some View {
         VStack(spacing: 10) {
             brushHeader("Brush over skin to smooth it")
-            labeledSlider("Size", systemImage: "circle.dashed", value: $smoothSize, range: 0.03...0.3)
-            labeledSlider("Intensity", systemImage: "drop", value: $smoothIntensity, range: 0...1)
+            labeledSlider("Size", systemImage: "circle.dashed", value: $smoothSize, range: 0.02...0.22)
+            brushAmountSlider("Intensity", systemImage: "drop", value: $smoothIntensity, kind: .smooth)
         }
     }
 
@@ -1054,7 +1064,7 @@ struct PhotoEditorView: View {
             }
             .padding(.horizontal)
             labeledSlider("Size", systemImage: "circle.dashed", value: $paintSize, range: 0.01...0.3)
-            labeledSlider("Opacity", systemImage: "drop.fill", value: $paintOpacity, range: 0.05...1)
+            brushAmountSlider("Opacity", systemImage: "drop.fill", value: $paintOpacity, kind: .paint)
         }
     }
 
@@ -1062,7 +1072,29 @@ struct PhotoEditorView: View {
         VStack(spacing: 10) {
             brushHeader("Brush over teeth to whiten them")
             labeledSlider("Size", systemImage: "circle.dashed", value: $teethSize, range: 0.012...0.12)
-            labeledSlider("Whiten", systemImage: "sparkles", value: $teethIntensity, range: 0...1)
+            brushAmountSlider("Whiten", systemImage: "sparkles", value: $teethIntensity, kind: .teeth)
+        }
+    }
+
+    /// An amount slider for a brush tool that *also* retroactively sets the opacity/strength of strokes
+    /// already painted with that tool (Facetune‑style live layer opacity), as well as new strokes.
+    private func brushAmountSlider(_ title: String, systemImage: String,
+                                   value: Binding<CGFloat>, kind: BrushStroke.Kind) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage).font(.system(size: 15)).frame(width: 22)
+            Text(title).font(.subheadline).frame(width: 80, alignment: .leading)
+            Slider(value: Binding(get: { Double(value.wrappedValue) },
+                                  set: { value.wrappedValue = CGFloat($0); setBrushOpacity(kind, $0); scheduleRender() }),
+                   in: 0...1) { editing in if editing { snapshot() } }
+                .tint(.white)
+        }
+        .padding(.horizontal)
+    }
+
+    /// Re-applies `value` as the opacity/strength of every existing stroke of `kind`.
+    private func setBrushOpacity(_ kind: BrushStroke.Kind, _ value: Double) {
+        for i in recipe.brushStrokes.indices where recipe.brushStrokes[i].kind == kind {
+            recipe.brushStrokes[i].intensity = value
         }
     }
 
@@ -1175,6 +1207,8 @@ struct PhotoEditorView: View {
         var scale: CGFloat = 0.4               // width as a fraction of the base image width
         var rotation: Angle = .zero
         var cutout = false
+        var effect: StickerEffectKind = .none  // shadow / glow drawn under the sticker
+        var effectAmount: CGFloat = 0.5
     }
 
     private var stickerPanel: some View {
@@ -1206,10 +1240,29 @@ struct PhotoEditorView: View {
                     } label: { Label("Delete", systemImage: "trash").font(.subheadline) }
                 }
                 .padding(.horizontal)
+
+                Picker("Effect", selection: Binding(
+                    get: { sel.effect },
+                    set: { v in updateSticker(sel.id) { $0.effect = v } })) {
+                    ForEach(StickerEffectKind.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented).padding(.horizontal)
+
+                if sel.effect != .none {
+                    labeledSlider(sel.effect == .glow ? "Glow" : "Shadow", systemImage: "circle.dashed",
+                                  value: Binding(get: { sel.effectAmount },
+                                                 set: { v in updateSticker(sel.id) { $0.effectAmount = v } }),
+                                  range: 0...1)
+                }
             } else {
                 Text("Tap a sticker to select it.").font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func updateSticker(_ id: UUID, _ change: (inout StickerItem) -> Void) {
+        guard let i = stickers.firstIndex(where: { $0.id == id }) else { return }
+        change(&stickers[i])
     }
 
     private func toggleStickerCutout(id: UUID, on: Bool) {
@@ -1247,7 +1300,119 @@ struct PhotoEditorView: View {
         stickers.compactMap { s in
             guard var img = StickerImaging.hdrImage(from: s.data) ?? CIImage(image: s.image) else { return nil }
             if s.cutout { img = StickerImaging.cutout(ci: img) ?? img }
-            return EditSticker(image: img, center: s.center, scale: Double(s.scale), rotation: s.rotation.radians)
+            return EditSticker(image: img, center: s.center, scale: Double(s.scale), rotation: s.rotation.radians,
+                               effect: s.effect, effectAmount: Double(s.effectAmount))
+        }
+    }
+
+    // MARK: Text panel
+
+    struct TextOverlayItem: Identifiable {
+        let id = UUID()
+        var string = "Text"
+        var fontName = "Helvetica Neue"
+        var color: Color = .white
+        var bold = false
+        var italic = false
+        var effect: TextEffect = .plain
+        var center = CGPoint(x: 0.5, y: 0.5)   // normalized top-left
+        var scale: CGFloat = 0.5               // width as a fraction of the base image width
+        var rotation: Angle = .zero
+        var image: UIImage?                    // cached render of the styled text
+    }
+
+    private var textPanel: some View {
+        VStack(spacing: 10) {
+            Button { addText() } label: {
+                Label("Add Text", systemImage: "plus.circle.fill").font(.subheadline.weight(.medium))
+            }
+            .tint(.white)
+
+            if let sel = texts.first(where: { $0.id == selectedText }) {
+                TextField("Type text", text: Binding(get: { sel.string },
+                                                     set: { v in updateText(sel.id) { $0.string = v } }))
+                    .textFieldStyle(.roundedBorder).padding(.horizontal)
+
+                HStack(spacing: 10) {
+                    ColorPicker("", selection: Binding(get: { sel.color },
+                                                       set: { v in updateText(sel.id) { $0.color = v } }),
+                                supportsOpacity: false).labelsHidden()
+                    styleToggle("B", on: sel.bold, weight: .bold) { updateText(sel.id) { $0.bold.toggle() } }
+                    styleToggle("I", on: sel.italic, italic: true) { updateText(sel.id) { $0.italic.toggle() } }
+                    Menu {
+                        ForEach(TextRender.fonts, id: \.self) { f in
+                            Button(f) { updateText(sel.id) { $0.fontName = f } }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(sel.fontName).lineLimit(1)
+                            Image(systemName: "chevron.down").font(.caption2)
+                        }
+                        .font(.subheadline).padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(.thinMaterial, in: Capsule())
+                    }
+                    Spacer()
+                    Button(role: .destructive) { deleteText(sel.id) } label: { Image(systemName: "trash") }
+                        .tint(.white)
+                }
+                .padding(.horizontal)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(TextEffect.allCases) { fx in
+                            Button { updateText(sel.id) { $0.effect = fx } } label: {
+                                Text(fx.label).font(.caption2.weight(.medium))
+                                    .padding(.horizontal, 10).padding(.vertical, 6)
+                                    .background(.thinMaterial, in: Capsule())
+                                    .overlay(Capsule().stroke(sel.effect == fx ? Color.white : .clear, lineWidth: 1.5))
+                                    .foregroundStyle(sel.effect == fx ? Color.white : Color.secondary)
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+            } else {
+                Text("Add text, then drag to move and pinch to resize. Pick a font, color, style (bold/italic), and one of 15 effects.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center).padding(.horizontal)
+            }
+        }
+    }
+
+    private func styleToggle(_ label: String, on: Bool, weight: Font.Weight = .regular,
+                             italic: Bool = false, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label).font(.system(size: 16, weight: weight)).italic(italic)
+                .frame(width: 32, height: 32)
+                .background(Circle().fill(on ? Color.white.opacity(0.25) : Color.white.opacity(0.08)))
+                .foregroundStyle(.white)
+        }
+    }
+
+    private func renderTextImage(_ t: TextOverlayItem) -> UIImage? {
+        TextRender.image(string: t.string, fontName: t.fontName, color: UIColor(t.color),
+                         bold: t.bold, italic: t.italic, effect: t.effect)
+    }
+    private func addText() {
+        var t = TextOverlayItem()
+        t.image = renderTextImage(t)
+        texts.append(t)
+        selectedText = t.id
+    }
+    private func updateText(_ id: UUID, _ change: (inout TextOverlayItem) -> Void) {
+        guard let i = texts.firstIndex(where: { $0.id == id }) else { return }
+        change(&texts[i])
+        texts[i].image = renderTextImage(texts[i])
+    }
+    private func deleteText(_ id: UUID) {
+        texts.removeAll { $0.id == id }
+        selectedText = texts.last?.id
+    }
+    /// Rendered text overlays as pipeline stickers (composited like image stickers on save).
+    private func editTexts() -> [EditSticker] {
+        texts.compactMap { t in
+            guard let ui = t.image ?? renderTextImage(t), let ci = CIImage(image: ui) else { return nil }
+            return EditSticker(image: ci, center: t.center, scale: Double(t.scale), rotation: t.rotation.radians)
         }
     }
 
@@ -1412,12 +1577,15 @@ struct PhotoEditorView: View {
         scheduleRender()
     }
     /// Any edit at all — recipe changes, placed stickers, or object removal — gates Save/Reset/Compare.
-    private var hasEdits: Bool { !recipe.isIdentity || !stickers.isEmpty || !retouchStrokes.isEmpty }
+    private var hasEdits: Bool {
+        !recipe.isIdentity || !stickers.isEmpty || !retouchStrokes.isEmpty || !texts.isEmpty
+    }
 
     private func reset() {
         guard hasEdits else { return }
         snapshot()
         stickers.removeAll(); selectedSticker = nil
+        texts.removeAll(); selectedText = nil
         retouchStrokes.removeAll(); editProxy = nil
         commit { recipe = EditRecipe() }
     }
@@ -1504,7 +1672,7 @@ struct PhotoEditorView: View {
         guard hasEdits else { dismiss(); return }
         let r = recipe
         let src = entry.url
-        let placed = editStickers()
+        let placed = editStickers() + editTexts()
         let strokes = retouchStrokes
         let title = upscale == .none ? "Saving edited photo…" : "Saving & upscaling photo…"
         let id = library.beginActivity(title, indeterminate: true)
@@ -1981,9 +2149,9 @@ private struct StickerOverlay: View {
         let pos = CGPoint(x: frame.minX + s.center.x * frame.width,
                           y: frame.minY + s.center.y * frame.height)
         let isSel = selected == s.id
-        return Image(uiImage: s.image)
-            .resizable()
-            .frame(width: w, height: w / max(0.05, aspect))
+        return applyStickerEffect(
+            Image(uiImage: s.image).resizable().frame(width: w, height: w / max(0.05, aspect)),
+            effect: s.effect, amount: s.effectAmount, size: w)
             .rotationEffect(s.rotation)
             .overlay { if isSel { RoundedRectangle(cornerRadius: 4).stroke(Color.white, lineWidth: 1.5) } }
             .position(pos)
@@ -2021,6 +2189,104 @@ private struct StickerOverlay: View {
             .onTapGesture { selected = s.id }
     }
 
+    /// Live shadow/glow preview for a sticker (the full‑quality version is rendered by the pipeline on save).
+    @ViewBuilder
+    private func applyStickerEffect<V: View>(_ view: V, effect: StickerEffectKind,
+                                             amount: CGFloat, size w: CGFloat) -> some View {
+        switch effect {
+        case .none:
+            view
+        case .shadow:
+            view.shadow(color: .black.opacity(0.55), radius: max(1, amount * w * 0.12),
+                        x: amount * w * 0.05, y: amount * w * 0.05)
+        case .glow:
+            view.shadow(color: .white.opacity(0.9), radius: max(1, amount * w * 0.10))
+                .shadow(color: .white.opacity(0.7), radius: max(1, amount * w * 0.18))
+        }
+    }
+
+    private func clamp01(_ v: CGFloat) -> CGFloat { min(max(v, 0), 1) }
+
+    private func fittedRect(in bounds: CGSize) -> CGRect {
+        guard imageSize.width > 0, imageSize.height > 0, bounds.width > 0, bounds.height > 0
+        else { return CGRect(origin: .zero, size: bounds) }
+        let s = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
+        let w = imageSize.width * s, h = imageSize.height * s
+        return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
+    }
+}
+
+/// Draggable / resizable / rotatable overlay for text items (shows each item's cached rendered image).
+private struct TextOverlay: View {
+    @Binding var texts: [PhotoEditorView.TextOverlayItem]
+    @Binding var selected: UUID?
+    let imageSize: CGSize
+
+    @State private var dragStart: CGPoint?
+    @State private var baseScale: CGFloat?
+    @State private var baseRotation: Angle?
+
+    var body: some View {
+        GeometryReader { geo in
+            let frame = fittedRect(in: geo.size)
+            ForEach(texts) { t in textView(t, frame: frame) }
+        }
+    }
+
+    private func update(_ id: UUID, _ change: (inout PhotoEditorView.TextOverlayItem) -> Void) {
+        guard let i = texts.firstIndex(where: { $0.id == id }) else { return }
+        change(&texts[i])
+    }
+
+    @ViewBuilder
+    private func textView(_ t: PhotoEditorView.TextOverlayItem, frame: CGRect) -> some View {
+        if let img = t.image {
+            let aspect = img.size.height > 0 ? img.size.width / img.size.height : 1
+            let w = max(20, t.scale * frame.width)
+            let pos = CGPoint(x: frame.minX + t.center.x * frame.width,
+                              y: frame.minY + t.center.y * frame.height)
+            let isSel = selected == t.id
+            Image(uiImage: img)
+                .resizable()
+                .frame(width: w, height: w / max(0.05, aspect))
+                .rotationEffect(t.rotation)
+                .overlay { if isSel { RoundedRectangle(cornerRadius: 4).stroke(Color.white, lineWidth: 1.5) } }
+                .position(pos)
+                .gesture(
+                    DragGesture()
+                        .onChanged { v in
+                            selected = t.id
+                            if dragStart == nil { dragStart = t.center }
+                            let start = dragStart ?? t.center
+                            guard frame.width > 0, frame.height > 0 else { return }
+                            update(t.id) { $0.center = CGPoint(
+                                x: clamp01(start.x + v.translation.width / frame.width),
+                                y: clamp01(start.y + v.translation.height / frame.height)) }
+                        }
+                        .onEnded { _ in dragStart = nil }
+                )
+                .simultaneousGesture(
+                    MagnifyGesture()
+                        .onChanged { v in
+                            selected = t.id
+                            if baseScale == nil { baseScale = t.scale }
+                            update(t.id) { $0.scale = min(2.5, max(0.05, (baseScale ?? t.scale) * v.magnification)) }
+                        }
+                        .onEnded { _ in baseScale = nil }
+                )
+                .simultaneousGesture(
+                    RotateGesture()
+                        .onChanged { v in
+                            selected = t.id
+                            if baseRotation == nil { baseRotation = t.rotation }
+                            update(t.id) { $0.rotation = (baseRotation ?? t.rotation) + v.rotation }
+                        }
+                        .onEnded { _ in baseRotation = nil }
+                )
+                .onTapGesture { selected = t.id }
+        }
+    }
+
     private func clamp01(_ v: CGFloat) -> CGFloat { min(max(v, 0), 1) }
 
     private func fittedRect(in bounds: CGSize) -> CGRect {
@@ -2039,6 +2305,7 @@ private struct BrushCanvas: UIViewRepresentable {
     let image: UIImage
     let brushRadius: CGFloat
     var strokeColor: UIColor = .systemRed
+    var showSizeRing: Bool = false        // a persistent circle showing the brush size (follows the finger)
     let onStroke: ([CGPoint], CGFloat) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -2062,19 +2329,24 @@ private struct BrushCanvas: UIViewRepresentable {
         brush.maximumNumberOfTouches = 1
         brush.delegate = context.coordinator
         sv.imageView.addGestureRecognizer(brush)
+        if showSizeRing { sv.imageView.layer.addSublayer(context.coordinator.sizeRing) }
+        DispatchQueue.main.async { context.coordinator.positionSizeRing(at: nil) }
         return sv
     }
 
     func updateUIView(_ sv: ReshapeScrollView, context: Context) {
         context.coordinator.parent = self
         if sv.imageView.image !== image { sv.setImage(image) }
+        context.coordinator.positionSizeRing(at: nil)   // reflect a size change; keep it centred when idle
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         var parent: BrushCanvas
         weak var scroll: ReshapeScrollView?
         private var points: [CGPoint] = []
+        private var brushing = false
         private let stroke = CAShapeLayer()
+        let sizeRing = CAShapeLayer()
         private var path = UIBezierPath()
 
         init(_ parent: BrushCanvas) {
@@ -2082,6 +2354,9 @@ private struct BrushCanvas: UIViewRepresentable {
             super.init()
             stroke.fillColor = UIColor.clear.cgColor
             stroke.lineCap = .round; stroke.lineJoin = .round
+            sizeRing.fillColor = UIColor.clear.cgColor
+            sizeRing.strokeColor = UIColor.white.withAlphaComponent(0.85).cgColor
+            sizeRing.lineWidth = 1.5
         }
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
@@ -2089,9 +2364,26 @@ private struct BrushCanvas: UIViewRepresentable {
         }
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             (scrollView as? ReshapeScrollView)?.centerContent()
+            if !brushing { positionSizeRing(at: nil) }
+        }
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            if !brushing { positionSizeRing(at: nil) }
         }
         func gestureRecognizer(_ g: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+
+        /// Draws the size ring at `p` (in imageView coords) or, when nil, centred in the visible viewport.
+        func positionSizeRing(at p: CGPoint?) {
+            guard parent.showSizeRing, let sv = scroll else { return }
+            let iv = sv.imageView, size = iv.bounds.size
+            guard size.width > 0, size.height > 0 else { return }
+            let center = p ?? sv.convert(CGPoint(x: sv.bounds.midX, y: sv.bounds.midY), to: iv)
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            sizeRing.path = UIBezierPath(arcCenter: center, radius: max(2, parent.brushRadius * size.width),
+                                         startAngle: 0, endAngle: .pi * 2, clockwise: true).cgPath
+            if sv.zoomScale > 0 { sizeRing.lineWidth = 1.5 / sv.zoomScale }
+            CATransaction.commit()
+        }
 
         @objc func handleBrush(_ g: UIPanGestureRecognizer) {
             guard let iv = scroll?.imageView else { return }
@@ -2100,18 +2392,23 @@ private struct BrushCanvas: UIViewRepresentable {
             let loc = g.location(in: iv)
             switch g.state {
             case .began:
+                brushing = true
                 points = []; path = UIBezierPath()
                 if stroke.superlayer == nil { iv.layer.addSublayer(stroke) }
                 stroke.strokeColor = parent.strokeColor.cgColor
                 stroke.lineWidth = max(2, parent.brushRadius * size.width * 2)
                 path.move(to: loc); stroke.path = path.cgPath
                 points.append(CGPoint(x: loc.x / size.width, y: loc.y / size.height))
+                positionSizeRing(at: loc)
             case .changed:
                 path.addLine(to: loc); stroke.path = path.cgPath
                 points.append(CGPoint(x: loc.x / size.width, y: loc.y / size.height))
+                positionSizeRing(at: loc)
             case .ended, .cancelled, .failed:
+                brushing = false
                 let pts = points, r = parent.brushRadius
                 points = []; stroke.path = nil
+                positionSizeRing(at: nil)               // return the ring to centre
                 if !pts.isEmpty { parent.onStroke(pts, r) }
             default: break
             }

@@ -50,7 +50,7 @@ enum SkinRecolor {
 
     // MARK: Skin-colour LUT
 
-    private static let cubeDimension = 16
+    private static let cubeDimension = 24
 
     /// A fresh `CIColorCube` each call (a `CIFilter` instance isn't safe to share across threads); the heavy
     /// `cubeData` itself is built once.
@@ -82,13 +82,17 @@ enum SkinRecolor {
         return cube.withUnsafeBufferPointer { Data(buffer: $0) }
     }()
 
-    /// Kovac et al. daylight skin-colour rule (+ a bright/flash variant), evaluated in 0…255 space.
+    /// Luma-independent skin test in **YCbCr** (the Chai–Ngan chroma locus, broadened). Because skin
+    /// chroma is roughly constant across tones, this catches dark→light skin alike — the earlier RGB
+    /// rule was calibrated for light skin and missed most of a darker subject. The subject mask already
+    /// excludes the background, so the test only has to separate skin from clothing/hair within the person.
     private static func skinLikely(_ r: Float, _ g: Float, _ b: Float) -> Bool {
         let R = r * 255, G = g * 255, B = b * 255
-        let mx = max(R, max(G, B)), mn = min(R, min(G, B))
-        let daylight = R > 95 && G > 40 && B > 20 && (mx - mn) > 15 &&
-                       abs(R - G) > 15 && R > G && R > B
-        let flash = R > 220 && G > 210 && B > 170 && abs(R - G) <= 15 && R > B && G > B
-        return daylight || flash
+        let y  = 0.299 * R + 0.587 * G + 0.114 * B
+        let cb = 128 - 0.168736 * R - 0.331264 * G + 0.5 * B
+        let cr = 128 + 0.5 * R - 0.418688 * G - 0.081312 * B
+        // Skin is reddish‑warm: Cr above mid, Cb below mid, with a generous window so deep tones qualify.
+        guard y > 25 else { return false }                 // exclude near‑black (hair/shadow)
+        return cb >= 70 && cb <= 135 && cr >= 132 && cr <= 185 && cr >= cb - 18
     }
 }

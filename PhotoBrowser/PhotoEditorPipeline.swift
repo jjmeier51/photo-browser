@@ -142,10 +142,48 @@ enum EditPipeline {
                 .concatenating(CGAffineTransform(rotationAngle: -s.rotation))            // screen CW → CI CCW
                 .concatenating(CGAffineTransform(translationX: targetX, y: targetY))
             let placed = s.image.transformed(by: t)
+            if s.effect != .none,
+               let fx = stickerEffect(placed, kind: s.effect, amount: s.effectAmount,
+                                      sizePx: s.scale * Double(e.width), extent: e) {
+                img = fx.applyingFilter("CISourceOverCompositing",
+                                        parameters: [kCIInputBackgroundImageKey: img]).cropped(to: e)
+            }
             img = placed.applyingFilter("CISourceOverCompositing",
                                         parameters: [kCIInputBackgroundImageKey: img]).cropped(to: e)
         }
         return img
+    }
+
+    /// A drop shadow or glow drawn under a placed sticker. Shadow = a blurred, offset black silhouette;
+    /// glow = a larger blurred white silhouette. `amount` (0…1) scales blur/offset; `sizePx` is the
+    /// sticker's on-image width so the effect scales with the sticker.
+    private static func stickerEffect(_ placed: CIImage, kind: StickerEffectKind, amount: Double,
+                                      sizePx: Double, extent e: CGRect) -> CIImage? {
+        guard kind != .none else { return nil }
+        let blur = max(2.0, sizePx * (0.02 + amount * 0.14))
+        switch kind {
+        case .none:
+            return nil
+        case .shadow:
+            // Black silhouette (clamp RGB to 0, keep alpha), faded by amount, blurred, offset down-right.
+            let op = 0.35 + amount * 0.45
+            let sil = placed
+                .applyingFilter("CIColorClamp", parameters: [
+                    "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                    "inputMaxComponents": CIVector(x: 0, y: 0, z: 0, w: 1)])
+                .applyingFilter("CIColorMatrix", parameters: [        // scale alpha → shadow opacity
+                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: op)])
+            let off = sizePx * 0.05
+            return sil.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blur])
+                .transformed(by: CGAffineTransform(translationX: off, y: -off))   // CI y-up: −y = down
+                .cropped(to: e)
+        case .glow:
+            // White silhouette (desaturate + max brightness, keep alpha), blurred wide.
+            let sil = placed.applyingFilter("CIColorControls", parameters: [
+                kCIInputSaturationKey: 0.0, kCIInputBrightnessKey: 1.0])
+            return sil.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blur * 1.5])
+                .cropped(to: e)
+        }
     }
 
     // MARK: Skin tone

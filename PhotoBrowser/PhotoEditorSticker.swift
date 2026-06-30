@@ -10,6 +10,22 @@ struct EditSticker: Sendable {
     let center: CGPoint   // normalized top-left
     let scale: Double     // sticker width / base width
     let rotation: Double  // radians
+    var effect: StickerEffectKind = .none
+    var effectAmount: Double = 0.5   // 0…1 — size/intensity of the shadow or glow
+}
+
+/// Optional decoration drawn *under* an image sticker.
+enum StickerEffectKind: String, CaseIterable, Identifiable, Codable, Sendable {
+    case none, shadow, glow
+    var id: String { rawValue }
+    var label: String { rawValue.capitalized }
+    var systemImage: String {
+        switch self {
+        case .none:   return "nosign"
+        case .shadow: return "shadow"
+        case .glow:   return "sun.max.fill"
+        }
+    }
 }
 
 enum StickerImaging {
