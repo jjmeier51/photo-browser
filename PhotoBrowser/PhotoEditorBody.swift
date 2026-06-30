@@ -168,12 +168,30 @@ enum BodyWarp {
         let hipY = b.flatMap { avgY($0.hipL, $0.hipR) }
         let topY = b?.nose.map { Double($0.y) } ?? shoulderY ?? 0.1
 
-        // Limb polylines (only valid if a mid/end joint exists, so a stray slider can't warp the torso).
-        let armL = limb(b?.shoulderL, b?.elbowL, b?.wristL)
-        let armR = limb(b?.shoulderR, b?.elbowR, b?.wristR)
-        let legL = limb(b?.hipL, b?.kneeL, b?.ankleL)
-        let legR = limb(b?.hipR, b?.kneeR, b?.ankleR)
+        // Limb tubes start partway down from the root joint so they don't grab the torso/neck/chest.
+        let armL = limb(b?.shoulderL, b?.elbowL, b?.wristL, startFrac: 0.40)
+        let armR = limb(b?.shoulderR, b?.elbowR, b?.wristR, startFrac: 0.40)
+        let legL = limb(b?.hipL, b?.kneeL, b?.ankleL, startFrac: 0.25)
+        let legR = limb(b?.hipR, b?.kneeR, b?.ankleR, startFrac: 0.25)
         let mouthCX = fc?.mouth.map { Double($0.x) }
+
+        // Localized breast/butt bulge centers (radial expansion, so neighbors are untouched).
+        let shoulderHalf = b.flatMap { lm -> Double? in
+            guard let l = lm.shoulderL, let r = lm.shoulderR else { return nil }
+            return abs(Double(l.x - r.x)) / 2
+        }
+        var breastCenters: [CGPoint] = []
+        if let cX = cx, let sY = shoulderY, let hY = hipY {
+            let cw = (shoulderHalf ?? 0.13) * 0.5
+            let chestY = sY + (hY - sY) * 0.26
+            breastCenters = [CGPoint(x: cX - cw, y: chestY), CGPoint(x: cX + cw, y: chestY)]
+        }
+        var buttCenters: [CGPoint] = []
+        for hip in [b?.hipL, b?.hipR] where hip != nil {
+            buttCenters.append(CGPoint(x: hip!.x, y: hip!.y + 0.05))
+        }
+        let breastRadius = max(0.06, (shoulderHalf ?? 0.13) * 0.7)
+        let buttRadius = max(0.06, (shoulderHalf ?? 0.13) * 0.85)
 
         for j in 1..<(rows - 1) {
             for i in 1..<(cols - 1) {
@@ -190,19 +208,23 @@ enum BodyWarp {
                     if s.waist != 0 {
                         dx -= s.waist * 0.30 * (u - cX) * gaussian(v, sY + torso * 0.72, torso * 0.15)
                     }
-                    if s.breasts != 0, v > sY {
-                        // A localized fuller, rounder bulge just below the shoulders.
-                        let f2 = gaussian(v, sY + torso * 0.22, torso * 0.13)
-                        dx += s.breasts * 0.22 * (u - cX) * f2
-                        dy += s.breasts * 0.10 * f2
+                }
+                if s.hips != 0, let cX = cx, let hY = hipY {
+                    dx -= s.hips * 0.26 * (u - cX) * gaussian(v, hY, 0.06)
+                }
+                // Breasts / Butt — localized round, protruding bulges (no vertical band shift).
+                if s.breasts != 0 {
+                    for c in breastCenters {
+                        let (rx, ry, fall) = radial(u, v, c, breastRadius, asp)
+                        dx += s.breasts * 0.13 * rx * fall
+                        dy += s.breasts * 0.13 * ry * fall
                     }
                 }
-                if let cX = cx, let hY = hipY {
-                    if s.hips != 0 { dx -= s.hips * 0.26 * (u - cX) * gaussian(v, hY, 0.06) }
-                    if s.butt != 0 {
-                        let f2 = gaussian(v, hY + 0.04, 0.06)
-                        dx += s.butt * 0.20 * (u - cX) * f2
-                        dy += s.butt * 0.06 * f2
+                if s.butt != 0 {
+                    for c in buttCenters {
+                        let (rx, ry, fall) = radial(u, v, c, buttRadius, asp)
+                        dx += s.butt * 0.16 * rx * fall
+                        dy += s.butt * 0.11 * ry * fall
                     }
                 }
                 if s.neck != 0, let cX = cx, let sY = shoulderY {
@@ -216,14 +238,14 @@ enum BodyWarp {
                 // ----- Limbs (slim toward the limb axis, confined to a tube around it) -----
                 if s.arms != 0 {
                     for poly in [armL, armR] {
-                        let (px, py, w) = slimPush(u, v, poly, 0.14, asp)
-                        dx += s.arms * 0.55 * px * w; dy += s.arms * 0.55 * py * w
+                        let (px, py, w) = slimPush(u, v, poly, 0.10, asp)
+                        dx += s.arms * 0.5 * px * w; dy += s.arms * 0.5 * py * w
                     }
                 }
                 if s.legs != 0 {
                     for poly in [legL, legR] {
-                        let (px, py, w) = slimPush(u, v, poly, 0.16, asp)
-                        dx += s.legs * 0.5 * px * w; dy += s.legs * 0.5 * py * w
+                        let (px, py, w) = slimPush(u, v, poly, 0.11, asp)
+                        dx += s.legs * 0.45 * px * w; dy += s.legs * 0.45 * py * w
                     }
                 }
                 if s.ankles != 0, let b {
@@ -271,13 +293,14 @@ enum BodyWarp {
                     if s.smile != 0 {
                         for corner in [fc.mouthLeft, fc.mouthRight] where corner != nil {
                             let cx2 = Double(corner!.x), cy2 = Double(corner!.y)
-                            let fall = gaussian(v, cy2, 0.05) * gaussian(u, cx2, 0.06)
-                            dy -= s.smile * 0.13 * fall                               // lift the corners
-                            if let mcx = mouthCX { dx += s.smile * 0.07 * sign(cx2 - mcx) * fall }  // and out
+                            let fall = gaussian(v, cy2, 0.045) * gaussian(u, cx2, 0.075)
+                            dy -= s.smile * 0.20 * fall                               // lift the corners (smirk)
+                            if let mcx = mouthCX { dx += s.smile * 0.08 * sign(cx2 - mcx) * fall }  // and out
                         }
                     }
-                    if s.forehead != 0, let by = fc.browY, let top = fc.faceTop, by > top {
-                        if v < by { dy -= s.forehead * 0.10 * gaussian(v, (top + by) / 2, (by - top) * 0.9) }
+                    // Forehead — very subtle vertical give, strictly inside the forehead band.
+                    if s.forehead != 0, let by = fc.browY, let top = fc.faceTop, by > top, v > top, v < by {
+                        dy -= s.forehead * 0.04 * gaussian(v, (top + by) / 2, (by - top) * 0.35)
                     }
                 }
 
@@ -341,9 +364,19 @@ enum BodyWarp {
     /// A limb polyline in normalized points. Requires a mid/end joint (elbow/knee/wrist/ankle) beyond the
     /// root so that — with no limb detected — the slider has no anchor and simply does nothing (rather
     /// than warping the torso). Returns [] when there aren't ≥2 usable points.
-    private static func limb(_ root: CGPoint?, _ mid: CGPoint?, _ end: CGPoint?) -> [(Double, Double)] {
+    private static func limb(_ root: CGPoint?, _ mid: CGPoint?, _ end: CGPoint?,
+                             startFrac: Double = 0) -> [(Double, Double)] {
         guard mid != nil || end != nil else { return [] }
-        let p = [root, mid, end].compactMap { $0.map { (Double($0.x), Double($0.y)) } }
+        var p: [(Double, Double)] = []
+        if let root, let next = mid ?? end {
+            // Trim the start down the first segment so the tube doesn't grab the root joint's area.
+            p.append((Double(root.x) + (Double(next.x) - Double(root.x)) * startFrac,
+                      Double(root.y) + (Double(next.y) - Double(root.y)) * startFrac))
+        } else if let root {
+            p.append((Double(root.x), Double(root.y)))
+        }
+        if let mid { p.append((Double(mid.x), Double(mid.y))) }
+        if let end { p.append((Double(end.x), Double(end.y))) }
         return p.count >= 2 ? p : []
     }
 

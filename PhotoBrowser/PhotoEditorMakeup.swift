@@ -9,30 +9,69 @@ import CoreGraphics
 /// Everything is on-device, landmark-anchored, and conservative; freckles use a fixed-seed PRNG so they
 /// don't shimmer between renders. Applied to the primary detected face.
 enum MakeupRenderer {
-    static func apply(_ image: CIImage, makeup m: MakeupRecipe, face: FaceLandmarks) -> CIImage {
+    static func apply(_ image: CIImage, makeup mRaw: MakeupRecipe, face: FaceLandmarks) -> CIImage {
+        let m = mRaw.scaled                          // bake the overall look strength
         let e = image.extent
         guard !m.isZero, !e.isInfinite, !e.isNull, e.width >= 8, e.height >= 8 else { return image }
         let size = CGSize(width: e.width, height: e.height)
-
-        let fmt = UIGraphicsImageRendererFormat.default()
-        fmt.scale = 1; fmt.opaque = false
-        let overlayImg = UIGraphicsImageRenderer(size: size, format: fmt).image { rctx in
-            draw(rctx.cgContext, size: size, makeup: m, face: face)
+        var out = image
+        // Soft pass — blush + eyeshadow heavily feathered so they read as a wash, not a splotch.
+        if m.blush > 0 || m.eyeshadow > 0 {
+            out = composite({ drawSoft($0, size: size, makeup: m, face: face) },
+                            over: out, extent: e, feather: Double(e.width) * 0.022)
         }
-        guard let overlayCG = overlayImg.cgImage else { return image }
-
-        var overlay = CIImage(cgImage: overlayCG)
-        let feather = max(1.0, Double(e.width) * 0.004)
-        overlay = overlay.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: feather])
-            .cropped(to: CGRect(origin: .zero, size: size))
-            .transformed(by: CGAffineTransform(translationX: e.minX, y: e.minY))   // align to base extent
-        return overlay.applyingFilter("CISourceOverCompositing",
-                                      parameters: [kCIInputBackgroundImageKey: image]).cropped(to: e)
+        // Sharp pass — lips, liner, lashes, brows, freckles with only a light feather.
+        if m.lips > 0 || m.eyeliner > 0 || m.lashes > 0 || m.brows > 0 || m.freckles > 0 {
+            out = composite({ drawSharp($0, size: size, makeup: m, face: face) },
+                            over: out, extent: e, feather: max(1, Double(e.width) * 0.0018))
+        }
+        return out
     }
 
-    // MARK: Drawing
+    private static func composite(_ drawing: (CGContext) -> Void, over base: CIImage,
+                                  extent e: CGRect, feather: Double) -> CIImage {
+        let size = CGSize(width: e.width, height: e.height)
+        let fmt = UIGraphicsImageRendererFormat.default(); fmt.scale = 1; fmt.opaque = false
+        let img = UIGraphicsImageRenderer(size: size, format: fmt).image { rctx in drawing(rctx.cgContext) }
+        guard let cg = img.cgImage else { return base }
+        var overlay = CIImage(cgImage: cg)
+        if feather > 0.5 {
+            overlay = overlay.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: feather])
+                .cropped(to: CGRect(origin: .zero, size: size))
+        }
+        overlay = overlay.transformed(by: CGAffineTransform(translationX: e.minX, y: e.minY))
+        return overlay.applyingFilter("CISourceOverCompositing",
+                                      parameters: [kCIInputBackgroundImageKey: base]).cropped(to: e)
+    }
 
-    private static func draw(_ ctx: CGContext, size: CGSize, makeup m: MakeupRecipe, face f: FaceLandmarks) {
+    // MARK: Soft pass
+
+    private static func drawSoft(_ ctx: CGContext, size: CGSize, makeup m: MakeupRecipe, face f: FaceLandmarks) {
+        let W = size.width, H = size.height
+        func px(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * W, y: p.y * H) }
+        func col(_ c: MakeupColor, _ a: Double) -> CGColor {
+            UIColor(red: CGFloat(c.r), green: CGFloat(c.g), blue: CGFloat(c.b),
+                    alpha: CGFloat(max(0, min(1, a)))).cgColor
+        }
+        if m.eyeshadow > 0 {
+            for poly in [f.leftEyePoly, f.rightEyePoly] where poly.count >= 3 {
+                let bb = bbox(poly.map(px))
+                let cxp = bb.midX, cyp = bb.minY - bb.height * 0.1
+                let rx = bb.width * 0.65, ry = bb.height * 0.95
+                ctx.setFillColor(col(m.eyeshadowColor, m.eyeshadow * 0.5))
+                ctx.fillEllipse(in: CGRect(x: cxp - rx, y: cyp - ry, width: rx * 2, height: ry * 2))
+            }
+        }
+        if m.blush > 0 {
+            for cheek in [f.cheekL, f.cheekR] where cheek != nil {
+                radial(ctx, center: px(cheek!), radius: max(8, W * 0.10), color: col(m.blushColor, m.blush * 0.55))
+            }
+        }
+    }
+
+    // MARK: Sharp pass
+
+    private static func drawSharp(_ ctx: CGContext, size: CGSize, makeup m: MakeupRecipe, face f: FaceLandmarks) {
         let W = size.width, H = size.height
         func px(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * W, y: p.y * H) }
         func col(_ c: MakeupColor, _ a: Double) -> CGColor {
@@ -41,30 +80,12 @@ enum MakeupRenderer {
         }
         let faceH = CGFloat(max(0.1, f.height)) * H
 
-        // Eyeshadow — soft ellipse above each eye.
-        if m.eyeshadow > 0 {
-            for poly in [f.leftEyePoly, f.rightEyePoly] where poly.count >= 3 {
-                let bb = bbox(poly.map(px))
-                let cxp = bb.midX, cyp = bb.minY - bb.height * 0.15
-                let rx = bb.width * 0.78, ry = bb.height * 1.2
-                ctx.setFillColor(col(m.eyeshadowColor, m.eyeshadow * 0.40))
-                ctx.fillEllipse(in: CGRect(x: cxp - rx, y: cyp - ry, width: rx * 2, height: ry * 2))
-            }
-        }
-        // Blush — soft radial gradient on each cheek.
-        if m.blush > 0 {
-            for cheek in [f.cheekL, f.cheekR] where cheek != nil {
-                radial(ctx, center: px(cheek!), radius: max(8, W * 0.09), color: col(m.blushColor, m.blush * 0.5))
-            }
-        }
-        // Brows — darken by stroking the brow line.
         if m.brows > 0 {
             for poly in [f.leftBrowPoly, f.rightBrowPoly] where poly.count >= 2 {
                 stroke(ctx, poly.map(px), color: col(MakeupColor(0.24, 0.16, 0.10), m.brows * 0.5),
                        width: faceH * 0.035)
             }
         }
-        // Lashes — soft dark line just above the upper lash line.
         if m.lashes > 0 {
             for poly in [f.leftEyePoly, f.rightEyePoly] where poly.count >= 4 {
                 let bb = bbox(poly.map(px))
@@ -72,7 +93,6 @@ enum MakeupRenderer {
                 stroke(ctx, line, color: col(MakeupColor(0.05, 0.04, 0.04), m.lashes * 0.7), width: bb.height * 0.11)
             }
         }
-        // Eyeliner — crisp dark line on the upper lash line with a small wing.
         if m.eyeliner > 0 {
             for poly in [f.leftEyePoly, f.rightEyePoly] where poly.count >= 4 {
                 let pts = poly.map(px); let bb = bbox(pts)
@@ -85,7 +105,6 @@ enum MakeupRenderer {
                 stroke(ctx, line, color: col(MakeupColor(0.04, 0.03, 0.03), m.eyeliner), width: bb.height * 0.15)
             }
         }
-        // Lipstick — fill the lip ring (outer minus inner so the mouth opening stays clear).
         if m.lips > 0, f.outerLips.count >= 3 {
             let path = CGMutablePath()
             addPoly(path, f.outerLips.map(px))
@@ -94,12 +113,12 @@ enum MakeupRenderer {
             ctx.setFillColor(col(m.lipsColor, m.lips * 0.55))
             ctx.fillPath(using: .evenOdd)
         }
-        // Freckles — scattered dots across the cheeks/nose, density by level.
+        // Freckles — dense scatter across the whole face; level 5 visibly covers it.
         if m.freckles > 0, let l = f.faceLeft, let r = f.faceRight {
-            let counts = [0, 14, 32, 64, 110, 170]
+            let counts = [0, 60, 140, 260, 420, 650]
             let n = counts[min(5, max(0, m.freckles))]
-            let top = (f.browY ?? Double((f.leftEye?.y ?? 0.4))) + 0.03
-            let bot = Double(f.mouth?.y ?? 0.72) - 0.02
+            let top = (f.faceTop ?? Double(f.leftEye?.y ?? 0.30)) + 0.02
+            let bot = (f.chin.map { Double($0.y) } ?? Double(f.mouth?.y ?? 0.75)) - 0.01
             let zone = CGRect(x: Double(l.x) * Double(W), y: top * Double(H),
                               width: max(1, Double(r.x - l.x)) * Double(W), height: max(1, (bot - top)) * Double(H))
             let contourPx = f.contour.map(px)
@@ -107,15 +126,15 @@ enum MakeupRenderer {
             let lipsPx = f.outerLips.map(px)
             var rng = LCG(seed: 0x9E3779B97F4A7C15)
             var placed = 0, tries = 0
-            ctx.setFillColor(col(MakeupColor(0.46, 0.29, 0.17), 0.5))
-            while placed < n && tries < n * 8 {
+            ctx.setFillColor(col(MakeupColor(0.45, 0.27, 0.15), 0.6))
+            while placed < n && tries < n * 10 {
                 tries += 1
                 let p = CGPoint(x: zone.minX + CGFloat(rng.next()) * zone.width,
                                 y: zone.minY + CGFloat(rng.next()) * zone.height)
                 if !contourPx.isEmpty, !pointInPolygon(p, contourPx) { continue }
-                if eyes.contains(where: { hypot($0.x - p.x, $0.y - p.y) < W * 0.05 }) { continue }
-                if pointInPolygon(p, lipsPx) { continue }
-                let rad = W * 0.0035 * CGFloat(0.6 + rng.next() * 0.8)
+                if eyes.contains(where: { hypot($0.x - p.x, $0.y - p.y) < W * 0.045 }) { continue }
+                if !lipsPx.isEmpty, pointInPolygon(p, lipsPx) { continue }
+                let rad = W * 0.0045 * CGFloat(0.6 + rng.next() * 0.8)
                 ctx.fillEllipse(in: CGRect(x: p.x - rad, y: p.y - rad, width: rad * 2, height: rad * 2))
                 placed += 1
             }

@@ -175,6 +175,9 @@ struct PhotoEditorView: View {
                                   onPush: { p, d in applyReshape(at: p, delta: d) },
                                   onEnd: { reshaping = false; scheduleRender() })
                         .padding(10)
+                } else if tab == .body || tab == .makeup {
+                    // Pinch-zoom + pan so the user can zoom into a face/body area while adjusting.
+                    ZoomablePreview(image: preview).padding(10)
                 } else {
                     ZStack {
                         if recipe.cutout == .transparent {
@@ -696,6 +699,19 @@ struct PhotoEditorView: View {
             m.blush = 0.5; m.blushColor = MakeupColor(0.96, 0.56, 0.55); m.freckles = 2; return m }()),
         MakeupLook(id: "Smoky", recipe: { var m = MakeupRecipe(); m.eyeshadow = 0.6; m.eyeshadowColor = MakeupColor(0.36, 0.34, 0.40)
             m.eyeliner = 0.8; m.lashes = 0.7; m.lips = 0.35; m.lipsColor = MakeupColor(0.70, 0.42, 0.40); return m }()),
+        MakeupLook(id: "Gothic", recipe: { var m = MakeupRecipe(); m.lips = 0.75; m.lipsColor = MakeupColor(0.12, 0.04, 0.08)
+            m.eyeshadow = 0.6; m.eyeshadowColor = MakeupColor(0.18, 0.16, 0.20); m.eyeliner = 0.95; m.lashes = 0.8
+            m.brows = 0.45; return m }()),
+        MakeupLook(id: "Bronze", recipe: { var m = MakeupRecipe(); m.eyeshadow = 0.5; m.eyeshadowColor = MakeupColor(0.60, 0.42, 0.22)
+            m.lips = 0.40; m.lipsColor = MakeupColor(0.85, 0.45, 0.38); m.blush = 0.4; m.blushColor = MakeupColor(0.92, 0.55, 0.42)
+            m.brows = 0.25; m.freckles = 1; return m }()),
+        MakeupLook(id: "Vintage", recipe: { var m = MakeupRecipe(); m.lips = 0.6; m.lipsColor = MakeupColor(0.74, 0.10, 0.16)
+            m.eyeliner = 0.45; m.brows = 0.3; m.blush = 0.25; return m }()),
+        MakeupLook(id: "Doll", recipe: { var m = MakeupRecipe(); m.lashes = 0.85; m.eyeliner = 0.45
+            m.lips = 0.5; m.lipsColor = MakeupColor(0.92, 0.42, 0.52); m.blush = 0.5; m.blushColor = MakeupColor(0.96, 0.55, 0.58)
+            m.freckles = 2; return m }()),
+        MakeupLook(id: "Editorial", recipe: { var m = MakeupRecipe(); m.eyeshadow = 0.6; m.eyeshadowColor = MakeupColor(0.55, 0.25, 0.30)
+            m.eyeliner = 0.8; m.lips = 0.4; m.lipsColor = MakeupColor(0.72, 0.42, 0.40); m.brows = 0.3; return m }()),
     ]
 
     private var makeupPanel: some View {
@@ -735,16 +751,33 @@ struct PhotoEditorView: View {
     }
 
     private var looksControls: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
-                Button { commit { recipe.makeup = MakeupRecipe() } } label: { lookLabel("None", on: recipe.makeup.isZero) }
-                ForEach(Self.makeupLooks) { look in
-                    Button { commit { recipe.makeup = look.recipe } } label: {
-                        lookLabel(look.id, on: recipe.makeup == look.recipe)
+        VStack(spacing: 10) {
+            if !recipe.makeup.isZero {
+                HStack {
+                    Text("Strength").font(.subheadline.weight(.medium))
+                    Spacer()
+                    Text("\(Int((recipe.makeup.strength * 100).rounded()))")
+                        .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                .padding(.horizontal)
+                Slider(value: makeupBinding(\.strength), in: 0...1) { editing in
+                    reshaping = editing
+                    if editing { snapshot() } else { scheduleRender() }
+                }
+                .tint(.white)
+                .padding(.horizontal)
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    Button { commit { recipe.makeup = MakeupRecipe() } } label: { lookLabel("None", on: recipe.makeup.isZero) }
+                    ForEach(Self.makeupLooks) { look in
+                        Button { commit { recipe.makeup = look.recipe } } label: {
+                            lookLabel(look.id, on: recipe.makeup == look.recipe)
+                        }
                     }
                 }
+                .padding(.horizontal)
             }
-            .padding(.horizontal)
         }
     }
 
@@ -1381,5 +1414,59 @@ private struct CheckerboardView: View {
             }
         }
         .background(Color.white.opacity(0.06))
+    }
+}
+
+/// Pinch-zoom + pan preview (no brush) for the Body and Makeup tabs, so the user can zoom into a region
+/// while scrubbing sliders. Reuses `ReshapeScrollView`, which re-fits only on aspect change — so the
+/// fast/full proxy swap during a drag keeps the current zoom.
+private struct ZoomablePreview: UIViewRepresentable {
+    let image: UIImage
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> ReshapeScrollView {
+        let sv = ReshapeScrollView()
+        sv.delegate = context.coordinator
+        sv.backgroundColor = .clear
+        sv.contentInsetAdjustmentBehavior = .never
+        sv.showsVerticalScrollIndicator = false
+        sv.showsHorizontalScrollIndicator = false
+        sv.bouncesZoom = true
+        sv.imageView.contentMode = .scaleAspectFit
+        sv.addSubview(sv.imageView)
+        sv.setImage(image)
+        context.coordinator.scroll = sv
+
+        let doubleTap = UITapGestureRecognizer(target: context.coordinator,
+                                               action: #selector(Coordinator.handleDoubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        sv.addGestureRecognizer(doubleTap)
+        return sv
+    }
+
+    func updateUIView(_ sv: ReshapeScrollView, context: Context) {
+        if sv.imageView.image !== image { sv.setImage(image) }
+    }
+
+    final class Coordinator: NSObject, UIScrollViewDelegate {
+        weak var scroll: ReshapeScrollView?
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            (scrollView as? ReshapeScrollView)?.imageView
+        }
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            (scrollView as? ReshapeScrollView)?.centerContent()
+        }
+        @objc func handleDoubleTap(_ g: UITapGestureRecognizer) {
+            guard let sv = scroll else { return }
+            if sv.zoomScale > sv.minimumZoomScale + 0.01 {
+                sv.setZoomScale(sv.minimumZoomScale, animated: true)
+            } else {
+                let p = g.location(in: sv.imageView)
+                let scale = min(sv.maximumZoomScale, 2.5)
+                let w = sv.bounds.width / scale, h = sv.bounds.height / scale
+                sv.zoom(to: CGRect(x: p.x - w / 2, y: p.y - h / 2, width: w, height: h), animated: true)
+            }
+        }
     }
 }

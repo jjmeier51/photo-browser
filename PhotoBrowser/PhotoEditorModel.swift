@@ -146,9 +146,19 @@ struct MakeupRecipe: Codable, Equatable {
     var lashes = 0.0
     var brows = 0.0
     var freckles = 0                                    // 0…5 density
+    var strength = 1.0                                  // overall multiplier for a chosen look (0…1)
 
     var isZero: Bool {
-        lips == 0 && blush == 0 && eyeshadow == 0 && eyeliner == 0 && lashes == 0 && brows == 0 && freckles == 0
+        strength <= 0 ||
+        (lips == 0 && blush == 0 && eyeshadow == 0 && eyeliner == 0 && lashes == 0 && brows == 0 && freckles == 0)
+    }
+    /// The recipe with every continuous amount scaled by `strength` (freckles keep their level).
+    var scaled: MakeupRecipe {
+        var m = self
+        m.lips *= strength; m.blush *= strength; m.eyeshadow *= strength
+        m.eyeliner *= strength; m.lashes *= strength; m.brows *= strength
+        m.strength = 1
+        return m
     }
 }
 
