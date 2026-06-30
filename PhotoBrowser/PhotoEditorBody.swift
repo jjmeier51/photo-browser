@@ -264,7 +264,7 @@ enum BodyWarp {
                         // inflate eases its inner edge toward the body axis. Stronger below the centre for a
                         // fuller, lower shape; damped at the clavicle; confined away from the arms.
                         let vw = 0.5 + 0.5 * smoothstep(ry / breastRadius + 0.5)
-                        let amt = s.breasts * 0.42 * fall * vw * bw
+                        let amt = s.breasts * 0.59 * fall * vw * bw
                         dx += amt * rx
                         dy += amt * ry
                     }
