@@ -267,6 +267,17 @@ enum BodyWarp {
                         dx -= s.ankles * 0.30 * (u - Double(a!.x)) * fall
                     }
                 }
+                // Feet — radial contraction toward a point just below each ankle, so the foot shrinks
+                // toward its own center. The falloff is tight (r ≈ 0.06) and only pulls *inward* (positive
+                // = smaller), so the ground/background outside the foot is left untouched.
+                if s.feet != 0, let b {
+                    for a in [b.ankleL, b.ankleR] where a != nil {
+                        let footC = CGPoint(x: a!.x, y: a!.y + 0.045)   // feet sit below the ankle joint
+                        let (rx, ry, fall) = radial(u, v, footC, 0.06, asp)
+                        dx -= s.feet * 0.30 * rx * fall
+                        dy -= s.feet * 0.30 * ry * fall
+                    }
+                }
 
                 // ----- Face -----
                 if let fc {
@@ -435,7 +446,7 @@ enum BodyWarp {
     /// Full strength out to the torso edge (so waist/hips actually move the body's sides), then fades
     /// quickly past it to spare the arms and keep the background still.
     private static func bodyWindow(_ d: Double, _ half: Double) -> Double {
-        let inner = half * 1.0, outer = half * 1.18
+        let inner = half * 0.98, outer = half * 1.08
         if d <= inner { return 1 }
         if d >= outer { return 0 }
         return 1 - smoothstep((d - inner) / (outer - inner))

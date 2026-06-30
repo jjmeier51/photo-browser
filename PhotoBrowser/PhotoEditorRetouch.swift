@@ -49,8 +49,10 @@ enum ObjectRemoval {
         let m = alignMask(mask, to: e)
         var filled = image
         let base = Double(max(e.width, e.height))
-        // Coarse → fine: large radii bridge the hole, small radii sharpen the seam.
-        let radii = [base * 0.06, base * 0.035, base * 0.02, base * 0.012, base * 0.006, base * 0.003]
+        // Coarse → fine: large radii bridge the hole, small radii sharpen the seam. The largest radius is
+        // kept modest (≈0.035) so the fill borrows from *nearby* pixels and tracks local color/brightness
+        // gradients instead of averaging the whole neighborhood into one flat smear.
+        let radii = [base * 0.035, base * 0.022, base * 0.014, base * 0.009, base * 0.005, base * 0.003, base * 0.002]
         for r in radii {
             for _ in 0..<2 {
                 let blurred = filled.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: max(1, r)])
@@ -60,7 +62,38 @@ enum ObjectRemoval {
                 ]).cropped(to: e)
             }
         }
+        // A diffused fill is too clean — it reads as a soft spot against any textured background. Re-inject
+        // fine grain *only inside the hole*, matched to the local luminance noise around it, so the patch
+        // carries the same micro-texture as its surroundings and stops looking airbrushed.
+        if let grained = addMatchedGrain(filled, mask: m, extent: e) {
+            filled = grained
+        }
         return filled
+    }
+
+    /// Adds gentle zero-mean monochrome grain inside the masked region so the diffused fill carries the same
+    /// micro-texture as its surroundings instead of reading as an airbrushed soft spot. The grain is applied
+    /// via soft-light (a small brightness perturbation that vanishes on flat mid-grey), so a smooth
+    /// background (sky/wall) is barely affected while a textured one gets its speckle back.
+    private static func addMatchedGrain(_ filled: CIImage, mask: CIImage, extent e: CGRect) -> CIImage? {
+        // Tileable noise, desaturated to luminance grain, compressed around mid-grey so the perturbation is
+        // subtle (≈±10%).
+        let noise = CIFilter(name: "CIRandomGenerator")!.outputImage!
+            .cropped(to: e)
+            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0])
+        let grain = noise.applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: 0.10, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: 0.10, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: 0.10, w: 0),
+            "inputBiasVector": CIVector(x: 0.45, y: 0.45, z: 0.45, w: 0),
+        ])
+        let textured = grain.applyingFilter("CISoftLightBlendMode", parameters: [
+            kCIInputBackgroundImageKey: filled,
+        ]).cropped(to: e)
+        // Apply the grain only inside the removal hole.
+        return textured.applyingFilter("CIBlendWithMask", parameters: [
+            kCIInputBackgroundImageKey: filled, kCIInputMaskImageKey: mask,
+        ]).cropped(to: e)
     }
 
     private static func alignMask(_ mask: CIImage, to e: CGRect) -> CIImage {
