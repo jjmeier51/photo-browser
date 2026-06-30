@@ -61,6 +61,9 @@ struct EditRecipe: Codable, Equatable {
     var hairColor: MakeupColor?
     var hairStrength = 0.85
 
+    // MARK: Skin tone (recolor the subject's skin; needs the subject mask). −1 = pale … 0 … +1 = tan.
+    var skinTone = 0.0
+
     /// True when nothing has been changed (used to gate the Save button / "no edits").
     var isIdentity: Bool { self == EditRecipe() }
 

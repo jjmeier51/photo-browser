@@ -19,9 +19,15 @@ struct PhotoEditorView: View {
     let entry: Entry
 
     private enum Tab: String, CaseIterable, Identifiable {
-        case adjust, filters, crop, reshape, retouch, body, makeup, hair, cutout, stickers
+        case adjust, filters, crop, reshape, retouch, body, makeup, hair, skin, cutout, stickers
         var id: String { rawValue }
-        var title: String { self == .cutout ? "Cut Out" : rawValue.capitalized }
+        var title: String {
+            switch self {
+            case .cutout: return "Cut Out"
+            case .skin:   return "Skin"
+            default:      return rawValue.capitalized
+            }
+        }
         var icon: String {
             switch self {
             case .adjust:   return "slider.horizontal.3"
@@ -32,6 +38,7 @@ struct PhotoEditorView: View {
             case .body:     return "figure.stand"
             case .makeup:   return "paintbrush.pointed.fill"
             case .hair:     return "comb.fill"
+            case .skin:     return "sun.max.fill"
             case .cutout:   return "person.and.background.dotted"
             case .stickers: return "photo.badge.plus"
             }
@@ -96,6 +103,7 @@ struct PhotoEditorView: View {
             if tab == .body { detectBodyIfNeeded(); detectSubjectIfNeeded() }   // mask confines the warp
             if tab == .makeup { detectBodyIfNeeded() }   // makeup needs face landmarks
             if tab == .hair { detectBodyIfNeeded(); detectSubjectIfNeeded() }   // hair needs face + subject mask
+            if tab == .skin { detectSubjectIfNeeded() }   // skin recolor is confined to the subject mask
             scheduleRender()                      // crop tab shows the uncropped frame; others bake the crop
         }
         .confirmationDialog("Save Photo", isPresented: $showSaveOptions, titleVisibility: .visible) {
@@ -279,6 +287,7 @@ struct PhotoEditorView: View {
             case .body:     bodyPanel
             case .makeup:   makeupPanel
             case .hair:     hairPanel
+            case .skin:     skinPanel
             case .cutout:   cutoutPanel
             case .stickers: stickerPanel
             }
@@ -986,6 +995,39 @@ struct PhotoEditorView: View {
             .frame(width: 34, height: 34)
             .overlay(Circle().stroke(sel ? Color.white : Color.white.opacity(0.3), lineWidth: sel ? 2.5 : 1))
             Text(name).font(.caption2).foregroundStyle(sel ? Color.white : Color.secondary)
+        }
+    }
+
+    // MARK: Skin panel
+
+    private var skinPanel: some View {
+        VStack(spacing: 12) {
+            if cutoutDetecting {
+                HStack(spacing: 8) {
+                    ProgressView().tint(.white)
+                    Text("Finding subject…").font(.subheadline).foregroundStyle(.secondary)
+                }
+            } else if cutoutNoSubject {
+                Text("No subject found in this photo.").font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                HStack {
+                    Text("Pale").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Skin Tone").font(.subheadline.weight(.medium))
+                    Spacer()
+                    Text("Tan").font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(.horizontal)
+                Slider(value: Binding(get: { recipe.skinTone },
+                                      set: { recipe.skinTone = $0; scheduleRender() }), in: -1...1) { editing in
+                    if editing { snapshot() }
+                }
+                .tint(.white).padding(.horizontal)
+                Button { commit { recipe.skinTone = 0 } } label: {
+                    Label("Reset", systemImage: "arrow.counterclockwise")
+                }
+                .font(.caption).tint(.white).disabled(recipe.skinTone == 0)
+            }
         }
     }
 

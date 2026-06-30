@@ -111,6 +111,7 @@ enum EditPipeline {
         var img = source
         img = cutout(img, r, mask: mask)        // background replacement first, so later edits apply to it
         img = hairStage(img, r, mask: mask, landmarks: landmarks)   // recolor hair before warps
+        img = skinStage(img, r, mask: mask)     // recolor skin under the makeup, confined to the subject
         img = makeupStage(img, r, landmarks: landmarks)   // makeup before warps, so it tracks the face
         img = bodyStage(img, r, landmarks: landmarks, mask: mask, hdr: hdr, fast: fast)   // shape only the subject
         img = geometry(img, r)
@@ -153,6 +154,13 @@ enum EditPipeline {
                                   mask: CIImage?, landmarks: EditLandmarks?) -> CIImage {
         guard let color = r.hairColor, let face = landmarks?.face, let mask else { return image }
         return HairRecolor.apply(image, color: color, strength: r.hairStrength, face: face, subjectMask: mask)
+    }
+
+    // MARK: Skin tone
+
+    private static func skinStage(_ image: CIImage, _ r: EditRecipe, mask: CIImage?) -> CIImage {
+        guard r.skinTone != 0 else { return image }
+        return SkinRecolor.apply(image, amount: r.skinTone, subjectMask: mask)
     }
 
     // MARK: Makeup

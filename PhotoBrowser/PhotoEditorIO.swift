@@ -99,7 +99,7 @@ enum PhotoEditorIO {
         guard let loaded = load(url: sourceURL) else { return false }
         let source = inpaintIfNeeded(loaded.image, retouch)    // object removal before everything else
         // The subject mask is needed for the cut-out and to confine body shaping to the subject.
-        let needsMask = recipe.cutout != nil || !recipe.body.isZero || (recipe.filterBackgroundOnly && recipe.filterID != nil) || recipe.hairColor != nil
+        let needsMask = recipe.cutout != nil || !recipe.body.isZero || (recipe.filterBackgroundOnly && recipe.filterID != nil) || recipe.hairColor != nil || recipe.skinTone != 0
         let mask = needsMask ? PhotoEditorCutout.subjectMask(for: source) : nil
         let landmarks = detectLandmarks(for: recipe, in: source)
         let rendered = upscaled(EditPipeline.render(source, recipe: recipe, mask: mask,
@@ -193,7 +193,7 @@ enum PhotoEditorIO {
         // overlays across the frame and reads as a blown-out, oversaturated result. Detect on a clamped
         // SDR copy, but render on the real HDR `source` so the headroom survives in the output.
         let visionSrc = source.applyingFilter("CIColorClamp").cropped(to: source.extent)
-        let needsMask = recipe.cutout != nil || !recipe.body.isZero || (recipe.filterBackgroundOnly && recipe.filterID != nil) || recipe.hairColor != nil
+        let needsMask = recipe.cutout != nil || !recipe.body.isZero || (recipe.filterBackgroundOnly && recipe.filterID != nil) || recipe.hairColor != nil || recipe.skinTone != 0
         let mask = needsMask ? PhotoEditorCutout.subjectMask(for: visionSrc) : nil
         let landmarks = detectLandmarks(for: recipe, in: visionSrc)
         let rendered = upscaled(EditPipeline.render(source, recipe: recipe, mask: mask,
