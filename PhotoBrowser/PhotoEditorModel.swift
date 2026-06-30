@@ -16,6 +16,11 @@ struct EditRecipe: Codable, Equatable {
     var flipH = false
     var flipV = false
     var straighten: Double = 0          // degrees, −45…45 (auto-cropped to valid bounds)
+    /// Keystone / perspective correction (`FR-CROP-02`), −1…1. `perspectiveV` converges the top (+) or
+    /// bottom (−) edge; `perspectiveH` converges the left (+) or right (−) edge. Applied after
+    /// rotate/flip/straighten and before the crop, with a slight cover-zoom so no blank corners show.
+    var perspectiveH: Double = 0
+    var perspectiveV: Double = 0
     /// The crop window as a normalized **top-left** rect (x,y,w,h in 0…1) within the image *after*
     /// rotate/flip/straighten. `nil` means the full frame (no crop). Fixed-ratio chips set a centered
     /// rect of that ratio; Freeform lets the user drag an arbitrary rect.
@@ -68,7 +73,8 @@ struct EditRecipe: Codable, Equatable {
 
     /// True when the geometry is untouched (preview can skip the geometry pass).
     var hasGeometry: Bool {
-        rotationQuarters != 0 || flipH || flipV || straighten != 0 || cropRect != nil
+        rotationQuarters != 0 || flipH || flipV || straighten != 0 ||
+        perspectiveH != 0 || perspectiveV != 0 || cropRect != nil
     }
 }
 

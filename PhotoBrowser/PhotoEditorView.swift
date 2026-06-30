@@ -99,6 +99,11 @@ struct PhotoEditorView: View {
     @State private var teethSize: CGFloat = 0.05
     @State private var teethIntensity: CGFloat = 0.7
 
+    // Filter favorites + search (FR-FILT-02). Favorites persist across sessions.
+    @State private var filterQuery = ""
+    @State private var filterFavorites: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.editorFilterFavorites") ?? [])
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -430,16 +435,53 @@ struct PhotoEditorView: View {
                 .padding(.horizontal)
             }
 
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.system(size: 13)).foregroundStyle(.secondary)
+                TextField("Search filters", text: $filterQuery)
+                    .textFieldStyle(.plain).font(.subheadline)
+                    .autocorrectionDisabled().textInputAutocapitalization(.never)
+                if !filterQuery.isEmpty {
+                    Button { filterQuery = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(.thinMaterial, in: Capsule())
+            .padding(.horizontal)
+
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
-                    filterTile(id: nil, name: "Original", thumb: originalThumb)
-                    ForEach(EditFilter.all) { f in
+                    if filterQuery.isEmpty {
+                        filterTile(id: nil, name: "Original", thumb: originalThumb)
+                    }
+                    ForEach(displayedFilters) { f in
                         filterTile(id: f.id, name: f.name, thumb: filterThumbs[f.id])
+                    }
+                    if displayedFilters.isEmpty && !filterQuery.isEmpty {
+                        Text("No filters match").font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 .padding(.horizontal)
             }
         }
+    }
+
+    /// Filters matching the search, favorites first (then the original order). Used by the filter strip.
+    private var displayedFilters: [EditFilter] {
+        let q = filterQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        let base = q.isEmpty ? EditFilter.all : EditFilter.all.filter { $0.name.lowercased().contains(q) }
+        let order = Dictionary(uniqueKeysWithValues: EditFilter.all.enumerated().map { ($0.element.id, $0.offset) })
+        return base.sorted { a, b in
+            let fa = filterFavorites.contains(a.id), fb = filterFavorites.contains(b.id)
+            if fa != fb { return fa }                        // favorites first
+            return (order[a.id] ?? 0) < (order[b.id] ?? 0)   // else original order (deterministic)
+        }
+    }
+
+    private func toggleFilterFavorite(_ id: String) {
+        if filterFavorites.contains(id) { filterFavorites.remove(id) } else { filterFavorites.insert(id) }
+        UserDefaults.standard.set(Array(filterFavorites), forKey: "photoBrowser.editorFilterFavorites")
     }
 
     private func filterTile(id: String?, name: String, thumb: UIImage?) -> some View {
@@ -457,6 +499,19 @@ struct PhotoEditorView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10)
                     .stroke(isSel ? Color.white : Color.white.opacity(0.15), lineWidth: isSel ? 2 : 1))
+                .overlay(alignment: .topTrailing) {
+                    if let id {
+                        Button { toggleFilterFavorite(id) } label: {
+                            Image(systemName: filterFavorites.contains(id) ? "star.fill" : "star")
+                                .font(.system(size: 10))
+                                .foregroundStyle(filterFavorites.contains(id) ? Color.yellow : Color.white.opacity(0.85))
+                                .padding(3)
+                                .background(.black.opacity(0.4), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(3)
+                    }
+                }
                 Text(name).font(.caption2)
             }
             .foregroundStyle(isSel ? Color.white : Color.secondary)
@@ -480,6 +535,9 @@ struct PhotoEditorView: View {
             .tint(.white)
             .padding(.horizontal)
 
+            keystoneSlider("Vertical", systemImage: "arrow.up.and.down", value: \.perspectiveV)
+            keystoneSlider("Horizontal", systemImage: "arrow.left.and.right", value: \.perspectiveH)
+
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 14) {
                     geomButton("rotate.left", "Left") {
@@ -502,6 +560,20 @@ struct PhotoEditorView: View {
                 .padding(.horizontal)
             }
         }
+    }
+
+    /// A bipolar keystone slider (perspective correction) bound to a recipe key path, snapshotting on grab.
+    private func keystoneSlider(_ title: String, systemImage: String,
+                                value keyPath: WritableKeyPath<EditRecipe, Double>) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage).font(.system(size: 15)).frame(width: 22)
+            Text(title).font(.subheadline).frame(width: 80, alignment: .leading)
+            Slider(value: Binding(get: { recipe[keyPath: keyPath] },
+                                  set: { recipe[keyPath: keyPath] = $0; scheduleRender() }),
+                   in: -1...1) { editing in if editing { snapshot() } }
+                .tint(.white)
+        }
+        .padding(.horizontal)
     }
 
     private func geomButton(_ icon: String, _ label: String, _ action: @escaping () -> Void) -> some View {

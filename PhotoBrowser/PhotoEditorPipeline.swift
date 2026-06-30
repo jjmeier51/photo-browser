@@ -239,10 +239,39 @@ enum EditPipeline {
             img = recenter(img.cropped(to: CGRect(x: c.x - inner.width / 2, y: c.y - inner.height / 2,
                                                   width: inner.width, height: inner.height)))
         }
+        img = perspective(img, r)        // keystone before the user's crop
         if let cr = r.cropRect, !isFullCrop(cr) {
             img = recenter(applyCrop(img, normalizedTopLeft: cr))
         }
         return img
+    }
+
+    /// Keystone / perspective correction (`FR-CROP-02`). Maps the frame corners to a trapezoid (top/bottom
+    /// or left/right edge brought in), then zooms slightly around the centre so the warped image still
+    /// covers the original frame (no blank corners) and crops back to it — keeping pixel dimensions stable.
+    private static func perspective(_ image: CIImage, _ r: EditRecipe) -> CIImage {
+        guard r.perspectiveH != 0 || r.perspectiveV != 0 else { return image }
+        let e = image.extent
+        guard e.width > 1, e.height > 1, !e.isInfinite, !e.isNull else { return image }
+        let w = e.width, h = e.height
+        let f: CGFloat = 0.12                          // max edge inset (fraction of the frame) at full slider
+        let kv = CGFloat(max(-1, min(1, r.perspectiveV)))
+        let kh = CGFloat(max(-1, min(1, r.perspectiveH)))
+        var tl = CGPoint(x: e.minX, y: e.maxY), tr = CGPoint(x: e.maxX, y: e.maxY)
+        var bl = CGPoint(x: e.minX, y: e.minY), br = CGPoint(x: e.maxX, y: e.minY)
+        let topI = max(0, kv) * w * f, botI = max(0, -kv) * w * f
+        tl.x += topI; tr.x -= topI; bl.x += botI; br.x -= botI
+        let leftI = max(0, kh) * h * f, rightI = max(0, -kh) * h * f
+        tl.y -= leftI; bl.y += leftI; tr.y -= rightI; br.y += rightI
+        let warped = image.applyingFilter("CIPerspectiveTransform", parameters: [
+            "inputTopLeft": CIVector(cgPoint: tl), "inputTopRight": CIVector(cgPoint: tr),
+            "inputBottomRight": CIVector(cgPoint: br), "inputBottomLeft": CIVector(cgPoint: bl)])
+        // The narrowed edge shrinks to (1 − 2·f·|k|) of the frame; zoom by its inverse so it still spans
+        // the full frame (so no blank corners), taking the larger of the two axes.
+        let s = max(1 / (1 - 2 * f * abs(kv)), 1 / (1 - 2 * f * abs(kh)))
+        let t = CGAffineTransform(translationX: e.midX, y: e.midY)
+            .scaledBy(x: s, y: s).translatedBy(x: -e.midX, y: -e.midY)
+        return warped.transformed(by: t).cropped(to: e)
     }
 
     private static func recenter(_ img: CIImage) -> CIImage {
