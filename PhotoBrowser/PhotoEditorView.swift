@@ -18,7 +18,7 @@ struct PhotoEditorView: View {
     let entry: Entry
 
     private enum Tab: String, CaseIterable, Identifiable {
-        case adjust, filters, crop, reshape, body, makeup, hair, cutout, stickers
+        case adjust, filters, crop, reshape, retouch, body, makeup, hair, cutout, stickers
         var id: String { rawValue }
         var title: String { self == .cutout ? "Cut Out" : rawValue.capitalized }
         var icon: String {
@@ -27,6 +27,7 @@ struct PhotoEditorView: View {
             case .filters:  return "camera.filters"
             case .crop:     return "crop.rotate"
             case .reshape:  return "hand.draw"
+            case .retouch:  return "wand.and.stars"
             case .body:     return "figure.stand"
             case .makeup:   return "paintbrush.pointed.fill"
             case .hair:     return "comb.fill"
@@ -72,6 +73,10 @@ struct PhotoEditorView: View {
     @State private var selectedSticker: UUID?
     @State private var stickerPickerItem: PhotosPickerItem?
     @State private var showStickerPicker = false
+    @State private var retouchStrokes: [RetouchStroke] = []   // object-removal brush strokes
+    @State private var editProxy: CIImage?                    // proxy with object removal baked in (render source)
+    @State private var retouchBrush: CGFloat = 0.05
+    @State private var retouchBusy = false
 
     var body: some View {
         ZStack {
@@ -195,6 +200,11 @@ struct PhotoEditorView: View {
                                   onPush: { p, d in applyReshape(at: p, delta: d) },
                                   onEnd: { reshaping = false; scheduleRender() })
                         .padding(10)
+                } else if tab == .retouch {
+                    // Pinch-zoom + pan with a one-finger brush to mark objects to remove.
+                    RetouchCanvas(image: preview, brushRadius: retouchBrush,
+                                  onStroke: { pts, r in applyRetouchStroke(pts, radius: r) })
+                        .padding(10)
                 } else if tab == .body || tab == .makeup || tab == .hair {
                     // Pinch-zoom + pan so the user can zoom into a face/body area while adjusting.
                     ZoomablePreview(image: preview).padding(10)
@@ -261,6 +271,7 @@ struct PhotoEditorView: View {
             case .filters: filterPanel
             case .crop:    cropPanel
             case .reshape: reshapePanel
+            case .retouch:  retouchPanel
             case .body:     bodyPanel
             case .makeup:   makeupPanel
             case .hair:     hairPanel
@@ -1045,6 +1056,52 @@ struct PhotoEditorView: View {
         }
     }
 
+    // MARK: Retouch panel
+
+    private var retouchPanel: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                if retouchBusy { ProgressView().tint(.white) }
+                Text(retouchBusy ? "Removing…" : "Brush over an object to remove it")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button { undoRetouch() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
+                    .font(.caption).tint(.white).disabled(retouchStrokes.isEmpty || retouchBusy)
+            }
+            .padding(.horizontal)
+            labeledSlider("Brush", systemImage: "circle.dashed", value: $retouchBrush, range: 0.02...0.15)
+        }
+    }
+
+    private func applyRetouchStroke(_ points: [CGPoint], radius: CGFloat) {
+        guard !points.isEmpty else { return }
+        retouchStrokes.append(RetouchStroke(points: points, radius: radius))
+        recomputeEditProxy()
+    }
+
+    private func undoRetouch() {
+        guard !retouchStrokes.isEmpty else { return }
+        retouchStrokes.removeLast()
+        recomputeEditProxy()
+    }
+
+    /// Rebuilds the object-removal proxy from the current strokes (off-main) and re-renders.
+    private func recomputeEditProxy() {
+        guard let proxy else { return }
+        if retouchStrokes.isEmpty { editProxy = nil; scheduleRender(); return }
+        retouchBusy = true
+        let strokes = retouchStrokes
+        Task.detached(priority: .userInitiated) {
+            let result = RetouchMask.image(for: strokes, size: proxy.extent.size)
+                .map { ObjectRemoval.inpaint(proxy, mask: $0) }
+            await MainActor.run {
+                editProxy = result
+                retouchBusy = false
+                scheduleRender()
+            }
+        }
+    }
+
     // MARK: Reshape panel
 
     private var reshapePanel: some View {
@@ -1158,12 +1215,14 @@ struct PhotoEditorView: View {
         recipe = next
         scheduleRender()
     }
-    /// Any edit at all — recipe changes or placed stickers — gates Save/Reset/Compare.
-    private var hasEdits: Bool { !recipe.isIdentity || !stickers.isEmpty }
+    /// Any edit at all — recipe changes, placed stickers, or object removal — gates Save/Reset/Compare.
+    private var hasEdits: Bool { !recipe.isIdentity || !stickers.isEmpty || !retouchStrokes.isEmpty }
 
     private func reset() {
         guard hasEdits else { return }
-        snapshot(); stickers.removeAll(); selectedSticker = nil
+        snapshot()
+        stickers.removeAll(); selectedSticker = nil
+        retouchStrokes.removeAll(); editProxy = nil
         commit { recipe = EditRecipe() }
     }
     private func selectFilter(_ id: String?) {
@@ -1201,7 +1260,8 @@ struct PhotoEditorView: View {
         guard let proxy else { return }
         if rendering { renderPending = true; return }
         rendering = true
-        let src = reshaping ? (fastProxy ?? proxy) : proxy
+        let base = editProxy ?? proxy   // object-removal result, if any, is the working source
+        let src = (reshaping && editProxy == nil) ? (fastProxy ?? base) : base
         let r = renderRecipe
         let mask = cutoutMask
         let landmarks = editLandmarks
@@ -1249,6 +1309,7 @@ struct PhotoEditorView: View {
         let r = recipe
         let src = entry.url
         let placed = editStickers()
+        let strokes = retouchStrokes
         let title = upscale == .none ? "Saving edited photo…" : "Saving & upscaling photo…"
         let id = library.beginActivity(title, indeterminate: true)
         dismiss()
@@ -1265,7 +1326,7 @@ struct PhotoEditorView: View {
             }
             let dest = PhotoEditorIO.editedDestination(for: src, format: fmt)
             let ok = PhotoEditorIO.save(recipe: r, sourceURL: src, to: dest, format: fmt,
-                                        upscale: upscale, stickers: placed)
+                                        upscale: upscale, stickers: placed, retouch: strokes)
             await MainActor.run {
                 library.endActivity(id, result: ok ? "Saved edited photo" : "Couldn’t save the edit")
                 if ok { library.contentDidChange() }
@@ -1730,5 +1791,91 @@ private struct StickerOverlay: View {
         let s = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
         let w = imageSize.width * s, h = imageSize.height * s
         return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
+    }
+}
+
+/// Zoomable canvas with a one-finger brush to mark objects for removal (TouchRetouch-style). Pinch
+/// zooms, two-finger drags pan, one finger paints; the painted path shows in red, and on lift the
+/// normalized stroke is reported so the view can rebuild the mask and inpaint.
+private struct RetouchCanvas: UIViewRepresentable {
+    let image: UIImage
+    let brushRadius: CGFloat
+    let onStroke: ([CGPoint], CGFloat) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> ReshapeScrollView {
+        let sv = ReshapeScrollView()
+        sv.delegate = context.coordinator
+        sv.backgroundColor = .clear
+        sv.contentInsetAdjustmentBehavior = .never
+        sv.showsVerticalScrollIndicator = false
+        sv.showsHorizontalScrollIndicator = false
+        sv.bouncesZoom = true
+        sv.panGestureRecognizer.minimumNumberOfTouches = 2
+        sv.imageView.contentMode = .scaleAspectFit
+        sv.imageView.isUserInteractionEnabled = true
+        sv.addSubview(sv.imageView)
+        sv.setImage(image)
+        context.coordinator.scroll = sv
+        let brush = UIPanGestureRecognizer(target: context.coordinator,
+                                           action: #selector(Coordinator.handleBrush(_:)))
+        brush.maximumNumberOfTouches = 1
+        brush.delegate = context.coordinator
+        sv.imageView.addGestureRecognizer(brush)
+        return sv
+    }
+
+    func updateUIView(_ sv: ReshapeScrollView, context: Context) {
+        context.coordinator.parent = self
+        if sv.imageView.image !== image { sv.setImage(image) }
+    }
+
+    final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
+        var parent: RetouchCanvas
+        weak var scroll: ReshapeScrollView?
+        private var points: [CGPoint] = []
+        private let stroke = CAShapeLayer()
+        private var path = UIBezierPath()
+
+        init(_ parent: RetouchCanvas) {
+            self.parent = parent
+            super.init()
+            stroke.strokeColor = UIColor.systemRed.withAlphaComponent(0.5).cgColor
+            stroke.fillColor = UIColor.clear.cgColor
+            stroke.lineCap = .round; stroke.lineJoin = .round
+        }
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            (scrollView as? ReshapeScrollView)?.imageView
+        }
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            (scrollView as? ReshapeScrollView)?.centerContent()
+        }
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+
+        @objc func handleBrush(_ g: UIPanGestureRecognizer) {
+            guard let iv = scroll?.imageView else { return }
+            let size = iv.bounds.size
+            guard size.width > 0, size.height > 0 else { return }
+            let loc = g.location(in: iv)
+            switch g.state {
+            case .began:
+                points = []; path = UIBezierPath()
+                if stroke.superlayer == nil { iv.layer.addSublayer(stroke) }
+                stroke.lineWidth = max(2, parent.brushRadius * size.width * 2)
+                path.move(to: loc); stroke.path = path.cgPath
+                points.append(CGPoint(x: loc.x / size.width, y: loc.y / size.height))
+            case .changed:
+                path.addLine(to: loc); stroke.path = path.cgPath
+                points.append(CGPoint(x: loc.x / size.width, y: loc.y / size.height))
+            case .ended, .cancelled, .failed:
+                let pts = points, r = parent.brushRadius
+                points = []; stroke.path = nil
+                if !pts.isEmpty { parent.onStroke(pts, r) }
+            default: break
+            }
+        }
     }
 }

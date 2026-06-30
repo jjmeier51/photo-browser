@@ -86,20 +86,23 @@ enum PhotoEditorIO {
     /// When `recipe.cutout` is set, the subject mask is computed here at full resolution.
     static func save(recipe: EditRecipe, sourceURL: URL, to destURL: URL,
                      format: ExportFormat = .heic, quality: Double = 0.92,
-                     upscale: Upscale = .none, stickers: [EditSticker] = []) -> Bool {
+                     upscale: Upscale = .none, stickers: [EditSticker] = [],
+                     retouch: [RetouchStroke] = []) -> Bool {
         // HDR retention: when the source carries HDR (gain map / PQ-HLG / RAW) and we aren't forced to
         // PNG (transparent cut-out), write a 10-bit HDR HEIC keeping the headroom. Falls back to SDR.
         if format != .png, isHDRSource(sourceURL),
-           saveHDR(recipe: recipe, sourceURL: sourceURL, to: destURL, upscale: upscale, stickers: stickers) {
+           saveHDR(recipe: recipe, sourceURL: sourceURL, to: destURL, upscale: upscale,
+                   stickers: stickers, retouch: retouch) {
             return true
         }
 
         guard let loaded = load(url: sourceURL) else { return false }
+        let source = inpaintIfNeeded(loaded.image, retouch)    // object removal before everything else
         // The subject mask is needed for the cut-out and to confine body shaping to the subject.
         let needsMask = recipe.cutout != nil || !recipe.body.isZero || (recipe.filterBackgroundOnly && recipe.filterID != nil) || recipe.hairColor != nil
-        let mask = needsMask ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
-        let landmarks = detectLandmarks(for: recipe, in: loaded.image)
-        let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask,
+        let mask = needsMask ? PhotoEditorCutout.subjectMask(for: source) : nil
+        let landmarks = detectLandmarks(for: recipe, in: source)
+        let rendered = upscaled(EditPipeline.render(source, recipe: recipe, mask: mask,
                                                     landmarks: landmarks, stickers: stickers), upscale)
         guard !rendered.extent.isInfinite, !rendered.extent.isNull,
               let cg = context.createCGImage(rendered, from: rendered.extent) else { return false }
@@ -129,6 +132,12 @@ enum PhotoEditorIO {
 
         copyFileDates(from: sourceURL, to: destURL)   // keep the browser's timeline stable
         return true
+    }
+
+    /// Applies object-removal inpainting to `image` if there are retouch strokes (else returns it).
+    static func inpaintIfNeeded(_ image: CIImage, _ retouch: [RetouchStroke]) -> CIImage {
+        guard !retouch.isEmpty, let mask = RetouchMask.image(for: retouch, size: image.extent.size) else { return image }
+        return ObjectRemoval.inpaint(image, mask: mask)
     }
 
     /// Detects whichever landmark sets the recipe needs (body shaping and/or makeup). Off-main,
@@ -175,12 +184,14 @@ enum PhotoEditorIO {
     /// Renders the edit on the HDR-expanded source and writes a 10-bit HDR HEIC, carrying the original
     /// metadata + capture date. Returns false so the caller can fall back to the standard SDR path.
     private static func saveHDR(recipe: EditRecipe, sourceURL: URL, to destURL: URL,
-                                upscale: Upscale = .none, stickers: [EditSticker] = []) -> Bool {
+                                upscale: Upscale = .none, stickers: [EditSticker] = [],
+                                retouch: [RetouchStroke] = []) -> Bool {
         guard let loaded = loadHDR(url: sourceURL) else { return false }
+        let source = inpaintIfNeeded(loaded.image, retouch)
         let needsMask = recipe.cutout != nil || !recipe.body.isZero || (recipe.filterBackgroundOnly && recipe.filterID != nil) || recipe.hairColor != nil
-        let mask = needsMask ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
-        let landmarks = detectLandmarks(for: recipe, in: loaded.image)
-        let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask,
+        let mask = needsMask ? PhotoEditorCutout.subjectMask(for: source) : nil
+        let landmarks = detectLandmarks(for: recipe, in: source)
+        let rendered = upscaled(EditPipeline.render(source, recipe: recipe, mask: mask,
                                                     landmarks: landmarks, stickers: stickers, hdr: true), upscale)
         guard !rendered.extent.isInfinite, !rendered.extent.isNull else { return false }
 
