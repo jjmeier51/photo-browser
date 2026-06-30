@@ -147,44 +147,50 @@ enum MakeupRenderer {
         }
     }
 
-    /// Freckles — many **tiny, defined, warm-brown** specks biased to the nose/cheek band (densest over the
-    /// nose bridge and upper cheeks). The earlier version read "too light and too large" because the specks
-    /// were big, low-alpha and then blurred by the shared sharp pass; here they are small, fairly opaque,
-    /// and rendered in their own no-blur pass so they stay crisp like real pigment. Level 5 covers the face.
+    /// Freckles — small, defined, dark reddish-brown specks **clustered on the nose bridge and both
+    /// cheeks**, where real freckles concentrate. The earlier version scattered them across the whole face
+    /// bounding-box ellipse, which on a tilted/cropped face spilled down onto the jaw and neck and looked
+    /// off-centre; anchoring to the actual nose/cheek landmarks keeps them on the face and symmetric. They
+    /// are rendered crisp (own no-blur pass) and fairly dark so they read like real pigment.
     private static func drawFreckles(_ ctx: CGContext, size: CGSize, makeup m: MakeupRecipe, face f: FaceLandmarks) {
-        guard m.freckles > 0, let center = f.center else { return }
+        guard m.freckles > 0 else { return }
         let W = size.width, H = size.height
         func px(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * W, y: p.y * H) }
-        let counts = [0, 130, 280, 470, 720, 1000]
+        let counts = [0, 90, 200, 340, 520, 760]
         let n = counts[min(5, max(0, m.freckles))]
-        let fcx = center.x * W, fcy = center.y * H
-        let frx = CGFloat(max(0.08, f.width)) * W * 0.50
-        let fry = CGFloat(max(0.10, f.height)) * H * 0.58
-        let bandY = (f.nose?.y).map { $0 * H } ?? fcy        // dense band centred on the nose
-        let browY = f.browY.map { CGFloat($0) * H } ?? (fcy - fry * 0.4)
+        let faceW = CGFloat(max(0.08, f.width)) * W
+        let sig = faceW * 0.13                                // cluster spread
+        // Anchors with a weight and an elliptical spread (nose narrower/taller, cheeks rounder).
+        var anchors: [(p: CGPoint, weight: Double, sx: CGFloat, sy: CGFloat)] = []
+        if let nose = f.nose { anchors.append((px(nose), 0.8, sig * 0.7, sig * 1.2)) }
+        if let cl = f.cheekL { anchors.append((px(cl), 1.0, sig * 1.05, sig * 1.1)) }
+        if let cr = f.cheekR { anchors.append((px(cr), 1.0, sig * 1.05, sig * 1.1)) }
+        if anchors.isEmpty, let c = f.center { anchors.append((px(c), 1.0, faceW * 0.3, faceW * 0.3)) }
+        let totalW = anchors.reduce(0) { $0 + $1.weight }
+        guard totalW > 0 else { return }
         let eyes = [f.leftEye, f.rightEye].compactMap { $0 }.map(px)
         let lipsPx = f.outerLips.map(px)
-        let eyeExclude = max(W * 0.035, CGFloat(f.eyeRadius) * W * 1.6)
+        let eyeExclude = max(W * 0.03, CGFloat(f.eyeRadius) * W * 1.3)
         var rng = LCG(seed: 0x9E3779B97F4A7C15)
         var placed = 0, tries = 0
-        while placed < n && tries < n * 20 {
+        while placed < n && tries < n * 25 {
             tries += 1
-            let ang = rng.next() * 2 * Double.pi
-            let rad = rng.next().squareRoot()
-            let p = CGPoint(x: fcx + CGFloat(cos(ang) * rad) * frx,
-                            y: fcy + CGFloat(sin(ang) * rad) * fry)
-            let vDist = Double(abs(p.y - bandY) / max(1, fry))
-            if rng.next() > max(0.18, 1 - vDist * vDist * 0.9) { continue }
-            if p.y < browY - fry * 0.05, rng.next() > 0.25 { continue }   // sparse above the brows
+            // Pick an anchor by weight, then a bounded triangular (≈Gaussian) offset around it.
+            var pick = rng.next() * totalW, idx = 0
+            for (i, a) in anchors.enumerated() { if pick < a.weight { idx = i; break }; pick -= a.weight }
+            let a = anchors[idx]
+            let gx = rng.next() + rng.next() - 1.0               // −1…1, peaked at 0
+            let gy = rng.next() + rng.next() - 1.0
+            let p = CGPoint(x: a.p.x + CGFloat(gx) * a.sx * 1.7, y: a.p.y + CGFloat(gy) * a.sy * 1.7)
             if eyes.contains(where: { hypot($0.x - p.x, $0.y - p.y) < eyeExclude }) { continue }
             if !lipsPx.isEmpty, pointInPolygon(p, lipsPx) { continue }
-            // Tiny (occasionally a touch bigger), fairly opaque, warm reddish-brown with per-speck jitter.
+            // Tiny (occasionally a touch bigger), dark reddish-brown, fairly opaque, with per-speck jitter.
             let big = rng.next() < 0.10
             let dot = W * (big ? 0.0011 : 0.00060) * CGFloat(0.6 + rng.next() * 0.6)
-            let alpha = (big ? 0.5 : 0.6) + rng.next() * 0.25
+            let alpha = (big ? 0.62 : 0.74) + rng.next() * 0.18
             let warm = rng.next()
-            let speck = UIColor(red: CGFloat(0.40 + warm * 0.16), green: CGFloat(0.22 + warm * 0.08),
-                                blue: CGFloat(0.13 + warm * 0.05), alpha: CGFloat(min(0.9, alpha))).cgColor
+            let speck = UIColor(red: CGFloat(0.33 + warm * 0.13), green: CGFloat(0.18 + warm * 0.06),
+                                blue: CGFloat(0.10 + warm * 0.04), alpha: CGFloat(min(0.95, alpha))).cgColor
             softSpeck(ctx, center: p, radius: dot, color: speck)
             placed += 1
         }

@@ -257,16 +257,19 @@ enum BodyWarp {
                         let w = (ry > 0 ? 1.0 : 0.25) * fall
                         let innerDir = cX > Double(c.x) ? 1.0 : -1.0     // direction toward the other breast (axis)
                         let sideN = (rx * innerDir) / breastRadius       // >0 on the inner half, <0 on the outer
+                        // Roundness: a gentle radial expansion from the breast centre (an expanding circle),
+                        // for a fuller, rounder dome. Zero at the exact centre so the peak isn't pulled out.
+                        dx += s.breasts * 0.20 * rx * w
+                        dy += s.breasts * 0.20 * ry * w
                         if sideN > 0 {
-                            // Inner mass moves toward the other breast → fuller centre / cleavage. Grows from
-                            // ~0 at the centre line to its max at the inner edge, so the peak isn't pulled out.
-                            dx += s.breasts * 0.34 * innerDir * sideN * w
+                            // Inner mass moves toward the other breast → fuller centre / cleavage.
+                            dx += s.breasts * 0.30 * innerDir * sideN * w
                         } else {
-                            // Outer mass eases outward a touch (faded past the torso so arms/armpits stay).
-                            dx += s.breasts * 0.14 * (-innerDir) * (-sideN) * w * henv
+                            // Outer mass eases outward just slightly (faded past the torso so arms stay).
+                            dx += s.breasts * 0.08 * (-innerDir) * (-sideN) * w * henv
                         }
                         // Bottom of the breast sags slightly downward for a natural, full look.
-                        dy += s.breasts * 0.22 * max(0, ry) * fall
+                        dy += s.breasts * 0.16 * max(0, ry) * fall
                     }
                 }
                 if s.butt != 0 {
