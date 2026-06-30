@@ -19,7 +19,7 @@ struct PhotoEditorView: View {
     let entry: Entry
 
     private enum Tab: String, CaseIterable, Identifiable {
-        case adjust, filters, crop, reshape, retouch, body, makeup, hair, skin, cutout, stickers
+        case adjust, filters, crop, reshape, retouch, smooth, paint, teeth, body, makeup, skin, cutout, stickers
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -35,9 +35,11 @@ struct PhotoEditorView: View {
             case .crop:     return "crop.rotate"
             case .reshape:  return "hand.draw"
             case .retouch:  return "wand.and.stars"
+            case .smooth:   return "drop.fill"
+            case .paint:    return "paintbrush.fill"
+            case .teeth:    return "mouth.fill"
             case .body:     return "figure.stand"
             case .makeup:   return "paintbrush.pointed.fill"
-            case .hair:     return "comb.fill"
             case .skin:     return "sun.max.fill"
             case .cutout:   return "person.and.background.dotted"
             case .stickers: return "photo.badge.plus"
@@ -87,6 +89,16 @@ struct PhotoEditorView: View {
     @State private var retouchBrush: CGFloat = 0.05
     @State private var retouchBusy = false
 
+    // Brush tools (smooth / paint / teeth). Sizes are fractions of image width; intensities are 0…1.
+    @State private var smoothSize: CGFloat = 0.12
+    @State private var smoothIntensity: CGFloat = 0.7
+    @State private var paintSize: CGFloat = 0.08
+    @State private var paintOpacity: CGFloat = 0.85
+    @State private var paintColor: Color = .red
+    @State private var paintErasing = false
+    @State private var teethSize: CGFloat = 0.05
+    @State private var teethIntensity: CGFloat = 0.7
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -102,7 +114,6 @@ struct PhotoEditorView: View {
             if tab == .cutout { detectSubjectIfNeeded() }
             if tab == .body { detectBodyIfNeeded(); detectSubjectIfNeeded() }   // mask confines the warp
             if tab == .makeup { detectBodyIfNeeded() }   // makeup needs face landmarks
-            if tab == .hair { detectBodyIfNeeded(); detectSubjectIfNeeded() }   // hair needs face + subject mask
             if tab == .skin { detectSubjectIfNeeded() }   // skin recolor is confined to the subject mask
             scheduleRender()                      // crop tab shows the uncropped frame; others bake the crop
         }
@@ -214,10 +225,17 @@ struct PhotoEditorView: View {
                         .padding(10)
                 } else if tab == .retouch {
                     // Pinch-zoom + pan with a one-finger brush to mark objects to remove.
-                    RetouchCanvas(image: preview, brushRadius: retouchBrush,
-                                  onStroke: { pts, r in applyRetouchStroke(pts, radius: r) })
+                    BrushCanvas(image: preview, brushRadius: retouchBrush,
+                                strokeColor: UIColor.systemRed.withAlphaComponent(0.5),
+                                onStroke: { pts, r in applyRetouchStroke(pts, radius: r) })
                         .padding(10)
-                } else if tab == .body || tab == .makeup || tab == .hair {
+                } else if tab == .smooth || tab == .paint || tab == .teeth {
+                    // One-finger brush for smooth / paint / teeth-whiten, with live stroke feedback.
+                    BrushCanvas(image: preview, brushRadius: activeBrushRadius,
+                                strokeColor: activeStrokeColor,
+                                onStroke: { pts, r in addBrushStroke(points: pts, radius: r) })
+                        .padding(10)
+                } else if tab == .body || tab == .makeup {
                     // Pinch-zoom + pan so the user can zoom into a face/body area while adjusting.
                     ZoomablePreview(image: preview).padding(10)
                 } else if tab == .stickers {
@@ -284,9 +302,11 @@ struct PhotoEditorView: View {
             case .crop:    cropPanel
             case .reshape: reshapePanel
             case .retouch:  retouchPanel
+            case .smooth:   smoothPanel
+            case .paint:    paintPanel
+            case .teeth:    teethPanel
             case .body:     bodyPanel
             case .makeup:   makeupPanel
-            case .hair:     hairPanel
             case .skin:     skinPanel
             case .cutout:   cutoutPanel
             case .stickers: stickerPanel
@@ -934,68 +954,109 @@ struct PhotoEditorView: View {
                 set: { recipe.makeup[keyPath: keyPath] = $0; scheduleRender() })
     }
 
-    // MARK: Hair panel
+    // MARK: Brush tools (smooth / paint / teeth)
 
-    private static let hairColors: [(name: String, color: MakeupColor)] = [
-        ("Black", MakeupColor(0.08, 0.07, 0.07)), ("Dark Brown", MakeupColor(0.22, 0.14, 0.09)),
-        ("Brown", MakeupColor(0.36, 0.23, 0.14)), ("Auburn", MakeupColor(0.40, 0.16, 0.10)),
-        ("Ginger", MakeupColor(0.66, 0.30, 0.12)), ("Red", MakeupColor(0.62, 0.12, 0.12)),
-        ("Blonde", MakeupColor(0.78, 0.62, 0.36)), ("Platinum", MakeupColor(0.86, 0.82, 0.72)),
-        ("Silver", MakeupColor(0.70, 0.72, 0.75)), ("Rose Gold", MakeupColor(0.84, 0.55, 0.52)),
-        ("Pink", MakeupColor(0.88, 0.36, 0.60)), ("Purple", MakeupColor(0.48, 0.24, 0.66)),
-        ("Blue", MakeupColor(0.22, 0.40, 0.78)), ("Teal", MakeupColor(0.16, 0.56, 0.56)),
-        ("Green", MakeupColor(0.24, 0.56, 0.30)),
-    ]
-
-    private var hairPanel: some View {
-        VStack(spacing: 12) {
-            if bodyDetecting || cutoutDetecting {
-                HStack(spacing: 8) {
-                    ProgressView().tint(.white)
-                    Text("Finding hair…").font(.subheadline).foregroundStyle(.secondary)
-                }
-            } else if editLandmarks?.face == nil {
-                Text("No face found in this photo.").font(.subheadline).foregroundStyle(.secondary)
-            } else {
-                if recipe.hairColor != nil {
-                    HStack {
-                        Text("Strength").font(.subheadline.weight(.medium))
-                        Spacer()
-                        Text("\(Int((recipe.hairStrength * 100).rounded()))")
-                            .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal)
-                    Slider(value: Binding(get: { recipe.hairStrength },
-                                          set: { recipe.hairStrength = $0; scheduleRender() }), in: 0.2...1) { editing in
-                        if editing { snapshot() }
-                    }
-                    .tint(.white).padding(.horizontal)
-                }
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        Button { commit { recipe.hairColor = nil } } label: { hairSwatch(nil, name: "None") }
-                        ForEach(Self.hairColors.indices, id: \.self) { i in
-                            let h = Self.hairColors[i]
-                            Button { commit { recipe.hairColor = h.color } } label: { hairSwatch(h.color, name: h.name) }
-                        }
-                    }
-                    .padding(.horizontal)
-                }
-            }
+    private var smoothPanel: some View {
+        VStack(spacing: 10) {
+            brushHeader("Brush over skin to smooth it")
+            labeledSlider("Size", systemImage: "circle.dashed", value: $smoothSize, range: 0.03...0.3)
+            labeledSlider("Intensity", systemImage: "drop", value: $smoothIntensity, range: 0...1)
         }
     }
 
-    private func hairSwatch(_ color: MakeupColor?, name: String) -> some View {
-        let sel = recipe.hairColor == color
-        return VStack(spacing: 5) {
-            Group {
-                if let color { Circle().fill(Color(red: color.r, green: color.g, blue: color.b)) }
-                else { Image(systemName: "slash.circle").foregroundStyle(.secondary) }
+    private var paintPanel: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 14) {
+                ColorPicker("Color", selection: $paintColor, supportsOpacity: false)
+                    .labelsHidden()
+                Button { paintErasing.toggle() } label: {
+                    Label("Erase", systemImage: "eraser")
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(.thinMaterial, in: Capsule())
+                        .foregroundStyle(paintErasing ? Color.accentColor : Color.primary)
+                }
+                Spacer()
+                Button { undoBrush() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
+                    .font(.caption).tint(.white).disabled(recipe.brushStrokes.isEmpty)
             }
-            .frame(width: 34, height: 34)
-            .overlay(Circle().stroke(sel ? Color.white : Color.white.opacity(0.3), lineWidth: sel ? 2.5 : 1))
-            Text(name).font(.caption2).foregroundStyle(sel ? Color.white : Color.secondary)
+            .padding(.horizontal)
+            labeledSlider("Size", systemImage: "circle.dashed", value: $paintSize, range: 0.01...0.3)
+            labeledSlider("Opacity", systemImage: "drop.fill", value: $paintOpacity, range: 0.05...1)
         }
+    }
+
+    private var teethPanel: some View {
+        VStack(spacing: 10) {
+            brushHeader("Brush over teeth to whiten them")
+            labeledSlider("Size", systemImage: "circle.dashed", value: $teethSize, range: 0.012...0.12)
+            labeledSlider("Whiten", systemImage: "sparkles", value: $teethIntensity, range: 0...1)
+        }
+    }
+
+    private func brushHeader(_ hint: String) -> some View {
+        HStack {
+            Text(hint).font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Button { undoBrush() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
+                .font(.caption).tint(.white).disabled(recipe.brushStrokes.isEmpty)
+        }
+        .padding(.horizontal)
+    }
+
+    /// Brush radius for the currently-active brush tool (fraction of image width).
+    private var activeBrushRadius: CGFloat {
+        switch tab {
+        case .smooth: return smoothSize
+        case .paint:  return paintSize
+        case .teeth:  return teethSize
+        default:      return 0.1
+        }
+    }
+
+    /// Live on-photo stroke colour while brushing (so paint previews its real colour/opacity).
+    private var activeStrokeColor: UIColor {
+        switch tab {
+        case .smooth: return UIColor.white.withAlphaComponent(0.35)
+        case .teeth:  return UIColor.systemTeal.withAlphaComponent(0.4)
+        case .paint:
+            return paintErasing ? UIColor.white.withAlphaComponent(0.5)
+                                : UIColor(paintColor).withAlphaComponent(max(0.15, paintOpacity))
+        default:      return .systemRed
+        }
+    }
+
+    private var paintColorModel: MakeupColor {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(paintColor).getRed(&r, green: &g, blue: &b, alpha: &a)
+        return MakeupColor(Double(r), Double(g), Double(b))
+    }
+
+    /// Builds a stroke for the active brush tool and adds it to the recipe (undoable, re-rendered).
+    private func addBrushStroke(points: [CGPoint], radius: CGFloat) {
+        guard !points.isEmpty else { return }
+        let stroke: BrushStroke
+        switch tab {
+        case .smooth:
+            stroke = BrushStroke(kind: .smooth, points: points, radius: Double(radius),
+                                 intensity: Double(smoothIntensity), color: nil)
+        case .teeth:
+            stroke = BrushStroke(kind: .teeth, points: points, radius: Double(radius),
+                                 intensity: Double(teethIntensity), color: nil)
+        case .paint:
+            stroke = paintErasing
+                ? BrushStroke(kind: .erase, points: points, radius: Double(radius), intensity: 1, color: nil)
+                : BrushStroke(kind: .paint, points: points, radius: Double(radius),
+                              intensity: Double(paintOpacity), color: paintColorModel)
+        default:
+            return
+        }
+        commit { recipe.brushStrokes.append(stroke) }
+    }
+
+    private func undoBrush() {
+        guard !recipe.brushStrokes.isEmpty else { return }
+        commit { recipe.brushStrokes.removeLast() }
     }
 
     // MARK: Skin panel
@@ -1899,12 +1960,13 @@ private struct StickerOverlay: View {
     }
 }
 
-/// Zoomable canvas with a one-finger brush to mark objects for removal (TouchRetouch-style). Pinch
-/// zooms, two-finger drags pan, one finger paints; the painted path shows in red, and on lift the
-/// normalized stroke is reported so the view can rebuild the mask and inpaint.
-private struct RetouchCanvas: UIViewRepresentable {
+/// Zoomable one-finger brush canvas (retouch / smooth / paint / teeth). Pinch zooms, two-finger drags
+/// pan, one finger paints; the path shows live in `strokeColor`, and on lift the normalized stroke +
+/// radius are reported so the view can build a mask / add a brush stroke.
+private struct BrushCanvas: UIViewRepresentable {
     let image: UIImage
     let brushRadius: CGFloat
+    var strokeColor: UIColor = .systemRed
     let onStroke: ([CGPoint], CGFloat) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -1937,16 +1999,15 @@ private struct RetouchCanvas: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
-        var parent: RetouchCanvas
+        var parent: BrushCanvas
         weak var scroll: ReshapeScrollView?
         private var points: [CGPoint] = []
         private let stroke = CAShapeLayer()
         private var path = UIBezierPath()
 
-        init(_ parent: RetouchCanvas) {
+        init(_ parent: BrushCanvas) {
             self.parent = parent
             super.init()
-            stroke.strokeColor = UIColor.systemRed.withAlphaComponent(0.5).cgColor
             stroke.fillColor = UIColor.clear.cgColor
             stroke.lineCap = .round; stroke.lineJoin = .round
         }
@@ -1969,6 +2030,7 @@ private struct RetouchCanvas: UIViewRepresentable {
             case .began:
                 points = []; path = UIBezierPath()
                 if stroke.superlayer == nil { iv.layer.addSublayer(stroke) }
+                stroke.strokeColor = parent.strokeColor.cgColor
                 stroke.lineWidth = max(2, parent.brushRadius * size.width * 2)
                 path.move(to: loc); stroke.path = path.cgPath
                 points.append(CGPoint(x: loc.x / size.width, y: loc.y / size.height))

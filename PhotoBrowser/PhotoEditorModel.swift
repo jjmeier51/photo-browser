@@ -57,12 +57,11 @@ struct EditRecipe: Codable, Equatable {
     // MARK: Makeup (face-landmark-driven overlays, supplied at render time)
     var makeup = MakeupRecipe()
 
-    // MARK: Hair color (approximate recolor; needs subject mask + face landmarks)
-    var hairColor: MakeupColor?
-    var hairStrength = 0.85
-
     // MARK: Skin tone (recolor the subject's skin; needs the subject mask). −1 = pale … 0 … +1 = tan.
     var skinTone = 0.0
+
+    // MARK: Brush strokes (smooth / paint / teeth-whiten / erase), applied last over the final image.
+    var brushStrokes: [BrushStroke] = []
 
     /// True when nothing has been changed (used to gate the Save button / "no edits").
     var isIdentity: Bool { self == EditRecipe() }
