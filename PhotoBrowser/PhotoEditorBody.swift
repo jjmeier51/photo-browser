@@ -198,6 +198,11 @@ enum BodyWarp {
             return abs(Double(l.x - r.x)) / 2
         }
         let torsoHalf = max(0.12, max(shoulderHalf ?? 0.18, hipHalf ?? 0.18))
+        // Facing direction (for side-view butt protrusion): how far the nose sits from the body axis,
+        // and which way the back faces (away from the nose).
+        let noseX = (b?.nose ?? fc?.nose).map { Double($0.x) }
+        let sideness: Double = (cx != nil && noseX != nil) ? min(1, abs(noseX! - cx!) / max(0.05, torsoHalf)) : 0
+        let backDir: Double = (cx != nil && noseX != nil) ? (cx! > noseX! ? 1 : -1) : 0
 
         for j in 1..<(rows - 1) {
             for i in 1..<(cols - 1) {
@@ -230,8 +235,9 @@ enum BodyWarp {
                 if s.butt != 0 {
                     for c in buttCenters {
                         let (rx, ry, fall) = radial(u, v, c, buttRadius, asp)
-                        dx += s.butt * 0.16 * rx * fall
-                        dy += s.butt * 0.11 * ry * fall
+                        dx += s.butt * 0.24 * rx * fall                       // rounder / fuller
+                        dy += s.butt * 0.18 * ry * fall
+                        dx += s.butt * 0.18 * backDir * sideness * fall       // protrude toward the back (side view)
                     }
                 }
                 if s.neck != 0, let cX = cx, let sY = shoulderY {
@@ -427,9 +433,9 @@ enum BodyWarp {
     private static func clamp(_ v: Double) -> Double { max(-0.3, min(0.3, v)) }
 
     /// Full strength out to the torso edge (so waist/hips actually move the body's sides), then fades
-    /// past it to spare the arms hanging just beyond.
+    /// quickly past it to spare the arms and keep the background still.
     private static func bodyWindow(_ d: Double, _ half: Double) -> Double {
-        let inner = half * 0.98, outer = half * 1.35
+        let inner = half * 1.0, outer = half * 1.18
         if d <= inner { return 1 }
         if d >= outer { return 0 }
         return 1 - smoothstep((d - inner) / (outer - inner))
