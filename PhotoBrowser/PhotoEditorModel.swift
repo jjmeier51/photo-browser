@@ -43,6 +43,7 @@ struct EditRecipe: Codable, Equatable {
     // MARK: Filter
     var filterID: String?              // see EditFilter.all; nil = none
     var filterIntensity = 1.0          // 0…1
+    var filterBackgroundOnly = false   // apply the filter only behind the subject
 
     // MARK: Reshape (manual liquify; applied last, per PRD §8 order)
     var reshape: ReshapeField?         // nil = no warp

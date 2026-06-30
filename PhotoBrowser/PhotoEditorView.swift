@@ -344,6 +344,18 @@ struct PhotoEditorView: View {
                 }
                 .tint(.white)
                 .padding(.horizontal)
+
+                Toggle(isOn: Binding(
+                    get: { recipe.filterBackgroundOnly },
+                    set: { on in
+                        commit { recipe.filterBackgroundOnly = on }
+                        if on { detectSubjectIfNeeded() }
+                    })) {
+                    Label("Background only", systemImage: "person.crop.rectangle.badge.plus")
+                        .font(.subheadline)
+                }
+                .tint(.white)
+                .padding(.horizontal)
             }
 
             ScrollView(.horizontal, showsIndicators: false) {

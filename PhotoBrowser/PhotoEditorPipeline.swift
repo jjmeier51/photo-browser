@@ -10,11 +10,9 @@ struct EditFilter: Identifiable {
     let make: @Sendable (CIImage) -> CIImage
 
     static let all: [EditFilter] = [
-        EditFilter(id: "vivid",   name: "Vivid")    { $0.applyingFilter("CIVibrance", parameters: ["inputAmount": 0.6])
-                                                        .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 1.12, kCIInputContrastKey: 1.06]) },
-        EditFilter(id: "warm",    name: "Warm")     { $0.applyingFilter("CITemperatureAndTint", parameters: ["inputNeutral": CIVector(x: 6500, y: 0), "inputTargetNeutral": CIVector(x: 4800, y: 0)])
-                                                        .applyingFilter("CIVibrance", parameters: ["inputAmount": 0.2]) },
-        EditFilter(id: "cool",    name: "Cool")     { $0.applyingFilter("CITemperatureAndTint", parameters: ["inputNeutral": CIVector(x: 6500, y: 0), "inputTargetNeutral": CIVector(x: 8800, y: 0)]) },
+        EditFilter(id: "vivid",   name: "Vivid")    { fgGrade($0, sat: 1.12, con: 1.06, vib: 0.6) },
+        EditFilter(id: "warm",    name: "Warm")     { fgGrade($0, temp: 4800, vib: 0.2) },
+        EditFilter(id: "cool",    name: "Cool")     { fgGrade($0, temp: 8800) },
         EditFilter(id: "film",    name: "Film")     { $0.applyingFilter("CIPhotoEffectInstant") },
         EditFilter(id: "fade",    name: "Faded")    { $0.applyingFilter("CIPhotoEffectFade") },
         EditFilter(id: "process", name: "Lo-Fi")    { $0.applyingFilter("CIPhotoEffectProcess") },
@@ -22,8 +20,80 @@ struct EditFilter: Identifiable {
         EditFilter(id: "mono",    name: "B&W")      { $0.applyingFilter("CIPhotoEffectMono") },
         EditFilter(id: "noir",    name: "Noir")     { $0.applyingFilter("CIPhotoEffectNoir") },
         EditFilter(id: "tonal",   name: "Silver")   { $0.applyingFilter("CIPhotoEffectTonal") },
+        // --- 30 more ---
+        EditFilter(id: "teal",     name: "Teal")     { fgGrade($0, temp: 7600, tint: -8, sat: 1.05, con: 1.05) },
+        EditFilter(id: "sunset",   name: "Sunset")   { fgGrade($0, temp: 4200, tint: 14, sat: 1.1, vib: 0.3) },
+        EditFilter(id: "vintage",  name: "Vintage")  { fgLift($0.applyingFilter("CISepiaTone", parameters: [kCIInputIntensityKey: 0.4]), 0.06) },
+        EditFilter(id: "matte",    name: "Matte")    { fgLift(fgGrade($0, sat: 0.95, con: 0.9), 0.09) },
+        EditFilter(id: "crisp",    name: "Crisp")    { fgGrade($0, temp: 6800, sat: 1.05, con: 1.14) },
+        EditFilter(id: "moody",    name: "Moody")    { fgGrade($0, temp: 6000, sat: 0.8, con: 1.12, bri: -0.04) },
+        EditFilter(id: "golden",   name: "Golden")   { fgGrade($0, temp: 4500, tint: 6, sat: 1.05, vib: 0.35) },
+        EditFilter(id: "pastel",   name: "Pastel")   { fgLift(fgGrade($0, sat: 0.85, con: 0.9, bri: 0.05), 0.08) },
+        EditFilter(id: "dramatic", name: "Drama")    { fgGrade($0, sat: 1.1, con: 1.25, vib: 0.3) },
+        EditFilter(id: "cinema",   name: "Cinema")   { fgGrade(fgSplit($0, shadow: -10, highlight: 8), sat: 1.04, con: 1.08) },
+        EditFilter(id: "sepia",    name: "Sepia")    { $0.applyingFilter("CISepiaTone", parameters: [kCIInputIntensityKey: 0.8]) },
+        EditFilter(id: "cross",    name: "X-Pro")    { fgGrade($0, temp: 5600, tint: -12, sat: 1.2, con: 1.18) },
+        EditFilter(id: "frost",    name: "Frost")    { fgGrade($0, temp: 9000, sat: 0.85, con: 0.95, bri: 0.04) },
+        EditFilter(id: "ember",    name: "Ember")    { fgGrade($0, temp: 3900, tint: 10, sat: 1.1, con: 1.06) },
+        EditFilter(id: "olive",    name: "Olive")    { fgGrade($0, temp: 6200, tint: -16, sat: 0.95) },
+        EditFilter(id: "rose",     name: "Rose")     { fgGrade($0, temp: 5800, tint: 18, sat: 1.0, bri: 0.03) },
+        EditFilter(id: "azure",    name: "Azure")    { fgGrade($0, temp: 9500, tint: -6, sat: 1.05) },
+        EditFilter(id: "mocha",    name: "Mocha")    { fgGrade($0.applyingFilter("CISepiaTone", parameters: [kCIInputIntensityKey: 0.25]), temp: 5200, sat: 0.9) },
+        EditFilter(id: "honey",    name: "Honey")    { fgGrade($0, temp: 4600, tint: 4, sat: 1.08, vib: 0.4) },
+        EditFilter(id: "slate",    name: "Slate")    { fgGrade($0, temp: 7800, sat: 0.6, con: 1.05) },
+        EditFilter(id: "punch",    name: "Punch")    { fgGrade($0, sat: 1.35, con: 1.15, vib: 0.4) },
+        EditFilter(id: "velvet",   name: "Velvet")   { fgGrade($0, temp: 4900, sat: 1.05, con: 1.2, bri: -0.03) },
+        EditFilter(id: "dusk",     name: "Dusk")     { fgGrade($0, temp: 7200, tint: 12, sat: 0.95, bri: -0.03) },
+        EditFilter(id: "bloom",    name: "Bloom")    { fgLift(fgGrade($0, temp: 5400, sat: 1.05, bri: 0.06), 0.05) },
+        EditFilter(id: "retro",    name: "Retro")    { fgLift(fgGrade($0, temp: 4700, sat: 0.85, con: 0.92), 0.1) },
+        EditFilter(id: "ivory",    name: "Ivory")    { fgGrade($0, temp: 5600, sat: 0.8, bri: 0.06) },
+        EditFilter(id: "carbon",   name: "Carbon")   { fgGrade($0.applyingFilter("CIPhotoEffectMono"), con: 1.25) },
+        EditFilter(id: "coral",    name: "Coral")    { fgGrade($0, temp: 4400, tint: 16, sat: 1.12, vib: 0.3) },
+        EditFilter(id: "mint",     name: "Mint")     { fgGrade($0, temp: 7000, tint: -18, sat: 1.0, bri: 0.03) },
+        EditFilter(id: "plum",     name: "Plum")     { fgGrade($0, temp: 7400, tint: 20, sat: 1.05, con: 1.08, bri: -0.03) },
+        EditFilter(id: "lush",     name: "Lush")     { fgGrade($0, temp: 6000, tint: -10, sat: 1.18, vib: 0.35) },
+        EditFilter(id: "smolder",  name: "Smolder")  { fgGrade(fgSplit($0, shadow: 6, highlight: -6), sat: 0.95, con: 1.15, bri: -0.04) },
     ]
     static func by(id: String?) -> EditFilter? { id.flatMap { id in all.first { $0.id == id } } }
+}
+
+// MARK: Filter grading helpers (file-scope so the @Sendable look closures can call them)
+
+private func fgGrade(_ img: CIImage, temp: CGFloat = 6500, tint: CGFloat = 0,
+                     sat: Double = 1, con: Double = 1, bri: Double = 0, vib: Double = 0) -> CIImage {
+    var x = img
+    if temp != 6500 || tint != 0 {
+        x = x.applyingFilter("CITemperatureAndTint", parameters: [
+            "inputNeutral": CIVector(x: 6500, y: 0), "inputTargetNeutral": CIVector(x: temp, y: tint)])
+    }
+    if sat != 1 || con != 1 || bri != 0 {
+        x = x.applyingFilter("CIColorControls", parameters: [
+            kCIInputSaturationKey: sat, kCIInputContrastKey: con, kCIInputBrightnessKey: bri])
+    }
+    if vib != 0 { x = x.applyingFilter("CIVibrance", parameters: ["inputAmount": vib]) }
+    return x
+}
+
+/// Lifts the blacks for a faded/matte look.
+private func fgLift(_ img: CIImage, _ amount: Double) -> CIImage {
+    img.applyingFilter("CIToneCurve", parameters: [
+        "inputPoint0": CIVector(x: 0, y: CGFloat(amount)),
+        "inputPoint1": CIVector(x: 0.25, y: 0.25 + CGFloat(amount) * 0.5),
+        "inputPoint2": CIVector(x: 0.5, y: 0.5),
+        "inputPoint3": CIVector(x: 0.75, y: 0.78),
+        "inputPoint4": CIVector(x: 1, y: 1)])
+}
+
+/// A simple split-tone: cool/warm shifts pushed differently into shadows vs highlights (teal-orange etc.).
+private func fgSplit(_ img: CIImage, shadow: CGFloat, highlight: CGFloat) -> CIImage {
+    let lows = img.applyingFilter("CITemperatureAndTint", parameters: [
+        "inputNeutral": CIVector(x: 6500, y: 0), "inputTargetNeutral": CIVector(x: 6500 + shadow * 120, y: 0)])
+    let highs = img.applyingFilter("CITemperatureAndTint", parameters: [
+        "inputNeutral": CIVector(x: 6500, y: 0), "inputTargetNeutral": CIVector(x: 6500 - highlight * 120, y: 0)])
+    // Blend highs into lows weighted by luminance.
+    let lumaMask = img.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0])
+    return highs.applyingFilter("CIBlendWithMask", parameters: [
+        kCIInputBackgroundImageKey: lows, kCIInputMaskImageKey: lumaMask]).cropped(to: img.extent)
 }
 
 /// Pure rendering of an `EditRecipe` over a source `CIImage` (PRD §8). Operations apply in the fixed
@@ -43,7 +113,7 @@ enum EditPipeline {
         img = bodyStage(img, r, landmarks: landmarks, mask: mask, hdr: hdr, fast: fast)   // shape only the subject
         img = geometry(img, r)
         img = toneColor(img, r)
-        img = filter(img, r)
+        img = filter(img, r, mask: mask)
         img = detail(img, r)
         img = effects(img, r)
         img = reshapeStage(img, r, hdr: hdr, fast: fast)
@@ -223,16 +293,34 @@ enum EditPipeline {
 
     // MARK: Filter
 
-    private static func filter(_ image: CIImage, _ r: EditRecipe) -> CIImage {
+    private static func filter(_ image: CIImage, _ r: EditRecipe, mask: CIImage?) -> CIImage {
         guard let f = EditFilter.by(id: r.filterID), r.filterIntensity > 0 else { return image }
-        let looked = f.make(image).cropped(to: image.extent)
-        if r.filterIntensity >= 1 { return looked }
-        // Cross-dissolve from the original (time 0) toward the filtered look (time 1) by intensity.
-        // CIDissolveTransition's blend target is `inputTargetImage` — there is no inputBackgroundImage.
-        return image.applyingFilter("CIDissolveTransition", parameters: [
-            kCIInputTargetImageKey: looked,
-            kCIInputTimeKey: r.filterIntensity,
-        ]).cropped(to: image.extent)
+        let look = f.make(image).cropped(to: image.extent)
+        var looked = look
+        if r.filterIntensity < 1 {
+            // Cross-dissolve from the original (time 0) toward the filtered look (time 1) by intensity.
+            looked = image.applyingFilter("CIDissolveTransition", parameters: [
+                kCIInputTargetImageKey: look, kCIInputTimeKey: r.filterIntensity,
+            ]).cropped(to: image.extent)
+        }
+        // Background-only: keep the subject from the original, take the filtered look only behind it.
+        if r.filterBackgroundOnly, let mask {
+            let m = alignMask(mask, to: image.extent)
+            return image.applyingFilter("CIBlendWithMask", parameters: [
+                kCIInputBackgroundImageKey: looked, kCIInputMaskImageKey: m,
+            ]).cropped(to: image.extent)
+        }
+        return looked
+    }
+
+    /// Scales a (proxy-resolution) mask to fill `extent`, so it lines up with the working image.
+    private static func alignMask(_ mask: CIImage, to extent: CGRect) -> CIImage {
+        let me = mask.extent
+        guard me.width > 0, me.height > 0 else { return mask }
+        let sx = extent.width / me.width, sy = extent.height / me.height
+        let scaled = mask.transformed(by: CGAffineTransform(scaleX: sx, y: sy))
+        return scaled.transformed(by: CGAffineTransform(translationX: extent.minX - scaled.extent.minX,
+                                                        y: extent.minY - scaled.extent.minY))
     }
 
     // MARK: Detail

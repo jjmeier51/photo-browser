@@ -96,7 +96,7 @@ enum PhotoEditorIO {
 
         guard let loaded = load(url: sourceURL) else { return false }
         // The subject mask is needed for the cut-out and to confine body shaping to the subject.
-        let needsMask = recipe.cutout != nil || !recipe.body.isZero
+        let needsMask = recipe.cutout != nil || !recipe.body.isZero || (recipe.filterBackgroundOnly && recipe.filterID != nil)
         let mask = needsMask ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
         let landmarks = detectLandmarks(for: recipe, in: loaded.image)
         let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask, landmarks: landmarks), upscale)
@@ -176,7 +176,7 @@ enum PhotoEditorIO {
     private static func saveHDR(recipe: EditRecipe, sourceURL: URL, to destURL: URL,
                                 upscale: Upscale = .none) -> Bool {
         guard let loaded = loadHDR(url: sourceURL) else { return false }
-        let needsMask = recipe.cutout != nil || !recipe.body.isZero
+        let needsMask = recipe.cutout != nil || !recipe.body.isZero || (recipe.filterBackgroundOnly && recipe.filterID != nil)
         let mask = needsMask ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
         let landmarks = detectLandmarks(for: recipe, in: loaded.image)
         let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask,
