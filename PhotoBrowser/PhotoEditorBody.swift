@@ -267,6 +267,12 @@ enum BodyWarp {
                         let amt = s.breasts * 0.59 * fall * vw * bw
                         dx += amt * rx
                         dy += amt * ry
+                        // Nudge the *outer* edge of each breast outward just slightly more. Smooth (zero
+                        // slope at the centre via smoothstep) and weighted by fall² so it concentrates in the
+                        // mid-breast and vanishes near the outer/arm edge — keeps it fold-free.
+                        let outerDir = Double(c.x) > cX ? 1.0 : -1.0
+                        let o = smoothstep(rx * outerDir / breastRadius)
+                        dx += s.breasts * 0.07 * outerDir * o * fall * fall * vw * bw
                     }
                 }
                 if s.butt != 0 {
