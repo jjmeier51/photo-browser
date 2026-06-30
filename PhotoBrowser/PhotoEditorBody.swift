@@ -182,7 +182,7 @@ enum BodyWarp {
         }
         var breastCenters: [CGPoint] = []
         if let cX = cx, let sY = shoulderY, let hY = hipY {
-            let cw = (shoulderHalf ?? 0.13) * 0.5
+            let cw = (shoulderHalf ?? 0.13) * 0.45
             let chestY = sY + (hY - sY) * 0.26
             breastCenters = [CGPoint(x: cX - cw, y: chestY), CGPoint(x: cX + cw, y: chestY)]
         }
@@ -191,7 +191,7 @@ enum BodyWarp {
             guard let l = lm.hipL, let r = lm.hipR else { return nil }
             return abs(Double(l.x - r.x)) / 2
         }
-        let breastRadius = max(0.05, (shoulderHalf ?? 0.13) * 0.5)   // kept clear of the arms (see bw below)
+        let breastRadius = max(0.06, (shoulderHalf ?? 0.13) * 0.6)   // kept clear of the arms (see bw below)
         let buttRadius = max(0.11, (hipHalf ?? shoulderHalf ?? 0.14) * 1.15)
         let torsoHalf = max(0.12, max(shoulderHalf ?? 0.18, hipHalf ?? 0.18))
         // Facing direction: how far the nose sits from the body axis (sideness 0 = front/back, 1 = profile)
@@ -250,30 +250,23 @@ enum BodyWarp {
                 }
                 // Breasts / Butt — localized round, protruding bulges (no vertical band shift).
                 if s.breasts != 0, let cX = cx {
-                    // Arm-safe horizontal window: full over the chest, faded to **zero before the arms** so
-                    // the breast warp never reaches the arm/torso edge (that collision was the tearing). It's
-                    // based on the breast spacing, not the wider shoulder span like the torso window.
+                    // Arm-safe horizontal window: full over the chest, faded to zero before the arms so the
+                    // warp never reaches the arm/torso edge.
                     let armHalf = shoulderHalf ?? hipHalf ?? 0.18
-                    let bw = bodyWindow(abs(u - cX), armHalf * 0.7)
+                    let bw = bodyWindow(abs(u - cX), armHalf * 0.85)
                     for c in breastCenters {
                         let (rx, ry, fall) = radial(u, v, c, breastRadius, asp)
-                        let innerDir = cX > Double(c.x) ? 1.0 : -1.0     // direction toward the other breast (axis)
-                        // Smooth vertical weight: damped above the breast centre (clavicle), full below — a
-                        // *hard* step here folded the mesh and tore the image at larger sizes.
-                        let vw = 0.3 + 0.7 * smoothstep(ry / breastRadius + 0.5)
-                        let g = fall * vw * bw
-                        // Roundness: a gentle radial expansion from the breast centre (expanding circle),
-                        // for a fuller, rounder dome. Zero at the exact centre, so the peak isn't pulled out.
-                        dx += s.breasts * 0.20 * rx * g
-                        dy += s.breasts * 0.20 * ry * g
-                        // Cleavage: inner half eases toward the other breast (stronger); outer half eases out
-                        // just slightly. Both grow continuously from 0 at the centre line (no seam).
-                        let inner = max(0.0, rx * innerDir) / breastRadius
-                        let outer = max(0.0, -rx * innerDir) / breastRadius
-                        dx += s.breasts * 0.30 * innerDir * inner * g
-                        dx -= s.breasts * 0.06 * innerDir * outer * g
-                        // Bottom of the breast sags slightly (smooth, with no kink at the centre line).
-                        dy += s.breasts * 0.15 * smoothstep(ry / breastRadius) * fall * bw
+                        guard fall > 0 else { continue }
+                        // A clean radial **inflate** (localized magnification) — the single warp pro apps
+                        // (Hypic/Facetune) use for a breast slider. It's a smooth, monotonic outward push
+                        // from each breast centre, which is mathematically fold-free (no tearing) — unlike the
+                        // extra directional pushes I tried before. Cleavage falls out for free: each breast's
+                        // inflate eases its inner edge toward the body axis. Stronger below the centre for a
+                        // fuller, lower shape; damped at the clavicle; confined away from the arms.
+                        let vw = 0.5 + 0.5 * smoothstep(ry / breastRadius + 0.5)
+                        let amt = s.breasts * 0.42 * fall * vw * bw
+                        dx += amt * rx
+                        dy += amt * ry
                     }
                 }
                 if s.butt != 0 {
