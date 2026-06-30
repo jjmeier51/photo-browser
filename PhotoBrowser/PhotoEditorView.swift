@@ -99,8 +99,8 @@ struct PhotoEditorView: View {
     @State private var paintOpacity: CGFloat = 0.85
     @State private var paintColor: Color = .red
     @State private var paintErasing = false
-    @State private var teethSize: CGFloat = 0.05
-    @State private var teethIntensity: CGFloat = 0.7
+    @State private var teethSize: CGFloat = 0.022
+    @State private var teethIntensity: CGFloat = 0.85
 
     // Filter favorites + search (FR-FILT-02). Favorites persist across sessions.
     @State private var filterQuery = ""
@@ -1071,7 +1071,7 @@ struct PhotoEditorView: View {
     private var teethPanel: some View {
         VStack(spacing: 10) {
             brushHeader("Brush over teeth to whiten them")
-            labeledSlider("Size", systemImage: "circle.dashed", value: $teethSize, range: 0.012...0.12)
+            labeledSlider("Size", systemImage: "circle.dashed", value: $teethSize, range: 0.008...0.07)
             brushAmountSlider("Whiten", systemImage: "sparkles", value: $teethIntensity, kind: .teeth)
         }
     }
@@ -1341,7 +1341,9 @@ struct PhotoEditorView: View {
                     styleToggle("I", on: sel.italic, italic: true) { updateText(sel.id) { $0.italic.toggle() } }
                     Menu {
                         ForEach(TextRender.fonts, id: \.self) { f in
-                            Button(f) { updateText(sel.id) { $0.fontName = f } }
+                            Button { updateText(sel.id) { $0.fontName = f } } label: {
+                                Text(f).font(.custom(f, size: 17))   // preview each name in its own font
+                            }
                         }
                     } label: {
                         HStack(spacing: 4) {
@@ -2229,7 +2231,12 @@ private struct TextOverlay: View {
     var body: some View {
         GeometryReader { geo in
             let frame = fittedRect(in: geo.size)
-            ForEach(texts) { t in textView(t, frame: frame) }
+            ZStack {
+                // Tapping the photo (off any text) deselects — "sets" the text so it stays put. Tapping a
+                // text re-selects it for editing/moving.
+                Color.clear.contentShape(Rectangle()).onTapGesture { selected = nil }
+                ForEach(texts) { t in textView(t, frame: frame) }
+            }
         }
     }
 

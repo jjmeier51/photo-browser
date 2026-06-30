@@ -21,10 +21,15 @@ enum MakeupRenderer {
             out = composite({ drawSoft($0, size: size, makeup: m, face: face) },
                             over: out, extent: e, feather: Double(e.width) * 0.006)
         }
-        // Sharp pass — lips, liner, lashes, brows, freckles with only a light feather.
-        if m.lips > 0 || m.eyeliner > 0 || m.lashes > 0 || m.brows > 0 || m.freckles > 0 {
+        // Sharp pass — lips, liner, lashes, brows with only a light feather.
+        if m.lips > 0 || m.eyeliner > 0 || m.lashes > 0 || m.brows > 0 {
             out = composite({ drawSharp($0, size: size, makeup: m, face: face) },
                             over: out, extent: e, feather: max(1, Double(e.width) * 0.0016))
+        }
+        // Freckle pass — drawn crisp (no extra blur) so the tiny specks stay defined, not washed out.
+        if m.freckles > 0 {
+            out = composite({ drawFreckles($0, size: size, makeup: m, face: face) },
+                            over: out, extent: e, feather: 0)
         }
         return out
     }
@@ -85,16 +90,39 @@ enum MakeupRenderer {
         let faceH = CGFloat(max(0.1, f.height)) * H
 
         if m.brows > 0 {
-            for poly in [f.leftBrowPoly, f.rightBrowPoly] where poly.count >= 2 {
-                stroke(ctx, poly.map(px), color: col(MakeupColor(0.24, 0.16, 0.10), m.brows * 0.5),
-                       width: faceH * 0.035)
+            // Define/fill the brows: a bold dark stroke along the brow. Fall back to a line above the eye
+            // when Vision returns a sparse eyebrow region (so it always does *something* visible).
+            for (poly, eye) in [(f.leftBrowPoly, f.leftEye), (f.rightBrowPoly, f.rightEye)] {
+                let line: [CGPoint]
+                if poly.count >= 2 { line = poly.map(px) }
+                else if let eye { let e = px(eye); let r = CGFloat(f.eyeRadius) * W
+                    line = [CGPoint(x: e.x - r * 1.3, y: e.y - r * 1.5), CGPoint(x: e.x, y: e.y - r * 1.9),
+                            CGPoint(x: e.x + r * 1.3, y: e.y - r * 1.5)] }
+                else { continue }
+                stroke(ctx, line, color: col(MakeupColor(0.18, 0.12, 0.08), min(1, m.brows * 0.9)),
+                       width: faceH * 0.05)
             }
         }
         if m.lashes > 0 {
-            for poly in [f.leftEyePoly, f.rightEyePoly] where poly.count >= 4 {
-                let bb = bbox(poly.map(px))
-                let line = upperLid(poly.map(px)).map { CGPoint(x: $0.x, y: $0.y - bb.height * 0.08) }
-                stroke(ctx, line, color: col(MakeupColor(0.05, 0.04, 0.04), m.lashes * 0.7), width: bb.height * 0.11)
+            // A bold dark lash line along the upper lid with a slight outward wing.
+            for (poly, eye) in [(f.leftEyePoly, f.leftEye), (f.rightEyePoly, f.rightEye)] {
+                var line: [CGPoint]
+                var thick: CGFloat
+                if poly.count >= 4 {
+                    let pts = poly.map(px); let bb = bbox(pts)
+                    line = upperLid(pts).map { CGPoint(x: $0.x, y: $0.y - bb.height * 0.06) }
+                    thick = max(2, bb.height * 0.22)
+                } else if let eye {
+                    let e = px(eye); let r = CGFloat(f.eyeRadius) * W
+                    line = [CGPoint(x: e.x - r, y: e.y - r * 0.4), CGPoint(x: e.x, y: e.y - r * 0.7),
+                            CGPoint(x: e.x + r, y: e.y - r * 0.4)]
+                    thick = max(2, r * 0.4)
+                } else { continue }
+                if line.count >= 2, let last = line.last, let prev = line.dropLast().last {  // outward wing
+                    let dx = last.x - prev.x, dy = last.y - prev.y, len = max(1, hypot(dx, dy))
+                    line.append(CGPoint(x: last.x + dx / len * thick * 1.6, y: last.y + dy / len * thick * 1.6 - thick))
+                }
+                stroke(ctx, line, color: col(MakeupColor(0.04, 0.03, 0.04), min(1, m.lashes * 0.95)), width: thick)
             }
         }
         if m.eyeliner > 0 {
@@ -117,58 +145,62 @@ enum MakeupRenderer {
             ctx.setFillColor(col(m.lipsColor, m.lips * 0.92))   // strong (so a 100% dark look reads as black lips)
             ctx.fillPath(using: .evenOdd)
         }
-        // Freckles — many *tiny, soft-edged, warm* specks, biased to the nose/cheek band the way real
-        // freckles cluster (densest over the nose bridge and upper cheeks, sparser toward the hairline and
-        // jaw). Each is a soft radial dab — not a hard brown dot — with per-speck size/opacity/hue jitter,
-        // so the result reads as pigment rather than painted spots. Level 5 visibly covers the face.
-        if m.freckles > 0, let center = f.center {
-            let counts = [0, 110, 240, 430, 680, 980]
-            let n = counts[min(5, max(0, m.freckles))]
-            let fcx = center.x * W, fcy = center.y * H
-            let frx = CGFloat(max(0.08, f.width)) * W * 0.50
-            let fry = CGFloat(max(0.10, f.height)) * H * 0.58
-            let bandY = (f.nose?.y).map { $0 * H } ?? fcy        // dense band centred on the nose
-            let browY = f.browY.map { CGFloat($0) * H } ?? (fcy - fry * 0.4)
-            let eyes = [f.leftEye, f.rightEye].compactMap { $0 }.map(px)
-            let lipsPx = f.outerLips.map(px)
-            let eyeExclude = max(W * 0.035, CGFloat(f.eyeRadius) * W * 1.6)
-            var rng = LCG(seed: 0x9E3779B97F4A7C15)
-            var placed = 0, tries = 0
-            while placed < n && tries < n * 20 {
-                tries += 1
-                // Uniform sample inside the face ellipse (polar with sqrt for even area density).
-                let ang = rng.next() * 2 * Double.pi
-                let rad = rng.next().squareRoot()
-                let p = CGPoint(x: fcx + CGFloat(cos(ang) * rad) * frx,
-                                y: fcy + CGFloat(sin(ang) * rad) * fry)
-                // Vertical density bias: keep more near the nose/cheek band, fewer toward forehead/jaw.
-                let vDist = Double(abs(p.y - bandY) / max(1, fry))
-                if rng.next() > max(0.18, 1 - vDist * vDist * 0.9) { continue }
-                if p.y < browY - fry * 0.05, rng.next() > 0.25 { continue }   // sparse above the brows
-                if eyes.contains(where: { hypot($0.x - p.x, $0.y - p.y) < eyeExclude }) { continue }
-                if !lipsPx.isEmpty, pointInPolygon(p, lipsPx) { continue }
-                // Mostly very small with the occasional larger one; soft alpha; warm reddish-tan with jitter.
-                let big = rng.next() < 0.12
-                let dot = W * (big ? 0.0016 : 0.0009) * CGFloat(0.7 + rng.next() * 0.8)
-                let alpha = (big ? 0.30 : 0.22) + rng.next() * 0.22
-                let warm = rng.next()
-                let speck = UIColor(red: CGFloat(0.50 + warm * 0.18), green: CGFloat(0.30 + warm * 0.10),
-                                    blue: CGFloat(0.20 + warm * 0.06), alpha: CGFloat(alpha)).cgColor
-                softSpeck(ctx, center: p, radius: dot, color: speck)
-                placed += 1
-            }
+    }
+
+    /// Freckles — many **tiny, defined, warm-brown** specks biased to the nose/cheek band (densest over the
+    /// nose bridge and upper cheeks). The earlier version read "too light and too large" because the specks
+    /// were big, low-alpha and then blurred by the shared sharp pass; here they are small, fairly opaque,
+    /// and rendered in their own no-blur pass so they stay crisp like real pigment. Level 5 covers the face.
+    private static func drawFreckles(_ ctx: CGContext, size: CGSize, makeup m: MakeupRecipe, face f: FaceLandmarks) {
+        guard m.freckles > 0, let center = f.center else { return }
+        let W = size.width, H = size.height
+        func px(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * W, y: p.y * H) }
+        let counts = [0, 130, 280, 470, 720, 1000]
+        let n = counts[min(5, max(0, m.freckles))]
+        let fcx = center.x * W, fcy = center.y * H
+        let frx = CGFloat(max(0.08, f.width)) * W * 0.50
+        let fry = CGFloat(max(0.10, f.height)) * H * 0.58
+        let bandY = (f.nose?.y).map { $0 * H } ?? fcy        // dense band centred on the nose
+        let browY = f.browY.map { CGFloat($0) * H } ?? (fcy - fry * 0.4)
+        let eyes = [f.leftEye, f.rightEye].compactMap { $0 }.map(px)
+        let lipsPx = f.outerLips.map(px)
+        let eyeExclude = max(W * 0.035, CGFloat(f.eyeRadius) * W * 1.6)
+        var rng = LCG(seed: 0x9E3779B97F4A7C15)
+        var placed = 0, tries = 0
+        while placed < n && tries < n * 20 {
+            tries += 1
+            let ang = rng.next() * 2 * Double.pi
+            let rad = rng.next().squareRoot()
+            let p = CGPoint(x: fcx + CGFloat(cos(ang) * rad) * frx,
+                            y: fcy + CGFloat(sin(ang) * rad) * fry)
+            let vDist = Double(abs(p.y - bandY) / max(1, fry))
+            if rng.next() > max(0.18, 1 - vDist * vDist * 0.9) { continue }
+            if p.y < browY - fry * 0.05, rng.next() > 0.25 { continue }   // sparse above the brows
+            if eyes.contains(where: { hypot($0.x - p.x, $0.y - p.y) < eyeExclude }) { continue }
+            if !lipsPx.isEmpty, pointInPolygon(p, lipsPx) { continue }
+            // Tiny (occasionally a touch bigger), fairly opaque, warm reddish-brown with per-speck jitter.
+            let big = rng.next() < 0.10
+            let dot = W * (big ? 0.0011 : 0.00060) * CGFloat(0.6 + rng.next() * 0.6)
+            let alpha = (big ? 0.5 : 0.6) + rng.next() * 0.25
+            let warm = rng.next()
+            let speck = UIColor(red: CGFloat(0.40 + warm * 0.16), green: CGFloat(0.22 + warm * 0.08),
+                                blue: CGFloat(0.13 + warm * 0.05), alpha: CGFloat(min(0.9, alpha))).cgColor
+            softSpeck(ctx, center: p, radius: dot, color: speck)
+            placed += 1
         }
     }
 
     /// A single freckle: a radial dab whose centre is near-solid and whose edge fades to transparent, so it
     /// reads as soft pigment instead of a hard dot.
     private static func softSpeck(_ ctx: CGContext, center: CGPoint, radius: CGFloat, color: CGColor) {
-        guard radius > 0.3, let clear = color.copy(alpha: 0) else { return }
+        let r = max(0.6, radius)
+        guard let clear = color.copy(alpha: 0) else { return }
         let cs = CGColorSpaceCreateDeviceRGB()
+        // A mostly-solid core that fades only at the very edge, so even tiny specks read as defined pigment.
         guard let grad = CGGradient(colorsSpace: cs, colors: [color, color, clear] as CFArray,
-                                    locations: [0, 0.45, 1]) else { return }
+                                    locations: [0, 0.6, 1]) else { return }
         ctx.drawRadialGradient(grad, startCenter: center, startRadius: 0,
-                               endCenter: center, endRadius: radius, options: [])
+                               endCenter: center, endRadius: r, options: [])
     }
 
     // MARK: Helpers

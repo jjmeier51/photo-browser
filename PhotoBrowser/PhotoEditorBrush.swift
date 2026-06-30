@@ -94,15 +94,15 @@ enum BrushRender {
                                      parameters: [kCIInputRadiusKey: max(2.0, W * 0.006)]).cropped(to: e)
     }
 
-    /// Teeth whitening: cool the warm/yellow cast, drop saturation, lift brightness.
+    /// Teeth whitening: strongly cool the warm/yellow cast, cut saturation, and lift brightness.
     private static func makeWhitened(_ image: CIImage) -> CIImage {
         let e = image.extent
         return image
             .applyingFilter("CITemperatureAndTint", parameters: [
                 "inputNeutral": CIVector(x: 6500, y: 0),
-                "inputTargetNeutral": CIVector(x: 7400, y: -8)])
+                "inputTargetNeutral": CIVector(x: 8200, y: -14)])
             .applyingFilter("CIColorControls", parameters: [
-                kCIInputBrightnessKey: 0.07, kCIInputSaturationKey: 0.55])
+                kCIInputBrightnessKey: 0.16, kCIInputSaturationKey: 0.28])
             .cropped(to: e)
     }
 }
