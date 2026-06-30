@@ -161,37 +161,41 @@ enum MakeupRenderer {
     /// off-centre; anchoring to the actual nose/cheek landmarks keeps them on the face and symmetric. They
     /// are rendered crisp (own no-blur pass) and fairly dark so they read like real pigment.
     private static func drawFreckles(_ ctx: CGContext, size: CGSize, makeup m: MakeupRecipe, face f: FaceLandmarks) {
-        guard m.freckles > 0 else { return }
+        guard m.freckles > 0, let center = f.center else { return }
         let W = size.width, H = size.height
         func px(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * W, y: p.y * H) }
         let counts = [0, 90, 200, 340, 520, 760]
         let n = counts[min(5, max(0, m.freckles))]
-        let faceW = CGFloat(max(0.08, f.width)) * W
-        let sig = faceW * 0.13                                // cluster spread
-        // Anchors with a weight and an elliptical spread (nose narrower/taller, cheeks rounder).
-        var anchors: [(p: CGPoint, weight: Double, sx: CGFloat, sy: CGFloat)] = []
-        if let nose = f.nose { anchors.append((px(nose), 0.8, sig * 0.7, sig * 1.2)) }
-        if let cl = f.cheekL { anchors.append((px(cl), 1.0, sig * 1.05, sig * 1.1)) }
-        if let cr = f.cheekR { anchors.append((px(cr), 1.0, sig * 1.05, sig * 1.1)) }
-        if anchors.isEmpty, let c = f.center { anchors.append((px(c), 1.0, faceW * 0.3, faceW * 0.3)) }
-        let totalW = anchors.reduce(0) { $0 + $1.weight }
-        guard totalW > 0 else { return }
+        let faceWpx = CGFloat(max(0.08, f.width)) * W
+        let faceHpx = CGFloat(max(0.10, f.height)) * H
+        let fcx = CGFloat(center.x) * W
+        let fcyEll = CGFloat(center.y) * H                    // face-ellipse centre (for the containment test)
+        // Fill the mid-face band — nose + both cheeks — centred on the nose, *not* the whole face box (which
+        // spilled onto the jaw/neck). Depends only on the face box + nose, so it doesn't need the cheek
+        // landmarks (those were unavailable here, which left freckles stuck under the nose). The skin mask in
+        // the makeup pass then trims anything off skin (hair, etc.).
+        let bandY = (f.nose?.y).map { CGFloat($0) * H } ?? fcyEll
+        let halfW = faceWpx * 0.44
+        let up = faceHpx * 0.24                               // up to just under the eyes
+        let down = faceHpx * 0.20                             // down to ~mouth level
         let eyes = [f.leftEye, f.rightEye].compactMap { $0 }.map(px)
         let lipsPx = f.outerLips.map(px)
-        let eyeExclude = max(W * 0.03, CGFloat(f.eyeRadius) * W * 1.3)
+        let eyeExclude = max(W * 0.03, CGFloat(f.eyeRadius) * W * 1.4)
         var rng = LCG(seed: 0x9E3779B97F4A7C15)
         var placed = 0, tries = 0
-        while placed < n && tries < n * 25 {
+        while placed < n && tries < n * 30 {
             tries += 1
-            // Pick an anchor by weight, then a bounded triangular (≈Gaussian) offset around it.
-            var pick = rng.next() * totalW, idx = 0
-            for (i, a) in anchors.enumerated() { if pick < a.weight { idx = i; break }; pick -= a.weight }
-            let a = anchors[idx]
-            let gx = rng.next() + rng.next() - 1.0               // −1…1, peaked at 0
-            let gy = rng.next() + rng.next() - 1.0
-            let p = CGPoint(x: a.p.x + CGFloat(gx) * a.sx * 1.7, y: a.p.y + CGFloat(gy) * a.sy * 1.7)
-            if eyes.contains(where: { hypot($0.x - p.x, $0.y - p.y) < eyeExclude }) { continue }
-            if !lipsPx.isEmpty, pointInPolygon(p, lipsPx) { continue }
+            let x = fcx + CGFloat(rng.next() * 2 - 1) * halfW
+            let dyf = rng.next() * 2 - 1
+            let y = bandY + CGFloat(dyf) * (dyf < 0 ? up : down)
+            // Keep inside the face ellipse so the corners (toward ears/hairline) are trimmed.
+            let nx = (x - fcx) / (faceWpx * 0.5), ny = (y - fcyEll) / (faceHpx * 0.5)
+            if nx * nx + ny * ny > 1.0 { continue }
+            // Denser over the nose/cheek band, thinning toward the edges.
+            let vDist = Double(abs(y - bandY) / max(1, down))
+            if rng.next() > max(0.3, 1 - vDist * vDist * 0.6) { continue }
+            if eyes.contains(where: { hypot($0.x - x, $0.y - y) < eyeExclude }) { continue }
+            if !lipsPx.isEmpty, pointInPolygon(CGPoint(x: x, y: y), lipsPx) { continue }
             // Tiny (occasionally a touch bigger), dark reddish-brown, fairly opaque, with per-speck jitter.
             let big = rng.next() < 0.10
             let dot = W * (big ? 0.0011 : 0.00060) * CGFloat(0.6 + rng.next() * 0.6)
@@ -199,7 +203,7 @@ enum MakeupRenderer {
             let warm = rng.next()
             let speck = UIColor(red: CGFloat(0.33 + warm * 0.13), green: CGFloat(0.18 + warm * 0.06),
                                 blue: CGFloat(0.10 + warm * 0.04), alpha: CGFloat(min(0.95, alpha))).cgColor
-            softSpeck(ctx, center: p, radius: dot, color: speck)
+            softSpeck(ctx, center: CGPoint(x: x, y: y), radius: dot, color: speck)
             placed += 1
         }
     }
