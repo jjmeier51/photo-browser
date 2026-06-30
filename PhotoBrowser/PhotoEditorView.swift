@@ -105,7 +105,7 @@ struct PhotoEditorView: View {
             Task {
                 if let data = try? await item.loadTransferable(type: Data.self), let img = UIImage(data: data) {
                     snapshot()
-                    stickers.append(StickerItem(image: img, original: img))
+                    stickers.append(StickerItem(data: data, image: img, original: img))
                     selectedSticker = stickers.last?.id
                 }
                 stickerPickerItem = nil
@@ -976,7 +976,8 @@ struct PhotoEditorView: View {
 
     struct StickerItem: Identifiable {
         let id = UUID()
-        var image: UIImage           // current (background-removed if `cutout`)
+        var data: Data               // original imported file data (kept so the save can re-decode in HDR)
+        var image: UIImage           // SDR display copy (background-removed if `cutout`)
         var original: UIImage
         var center = CGPoint(x: 0.5, y: 0.5)   // normalized top-left
         var scale: CGFloat = 0.4               // width as a fraction of the base image width
@@ -1033,11 +1034,14 @@ struct PhotoEditorView: View {
         }
     }
 
-    /// Converts the placed stickers into render-pipeline stickers (full-res compositing).
+    /// Converts the placed stickers into render-pipeline stickers (full-res compositing). The sticker is
+    /// re-decoded from its original data **in HDR** (`expandToHDR`) so imported HDR stickers keep their
+    /// headroom in the composite; cut-outs are done in HDR float too. Falls back to the SDR display copy.
     private func editStickers() -> [EditSticker] {
         stickers.compactMap { s in
-            guard let ci = CIImage(image: s.image) else { return nil }
-            return EditSticker(image: ci, center: s.center, scale: Double(s.scale), rotation: s.rotation.radians)
+            guard var img = StickerImaging.hdrImage(from: s.data) ?? CIImage(image: s.image) else { return nil }
+            if s.cutout { img = StickerImaging.cutout(ci: img) ?? img }
+            return EditSticker(image: img, center: s.center, scale: Double(s.scale), rotation: s.rotation.radians)
         }
     }
 
