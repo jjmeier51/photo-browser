@@ -86,11 +86,11 @@ enum PhotoEditorIO {
     /// When `recipe.cutout` is set, the subject mask is computed here at full resolution.
     static func save(recipe: EditRecipe, sourceURL: URL, to destURL: URL,
                      format: ExportFormat = .heic, quality: Double = 0.92,
-                     upscale: Upscale = .none) -> Bool {
+                     upscale: Upscale = .none, stickers: [EditSticker] = []) -> Bool {
         // HDR retention: when the source carries HDR (gain map / PQ-HLG / RAW) and we aren't forced to
         // PNG (transparent cut-out), write a 10-bit HDR HEIC keeping the headroom. Falls back to SDR.
         if format != .png, isHDRSource(sourceURL),
-           saveHDR(recipe: recipe, sourceURL: sourceURL, to: destURL, upscale: upscale) {
+           saveHDR(recipe: recipe, sourceURL: sourceURL, to: destURL, upscale: upscale, stickers: stickers) {
             return true
         }
 
@@ -99,7 +99,8 @@ enum PhotoEditorIO {
         let needsMask = recipe.cutout != nil || !recipe.body.isZero || (recipe.filterBackgroundOnly && recipe.filterID != nil)
         let mask = needsMask ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
         let landmarks = detectLandmarks(for: recipe, in: loaded.image)
-        let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask, landmarks: landmarks), upscale)
+        let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask,
+                                                    landmarks: landmarks, stickers: stickers), upscale)
         guard !rendered.extent.isInfinite, !rendered.extent.isNull,
               let cg = context.createCGImage(rendered, from: rendered.extent) else { return false }
 
@@ -174,13 +175,13 @@ enum PhotoEditorIO {
     /// Renders the edit on the HDR-expanded source and writes a 10-bit HDR HEIC, carrying the original
     /// metadata + capture date. Returns false so the caller can fall back to the standard SDR path.
     private static func saveHDR(recipe: EditRecipe, sourceURL: URL, to destURL: URL,
-                                upscale: Upscale = .none) -> Bool {
+                                upscale: Upscale = .none, stickers: [EditSticker] = []) -> Bool {
         guard let loaded = loadHDR(url: sourceURL) else { return false }
         let needsMask = recipe.cutout != nil || !recipe.body.isZero || (recipe.filterBackgroundOnly && recipe.filterID != nil)
         let mask = needsMask ? PhotoEditorCutout.subjectMask(for: loaded.image) : nil
         let landmarks = detectLandmarks(for: recipe, in: loaded.image)
         let rendered = upscaled(EditPipeline.render(loaded.image, recipe: recipe, mask: mask,
-                                                    landmarks: landmarks, hdr: true), upscale)
+                                                    landmarks: landmarks, stickers: stickers, hdr: true), upscale)
         guard !rendered.extent.isInfinite, !rendered.extent.isNull else { return false }
 
         var props = loaded.properties

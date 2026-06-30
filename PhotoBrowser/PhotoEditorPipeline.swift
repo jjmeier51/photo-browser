@@ -106,7 +106,8 @@ enum EditPipeline {
     /// `hdr` routes the reshape warp through a 16-bit float wide-gamut raster so HDR headroom survives
     /// (set it on the HDR save path; the SDR preview/export leave it false for speed).
     static func render(_ source: CIImage, recipe r: EditRecipe, mask: CIImage? = nil,
-                       landmarks: EditLandmarks? = nil, hdr: Bool = false, fast: Bool = false) -> CIImage {
+                       landmarks: EditLandmarks? = nil, stickers: [EditSticker]? = nil,
+                       hdr: Bool = false, fast: Bool = false) -> CIImage {
         var img = source
         img = cutout(img, r, mask: mask)        // background replacement first, so later edits apply to it
         img = makeupStage(img, r, landmarks: landmarks)   // makeup before warps, so it tracks the face
@@ -117,7 +118,32 @@ enum EditPipeline {
         img = detail(img, r)
         img = effects(img, r)
         img = reshapeStage(img, r, hdr: hdr, fast: fast)
+        img = stickerStage(img, stickers)       // image stickers go on top of everything
         return img.cropped(to: img.extent)      // settle the extent
+    }
+
+    // MARK: Stickers
+
+    private static func stickerStage(_ image: CIImage, _ stickers: [EditSticker]?) -> CIImage {
+        guard let stickers, !stickers.isEmpty else { return image }
+        let e = image.extent
+        guard e.width > 0, e.height > 0 else { return image }
+        var img = image
+        for s in stickers {
+            let se = s.image.extent
+            guard se.width > 0, se.height > 0 else { continue }
+            let scaleF = (s.scale * Double(e.width)) / Double(se.width)
+            let targetX = Double(s.center.x) * Double(e.width) + Double(e.minX)
+            let targetY = (1 - Double(s.center.y)) * Double(e.height) + Double(e.minY)   // top-left → bottom-left
+            let t = CGAffineTransform(translationX: -se.midX, y: -se.midY)
+                .concatenating(CGAffineTransform(scaleX: scaleF, y: scaleF))
+                .concatenating(CGAffineTransform(rotationAngle: -s.rotation))            // screen CW → CI CCW
+                .concatenating(CGAffineTransform(translationX: targetX, y: targetY))
+            let placed = s.image.transformed(by: t)
+            img = placed.applyingFilter("CISourceOverCompositing",
+                                        parameters: [kCIInputBackgroundImageKey: img]).cropped(to: e)
+        }
+        return img
     }
 
     // MARK: Makeup

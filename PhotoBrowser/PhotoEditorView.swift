@@ -1,6 +1,7 @@
 import SwiftUI
 import CoreImage
 import UIKit
+import PhotosUI
 
 /// The full-screen photo editor (Hypic/Facetune-style) built on the non-destructive `EditRecipe`
 /// backbone (PRD Phase 1). A downscaled **proxy** of the source drives a live preview at interactive
@@ -17,18 +18,19 @@ struct PhotoEditorView: View {
     let entry: Entry
 
     private enum Tab: String, CaseIterable, Identifiable {
-        case adjust, filters, crop, reshape, body, makeup, cutout
+        case adjust, filters, crop, reshape, body, makeup, cutout, stickers
         var id: String { rawValue }
         var title: String { self == .cutout ? "Cut Out" : rawValue.capitalized }
         var icon: String {
             switch self {
-            case .adjust:  return "slider.horizontal.3"
-            case .filters: return "camera.filters"
-            case .crop:    return "crop.rotate"
-            case .reshape: return "hand.draw"
-            case .body:    return "figure.stand"
-            case .makeup:  return "paintbrush.pointed.fill"
-            case .cutout:  return "person.and.background.dotted"
+            case .adjust:   return "slider.horizontal.3"
+            case .filters:  return "camera.filters"
+            case .crop:     return "crop.rotate"
+            case .reshape:  return "hand.draw"
+            case .body:     return "figure.stand"
+            case .makeup:   return "paintbrush.pointed.fill"
+            case .cutout:   return "person.and.background.dotted"
+            case .stickers: return "photo.badge.plus"
             }
         }
     }
@@ -65,6 +67,10 @@ struct PhotoEditorView: View {
     @State private var bodyNoPerson = false
     @State private var selectedBody = "slim"                // active body/face control chip
     @State private var selectedMakeup = "looks"             // active makeup category chip
+    @State private var stickers: [StickerItem] = []
+    @State private var selectedSticker: UUID?
+    @State private var stickerPickerItem: PhotosPickerItem?
+    @State private var showStickerPicker = false
 
     var body: some View {
         ZStack {
@@ -90,6 +96,18 @@ struct PhotoEditorView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Upscale the saved photo?")
+        }
+        .photosPicker(isPresented: $showStickerPicker, selection: $stickerPickerItem, matching: .images)
+        .onChange(of: stickerPickerItem) { _, item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self), let img = UIImage(data: data) {
+                    snapshot()
+                    stickers.append(StickerItem(image: img, original: img))
+                    selectedSticker = stickers.last?.id
+                }
+                stickerPickerItem = nil
+            }
         }
     }
 
@@ -134,10 +152,10 @@ struct PhotoEditorView: View {
             Button { redo() } label: { Image(systemName: "arrow.uturn.forward") }
                 .disabled(redoStack.isEmpty)
             Button { reset() } label: { Image(systemName: "arrow.counterclockwise") }
-                .disabled(recipe.isIdentity)
+                .disabled(!hasEdits)
             Spacer()
             Button { showSaveOptions = true } label: { Text("Save").fontWeight(.semibold) }
-                .disabled(recipe.isIdentity)
+                .disabled(!hasEdits)
         }
         .font(.body)
         .tint(.white)
@@ -149,12 +167,12 @@ struct PhotoEditorView: View {
     private var compareButton: some View {
         Image(systemName: showOriginal ? "rectangle.fill.on.rectangle.fill" : "rectangle.on.rectangle")
             .font(.body)
-            .foregroundStyle(recipe.isIdentity ? Color.secondary : Color.white)
+            .foregroundStyle(hasEdits ? Color.white : Color.secondary)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in
-                        guard !recipe.isIdentity, originalPreview != nil else { return }
+                        guard hasEdits, originalPreview != nil else { return }
                         if !showOriginal { withAnimation(.easeOut(duration: 0.1)) { showOriginal = true } }
                     }
                     .onEnded { _ in withAnimation(.easeOut(duration: 0.1)) { showOriginal = false } }
@@ -178,6 +196,12 @@ struct PhotoEditorView: View {
                 } else if tab == .body || tab == .makeup {
                     // Pinch-zoom + pan so the user can zoom into a face/body area while adjusting.
                     ZoomablePreview(image: preview).padding(10)
+                } else if tab == .stickers {
+                    ZStack {
+                        Image(uiImage: preview).resizable().scaledToFit()
+                        StickerOverlay(stickers: $stickers, selected: $selectedSticker, imageSize: preview.size)
+                    }
+                    .padding(10)
                 } else {
                     ZStack {
                         if recipe.cutout == .transparent {
@@ -235,9 +259,10 @@ struct PhotoEditorView: View {
             case .filters: filterPanel
             case .crop:    cropPanel
             case .reshape: reshapePanel
-            case .body:    bodyPanel
-            case .makeup:  makeupPanel
-            case .cutout:  cutoutPanel
+            case .body:     bodyPanel
+            case .makeup:   makeupPanel
+            case .cutout:   cutoutPanel
+            case .stickers: stickerPanel
             }
             tabBar
         }
@@ -880,6 +905,75 @@ struct PhotoEditorView: View {
                 set: { recipe.makeup[keyPath: keyPath] = $0; scheduleRender() })
     }
 
+    // MARK: Sticker panel
+
+    struct StickerItem: Identifiable {
+        let id = UUID()
+        var image: UIImage           // current (background-removed if `cutout`)
+        var original: UIImage
+        var center = CGPoint(x: 0.5, y: 0.5)   // normalized top-left
+        var scale: CGFloat = 0.4               // width as a fraction of the base image width
+        var rotation: Angle = .zero
+        var cutout = false
+    }
+
+    private var stickerPanel: some View {
+        VStack(spacing: 12) {
+            Button { showStickerPicker = true } label: {
+                Label("Add Sticker", systemImage: "plus.circle.fill").font(.subheadline.weight(.medium))
+            }
+            .tint(.white)
+
+            if stickers.isEmpty {
+                Text("Add an image, then drag to move and pinch to resize. Cut out its subject to drop just the person on top.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center).padding(.horizontal)
+            } else if let idx = stickers.firstIndex(where: { $0.id == selectedSticker }) {
+                HStack(spacing: 16) {
+                    Toggle(isOn: Binding(
+                        get: { stickers[idx].cutout },
+                        set: { toggleStickerCutout(idx, on: $0) })) {
+                        Label("Cut out", systemImage: "person.crop.circle.badge.checkmark").font(.subheadline)
+                    }
+                    .tint(.white).fixedSize()
+                    Spacer()
+                    Button(role: .destructive) {
+                        snapshot(); stickers.remove(at: idx); selectedSticker = stickers.last?.id
+                    } label: { Label("Delete", systemImage: "trash").font(.subheadline) }
+                }
+                .padding(.horizontal)
+            } else {
+                Text("Tap a sticker to select it.").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func toggleStickerCutout(_ idx: Int, on: Bool) {
+        guard stickers.indices.contains(idx) else { return }
+        snapshot()
+        stickers[idx].cutout = on
+        if on {
+            let original = stickers[idx].original
+            let id = stickers[idx].id
+            Task.detached(priority: .userInitiated) {
+                let cut = StickerImaging.cutout(original)
+                await MainActor.run {
+                    if let cut, let i = stickers.firstIndex(where: { $0.id == id }) { stickers[i].image = cut }
+                }
+            }
+        } else {
+            stickers[idx].image = stickers[idx].original
+        }
+    }
+
+    /// Converts the placed stickers into render-pipeline stickers (full-res compositing).
+    private func editStickers() -> [EditSticker] {
+        stickers.compactMap { s in
+            guard let ci = CIImage(image: s.image) else { return nil }
+            return EditSticker(image: ci, center: s.center, scale: Double(s.scale), rotation: s.rotation.radians)
+        }
+    }
+
     // MARK: Reshape panel
 
     private var reshapePanel: some View {
@@ -993,8 +1087,12 @@ struct PhotoEditorView: View {
         recipe = next
         scheduleRender()
     }
+    /// Any edit at all — recipe changes or placed stickers — gates Save/Reset/Compare.
+    private var hasEdits: Bool { !recipe.isIdentity || !stickers.isEmpty }
+
     private func reset() {
-        guard !recipe.isIdentity else { return }
+        guard hasEdits else { return }
+        snapshot(); stickers.removeAll(); selectedSticker = nil
         commit { recipe = EditRecipe() }
     }
     private func selectFilter(_ id: String?) {
@@ -1076,9 +1174,10 @@ struct PhotoEditorView: View {
     // MARK: - Save
 
     private func performSave(_ upscale: PhotoEditorIO.Upscale) {
-        guard !recipe.isIdentity else { dismiss(); return }
+        guard hasEdits else { dismiss(); return }
         let r = recipe
         let src = entry.url
+        let placed = editStickers()
         let title = upscale == .none ? "Saving edited photo…" : "Saving & upscaling photo…"
         let id = library.beginActivity(title, indeterminate: true)
         dismiss()
@@ -1094,7 +1193,8 @@ struct PhotoEditorView: View {
                 fmt = PhotoEditorIO.format(forSource: src)
             }
             let dest = PhotoEditorIO.editedDestination(for: src, format: fmt)
-            let ok = PhotoEditorIO.save(recipe: r, sourceURL: src, to: dest, format: fmt, upscale: upscale)
+            let ok = PhotoEditorIO.save(recipe: r, sourceURL: src, to: dest, format: fmt,
+                                        upscale: upscale, stickers: placed)
             await MainActor.run {
                 library.endActivity(id, result: ok ? "Saved edited photo" : "Couldn’t save the edit")
                 if ok { library.contentDidChange() }
@@ -1480,5 +1580,84 @@ private struct ZoomablePreview: UIViewRepresentable {
                 sv.zoom(to: CGRect(x: p.x - w / 2, y: p.y - h / 2, width: w, height: h), animated: true)
             }
         }
+    }
+}
+
+/// Interactive layer for image stickers over the preview. Each sticker is draggable (move), pinchable
+/// (resize) and rotatable; tap selects. Positions are normalized to the fitted image rect so they match
+/// the pipeline's full-res compositing.
+private struct StickerOverlay: View {
+    @Binding var stickers: [PhotoEditorView.StickerItem]
+    @Binding var selected: UUID?
+    let imageSize: CGSize
+
+    @State private var dragStart: CGPoint?
+    @State private var baseScale: CGFloat?
+    @State private var baseRotation: Angle?
+
+    var body: some View {
+        GeometryReader { geo in
+            let frame = fittedRect(in: geo.size)
+            ForEach($stickers) { $sticker in
+                stickerView($sticker, frame: frame)
+            }
+        }
+    }
+
+    private func stickerView(_ sticker: Binding<PhotoEditorView.StickerItem>, frame: CGRect) -> some View {
+        let s = sticker.wrappedValue
+        let aspect = s.image.size.height > 0 ? s.image.size.width / s.image.size.height : 1
+        let w = max(20, s.scale * frame.width)
+        let pos = CGPoint(x: frame.minX + s.center.x * frame.width,
+                          y: frame.minY + s.center.y * frame.height)
+        let isSel = selected == s.id
+        return Image(uiImage: s.image)
+            .resizable()
+            .frame(width: w, height: w / max(0.05, aspect))
+            .rotationEffect(s.rotation)
+            .overlay { if isSel { RoundedRectangle(cornerRadius: 4).stroke(Color.white, lineWidth: 1.5) } }
+            .position(pos)
+            .gesture(
+                DragGesture()
+                    .onChanged { v in
+                        selected = s.id
+                        if dragStart == nil { dragStart = s.center }
+                        let start = dragStart ?? s.center
+                        guard frame.width > 0, frame.height > 0 else { return }
+                        sticker.wrappedValue.center = CGPoint(
+                            x: clamp01(start.x + v.translation.width / frame.width),
+                            y: clamp01(start.y + v.translation.height / frame.height))
+                    }
+                    .onEnded { _ in dragStart = nil }
+            )
+            .simultaneousGesture(
+                MagnifyGesture()
+                    .onChanged { v in
+                        selected = s.id
+                        if baseScale == nil { baseScale = s.scale }
+                        sticker.wrappedValue.scale = min(2.5, max(0.05, (baseScale ?? s.scale) * v.magnification))
+                    }
+                    .onEnded { _ in baseScale = nil }
+            )
+            .simultaneousGesture(
+                RotateGesture()
+                    .onChanged { v in
+                        selected = s.id
+                        if baseRotation == nil { baseRotation = s.rotation }
+                        sticker.wrappedValue.rotation = (baseRotation ?? s.rotation) + v.rotation
+                    }
+                    .onEnded { _ in baseRotation = nil }
+            )
+            .onTapGesture { selected = s.id }
+    }
+
+    private func clamp01(_ v: CGFloat) -> CGFloat { min(max(v, 0), 1) }
+
+    private func fittedRect(in bounds: CGSize) -> CGRect {
+        guard imageSize.width > 0, imageSize.height > 0, bounds.width > 0, bounds.height > 0
+        else { return CGRect(origin: .zero, size: bounds) }
+        let s = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
+        let w = imageSize.width * s, h = imageSize.height * s
+        return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
     }
 }
