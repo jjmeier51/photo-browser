@@ -169,8 +169,8 @@ enum BodyWarp {
         let topY = b?.nose.map { Double($0.y) } ?? shoulderY ?? 0.1
 
         // Limb tubes start partway down from the root joint so they don't grab the torso/neck/chest.
-        let armL = limb(b?.shoulderL, b?.elbowL, b?.wristL, startFrac: 0.40)
-        let armR = limb(b?.shoulderR, b?.elbowR, b?.wristR, startFrac: 0.40)
+        let armL = limb(b?.shoulderL, b?.elbowL, b?.wristL, startFrac: 0.50)
+        let armR = limb(b?.shoulderR, b?.elbowR, b?.wristR, startFrac: 0.50)
         let legL = limb(b?.hipL, b?.kneeL, b?.ankleL, startFrac: 0.25)
         let legR = limb(b?.hipR, b?.kneeR, b?.ankleR, startFrac: 0.25)
         let mouthCX = fc?.mouth.map { Double($0.x) }
@@ -242,12 +242,11 @@ enum BodyWarp {
                 }
                 if s.height != 0, v > topY { dy += s.height * 0.13 * (v - topY) * henv }
 
-                // ----- Limbs (slim toward the limb axis, confined to a tube; arms only OUTSIDE the torso) -----
+                // ----- Limbs (slim toward the limb axis, confined to a tube around it) -----
                 if s.arms != 0 {
-                    let lat = cx.map { lateralWindow(abs(u - $0), torsoHalf) } ?? 1   // 0 on torso → 1 past it
                     for poly in [armL, armR] {
-                        let (px, py, w) = slimPush(u, v, poly, 0.10, asp)
-                        dx += s.arms * 0.5 * px * w * lat; dy += s.arms * 0.5 * py * w * lat
+                        let (px, py, w) = slimPush(u, v, poly, 0.085, asp)
+                        dx += s.arms * 0.55 * px * w; dy += s.arms * 0.55 * py * w
                     }
                 }
                 if s.legs != 0 {
@@ -268,20 +267,20 @@ enum BodyWarp {
                     if s.eyes != 0 {
                         for eye in [fc.leftEye, fc.rightEye] where eye != nil {
                             let (rx, ry, fall) = radial(u, v, eye!, fc.eyeRadius * 2.4, asp)
-                            dx += s.eyes * 0.42 * rx * fall      // slightly wider than tall
-                            dy += s.eyes * 0.32 * ry * fall
+                            dx += s.eyes * 0.6 * rx * fall      // slightly wider than tall
+                            dy += s.eyes * 0.45 * ry * fall
                         }
                     }
                     if s.nose != 0, let c = fc.nose {
                         // Clamp the radius so the nose effect can't reach the eyes/cheeks.
-                        let (rx, ry, fall) = radial(u, v, c, min(fc.noseRadius * 1.0, 0.045), asp)
-                        dx += s.nose * 0.26 * rx * fall
-                        dy += s.nose * 0.26 * ry * fall
+                        let (rx, ry, fall) = radial(u, v, c, min(fc.noseRadius * 1.0, 0.05), asp)
+                        dx += s.nose * 0.55 * rx * fall
+                        dy += s.nose * 0.55 * ry * fall
                     }
                     if s.lips != 0, let c = fc.mouth {
-                        let (rx, ry, fall) = radial(u, v, c, fc.mouthRadius * 1.5, asp)
-                        dx += s.lips * 0.30 * rx * fall
-                        dy += s.lips * 0.30 * ry * fall
+                        let (rx, ry, fall) = radial(u, v, c, fc.mouthRadius * 1.6, asp)
+                        dx += s.lips * 0.6 * rx * fall
+                        dy += s.lips * 0.6 * ry * fall
                     }
                     if s.ears != 0 {
                         for ear in [fc.faceLeft, fc.faceRight] where ear != nil {
@@ -427,18 +426,12 @@ enum BodyWarp {
     private static func sign(_ v: Double) -> Double { v >= 0 ? 1 : -1 }
     private static func clamp(_ v: Double) -> Double { max(-0.3, min(0.3, v)) }
 
-    /// 1 within the torso column, smoothly → 0 past the arms (confines broad torso squeezes).
+    /// 1 within the torso column, smoothly → 0 just past its edge (so waist/hips squeezes don't reach
+    /// the arms hanging beside the body).
     private static func bodyWindow(_ d: Double, _ half: Double) -> Double {
-        let inner = half * 0.9, outer = half * 1.6
+        let inner = half * 0.7, outer = half * 1.05
         if d <= inner { return 1 }
         if d >= outer { return 0 }
         return 1 - smoothstep((d - inner) / (outer - inner))
-    }
-    /// 0 on the torso, smoothly → 1 past it (so arm slimming can't touch the torso/chest/waist).
-    private static func lateralWindow(_ d: Double, _ half: Double) -> Double {
-        let inner = half * 0.85, outer = half * 1.2
-        if d <= inner { return 0 }
-        if d >= outer { return 1 }
-        return smoothstep((d - inner) / (outer - inner))
     }
 }

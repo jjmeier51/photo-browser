@@ -34,8 +34,8 @@ enum MakeupRenderer {
     /// An ellipse roughly covering the face, used to clip overlays so makeup stays on the face.
     private static func faceClip(_ f: FaceLandmarks, size: CGSize) -> CGRect? {
         guard let c = f.center else { return nil }
-        let rx = CGFloat(max(0.08, f.width * 0.62)) * size.width
-        let ry = CGFloat(max(0.10, f.height * 0.72)) * size.height
+        let rx = CGFloat(max(0.10, f.width * 0.72)) * size.width
+        let ry = CGFloat(max(0.12, f.height * 0.82)) * size.height
         return CGRect(x: c.x * size.width - rx, y: c.y * size.height - ry, width: rx * 2, height: ry * 2)
     }
 
@@ -72,14 +72,14 @@ enum MakeupRenderer {
             for poly in [f.leftEyePoly, f.rightEyePoly] where poly.count >= 3 {
                 let bb = bbox(poly.map(px))
                 let cxp = bb.midX, cyp = bb.minY - bb.height * 0.1
-                let rx = bb.width * 0.6, ry = bb.height * 0.8
-                ctx.setFillColor(col(m.eyeshadowColor, m.eyeshadow * 0.38))
+                let rx = bb.width * 0.7, ry = bb.height * 0.9
+                ctx.setFillColor(col(m.eyeshadowColor, m.eyeshadow * 0.6))
                 ctx.fillEllipse(in: CGRect(x: cxp - rx, y: cyp - ry, width: rx * 2, height: ry * 2))
             }
         }
         if m.blush > 0 {
             for cheek in [f.cheekL, f.cheekR] where cheek != nil {
-                radial(ctx, center: px(cheek!), radius: max(8, W * 0.055), color: col(m.blushColor, m.blush * 0.42))
+                radial(ctx, center: px(cheek!), radius: max(8, W * 0.06), color: col(m.blushColor, m.blush * 0.5))
             }
         }
     }
@@ -125,7 +125,7 @@ enum MakeupRenderer {
             addPoly(path, f.outerLips.map(px))
             if f.innerLips.count >= 3 { addPoly(path, f.innerLips.map(px)) }
             ctx.addPath(path)
-            ctx.setFillColor(col(m.lipsColor, m.lips * 0.55))
+            ctx.setFillColor(col(m.lipsColor, m.lips * 0.92))   // strong (so a 100% dark look reads as black lips)
             ctx.fillPath(using: .evenOdd)
         }
         // Freckles — dense scatter across the whole face; level 5 visibly covers it.

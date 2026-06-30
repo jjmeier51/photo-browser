@@ -699,9 +699,9 @@ struct PhotoEditorView: View {
             m.blush = 0.5; m.blushColor = MakeupColor(0.96, 0.56, 0.55); m.freckles = 2; return m }()),
         MakeupLook(id: "Smoky", recipe: { var m = MakeupRecipe(); m.eyeshadow = 0.6; m.eyeshadowColor = MakeupColor(0.36, 0.34, 0.40)
             m.eyeliner = 0.8; m.lashes = 0.7; m.lips = 0.35; m.lipsColor = MakeupColor(0.70, 0.42, 0.40); return m }()),
-        MakeupLook(id: "Gothic", recipe: { var m = MakeupRecipe(); m.lips = 0.75; m.lipsColor = MakeupColor(0.12, 0.04, 0.08)
-            m.eyeshadow = 0.6; m.eyeshadowColor = MakeupColor(0.18, 0.16, 0.20); m.eyeliner = 0.95; m.lashes = 0.8
-            m.brows = 0.45; return m }()),
+        MakeupLook(id: "Gothic", recipe: { var m = MakeupRecipe(); m.lips = 1.0; m.lipsColor = MakeupColor(0.02, 0.02, 0.03)
+            m.eyeshadow = 1.0; m.eyeshadowColor = MakeupColor(0.03, 0.03, 0.05); m.eyeliner = 1.0; m.lashes = 0.9
+            m.brows = 0.5; return m }()),
         MakeupLook(id: "Bronze", recipe: { var m = MakeupRecipe(); m.eyeshadow = 0.5; m.eyeshadowColor = MakeupColor(0.60, 0.42, 0.22)
             m.lips = 0.40; m.lipsColor = MakeupColor(0.85, 0.45, 0.38); m.blush = 0.4; m.blushColor = MakeupColor(0.92, 0.55, 0.42)
             m.brows = 0.25; m.freckles = 1; return m }()),
@@ -1039,9 +1039,9 @@ struct PhotoEditorView: View {
         let url = entry.url
         let loaded = await Task.detached(priority: .userInitiated) { PhotoEditorIO.load(url: url) }.value
         guard let loaded else { loadFailed = true; return }
-        let p = PhotoEditorIO.proxy(loaded.image, maxDimension: 1600)
+        let p = PhotoEditorIO.proxy(loaded.image, maxDimension: 2200)   // higher-res preview → stays sharp when zoomed
         proxy = p
-        fastProxy = PhotoEditorIO.proxy(p, maxDimension: 820)    // lighter render → higher FPS while dragging a warp
+        fastProxy = PhotoEditorIO.proxy(p, maxDimension: 1000)   // lighter render → higher FPS while dragging a warp
         scheduleRender()
         originalPreview = await Task.detached(priority: .utility) {
             PhotoEditorIO.renderUIImage(p, recipe: EditRecipe())   // unedited proxy for compare

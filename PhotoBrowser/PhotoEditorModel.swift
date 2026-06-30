@@ -75,7 +75,7 @@ struct ReshapeField: Codable, Equatable {
     var dx: [Double]
     var dy: [Double]
 
-    init(cols: Int = 25, rows: Int = 25) {
+    init(cols: Int = 41, rows: Int = 41) {   // fine enough to localize small face features (nose/lips)
         self.cols = max(3, cols)
         self.rows = max(3, rows)
         dx = Array(repeating: 0, count: self.cols * self.rows)
