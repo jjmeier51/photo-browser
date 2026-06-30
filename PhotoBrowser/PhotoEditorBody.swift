@@ -218,18 +218,20 @@ enum BodyWarp {
                         dx -= s.slim * 0.28 * (u - cX) * gaussian(v, sY + torso * 0.5, torso * 0.5) * henv
                     }
                     if s.waist != 0 {
-                        dx -= s.waist * 0.40 * (u - cX) * gaussian(v, sY + torso * 0.72, torso * 0.18) * henv
+                        // Tighter vertical band + lower magnitude so it cinches the waistline instead of
+                        // dragging the whole torso.
+                        dx -= s.waist * 0.30 * (u - cX) * gaussian(v, sY + torso * 0.72, torso * 0.14) * henv
                     }
                 }
                 if s.hips != 0, let cX = cx, let hY = hipY {
-                    dx -= s.hips * 0.36 * (u - cX) * gaussian(v, hY, 0.08) * henv
+                    dx -= s.hips * 0.28 * (u - cX) * gaussian(v, hY, 0.06) * henv
                 }
                 // Breasts / Butt — localized round, protruding bulges (no vertical band shift).
                 if s.breasts != 0 {
                     for c in breastCenters {
                         let (rx, ry, fall) = radial(u, v, c, breastRadius, asp)
-                        dx += s.breasts * 0.18 * rx * fall
-                        dy += s.breasts * 0.17 * ry * fall
+                        dx += s.breasts * 0.22 * rx * fall
+                        dy += s.breasts * 0.20 * ry * fall
                     }
                 }
                 if s.butt != 0 {
@@ -294,10 +296,13 @@ enum BodyWarp {
                         }
                     }
                     if s.nose != 0, let c = fc.nose {
-                        // Clamp the radius so the nose effect can't reach the eyes/cheeks.
-                        let (rx, ry, fall) = radial(u, v, c, min(fc.noseRadius * 1.0, 0.05), asp)
-                        dx += s.nose * 0.55 * rx * fall
-                        dy += s.nose * 0.55 * ry * fall
+                        // Positive = smaller nose: pull the sides inward (narrower) and shorten slightly.
+                        // Radius is large enough to actually grab the nose but capped so it stays off the
+                        // eyes/cheeks.
+                        let r = min(max(fc.noseRadius, 0.045) * 1.5, 0.075)
+                        let (rx, ry, fall) = radial(u, v, c, r, asp)
+                        dx -= s.nose * 0.75 * rx * fall      // narrow horizontally
+                        dy -= s.nose * 0.35 * ry * fall      // shorten vertically
                     }
                     if s.lips != 0, let c = fc.mouth {
                         let (rx, ry, fall) = radial(u, v, c, fc.mouthRadius * 1.6, asp)
@@ -320,13 +325,13 @@ enum BodyWarp {
                         let mouthY = fc.mouth.map { Double($0.y) } ?? (Double(c.y) - 0.08)
                         if v > mouthY { dy += s.chin * 0.06 * gaussian(v, Double(c.y), 0.05) }
                     }
-                    if s.smile != 0 {
-                        // Small corner lift (magnitudes are direct fractions of the image, so keep them tiny).
+                    if s.smile != 0, let mcx = mouthCX {
+                        // Lift + widen each mouth corner inside a *tight* radial brush (hard zero past its
+                        // edge) so the smile stays local instead of warping the whole lower face.
                         for corner in [fc.mouthLeft, fc.mouthRight] where corner != nil {
-                            let cx2 = Double(corner!.x), cy2 = Double(corner!.y)
-                            let fall = gaussian(v, cy2, 0.035) * gaussian(u, cx2, 0.05)
-                            dy -= s.smile * 0.05 * fall                               // lift the corners (smirk)
-                            if let mcx = mouthCX { dx += s.smile * 0.025 * sign(cx2 - mcx) * fall }
+                            let (_, _, fall) = radial(u, v, corner!, 0.055, asp)
+                            dy -= s.smile * 0.06 * fall                                      // lift the corner up
+                            dx += s.smile * 0.035 * sign(Double(corner!.x) - mcx) * fall     // pull it outward
                         }
                     }
                     // Forehead — very subtle vertical give, strictly inside the forehead band.

@@ -49,10 +49,10 @@ enum ObjectRemoval {
         let m = alignMask(mask, to: e)
         var filled = image
         let base = Double(max(e.width, e.height))
-        // Coarse → fine: large radii bridge the hole, small radii sharpen the seam. The largest radius is
-        // kept modest (≈0.035) so the fill borrows from *nearby* pixels and tracks local color/brightness
-        // gradients instead of averaging the whole neighborhood into one flat smear.
-        let radii = [base * 0.035, base * 0.022, base * 0.014, base * 0.009, base * 0.005, base * 0.003, base * 0.002]
+        // Coarse → fine: the largest radii must be big enough to actually bridge the hole and flood it with
+        // surrounding colour — too-small radii leave the object's own pixels behind as a grey smear. The
+        // small radii then tighten the seam.
+        let radii = [base * 0.08, base * 0.05, base * 0.03, base * 0.018, base * 0.01, base * 0.005, base * 0.0025]
         for r in radii {
             for _ in 0..<2 {
                 let blurred = filled.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: max(1, r)])
@@ -81,11 +81,13 @@ enum ObjectRemoval {
         let noise = CIFilter(name: "CIRandomGenerator")!.outputImage!
             .cropped(to: e)
             .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0])
+        // Centre the grain exactly on mid-grey (0.5) so soft-light neither lightens nor darkens the fill on
+        // average — a bias below 0.5 was greying the patch. Small amplitude keeps it a texture, not a haze.
         let grain = noise.applyingFilter("CIColorMatrix", parameters: [
-            "inputRVector": CIVector(x: 0.10, y: 0, z: 0, w: 0),
-            "inputGVector": CIVector(x: 0, y: 0.10, z: 0, w: 0),
-            "inputBVector": CIVector(x: 0, y: 0, z: 0.10, w: 0),
-            "inputBiasVector": CIVector(x: 0.45, y: 0.45, z: 0.45, w: 0),
+            "inputRVector": CIVector(x: 0.06, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: 0.06, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: 0.06, w: 0),
+            "inputBiasVector": CIVector(x: 0.47, y: 0.47, z: 0.47, w: 0),
         ])
         let textured = grain.applyingFilter("CISoftLightBlendMode", parameters: [
             kCIInputBackgroundImageKey: filled,
