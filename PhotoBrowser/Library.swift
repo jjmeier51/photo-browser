@@ -544,6 +544,19 @@ final class Library {
     }
     func isAIGenerated(_ url: URL) -> Bool { aiGeneratedPaths.contains(url.path) }
 
+    // MARK: - Edited in-app
+
+    /// Paths of files produced by the in-app photo editor, so a folder can filter to "Edited" items.
+    var editedInAppPaths: Set<String> = Library.migrateBulk("editedInApp", legacyKey: "photoBrowser.editedInApp") {
+        Set(UserDefaults.standard.stringArray(forKey: $0) ?? [])
+    }
+    func markEditedInApp(_ url: URL) {
+        editedInAppPaths.insert(url.path)
+        Self.saveBulk(editedInAppPaths, "editedInApp")
+        labelsVersion += 1
+    }
+    func isEditedInApp(_ url: URL) -> Bool { editedInAppPaths.contains(url.path) }
+
     // MARK: - taylorpictures.net downloaded albums
 
     /// Coppermine album ids already downloaded, so the browser can mark them.
@@ -1033,6 +1046,7 @@ final class Library {
     private func applyRemap(_ remap: (String) -> String) {
         favorites = Set(favorites.map(remap))
         aiLabels = Set(aiLabels.map(remap))
+        editedInAppPaths = Set(editedInAppPaths.map(remap))
         framesFolders = Set(framesFolders.map(remap))
         kardashianFolders = Set(kardashianFolders.map(remap))
         instagramHighlights = Set(instagramHighlights.map(remap))
@@ -1058,6 +1072,7 @@ final class Library {
 
         Self.saveBulk(favorites, "favorites")
         Self.saveBulk(aiLabels, "ai")
+        Self.saveBulk(editedInAppPaths, "editedInApp")
         UserDefaults.standard.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
         UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
         UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")

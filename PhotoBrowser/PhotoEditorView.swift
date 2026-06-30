@@ -1138,7 +1138,7 @@ struct PhotoEditorView: View {
             .padding(.horizontal)
 
             labeledSlider("Size", systemImage: "circle.dashed",
-                          value: $reshapeRadius, range: 0.06...0.4)
+                          value: $reshapeRadius, range: 0.02...0.4)
             labeledSlider("Strength", systemImage: "scribble.variable",
                           value: $reshapeStrength, range: 0.1...1.0)
         }
@@ -1161,7 +1161,8 @@ struct PhotoEditorView: View {
     /// the reshape mesh, with a smooth round-brush falloff, then re-renders.
     private func applyReshape(at p: CGPoint, delta: CGSize) {
         guard let aspect = previewImageRatio else { return }
-        var f = recipe.reshape ?? ReshapeField()
+        // A finer mesh than the body warp's default so a small brush can localize to a tiny area.
+        var f = recipe.reshape ?? ReshapeField(cols: 61, rows: 61)
         let cols = f.cols, rows = f.rows
         let r = Double(reshapeRadius)
         let strength = Double(reshapeStrength)
@@ -1349,7 +1350,7 @@ struct PhotoEditorView: View {
                                         upscale: upscale, stickers: placed, retouch: strokes)
             await MainActor.run {
                 library.endActivity(id, result: ok ? "Saved edited photo" : "Couldn’t save the edit")
-                if ok { library.contentDidChange() }
+                if ok { library.markEditedInApp(dest); library.contentDidChange() }
             }
         }
     }
@@ -1536,18 +1537,26 @@ private struct ReshapeCanvas: UIViewRepresentable {
                                                action: #selector(Coordinator.handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
         sv.addGestureRecognizer(doubleTap)
+        context.coordinator.lastBrushRadius = brushRadius   // no preview flash on first appear
 
         return sv
     }
 
     func updateUIView(_ sv: ReshapeScrollView, context: Context) {
+        let radiusChanged = abs(context.coordinator.lastBrushRadius - brushRadius) > 0.0001
         context.coordinator.parent = self
         if sv.imageView.image !== image { sv.setImage(image) }
+        // Flash a preview ring at the brush's new size while the user drags the Size slider.
+        if radiusChanged {
+            context.coordinator.lastBrushRadius = brushRadius
+            context.coordinator.showSizePreview()
+        }
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         var parent: ReshapeCanvas
         weak var scroll: ReshapeScrollView?
+        var lastBrushRadius: CGFloat = -1
         private var last: CGPoint?
         private let ring = CAShapeLayer()
 
@@ -1579,7 +1588,9 @@ private struct ReshapeCanvas: UIViewRepresentable {
             case .began:
                 last = loc
                 parent.onBegin()
+                NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(hidePreview), object: nil)
                 if ring.superlayer == nil { iv.layer.addSublayer(ring) }
+                ring.opacity = 1
                 updateRing(at: loc, in: size); ring.isHidden = false
             case .changed:
                 let prev = last ?? loc
@@ -1610,6 +1621,32 @@ private struct ReshapeCanvas: UIViewRepresentable {
             ring.path = UIBezierPath(arcCenter: loc, radius: parent.brushRadius * size.width,
                                      startAngle: 0, endAngle: .pi * 2, clockwise: true).cgPath
             if let z = scroll?.zoomScale, z > 0 { ring.lineWidth = 1.5 / z }   // ~constant on-screen width
+        }
+
+        /// Shows the brush ring at its new size, centred on the visible area, while the Size slider moves,
+        /// then fades it out shortly after the last change (so the user can *see* how big the brush is).
+        func showSizePreview() {
+            guard last == nil, let sv = scroll else { return }   // not while actively brushing
+            let iv = sv.imageView
+            let size = iv.bounds.size
+            guard size.width > 0, size.height > 0 else { return }
+            if ring.superlayer == nil { iv.layer.addSublayer(ring) }
+            let center = sv.convert(CGPoint(x: sv.bounds.midX, y: sv.bounds.midY), to: iv)
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            updateRing(at: center, in: size)
+            ring.opacity = 1; ring.isHidden = false
+            CATransaction.commit()
+            NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(hidePreview), object: nil)
+            perform(#selector(hidePreview), with: nil, afterDelay: 0.8)
+        }
+
+        @objc private func hidePreview() {
+            guard last == nil else { return }   // keep it if a brush drag started meanwhile
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = 1; fade.toValue = 0; fade.duration = 0.35
+            ring.add(fade, forKey: "fade")
+            ring.opacity = 0
+            ring.isHidden = true
         }
 
         private func clamp01(_ v: CGFloat) -> CGFloat { min(max(v, 0), 1) }

@@ -40,6 +40,7 @@ struct FolderView: View {
     @State private var loaded = false
     @State private var yearFilter: Int?
     @State private var typeFilter: TypeFilter = .all
+    @State private var showEditedOnly = false
     @State private var showFavoritesOnly = false
     @State private var favoriteEntries: [Entry] = []
     @State private var captureDates: [URL: Date] = [:]
@@ -271,7 +272,7 @@ struct FolderView: View {
                 let aged = applyType(agedList.filter { $0.age == target }.map { $0.entry })
                 results += aged.filter { !existing.contains($0.url) }
             }
-            return results
+            return applyEdited(results)
         }
 
         // Bubble folders (Instagram + album highlights) are shown as bubbles, not tiles.
@@ -285,8 +286,14 @@ struct FolderView: View {
             }
         }
         list = applyType(list)
+        list = applyEdited(list)
         if advancedActive { list = list.filter { passesAdvanced($0) } }
         return list
+    }
+
+    /// Keeps only files produced by the in-app editor (when the "Edited" filter is on).
+    private func applyEdited(_ list: [Entry]) -> [Entry] {
+        showEditedOnly ? list.filter { !$0.isFolder && library.isEditedInApp($0.url) } : list
     }
 
     /// Content-type filter (hides subfolders when a type is chosen).
@@ -1308,6 +1315,7 @@ struct FolderView: View {
     private var headerSubtitle: String {
         if showFavoritesOnly { return "Favorites" }
         if showAIOnly { return "To AI" }
+        if showEditedOnly { return "Edited" }
         if let ig = library.instagramInfo(for: url) {
             let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
             let when = f.string(from: Date(timeIntervalSince1970: ig.lastUpdated))
@@ -1335,7 +1343,7 @@ struct FolderView: View {
             HStack(spacing: 10) {
                 Button {
                     showFavoritesOnly.toggle()
-                    if showFavoritesOnly { showAIOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false }
+                    if showFavoritesOnly { showAIOnly = false; showEditedOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false }
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: showFavoritesOnly ? "heart.fill" : "heart")
@@ -1348,7 +1356,7 @@ struct FolderView: View {
 
                 Button {
                     showAIOnly.toggle()
-                    if showAIOnly { showFavoritesOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false }
+                    if showAIOnly { showFavoritesOnly = false; showEditedOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false }
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "sparkles")
@@ -1357,6 +1365,22 @@ struct FolderView: View {
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     .background(.thinMaterial, in: Capsule())
                     .foregroundStyle(showAIOnly ? Color.yellow : Color.primary)
+                }
+
+                Button {
+                    showEditedOnly.toggle()
+                    if showEditedOnly {
+                        showFavoritesOnly = false; showAIOnly = false
+                        tsLabelFilter.removeAll(); tsNoLabel = false; ageFilter = nil
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "wand.and.stars")
+                        Text("Edited").font(.subheadline.weight(.medium))
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(.thinMaterial, in: Capsule())
+                    .foregroundStyle(showEditedOnly ? Color.accentColor : Color.primary)
                 }
 
                 if hasCustomLabels {
@@ -1788,7 +1812,7 @@ struct FolderView: View {
     /// Toggles a Taylor Swift label in the filter (and leaves the other modes).
     private func toggleTSLabelFilter(_ name: String) {
         if tsLabelFilter.contains(name) { tsLabelFilter.remove(name) }
-        else { tsLabelFilter.insert(name); tsNoLabel = false; showFavoritesOnly = false; showAIOnly = false }
+        else { tsLabelFilter.insert(name); tsNoLabel = false; showFavoritesOnly = false; showAIOnly = false; showEditedOnly = false }
     }
 
     /// Toggles the "No Label" filter (unlabeled photos/videos), clearing the others.
