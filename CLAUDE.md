@@ -2,6 +2,11 @@
 
 Guidance for AI assistants working in this repository.
 
+> **Photo editor:** for a full description of the in-app photo-editing module
+> (every tool, how it's built, and the invariants), see
+> [`docs/photo-editor-capabilities.md`](docs/photo-editor-capabilities.md). Read it
+> before changing anything under `PhotoBrowser/PhotoEditor*.swift`.
+
 ## What this is
 
 **Photo Browser** is a native iOS/iPadOS app (SwiftUI) for browsing and managing
