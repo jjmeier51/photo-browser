@@ -191,7 +191,7 @@ enum BodyWarp {
             guard let l = lm.hipL, let r = lm.hipR else { return nil }
             return abs(Double(l.x - r.x)) / 2
         }
-        let breastRadius = max(0.06, (shoulderHalf ?? 0.13) * 0.7)
+        let breastRadius = max(0.05, (shoulderHalf ?? 0.13) * 0.5)   // kept clear of the arms (see bw below)
         let buttRadius = max(0.11, (hipHalf ?? shoulderHalf ?? 0.14) * 1.15)
         let torsoHalf = max(0.12, max(shoulderHalf ?? 0.18, hipHalf ?? 0.18))
         // Facing direction: how far the nose sits from the body axis (sideness 0 = front/back, 1 = profile)
@@ -250,27 +250,30 @@ enum BodyWarp {
                 }
                 // Breasts / Butt — localized round, protruding bulges (no vertical band shift).
                 if s.breasts != 0, let cX = cx {
+                    // Arm-safe horizontal window: full over the chest, faded to **zero before the arms** so
+                    // the breast warp never reaches the arm/torso edge (that collision was the tearing). It's
+                    // based on the breast spacing, not the wider shoulder span like the torso window.
+                    let armHalf = shoulderHalf ?? hipHalf ?? 0.18
+                    let bw = bodyWindow(abs(u - cX), armHalf * 0.7)
                     for c in breastCenters {
                         let (rx, ry, fall) = radial(u, v, c, breastRadius, asp)
                         let innerDir = cX > Double(c.x) ? 1.0 : -1.0     // direction toward the other breast (axis)
                         // Smooth vertical weight: damped above the breast centre (clavicle), full below — a
                         // *hard* step here folded the mesh and tore the image at larger sizes.
                         let vw = 0.3 + 0.7 * smoothstep(ry / breastRadius + 0.5)
-                        // Confine to the torso column (henv) so the warp fades out *before* the body
-                        // silhouette — a large push meeting the subject-mask edge is what caused the tearing.
-                        let g = fall * vw * henv
+                        let g = fall * vw * bw
                         // Roundness: a gentle radial expansion from the breast centre (expanding circle),
                         // for a fuller, rounder dome. Zero at the exact centre, so the peak isn't pulled out.
-                        dx += s.breasts * 0.18 * rx * g
-                        dy += s.breasts * 0.18 * ry * g
+                        dx += s.breasts * 0.20 * rx * g
+                        dy += s.breasts * 0.20 * ry * g
                         // Cleavage: inner half eases toward the other breast (stronger); outer half eases out
                         // just slightly. Both grow continuously from 0 at the centre line (no seam).
                         let inner = max(0.0, rx * innerDir) / breastRadius
                         let outer = max(0.0, -rx * innerDir) / breastRadius
-                        dx += s.breasts * 0.26 * innerDir * inner * g
+                        dx += s.breasts * 0.30 * innerDir * inner * g
                         dx -= s.breasts * 0.06 * innerDir * outer * g
                         // Bottom of the breast sags slightly (smooth, with no kink at the centre line).
-                        dy += s.breasts * 0.13 * smoothstep(ry / breastRadius) * fall * henv
+                        dy += s.breasts * 0.15 * smoothstep(ry / breastRadius) * fall * bw
                     }
                 }
                 if s.butt != 0 {
