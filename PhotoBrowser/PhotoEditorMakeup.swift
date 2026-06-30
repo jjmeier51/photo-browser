@@ -15,24 +15,39 @@ enum MakeupRenderer {
         guard !m.isZero, !e.isInfinite, !e.isNull, e.width >= 8, e.height >= 8 else { return image }
         let size = CGSize(width: e.width, height: e.height)
         var out = image
-        // Soft pass — blush + eyeshadow heavily feathered so they read as a wash, not a splotch.
+        // A face clip (ellipse from the face box) so nothing can bleed onto hair/neck/background.
+        let clip = faceClip(face, size: size)
+        // Soft pass — blush + eyeshadow, lightly feathered. (A heavy blur here is what produced the
+        // earlier "big splotch", so the feather is kept modest.)
         if m.blush > 0 || m.eyeshadow > 0 {
             out = composite({ drawSoft($0, size: size, makeup: m, face: face) },
-                            over: out, extent: e, feather: Double(e.width) * 0.022)
+                            over: out, extent: e, feather: Double(e.width) * 0.006, clip: clip)
         }
         // Sharp pass — lips, liner, lashes, brows, freckles with only a light feather.
         if m.lips > 0 || m.eyeliner > 0 || m.lashes > 0 || m.brows > 0 || m.freckles > 0 {
             out = composite({ drawSharp($0, size: size, makeup: m, face: face) },
-                            over: out, extent: e, feather: max(1, Double(e.width) * 0.0018))
+                            over: out, extent: e, feather: max(1, Double(e.width) * 0.0016), clip: clip)
         }
         return out
     }
 
+    /// An ellipse roughly covering the face, used to clip overlays so makeup stays on the face.
+    private static func faceClip(_ f: FaceLandmarks, size: CGSize) -> CGRect? {
+        guard let c = f.center else { return nil }
+        let rx = CGFloat(max(0.08, f.width * 0.62)) * size.width
+        let ry = CGFloat(max(0.10, f.height * 0.72)) * size.height
+        return CGRect(x: c.x * size.width - rx, y: c.y * size.height - ry, width: rx * 2, height: ry * 2)
+    }
+
     private static func composite(_ drawing: (CGContext) -> Void, over base: CIImage,
-                                  extent e: CGRect, feather: Double) -> CIImage {
+                                  extent e: CGRect, feather: Double, clip: CGRect?) -> CIImage {
         let size = CGSize(width: e.width, height: e.height)
         let fmt = UIGraphicsImageRendererFormat.default(); fmt.scale = 1; fmt.opaque = false
-        let img = UIGraphicsImageRenderer(size: size, format: fmt).image { rctx in drawing(rctx.cgContext) }
+        let img = UIGraphicsImageRenderer(size: size, format: fmt).image { rctx in
+            let ctx = rctx.cgContext
+            if let clip { ctx.addEllipse(in: clip); ctx.clip() }   // keep makeup on the face
+            drawing(ctx)
+        }
         guard let cg = img.cgImage else { return base }
         var overlay = CIImage(cgImage: cg)
         if feather > 0.5 {
@@ -57,14 +72,14 @@ enum MakeupRenderer {
             for poly in [f.leftEyePoly, f.rightEyePoly] where poly.count >= 3 {
                 let bb = bbox(poly.map(px))
                 let cxp = bb.midX, cyp = bb.minY - bb.height * 0.1
-                let rx = bb.width * 0.65, ry = bb.height * 0.95
-                ctx.setFillColor(col(m.eyeshadowColor, m.eyeshadow * 0.5))
+                let rx = bb.width * 0.6, ry = bb.height * 0.8
+                ctx.setFillColor(col(m.eyeshadowColor, m.eyeshadow * 0.38))
                 ctx.fillEllipse(in: CGRect(x: cxp - rx, y: cyp - ry, width: rx * 2, height: ry * 2))
             }
         }
         if m.blush > 0 {
             for cheek in [f.cheekL, f.cheekR] where cheek != nil {
-                radial(ctx, center: px(cheek!), radius: max(8, W * 0.10), color: col(m.blushColor, m.blush * 0.55))
+                radial(ctx, center: px(cheek!), radius: max(8, W * 0.055), color: col(m.blushColor, m.blush * 0.42))
             }
         }
     }

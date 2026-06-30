@@ -192,6 +192,12 @@ enum BodyWarp {
         }
         let breastRadius = max(0.06, (shoulderHalf ?? 0.13) * 0.7)
         let buttRadius = max(0.06, (shoulderHalf ?? 0.13) * 0.85)
+        // Half-width of the torso column; broad squeezes are confined inside it (so arms/background stay).
+        let hipHalf = b.flatMap { lm -> Double? in
+            guard let l = lm.hipL, let r = lm.hipR else { return nil }
+            return abs(Double(l.x - r.x)) / 2
+        }
+        let torsoHalf = max(0.12, max(shoulderHalf ?? 0.18, hipHalf ?? 0.18))
 
         for j in 1..<(rows - 1) {
             for i in 1..<(cols - 1) {
@@ -199,18 +205,19 @@ enum BodyWarp {
                 let v = Double(j) / Double(rows - 1)
                 var dx = 0.0, dy = 0.0
 
-                // ----- Body (torso: tight vertical bands; the subject mask isolates left↔right) -----
+                // ----- Body (torso: tight vertical bands, confined to the torso column) -----
+                let henv = cx.map { bodyWindow(abs(u - $0), torsoHalf) } ?? 1   // 1 on torso → 0 past the arms
                 if let cX = cx, let sY = shoulderY, let hY = hipY {
                     let torso = max(0.06, hY - sY)
                     if s.slim != 0 {
-                        dx -= s.slim * 0.24 * (u - cX) * gaussian(v, sY + torso * 0.5, torso * 0.5)
+                        dx -= s.slim * 0.24 * (u - cX) * gaussian(v, sY + torso * 0.5, torso * 0.5) * henv
                     }
                     if s.waist != 0 {
-                        dx -= s.waist * 0.30 * (u - cX) * gaussian(v, sY + torso * 0.72, torso * 0.15)
+                        dx -= s.waist * 0.30 * (u - cX) * gaussian(v, sY + torso * 0.72, torso * 0.15) * henv
                     }
                 }
                 if s.hips != 0, let cX = cx, let hY = hipY {
-                    dx -= s.hips * 0.26 * (u - cX) * gaussian(v, hY, 0.06)
+                    dx -= s.hips * 0.26 * (u - cX) * gaussian(v, hY, 0.06) * henv
                 }
                 // Breasts / Butt — localized round, protruding bulges (no vertical band shift).
                 if s.breasts != 0 {
@@ -233,13 +240,14 @@ enum BodyWarp {
                     let gap = max(0.05, sY - chinY)
                     dx -= s.neck * 0.24 * (u - cX) * gaussian(v, chinY + gap * 0.5, gap * 0.18)
                 }
-                if s.height != 0, v > topY { dy += s.height * 0.13 * (v - topY) }
+                if s.height != 0, v > topY { dy += s.height * 0.13 * (v - topY) * henv }
 
-                // ----- Limbs (slim toward the limb axis, confined to a tube around it) -----
+                // ----- Limbs (slim toward the limb axis, confined to a tube; arms only OUTSIDE the torso) -----
                 if s.arms != 0 {
+                    let lat = cx.map { lateralWindow(abs(u - $0), torsoHalf) } ?? 1   // 0 on torso → 1 past it
                     for poly in [armL, armR] {
                         let (px, py, w) = slimPush(u, v, poly, 0.10, asp)
-                        dx += s.arms * 0.5 * px * w; dy += s.arms * 0.5 * py * w
+                        dx += s.arms * 0.5 * px * w * lat; dy += s.arms * 0.5 * py * w * lat
                     }
                 }
                 if s.legs != 0 {
@@ -265,9 +273,10 @@ enum BodyWarp {
                         }
                     }
                     if s.nose != 0, let c = fc.nose {
-                        let (rx, ry, fall) = radial(u, v, c, fc.noseRadius * 1.8, asp)
-                        dx += s.nose * 0.30 * rx * fall
-                        dy += s.nose * 0.30 * ry * fall
+                        // Clamp the radius so the nose effect can't reach the eyes/cheeks.
+                        let (rx, ry, fall) = radial(u, v, c, min(fc.noseRadius * 1.0, 0.045), asp)
+                        dx += s.nose * 0.26 * rx * fall
+                        dy += s.nose * 0.26 * ry * fall
                     }
                     if s.lips != 0, let c = fc.mouth {
                         let (rx, ry, fall) = radial(u, v, c, fc.mouthRadius * 1.5, asp)
@@ -288,14 +297,15 @@ enum BodyWarp {
                     }
                     if s.chin != 0, let c = fc.chin {
                         let mouthY = fc.mouth.map { Double($0.y) } ?? (Double(c.y) - 0.08)
-                        if v > mouthY { dy += s.chin * 0.16 * gaussian(v, Double(c.y), 0.06) }
+                        if v > mouthY { dy += s.chin * 0.06 * gaussian(v, Double(c.y), 0.05) }
                     }
                     if s.smile != 0 {
+                        // Small corner lift (magnitudes are direct fractions of the image, so keep them tiny).
                         for corner in [fc.mouthLeft, fc.mouthRight] where corner != nil {
                             let cx2 = Double(corner!.x), cy2 = Double(corner!.y)
-                            let fall = gaussian(v, cy2, 0.045) * gaussian(u, cx2, 0.075)
-                            dy -= s.smile * 0.20 * fall                               // lift the corners (smirk)
-                            if let mcx = mouthCX { dx += s.smile * 0.08 * sign(cx2 - mcx) * fall }  // and out
+                            let fall = gaussian(v, cy2, 0.035) * gaussian(u, cx2, 0.05)
+                            dy -= s.smile * 0.05 * fall                               // lift the corners (smirk)
+                            if let mcx = mouthCX { dx += s.smile * 0.025 * sign(cx2 - mcx) * fall }
                         }
                     }
                     // Forehead — very subtle vertical give, strictly inside the forehead band.
@@ -416,4 +426,19 @@ enum BodyWarp {
     }
     private static func sign(_ v: Double) -> Double { v >= 0 ? 1 : -1 }
     private static func clamp(_ v: Double) -> Double { max(-0.3, min(0.3, v)) }
+
+    /// 1 within the torso column, smoothly → 0 past the arms (confines broad torso squeezes).
+    private static func bodyWindow(_ d: Double, _ half: Double) -> Double {
+        let inner = half * 0.9, outer = half * 1.6
+        if d <= inner { return 1 }
+        if d >= outer { return 0 }
+        return 1 - smoothstep((d - inner) / (outer - inner))
+    }
+    /// 0 on the torso, smoothly → 1 past it (so arm slimming can't touch the torso/chest/waist).
+    private static func lateralWindow(_ d: Double, _ half: Double) -> Double {
+        let inner = half * 0.85, outer = half * 1.2
+        if d <= inner { return 0 }
+        if d >= outer { return 1 }
+        return smoothstep((d - inner) / (outer - inner))
+    }
 }
