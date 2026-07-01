@@ -266,9 +266,14 @@ struct FolderView: View {
         // Searching: recursive results (current folder + all subfolders).
         if !q.isEmpty {
             var results = applyType(searchResults)
+            var existing = Set(results.map { $0.url })
+            // Always match this folder's own subfolders by name — the index only knows folders that hold
+            // indexed media, so this guarantees folders like "Today's Instagram Stories" are findable.
+            let folderHits = entries.filter { $0.isFolder && !existing.contains($0.url) && matches($0, q) }
+            results += folderHits
+            existing.formUnion(folderHits.map { $0.url })
             // Age search: a numeric query also matches media of that age.
             if let target = Int(q) {
-                let existing = Set(results.map { $0.url })
                 let aged = applyType(agedList.filter { $0.age == target }.map { $0.entry })
                 results += aged.filter { !existing.contains($0.url) }
             }
@@ -1110,7 +1115,9 @@ struct FolderView: View {
     @ViewBuilder private var emptyOverlay: some View {
         if filtered.isEmpty {
             VStack(spacing: 8) {
-                if loadingAges && (ageFilter != nil || !query.trimmingCharacters(in: .whitespaces).isEmpty) {
+                if loadingAges && (ageFilter != nil || Int(query.trimmingCharacters(in: .whitespaces)) != nil) {
+                    // Only block on ages for an actual age filter / numeric (age) query — a text search must
+                    // not get stuck behind the age computation.
                     ProgressView()
                     Text("Calculating ages…").foregroundStyle(.secondary)
                 } else if searching {

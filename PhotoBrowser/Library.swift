@@ -1402,10 +1402,29 @@ final class Library {
     func searchIndex(under folder: URL, query: String, captions: [String: String], sort: SortKey) -> [Entry] {
         let q = query.lowercased()
         let base = folder.path
-        let matches = index.filter { e in
-            (e.url.path == base || e.url.path.hasPrefix(base + "/")) &&
-            (e.name.lowercased().contains(q) || (captions[e.url.path]?.lowercased().contains(q) ?? false)
-             || (MetadataLoader.ocrTextCached(for: e)?.contains(q) ?? false))   // text inside photos
+        var matches: [Entry] = []
+        var parents = Set<String>()                        // folders holding indexed media (for folder-name search)
+        for e in index {
+            let p = e.url.path
+            guard p == base || p.hasPrefix(base + "/") else { continue }
+            if e.name.lowercased().contains(q) || (captions[p]?.lowercased().contains(q) ?? false)
+                || (MetadataLoader.ocrTextCached(for: e)?.contains(q) ?? false) {   // text inside photos
+                matches.append(e)
+            }
+            parents.insert((p as NSString).deletingLastPathComponent)
+        }
+        // The media index has no folders, so a folder name like "Today's Instagram Stories" was never
+        // matched. Expand the parent folders (and their ancestors under `base`) and match their names too.
+        var folders = Set<String>()
+        for parent in parents {
+            var dir = parent
+            while dir.count > base.count, dir.hasPrefix(base), folders.insert(dir).inserted {
+                dir = (dir as NSString).deletingLastPathComponent
+            }
+        }
+        for fp in folders where ((fp as NSString).lastPathComponent).lowercased().contains(q) {
+            let u = URL(fileURLWithPath: fp, isDirectory: true)
+            matches.append(Entry(url: u, name: u.lastPathComponent, kind: .folder, size: 0, modified: .distantPast))
         }
         return Self.sortEntries(matches, by: sort)
     }
