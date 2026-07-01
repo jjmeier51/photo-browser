@@ -848,13 +848,25 @@ final class Library {
     func prepareTodaysStoriesFolder(root: URL) -> URL {
         let folder = root.appendingPathComponent("Today's Instagram Stories", isDirectory: true)
         let now = Date().timeIntervalSince1970
+        let fm = FileManager.default
         if igStoriesTempStart == 0 || now - igStoriesTempStart > 24 * 3600 {
-            try? FileManager.default.removeItem(at: folder)
+            // Clear by an atomic *rename* to a hidden trash name, then delete that in the background. Deleting
+            // in place risks leaving a half-removed, un-listable folder if iOS kills the app mid-delete (an
+            // external drive is slow) — which corrupts the directory entry so the folder can't even be
+            // re-created, moved or deleted afterward.
+            if fm.fileExists(atPath: folder.path) {
+                let trash = root.appendingPathComponent(".pb-oldstories-\(UUID().uuidString)", isDirectory: true)
+                if (try? fm.moveItem(at: folder, to: trash)) != nil {
+                    Task.detached(priority: .background) { try? FileManager.default.removeItem(at: trash) }
+                } else {
+                    try? fm.removeItem(at: folder)
+                }
+            }
             setIGStoriesTempStart(now)
             storyLinks = [:]                                  // the linked temp files are gone now
             UserDefaults.standard.set(storyLinks, forKey: "photoBrowser.storyLinks")
         }
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder
     }
 
