@@ -19,6 +19,7 @@ enum ImportPurpose { case open, transfer, relink }
 /// viewer for photos/videos, and a Select mode for save/delete.
 struct FolderView: View {
     @Environment(Library.self) private var library
+    @Environment(\.scenePhase) private var scenePhase
     let url: URL
     let isRoot: Bool
 
@@ -386,6 +387,7 @@ struct FolderView: View {
                 .padding(4)
             }
             .scrollDisabled(scrollLocked)        // freeze the page while a select-drag is active
+            .refreshable { await reload() }      // pull down to force a fresh disk re-listing
             .coordinateSpace(name: "grid")
             .background(
                 GeometryReader { g in
@@ -1052,6 +1054,9 @@ struct FolderView: View {
         let loaders = AnyView(chrome
             .task(id: library.sort) { await reload() }
             .onChange(of: library.changeToken) { Task { await reload() } }
+            // Re-list on return to foreground, so folders created/changed while the app was backgrounded
+            // (e.g. a stories run finishing, or a change made in the Files app) show up.
+            .onChange(of: scenePhase) { if scenePhase == .active { Task { await reload() } } }
             .task(id: "search-\(query)-\(library.sort.rawValue)-\(library.index.count)") { await runSearch() }
             // Embedded captions are only needed to match a search; load them lazily so a
             // plain folder open doesn't read every file on the drive.
