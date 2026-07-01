@@ -293,7 +293,10 @@ struct FolderView: View {
 
     /// Keeps only files produced by the in-app editor (when the "Edited" filter is on).
     private func applyEdited(_ list: [Entry]) -> [Entry] {
-        showEditedOnly ? list.filter { !$0.isFolder && library.isEditedInApp($0.url) } : list
+        // Keep folders visible so you can still navigate / create folders while the filter is on; only the
+        // *media* is narrowed to in-app-edited items. (Hiding folders made "Today's Instagram Stories" and
+        // newly-created folders seem to vanish.)
+        showEditedOnly ? list.filter { $0.isFolder || library.isEditedInApp($0.url) } : list
     }
 
     /// Content-type filter (hides subfolders when a type is chosen).
@@ -1934,7 +1937,13 @@ struct FolderView: View {
     private func createFolder() {
         let name = newFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
         newFolderName = ""
-        guard FileActions.createFolder(named: name, in: url) else { return }
+        guard !name.isEmpty else { return }
+        guard FileActions.createFolder(named: name, in: url) else {
+            // Don't fail silently — tell the user why (usually a name clash or a non-writable drive).
+            let id = library.beginActivity("New Folder")
+            library.endActivity(id, result: "Couldn't create “\(name)”. A folder with that name may already exist, or the drive isn't writable right now.")
+            return
+        }
         library.contentDidChange()                       // refresh this folder's listing
         library.path.append(url.appendingPathComponent(name, isDirectory: true))   // open the new folder
     }
