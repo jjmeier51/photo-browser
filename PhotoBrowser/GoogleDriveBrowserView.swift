@@ -2,14 +2,19 @@ import SwiftUI
 import WebKit
 
 /// A built-in browser for Google Drive. You sign in with your normal Google login (the session persists in
-/// a private, on-device data store), navigate to any folder, and tap **This Folder** to download every item
-/// loaded in the view, or **Selected** to download just the items you've selected. Downloads use the
-/// signed-in **web session** (cookies) — no API key/token — and run as an app-wide background task so you
-/// can keep using the app while they finish. Nothing is uploaded.
+/// a private, on-device data store), navigate to a folder, then either download **This Folder** (every item
+/// loaded in the view) or turn on **Select** and tap items to pick specific ones.
+///
+/// Google Drive's *mobile web* UI has no usable multi-select (a tap just opens the item), so Select mode
+/// injects our own tap-to-select layer: while it's on, tapping an item toggles a highlight instead of
+/// opening it. Downloads use the signed-in **web session** (cookies) — no API key/token — and run as an
+/// app-wide background task so you can keep using the app. Nothing is uploaded.
 struct GoogleDriveBrowserView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
     let targetFolder: URL
+
+    @State private var selectMode = false
 
     @State private var webView: WKWebView = {
         let cfg = WKWebViewConfiguration()
@@ -33,9 +38,16 @@ struct GoogleDriveBrowserView: View {
                         Button { webView.goBack() } label: { Image(systemName: "chevron.left") }
                     }
                     ToolbarItemGroup(placement: .bottomBar) {
-                        Button { download(selectedOnly: true) } label: {
-                            Label("Selected", systemImage: "checkmark.circle")
+                        Button { toggleSelectMode() } label: {
+                            Label(selectMode ? "Selecting" : "Select",
+                                  systemImage: selectMode ? "checkmark.circle.fill" : "checkmark.circle")
                         }
+                        .tint(selectMode ? .accentColor : nil)
+                        Spacer()
+                        Button { download(selectedOnly: true) } label: {
+                            Label("Selected", systemImage: "arrow.down.circle")
+                        }
+                        .disabled(!selectMode)
                         Spacer()
                         Button { download(selectedOnly: false) } label: {
                             Label("This Folder", systemImage: "square.and.arrow.down")
@@ -51,25 +63,42 @@ struct GoogleDriveBrowserView: View {
         }
     }
 
-    /// Scrapes the Drive page for item IDs (all loaded, or just the selected ones), grabs the session
-    /// cookies, kicks off the background download, and closes so you can keep using the app.
-    private func download(selectedOnly: Bool) {
+    /// Turns tap-to-select on/off. While on, a document-level capture-phase click handler intercepts taps on
+    /// Drive items (elements carrying a `data-id`), toggles a blue outline + a tracked set, and prevents the
+    /// default open/navigate. While off, taps behave normally so you can browse into folders.
+    private func toggleSelectMode() {
+        selectMode.toggle()
         let js = """
         (function() {
-          function ids(sel) {
-            return Array.from(document.querySelectorAll(sel))
-              .map(function(e) { return e.getAttribute('data-id'); })
-              .filter(Boolean);
+          window.__pbSel = window.__pbSel || {};
+          window.__pbSelectMode = \(selectMode ? "true" : "false");
+          if (!window.__pbInstalled) {
+            window.__pbInstalled = true;
+            document.addEventListener('click', function(e) {
+              if (!window.__pbSelectMode) return;
+              var el = e.target.closest('[data-id]');
+              if (!el) return;
+              e.preventDefault(); e.stopImmediatePropagation();
+              var id = el.getAttribute('data-id');
+              if (window.__pbSel[id]) { delete window.__pbSel[id]; el.style.outline = ''; }
+              else { window.__pbSel[id] = true; el.style.outline = '3px solid #4285F4'; el.style.outlineOffset = '-3px'; }
+            }, true);
           }
-          var sel = Array.from(new Set(ids('[data-id][aria-selected="true"]')));
-          var all = Array.from(new Set(ids('[data-id]')));
-          return JSON.stringify({ selected: sel, all: all });
+          return '';
         })();
         """
+        webView.evaluateJavaScript(js)
+    }
+
+    /// Reads the item IDs (the tap-selected set, or every loaded item), grabs the session cookies, starts the
+    /// background download, and closes so you can keep using the app.
+    private func download(selectedOnly: Bool) {
+        let js = selectedOnly
+            ? "JSON.stringify(Object.keys(window.__pbSel || {}));"
+            : "JSON.stringify(Array.from(new Set(Array.from(document.querySelectorAll('[data-id]')).map(function(e){return e.getAttribute('data-id');}).filter(Boolean))));"
         webView.evaluateJavaScript(js) { result, _ in
             guard let s = result as? String, let data = s.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: [String]] else { return }
-            let ids = selectedOnly ? (obj["selected"] ?? []) : (obj["all"] ?? [])
+                  let ids = (try? JSONSerialization.jsonObject(with: data)) as? [String] else { return }
             webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
                 let header = cookies.filter { $0.domain.contains("google.com") }
                     .map { "\($0.name)=\($0.value)" }
