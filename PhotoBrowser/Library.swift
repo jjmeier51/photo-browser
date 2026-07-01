@@ -632,6 +632,44 @@ final class Library {
         }
     }
 
+    // MARK: - Google Drive download (app-wide, navigable while it runs)
+
+    func startGoogleDriveDownload(link: String, into folder: URL) {
+        runDriveDownload(into: folder) { report in
+            await GoogleDrive.importLink(link, into: folder, progress: report)
+        }
+    }
+    func startGoogleDriveDownload(items: [GoogleDrive.Item], into folder: URL) {
+        guard !items.isEmpty else { return }
+        runDriveDownload(into: folder) { report in
+            await GoogleDrive.importItems(items, into: folder, progress: report)
+        }
+    }
+    private func runDriveDownload(into folder: URL,
+                                 op: @escaping @Sendable (@escaping @Sendable (GoogleDrive.Progress) -> Void) async -> GoogleDrive.Result) {
+        let id = beginActivity("Google Drive")
+        setActivity(id, status: "Preparing…")
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Google Drive Download")
+        Task {
+            let r = await op { p in
+                Task { @MainActor in
+                    let line = p.total > 0
+                        ? "Downloading \(p.done)/\(p.total)" + (p.currentName.isEmpty ? "…" : " — \(p.currentName)")
+                        : "Downloading…"
+                    self.setActivity(id, status: line, fraction: p.fraction)
+                }
+            }
+            endActivity(id, result: driveResultMessage(r))
+            if r.downloaded > 0 { contentDidChange() }
+            bg.end()
+        }
+    }
+    private func driveResultMessage(_ r: GoogleDrive.Result) -> String {
+        if r.downloaded == 0, let note = r.note { return note }
+        let base = "Downloaded \(r.downloaded) item\(r.downloaded == 1 ? "" : "s")" + (r.folderName.map { " to “\($0)”" } ?? "")
+        return r.failed > 0 ? base + "; \(r.failed) failed." : base + "."
+    }
+
     /// Clean-up review state per folder: the set of item paths already decided on
     /// (kept or deleted). The queue on (re-)open is simply "viewable items not in
     /// this set", so it resumes correctly every run regardless of order.

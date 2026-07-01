@@ -109,6 +109,7 @@ struct FolderView: View {
     @State private var showPhotosLibrary = false
     @State private var photosLibraryMoves = false
     @State private var showMegaImport = false
+    @State private var showGoogleDrive = false
     @State private var showTaylorBrowser = false
     @State private var showAccessKardashian = false
     @State private var showTaylorCrossRef = false
@@ -812,6 +813,9 @@ struct FolderView: View {
             }
             .fullScreenCover(isPresented: $showMegaImport) {
                 MegaImportView(targetFolder: url) { Task { await reload() } }
+            }
+            .sheet(isPresented: $showGoogleDrive) {
+                GoogleDriveView(targetFolder: url)
             }
             .fullScreenCover(isPresented: $showDuplicates) {
                 DuplicatesView(folder: url)
@@ -1545,6 +1549,9 @@ struct FolderView: View {
                     }
                     Button { showMegaImport = true } label: {
                         Label("Add from MEGA…", systemImage: "arrow.down.circle")
+                    }
+                    Button { showGoogleDrive = true } label: {
+                        Label("Download from Google Drive…", systemImage: "arrow.down.doc")
                     }
                     Button { igForceFull = false; showInstagram = true } label: {
                         Label(library.isInstagramFolder(url) ? "Get New Instagram Posts" : "Download Instagram Profile…",
