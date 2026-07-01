@@ -814,8 +814,8 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showMegaImport) {
                 MegaImportView(targetFolder: url) { Task { await reload() } }
             }
-            .sheet(isPresented: $showGoogleDrive) {
-                GoogleDriveView(targetFolder: url)
+            .fullScreenCover(isPresented: $showGoogleDrive) {
+                GoogleDriveBrowserView(targetFolder: url)
             }
             .fullScreenCover(isPresented: $showDuplicates) {
                 DuplicatesView(folder: url)

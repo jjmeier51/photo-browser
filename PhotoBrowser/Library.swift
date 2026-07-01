@@ -645,6 +645,12 @@ final class Library {
             await GoogleDrive.importItems(items, into: folder, progress: report)
         }
     }
+    /// Download from the built-in browser's signed-in session (cookies) — the file IDs scraped from the page.
+    func startGoogleDriveCookieDownload(fileIDs: [String], cookieHeader: String, into folder: URL) {
+        runDriveDownload(into: folder) { report in
+            await GoogleDrive.downloadViaCookies(fileIDs: fileIDs, cookieHeader: cookieHeader, into: folder, progress: report)
+        }
+    }
     private func runDriveDownload(into folder: URL,
                                  op: @escaping @Sendable (@escaping @Sendable (GoogleDrive.Progress) -> Void) async -> GoogleDrive.Result) {
         let id = beginActivity("Google Drive")

@@ -213,6 +213,74 @@ enum GoogleDrive {
         return Result(downloaded: ok, failed: failed, folderName: firstFolder, note: note)
     }
 
+    // MARK: - Cookie-session download (from the built-in browser login)
+
+    /// Downloads the given Drive file IDs using the signed-in **web session cookies** captured from the
+    /// in-app browser — no API key/token needed. Each file is fetched from Drive's `uc?export=download`
+    /// endpoint; the saved name comes from the response's Content-Disposition. Best-effort and concurrent:
+    /// folders / Google-native docs / oversized (virus-scan-gated) files are skipped rather than failing.
+    nonisolated static func downloadViaCookies(fileIDs: [String], cookieHeader: String, into folder: URL,
+                                               progress: @escaping @Sendable (Progress) -> Void) async -> Result {
+        let ids = Array(Set(fileIDs)).filter { !$0.isEmpty }
+        let total = ids.count
+        guard total > 0 else {
+            return Result(downloaded: 0, failed: 0, folderName: nil,
+                          note: "No items found on this page. Open a folder (or select items) first, and scroll so they load.")
+        }
+        var done = 0, ok = 0
+        await withTaskGroup(of: Bool.self) { group in
+            var idx = 0
+            let maxConcurrent = 5
+            func addNext() {
+                guard idx < ids.count else { return }
+                let id = ids[idx]; idx += 1
+                progress(Progress(fraction: Double(done) / Double(total), done: done, total: total, currentName: ""))
+                group.addTask { await downloadOneViaCookie(id: id, cookieHeader: cookieHeader, into: folder) }
+            }
+            for _ in 0..<min(maxConcurrent, ids.count) { addNext() }
+            while let success = await group.next() {
+                done += 1; if success { ok += 1 }
+                progress(Progress(fraction: Double(done) / Double(total), done: done, total: total, currentName: ""))
+                addNext()
+            }
+        }
+        let note = ok == 0
+            ? "Nothing downloaded — items may be folders/Google Docs, or the sign-in expired. Open the folder, select items, and try again."
+            : nil
+        return Result(downloaded: ok, failed: total - ok, folderName: folder.lastPathComponent, note: note)
+    }
+
+    private nonisolated static func downloadOneViaCookie(id: String, cookieHeader: String, into folder: URL) async -> Bool {
+        guard let url = URL(string: "https://drive.google.com/uc?export=download&id=\(id)&confirm=t") else { return false }
+        var req = URLRequest(url: url); req.timeoutInterval = 120
+        req.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+                     forHTTPHeaderField: "User-Agent")
+        guard let (tmp, resp) = try? await URLSession.shared.download(for: req),
+              let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else { return false }
+        let fm = FileManager.default
+        // An HTML body means Drive returned a confirm/quota page, not the file — skip it.
+        if (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased().contains("text/html") {
+            try? fm.removeItem(at: tmp); return false
+        }
+        let name = filename(from: http) ?? "drive-\(id)"
+        let dest = uniqueChild(named: name, in: folder)
+        guard (try? fm.moveItem(at: tmp, to: dest)) != nil else { try? fm.removeItem(at: tmp); return false }
+        return true
+    }
+
+    /// The download's filename from a `Content-Disposition` header (`filename*=UTF-8''…` preferred).
+    private nonisolated static func filename(from http: HTTPURLResponse) -> String? {
+        guard let cd = http.value(forHTTPHeaderField: "Content-Disposition") else { return nil }
+        if let r = cd.range(of: "filename\\*=UTF-8''[^;\\r\\n]+", options: .regularExpression) {
+            return String(cd[r]).replacingOccurrences(of: "filename*=UTF-8''", with: "").removingPercentEncoding
+        }
+        if let r = cd.range(of: "filename=\"[^\"]+\"", options: .regularExpression) {
+            return String(cd[r]).replacingOccurrences(of: "filename=", with: "").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        }
+        return nil
+    }
+
     private nonisolated static func uniqueChild(named name: String, in folder: URL) -> URL {
         let safe = name.replacingOccurrences(of: "/", with: "-")
         let fm = FileManager.default
