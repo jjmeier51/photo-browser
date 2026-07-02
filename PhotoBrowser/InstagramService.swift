@@ -186,11 +186,15 @@ enum InstagramService {
     @discardableResult
     nonisolated static func copyToTemp(_ files: [String], handle: String, into tempFolder: URL) async -> [String] {
         let fm = FileManager.default
-        try? fm.createDirectory(at: tempFolder, withIntermediateDirectories: true)
+        // Each user's stories go into their own subfolder inside "Today's Instagram Stories", so the temp
+        // collection is organized by handle instead of a flat pile with prefixed names.
+        let cleaned = handle.replacingOccurrences(of: "/", with: "-").trimmingCharacters(in: .whitespaces)
+        let userFolder = tempFolder.appendingPathComponent(cleaned.isEmpty ? "Unknown" : cleaned, isDirectory: true)
+        try? fm.createDirectory(at: userFolder, withIntermediateDirectories: true)
         var written: [String] = []
         for path in files {
             let src = URL(fileURLWithPath: path)
-            let dest = tempFolder.appendingPathComponent("\(handle)_\(src.lastPathComponent)")
+            let dest = userFolder.appendingPathComponent(src.lastPathComponent)
             if fm.fileExists(atPath: dest.path) { continue }      // already copied this run/window — dedup
             guard (try? fm.copyItem(at: src, to: dest)) != nil else { continue }
             let vals = try? src.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])

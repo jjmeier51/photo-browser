@@ -458,6 +458,55 @@ enum MediaEditing {
         return replaceInPlace(original: url, temp: tmp)
     }
 
+    /// Resizes a photo to exactly `targetWidth`×`targetHeight` pixels (high-quality Lanczos), re-encoded in
+    /// place while **preserving metadata** (EXIF capture date, GPS, …). Handles both down- and up-scaling.
+    /// The caller supplies a proportional target (aspect-preserving). Writes to a temp file and verifies it
+    /// decodes before swapping it in, so a bad encode can't corrupt the photo. SDR pixels only. Returns true.
+    static func resizePhotoInPlace(url: URL, targetWidth: Int, targetHeight: Int) -> Bool {
+        guard targetWidth > 1, targetHeight > 1,
+              let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let full = loadFullCGImage(src), full.width > 0, full.height > 0 else { return false }
+        // No-op if the size is unchanged.
+        if targetWidth == full.width, targetHeight == full.height { return true }
+        let sx = CGFloat(targetWidth) / CGFloat(full.width)
+        let sy = CGFloat(targetHeight) / CGFloat(full.height)
+        let ci = CIImage(cgImage: full).clampedToExtent()
+            .applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: sx, kCIInputAspectRatioKey: sy / sx])
+            .cropped(to: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
+        let ctx = CIContext(options: nil)
+        guard let out = ctx.createCGImage(ci, from: ci.extent) else { return false }
+
+        var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        props[kCGImagePropertyPixelWidth] = targetWidth
+        props[kCGImagePropertyPixelHeight] = targetHeight
+
+        let tmp = url.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).rsz")
+        let type = CGImageSourceGetType(src) ?? (UTType.heic.identifier as CFString)
+        func encode(_ t: CFString) -> Bool {
+            guard let dst = CGImageDestinationCreateWithURL(tmp as CFURL, t, 1, nil) else { return false }
+            CGImageDestinationAddImage(dst, out, props as CFDictionary)
+            return CGImageDestinationFinalize(dst)
+        }
+        if !encode(type) {
+            try? FileManager.default.removeItem(at: tmp)
+            guard encode(UTType.jpeg.identifier as CFString) else { try? FileManager.default.removeItem(at: tmp); return false }
+        }
+        guard CGImageSourceCreateWithURL(tmp as CFURL, nil).flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }) != nil else {
+            try? FileManager.default.removeItem(at: tmp); return false
+        }
+        return replaceInPlace(original: url, temp: tmp)
+    }
+
+    /// The stored pixel dimensions of an image file (upright), without decoding the pixels.
+    static func pixelSize(of url: URL) -> (width: Int, height: Int)? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int else { return nil }
+        // EXIF orientation 5–8 swaps width/height when displayed upright.
+        let o = (props[kCGImagePropertyOrientation] as? Int) ?? 1
+        return (5...8).contains(o) ? (h, w) : (w, h)
+    }
+
     /// Full-resolution, upright CGImage from an open image source.
     private static func loadFullCGImage(_ src: CGImageSource) -> CGImage? {
         let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]

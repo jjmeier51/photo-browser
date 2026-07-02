@@ -22,6 +22,7 @@ struct ViewerView: View {
     @State private var showEditor = false
     @State private var showStudio = false
     @State private var showResize = false
+    @State private var showChangeSize = false
     @State private var showAIEdit = false
     @State private var showMovePicker = false
     @State private var showCopyPicker = false
@@ -94,6 +95,9 @@ struct ViewerView: View {
         }
         .fullScreenCover(isPresented: $showResize) {
             if let current { ResizeEditorView(entry: current) }
+        }
+        .sheet(isPresented: $showChangeSize) {
+            if let current { ChangeSizeView(entry: current) }
         }
         .sheet(isPresented: $showAIEdit) {
             if let current { AIEditView(entry: current) }
@@ -246,6 +250,9 @@ struct ViewerView: View {
                         if current?.kind == .image {
                             Button { showResize = true } label: {
                                 Label("Resize / Extend", systemImage: "aspectratio")
+                            }
+                            Button { showChangeSize = true } label: {
+                                Label("Change Size…", systemImage: "arrow.up.left.and.arrow.down.right")
                             }
                             Button { showAIEdit = true } label: {
                                 Label("Edit with AI", systemImage: "wand.and.stars")
