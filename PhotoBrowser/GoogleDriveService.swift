@@ -228,7 +228,8 @@ enum GoogleDrive {
                           note: "No items found on this page. Open a folder (or select items) first, and scroll so they load.")
         }
         var done = 0, ok = 0
-        await withTaskGroup(of: Bool.self) { group in
+        var firstReason: String?
+        await withTaskGroup(of: (Bool, String?).self) { group in
             var idx = 0
             let maxConcurrent = 5
             func addNext() {
@@ -238,31 +239,63 @@ enum GoogleDrive {
                 group.addTask { await downloadOneViaCookie(id: id, cookieHeader: cookieHeader, into: folder) }
             }
             for _ in 0..<min(maxConcurrent, ids.count) { addNext() }
-            while let success = await group.next() {
+            while let (success, reason) = await group.next() {
                 done += 1; if success { ok += 1 }
+                if !success, firstReason == nil, let reason { firstReason = reason }
                 progress(Progress(fraction: Double(done) / Double(total), done: done, total: total, currentName: ""))
                 addNext()
             }
         }
+        // Name the actual cause — the failure modes (folders/Docs selected, expired
+        // sign-in, Google changing the download flow) each need a different user action.
         let note = ok == 0
-            ? "Nothing downloaded — items may be folders/Google Docs, or the sign-in expired. Open the folder, select items, and try again."
+            ? "Nothing downloaded — " + (firstReason ?? "the items may be folders or Google Docs; open the folder, select items, and try again") + "."
             : nil
         return Result(downloaded: ok, failed: total - ok, folderName: folder.lastPathComponent, note: note)
     }
 
-    private nonisolated static func downloadOneViaCookie(id: String, cookieHeader: String, into folder: URL) async -> Bool {
+    /// (success, failure reason) — the reason is surfaced to the user, so keep it actionable.
+    private nonisolated static func downloadOneViaCookie(id: String, cookieHeader: String, into folder: URL) async -> (Bool, String?) {
         // Step 1: the standard download URL. Small files return their bytes directly; **large** files
         // (>~100 MB, which can't be virus-scanned) return an HTML confirm page instead.
-        guard let url = URL(string: "https://drive.google.com/uc?export=download&id=\(id)"),
-              let (tmp, http) = await fetch(url, cookieHeader) else { return false }
-        if !isHTML(http) { return save(tmp, http: http, id: id, into: folder) }
-        // Step 2: it's the large-file confirm page — parse its form and fetch the real download URL.
+        guard let url = URL(string: "https://drive.google.com/uc?export=download&id=\(id)") else { return (false, nil) }
+        guard let (tmp, http) = await fetch(url, cookieHeader) else {
+            return (false, "Drive refused the request (the sign-in may have expired — reopen “Browse Google Drive…” and log in again)")
+        }
+        if !isHTML(http) {
+            let saved = save(tmp, http: http, id: id, into: folder)
+            return (saved, saved ? nil : "the file downloaded but couldn’t be saved onto the drive")
+        }
+        // Step 2: it answered with HTML — the large-file confirm page, or a sign-in/consent page.
         let html = (try? String(contentsOf: tmp, encoding: .utf8)) ?? ""
         try? FileManager.default.removeItem(at: tmp)
-        guard let confirmURL = parseConfirmForm(html, fallbackID: id),
-              let (tmp2, http2) = await fetch(confirmURL, cookieHeader) else { return false }
-        if isHTML(http2) { try? FileManager.default.removeItem(at: tmp2); return false }   // still blocked (e.g. quota)
-        return save(tmp2, http: http2, id: id, into: folder)
+        if looksLikeSignIn(html) {
+            return (false, "Google answered with a sign-in page — reopen “Browse Google Drive…” and log in again")
+        }
+        // A real confirm page carries the download form; anything else (Google changed the
+        // page) → try the modern usercontent endpoint directly before giving up.
+        let hasConfirmForm = html.contains("usercontent.google.com/download")
+            || html.contains("name=\"uuid\"") || html.contains("confirm=")
+        let confirmURL = hasConfirmForm
+            ? parseConfirmForm(html, fallbackID: id)
+            : URL(string: "https://drive.usercontent.google.com/download?id=\(id)&export=download&confirm=t")
+        guard let confirmURL, let (tmp2, http2) = await fetch(confirmURL, cookieHeader) else {
+            return (false, "the download confirmation step was refused (Google may have changed the flow, or the item isn’t downloadable)")
+        }
+        if isHTML(http2) {   // still blocked (e.g. quota, or the flow changed again)
+            let html2 = (try? String(contentsOf: tmp2, encoding: .utf8)) ?? ""
+            try? FileManager.default.removeItem(at: tmp2)
+            return (false, looksLikeSignIn(html2)
+                ? "Google answered with a sign-in page — reopen “Browse Google Drive…” and log in again"
+                : "Drive kept answering with a web page instead of the file (quota-limited, or the download flow changed)")
+        }
+        let saved = save(tmp2, http: http2, id: id, into: folder)
+        return (saved, saved ? nil : "the file downloaded but couldn’t be saved onto the drive")
+    }
+
+    /// Heuristic for Google's sign-in/consent interstitials.
+    private nonisolated static func looksLikeSignIn(_ html: String) -> Bool {
+        html.contains("accounts.google.com") || html.contains("ServiceLogin") || html.contains("signin/identifier")
     }
 
     private nonisolated static func fetch(_ url: URL, _ cookieHeader: String) async -> (URL, HTTPURLResponse)? {
