@@ -33,6 +33,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 - **Misc:** highlight-bubble covers decode off the main thread (was a sync decode during
   layout); bulk capture-date/spec/caption reads are time-boxed so one corrupt file can't stall
   a folder pass (timeouts stay uncached and retry when the drive is healthy).
+- **TikTok "Get New" can no longer permanently skip failed downloads** — the incremental
+  cutoff (`newestDate`) used to advance when links were *resolved*, so a queued background
+  download that later failed fell behind the cutoff and was never re-listed. The cutoff now
+  advances only when a video is actually filed onto the drive; anything that failed stays
+  ahead of it and is re-fetched (id-dedup still prevents duplicates) on the next run.
 
 ## 2026-06-26
 

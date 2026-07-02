@@ -144,11 +144,14 @@ struct TikTokImportView: View {
 
             // Refresh like counts on already-downloaded videos too (not just the new ones).
             library.applyTikTokLikes(result.allStats, in: dest)
-            // Record the resolved author id and advance the incremental cutoff to the newest post.
+            // Record the resolved author id. The incremental cutoff (`newestDate`) is
+            // deliberately NOT advanced here — at this point the videos are only
+            // *queued* on the background session. It advances in
+            // `Library.processPendingTikTok`, once each video is actually filed onto
+            // the drive, so a download that fails in the background stays ahead of the
+            // cutoff and is re-listed (then re-fetched via id-dedup) by the next run.
             if var info = library.tiktokInfo(for: dest) {
                 if info.secUid.isEmpty, !result.authorId.isEmpty { info.secUid = result.authorId }
-                let newest = max(info.newestDate ?? 0, result.newest)
-                if newest > 0 { info.newestDate = newest }
                 library.setTikTokInfo(info, for: dest)
             }
             resolving = false

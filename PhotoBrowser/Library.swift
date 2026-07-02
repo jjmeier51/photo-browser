@@ -252,6 +252,7 @@ final class Library {
         let fm = FileManager.default
         var captionUpdates: [String: String] = [:]
         var idsByFolder: [String: [String]] = [:]
+        var newestByFolder: [String: Double] = [:]   // newest post date actually filed, per profile folder
         var requeue: [[String: Any]] = []        // entries we couldn't file yet (drive busy) — retry later
         var changed = false
         for rec in pending {
@@ -272,7 +273,12 @@ final class Library {
             }
             if let caption = rec["caption"] as? String, !caption.isEmpty { captionUpdates[dest] = caption }
             if let likes = rec["likes"] as? Int, likes > 0 { tiktokLikes[dest] = likes }
-            if let folder = rec["folder"] as? String, let id = rec["id"] as? String { idsByFolder[folder, default: []].append(id) }
+            if let folder = rec["folder"] as? String, let id = rec["id"] as? String {
+                idsByFolder[folder, default: []].append(id)
+                if let ct = rec["createTime"] as? Double, ct > 0 {
+                    newestByFolder[folder] = max(newestByFolder[folder] ?? 0, ct)
+                }
+            }
             changed = true
         }
         BackgroundDownloader.shared.requeue(requeue)
@@ -284,6 +290,14 @@ final class Library {
             info.downloaded.append(contentsOf: fresh)
             info.videos += fresh.count
             info.lastUpdated = Date().timeIntervalSince1970
+            // Advance the incremental "Get New" cutoff only now that these videos are
+            // actually on the drive. Advancing at link-resolution time permanently
+            // skipped any queued download that later failed — it fell behind the
+            // cutoff, so the next run stopped paging before re-listing it and the
+            // id-dedup never got a chance to re-fetch it.
+            if let newest = newestByFolder[folder], newest > (info.newestDate ?? 0) {
+                info.newestDate = newest
+            }
             tiktokFolders[folder] = info
         }
         if !idsByFolder.isEmpty { persistTikTokFolders() }

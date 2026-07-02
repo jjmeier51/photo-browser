@@ -8,7 +8,7 @@ struct TTFolderInfo: Codable, Sendable {
     var lastUpdated: Double           // unix time of the last successful run
     var downloaded: [String]          // video ids already pulled (dedup)
     var videos: Int
-    var newestDate: Double?           // post date of the newest video seen — the incremental cutoff
+    var newestDate: Double?           // post date of the newest video *filed onto the drive* — the incremental cutoff
 }
 
 /// Resolves a whole TikTok profile's own videos — like ssstik/snaptik, but for the entire
