@@ -251,22 +251,68 @@ enum GoogleDrive {
     }
 
     private nonisolated static func downloadOneViaCookie(id: String, cookieHeader: String, into folder: URL) async -> Bool {
-        guard let url = URL(string: "https://drive.google.com/uc?export=download&id=\(id)&confirm=t") else { return false }
-        var req = URLRequest(url: url); req.timeoutInterval = 120
+        // Step 1: the standard download URL. Small files return their bytes directly; **large** files
+        // (>~100 MB, which can't be virus-scanned) return an HTML confirm page instead.
+        guard let url = URL(string: "https://drive.google.com/uc?export=download&id=\(id)"),
+              let (tmp, http) = await fetch(url, cookieHeader) else { return false }
+        if !isHTML(http) { return save(tmp, http: http, id: id, into: folder) }
+        // Step 2: it's the large-file confirm page — parse its form and fetch the real download URL.
+        let html = (try? String(contentsOf: tmp, encoding: .utf8)) ?? ""
+        try? FileManager.default.removeItem(at: tmp)
+        guard let confirmURL = parseConfirmForm(html, fallbackID: id),
+              let (tmp2, http2) = await fetch(confirmURL, cookieHeader) else { return false }
+        if isHTML(http2) { try? FileManager.default.removeItem(at: tmp2); return false }   // still blocked (e.g. quota)
+        return save(tmp2, http: http2, id: id, into: folder)
+    }
+
+    private nonisolated static func fetch(_ url: URL, _ cookieHeader: String) async -> (URL, HTTPURLResponse)? {
+        var req = URLRequest(url: url); req.timeoutInterval = 300     // room for big files
         req.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
         req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
                      forHTTPHeaderField: "User-Agent")
         guard let (tmp, resp) = try? await URLSession.shared.download(for: req),
-              let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else { return false }
+              let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else { return nil }
+        return (tmp, http)
+    }
+
+    private nonisolated static func isHTML(_ http: HTTPURLResponse) -> Bool {
+        (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased().contains("text/html")
+    }
+
+    private nonisolated static func save(_ tmp: URL, http: HTTPURLResponse, id: String, into folder: URL) -> Bool {
         let fm = FileManager.default
-        // An HTML body means Drive returned a confirm/quota page, not the file — skip it.
-        if (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased().contains("text/html") {
-            try? fm.removeItem(at: tmp); return false
-        }
-        let name = filename(from: http) ?? "drive-\(id)"
-        let dest = uniqueChild(named: name, in: folder)
+        let dest = uniqueChild(named: filename(from: http) ?? "drive-\(id)", in: folder)
         guard (try? fm.moveItem(at: tmp, to: dest)) != nil else { try? fm.removeItem(at: tmp); return false }
         return true
+    }
+
+    /// Rebuilds the real download URL from Drive's large-file confirm page (a `<form>` with hidden inputs
+    /// including a `confirm` token and a `uuid`).
+    private nonisolated static func parseConfirmForm(_ html: String, fallbackID id: String) -> URL? {
+        let action = (firstMatch("<form[^>]*action=\"([^\"]+)\"", html) ?? "https://drive.usercontent.google.com/download")
+            .replacingOccurrences(of: "&amp;", with: "&")
+        var params: [String: String] = ["id": id, "export": "download", "confirm": "t"]
+        // Hidden inputs (name/value in either attribute order).
+        for (pattern, nameFirst) in [("<input[^>]*name=\"([^\"]+)\"[^>]*value=\"([^\"]*)\"", true),
+                                     ("<input[^>]*value=\"([^\"]*)\"[^>]*name=\"([^\"]+)\"", false)] {
+            guard let r = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let ns = html as NSString
+            for m in r.matches(in: html, range: NSRange(location: 0, length: ns.length)) where m.numberOfRanges >= 3 {
+                let a = ns.substring(with: m.range(at: 1)), b = ns.substring(with: m.range(at: 2))
+                params[nameFirst ? a : b] = nameFirst ? b : a
+            }
+        }
+        var comps = URLComponents(string: action)
+        comps?.queryItems = params.map { URLQueryItem(name: $0.key, value: $0.value) }
+        return comps?.url
+    }
+
+    private nonisolated static func firstMatch(_ pattern: String, _ s: String) -> String? {
+        guard let r = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let ns = s as NSString
+        guard let m = r.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)),
+              m.numberOfRanges > 1, m.range(at: 1).location != NSNotFound else { return nil }
+        return ns.substring(with: m.range(at: 1))
     }
 
     /// The download's filename from a `Content-Disposition` header (`filename*=UTF-8''…` preferred).
