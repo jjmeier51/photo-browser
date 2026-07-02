@@ -1695,7 +1695,7 @@ struct PhotoEditorView: View {
                                         upscale: upscale, stickers: placed, retouch: strokes)
             await MainActor.run {
                 library.endActivity(id, result: ok ? "Saved edited photo" : "Couldn’t save the edit")
-                if ok { library.markEditedInApp(dest); library.contentDidChange() }
+                if ok { library.markEditedInApp(dest); library.contentDidChange(under: dest.deletingLastPathComponent()) }
             }
         }
     }

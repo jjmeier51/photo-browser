@@ -53,6 +53,13 @@ struct ZoomableImageView: View {
             badge = await MetadataLoader.photoBadge(url: url)
             // This page owns the album-cover source while it's visible.
             coverSource?.liveProvider = nil
+            // Preloaded by the viewer (or shown before)? Show it instantly — this is
+            // what makes swiping feel like Photos instead of a cold decode per page.
+            if let ready = ViewerPageCache.shared.image(for: url) {
+                displayImage = ready
+                coverSource?.staticImage = ready
+                return
+            }
             // Fast embedded-thumbnail preview first, then the full image.
             if let preview = await Self.decode(url: url, maxPixel: 1400, fullQuality: false) {
                 if displayImage == nil { displayImage = preview; coverSource?.staticImage = preview }
@@ -60,6 +67,7 @@ struct ZoomableImageView: View {
             if let full = await Self.decode(url: url, maxPixel: 2600, fullQuality: true) {
                 displayImage = full
                 coverSource?.staticImage = full
+                ViewerPageCache.shared.store(full, for: url)   // swiping back is instant
             }
         }
         // If this still has a motion sibling, enable touch-and-hold to play it.
@@ -127,6 +135,49 @@ struct ZoomableImageView: View {
             kCGImageSourceThumbnailMaxPixelSize: maxPixel
         ]
         return CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary)
+    }
+}
+
+/// A tiny cache of decoded viewer pages so the viewer can preload index±1 and a
+/// swipe lands on an already-decoded image (the Photos-app feel) instead of a
+/// cold two-stage decode from the drive. A handful of full-quality pages at most
+/// (NSCache cost-bounded), keyed by path.
+///
+/// `nonisolated` for the same reason as `Thumbnailer`: an unmarked class is
+/// MainActor-bound under the project's default isolation, which would drag the
+/// preload decodes onto the main thread. NSCache is thread-safe.
+nonisolated final class ViewerPageCache: @unchecked Sendable {
+    static let shared = ViewerPageCache()
+
+    private let cache: NSCache<NSString, UIImage> = {
+        let c = NSCache<NSString, UIImage>()
+        c.countLimit = 5
+        c.totalCostLimit = 160 * 1024 * 1024
+        return c
+    }()
+
+    func image(for url: URL) -> UIImage? { cache.object(forKey: url.path as NSString) }
+
+    func store(_ image: UIImage, for url: URL) {
+        let cost = Int(image.size.width * image.scale * image.size.height * image.scale) * 4
+        cache.setObject(image, forKey: url.path as NSString, cost: cost)
+    }
+
+    /// Dropped wholesale on any content change: pages are keyed by path only (no
+    /// mtime), so an in-place edit would otherwise re-show the pre-edit pixels.
+    /// The cache is a handful of images — refilling it is cheap.
+    func clear() { cache.removeAllObjects() }
+
+    /// Decodes `url` at full viewer quality into the cache, off the main thread.
+    /// No-op if it's already there or another preload beat us to it.
+    func preload(url: URL) {
+        guard image(for: url) == nil else { return }
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self, self.image(for: url) == nil else { return }
+            if let full = await ZoomableImageView.decode(url: url, maxPixel: 2600, fullQuality: true) {
+                self.store(full, for: url)
+            }
+        }
     }
 }
 

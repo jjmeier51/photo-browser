@@ -170,8 +170,9 @@ A full Hypic/Facetune-style editor was built from scratch inside the app.
   or a failing SSD) can corrupt a directory entry so a folder shows as a *file* or won't list. This is a
   filesystem/hardware issue (repair with Disk Utility First Aid); the app now avoids in-place deletes of the
   stories folder, but any write path is exposed to a yanked drive.
-- **Age computation** over a large library (100+ albums) runs on every content change and can be slow; it's
-  no longer allowed to block text search, but it's still heavier than it needs to be.
+- ~~**Age computation** over a large library (100+ albums) runs on every content change and can be slow~~ —
+  fixed: it's now lazy (runs only when an age sort/filter/search is engaged or the Age menu is opened),
+  and capture dates are pre-warmed into a persistent store in the background.
 - **No test target / CI**; every change is verified by building and exercising the app (the dev environment
   can't compile it — all Swift here was written blind and verified on device).
 
@@ -197,8 +198,8 @@ A full Hypic/Facetune-style editor was built from scratch inside the app.
   folder download, and no dependence on the web DOM. This is the single biggest robustness win for Drive.
 
 **Reliability & performance**
-- Make **age computation lazy** — compute only when the Age filter/sort is actually used, and cache more
-  aggressively; consider a background index.
+- ~~Make **age computation lazy**~~ — done (computed only when the Age filter/sort/search or menu is used);
+  the whole-drive index and per-file dates/specs now persist across launches too.
 - Add **retry/backoff** and resumable downloads for cloud transfers; consider chunked range requests so a
   cut-off large download can resume.
 - Harden **all** external-drive write paths the way the stories folder was hardened (write to a temp name,

@@ -87,7 +87,10 @@ enum LabelKind: String, CaseIterable, Identifiable {
 }
 
 /// Dimensions + HDR for a media file (for resolution/HDR filters).
-struct MediaSpec: Sendable {
+/// Codable so specs persist across launches (see `MetadataLoader`'s spec store) —
+/// reading one means opening the file with ImageIO/AVFoundation, far too slow to
+/// redo every launch on an external drive.
+struct MediaSpec: Sendable, Codable {
     var longSide: Int = 0
     var pixels: Int = 0
     var isHDR: Bool = false

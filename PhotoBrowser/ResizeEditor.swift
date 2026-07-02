@@ -176,7 +176,7 @@ struct ResizeEditorView: View {
                      : MediaEditing.resizeCanvasInPlace(url: url, targetAspect: ratio, fill: style)
             }.value
             saving = false
-            if ok { library.contentDidChange() }
+            if ok { library.contentDidChange(under: url.deletingLastPathComponent()) }
             dismiss()
         }
     }

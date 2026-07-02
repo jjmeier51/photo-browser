@@ -13,9 +13,14 @@ struct PhotoBrowserApp: App {
                 .environment(library)
                 .preferredColorScheme(.dark)
                 .task { library.restoreLastFolder() }
-                // File any background downloads that completed while we were away.
+                // On every return to foreground: retry the drive if it was missing
+                // (or moved to a new mount path), then file any background downloads
+                // that completed while we were away.
                 .onChange(of: scenePhase) { _, phase in
-                    if phase == .active { library.processPendingTikTok() }
+                    if phase == .active {
+                        library.reconnectIfNeeded()
+                        library.processPendingTikTok()
+                    }
                 }
         }
     }

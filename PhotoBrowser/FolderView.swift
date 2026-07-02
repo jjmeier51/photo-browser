@@ -104,6 +104,8 @@ struct FolderView: View {
     @State private var ageFilter: Int?
     @State private var agedList: [(entry: Entry, age: Int)] = []
     @State private var loadingAges = false
+    /// Set when the Age menu is first opened, so ages compute lazily on demand.
+    @State private var agesRequested = false
     @State private var showLibrary = false
     @State private var showPhotosPicker = false
     @State private var showPhotosLibrary = false
@@ -172,6 +174,11 @@ struct FolderView: View {
 
     private var tsLabelMode: Bool { !tsLabelFilter.isEmpty || tsNoLabel }
     private var availableAges: [Int] { Array(Set(agedList.map { $0.age })).sorted() }
+    /// Whether anything on screen actually needs per-file ages right now.
+    private var agesNeeded: Bool {
+        library.sort.isAge || ageFilter != nil || agesRequested
+            || Int(query.trimmingCharacters(in: .whitespaces)) != nil
+    }
 
     /// Real capture year (EXIF/creation) when known, else the file's modified year.
     private func year(of entry: Entry) -> Int {
@@ -1013,7 +1020,7 @@ struct FolderView: View {
                 if r.failed > 0 { msg += " \(r.failed) couldn’t be written." }
                 resultMessage = msg
             }
-            library.contentDidChange()
+            library.contentDidChange(under: url)
             await reload()
         }
     }
@@ -1096,9 +1103,12 @@ struct FolderView: View {
                     fileSpecs = await library.mediaSpecs(for: entries)
                 }
             }
-            // Compute ages (folder + subfolders) when a birthday is in context — used
-            // by the Age filter and age search.
-            .task(id: "ages-\(library.changeToken)-\(url.path)") {
+            // Compute ages (folder + subfolders) only when actually engaged — an age
+            // sort/filter, a numeric (age) search, or the Age menu being opened. The
+            // pass is a recursive walk + EXIF read of the whole subtree, far too heavy
+            // to run just because a folder sits somewhere under a birthday folder.
+            .task(id: "ages-\(library.changeToken)-\(url.path)-\(agesNeeded)") {
+                guard agesNeeded else { return }
                 if library.hasBirthdayContext(url) {
                     loadingAges = true
                     agedList = await library.agedMedia(under: url, birthdays: library.folderBirthdays, sort: library.sort)
@@ -1304,12 +1314,7 @@ struct FolderView: View {
     }
 
     @ViewBuilder private func bubbleImage(_ entry: Entry) -> some View {
-        if let cover = library.coverURL(for: entry.url), let img = UIImage(contentsOfFile: cover.path) {
-            Image(uiImage: img).resizable().scaledToFill()
-        } else {
-            Circle().fill(Color(white: 0.2))
-                .overlay { Image(systemName: "photo.stack").font(.title3).foregroundStyle(.secondary) }
-        }
+        BubbleCover(coverURL: library.coverURL(for: entry.url))
     }
 
     /// Toggles a folder's "album highlight" status; seeds its bubble cover from the
@@ -1430,7 +1435,12 @@ struct FolderView: View {
                 } else {
                     if library.hasBirthdayContext(url) {
                         Menu {
+                            // Opening this menu is what triggers the lazy age pass.
                             Button { ageFilter = nil } label: { check("All Ages", ageFilter == nil) }
+                                .onAppear { agesRequested = true }
+                            if loadingAges && availableAges.isEmpty {
+                                Text("Calculating ages…")
+                            }
                             ForEach(availableAges, id: \.self) { age in
                                 Button { ageFilter = age } label: { check("Age \(age)", ageFilter == age) }
                             }
@@ -1719,7 +1729,7 @@ struct FolderView: View {
             resultMessage = failed == 0
                 ? "Rotated \(targets.count) item(s)."
                 : "Rotated \(targets.count - failed) of \(targets.count); \(failed) couldn’t be saved."
-            library.contentDidChange()
+            library.contentDidChange(under: url)
             await reload()
         }
     }
@@ -1752,7 +1762,7 @@ struct FolderView: View {
             if skipped > 0 { msg += " \(skipped) already ≥\(label)." }
             if failed > 0 { msg += " \(failed) couldn’t be processed." }
             resultMessage = msg
-            library.contentDidChange()
+            library.contentDidChange(under: url)
             await reload()
         }
     }
@@ -1785,7 +1795,7 @@ struct FolderView: View {
             if skipped > 0 { msg += " \(skipped) already ≥\(label)." }
             if failed > 0 { msg += " \(failed) couldn’t be processed." }
             resultMessage = msg
-            library.contentDidChange()
+            library.contentDidChange(under: url)
             await reload()
         }
     }
@@ -1802,7 +1812,7 @@ struct FolderView: View {
             editProgress = 1
             editProcessing = false; bg.end()
             resultMessage = ok ? "Upscaled “\(entry.name)”." : "Couldn’t upscale “\(entry.name)”."
-            library.contentDidChange()
+            library.contentDidChange(under: url)
             await reload()
         }
     }
@@ -1887,17 +1897,27 @@ struct FolderView: View {
 
     private func reload() async {
         // Paint a cached listing instantly so re-opening a folder is snappy; we still
-        // re-read from disk below and update if anything changed. On a cold launch the root
-        // falls back to a persisted snapshot so the homepage appears immediately.
+        // re-read from disk below and update if anything changed. On a cold launch any
+        // folder falls back to its persisted snapshot so it appears immediately.
         if let cached = library.cachedListing(of: url), !cached.isEmpty {
             entries = cached; liveImageURLs = Self.detectLivePairs(in: cached); loaded = true
-        } else if isRoot, let saved = library.persistedRootListing(), !saved.isEmpty {
+        } else if let saved = await library.persistedListing(of: url), !saved.isEmpty {
+            // Cold launch: every folder (not just the root) paints its last-known
+            // listing instantly; the live re-read below refreshes it.
             entries = saved; liveImageURLs = Self.detectLivePairs(in: saved); loaded = true
         } else {
             loaded = false
         }
         fileSpecs = [:]; folderYears = [:]
         let list = await library.listing(of: url, sort: library.sort)
+        if list.isEmpty, !FileManager.default.fileExists(atPath: url.path) {
+            // The folder vanished under us — most likely the drive was unplugged (or
+            // came back under a new mount path). Let the library re-resolve its
+            // bookmark; while the drive is offline keep the last-known tiles instead
+            // of blanking the grid.
+            library.reconnectIfNeeded()
+            if let root = library.rootURL, !FileManager.default.fileExists(atPath: root.path) { return }
+        }
         library.cacheListing(list, for: url)
         entries = list
         liveImageURLs = Self.detectLivePairs(in: list)
@@ -1963,7 +1983,7 @@ struct FolderView: View {
             library.endActivity(id, result: "Couldn't create “\(name)”. A folder with that name may already exist, or the drive isn't writable right now.")
             return
         }
-        library.contentDidChange()                       // refresh this folder's listing
+        library.contentDidChange(under: url)                       // refresh this folder's listing
         library.path.append(url.appendingPathComponent(name, isDirectory: true))   // open the new folder
     }
 
@@ -2086,7 +2106,7 @@ struct FolderView: View {
                 if let newVideo = result.newVideo, newVideo != pair.video {
                     library.itemMoved(from: pair.video, to: newVideo)   // labels follow the rename
                 }
-                library.contentDidChange()
+                library.contentDidChange(under: url)
                 resultMessage = "Live Photo created. Touch and hold the photo to play it."
             } else {
                 resultMessage = "Couldn’t make a Live Photo from those two items."
@@ -2123,6 +2143,32 @@ struct FolderView: View {
     private func exportToFiles() {
         exportURLs = selectedEntries().map(\.url)
         showExporter = true
+    }
+}
+
+/// A highlight bubble's cover, decoded off the main thread. The old synchronous
+/// `UIImage(contentsOfFile:)` decoded every bubble's JPEG on the main actor during
+/// layout — a visible hitch when a row of bubbles appears on a slow drive.
+private struct BubbleCover: View {
+    let coverURL: URL?
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                Circle().fill(Color(white: 0.2))
+                    .overlay { Image(systemName: "photo.stack").font(.title3).foregroundStyle(.secondary) }
+            }
+        }
+        .task(id: coverURL) {
+            guard let coverURL else { image = nil; return }
+            image = await Task.detached(priority: .userInitiated) {
+                let raw = UIImage(contentsOfFile: coverURL.path)
+                return raw?.preparingForDisplay() ?? raw     // decode now, off-main
+            }.value
+        }
     }
 }
 

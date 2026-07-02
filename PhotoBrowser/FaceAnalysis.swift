@@ -108,4 +108,24 @@ final class FaceStore: @unchecked Sendable {
         let snapshot = map; dirty = false; lock.unlock()
         if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: fileURL, options: .atomic) }
     }
+
+    /// Rewrites every stored path through `transform` — used when files move/rename
+    /// in-app and when the drive remounts under a new mount UUID, so detections
+    /// (and the People groupings that reference them) stay attached.
+    func remap(_ transform: (String) -> String) {
+        lock.lock()
+        var changed = false
+        var newMap: [String: [DetectedFace]] = [:]
+        newMap.reserveCapacity(map.count)
+        for (path, faces) in map {
+            let np = transform(path)
+            if np != path { changed = true }
+            newMap[np] = faces
+        }
+        if changed { map = newMap; dirty = true }
+        lock.unlock()
+        // Off-main: remaps run from MainActor move/rename paths, and faces.json can
+        // be large (a feature print per face) — encoding it inline would hitch the UI.
+        if changed { Task.detached(priority: .utility) { [self] in flush() } }
+    }
 }

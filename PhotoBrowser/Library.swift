@@ -1,5 +1,6 @@
 import SwiftUI
 import Observation
+import CryptoKit
 
 /// App-wide state: the chosen root folder (with persistent access), the
 /// navigation path, and the current sort. Uses the Observation framework so
@@ -9,6 +10,13 @@ import Observation
 final class Library {
     var rootURL: URL?
     var rootName = ""
+    /// True when a saved bookmark exists but the drive it points at isn't reachable
+    /// right now (unplugged at launch, or yanked mid-session). Views show a
+    /// "waiting for drive" state instead of the first-run empty state, and
+    /// `reconnectIfNeeded()` keeps retrying until the volume returns — previously a
+    /// launch without the drive silently dropped the library ("forgot" the drive).
+    var waitingForDrive = false
+    var hasSavedBookmark: Bool { UserDefaults.standard.data(forKey: bookmarkKey) != nil }
     var path: [URL] = []
     /// A folder the user asked to jump to from deep inside the viewer (e.g. "Open Stories"
     /// in the info panel). The info sheet and the viewer cover tear themselves down, then the
@@ -38,7 +46,27 @@ final class Library {
     /// Bumps when files are added/edited from outside the folder view (e.g. the
     /// editor saving a cropped copy) so the current folder reloads.
     var changeToken = 0
-    func contentDidChange() { changeToken += 1; folderYearsCache.removeAll(); listingCache.removeAll() }
+    /// Signals a content change. Pass the folder the change happened under to evict
+    /// only that subtree's cached listings/years — a global clear forces every folder
+    /// (and the year/age passes) to recompute, which made one saved edit or one
+    /// finished download re-scan the whole drive. Omit it for genuinely global events.
+    func contentDidChange(under folder: URL? = nil) {
+        changeToken += 1
+        ViewerPageCache.shared.clear()   // pages are path-keyed; an in-place edit must not re-show old pixels
+        guard let folder else {
+            folderYearsCache.removeAll()
+            listingCache.removeAll()
+            listingOrder.removeAll()
+            return
+        }
+        // Ancestors matter too: their listings show this folder, and their year sets
+        // aggregate the whole subtree.
+        let p = folder.path
+        func related(_ key: String) -> Bool { key == p || key.hasPrefix(p + "/") || p.hasPrefix(key + "/") }
+        for key in Array(listingCache.keys) where related(key) { listingCache.removeValue(forKey: key) }
+        listingOrder.removeAll { listingCache[$0] == nil }
+        for key in Array(folderYearsCache.keys) where related(key) { folderYearsCache.removeValue(forKey: key) }
+    }
 
     // MARK: - Bulk store (file-backed)
 
@@ -80,37 +108,51 @@ final class Library {
         if listingCache[folder.path] == nil { listingOrder.append(folder.path) }
         listingCache[folder.path] = entries
         while listingOrder.count > 60 { listingCache.removeValue(forKey: listingOrder.removeFirst()) }
-        if folder.path == (activeRoot?.path ?? rootURL?.path) { persistRootListing(entries) }   // homepage
+        Self.persistListing(entries, for: folder)
     }
 
-    /// Persisted snapshot of the **root** listing, so a cold launch paints the homepage instantly
-    /// (then refreshes from disk). Keyed by the drive-relative root so a reconnect still matches.
-    private struct RootListing: Codable { let rootStable: String; let rootPath: String; let entries: [Entry] }
-    @ObservationIgnored private lazy var rootListingFile: URL = {
+    /// Persisted per-folder listing snapshots, so a cold launch paints **every**
+    /// folder instantly (then refreshes from disk) — previously only the root had
+    /// this, and each subfolder's first open waited on a live directory read.
+    /// One small JSON per folder, named by the drive-relative path so snapshots
+    /// survive the drive remounting under a new mount UUID.
+    private struct ListingSnapshot: Codable { let folderStable: String; let folderPath: String; let entries: [Entry] }
+    @ObservationIgnored nonisolated private static let listingsDir: URL = {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("rootListing.json")
+        let dir = base.appendingPathComponent("listings", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
     }()
-    private func persistRootListing(_ entries: [Entry]) {
-        guard let root = (activeRoot ?? rootURL) else { return }
-        let snapshot = RootListing(rootStable: root.stableCacheID, rootPath: root.path, entries: entries)
-        Task.detached(priority: .utility) { [file = rootListingFile] in
-            if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: file) }
+    nonisolated private static func listingFile(for folder: URL) -> URL {
+        let digest = SHA256.hash(data: Data(folder.stableCacheID.utf8))
+        let name = digest.map { String(format: "%02x", $0) }.joined()
+        return listingsDir.appendingPathComponent(name).appendingPathExtension("json")
+    }
+    nonisolated private static func persistListing(_ entries: [Entry], for folder: URL) {
+        let snapshot = ListingSnapshot(folderStable: folder.stableCacheID, folderPath: folder.path, entries: entries)
+        Task.detached(priority: .utility) {
+            if let data = try? JSONEncoder().encode(snapshot) {
+                try? data.write(to: listingFile(for: folder), options: .atomic)
+            }
         }
     }
-    func persistedRootListing() -> [Entry]? {
-        guard let root = (activeRoot ?? rootURL),
-              let data = try? Data(contentsOf: rootListingFile),
-              let snapshot = try? JSONDecoder().decode(RootListing.self, from: data),
-              snapshot.rootStable == root.stableCacheID else { return nil }
-        if snapshot.rootPath == root.path { return snapshot.entries }
-        // Reconnected under a new mount path — remap the entries onto the current root.
-        let old = snapshot.rootPath, new = root.path
-        return snapshot.entries.map { e in
-            let p = e.url.path
-            guard p.hasPrefix(old) else { return e }
-            return Entry(url: URL(fileURLWithPath: new + p.dropFirst(old.count)),
-                         name: e.name, kind: e.kind, size: e.size, modified: e.modified)
-        }
+    /// The saved snapshot for `folder`, remapped if the drive reconnected under a
+    /// new mount path. Reads off the main actor — call before the live listing.
+    nonisolated func persistedListing(of folder: URL) async -> [Entry]? {
+        await Task.detached(priority: .userInitiated) { () -> [Entry]? in
+            guard let data = try? Data(contentsOf: Self.listingFile(for: folder)),
+                  let snapshot = try? JSONDecoder().decode(ListingSnapshot.self, from: data),
+                  snapshot.folderStable == folder.stableCacheID else { return nil }
+            if snapshot.folderPath == folder.path { return snapshot.entries }
+            // Reconnected under a new mount path — remap the entries onto the current folder.
+            let old = snapshot.folderPath, new = folder.path
+            return snapshot.entries.map { e in
+                let p = e.url.path
+                guard p.hasPrefix(old) else { return e }
+                return Entry(url: URL(fileURLWithPath: new + p.dropFirst(old.count)),
+                             name: e.name, kind: e.kind, size: e.size, modified: e.modified)
+            }
+        }.value
     }
 
     /// The last folder a Move/Copy sent items to, so the picker can default there.
@@ -1125,10 +1167,32 @@ final class Library {
             let nf = remap(state.folderPath)
             if nf != state.folderPath { state.folderPath = nf; accessKardashian[name] = state }
         }
+        aiGeneratedPaths = Set(aiGeneratedPaths.map(remap))
+        cleanupReviewed = Dictionary(cleanupReviewed.map { (remap($0.key), $0.value.map(remap)) }, uniquingKeysWith: { a, _ in a })
+        notDuplicatePairs = Set(notDuplicatePairs.map { pair in
+            let parts = pair.split(separator: "\n", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { return pair }
+            return Self.pairKey(remap(parts[0]), remap(parts[1]))
+        })
+        // People reference faces as "path#index"; the face detections themselves are
+        // keyed by raw path in the FaceStore. Both must follow, or the whole People
+        // library silently orphans on a move/rename or a drive remount.
+        people = people.mapValues { ids in
+            Set(ids.map { id in
+                let path = Self.pathOfFaceID(id)
+                let np = remap(path)
+                return np == path ? id : np + id.dropFirst(path.count)
+            })
+        }
+        FaceStore.shared.remap(remap)
 
         Self.saveBulk(favorites, "favorites")
         Self.saveBulk(aiLabels, "ai")
         Self.saveBulk(editedInAppPaths, "editedInApp")
+        Self.saveBulk(aiGeneratedPaths, "aiGenerated")
+        Self.saveBulk(cleanupReviewed, "cleanupReviewed")
+        Self.saveBulk(notDuplicatePairs, "notDuplicates")
+        Self.saveBulk(people, "people")
         UserDefaults.standard.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
         UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
         UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
@@ -1374,10 +1438,18 @@ final class Library {
 
     /// Defers the whole-drive index build (used by search / Library) a moment so it doesn't
     /// contend for drive I/O with the homepage's first listing + thumbnail prefetch on launch.
+    /// A persisted snapshot of the previous index loads first, so search and the Library view
+    /// are usable immediately instead of waiting out a full drive walk on every launch.
     func scheduleIndexBuild() {
-        guard rootURL != nil else { return }
+        guard let root = rootURL else { return }
         indexing = true                 // show index-dependent views a loading state during the wait
         Task {
+            if index.isEmpty, let saved = await Self.loadIndexSnapshot(for: root), !saved.isEmpty {
+                if index.isEmpty && rootURL == root {   // nothing newer arrived while we read
+                    index = saved
+                    indexing = false
+                }
+            }
             try? await Task.sleep(nanoseconds: 1_800_000_000)
             buildIndex()
         }
@@ -1385,11 +1457,77 @@ final class Library {
 
     func buildIndex() {
         guard let root = rootURL else { return }
-        indexing = true
+        if index.isEmpty { indexing = true }    // a snapshot already loaded → refresh silently
         Task {
             let all = await Self.enumerateAll(root)
             self.index = all
             self.indexing = false
+            Self.saveIndexSnapshot(all, for: root)
+            self.prewarmCaptureDates()
+        }
+    }
+
+    /// Persisted whole-drive index (same remount-tolerant scheme as the listing
+    /// snapshots), so launch #2+ has instant search/Library while the fresh walk runs.
+    private struct IndexSnapshot: Codable { let rootStable: String; let rootPath: String; let entries: [Entry] }
+    @ObservationIgnored nonisolated private static let indexFile: URL = {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("libraryIndex.json")
+    }()
+    nonisolated private static func saveIndexSnapshot(_ entries: [Entry], for root: URL) {
+        let snapshot = IndexSnapshot(rootStable: root.stableCacheID, rootPath: root.path, entries: entries)
+        Task.detached(priority: .utility) {
+            if let data = try? JSONEncoder().encode(snapshot) {
+                try? data.write(to: indexFile, options: .atomic)
+            }
+        }
+    }
+    nonisolated private static func loadIndexSnapshot(for root: URL) async -> [Entry]? {
+        await Task.detached(priority: .userInitiated) { () -> [Entry]? in
+            guard let data = try? Data(contentsOf: indexFile),
+                  let snapshot = try? JSONDecoder().decode(IndexSnapshot.self, from: data),
+                  snapshot.rootStable == root.stableCacheID else { return nil }
+            if snapshot.rootPath == root.path { return snapshot.entries }
+            let old = snapshot.rootPath, new = root.path
+            return snapshot.entries.map { e in
+                let p = e.url.path
+                guard p.hasPrefix(old) else { return e }
+                return Entry(url: URL(fileURLWithPath: new + p.dropFirst(old.count)),
+                             name: e.name, kind: e.kind, size: e.size, modified: e.modified)
+            }
+        }.value
+    }
+
+    /// Fills the persistent capture-date store for the whole library in the
+    /// background, so the first visit to any folder finds its dates already cached
+    /// instead of paying a full EXIF/AVAsset pass (the default sort wants dates).
+    /// Files already in the store short-circuit to a dictionary lookup, so on a
+    /// warmed library this whole pass costs almost nothing. Runs once per launch,
+    /// at background priority so it never contends with browsing.
+    @ObservationIgnored private var didPrewarmDates = false
+    private func prewarmCaptureDates() {
+        guard !didPrewarmDates else { return }
+        didPrewarmDates = true
+        let media = index.filter { $0.kind == .image || $0.kind == .video }
+        guard !media.isEmpty else { return }
+        Task.detached(priority: .background) {
+            var next = 0
+            var done = 0
+            await withTaskGroup(of: Void.self) { group in
+                let maxConcurrent = 4       // gentle — browsing keeps priority on the drive
+                func addNext() {
+                    guard next < media.count else { return }
+                    let e = media[next]; next += 1
+                    group.addTask { _ = await MetadataLoader.captureDate(for: e) }
+                }
+                for _ in 0..<min(maxConcurrent, media.count) { addNext() }
+                while await group.next() != nil {
+                    done += 1
+                    if done % 500 == 0 { MetadataLoader.flushDateStore() }   // survive an early exit
+                    addNext()
+                }
+            }
+            MetadataLoader.flushDateStore()
         }
     }
 
@@ -1490,6 +1628,7 @@ final class Library {
     func chooseFolder(_ url: URL) {
         if let prev = activeRoot { prev.stopAccessingSecurityScopedResource() }
         _ = url.startAccessingSecurityScopedResource()   // best-effort; keep for session
+        waitingForDrive = false
         activeRoot = url
         rootURL = url
         rootName = url.lastPathComponent
@@ -1509,11 +1648,24 @@ final class Library {
         guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { return }
         var stale = false
         guard let url = try? URL(resolvingBookmarkData: data, options: [],
-                                 relativeTo: nil, bookmarkDataIsStale: &stale) else { return }
+                                 relativeTo: nil, bookmarkDataIsStale: &stale) else {
+            // The bookmark exists but won't resolve — the drive isn't plugged in
+            // (yet). Don't drop the library; wait and retry (reconnectIfNeeded).
+            waitingForDrive = true
+            return
+        }
         _ = url.startAccessingSecurityScopedResource()
+        // Resolution can also succeed against a volume that isn't actually mounted;
+        // treat an unreachable root the same as a failed resolve.
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            url.stopAccessingSecurityScopedResource()
+            waitingForDrive = true
+            return
+        }
         if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
             UserDefaults.standard.set(fresh, forKey: bookmarkKey)   // refresh the bookmark after a remount
         }
+        waitingForDrive = false
         activeRoot = url
         rootURL = url
         rootName = url.lastPathComponent
@@ -1523,6 +1675,48 @@ final class Library {
         BackgroundDownloader.shared.activate()   // reconnect to the background session
         processPendingTikTok()            // file anything that finished while we were closed
         scheduleIndexBuild()
+    }
+
+    /// Re-checks drive availability. Cheap when everything is fine, so it's safe to
+    /// call on every foreground and from the waiting screen's retry loop. Covers:
+    /// a failed launch restore (drive plugged in later), and a root that vanished
+    /// mid-session because the drive was unplugged — including coming back under a
+    /// **new** mount path, which the bookmark re-resolves to.
+    func reconnectIfNeeded() {
+        if rootURL == nil {
+            if hasSavedBookmark { restoreLastFolder() }
+            return
+        }
+        guard let root = rootURL else { return }
+        if FileManager.default.fileExists(atPath: root.path) {
+            waitingForDrive = false
+            return
+        }
+        guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { waitingForDrive = true; return }
+        var stale = false
+        guard let fresh = try? URL(resolvingBookmarkData: data, options: [],
+                                   relativeTo: nil, bookmarkDataIsStale: &stale),
+              fresh.path != root.path,
+              FileManager.default.fileExists(atPath: fresh.path) else {
+            waitingForDrive = true          // still gone — keep the session, keep retrying
+            return
+        }
+        // The drive is back under a new mount path: swap the root over, re-key all
+        // path-keyed metadata, and drop the (now dead-pathed) navigation stack.
+        root.stopAccessingSecurityScopedResource()
+        _ = fresh.startAccessingSecurityScopedResource()
+        if stale, let d = try? fresh.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+            UserDefaults.standard.set(d, forKey: bookmarkKey)
+        }
+        waitingForDrive = false
+        activeRoot = fresh
+        rootURL = fresh
+        rootName = fresh.lastPathComponent
+        path = []
+        rekeyRootIfRemounted(to: fresh.path)
+        processPendingTikTok()
+        scheduleIndexBuild()
+        contentDidChange()
     }
 
     /// When an external drive is replugged it remounts under a new `…/userfsd/<UUID>/…` path, so
@@ -1585,6 +1779,7 @@ final class Library {
                 addNext()
             }
         }
+        MetadataLoader.flushSpecStore()    // persist any newly-read specs
         return result
     }
 

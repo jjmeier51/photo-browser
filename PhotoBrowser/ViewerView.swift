@@ -122,6 +122,15 @@ struct ViewerView: View {
             headerDate = nil
             if let current { headerDate = await MetadataLoader.captureDate(for: current) }
         }
+        // Preload the neighbouring photos so a swipe shows an already-decoded page
+        // (like Photos) instead of starting a cold decode from the drive.
+        .task(id: index) {
+            for delta in [1, -1] {
+                let i = index + delta
+                guard items.indices.contains(i), items[i].kind == .image else { continue }
+                ViewerPageCache.shared.preload(url: items[i].url)
+            }
+        }
         // Slideshow: hold each item, then advance (wrapping around).
         .task(id: slideshow ? index : -1) {
             guard slideshow, !items.isEmpty else { return }
@@ -156,7 +165,7 @@ struct ViewerView: View {
     private func duplicateCurrent() {
         guard let current else { return }
         let n = FileActions.duplicate([current])
-        library.contentDidChange()
+        library.contentDidChange(under: current.url.deletingLastPathComponent())
         note(n > 0 ? "Duplicated" : "Couldn’t duplicate")
     }
 
@@ -166,7 +175,7 @@ struct ViewerView: View {
         Task {
             let outcome = await FileActions.copyItems([src], to: dest, skipCollisions: false) { _ in }
             if !outcome.copied.isEmpty { library.setLastTransferDestination(dest) }
-            library.contentDidChange()   // a copy into the visible folder should appear
+            library.contentDidChange(under: dest)   // a copy into the visible folder should appear
             note(outcome.copied.isEmpty ? "Couldn’t copy" : "Copied")
         }
     }
@@ -179,7 +188,8 @@ struct ViewerView: View {
             guard !outcome.moved.isEmpty else { note("Couldn’t move"); return }
             library.itemsMoved(outcome.moved)            // labels/captions follow the file
             library.setLastTransferDestination(dest)
-            library.contentDidChange()
+            library.contentDidChange(under: src.deletingLastPathComponent())
+            library.contentDidChange(under: dest)
             note("Moved")
             removeCurrentAndAdvance()
         }
@@ -190,7 +200,7 @@ struct ViewerView: View {
         let assetIDs = library.origin(for: current.url).map { [$0] } ?? []
         FileActions.delete([current])
         library.clearOrigins([current.url])
-        library.contentDidChange()
+        library.contentDidChange(under: current.url.deletingLastPathComponent())
         if !assetIDs.isEmpty { Task { await FileActions.deletePhotosAssets(assetIDs) } }
         removeCurrentAndAdvance()
     }
@@ -322,7 +332,7 @@ private struct PageView: View {
                       onDismiss: onDismiss, onInfo: onInfo,
                       onZoomChanged: onZoomChanged, onControlsHidden: onControlsHidden,
                       onPrev: onPrev, onNext: onNext,
-                      onCaptured: { library.contentDidChange() })
+                      onCaptured: { library.contentDidChange(under: item.url.deletingLastPathComponent()) })
         } else {
             ZoomableImageView(url: item.url, coverSource: coverSource, onDismiss: onDismiss, onInfo: onInfo,
                               onZoomChanged: onZoomChanged, onToggleChrome: onToggleChrome,

@@ -78,12 +78,14 @@ struct EntryCell: View {
             .clipShape(Rectangle())
             .contentShape(Rectangle())
             .task(id: entry.id) {
-                if entry.kind == .video { duration = await Self.loadDuration(entry) }
                 guard entry.kind == .image || entry.kind == .video || entry.kind == .pdf else { return }
+                // Thumbnail first — it's what the user is waiting on; the duration
+                // badge (a fuller first-time AVAsset read) fills in right after.
                 image = await Thumbnailer.shared.thumbnail(
                     for: entry,
                     size: CGSize(width: 110, height: 110),
                     scale: UIScreen.main.scale)
+                if entry.kind == .video { duration = await Self.loadDuration(entry) }
             }
             .task(id: coverURL) {
                 cover = coverURL.flatMap { UIImage(contentsOfFile: $0.path) }
@@ -148,9 +150,10 @@ struct EntryCell: View {
     private static func loadDuration(_ entry: Entry) async -> String? {
         let key = "\(entry.url.stableCacheID)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)" as NSString
         if let cached = durationCache.object(forKey: key) { return cached as String }
-        let asset = AVURLAsset(url: entry.url)
-        guard let d = try? await asset.load(.duration) else { return nil }
-        let s = d.seconds
+        // Durations come from the media-spec store, which persists to disk — so a
+        // video's AVAsset is opened at most once ever, not once per launch. (This
+        // also pre-warms the spec the resolution/HDR filters need.)
+        let s = await MetadataLoader.mediaSpec(for: entry).duration
         guard s.isFinite, s > 0 else { return nil }
         let t = Int(s.rounded())
         let label = String(format: "%d:%02d", t / 60, t % 60)

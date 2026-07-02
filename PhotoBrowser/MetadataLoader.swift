@@ -94,6 +94,61 @@ enum MetadataLoader {
     /// Persists any newly-read capture dates. Call after a batch of reads.
     static func flushDateStore() { dateStore.flush() }
 
+    // MARK: - Persistent media-spec cache
+
+    /// Dimensions/HDR/duration back the resolution filters, the duration sort and
+    /// the video tiles' length badges. Like capture dates they're expensive to read
+    /// (ImageIO/AVAsset per file) and the in-memory cache dies with the app, so
+    /// specs persist keyed `path|mtime|size` — each file is inspected at most once,
+    /// ever. Single stores debounce their flush: tiles record specs one at a time
+    /// as they first appear, and rewriting the whole file per tile would thrash.
+    private final class SpecStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var map: [String: MediaSpec]
+        private var dirty = false
+        private var flushScheduled = false
+        private let fileURL: URL
+
+        init() {
+            let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            fileURL = dir.appendingPathComponent("mediaSpecs.json")
+            map = (try? Data(contentsOf: fileURL)).flatMap { try? JSONDecoder().decode([String: MediaSpec].self, from: $0) } ?? [:]
+        }
+
+        func lookup(_ key: String) -> MediaSpec? { lock.lock(); defer { lock.unlock() }; return map[key] }
+
+        func store(_ key: String, _ spec: MediaSpec) {
+            lock.lock(); map[key] = spec; dirty = true; lock.unlock()
+            scheduleFlush()
+        }
+
+        func flush() {
+            lock.lock(); guard dirty else { lock.unlock(); return }
+            let snapshot = map; dirty = false; lock.unlock()
+            if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: fileURL, options: .atomic) }
+        }
+
+        /// Coalesces a burst of single stores (scrolling a folder of new videos)
+        /// into one disk write a few seconds later.
+        private func scheduleFlush() {
+            lock.lock()
+            let start = !flushScheduled
+            if start { flushScheduled = true }
+            lock.unlock()
+            guard start else { return }
+            Task.detached(priority: .utility) { [self] in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                lock.lock(); flushScheduled = false; lock.unlock()
+                flush()
+            }
+        }
+    }
+
+    private static let specStore = SpecStore()
+
+    /// Persists any newly-read specs immediately. Call after a bulk read.
+    static func flushSpecStore() { specStore.flush() }
+
     // MARK: - On-device photo-text (OCR) index
 
     /// Recognized text per photo, keyed `path|mtime|size` (so an edit re-OCRs).
@@ -169,8 +224,16 @@ enum MetadataLoader {
     static func mediaSpec(for entry: Entry) async -> MediaSpec {
         let key = cacheKey(for: entry)
         if let cached = specCache.object(forKey: key) { return cached.value ?? MediaSpec() }
-        let spec = await readMediaSpec(for: entry)
+        // Disk store: a file's dimensions/duration are read at most once across launches.
+        if let known = specStore.lookup(key as String) {
+            specCache.setObject(CachedValue(known), forKey: key)
+            return known
+        }
+        // Time-boxed like the info panel's reads: one corrupt/slow file must not stall
+        // a bulk spec pass. A timeout stays uncached so a healthy drive retries later.
+        guard let spec = await withTimeout(10, { await readMediaSpec(for: entry) }) else { return MediaSpec() }
         specCache.setObject(CachedValue(spec), forKey: key)
+        specStore.store(key as String, spec)
         return spec
     }
 
@@ -239,7 +302,8 @@ enum MetadataLoader {
     static func existingCaption(for entry: Entry) async -> String? {
         let key = cacheKey(for: entry)
         if let cached = captionCache.object(forKey: key) { return cached.value }
-        let caption = await readExistingCaption(for: entry)
+        // Time-boxed for the same reason as capture dates; a timeout stays uncached.
+        guard let caption = await withTimeout(8, { await readExistingCaption(for: entry) }) else { return nil }
         captionCache.setObject(CachedValue(caption), forKey: key)
         return caption
     }
@@ -374,7 +438,10 @@ enum MetadataLoader {
             dateCache.setObject(CachedValue(known), forKey: key)
             return known
         }
-        let date = await readCaptureDate(for: entry)
+        // Time-boxed so a slow/corrupt file can't stall a bulk date pass. A timeout is
+        // deliberately NOT cached (storing it would permanently record "no date"), so
+        // the file is retried once the drive is healthy again.
+        guard let date = await withTimeout(10, { await readCaptureDate(for: entry) }) else { return nil }
         dateCache.setObject(CachedValue(date), forKey: key)
         dateStore.store(key as String, date)
         return date

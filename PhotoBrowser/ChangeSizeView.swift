@@ -139,7 +139,7 @@ struct ChangeSizeView: View {
             let ok = MediaEditing.resizePhotoInPlace(url: url, targetWidth: t.w, targetHeight: t.h)
             await MainActor.run {
                 busy = false
-                if ok { library.contentDidChange() }
+                if ok { library.contentDidChange(under: url.deletingLastPathComponent()) }
                 dismiss()
             }
         }

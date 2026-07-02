@@ -136,7 +136,7 @@ struct MediaEditorView: View {
             working = false
             bg.end()
             if ok {
-                library.contentDidChange()   // reload folder → new mtime/size → fresh thumbnail
+                library.contentDidChange(under: url.deletingLastPathComponent())   // reload folder → new mtime/size → fresh thumbnail
                 dismiss()
             } else {
                 errorNote = "The edit could not be saved."

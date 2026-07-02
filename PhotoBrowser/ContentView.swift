@@ -24,6 +24,10 @@ struct ContentView: View {
                     if let root = library.rootURL {
                         FolderView(url: root, isRoot: true)
                             .id(root)            // reload when the root folder changes
+                    } else if library.waitingForDrive {
+                        // A library exists but its drive isn't reachable — wait for it
+                        // instead of dropping to the first-run screen ("forgetting").
+                        WaitingForDrive()
                     } else {
                         EmptyState()
                     }
@@ -72,6 +76,59 @@ struct ContentView: View {
 
     private func pillTitle(_ a: Library.Activity) -> String {
         a.fraction >= 0 ? "\(a.title) — \(Int(a.fraction * 100))%" : a.title
+    }
+}
+
+/// Shown when a saved library exists but its drive isn't reachable (e.g. the app
+/// launched before the SSD was plugged in). Retries quietly and reopens the
+/// library the moment the drive mounts; opening a different folder stays
+/// available as an escape hatch.
+struct WaitingForDrive: View {
+    @Environment(Library.self) private var library
+    @State private var showImporter = false
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "externaldrive.badge.questionmark")
+                .font(.system(size: 52))
+                .foregroundStyle(.secondary)
+            Text("Waiting for your drive…")
+                .font(.title3.bold())
+            Text("Plug in the drive that holds your library and it will reopen automatically.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+            ProgressView()
+                .padding(.top, 4)
+            Button {
+                showImporter = true
+            } label: {
+                Label("Open a Different Folder", systemImage: "folder.badge.plus").padding(.horizontal, 8)
+            }
+            .buttonStyle(.bordered)
+            .padding(.top, 8)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppGradient())
+        .navigationTitle("Photo Browser")
+        .navigationBarTitleDisplayMode(.inline)
+        .fileImporter(isPresented: $showImporter,
+                      allowedContentTypes: [.folder],
+                      allowsMultipleSelection: false) { result in
+            if case .success(let urls) = result, let url = urls.first {
+                library.chooseFolder(url)
+            }
+        }
+        // Poll while visible: iOS gives apps no volume-mount notification, so a
+        // light retry loop is the only way to notice the drive coming back while
+        // the app stays foregrounded. (Foregrounding also retries, in the App.)
+        .task {
+            while !Task.isCancelled {
+                library.reconnectIfNeeded()
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
     }
 }
 

@@ -2,6 +2,38 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-02 — drive persistence + instant-browsing pass
+
+- **The app no longer "forgets" the SSD.** The saved folder bookmark used to be tried exactly
+  once at launch — launch without the drive and the app dropped to the first-run screen. Now a
+  "Waiting for your drive…" screen retries until the volume mounts (and every return to
+  foreground retries too), reopening the library automatically. A drive yanked **mid-session**
+  is also detected and re-resolved — including when it comes back under a new mount path, which
+  swaps the root over and re-keys everything.
+- **Replug/move re-keying is now complete** — the People/faces library, "AI" badges, Clean Up
+  progress, and dismissed duplicate pairs previously orphaned on every drive remount (and on
+  in-app moves of their folders); they now follow along with everything else.
+- **Every folder paints instantly on cold launch** — per-folder listing snapshots on disk
+  (previously only the root had one), keyed drive-relative so they survive remounts.
+- **Instant search/Library on launch** — the whole-drive index is persisted and loaded
+  immediately; the fresh walk still runs in the background and replaces it.
+- **Dimensions/HDR/durations persist to disk** like capture dates already did — the resolution
+  filters, duration sort and video-length badges stop re-opening every AVAsset each launch. A
+  background pass also pre-warms capture dates for the whole library (once ever per file), so
+  first visits to folders sort by real capture date without an EXIF wait.
+- **One edit no longer re-scans everything** — content-change notifications are scoped to the
+  affected folder, so saving an edit or finishing a download stops evicting every cached
+  listing and re-running the year/age passes app-wide.
+- **Age computation is lazy** — the recursive walk + EXIF pass now runs only when an age
+  sort/filter/search is engaged or the Age menu is opened, not on every visit to any folder
+  under a birthday folder.
+- **Photos-style viewer swiping** — the viewer preloads the neighbouring photos into a small
+  decoded-page cache, so swipes land on an already-decoded image instead of a cold two-stage
+  decode from the drive.
+- **Misc:** highlight-bubble covers decode off the main thread (was a sync decode during
+  layout); bulk capture-date/spec/caption reads are time-boxed so one corrupt file can't stall
+  a folder pass (timeouts stay uncached and retry when the drive is healthy).
+
 ## 2026-06-26
 
 - **Instagram downloads run in the background** — "Download Instagram Profile" / "Get New Posts"
