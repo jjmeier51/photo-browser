@@ -50,7 +50,11 @@ extension URL {
     /// dates, media specs, durations) misses, regenerating the whole library on each reconnect.
     /// Dropping the mount-UUID segment yields a stable, drive-relative key. Non-external paths
     /// (no marker) fall through to the full path unchanged.
-    var stableCacheID: String {
+    /// `nonisolated`: a pure function of `path`, and the listing/index snapshot
+    /// helpers key their files with it from detached tasks — under the project's
+    /// default-MainActor isolation an unannotated extension member is
+    /// MainActor-bound and can't be touched off-main.
+    nonisolated var stableCacheID: String {
         let p = path
         guard let r = p.range(of: "/com.apple.filesystems.userfsd/") else { return p }
         let after = p[r.upperBound...]                          // "<UUID>/rest…"
