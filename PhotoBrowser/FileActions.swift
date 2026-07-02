@@ -1005,11 +1005,16 @@ enum FileActions {
                                 folderName: String,
                                 requestedFPS: Double = 0,
                                 onProgress: @escaping @Sendable (Double) -> Void = { _ in })
-    async -> (folder: URL?, count: Int, firstFrame: URL?) {
+    async -> (folder: URL?, count: Int, firstFrame: URL?, note: String?) {
         let name = folderName.trimmingCharacters(in: .whitespacesAndNewlines)
         let safeName = name.isEmpty ? (url.deletingPathExtension().lastPathComponent + " Frames") : name
         let asset = AVURLAsset(url: url)
-        guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return (nil, 0, nil) }
+        // `note` explains a zero-frame outcome — the failure modes here (unreadable
+        // video, un-creatable folder, failing drive writes) are indistinguishable to
+        // the user otherwise, and a generic message made this undiagnosable.
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first else {
+            return (nil, 0, nil, "the video couldn’t be opened (no readable video track — the file may be damaged).")
+        }
         let isHDR = ((try? await track.load(.mediaCharacteristics))?.contains(.containsHDRVideo)) ?? false
         let props = await MetadataLoader.exifProperties(forVideo: url)
         let duration = (try? await asset.load(.duration))?.seconds ?? 0
@@ -1022,7 +1027,7 @@ enum FileActions {
         // long, high-fps clips. `fps` only sizes `total`/the time grid; the reader
         // writes whatever it actually decodes.
         let interval = 1.0 / fps
-        guard duration > 0 else { return (nil, 0, nil) }
+        guard duration > 0 else { return (nil, 0, nil, "the video reports no duration — it may be damaged.") }
         let total = max(1, Int((duration * fps).rounded()))
 
         // Resume into the saved folder if a prior export of this exact file is
@@ -1031,6 +1036,7 @@ enum FileActions {
         let fm = FileManager.default
         let dir: URL
         var startIndex = 0
+        var createdFresh = false      // this run made the folder → remove it again if no frame lands
         var isDir: ObjCBool = false
         if let saved = exportProgress(forVideoKey: videoKey),
            fm.fileExists(atPath: saved.folder, isDirectory: &isDir), isDir.boolValue {
@@ -1051,9 +1057,10 @@ enum FileActions {
                 candidate = parent.appendingPathComponent("\(safeName) \(suffix)", isDirectory: true)
                 suffix += 1
             }
+            createdFresh = !fm.fileExists(atPath: candidate.path)
             try? fm.createDirectory(at: candidate, withIntermediateDirectories: true)
             guard fm.fileExists(atPath: candidate.path, isDirectory: &isDir), isDir.boolValue else {
-                return (nil, 0, nil)     // couldn't create a real folder — fail honestly
+                return (nil, 0, nil, "the frames folder couldn’t be created on the drive — it may be full, read-only, or need repair (Disk Utility First Aid).")
             }
             dir = candidate
         }
@@ -1068,10 +1075,14 @@ enum FileActions {
         // Report the total frames now on disk (resumed + previously-exported).
         let onDisk = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil,
                                                                    options: [.skipsHiddenFiles]))?.count ?? result.1
+        if onDisk == 0 {
+            if createdFresh { try? fm.removeItem(at: dir) }   // don't leave an empty junk folder behind
+            return (nil, 0, nil, result.2)
+        }
         // Index-0 frame, used by the caller to seed the new folder's cover.
         let firstFramePath = dir.appendingPathComponent("\(safeName) 0.heic")
         let firstFrame = FileManager.default.fileExists(atPath: firstFramePath.path) ? firstFramePath : nil
-        return (result.0, onDisk, firstFrame)
+        return (result.0, onDisk, firstFrame, nil)
     }
 
     /// Sequential AVAssetReader that writes every decoded frame in order (10-bit
@@ -1083,13 +1094,16 @@ enum FileActions {
                                                dir: URL, safeName: String, props: [String: Any],
                                                duration: Double, interval: Double, total: Int, startIndex: Int,
                                                videoKey: String, isHDR: Bool,
-                                               onProgress: @escaping @Sendable (Double) -> Void) async -> (URL?, Int) {
-        await Task.detached(priority: .userInitiated) { () -> (URL?, Int) in
+                                               onProgress: @escaping @Sendable (Double) -> Void) async -> (URL?, Int, String?) {
+        await Task.detached(priority: .userInitiated) { () -> (URL?, Int, String?) in
             let settings: [String: Any] = [
                 kCVPixelBufferPixelFormatTypeKey as String:
                     isHDR ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_32BGRA
             ]
             var written = 0
+            var encodeFailures = 0
+            var writeError: String?          // first disk-write error, verbatim — names the real cause (full/read-only/corrupt)
+            var everStartedReading = false
             var frameIndex = startIndex                  // next frame index to capture
             var nextTime = Double(startIndex) * interval  // its target time
             var startTime = nextTime                      // where the current reader begins
@@ -1107,6 +1121,7 @@ enum FileActions {
                 guard reader.canAdd(output) else { break }
                 reader.add(output)
                 guard reader.startReading() else { break }
+                everStartedReading = true
 
                 var lastPTS = startTime
                 var advanced = false
@@ -1116,14 +1131,17 @@ enum FileActions {
                         if pts.isFinite { lastPTS = pts; advanced = true }
                         if pts.isFinite, pts + 1e-4 >= nextTime {
                             let dest = dir.appendingPathComponent("\(safeName) \(frameIndex).heic")
-                            if !FileManager.default.fileExists(atPath: dest.path),
-                               let pb = CMSampleBufferGetImageBuffer(sample),
-                               let data = encodeFrame(pb, transform: transform, properties: props, scale: 1.5),  // 1.5× each frame
-                               (try? data.write(to: dest)) != nil {
-                                // Count only frames actually on disk — counting before the
-                                // write made a run whose writes all failed (missing folder,
-                                // yanked drive) report "Exported N frames" with nothing saved.
-                                written += 1
+                            if !FileManager.default.fileExists(atPath: dest.path) {
+                                if let pb = CMSampleBufferGetImageBuffer(sample),
+                                   let data = encodeFrame(pb, transform: transform, properties: props, scale: 1.5) {  // 1.5× each frame
+                                    // Count only frames actually on disk — counting before the
+                                    // write made a run whose writes all failed (missing folder,
+                                    // yanked drive) report "Exported N frames" with nothing saved.
+                                    do { try data.write(to: dest); written += 1 }
+                                    catch { if writeError == nil { writeError = error.localizedDescription } }
+                                } else {
+                                    encodeFailures += 1
+                                }
                             }
                             frameIndex += 1
                             nextTime = Double(frameIndex) * interval
@@ -1155,7 +1173,20 @@ enum FileActions {
                 }
             }
             onProgress(1.0)
-            return (dir, written)
+            // Explain a zero-frame run — each cause needs a different user action.
+            var note: String?
+            if written == 0 {
+                if let writeError {
+                    note = "the frames couldn’t be written to the drive (\(writeError))."
+                } else if encodeFailures > 0 {
+                    note = "the video decoded but its frames couldn’t be encoded (\(encodeFailures) failed)."
+                } else if !everStartedReading {
+                    note = "the video couldn’t be opened for decoding — it may use an unsupported codec or be damaged."
+                } else {
+                    note = "the video produced no decodable frames — it may be damaged."
+                }
+            }
+            return (dir, written, note)
         }.value
     }
 

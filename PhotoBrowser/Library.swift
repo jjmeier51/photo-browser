@@ -672,7 +672,7 @@ final class Library {
         setActivity(id, status: label)
         let bg = BackgroundTaskHolder(); bg.begin(name: "Export All Frames")
         Task {
-            let (folder, count, firstFrame) = await FileActions.exportAllFrames(
+            let (folder, count, firstFrame, note) = await FileActions.exportAllFrames(
                 of: entry.url, folderName: name, requestedFPS: fps) { p in
                 Task { @MainActor in self.setActivity(id, fraction: p) }
             }
@@ -682,7 +682,7 @@ final class Library {
             }
             endActivity(id, result: count > 0
                 ? "Exported \(count) frame\(count == 1 ? "" : "s") to “\(folder?.lastPathComponent ?? "Frames")”."
-                : "Couldn’t export frames.")
+                : "Couldn’t export frames — " + (note ?? "unknown reason."))
             contentDidChange()
             bg.end()
         }
