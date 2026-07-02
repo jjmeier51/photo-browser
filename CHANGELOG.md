@@ -33,6 +33,13 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 - **Misc:** highlight-bubble covers decode off the main thread (was a sync decode during
   layout); bulk capture-date/spec/caption reads are time-boxed so one corrupt file can't stall
   a folder pass (timeouts stay uncached and retry when the drive is healthy).
+- **Export All Frames no longer reports phantom success** — frames were counted before
+  their write was checked, so a run whose folder couldn't be created (e.g. a corrupt
+  extension-less "data" file occupying the folder's name after an interrupted write on the
+  drive) said "Exported N frames" with nothing saved. Now: only frames actually on disk are
+  counted; a corrupt file-entry at the target name steps aside to "Name 2"; the resume
+  checkpoint verifies its saved folder is a real directory; and a stat that transiently fails
+  during listing re-checks instead of rendering a real folder as a "data" file tile.
 - **TikTok "Get New" can no longer permanently skip failed downloads** — the incremental
   cutoff (`newestDate`) used to advance when links were *resolved*, so a queued background
   download that later failed fell behind the cutoff and was never re-listed. The cutoff now

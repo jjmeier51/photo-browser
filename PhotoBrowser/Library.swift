@@ -1922,9 +1922,17 @@ final class Library {
                 let i = index; let url = urls[i]; index += 1
                 group.addTask {
                     let rv = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey])
+                    var isDirectory = rv?.isDirectory ?? false
+                    if rv?.isDirectory == nil {
+                        // A stat that transiently fails on a busy external drive must not
+                        // turn a folder into an extension-less "data" file tile — re-check
+                        // the cheap way before classifying.
+                        var d: ObjCBool = false
+                        if FileManager.default.fileExists(atPath: url.path, isDirectory: &d) { isDirectory = d.boolValue }
+                    }
                     return (i, Entry(url: url,
                                      name: url.lastPathComponent,
-                                     kind: classify(url: url, isDirectory: rv?.isDirectory ?? false),
+                                     kind: classify(url: url, isDirectory: isDirectory),
                                      size: Int64(rv?.fileSize ?? 0),
                                      modified: rv?.contentModificationDate ?? .distantPast))
                 }

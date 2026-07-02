@@ -1028,15 +1028,34 @@ enum FileActions {
         // Resume into the saved folder if a prior export of this exact file is
         // unfinished; otherwise start a fresh folder beside the video.
         let videoKey = videoExportKey(for: url)
+        let fm = FileManager.default
         let dir: URL
         var startIndex = 0
+        var isDir: ObjCBool = false
         if let saved = exportProgress(forVideoKey: videoKey),
-           FileManager.default.fileExists(atPath: saved.folder) {
-            dir = URL(fileURLWithPath: saved.folder)
+           fm.fileExists(atPath: saved.folder, isDirectory: &isDir), isDir.boolValue {
+            // Must be a real *directory* — a plain fileExists also matches a corrupt
+            // file-entry left where the folder used to be, and "resuming" into that
+            // silently drops every frame.
+            dir = URL(fileURLWithPath: saved.folder, isDirectory: true)
             startIndex = min(max(0, saved.nextIndex), total)
         } else {
-            dir = url.deletingLastPathComponent().appendingPathComponent(safeName, isDirectory: true)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            // A damaged directory entry on an external drive shows up as an
+            // extension-less *file* occupying the folder's name; createDirectory then
+            // fails and every frame write with it. Step to "Name 2", "Name 3", …
+            // instead of exporting into nothing.
+            let parent = url.deletingLastPathComponent()
+            var candidate = parent.appendingPathComponent(safeName, isDirectory: true)
+            var suffix = 2
+            while fm.fileExists(atPath: candidate.path, isDirectory: &isDir), !isDir.boolValue, suffix < 100 {
+                candidate = parent.appendingPathComponent("\(safeName) \(suffix)", isDirectory: true)
+                suffix += 1
+            }
+            try? fm.createDirectory(at: candidate, withIntermediateDirectories: true)
+            guard fm.fileExists(atPath: candidate.path, isDirectory: &isDir), isDir.boolValue else {
+                return (nil, 0, nil)     // couldn't create a real folder — fail honestly
+            }
+            dir = candidate
         }
         setExportProgress(ExportProgress(folder: dir.path, total: total, nextIndex: startIndex), forVideoKey: videoKey)
 
@@ -1099,8 +1118,11 @@ enum FileActions {
                             let dest = dir.appendingPathComponent("\(safeName) \(frameIndex).heic")
                             if !FileManager.default.fileExists(atPath: dest.path),
                                let pb = CMSampleBufferGetImageBuffer(sample),
-                               let data = encodeFrame(pb, transform: transform, properties: props, scale: 1.5) {  // 1.5× each frame
-                                try? data.write(to: dest)
+                               let data = encodeFrame(pb, transform: transform, properties: props, scale: 1.5),  // 1.5× each frame
+                               (try? data.write(to: dest)) != nil {
+                                // Count only frames actually on disk — counting before the
+                                // write made a run whose writes all failed (missing folder,
+                                // yanked drive) report "Exported N frames" with nothing saved.
                                 written += 1
                             }
                             frameIndex += 1
