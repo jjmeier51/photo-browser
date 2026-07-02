@@ -256,11 +256,19 @@ enum GoogleDrive {
 
     /// (success, failure reason) — the reason is surfaced to the user, so keep it actionable.
     private nonisolated static func downloadOneViaCookie(id: String, cookieHeader: String, into folder: URL) async -> (Bool, String?) {
+        // Downloads *stage on the phone* (URLSession writes to app temp storage) before
+        // moving onto the drive — a nearly-full iPhone fails every download no matter
+        // how much room the SSD has, so say that instead of a misleading auth error.
+        if let free = freeDeviceSpace(), free < 250 * 1024 * 1024 {
+            return (false, "your iPhone is nearly out of storage (\(free.sizeString) free) — downloads stage on the phone before moving to the drive, so free up space and try again")
+        }
         // Step 1: the standard download URL. Small files return their bytes directly; **large** files
         // (>~100 MB, which can't be virus-scanned) return an HTML confirm page instead.
         guard let url = URL(string: "https://drive.google.com/uc?export=download&id=\(id)") else { return (false, nil) }
-        guard let (tmp, http) = await fetch(url, cookieHeader) else {
-            return (false, "Drive refused the request (the sign-in may have expired — reopen “Browse Google Drive…” and log in again)")
+        let tmp: URL, http: HTTPURLResponse
+        switch await fetch(url, cookieHeader) {
+        case .failure(let why): return (false, why)
+        case .file(let t, let h): tmp = t; http = h
         }
         if !isHTML(http) {
             let saved = save(tmp, http: http, id: id, into: folder)
@@ -279,8 +287,13 @@ enum GoogleDrive {
         let confirmURL = hasConfirmForm
             ? parseConfirmForm(html, fallbackID: id)
             : URL(string: "https://drive.usercontent.google.com/download?id=\(id)&export=download&confirm=t")
-        guard let confirmURL, let (tmp2, http2) = await fetch(confirmURL, cookieHeader) else {
+        guard let confirmURL else {
             return (false, "the download confirmation step was refused (Google may have changed the flow, or the item isn’t downloadable)")
+        }
+        let tmp2: URL, http2: HTTPURLResponse
+        switch await fetch(confirmURL, cookieHeader) {
+        case .failure(let why): return (false, why)
+        case .file(let t, let h): tmp2 = t; http2 = h
         }
         if isHTML(http2) {   // still blocked (e.g. quota, or the flow changed again)
             let html2 = (try? String(contentsOf: tmp2, encoding: .utf8)) ?? ""
@@ -298,14 +311,38 @@ enum GoogleDrive {
         html.contains("accounts.google.com") || html.contains("ServiceLogin") || html.contains("signin/identifier")
     }
 
-    private nonisolated static func fetch(_ url: URL, _ cookieHeader: String) async -> (URL, HTTPURLResponse)? {
+    private enum Fetch { case file(URL, HTTPURLResponse), failure(String) }
+
+    private nonisolated static func fetch(_ url: URL, _ cookieHeader: String) async -> Fetch {
         var req = URLRequest(url: url); req.timeoutInterval = 300     // room for big files
         req.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
         req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
                      forHTTPHeaderField: "User-Agent")
-        guard let (tmp, resp) = try? await URLSession.shared.download(for: req),
-              let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else { return nil }
-        return (tmp, http)
+        do {
+            let (tmp, resp) = try await URLSession.shared.download(for: req)
+            guard let http = resp as? HTTPURLResponse else { return .failure("unexpected response") }
+            guard (200...299).contains(http.statusCode) else {
+                return .failure("Drive answered HTTP \(http.statusCode)"
+                                + (http.statusCode == 401 || http.statusCode == 403
+                                   ? " — reopen “Browse Google Drive…” and log in again" : ""))
+            }
+            return .file(tmp, http)
+        } catch {
+            // A full *phone* kills the staging write — name it, or it masquerades as auth.
+            let urlCode = (error as? URLError)?.code
+            if urlCode == .cannotWriteToFile || urlCode == .cannotCreateFile
+                || (error as? CocoaError)?.code == .fileWriteOutOfSpace {
+                return .failure("your iPhone ran out of storage while staging the download — free up space and try again")
+            }
+            return .failure(error.localizedDescription)
+        }
+    }
+
+    /// Free space on the phone (where downloads stage before moving to the drive).
+    private nonisolated static func freeDeviceSpace() -> Int64? {
+        let values = try? FileManager.default.temporaryDirectory
+            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage
     }
 
     private nonisolated static func isHTML(_ http: HTTPURLResponse) -> Bool {
