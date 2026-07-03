@@ -4,6 +4,13 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-03
 
+- **accessKardashian downloads run app-wide and pause anywhere** — the run moved off the member
+  screen onto `Library` (progress pill + completion popup, like Instagram/Drive), so you can
+  close the sheet, browse the app, and briefly switch apps while it downloads; reopening the
+  member screen reattaches to live progress, and Pause is available at any time (Resume picks
+  up where it left off). Caption translation now completes app-wide too. Speed: Resume/Fetch
+  New skips already-downloaded photos via one directory listing instead of a per-file stat on
+  the drive — a big head start on galleries with tens of thousands already saved.
 - **"Today's Instagram Stories" is flat again** — reverted the per-handle subfolders; collected
   stories go back to handle-prefixed filenames in one scrollable grid. Any leftover handle
   subfolders are flattened automatically the next time the folder is used (story links follow).

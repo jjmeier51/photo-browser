@@ -160,6 +160,14 @@ enum AccessKardashian {
         var captions: [String: String] = [:]
         var labels: [String: [String]] = [:]
 
+        // One directory listing beats a stat per planned photo: a Resume/Fetch New
+        // over a big gallery (tens of thousands already on disk) spent its time in
+        // per-file `fileExists` on the external drive before any download started.
+        // If the listing itself fails (drive hiccup) fall back to per-file stats —
+        // never treat "couldn't list" as "have nothing" and re-download everything.
+        let existingNames: Set<String>? = overwrite ? []
+            : (try? FileManager.default.contentsOfDirectory(atPath: folder.path)).map { Set($0.map { $0.lowercased() }) }
+
         await withTaskGroup(of: (ok: Bool, skipped: Bool, path: String?, category: String, caption: String?).self) { group in
             var idx = 0
             let maxConcurrent = 22              // matched to the connection pool (higher throttled)
@@ -169,7 +177,9 @@ enum AccessKardashian {
                 let coord = p.place.flatMap { coords[$0] ?? nil }
                 group.addTask {
                     let dest = folder.appendingPathComponent(p.destName)
-                    if !overwrite, FileManager.default.fileExists(atPath: dest.path) {
+                    let alreadyHave = existingNames.map { $0.contains(p.destName.lowercased()) }
+                        ?? FileManager.default.fileExists(atPath: dest.path)
+                    if !overwrite, alreadyHave {
                         return (true, true, dest.path, p.category, p.caption)   // already have it
                     }
                     let ok = await downloadImage(p.fullURL, to: dest, date: p.date, coord: coord)

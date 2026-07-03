@@ -732,6 +732,92 @@ final class Library {
         return r.failed > 0 ? base + "; \(r.failed) failed." : base + "."
     }
 
+    // MARK: - accessKardashian downloads (app-wide, pausable)
+
+    /// Live per-member download state, so the accessKardashian screens can show
+    /// progress and offer Pause from anywhere while the run continues app-wide —
+    /// the run used to live inside the member screen's own state, so leaving it
+    /// orphaned the download.
+    var akRunning: Set<String> = []
+    var akProgress: [String: AccessKardashian.Progress] = [:]
+    /// Captions awaiting Portuguese→English translation. Hosted on `ContentView`'s
+    /// translation modifier so translation still happens after the download screen
+    /// (which used to host it) is closed.
+    var akPendingCaptions: [String: String] = [:]
+    @ObservationIgnored private var akCancelFlags: [String: CancelFlag] = [:]
+
+    func isAKDownloadRunning(_ memberName: String) -> Bool { akRunning.contains(memberName) }
+    /// Lets in-flight photo downloads finish, then stops — Resume picks up from here.
+    func pauseAKDownload(_ memberName: String) { akCancelFlags[memberName]?.set() }
+
+    /// Crawls + downloads `member`'s gallery as an app-wide background activity
+    /// (progress pill, navigable, best-effort background window), pausable at any
+    /// time via `pauseAKDownload`. State/labels/captions/covers persist exactly as
+    /// the old in-view run did.
+    func startAKDownload(member: AccessKardashian.Member, into parentFolder: URL,
+                         overwrite: Bool, refreshIndex: Bool) {
+        guard !akRunning.contains(member.name) else { return }
+        let folder = parentFolder.appendingPathComponent(member.name, isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        markKardashianFolder(folder)
+        if let d = AccessKardashian.birthdayDate(member) { setBirthday(d, for: folder) }
+
+        let flag = CancelFlag()
+        akCancelFlags[member.name] = flag
+        akRunning.insert(member.name)
+        akProgress[member.name] = AccessKardashian.Progress(phase: "Starting…", fraction: 0, done: 0, total: 0)
+        let id = beginActivity("accessKardashian", indeterminate: true)
+        setActivity(id, status: member.name)
+        let bg = BackgroundTaskHolder(); bg.begin(name: "accessKardashian \(member.name)")
+        Task {
+            let r = await AccessKardashian.run(
+                member: member, into: folder, overwrite: overwrite, refreshIndex: refreshIndex,
+                progress: { p in
+                    Task { @MainActor in
+                        self.akProgress[member.name] = p
+                        let line = p.phase == "Downloading"
+                            ? "\(member.name) — \(p.done) of \(p.total)" : "\(member.name) — \(p.phase)"
+                        self.setActivity(id, status: line, fraction: p.phase == "Downloading" ? p.fraction : -1)
+                    }
+                },
+                isCancelled: { flag.isSet })
+
+            // Tag every downloaded photo with its category label, and store captions
+            // (Portuguese now; translated to English app-wide on iOS 18+).
+            addLabels(r.labelsByCategory)
+            if !r.captions.isEmpty {
+                setCaptions(r.captions)
+                akPendingCaptions.merge(r.captions) { _, new in new }
+            }
+            // Clear Coppermine file-info tooltips an earlier version wrongly stored as captions.
+            let stale = captions.filter { $0.key.hasPrefix(folder.path + "/") && AccessKardashian.isInfoBlock($0.value) }
+            if !stale.isEmpty { setCaptions(stale.mapValues { _ in "" }) }
+
+            let present = r.downloaded + r.skipped
+            setAKMember(member.name, .init(folderPath: folder.path, completed: !r.cancelled,
+                                           total: max(r.total, present), downloaded: present,
+                                           updated: Date().timeIntervalSince1970))
+            akRunning.remove(member.name)
+            akCancelFlags[member.name] = nil
+            akProgress[member.name] = nil
+            endActivity(id, result: akResultMessage(member: member, r: r, present: present))
+            if present > 0 { contentDidChange(under: folder) }
+            bg.end()
+        }
+    }
+
+    private func akResultMessage(member: AccessKardashian.Member, r: AccessKardashian.Result, present: Int) -> String {
+        if r.cancelled {
+            return "Paused \(member.name) at \(present) of \(max(r.total, present)) — resume anytime from “Download from accessKardashian…”."
+        }
+        guard r.downloaded > 0 || r.skipped > 0 else { return r.note ?? "Nothing downloaded for \(member.name)." }
+        var s = "Downloaded \(r.downloaded) new photo\(r.downloaded == 1 ? "" : "s") for \(member.name)"
+        if r.skipped > 0 { s += " (\(r.skipped) already had)" }
+        s += "."
+        if let note = r.note { s += " \(note)" }
+        return s
+    }
+
     /// Clean-up review state per folder: the set of item paths already decided on
     /// (kept or deleted). The queue on (re-)open is simply "viewable items not in
     /// this set", so it resumes correctly every run regardless of order.

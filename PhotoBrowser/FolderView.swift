@@ -813,7 +813,7 @@ struct FolderView: View {
                 TaylorBrowserView(targetFolder: url) { Task { await reload() } }
             }
             .fullScreenCover(isPresented: $showAccessKardashian) {
-                AccessKardashianView(targetFolder: url) { Task { await reload() } }
+                AccessKardashianView(targetFolder: url)   // runs app-wide; contentDidChange refreshes the folder
             }
             .fullScreenCover(isPresented: $showTaylorCrossRef) {
                 TaylorCrossReferenceView(folder: url) { Task { await reload() } }

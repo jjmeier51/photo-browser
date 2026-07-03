@@ -72,6 +72,12 @@ struct ContentView: View {
         } message: {
             Text(library.activityResults.first ?? "")
         }
+        // Portuguese→English caption translation for accessKardashian downloads —
+        // hosted app-wide so it completes even after the download screen is closed.
+        .modifier(CaptionTranslation(pending: $library.akPendingCaptions) { translated in
+            library.setCaptions(translated)
+            library.akPendingCaptions = [:]
+        })
     }
 
     private func pillTitle(_ a: Library.Activity) -> String {

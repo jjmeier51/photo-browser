@@ -8,13 +8,16 @@ import Translation
 /// category (Candids / Photoshoots / …), stamped with her birthday, and carrying
 /// the gallery's dates, locations, and captions. Each member remembers her state,
 /// so a finished download offers "Fetch New" / "Re-download" and a paused one
-/// offers "Resume". Downloads run with high concurrency and keep going briefly in
-/// the background.
+/// offers "Resume".
+///
+/// The download itself runs on `Library` as an **app-wide activity** (progress
+/// pill), so these screens can be closed and the app navigated freely while it
+/// runs; it also keeps going briefly when the app is backgrounded. Pause anytime —
+/// Resume picks up where it left off.
 struct AccessKardashianView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
     let targetFolder: URL
-    let onFinished: () -> Void
 
     var body: some View {
         NavigationStack {
@@ -22,7 +25,7 @@ struct AccessKardashianView: View {
                 Section {
                     ForEach(AccessKardashian.members) { member in
                         NavigationLink {
-                            AKMemberDownloadView(member: member, targetFolder: targetFolder, onFinished: onFinished)
+                            AKMemberDownloadView(member: member, targetFolder: targetFolder)
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(member.name).font(.body)
@@ -31,7 +34,7 @@ struct AccessKardashianView: View {
                         }
                     }
                 } footer: {
-                    Text("Photos come from accesskardashian.com.br (a public fan gallery). Each member downloads into her own folder, tagged by category and stamped with her birthday. Coverage and captions are best-effort.")
+                    Text("Photos come from accesskardashian.com.br (a public fan gallery). Each member downloads into her own folder, tagged by category and stamped with her birthday. Downloads run app-wide — you can close this and keep browsing. Coverage and captions are best-effort.")
                 }
             }
             .navigationTitle("accessKardashian")
@@ -41,6 +44,10 @@ struct AccessKardashianView: View {
     }
 
     private func statusLine(_ member: AccessKardashian.Member) -> String {
+        if library.isAKDownloadRunning(member.name) {
+            let p = library.akProgress[member.name]
+            return p?.phase == "Downloading" ? "Downloading — \(p?.done ?? 0) of \(p?.total ?? 0)…" : "Downloading…"
+        }
         guard let s = library.akMember(member.name) else { return "Not downloaded yet" }
         let when = Self.relative(Date(timeIntervalSince1970: s.updated))
         if s.completed { return "\(s.downloaded) photos · updated \(when)" }
@@ -53,31 +60,26 @@ struct AccessKardashianView: View {
     }
 }
 
-/// One member's download screen: progress, pause/cancel, and the right action(s)
-/// for her current state.
+/// One member's download screen: progress, pause, and the right action(s) for her
+/// current state. Purely a control surface — the run itself lives on `Library`, so
+/// closing this screen (or the sheet) never interrupts it, and reopening it
+/// reattaches to the live progress.
 private struct AKMemberDownloadView: View {
     @Environment(Library.self) private var library
     let member: AccessKardashian.Member
     let targetFolder: URL
-    let onFinished: () -> Void
-
-    @State private var running = false
-    @State private var progress = AccessKardashian.Progress(phase: "", fraction: 0, done: 0, total: 0)
-    @State private var result: AccessKardashian.Result?
-    @State private var task: Task<Void, Never>?
-    @State private var cancel = CancelFlag()
-
-    // Captions come back in Portuguese; setting this drives the on-device
-    // translation to English on iOS 18+ (see `CaptionTranslation`).
-    @State private var pendingCaptions: [String: String] = [:]
 
     private var state: Library.AKMember? { library.akMember(member.name) }
+    private var running: Bool { library.isAKDownloadRunning(member.name) }
+    private var progress: AccessKardashian.Progress {
+        library.akProgress[member.name] ?? AccessKardashian.Progress(phase: "Starting…", fraction: 0, done: 0, total: 0)
+    }
 
     var body: some View {
         Form {
             Section {
                 Label(member.name, systemImage: "person.crop.circle")
-                if let s = state {
+                if let s = state, !running {
                     Text(s.completed ? "\(s.downloaded) photos downloaded."
                                      : "Paused at \(s.downloaded) of \(s.total).")
                         .font(.callout).foregroundStyle(.secondary)
@@ -89,29 +91,24 @@ private struct AKMemberDownloadView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         ProgressView(value: progress.total > 0 ? progress.fraction : 0)
                         Text(progressLine).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                        Text("Keep the app open. It keeps going briefly if you switch away, but can’t finish once the app is closed.")
+                        Text("Runs app-wide — leave this screen and keep browsing; it also keeps going briefly if you switch apps (iOS ends it once the app is closed). Pause anytime; Resume picks up where it left off.")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
-                    Button(role: .destructive) { pause() } label: {
+                    Button(role: .destructive) { library.pauseAKDownload(member.name) } label: {
                         Label("Pause", systemImage: "pause.circle")
                     }
                 }
             } else {
-                if let r = result {
-                    Section {
-                        Label(summary(r), systemImage: r.cancelled ? "pause.circle" : "checkmark.circle")
-                            .foregroundStyle(r.downloaded > 0 || r.skipped > 0 ? .green : .orange)
-                        if let note = r.note, !r.cancelled { Text(note).font(.caption).foregroundStyle(.secondary) }
-                    }
-                }
                 Section { ForEach(actions, id: \.title) { action in
-                    Button { run(overwrite: action.overwrite, refresh: action.refresh) } label: { Label(action.title, systemImage: action.icon) }
+                    Button {
+                        library.startAKDownload(member: member, into: targetFolder,
+                                                overwrite: action.overwrite, refreshIndex: action.refresh)
+                    } label: { Label(action.title, systemImage: action.icon) }
                 } }
             }
         }
         .navigationTitle(member.name)
         .navigationBarTitleDisplayMode(.inline)
-        .modifier(CaptionTranslation(pending: $pendingCaptions, apply: applyTranslated))
     }
 
     // MARK: - Actions for the current state
@@ -139,56 +136,6 @@ private struct AKMemberDownloadView: View {
             : progress.phase
     }
 
-    private func summary(_ r: AccessKardashian.Result) -> String {
-        if r.cancelled { return "Paused — \(r.downloaded + r.skipped) of \(r.total) downloaded." }
-        guard r.downloaded > 0 || r.skipped > 0 else { return r.note ?? "Nothing downloaded." }
-        var s = "Downloaded \(r.downloaded) new photo\(r.downloaded == 1 ? "" : "s")"
-        if r.skipped > 0 { s += " (\(r.skipped) already had)" }
-        return s + "."
-    }
-
-    // MARK: - Run / pause
-
-    private func run(overwrite: Bool, refresh: Bool) {
-        let folder = targetFolder.appendingPathComponent(member.name, isDirectory: true)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        library.markKardashianFolder(folder)
-        if let d = AccessKardashian.birthdayDate(member) { library.setBirthday(d, for: folder) }
-
-        let flag = CancelFlag(); cancel = flag
-        running = true; result = nil
-        let bg = BackgroundTaskHolder(); bg.begin(name: "accessKardashian \(member.name)")
-        task = Task {
-            let r = await AccessKardashian.run(member: member, into: folder, overwrite: overwrite, refreshIndex: refresh,
-                                               progress: { p in Task { @MainActor in progress = p } },
-                                               isCancelled: { flag.isSet })
-            // Tag every downloaded photo with its category label, and store captions
-            // (Portuguese now; translated to English on iOS 18+).
-            library.addLabels(r.labelsByCategory)
-            if !r.captions.isEmpty { library.setCaptions(r.captions); pendingCaptions = r.captions }
-            // Clear Coppermine file-info tooltips an earlier version wrongly stored as captions.
-            let stale = library.captions.filter { $0.key.hasPrefix(folder.path + "/") && AccessKardashian.isInfoBlock($0.value) }
-            if !stale.isEmpty { library.setCaptions(stale.mapValues { _ in "" }) }
-
-            let present = r.downloaded + r.skipped
-            library.setAKMember(member.name, .init(folderPath: folder.path, completed: !r.cancelled,
-                                                   total: max(r.total, present), downloaded: present,
-                                                   updated: Date().timeIntervalSince1970))
-            running = false; bg.end()
-            result = r
-            if present > 0 { library.contentDidChange(); onFinished() }
-        }
-    }
-
-    private func pause() { cancel.set() }    // lets in-flight downloads finish, then stops
-
-    /// Receives path→English from `CaptionTranslation` and overwrites the stored
-    /// (Portuguese) captions.
-    private func applyTranslated(_ map: [String: String]) {
-        guard !map.isEmpty else { return }
-        library.setCaptions(map)
-        pendingCaptions = [:]
-    }
 }
 
 /// Thread-safe cancel flag shared with the `nonisolated` downloader (pausing lets
@@ -202,8 +149,10 @@ final class CancelFlag: @unchecked Sendable {
 
 /// Runs the Portuguese→English caption translation on iOS 18+ (Apple's on-device
 /// Translation framework); a no-op on iOS 17 / when the framework is unavailable,
-/// leaving the original captions in place.
-private struct CaptionTranslation: ViewModifier {
+/// leaving the original captions in place. Hosted on `ContentView` (bound to
+/// `Library.akPendingCaptions`) so translation completes even after the download
+/// screen is closed — the download itself runs app-wide on `Library`.
+struct CaptionTranslation: ViewModifier {
     @Binding var pending: [String: String]
     let apply: ([String: String]) -> Void
 
