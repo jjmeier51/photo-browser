@@ -119,7 +119,9 @@ struct FolderStats: Sendable {
 
 extension Int64 {
     /// File size as KB/MB/GB to two decimals.
-    var sizeString: String {
+    /// `nonisolated`: a pure formatter, also used from off-main download paths —
+    /// unannotated extension members are MainActor-bound under default isolation.
+    nonisolated var sizeString: String {
         let bytes = Double(self)
         if bytes >= 1_073_741_824 { return String(format: "%.2f GB", bytes / 1_073_741_824) }
         if bytes >= 1_048_576 { return String(format: "%.2f MB", bytes / 1_048_576) }
