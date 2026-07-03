@@ -588,6 +588,29 @@ final class Library {
     }
     func deletePerson(_ name: String) { people[name] = nil; persistPeople() }
 
+    // MARK: - AI prompt history
+
+    /// Recent "Edit with AI" prompts, newest first — shown in the AI edit screen so
+    /// a past prompt can be dropped back into the prompt box with a tap. Deduped
+    /// case-insensitively (reusing a prompt moves it to the top), capped at 50.
+    var aiPromptHistory: [String] = UserDefaults.standard.stringArray(forKey: "photoBrowser.aiPromptHistory") ?? []
+    func recordAIPrompt(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        aiPromptHistory.removeAll { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
+        aiPromptHistory.insert(trimmed, at: 0)
+        if aiPromptHistory.count > 50 { aiPromptHistory.removeLast(aiPromptHistory.count - 50) }
+        UserDefaults.standard.set(aiPromptHistory, forKey: "photoBrowser.aiPromptHistory")
+    }
+    func deleteAIPrompt(_ text: String) {
+        aiPromptHistory.removeAll { $0 == text }
+        UserDefaults.standard.set(aiPromptHistory, forKey: "photoBrowser.aiPromptHistory")
+    }
+    func deleteAIPrompts(at offsets: IndexSet) {
+        aiPromptHistory.remove(atOffsets: offsets)
+        UserDefaults.standard.set(aiPromptHistory, forKey: "photoBrowser.aiPromptHistory")
+    }
+
     // MARK: - AI-generated images
 
     var aiGeneratedPaths: Set<String> = Library.migrateBulk("aiGenerated", legacyKey: "photoBrowser.aiGenerated") {

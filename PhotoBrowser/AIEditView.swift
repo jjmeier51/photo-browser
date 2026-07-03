@@ -1,8 +1,11 @@
 import SwiftUI
+import UIKit
 
 /// AI image editing (Astria): the user describes the edit and how many variations
-/// to generate, and reviews the results (Keep saves to the AI folder).
+/// to generate, and reviews the results (Keep saves to the AI folder). Past
+/// prompts are kept as a tap-to-reuse history below the prompt box.
 struct AIEditView: View {
+    @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
     let entry: Entry
 
@@ -22,6 +25,37 @@ struct AIEditView: View {
                 Section("What would you like to change?") {
                     TextField("e.g. make the sky a sunset, remove the sign…", text: $prompt, axis: .vertical)
                         .lineLimit(2...5)
+                }
+                if !library.aiPromptHistory.isEmpty {
+                    Section {
+                        ForEach(library.aiPromptHistory, id: \.self) { past in
+                            // Tap = paste it into the prompt box above.
+                            Button { prompt = past } label: {
+                                HStack {
+                                    Text(past).lineLimit(2).foregroundStyle(.primary)
+                                    Spacer()
+                                    Image(systemName: "arrow.up.circle")
+                                        .font(.callout).foregroundStyle(.secondary)
+                                }
+                            }
+                            .contextMenu {
+                                Button { prompt = past } label: {
+                                    Label("Use as Prompt", systemImage: "text.insert")
+                                }
+                                Button { UIPasteboard.general.string = past } label: {
+                                    Label("Copy", systemImage: "doc.on.doc")
+                                }
+                                Button(role: .destructive) { library.deleteAIPrompt(past) } label: {
+                                    Label("Remove from History", systemImage: "trash")
+                                }
+                            }
+                        }
+                        .onDelete { library.deleteAIPrompts(at: $0) }
+                    } header: {
+                        Text("Previous prompts")
+                    } footer: {
+                        Text("Tap a prompt to use it again. Long-press to copy it, or swipe to remove it.")
+                    }
                 }
                 Section("Model") {
                     Picker("Model", selection: $model) {
@@ -71,6 +105,7 @@ struct AIEditView: View {
 
     private func generate() {
         guard AIExtend.isConfigured else { showSettings = true; return }
+        library.recordAIPrompt(prompt)     // history, newest first (reuse moves it to the top)
         running = true; error = nil
         let url = entry.url, p = prompt, n = count, m = model
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Edit")
