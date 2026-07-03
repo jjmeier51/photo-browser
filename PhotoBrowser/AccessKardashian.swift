@@ -116,6 +116,11 @@ enum AccessKardashian {
                                 progress: @escaping @Sendable (Progress) -> Void,
                                 isCancelled: @escaping @Sendable () -> Bool) async -> Result {
         var result = Result()
+        // Diagnostic log beside the member folders — plain text, viewable in-app,
+        // so a slow run shows *where* the time went (fetch vs stall/retry vs write).
+        let log = AKLog(in: folder.deletingLastPathComponent(), member: member.name)
+        log.add("config: overwrite=\(overwrite) refreshIndex=\(refreshIndex) concurrency=22 idleTimeout=20s")
+        defer { log.flush() }
 
         // Reuse the cached album index unless a refresh was asked for — this is what
         // makes Resume/Re-download skip the (slow) crawl that was stalling on "Listing".
@@ -123,16 +128,19 @@ enum AccessKardashian {
         if !refreshIndex, let cached = loadCachedPlan(member), !cached.isEmpty {
             progress(Progress(phase: "Loaded saved index — \(cached.count) photos", fraction: 0, done: 0, total: cached.count))
             plan = cached
+            log.add("plan: cached index, \(plan.count) photos")
         } else {
             progress(Progress(phase: "Finding \(member.name)’s gallery…", fraction: 0, done: 0, total: 0))
             guard let rootCat = await memberRootCat(member) else {
                 result.note = "Couldn’t find \(member.name)’s gallery on accesskardashian.com.br."
+                log.add("ABORT: gallery not found")
                 return result
             }
             plan = await buildPlan(rootCat: rootCat, member: member, progress: progress, isCancelled: isCancelled)
+            log.add("plan: fresh crawl, \(plan.count) photos")
             guard !plan.isEmpty else {
-                if isCancelled() { result.cancelled = true }
-                else { result.note = "No photos found in \(member.name)’s gallery." }
+                if isCancelled() { result.cancelled = true; log.add("paused during crawl") }
+                else { result.note = "No photos found in \(member.name)’s gallery."; log.add("ABORT: no photos found") }
                 return result
             }
             // Deterministic order (stable across runs so resume lines up) + unique flat
@@ -142,7 +150,7 @@ enum AccessKardashian {
             // Only cache a *complete* crawl, so a paused listing re-crawls next time.
             if !isCancelled() { saveCachedPlan(member, plan) }
         }
-        if isCancelled() { result.cancelled = true; return result }
+        if isCancelled() { result.cancelled = true; log.add("paused before downloads"); return result }
         result.total = plan.count
 
         // Pre-geocode the distinct album places once (CLGeocoder is rate-limited, so
@@ -153,9 +161,13 @@ enum AccessKardashian {
         if !distinctPlaces.isEmpty {
             progress(Progress(phase: "Locating \(distinctPlaces.count) place(s)…", fraction: 0, done: 0, total: plan.count))
         }
+        let geoStart = Date()
         for place in distinctPlaces where !isCancelled() { coords[place] = await geocode(place) }
+        if !distinctPlaces.isEmpty {
+            log.add("geocoded \(distinctPlaces.count) place(s) in \(Int(Date().timeIntervalSince(geoStart)))s")
+        }
 
-        if isCancelled() { result.cancelled = true; return result }
+        if isCancelled() { result.cancelled = true; log.add("paused during geocoding"); return result }
 
         let total = plan.count
         var done = 0
@@ -170,8 +182,11 @@ enum AccessKardashian {
         // never treat "couldn't list" as "have nothing" and re-download everything.
         let existingNames: Set<String>? = overwrite ? []
             : (try? FileManager.default.contentsOfDirectory(atPath: folder.path)).map { Set($0.map { $0.lowercased() }) }
+        log.add("already on disk: \(existingNames.map { String($0.count) } ?? "listing failed — per-file stats") · downloads starting")
 
         let downloadStart = Date()
+        var fetchTotal = 0.0, saveTotal = 0.0, bytesTotal = 0
+        var slow5 = 0, slow15 = 0
         await withTaskGroup(of: (ok: Bool, skipped: Bool, path: String?, category: String, caption: String?, dl: DLStats?).self) { group in
             var idx = 0
             let maxConcurrent = 22              // matched to the connection pool (higher throttled)
@@ -193,12 +208,27 @@ enum AccessKardashian {
             for _ in 0..<min(maxConcurrent, total) { addNext() }
             while let r = await group.next() {
                 if r.skipped { result.skipped += 1 } else if r.ok { result.downloaded += 1 } else { result.failed += 1 }
-                if let dl = r.dl { result.retried += dl.retries; result.reducedSize += dl.fallbacks }
+                if let dl = r.dl {
+                    result.retried += dl.retries; result.reducedSize += dl.fallbacks
+                    fetchTotal += dl.fetchSecs; saveTotal += dl.saveSecs; bytesTotal += dl.bytes
+                    if dl.fetchSecs > 5 { slow5 += 1 }
+                    if dl.fetchSecs > 15 { slow15 += 1 }
+                    // One line per real download (skips excluded) — the raw material
+                    // for diagnosing a slow run.
+                    let flag = r.ok ? (dl.fallbacks > 0 ? "ok(reduced)" : "ok") : "FAIL"
+                    log.add(String(format: "%@ fetch=%.1fs save=%.2fs %dKB retries=%d %@",
+                                   flag, dl.fetchSecs, dl.saveSecs, dl.bytes / 1024, dl.retries,
+                                   (r.path as NSString?)?.lastPathComponent ?? "?"))
+                }
                 if let path = r.path {
                     labels[r.category, default: []].append(path)
                     if let cap = r.caption, !cap.isEmpty { captions[path] = cap }
                 }
                 done += 1
+                if done % 200 == 0 {
+                    let mins = max(Date().timeIntervalSince(downloadStart) / 60, 1.0 / 60)
+                    log.add("progress \(done)/\(total) — \(Int(Double(result.downloaded) / mins))/min downloaded, \(result.skipped) skipped")
+                }
                 // Throttle UI updates — at this fan-out a callback per image floods the
                 // main actor and slows everything down.
                 if done == total || done % 12 == 0 {
@@ -207,8 +237,20 @@ enum AccessKardashian {
                 addNext()
             }
         }
-        let minutes = max(Date().timeIntervalSince(downloadStart) / 60, 1.0 / 60)
+        let wall = Date().timeIntervalSince(downloadStart)
+        let minutes = max(wall / 60, 1.0 / 60)
         result.perMinute = Int(Double(result.downloaded) / minutes)
+        if result.downloaded > 0 {
+            // avg parallelism = busy-time ÷ wall-time: ~22 means the slots stayed
+            // full (host/route is the limit); ~1–3 means something is serializing.
+            log.add(String(format: "summary: %d downloaded, %d skipped, %d failed in %.0fs · %d/min · avgFetch=%.1fs avgSave=%.2fs · %.1fMB · retries=%d reduced=%d · fetch>5s=%d >15s=%d · avg parallelism=%.1f",
+                           result.downloaded, result.skipped, result.failed, wall, result.perMinute,
+                           fetchTotal / Double(result.downloaded), saveTotal / Double(result.downloaded),
+                           Double(bytesTotal) / 1_048_576, result.retried, result.reducedSize, slow5, slow15,
+                           (fetchTotal + saveTotal) / max(wall, 0.1)))
+        } else {
+            log.add("summary: nothing downloaded (\(result.skipped) skipped, \(result.failed) failed) cancelled=\(isCancelled())")
+        }
         result.captions = captions
         result.labelsByCategory = labels
         result.cancelled = isCancelled()
@@ -594,8 +636,14 @@ enum AccessKardashian {
 
     // MARK: - Download + metadata
 
-    /// How one photo's download went, aggregated into the run's diagnostics.
-    struct DLStats: Sendable { var retries = 0; var fallbacks = 0 }
+    /// How one photo's download went, aggregated into the run's diagnostics and log.
+    struct DLStats: Sendable {
+        var retries = 0
+        var fallbacks = 0
+        var fetchSecs: Double = 0     // total network time incl. retries
+        var saveSecs: Double = 0      // metadata-embed + drive write time
+        var bytes = 0
+    }
 
     /// Download the original bytes, retrying **transient** failures (the gallery
     /// throttles under load) with short backoff. A hard 4xx skips straight to the
@@ -603,6 +651,7 @@ enum AccessKardashian {
     /// pure dead time per photo. No sleep after a final attempt either.
     nonisolated private static func downloadImage(_ fullURL: URL, to dest: URL, date: Date?, coord: Coord?) async -> (ok: Bool, stats: DLStats) {
         var stats = DLStats()
+        let t0 = Date()
         let filename = fullURL.lastPathComponent
         let normalURL = fullURL.deletingLastPathComponent().appendingPathComponent("normal_" + filename)
         urls: for url in [fullURL, normalURL] {
@@ -610,8 +659,13 @@ enum AccessKardashian {
                 switch await fetchImageData(url) {
                 case .ok(let data):
                     if url != fullURL { stats.fallbacks += 1 }
+                    stats.bytes = data.count
+                    stats.fetchSecs = Date().timeIntervalSince(t0)
                     // Bytes arrived — if the drive write fails, retrying the network won't help.
-                    return (saveImage(data, to: dest, albumDate: date, coord: coord), stats)
+                    let s0 = Date()
+                    let ok = saveImage(data, to: dest, albumDate: date, coord: coord)
+                    stats.saveSecs = Date().timeIntervalSince(s0)
+                    return (ok, stats)
                 case .hardMiss:
                     continue urls                    // 404 etc. — go straight to the fallback size
                 case .transient:
@@ -620,6 +674,7 @@ enum AccessKardashian {
                 }
             }
         }
+        stats.fetchSecs = Date().timeIntervalSince(t0)
         return (false, stats)
     }
 
@@ -792,5 +847,52 @@ enum AccessKardashian {
         let cleaned = name.components(separatedBy: CharacterSet(charactersIn: "/\\:?%*|\"<>")).joined(separator: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? "image.jpg" : String(cleaned.prefix(120))
+    }
+}
+
+/// Plain-text diagnostic log for accessKardashian runs, written as
+/// "accessKardashian Log.txt" beside the member folders (tap it in-app to read it,
+/// or open it in Files). Buffered + appended in chunks so logging can't slow the
+/// download it's measuring; starts fresh once it grows past a few MB. Best-effort
+/// on a `@unchecked Sendable` lock, same pattern as the metadata stores.
+final class AKLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    private let fileURL: URL
+    private let start = Date()
+
+    init(in parent: URL, member: String) {
+        fileURL = parent.appendingPathComponent("accessKardashian Log.txt")
+        if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 4_000_000 {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        add("===== \(df.string(from: start)) — \(member) =====")
+    }
+
+    /// Appends one line, stamped with seconds since the run started.
+    func add(_ line: String) {
+        lock.lock()
+        lines.append(String(format: "[%7.1fs] ", Date().timeIntervalSince(start)) + line)
+        let buffered = lines.count
+        lock.unlock()
+        if buffered >= 50 { flush() }
+    }
+
+    func flush() {
+        lock.lock()
+        guard !lines.isEmpty else { lock.unlock(); return }
+        let chunk = lines.joined(separator: "\n") + "\n"
+        lines.removeAll()
+        lock.unlock()
+        guard let data = chunk.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: fileURL) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: fileURL)
+        }
     }
 }
