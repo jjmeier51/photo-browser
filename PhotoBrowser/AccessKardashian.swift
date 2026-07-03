@@ -120,6 +120,7 @@ enum AccessKardashian {
         // so a slow run shows *where* the time went (fetch vs stall/retry vs write).
         let log = AKLog(in: folder.deletingLastPathComponent(), member: member.name)
         log.add("config: overwrite=\(overwrite) refreshIndex=\(refreshIndex) concurrency=22 idleTimeout=20s")
+        log.add("free space — drive: \(freeSpace(at: folder)?.sizeString ?? "?"), phone: \(freeSpace(at: FileManager.default.temporaryDirectory)?.sizeString ?? "?")")
         defer { log.flush() }
 
         // Reuse the cached album index unless a refresh was asked for — this is what
@@ -187,11 +188,14 @@ enum AccessKardashian {
         let downloadStart = Date()
         var fetchTotal = 0.0, saveTotal = 0.0, bytesTotal = 0
         var slow5 = 0, slow15 = 0
-        await withTaskGroup(of: (ok: Bool, skipped: Bool, path: String?, category: String, caption: String?, dl: DLStats?).self) { group in
+        var consecutiveFails = 0
+        var lastSaveError: String?
+        var aborted = false
+        await withTaskGroup(of: (ok: Bool, skipped: Bool, path: String?, name: String, category: String, caption: String?, dl: DLStats?).self) { group in
             var idx = 0
             let maxConcurrent = 22              // matched to the connection pool (higher throttled)
             func addNext() {
-                guard idx < plan.count, !isCancelled() else { return }
+                guard idx < plan.count, !isCancelled(), !aborted else { return }
                 let p = plan[idx]; idx += 1
                 let coord = p.place.flatMap { coords[$0] ?? nil }
                 group.addTask {
@@ -199,10 +203,10 @@ enum AccessKardashian {
                     let alreadyHave = existingNames.map { $0.contains(p.destName.lowercased()) }
                         ?? FileManager.default.fileExists(atPath: dest.path)
                     if !overwrite, alreadyHave {
-                        return (true, true, dest.path, p.category, p.caption, nil)   // already have it
+                        return (true, true, dest.path, p.destName, p.category, p.caption, nil)   // already have it
                     }
                     let r = await downloadImage(p.fullURL, to: dest, date: p.date, coord: coord)
-                    return (r.ok, false, r.ok ? dest.path : nil, p.category, p.caption, r.stats)
+                    return (r.ok, false, r.ok ? dest.path : nil, p.destName, p.category, p.caption, r.stats)
                 }
             }
             for _ in 0..<min(maxConcurrent, total) { addNext() }
@@ -216,9 +220,23 @@ enum AccessKardashian {
                     // One line per real download (skips excluded) — the raw material
                     // for diagnosing a slow run.
                     let flag = r.ok ? (dl.fallbacks > 0 ? "ok(reduced)" : "ok") : "FAIL"
-                    log.add(String(format: "%@ fetch=%.1fs save=%.2fs %dKB retries=%d %@",
-                                   flag, dl.fetchSecs, dl.saveSecs, dl.bytes / 1024, dl.retries,
-                                   (r.path as NSString?)?.lastPathComponent ?? "?"))
+                    log.add(String(format: "%@ fetch=%.1fs save=%.2fs %dKB retries=%d %@%@",
+                                   flag, dl.fetchSecs, dl.saveSecs, dl.bytes / 1024, dl.retries, r.name,
+                                   dl.saveError.map { " — \($0)" } ?? ""))
+                    // Circuit breaker: a run of failed *writes* means the drive is the
+                    // problem (full / corrupt / failing) — stop burning bandwidth on
+                    // thousands of downloads that can't land, and say so.
+                    if !r.ok {
+                        consecutiveFails += 1
+                        if let e = dl.saveError { lastSaveError = e }
+                        if consecutiveFails >= 30, !aborted {
+                            aborted = true
+                            log.add("ABORT: \(consecutiveFails) consecutive failures — last write error: \(lastSaveError ?? "network")")
+                            group.cancelAll()
+                        }
+                    } else {
+                        consecutiveFails = 0
+                    }
                 }
                 if let path = r.path {
                     labels[r.category, default: []].append(path)
@@ -237,19 +255,26 @@ enum AccessKardashian {
                 addNext()
             }
         }
+        if aborted {
+            result.cancelled = true       // paused, not completed — Resume works once the drive is fixed
+            result.note = "Stopped: repeated failures writing to the drive"
+                + (lastSaveError.map { " (\($0))" } ?? "")
+                + " — check its free space, or repair it with Disk Utility First Aid."
+        }
         let wall = Date().timeIntervalSince(downloadStart)
         let minutes = max(wall / 60, 1.0 / 60)
         result.perMinute = Int(Double(result.downloaded) / minutes)
-        if result.downloaded > 0 {
+        let attempts = max(result.downloaded + result.failed, 1)   // averages are per attempt, not per success
+        if result.downloaded + result.failed > 0 {
             // avg parallelism = busy-time ÷ wall-time: ~22 means the slots stayed
             // full (host/route is the limit); ~1–3 means something is serializing.
             log.add(String(format: "summary: %d downloaded, %d skipped, %d failed in %.0fs · %d/min · avgFetch=%.1fs avgSave=%.2fs · %.1fMB · retries=%d reduced=%d · fetch>5s=%d >15s=%d · avg parallelism=%.1f",
                            result.downloaded, result.skipped, result.failed, wall, result.perMinute,
-                           fetchTotal / Double(result.downloaded), saveTotal / Double(result.downloaded),
+                           fetchTotal / Double(attempts), saveTotal / Double(attempts),
                            Double(bytesTotal) / 1_048_576, result.retried, result.reducedSize, slow5, slow15,
                            (fetchTotal + saveTotal) / max(wall, 0.1)))
         } else {
-            log.add("summary: nothing downloaded (\(result.skipped) skipped, \(result.failed) failed) cancelled=\(isCancelled())")
+            log.add("summary: nothing to download (\(result.skipped) skipped) cancelled=\(isCancelled())")
         }
         result.captions = captions
         result.labelsByCategory = labels
@@ -643,6 +668,7 @@ enum AccessKardashian {
         var fetchSecs: Double = 0     // total network time incl. retries
         var saveSecs: Double = 0      // metadata-embed + drive write time
         var bytes = 0
+        var saveError: String?        // the drive write's actual error, verbatim
     }
 
     /// Download the original bytes, retrying **transient** failures (the gallery
@@ -663,9 +689,9 @@ enum AccessKardashian {
                     stats.fetchSecs = Date().timeIntervalSince(t0)
                     // Bytes arrived — if the drive write fails, retrying the network won't help.
                     let s0 = Date()
-                    let ok = saveImage(data, to: dest, albumDate: date, coord: coord)
+                    stats.saveError = saveImage(data, to: dest, albumDate: date, coord: coord)
                     stats.saveSecs = Date().timeIntervalSince(s0)
-                    return (ok, stats)
+                    return (stats.saveError == nil, stats)
                 case .hardMiss:
                     continue urls                    // 404 etc. — go straight to the fallback size
                 case .transient:
@@ -703,7 +729,9 @@ enum AccessKardashian {
     /// straight from the in-memory bytes while writing — no decode/temp-file/replace
     /// round-trip. Files that already carry EXIF are written verbatim. This is the
     /// hot path (tens of thousands of images), so it does exactly one disk write.
-    nonisolated private static func saveImage(_ data: Data, to dest: URL, albumDate: Date?, coord: Coord?) -> Bool {
+    /// Returns nil on success, else the write's actual error — swallowing it made a
+    /// drive-side failure (full / corrupt / dying) look like a slow network.
+    nonisolated private static func saveImage(_ data: Data, to dest: URL, albumDate: Date?, coord: Coord?) -> String? {
         try? FileManager.default.removeItem(at: dest)            // overwrite / re-run safety
         var effectiveDate = albumDate
         if let src = CGImageSourceCreateWithData(data as CFData, nil), let type = CGImageSourceGetType(src) {
@@ -713,13 +741,15 @@ enum AccessKardashian {
             let needCoord: Coord? = have.hasGPS ? nil : coord
             if needDate != nil || needCoord != nil,
                writeImage(src: src, type: type, to: dest, date: needDate, coord: needCoord) {
-                setFileDate(dest, effectiveDate); return true
+                setFileDate(dest, effectiveDate); return nil
             }
         }
-        // Nothing to embed (or embedding failed) — write the bytes as-is.
-        guard (try? data.write(to: dest, options: .atomic)) != nil else { return false }
+        // Nothing to embed (or embedding failed) — write the bytes as-is. This raw
+        // write's error is the authoritative reason when both paths fail.
+        do { try data.write(to: dest, options: .atomic) }
+        catch { return error.localizedDescription }
         setFileDate(dest, effectiveDate)
-        return true
+        return nil
     }
 
     /// Lossless metadata-embedding write: copies the encoded image (no pixel
@@ -771,6 +801,12 @@ enum AccessKardashian {
             if let d = f.date(from: s) { return (true, d, hasGPS) }
         }
         return (false, nil, hasGPS)
+    }
+
+    /// Free capacity on the volume holding `url` (drive or phone).
+    nonisolated private static func freeSpace(at url: URL) -> Int64? {
+        (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+            .volumeAvailableCapacityForImportantUsage
     }
 
     nonisolated private static func geocode(_ place: String) async -> Coord? {

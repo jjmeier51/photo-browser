@@ -821,7 +821,9 @@ final class Library {
 
     private func akResultMessage(member: AccessKardashian.Member, r: AccessKardashian.Result, present: Int) -> String {
         if r.cancelled {
-            return "Paused \(member.name) at \(present) of \(max(r.total, present)) — resume anytime from “Download from accessKardashian…”."
+            // A drive-failure abort also lands here (paused, resumable) — surface its note.
+            return "Paused \(member.name) at \(present) of \(max(r.total, present))."
+                + (r.note.map { " \($0)" } ?? " Resume anytime from “Download from accessKardashian…”.")
         }
         guard r.downloaded > 0 || r.skipped > 0 else { return r.note ?? "Nothing downloaded for \(member.name)." }
         var s = "Downloaded \(r.downloaded) new photo\(r.downloaded == 1 ? "" : "s") for \(member.name)"
