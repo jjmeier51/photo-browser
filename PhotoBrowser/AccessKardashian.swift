@@ -60,6 +60,9 @@ enum AccessKardashian {
     struct Result: Sendable {
         var downloaded = 0, skipped = 0, failed = 0, total = 0
         var cancelled = false
+        var retried = 0                // transient fetch failures that were retried
+        var reducedSize = 0            // photos that fell back to the `normal_` (resized) version
+        var perMinute = 0              // average download rate over the download phase
         var note: String?
         /// Applied by the caller on the main actor (Library is `@MainActor`):
         var captions: [String: String] = [:]           // path → caption (Portuguese; the view translates)
@@ -168,7 +171,8 @@ enum AccessKardashian {
         let existingNames: Set<String>? = overwrite ? []
             : (try? FileManager.default.contentsOfDirectory(atPath: folder.path)).map { Set($0.map { $0.lowercased() }) }
 
-        await withTaskGroup(of: (ok: Bool, skipped: Bool, path: String?, category: String, caption: String?).self) { group in
+        let downloadStart = Date()
+        await withTaskGroup(of: (ok: Bool, skipped: Bool, path: String?, category: String, caption: String?, dl: DLStats?).self) { group in
             var idx = 0
             let maxConcurrent = 22              // matched to the connection pool (higher throttled)
             func addNext() {
@@ -180,15 +184,16 @@ enum AccessKardashian {
                     let alreadyHave = existingNames.map { $0.contains(p.destName.lowercased()) }
                         ?? FileManager.default.fileExists(atPath: dest.path)
                     if !overwrite, alreadyHave {
-                        return (true, true, dest.path, p.category, p.caption)   // already have it
+                        return (true, true, dest.path, p.category, p.caption, nil)   // already have it
                     }
-                    let ok = await downloadImage(p.fullURL, to: dest, date: p.date, coord: coord)
-                    return (ok, false, ok ? dest.path : nil, p.category, p.caption)
+                    let r = await downloadImage(p.fullURL, to: dest, date: p.date, coord: coord)
+                    return (r.ok, false, r.ok ? dest.path : nil, p.category, p.caption, r.stats)
                 }
             }
             for _ in 0..<min(maxConcurrent, total) { addNext() }
             while let r = await group.next() {
                 if r.skipped { result.skipped += 1 } else if r.ok { result.downloaded += 1 } else { result.failed += 1 }
+                if let dl = r.dl { result.retried += dl.retries; result.reducedSize += dl.fallbacks }
                 if let path = r.path {
                     labels[r.category, default: []].append(path)
                     if let cap = r.caption, !cap.isEmpty { captions[path] = cap }
@@ -202,6 +207,8 @@ enum AccessKardashian {
                 addNext()
             }
         }
+        let minutes = max(Date().timeIntervalSince(downloadStart) / 60, 1.0 / 60)
+        result.perMinute = Int(Double(result.downloaded) / minutes)
         result.captions = captions
         result.labelsByCategory = labels
         result.cancelled = isCancelled()
@@ -587,34 +594,53 @@ enum AccessKardashian {
 
     // MARK: - Download + metadata
 
-    /// Download the original bytes, retrying transient failures (the gallery
-    /// throttles under load, which surfaced as a high failure rate with no retry).
-    /// If the full-size original genuinely can't be fetched, fall back to the
-    /// `normal_` (resized) version so the photo isn't lost entirely.
-    nonisolated private static func downloadImage(_ fullURL: URL, to dest: URL, date: Date?, coord: Coord?) async -> Bool {
+    /// How one photo's download went, aggregated into the run's diagnostics.
+    struct DLStats: Sendable { var retries = 0; var fallbacks = 0 }
+
+    /// Download the original bytes, retrying **transient** failures (the gallery
+    /// throttles under load) with short backoff. A hard 4xx skips straight to the
+    /// `normal_` (resized) fallback — retrying a 404 three times with sleeps was
+    /// pure dead time per photo. No sleep after a final attempt either.
+    nonisolated private static func downloadImage(_ fullURL: URL, to dest: URL, date: Date?, coord: Coord?) async -> (ok: Bool, stats: DLStats) {
+        var stats = DLStats()
         let filename = fullURL.lastPathComponent
         let normalURL = fullURL.deletingLastPathComponent().appendingPathComponent("normal_" + filename)
-        for url in [fullURL, normalURL] {
+        urls: for url in [fullURL, normalURL] {
             for attempt in 0..<3 {
-                if let data = await fetchImageData(url), saveImage(data, to: dest, albumDate: date, coord: coord) {
-                    return true
+                switch await fetchImageData(url) {
+                case .ok(let data):
+                    if url != fullURL { stats.fallbacks += 1 }
+                    // Bytes arrived — if the drive write fails, retrying the network won't help.
+                    return (saveImage(data, to: dest, albumDate: date, coord: coord), stats)
+                case .hardMiss:
+                    continue urls                    // 404 etc. — go straight to the fallback size
+                case .transient:
+                    stats.retries += 1
+                    if attempt < 2 { try? await Task.sleep(nanoseconds: UInt64(250_000_000) << attempt) }   // 0.25s, 0.5s
                 }
-                try? await Task.sleep(nanoseconds: UInt64(250_000_000) << attempt)   // 0.25s, 0.5s, 1s
             }
         }
-        return false
+        return (false, stats)
     }
 
-    /// Fetch image bytes, rejecting non-2xx responses and tiny bodies (HTML error
-    /// pages the gallery returns instead of a 404).
-    nonisolated private static func fetchImageData(_ url: URL) async -> Data? {
+    private enum ImageFetch: Sendable { case ok(Data); case hardMiss; case transient }
+
+    /// Fetch image bytes. Distinguishes a hard 4xx (don't retry) from transient
+    /// failures (5xx / stall / HTML error body). The idle timeout is deliberately
+    /// short: the gallery's host sometimes just stalls or resets a connection, and
+    /// at 90s each stalled request parked one of the 22 download slots for a minute
+    /// and a half — enough stalls and throughput collapsed to a crawl. 20s frees
+    /// the slot fast; the retry reconnects and usually goes straight through.
+    nonisolated private static func fetchImageData(_ url: URL) async -> ImageFetch {
         var req = URLRequest(url: url)
         req.setValue(host, forHTTPHeaderField: "Referer")
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        req.timeoutInterval = 90
-        guard let (data, resp) = try? await downloadSession.data(for: req) else { return nil }
-        if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return nil }
-        return data.count >= 512 ? data : nil
+        req.timeoutInterval = 20
+        guard let (data, resp) = try? await downloadSession.data(for: req) else { return .transient }
+        if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            return (400...499).contains(http.statusCode) ? .hardMiss : .transient
+        }
+        return data.count >= 512 ? .ok(data) : .transient
     }
 
     /// Write the downloaded bytes in a *single pass*: if the image lacks a capture

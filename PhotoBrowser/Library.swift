@@ -745,6 +745,9 @@ final class Library {
     /// (which used to host it) is closed.
     var akPendingCaptions: [String: String] = [:]
     @ObservationIgnored private var akCancelFlags: [String: CancelFlag] = [:]
+    /// When each member's *download phase* started — drives the live photos/min in
+    /// the pill, the first thing to look at when a run feels slow.
+    @ObservationIgnored private var akDownloadPhaseStart: [String: Date] = [:]
 
     func isAKDownloadRunning(_ memberName: String) -> Bool { akRunning.contains(memberName) }
     /// Lets in-flight photo downloads finish, then stops — Resume picks up from here.
@@ -775,8 +778,17 @@ final class Library {
                 progress: { p in
                     Task { @MainActor in
                         self.akProgress[member.name] = p
-                        let line = p.phase == "Downloading"
-                            ? "\(member.name) — \(p.done) of \(p.total)" : "\(member.name) — \(p.phase)"
+                        let line: String
+                        if p.phase == "Downloading" {
+                            let started = self.akDownloadPhaseStart[member.name] ?? {
+                                let now = Date(); self.akDownloadPhaseStart[member.name] = now; return now
+                            }()
+                            let mins = Date().timeIntervalSince(started) / 60
+                            let rate = mins > 0.3 ? " · ~\(Int(Double(p.done) / mins))/min" : ""
+                            line = "\(member.name) — \(p.done) of \(p.total)\(rate)"
+                        } else {
+                            line = "\(member.name) — \(p.phase)"
+                        }
                         self.setActivity(id, status: line, fraction: p.phase == "Downloading" ? p.fraction : -1)
                     }
                 },
@@ -800,6 +812,7 @@ final class Library {
             akRunning.remove(member.name)
             akCancelFlags[member.name] = nil
             akProgress[member.name] = nil
+            akDownloadPhaseStart[member.name] = nil
             endActivity(id, result: akResultMessage(member: member, r: r, present: present))
             if present > 0 { contentDidChange(under: folder) }
             bg.end()
@@ -814,6 +827,11 @@ final class Library {
         var s = "Downloaded \(r.downloaded) new photo\(r.downloaded == 1 ? "" : "s") for \(member.name)"
         if r.skipped > 0 { s += " (\(r.skipped) already had)" }
         s += "."
+        // Diagnostics: the rate plus what dragged on it (retries = the gallery
+        // stalling/throttling; reduced size = originals missing on the server).
+        if r.downloaded > 0, r.perMinute > 0 { s += " ~\(r.perMinute)/min." }
+        if r.retried > 0 { s += " \(r.retried) retr\(r.retried == 1 ? "y" : "ies")." }
+        if r.reducedSize > 0 { s += " \(r.reducedSize) at reduced size." }
         if let note = r.note { s += " \(note)" }
         return s
     }
