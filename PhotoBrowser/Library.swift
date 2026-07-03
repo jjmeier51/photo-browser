@@ -967,7 +967,31 @@ final class Library {
             UserDefaults.standard.set(storyLinks, forKey: "photoBrowser.storyLinks")
         }
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        flattenStoriesSubfolders(in: folder)
         return folder
+    }
+
+    /// Transition cleanup: earlier builds organized today's stories into per-handle
+    /// subfolders; the collection is flat again (handle-prefixed names), so pull any
+    /// leftover subfolder's files up and remove it. No-op once none remain.
+    private func flattenStoriesSubfolders(in folder: URL) {
+        let fm = FileManager.default
+        let children = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey],
+                                                    options: [.skipsHiddenFiles])) ?? []
+        var moves: [(from: URL, to: URL)] = []
+        for sub in children where (try? sub.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+            let handle = sub.lastPathComponent
+            let files = (try? fm.contentsOfDirectory(at: sub, includingPropertiesForKeys: nil,
+                                                     options: [.skipsHiddenFiles])) ?? []
+            var movedAll = true
+            for f in files {
+                let dest = folder.appendingPathComponent("\(handle)_\(f.lastPathComponent)")
+                if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: f); continue }   // already flat — drop the dupe
+                if (try? fm.moveItem(at: f, to: dest)) != nil { moves.append((f, dest)) } else { movedAll = false }
+            }
+            if movedAll { try? fm.removeItem(at: sub) }
+        }
+        if !moves.isEmpty { itemsMoved(moves) }   // story links / labels follow the files up
     }
 
     /// Last Instagram handle downloaded from a folder, so reruns prefill it.

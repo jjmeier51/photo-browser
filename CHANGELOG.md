@@ -2,6 +2,12 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-03
+
+- **"Today's Instagram Stories" is flat again** — reverted the per-handle subfolders; collected
+  stories go back to handle-prefixed filenames in one scrollable grid. Any leftover handle
+  subfolders are flattened automatically the next time the folder is used (story links follow).
+
 ## 2026-07-02 — drive persistence + instant-browsing pass
 
 - **The app no longer "forgets" the SSD.** The saved folder bookmark used to be tried exactly

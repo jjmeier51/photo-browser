@@ -96,8 +96,9 @@ A full Hypic/Facetune-style editor was built from scratch inside the app.
 
 - **Downloads & stories run as app-wide background activities** — navigate around while they run. (`6f56a7e`,
   `40ba93b`)
-- **"Today's Instagram Stories" organized by handle** — each user's stories go into their own handle
-  subfolder instead of a flat prefixed pile. (`254bd35`)
+- ~~**"Today's Instagram Stories" organized by handle**~~ — reverted: the collection is flat again
+  (handle-prefixed filenames); the per-handle subfolders made the daily folder a pile of folders to
+  open one by one. Leftover subfolders are flattened automatically. (`254bd35`, then reverted)
 - **Safer stories-folder clearing** — clear via atomic rename → background delete, so an interrupted delete
   can't leave a corrupt, un-listable folder. (`3878eb3`)
 
