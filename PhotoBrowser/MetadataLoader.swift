@@ -188,6 +188,7 @@ enum MetadataLoader {
         dateStore.duplicatePrefix(from, to)
         specStore.duplicatePrefix(from, to)
         ocrStore.duplicatePrefix(from, to)
+        placeStore.duplicatePrefix(from, to)
     }
 
     // MARK: - On-device photo-text (OCR) index
@@ -242,6 +243,115 @@ enum MetadataLoader {
     static func ocrTextCached(for entry: Entry) -> String? {
         let text = ocrStore.lookup(storeKey(for: entry))
         return (text?.isEmpty ?? true) ? nil : text
+    }
+
+    // MARK: - Location (place-name) index for search
+
+    /// Place names for search, in two persistent layers: each photo's GPS reduces
+    /// to a ~1km bin ("lat|lng" at 2 decimals), and each *bin* is reverse-geocoded
+    /// once. CLGeocoder is hard rate-limited, so binning is what makes indexing a
+    /// whole drive feasible — thousands of photos from one event collapse into a
+    /// single geocode. "" records "no GPS" / "couldn't name" so nothing re-reads.
+    private struct PlaceIndex: Codable { var fileBins: [String: String]; var binPlaces: [String: String] }
+    private final class PlaceStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fileBins: [String: String]     // fileKey → bin ("" = no GPS)
+        private var binPlaces: [String: String]    // bin → place, stored lowercased for matching
+        private var dirty = false
+        private let fileURL: URL
+
+        init() {
+            let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            fileURL = dir.appendingPathComponent("placeIndex.json")
+            let idx = (try? Data(contentsOf: fileURL)).flatMap { try? JSONDecoder().decode(PlaceIndex.self, from: $0) }
+            fileBins = idx?.fileBins ?? [:]
+            binPlaces = idx?.binPlaces ?? [:]
+        }
+
+        func binIfKnown(_ key: String) -> String? { lock.lock(); defer { lock.unlock() }; return fileBins[key] }
+        func setBin(_ key: String, _ bin: String) { lock.lock(); fileBins[key] = bin; dirty = true; lock.unlock() }
+        func place(forBin bin: String) -> String? { lock.lock(); defer { lock.unlock() }; return binPlaces[bin] }
+        func setPlace(_ place: String, forBin bin: String) { lock.lock(); binPlaces[bin] = place; dirty = true; lock.unlock() }
+        func unnamedBins() -> [String] {
+            lock.lock(); defer { lock.unlock() }
+            return Array(Set(fileBins.values.filter { !$0.isEmpty }).subtracting(binPlaces.keys))
+        }
+
+        func flush() {
+            lock.lock()
+            guard dirty else { lock.unlock(); return }
+            let snapshot = PlaceIndex(fileBins: fileBins, binPlaces: binPlaces); dirty = false
+            lock.unlock()
+            if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: fileURL, options: .atomic) }
+        }
+
+        /// Backup-drive duplication — file bins only; bin→place names are global.
+        func duplicatePrefix(_ from: String, _ to: String) {
+            lock.lock()
+            var adds: [String: String] = [:]
+            for (k, v) in fileBins where k.hasPrefix(from + "/") {
+                let nk = to + k.dropFirst(from.count)
+                if fileBins[nk] == nil { adds[nk] = v }
+            }
+            for (k, v) in adds { fileBins[k] = v }
+            if !adds.isEmpty { dirty = true }
+            lock.unlock()
+            flush()
+        }
+    }
+
+    private static let placeStore = PlaceStore()
+    static func flushPlaceStore() { placeStore.flush() }
+
+    /// Cache-only place text for search (lowercased) — nil until the photo's
+    /// location has been indexed *and* its bin named. Never geocodes on the hot path.
+    static func placeTextCached(for entry: Entry) -> String? {
+        guard let bin = placeStore.binIfKnown(storeKey(for: entry)), !bin.isEmpty,
+              let place = placeStore.place(forBin: bin), !place.isEmpty else { return nil }
+        return place
+    }
+
+    /// Reads (and caches) the photo's GPS bin — ImageIO only, no geocoding.
+    static func gpsBin(for entry: Entry) async -> String {
+        let key = storeKey(for: entry)
+        if let known = placeStore.binIfKnown(key) { return known }
+        guard entry.kind == .image else { placeStore.setBin(key, ""); return "" }
+        let bin = await Task.detached(priority: .utility) { () -> String in
+            guard let src = CGImageSourceCreateWithURL(entry.url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+                  let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+                  let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any],
+                  let latRaw = (gps[kCGImagePropertyGPSLatitude] as? NSNumber)?.doubleValue,
+                  let lngRaw = (gps[kCGImagePropertyGPSLongitude] as? NSNumber)?.doubleValue else { return "" }
+            var lat = latRaw, lng = lngRaw
+            if (gps[kCGImagePropertyGPSLatitudeRef] as? String)?.uppercased() == "S" { lat = -lat }
+            if (gps[kCGImagePropertyGPSLongitudeRef] as? String)?.uppercased() == "W" { lng = -lng }
+            guard lat.isFinite, lng.isFinite, abs(lat) <= 90, abs(lng) <= 180, !(lat == 0 && lng == 0) else { return "" }
+            return String(format: "%.2f|%.2f", lat, lng)
+        }.value
+        placeStore.setBin(key, bin)
+        return bin
+    }
+
+    /// Names every not-yet-geocoded bin, serially (CLGeocoder is rate-limited),
+    /// capped per run — re-running the index continues where it stopped. Returns
+    /// how many bins were attempted.
+    static func geocodeUnnamedBins(limit: Int = 200,
+                                   progress: @escaping @Sendable (Int, Int) -> Void) async -> Int {
+        let bins = Array(placeStore.unnamedBins().prefix(limit))
+        for (i, bin) in bins.enumerated() {
+            let parts = bin.split(separator: "|")
+            if parts.count == 2, let lat = Double(parts[0]), let lng = Double(parts[1]) {
+                let place = await placeName(for: CLLocationCoordinate2D(latitude: lat, longitude: lng)) ?? ""
+                placeStore.setPlace(place.lowercased(), forBin: bin)
+            } else {
+                placeStore.setPlace("", forBin: bin)
+            }
+            progress(i + 1, bins.count)
+            if i % 20 == 19 { placeStore.flush() }               // survive an early exit
+            try? await Task.sleep(nanoseconds: 1_200_000_000)    // stay under the geocoder's limit
+        }
+        placeStore.flush()
+        return bins.count
     }
 
     /// Recognizes (and caches) the text in a photo. Used by the indexing pass; runs

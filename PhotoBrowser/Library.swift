@@ -1710,7 +1710,9 @@ final class Library {
                 let nameMatch = entry.name.lowercased().contains(q)
                 let capMatch = captions[url.path]?.lowercased().contains(q) ?? false
                 let ocrMatch = !nameMatch && !capMatch && (MetadataLoader.ocrTextCached(for: entry)?.contains(q) ?? false)
-                guard nameMatch || capMatch || ocrMatch else { continue }
+                let placeMatch = !nameMatch && !capMatch && !ocrMatch
+                    && (MetadataLoader.placeTextCached(for: entry)?.contains(q) ?? false)
+                guard nameMatch || capMatch || ocrMatch || placeMatch else { continue }
                 result.append(entry)
             }
             return Self.sortEntries(result, by: sort)
@@ -1968,22 +1970,27 @@ final class Library {
     }
 
     /// In-memory search over the prebuilt index (instant once the index exists).
+    /// Matches folder names, file names, app captions, OCR'd photo text, and
+    /// indexed place names — deduped by URL (a folder can be found both as an
+    /// index entry and via parent expansion, and duplicate ids broke the grid).
     func searchIndex(under folder: URL, query: String, captions: [String: String], sort: SortKey) -> [Entry] {
         let q = query.lowercased()
         let base = folder.path
         var matches: [Entry] = []
-        var parents = Set<String>()                        // folders holding indexed media (for folder-name search)
+        var seen = Set<String>()                           // dedup across both match phases
+        var parents = Set<String>()                        // folders holding indexed entries (for folder-name search)
         for e in index {
             let p = e.url.path
             guard p == base || p.hasPrefix(base + "/") else { continue }
             if e.name.lowercased().contains(q) || (captions[p]?.lowercased().contains(q) ?? false)
-                || (MetadataLoader.ocrTextCached(for: e)?.contains(q) ?? false) {   // text inside photos
-                matches.append(e)
+                || (MetadataLoader.ocrTextCached(for: e)?.contains(q) ?? false)       // text inside photos
+                || (MetadataLoader.placeTextCached(for: e)?.contains(q) ?? false) {   // indexed place names
+                if seen.insert(p).inserted { matches.append(e) }
             }
             parents.insert((p as NSString).deletingLastPathComponent)
         }
-        // The media index has no folders, so a folder name like "Today's Instagram Stories" was never
-        // matched. Expand the parent folders (and their ancestors under `base`) and match their names too.
+        // Safety net for folders the index snapshot may lack (created after the last
+        // build): expand every matched entry's ancestor folders and match their names.
         var folders = Set<String>()
         for parent in parents {
             var dir = parent
@@ -1991,11 +1998,42 @@ final class Library {
                 dir = (dir as NSString).deletingLastPathComponent
             }
         }
-        for fp in folders where ((fp as NSString).lastPathComponent).lowercased().contains(q) {
+        for fp in folders where ((fp as NSString).lastPathComponent).lowercased().contains(q) && !seen.contains(fp) {
+            seen.insert(fp)
             let u = URL(fileURLWithPath: fp, isDirectory: true)
             matches.append(Entry(url: u, name: u.lastPathComponent, kind: .folder, size: 0, modified: .distantPast))
         }
         return Self.sortEntries(matches, by: sort)
+    }
+
+    /// Scans every photo's GPS under `folder` (cached per file, ImageIO only) and
+    /// reverse-geocodes each distinct ~1km location once, so search can match
+    /// place names ("paris", "brooklyn", …). The geocoding pass is capped per run
+    /// (CLGeocoder is rate-limited) — re-running continues where it left off.
+    nonisolated func buildLocationIndex(under folder: URL,
+                                        progress: @escaping @Sendable (Double) -> Void) async -> (photos: Int, places: Int) {
+        let images = await Self.enumerateAll(folder).filter { $0.kind == .image }
+        let total = images.count
+        guard total > 0 else { return (0, 0) }
+        var index = 0, done = 0
+        await withTaskGroup(of: Void.self) { group in
+            func addNext() {
+                guard index < total else { return }
+                let e = images[index]; index += 1
+                group.addTask { _ = await MetadataLoader.gpsBin(for: e) }
+            }
+            for _ in 0..<min(8, total) { addNext() }
+            while await group.next() != nil {
+                done += 1
+                if done % 25 == 0 || done == total { progress(0.5 * Double(done) / Double(total)) }
+                addNext()
+            }
+        }
+        MetadataLoader.flushPlaceStore()
+        let named = await MetadataLoader.geocodeUnnamedBins { d, t in
+            progress(0.5 + 0.5 * Double(d) / Double(max(t, 1)))
+        }
+        return (total, named)
     }
 
     // MARK: - Choosing / restoring the root folder

@@ -4,6 +4,12 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-03
 
+- **Search: locations + dedup** — new "Index Locations" action (⋯ menu) reads photo GPS
+  (cached per file), bins it to ~1km cells, and reverse-geocodes each *place* once
+  (rate-limit-friendly, capped per run, resumable); search then matches place names
+  ("paris", "brooklyn") alongside folder names, file names, captions, and OCR'd photo text.
+  Index search results are now deduped by URL — folders could match twice (as an index entry
+  and via parent expansion), and duplicate ids confused the results grid.
 - **"Copy Metadata to Backup Drive…"** (⋯ menu) — after copying the library's files to a
   backup SSD, this duplicates *every* piece of path-keyed data onto the backup's matching
   paths, keeping the primary untouched: favorites, To AI, custom labels, captions, covers,

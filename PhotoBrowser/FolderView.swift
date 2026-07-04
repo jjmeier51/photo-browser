@@ -87,6 +87,8 @@ struct FolderView: View {
     @State private var fixingDates = false
     @State private var indexingText = false
     @State private var textIndexProgress = 0.0
+    @State private var indexingPlaces = false
+    @State private var placeIndexProgress = 0.0
     @State private var confirmPhoneCheck = false
     @State private var checkingPhone = false
     @State private var phoneProgress = 0.0
@@ -348,9 +350,11 @@ struct FolderView: View {
         }
     }
 
-    /// Search matches filename or caption.
+    /// Search matches filename, caption, or an indexed place name.
     private func matches(_ entry: Entry, _ q: String) -> Bool {
-        entry.name.lowercased().contains(q) || effectiveCaption(for: entry).lowercased().contains(q)
+        entry.name.lowercased().contains(q)
+            || effectiveCaption(for: entry).lowercased().contains(q)
+            || (MetadataLoader.placeTextCached(for: entry)?.contains(q) ?? false)
     }
 
     private var mediaItems: [Entry] { filtered.filter { $0.isViewable } }
@@ -874,6 +878,7 @@ struct FolderView: View {
             .overlay { if importing { importingOverlay } }
             .overlay { if fixingDates { fixingOverlay } }
             .overlay { if indexingText { textIndexOverlay } }
+            .overlay { if indexingPlaces { placeIndexOverlay } }
             .overlay { if checkingPhone { phoneCheckOverlay } }
             .overlay { emptyOverlay }
             .fullScreenCover(item: $transferItem) { item in
@@ -961,6 +966,19 @@ struct FolderView: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
 
+    @ViewBuilder private var placeIndexOverlay: some View {
+        VStack(spacing: 12) {
+            Text(placeIndexProgress < 0.5 ? "Reading photo locations…" : "Naming places…")
+                .font(.subheadline.weight(.medium))
+            ProgressView(value: placeIndexProgress).progressViewStyle(.linear).frame(width: 220)
+            Text("\(Int(placeIndexProgress * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            Text("Afterwards, search also finds photos by where they were taken.")
+                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+        .padding(24).frame(maxWidth: 280)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
     @ViewBuilder private var phoneCheckOverlay: some View {
         VStack(spacing: 12) {
             Text("Checking your iPhone Photos…").font(.subheadline.weight(.medium))
@@ -1008,6 +1026,25 @@ struct FolderView: View {
             indexingText = false
             bg.end()
             resultMessage = total == 0 ? "No photos here to read." : "Read text in \(total) photo(s). Search now finds words inside them."
+        }
+    }
+
+    /// Scans photo GPS + names each distinct place under this folder so search can
+    /// match locations ("paris", "brooklyn", …). Geocoding is rate-limited and
+    /// capped per run — re-run to continue naming a very travelled library.
+    private func runLocationIndex() {
+        indexingPlaces = true; placeIndexProgress = 0
+        let bg = BackgroundTaskHolder()
+        bg.begin(name: "Index Locations")
+        Task {
+            let (photos, places) = await library.buildLocationIndex(under: url) { p in
+                Task { @MainActor in placeIndexProgress = p }
+            }
+            indexingPlaces = false
+            bg.end()
+            resultMessage = photos == 0 ? "No photos here to scan."
+                : places == 0 ? "Scanned \(photos) photo(s) — no new places to name. Search matches the already-indexed locations."
+                : "Scanned \(photos) photo(s) and named \(places) place(s). Search now finds photos by location."
         }
     }
 
@@ -1557,6 +1594,7 @@ struct FolderView: View {
                     Button { showDuplicates = true } label: { Label("Find Duplicates", systemImage: "doc.on.doc") }
                     Button { confirmFixDates = true } label: { Label("Restore Capture Dates", systemImage: "clock.arrow.circlepath") }
                     Button { runTextIndex() } label: { Label("Index Text in Photos", systemImage: "text.viewfinder") }
+                    Button { runLocationIndex() } label: { Label("Index Locations", systemImage: "location.viewfinder") }
                     Button { confirmPhoneCheck = true } label: { Label("Check if on iPhone", systemImage: "iphone") }
                         .disabled(mediaItems.isEmpty)
                     Button { showPeople = true } label: { Label("People", systemImage: "person.2.crop.square.stack") }
