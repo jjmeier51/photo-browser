@@ -755,6 +755,109 @@ final class Library {
         return r.failed > 0 ? base + "; \(r.failed) failed." : base + "."
     }
 
+    // MARK: - Bulk Instagram download (app-wide)
+
+    /// One mapped profile for the bulk downloader.
+    struct BulkIGJob: Sendable { let folder: URL; let name: String; let handle: String }
+
+    var bulkIGRunning = false
+
+    /// Downloads/updates every mapped profile as an app-wide activity (progress
+    /// pill, navigable, best-effort background window), replacing the old in-sheet
+    /// run that died if the sheet was left. Already-downloaded profiles are no
+    /// longer skipped — they get an incremental "new posts only" pass (the id-dedup
+    /// in `InstagramService.run` stops paging a dozen posts past the newest one we
+    /// have, so a no-news profile costs a couple of requests).
+    func startBulkInstagramDownload(jobs: [BulkIGJob], root: URL, skipTagged: Bool, upscale1080: Bool) {
+        guard !bulkIGRunning, !jobs.isEmpty else { return }
+        bulkIGRunning = true
+        let id = beginActivity("Instagram")
+        setActivity(id, status: "Starting…")
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Bulk Instagram Download")
+        UIApplication.shared.isIdleTimerDisabled = true       // long run — keep the screen alive
+        Task {
+            defer {
+                bulkIGRunning = false
+                UIApplication.shared.isIdleTimerDisabled = false
+                bg.end()
+            }
+            guard let creds = await InstagramAuth.credentials() else {
+                endActivity(id, result: "Not logged in to Instagram — open “Bulk Download Instagram Profiles…” and log in.")
+                return
+            }
+            // Shared rolling temp folder (append within 24h, replace across days).
+            let tempFolder = prepareTodaysStoriesFolder(root: root)
+            var totalPhotos = 0, totalVideos = 0, totalStories = 0, profilesWithNew = 0
+            var firstNote: String?
+            for (i, job) in jobs.enumerated() {
+                setLastIGHandle(job.handle, for: job.folder)      // remember the mapping
+                let dest = resolveIGDestination(person: job.folder, handle: job.handle)
+                try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+                let prior = instagramInfo(for: dest)
+                let already = Set(prior?.downloaded ?? [])
+                setActivity(id, status: "@\(job.handle) — \(already.isEmpty ? "downloading" : "checking for new posts") (\(i + 1) of \(jobs.count))",
+                            fraction: Double(i) / Double(jobs.count))
+                let r = await InstagramService.run(handle: job.handle, into: dest, alreadyDownloaded: already,
+                                                   creds: creds, includeTagged: !skipTagged) { p in
+                    Task { @MainActor in
+                        self.setActivity(id, fraction: (Double(i) + p.fraction) / Double(jobs.count))
+                    }
+                }
+                await InstagramApply.apply(r, to: dest, already: already, prior: prior,
+                                           forceFull: false, library: self)
+                if upscale1080 {
+                    await InstagramApply.upscaleVideosTo1080(r.files) { done, total in
+                        Task { @MainActor in
+                            self.setActivity(id, status: "@\(job.handle) — upscaling videos \(done) of \(total)")
+                        }
+                    }
+                }
+                // Any stories pulled this run are today's — collect them into the shared folder.
+                let storiesFolder = dest.appendingPathComponent("Stories", isDirectory: true)
+                let storyFiles = r.files.filter { $0.hasPrefix(storiesFolder.path + "/") }
+                if !storyFiles.isEmpty {
+                    let copied = await InstagramService.copyToTemp(storyFiles, handle: job.handle, into: tempFolder)
+                    setStoryLinks(copied, to: storiesFolder)        // metadata link → person's Stories
+                }
+                totalPhotos += r.photos; totalVideos += r.videos; totalStories += storyFiles.count
+                if r.photos + r.videos > 0 { profilesWithNew += 1 }
+                if firstNote == nil, r.photos + r.videos == 0, let note = r.note { firstNote = "@\(job.handle): \(note)" }
+            }
+            // Drop the shared folder if this run added nothing to it.
+            if let contents = try? FileManager.default.contentsOfDirectory(atPath: tempFolder.path), contents.isEmpty {
+                try? FileManager.default.removeItem(at: tempFolder)
+            }
+            let total = totalPhotos + totalVideos
+            var msg = total > 0
+                ? "Instagram: \(total) new item\(total == 1 ? "" : "s") across \(profilesWithNew) of \(jobs.count) profile\(jobs.count == 1 ? "" : "s")"
+                : "Instagram: no new posts across \(jobs.count) profile\(jobs.count == 1 ? "" : "s")"
+            if totalStories > 0 { msg += "; \(totalStories) stor\(totalStories == 1 ? "y" : "ies") collected" }
+            msg += "."
+            if total == 0, let firstNote { msg += " \(firstNote)" }
+            endActivity(id, result: msg)
+            contentDidChange(under: root)
+        }
+    }
+
+    /// The folder to download `@handle` into for a person folder: the
+    /// already-registered Instagram folder when one exists (the `<handle>`
+    /// subfolder, any registered immediate subfolder with that handle, or the
+    /// person folder itself from the old flat layout), else a fresh `<handle>`
+    /// subfolder. Reusing the registered folder is what turns a bulk re-run into an
+    /// incremental "new posts only" pass — a parallel folder would have an empty
+    /// dedup record and re-download the entire profile.
+    private func resolveIGDestination(person: URL, handle: String) -> URL {
+        let direct = person.appendingPathComponent(handle, isDirectory: true)
+        if instagramInfo(for: direct) != nil { return direct }
+        let children = (try? FileManager.default.contentsOfDirectory(
+            at: person, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+        for child in children where (try? child.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+            if instagramFolders[child.path]?.handle.caseInsensitiveCompare(handle) == .orderedSame { return child }
+        }
+        if instagramFolders[person.path]?.handle.caseInsensitiveCompare(handle) == .orderedSame { return person }
+        return direct
+    }
+
     // MARK: - accessKardashian downloads (app-wide, pausable)
 
     /// Live per-member download state, so the accessKardashian screens can show

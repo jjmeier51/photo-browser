@@ -4,6 +4,12 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-03
 
+- **Bulk Instagram Download runs app-wide and updates existing profiles** — the run moved
+  onto `Library` (progress pill + completion popup), so the sheet can be closed and the app
+  navigated (and briefly backgrounded) while it works. Already-downloaded profiles are no
+  longer skipped: they get an incremental "new posts only" check, targeting the profile's
+  existing registered folder so nothing re-downloads. Also: "Edit with AI" gained a
+  tap-to-reuse prompt history.
 - **accessKardashian downloads run app-wide and pause anywhere** — the run moved off the member
   screen onto `Library` (progress pill + completion popup, like Instagram/Drive), so you can
   close the sheet, browse the app, and briefly switch apps while it downloads; reopening the
