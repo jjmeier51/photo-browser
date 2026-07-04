@@ -4,6 +4,13 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-03
 
+- **"Copy Metadata to Backup Drive…"** (⋯ menu) — after copying the library's files to a
+  backup SSD, this duplicates *every* piece of path-keyed data onto the backup's matching
+  paths, keeping the primary untouched: favorites, To AI, custom labels, captions, covers,
+  birthdays, Edited/AI badges, Instagram/Facebook/TikTok profile records, highlights, bubble
+  order, story links, likes, Clean Up progress, not-duplicate pairs, and the People library —
+  plus the per-file caches (capture dates, media specs, OCR text) so the backup browses warm.
+  Thumbnails are shared automatically when the backup's internal layout matches.
 - **Bulk Instagram Download runs app-wide and updates existing profiles** — the run moved
   onto `Library` (progress pill + completion popup), so the sheet can be closed and the app
   navigated (and briefly backgrounded) while it works. Already-downloaded profiles are no

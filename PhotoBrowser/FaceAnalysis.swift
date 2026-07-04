@@ -109,6 +109,21 @@ final class FaceStore: @unchecked Sendable {
         if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: fileURL, options: .atomic) }
     }
 
+    /// Adds a copy of every entry under `from`'s subtree keyed at the matching path
+    /// under `to` — backup-drive duplication; originals kept.
+    func duplicatePrefix(from: String, to: String) {
+        lock.lock()
+        var adds: [String: [DetectedFace]] = [:]
+        for (path, faces) in map where path.hasPrefix(from + "/") {
+            let np = to + path.dropFirst(from.count)
+            if map[np] == nil { adds[np] = faces }
+        }
+        for (k, v) in adds { map[k] = v }
+        if !adds.isEmpty { dirty = true }
+        lock.unlock()
+        if !adds.isEmpty { Task.detached(priority: .utility) { [self] in flush() } }
+    }
+
     /// Rewrites every stored path through `transform` — used when files move/rename
     /// in-app and when the drive remounts under a new mount UUID, so detections
     /// (and the People groupings that reference them) stay attached.

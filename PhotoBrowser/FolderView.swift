@@ -13,7 +13,7 @@ struct ViewerPresentation: Identifiable {
 
 /// What the single folder picker is being used for (one `.fileImporter` total —
 /// multiple `.fileImporter` modifiers on one view conflict in SwiftUI).
-enum ImportPurpose { case open, transfer, relink }
+enum ImportPurpose { case open, transfer, relink, backupMetadata }
 
 /// Browses one directory: subfolders + files, with sort, search, a full-screen
 /// viewer for photos/videos, and a Select mode for save/delete.
@@ -705,9 +705,10 @@ struct FolderView: View {
                 // confirmation / start work (otherwise it gets swallowed mid-dismiss).
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
                     switch purpose {
-                    case .open:     library.chooseFolder(picked)
-                    case .transfer: transferItem = PreviewItem(url: picked)
-                    case .relink:   performRelink(oldRoot: picked)
+                    case .open:           library.chooseFolder(picked)
+                    case .transfer:       transferItem = PreviewItem(url: picked)
+                    case .relink:         performRelink(oldRoot: picked)
+                    case .backupMetadata: performBackupCopy(newRoot: picked)
                     }
                 }
             }
@@ -895,6 +896,17 @@ struct FolderView: View {
         library.migrateMetadata(fromRoot: oldRoot, toRoot: url, removeSource: true, verifyExists: true)
         if accessed { oldRoot.stopAccessingSecurityScopedResource() }
         resultMessage = "Re-linked Favorites, covers, and captions to this drive."
+    }
+
+    /// Duplicates ALL metadata under this folder (favorites, labels, captions,
+    /// covers, birthdays, People, profile records, cached dates/specs/OCR) onto its
+    /// copy on a backup drive — pick the backup's copy of *this* folder. Originals
+    /// stay untouched; this drive remains the primary.
+    private func performBackupCopy(newRoot: URL) {
+        let n = library.duplicateMetadata(from: url, to: newRoot)
+        resultMessage = n > 0
+            ? "Copied \(n) metadata entr\(n == 1 ? "y" : "ies") — favorites, labels, captions, covers, birthdays, People and profile records — onto “\(newRoot.lastPathComponent)”."
+            : "Nothing to copy — no metadata found under “\(url.lastPathComponent)”, or the same folder was picked."
     }
 
     @ViewBuilder private var makingLiveOverlay: some View {
@@ -1604,6 +1616,9 @@ struct FolderView: View {
                     }
                     Button { pickFolder(.relink) } label: {
                         Label("Re-link Favorites from a Drive…", systemImage: "link")
+                    }
+                    Button { pickFolder(.backupMetadata) } label: {
+                        Label("Copy Metadata to Backup Drive…", systemImage: "externaldrive.badge.checkmark")
                     }
                     if isRoot {
                         Button { pickFolder(.open) } label: { Label("Open Folder…", systemImage: "externaldrive") }

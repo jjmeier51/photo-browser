@@ -1566,6 +1566,111 @@ final class Library {
         return result
     }
 
+    /// Duplicates every piece of path-keyed data under `oldRoot` — Favorites, To AI,
+    /// custom labels, captions, covers, birthdays, edited/AI badges, frames folders,
+    /// Instagram/Facebook/TikTok records, highlights, bubble order, story links,
+    /// likes, Clean Up progress, not-duplicate pairs, People faces — onto the same
+    /// relative paths under `newRoot`, **keeping the originals**. For a backup drive
+    /// holding a copy of the library: browsing the backup then shows everything the
+    /// primary shows. The persistent per-file caches (capture dates, media specs,
+    /// OCR text) are duplicated too, so the backup browses warm. Deliberately blind
+    /// (no per-file existence checks): stat-ing tens of thousands of keys on an
+    /// external drive would take minutes, and an entry for a file the backup lacks
+    /// is inert. Returns the number of entries added.
+    func duplicateMetadata(from oldRoot: URL, to newRoot: URL) -> Int {
+        let from = oldRoot.path, to = newRoot.path
+        guard from != to, !to.hasPrefix(from + "/"), !from.hasPrefix(to + "/") else { return 0 }
+        var added = 0
+        func mapped(_ p: String) -> String? {
+            guard p == from || p.hasPrefix(from + "/") else { return nil }
+            return to + p.dropFirst(from.count)
+        }
+        func dupSet(_ set: inout Set<String>) {
+            for p in Array(set) { if let np = mapped(p), set.insert(np).inserted { added += 1 } }
+        }
+        func dupDict<V>(_ dict: inout [String: V], value: (V) -> V = { $0 }) {
+            for (k, v) in dict { if let nk = mapped(k), dict[nk] == nil { dict[nk] = value(v); added += 1 } }
+        }
+
+        dupSet(&favorites); dupSet(&aiLabels); dupSet(&editedInAppPaths); dupSet(&aiGeneratedPaths)
+        dupSet(&framesFolders); dupSet(&kardashianFolders); dupSet(&instagramHighlights); dupSet(&albumHighlights)
+        customLabels = customLabels.mapValues { paths in
+            var s = paths
+            for p in paths { if let np = mapped(p), s.insert(np).inserted { added += 1 } }
+            return s
+        }
+        dupDict(&captions); dupDict(&photoOrigins); dupDict(&igPostedBy); dupDict(&igLastHandle)
+        dupDict(&lastTikTokHandleByFolder); dupDict(&tiktokLikes); dupDict(&folderBirthdays)
+        dupDict(&instagramFolders); dupDict(&facebookFolders); dupDict(&tiktokFolders)
+        dupDict(&cleanupReviewed, value: { $0.map { mapped($0) ?? $0 } })
+        dupDict(&bubbleOrders, value: { $0.map { mapped($0) ?? $0 } })
+        for (k, v) in storyLinks {
+            if let nk = mapped(k), storyLinks[nk] == nil { storyLinks[nk] = mapped(v) ?? v; added += 1 }
+        }
+        for pair in Array(notDuplicatePairs) {
+            let parts = pair.split(separator: "\n", maxSplits: 1).map(String.init)
+            guard parts.count == 2, let a = mapped(parts[0]), let b = mapped(parts[1]) else { continue }
+            if notDuplicatePairs.insert(Self.pairKey(a, b)).inserted { added += 1 }
+        }
+        // People: each person gains her backup-side face references (same groups).
+        for (name, ids) in people {
+            var set = ids
+            for id in ids {
+                let path = Self.pathOfFaceID(id)
+                guard let np = mapped(path) else { continue }
+                if set.insert(np + id.dropFirst(path.count)).inserted { added += 1 }
+            }
+            people[name] = set
+        }
+        FaceStore.shared.duplicatePrefix(from: from, to: to)
+        // Covers: the backup key gets its own copy of the image file, so deleting
+        // either side later can't strip the other's cover.
+        let fm = FileManager.default
+        var newCovers = folderCovers
+        for (key, filename) in folderCovers {
+            guard let nk = mapped(key), newCovers[nk] == nil else { continue }
+            let newName = UUID().uuidString + ".jpg"
+            if (try? fm.copyItem(at: coversDirectory.appendingPathComponent(filename),
+                                 to: coversDirectory.appendingPathComponent(newName))) != nil {
+                newCovers[nk] = newName; added += 1
+            }
+        }
+        folderCovers = newCovers
+        // Per-file caches are keyed drive-relative — a no-op when the backup's
+        // in-volume layout matches the primary (they already hit as-is).
+        MetadataLoader.duplicateStores(fromStablePrefix: oldRoot.stableCacheID,
+                                       toStablePrefix: newRoot.stableCacheID)
+
+        guard added > 0 else { return 0 }
+        Self.saveBulk(favorites, "favorites")
+        Self.saveBulk(aiLabels, "ai")
+        Self.saveBulk(editedInAppPaths, "editedInApp")
+        Self.saveBulk(aiGeneratedPaths, "aiGenerated")
+        Self.saveBulk(cleanupReviewed, "cleanupReviewed")
+        Self.saveBulk(notDuplicatePairs, "notDuplicates")
+        Self.saveBulk(people, "people")
+        Self.saveBulk(captions, "captions")
+        Self.saveBulk(photoOrigins, "photoOrigins")
+        Self.saveBulk(igPostedBy, "igPostedBy")
+        UserDefaults.standard.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
+        UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
+        UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
+        UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
+        UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
+        UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
+        UserDefaults.standard.set(storyLinks, forKey: "photoBrowser.storyLinks")
+        UserDefaults.standard.set(folderBirthdays, forKey: "photoBrowser.birthdays")
+        UserDefaults.standard.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
+        UserDefaults.standard.set(lastTikTokHandleByFolder, forKey: "photoBrowser.lastTikTokHandle")
+        persistCustomLabels()
+        persistInstagramFolders()
+        persistFacebookFolders()
+        persistTikTokFolders()
+        persistTikTokLikes()
+        labelsVersion += 1
+        return added
+    }
+
     /// Labeled items (favorites or To AI) at or below `folder`, including folders.
     /// Resolves saved paths directly (no full-tree walk) so it's fast on big drives.
     nonisolated func labeledEntries(under folder: URL, paths: Set<String>, sort: SortKey) async -> [Entry] {

@@ -87,6 +87,21 @@ enum MetadataLoader {
             lock.unlock()
             if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: fileURL, options: .atomic) }
         }
+
+        /// Copies every entry under `from`'s drive-relative subtree to the matching
+        /// key under `to` (backup-drive duplication; originals kept).
+        func duplicatePrefix(_ from: String, _ to: String) {
+            lock.lock()
+            var adds: [String: Double] = [:]
+            for (k, v) in map where k.hasPrefix(from + "/") {
+                let nk = to + k.dropFirst(from.count)
+                if map[nk] == nil { adds[nk] = v }
+            }
+            for (k, v) in adds { map[k] = v }
+            if !adds.isEmpty { dirty = true }
+            lock.unlock()
+            flush()
+        }
     }
 
     private static let dateStore = DateStore()
@@ -142,12 +157,38 @@ enum MetadataLoader {
                 flush()
             }
         }
+
+        /// Copies every entry under `from`'s drive-relative subtree to the matching
+        /// key under `to` (backup-drive duplication; originals kept).
+        func duplicatePrefix(_ from: String, _ to: String) {
+            lock.lock()
+            var adds: [String: MediaSpec] = [:]
+            for (k, v) in map where k.hasPrefix(from + "/") {
+                let nk = to + k.dropFirst(from.count)
+                if map[nk] == nil { adds[nk] = v }
+            }
+            for (k, v) in adds { map[k] = v }
+            if !adds.isEmpty { dirty = true }
+            lock.unlock()
+            flush()
+        }
     }
 
     private static let specStore = SpecStore()
 
     /// Persists any newly-read specs immediately. Call after a bulk read.
     static func flushSpecStore() { specStore.flush() }
+
+    /// Duplicates the per-file caches (capture dates, media specs, OCR text) from
+    /// one drive-relative root prefix onto another — used when copying metadata to
+    /// a backup drive so it browses warm. No-op when the prefixes match (the
+    /// stableCacheID keys already hit for an identically-laid-out backup).
+    static func duplicateStores(fromStablePrefix from: String, toStablePrefix to: String) {
+        guard from != to else { return }
+        dateStore.duplicatePrefix(from, to)
+        specStore.duplicatePrefix(from, to)
+        ocrStore.duplicatePrefix(from, to)
+    }
 
     // MARK: - On-device photo-text (OCR) index
 
@@ -171,6 +212,21 @@ enum MetadataLoader {
             lock.lock(); guard dirty else { lock.unlock(); return }
             let snapshot = map; dirty = false; lock.unlock()
             if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: fileURL, options: .atomic) }
+        }
+
+        /// Copies every entry under `from`'s drive-relative subtree to the matching
+        /// key under `to` (backup-drive duplication; originals kept).
+        func duplicatePrefix(_ from: String, _ to: String) {
+            lock.lock()
+            var adds: [String: String] = [:]
+            for (k, v) in map where k.hasPrefix(from + "/") {
+                let nk = to + k.dropFirst(from.count)
+                if map[nk] == nil { adds[nk] = v }
+            }
+            for (k, v) in adds { map[k] = v }
+            if !adds.isEmpty { dirty = true }
+            lock.unlock()
+            flush()
         }
     }
 
