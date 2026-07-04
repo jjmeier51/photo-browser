@@ -31,7 +31,14 @@ struct AllStoriesView: View {
         let picData: Data?
     }
 
-    private var trackedCount: Int { library.instagramFolders.count }
+    /// Only the profiles under *this* drive's root. The library may deliberately
+    /// hold a duplicate record per profile for a backup drive's copy ("Copy
+    /// Metadata to Backup Drive…"), and the sweep must count — and fetch — each
+    /// profile once, for the drive being browsed, not once per drive.
+    private var trackedProfiles: [String: IGFolderInfo] {
+        library.instagramFolders.filter { $0.key == root.path || $0.key.hasPrefix(root.path + "/") }
+    }
+    private var trackedCount: Int { trackedProfiles.count }
 
     var body: some View {
         NavigationStack {
@@ -98,7 +105,7 @@ struct AllStoriesView: View {
                 library.endActivity(id, result: "Couldn’t start — not logged in to Instagram."); bg.end(); return
             }
             let fm = FileManager.default
-            let folders: [(url: URL, info: IGFolderInfo, hasCover: Bool)] = library.instagramFolders.compactMap { path, info in
+            let folders: [(url: URL, info: IGFolderInfo, hasCover: Bool)] = trackedProfiles.compactMap { path, info in
                 let url = URL(fileURLWithPath: path)
                 var isDir: ObjCBool = false
                 let folderExists = fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
