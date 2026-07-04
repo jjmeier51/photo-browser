@@ -42,6 +42,7 @@ struct FolderView: View {
     @State private var yearFilter: Int?
     @State private var typeFilter: TypeFilter = .all
     @State private var showEditedOnly = false
+    @State private var showHiddenFolders = false
     @State private var showFavoritesOnly = false
     @State private var favoriteEntries: [Entry] = []
     @State private var captureDates: [URL: Date] = [:]
@@ -259,19 +260,19 @@ struct FolderView: View {
         // gathered recursively under this folder.
         if tsLabelMode {
             let base = applyType(tsLabelEntries)
-            return q.isEmpty ? base : base.filter { matches($0, q) }
+            return applyHidden(q.isEmpty ? base : base.filter { matches($0, q) })
         }
 
         // Favorites / To AI mode: labeled items + folder/photo/video sub-filter.
         if labelMode {
             let base = applyLabelKind(showAIOnly ? aiEntries : favoriteEntries)
-            return q.isEmpty ? base : base.filter { matches($0, q) }
+            return applyHidden(q.isEmpty ? base : base.filter { matches($0, q) })
         }
 
         // Age mode: recursive aged media (folder + subfolders) of the chosen age.
         if let ageFilter {
             let base = applyType(agedList.filter { $0.age == ageFilter }.map { $0.entry })
-            return q.isEmpty ? base : base.filter { matches($0, q) }
+            return applyHidden(q.isEmpty ? base : base.filter { matches($0, q) })
         }
 
         // Searching: recursive results (current folder + all subfolders).
@@ -288,7 +289,7 @@ struct FolderView: View {
                 let aged = applyType(agedList.filter { $0.age == target }.map { $0.entry })
                 results += aged.filter { !existing.contains($0.url) }
             }
-            return applyEdited(results)
+            return applyHidden(applyEdited(results))
         }
 
         // Bubble folders (Instagram + album highlights) are shown as bubbles, not tiles.
@@ -304,7 +305,14 @@ struct FolderView: View {
         list = applyType(list)
         list = applyEdited(list)
         if advancedActive { list = list.filter { passesAdvanced($0) } }
-        return list
+        return applyHidden(list)
+    }
+
+    /// Removes hidden folders — and, for recursive result sets (search, labels,
+    /// ages), anything inside them — unless "Show Hidden Folders" is on.
+    private func applyHidden(_ list: [Entry]) -> [Entry] {
+        guard !showHiddenFolders, !library.hiddenFolders.isEmpty else { return list }
+        return list.filter { !library.isUnderHiddenFolder($0.url.path) }
     }
 
     /// Keeps only files produced by the in-app editor (when the "Edited" filter is on).
@@ -452,6 +460,9 @@ struct FolderView: View {
                   isAIGenerated: library.isAIGenerated(entry.url),
                   coverURL: entry.isFolder ? library.coverURL(for: entry.url) : nil,
                   likeCount: entry.kind == .video ? library.tiktokLikeCount(for: entry.url) : nil)
+            // A revealed hidden folder reads as hidden (dimmed) so it isn't mistaken
+            // for a normal one; invisible entirely unless Show Hidden Folders is on.
+            .opacity(entry.isFolder && library.isHiddenFolder(entry.url) ? 0.45 : 1)
             .background {
                 // Always publish cell frames (only the visible LazyVGrid cells exist)
                 // so a drag-select can begin immediately — even before Select mode.
@@ -564,6 +575,14 @@ struct FolderView: View {
         if entry.isFolder {
             Button { folderInfoItem = PreviewItem(url: entry.url) } label: {
                 Label("Get Info", systemImage: "info.circle")
+            }
+            // Hide = out of sight (tile, bubble, search), nothing touched on the drive.
+            Button {
+                library.setFolderHidden(!library.isHiddenFolder(entry.url), for: entry.url)
+            } label: {
+                library.isHiddenFolder(entry.url)
+                    ? Label("Unhide Folder", systemImage: "eye")
+                    : Label("Hide Folder", systemImage: "eye.slash")
             }
             Button { birthdayFolderItem = PreviewItem(url: entry.url) } label: {
                 Label(library.birthday(for: entry.url) != nil ? "Edit Birthday" : "Add Birthday",
@@ -1253,7 +1272,8 @@ struct FolderView: View {
     }
     private var igBubbles: [Entry] {
         let order = library.bubbleOrder(for: url)
-        return entries.filter { $0.isFolder && isBubbleFolder($0.url) }
+        return entries.filter { $0.isFolder && isBubbleFolder($0.url)
+                && (showHiddenFolders || !library.isHiddenFolder($0.url)) }
             .sorted { a, b in
                 let ra = bubbleRank(a.url), rb = bubbleRank(b.url)
                 if ra != rb { return ra < rb }     // Instagram, then Facebook, pinned
@@ -1591,6 +1611,7 @@ struct FolderView: View {
                     Button { playSlideshow() } label: { Label("Play Slideshow", systemImage: "play.rectangle") }
                         .disabled(mediaItems.isEmpty)
                     Button { showNewFolder = true } label: { Label("New Folder", systemImage: "folder.badge.plus") }
+                    Toggle(isOn: $showHiddenFolders) { Label("Show Hidden Folders", systemImage: "eye.slash") }
                     Button { showDuplicates = true } label: { Label("Find Duplicates", systemImage: "doc.on.doc") }
                     Button { confirmFixDates = true } label: { Label("Restore Capture Dates", systemImage: "clock.arrow.circlepath") }
                     Button { runTextIndex() } label: { Label("Index Text in Photos", systemImage: "text.viewfinder") }

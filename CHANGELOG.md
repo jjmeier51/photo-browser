@@ -4,6 +4,10 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-03
 
+- **Hide folders** — long-press a folder → "Hide Folder": it vanishes from the grid, the
+  bubble row, and search (contents included) without touching the drive. The ⋯ menu's
+  "Show Hidden Folders" toggle reveals them dimmed for unhiding. Hidden state follows
+  moves/renames/remounts and copies to backup drives with the rest of the metadata.
 - **Search: locations + dedup** — new "Index Locations" action (⋯ menu) reads photo GPS
   (cached per file), bins it to ~1km cells, and reverse-geocodes each *place* once
   (rate-limit-friendly, capped per run, resumable); search then matches place names

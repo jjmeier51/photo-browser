@@ -1116,6 +1116,22 @@ final class Library {
         UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
     }
 
+    /// Folders hidden from browsing — no grid tile, no bubble, and (with their
+    /// contents) no search hits — without touching anything on the drive. The
+    /// "Show Hidden Folders" toggle in the ⋯ menu reveals them for unhiding.
+    var hiddenFolders: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.hiddenFolders") ?? [])
+    func isHiddenFolder(_ url: URL) -> Bool { hiddenFolders.contains(url.path) }
+    /// Whether `path` is a hidden folder or lives inside one.
+    func isUnderHiddenFolder(_ path: String) -> Bool {
+        hiddenFolders.contains { path == $0 || path.hasPrefix($0 + "/") }
+    }
+    func setFolderHidden(_ hidden: Bool, for url: URL) {
+        if hidden { hiddenFolders.insert(url.path) } else { hiddenFolders.remove(url.path) }
+        UserDefaults.standard.set(Array(hiddenFolders), forKey: "photoBrowser.hiddenFolders")
+        labelsVersion += 1
+        contentDidChange(under: url.deletingLastPathComponent())
+    }
+
     /// Folders the user turned into "album highlights" — shown as bubbles like the
     /// Instagram ones (but for any folder).
     var albumHighlights: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.albumHighlights") ?? [])
@@ -1419,6 +1435,7 @@ final class Library {
         kardashianFolders = Set(kardashianFolders.map(remap))
         instagramHighlights = Set(instagramHighlights.map(remap))
         albumHighlights = Set(albumHighlights.map(remap))
+        hiddenFolders = Set(hiddenFolders.map(remap))
         customLabels = customLabels.mapValues { Set($0.map(remap)) }
         captions = remapKeys(captions, remap)
         folderCovers = remapKeys(folderCovers, remap)
@@ -1467,6 +1484,7 @@ final class Library {
         UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
         UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
         UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
+        UserDefaults.standard.set(Array(hiddenFolders), forKey: "photoBrowser.hiddenFolders")
         Self.saveBulk(captions, "captions")
         UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
         Self.saveBulk(photoOrigins, "photoOrigins")
@@ -1594,6 +1612,7 @@ final class Library {
 
         dupSet(&favorites); dupSet(&aiLabels); dupSet(&editedInAppPaths); dupSet(&aiGeneratedPaths)
         dupSet(&framesFolders); dupSet(&kardashianFolders); dupSet(&instagramHighlights); dupSet(&albumHighlights)
+        dupSet(&hiddenFolders)
         customLabels = customLabels.mapValues { paths in
             var s = paths
             for p in paths { if let np = mapped(p), s.insert(np).inserted { added += 1 } }
@@ -1656,6 +1675,7 @@ final class Library {
         UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
         UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
         UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
+        UserDefaults.standard.set(Array(hiddenFolders), forKey: "photoBrowser.hiddenFolders")
         UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
         UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
         UserDefaults.standard.set(storyLinks, forKey: "photoBrowser.storyLinks")
