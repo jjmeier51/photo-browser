@@ -2,6 +2,15 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-05
+
+- **Object removal: optional CoreML (LaMa) tier** — if a converted LaMa inpainting model is
+  dropped into `PhotoBrowser/` (`Inpainting.mlpackage` / `LaMa.mlpackage` — see
+  `docs/ml-inpainting.md` for the 5-minute conversion), removals run through the generative
+  network first (Neural Engine, context window ≥512pt, same feathered hole-only composite) and
+  fall back to exemplar synthesis on any failure. Without a model the app builds and behaves
+  exactly as before — `MLInpainter` discovers the model and its I/O contract at runtime.
+
 ## 2026-07-03
 
 - **Object removal: strokes are independent** — each removal now inpaints in its own tight

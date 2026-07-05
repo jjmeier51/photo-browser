@@ -46,13 +46,43 @@ enum RetouchMask {
 /// fast at any image size), and only the masked region plus a feathered seam is composited back —
 /// every other pixel is the untouched original. Degenerate cases (mask covering most of the image,
 /// render failures) fall back to the old diffusion fill rather than failing.
+///
+/// When a CoreML inpainting model is bundled (see `MLInpainter` / `docs/ml-inpainting.md`) it runs
+/// first: a generative LaMa-class network understands structure (railings, skin, fabric) that patch
+/// copying can only approximate. Any failure there falls straight through to exemplar synthesis, so
+/// the model is a pure upgrade, never a dependency.
 enum ObjectRemoval {
     static func inpaint(_ image: CIImage, mask: CIImage) -> CIImage {
         let e = image.extent
         guard e.width >= 4, e.height >= 4 else { return image }
         let m = alignMask(mask, to: e)
-        if let out = exemplarFill(image, mask: m, extent: e) { return out }
+        guard let bbox = maskBounds(of: m, extent: e) else { return image }   // empty mask
+        if let out = mlFill(image, mask: m, extent: e, bbox: bbox) { return out }
+        if let out = exemplarFill(image, mask: m, extent: e, bbox: bbox) { return out }
         return diffusionFill(image, mask: m, extent: e)
+    }
+
+    // MARK: - ML inpainting (tier 1, only when a model is bundled)
+
+    private static func mlFill(_ image: CIImage, mask m: CIImage, extent e: CGRect, bbox: CGRect) -> CIImage? {
+        guard MLInpainter.shared.isAvailable else { return nil }
+        // Window: generous context around the hole, grown toward the model's native
+        // input size so small strokes aren't upscaled into a fixed 512² input (which
+        // would soften the fill against its full-res surroundings).
+        let margin = max(max(bbox.width, bbox.height), 96)
+        var win = bbox.insetBy(dx: -margin, dy: -margin)
+        let minSide: CGFloat = 512
+        if win.width < minSide { win = win.insetBy(dx: -(minSide - win.width) / 2, dy: 0) }
+        if win.height < minSide { win = win.insetBy(dx: 0, dy: -(minSide - win.height) / 2) }
+        win = win.intersection(e).integral
+        guard win.width >= 32, win.height >= 32 else { return nil }
+        let shift = CGAffineTransform(translationX: -win.minX, y: -win.minY)
+        guard let filled = MLInpainter.shared.fill(
+            window: image.cropped(to: win).transformed(by: shift),
+            mask: m.cropped(to: win).transformed(by: shift),
+            context: PhotoEditorIO.context) else { return nil }
+        let placed = filled.transformed(by: CGAffineTransform(translationX: win.minX, y: win.minY))
+        return compositeHole(placed, over: image, mask: m, extent: e)
     }
 
     // MARK: - Exemplar synthesis
@@ -60,15 +90,17 @@ enum ObjectRemoval {
     private static let patch = 9        // odd; 9 balances texture fidelity vs. search cost
     private static let half = 4
 
-    private static func exemplarFill(_ image: CIImage, mask m: CIImage, extent e: CGRect) -> CIImage? {
-        // --- 1. Mask bounding box, from a small probe raster ---
+    /// Bounding box of the white (remove) area of the mask, in image coordinates, measured on a
+    /// small probe raster. Nil when the mask is empty; the full extent when the probe can't render
+    /// (better to hand downstream tiers an oversized window than to skip the removal).
+    private static func maskBounds(of m: CIImage, extent e: CGRect) -> CGRect? {
         let probeLong = 256.0
         let ps = min(1.0, probeLong / Double(max(e.width, e.height)))
         let pw = max(1, Int((Double(e.width) * ps).rounded()))
         let ph = max(1, Int((Double(e.height) * ps).rounded()))
         let maskAtOrigin = m.transformed(by: CGAffineTransform(translationX: -e.minX, y: -e.minY))
         guard let probe = rasterize(maskAtOrigin.transformed(by: CGAffineTransform(scaleX: CGFloat(ps), y: CGFloat(ps))),
-                                    w: pw, h: ph) else { return nil }
+                                    w: pw, h: ph) else { return e }
         var minPX = Int.max, minPY = Int.max, maxPX = -1, maxPY = -1
         for y in 0..<ph {
             for x in 0..<pw where probe[(y * pw + x) * 4] > 32 {
@@ -76,18 +108,20 @@ enum ObjectRemoval {
                 if y < minPY { minPY = y }; if y > maxPY { maxPY = y }
             }
         }
-        guard maxPX >= 0 else { return image }               // empty mask — nothing to remove
+        guard maxPX >= 0 else { return nil }                 // empty mask — nothing to remove
+        // Probe rows are top-down; convert to CI coordinates (bottom-up).
+        return CGRect(x: e.minX + CGFloat(Double(minPX) / ps),
+                      y: e.maxY - CGFloat(Double(maxPY + 1) / ps),
+                      width: CGFloat(Double(maxPX - minPX + 1) / ps),
+                      height: CGFloat(Double(maxPY - minPY + 1) / ps))
+    }
 
-        // Probe rows are top-down; convert to CI coordinates (bottom-up), then expand
-        // by the bbox's own size on every side so the window holds plenty of source
-        // texture, and clamp to the image.
-        let bx = e.minX + CGFloat(Double(minPX) / ps)
-        let bw = CGFloat(Double(maxPX - minPX + 1) / ps)
-        let by = e.maxY - CGFloat(Double(maxPY + 1) / ps)
-        let bh = CGFloat(Double(maxPY - minPY + 1) / ps)
+    private static func exemplarFill(_ image: CIImage, mask m: CIImage, extent e: CGRect, bbox: CGRect) -> CIImage? {
+        // --- 1. Working window: the mask bbox expanded by its own size on every side
+        //        so the window holds plenty of source texture, clamped to the image ---
+        let bw = bbox.width, bh = bbox.height
         let margin = max(max(bw, bh), CGFloat(48))
-        let roi = CGRect(x: bx - margin, y: by - margin, width: bw + 2 * margin, height: bh + 2 * margin)
-            .intersection(e).integral
+        let roi = bbox.insetBy(dx: -margin, dy: -margin).intersection(e).integral
         guard roi.width >= CGFloat(patch * 3), roi.height >= CGFloat(patch * 3) else { return nil }
 
         // --- 2. Working rasters (image + mask) at adaptive resolution ---
@@ -306,6 +340,12 @@ enum ObjectRemoval {
         let placed = CIImage(cgImage: outCG)
             .transformed(by: CGAffineTransform(scaleX: roi.width / CGFloat(w), y: roi.height / CGFloat(h)))
             .transformed(by: CGAffineTransform(translationX: roi.minX, y: roi.minY))
+        return compositeHole(placed, over: image, mask: m, extent: e)
+    }
+
+    /// Composites a filled window back over the original: only the masked hole (plus a feathered
+    /// seam scaled to the image size) takes the new pixels — everything else stays untouched.
+    private static func compositeHole(_ placed: CIImage, over image: CIImage, mask m: CIImage, extent e: CGRect) -> CIImage {
         let feather = max(1.0, Double(max(e.width, e.height)) * 0.0015)
         let soft = m.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: feather]).cropped(to: e)
         let over = placed.composited(over: image).cropped(to: e)

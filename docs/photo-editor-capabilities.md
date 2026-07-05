@@ -166,6 +166,11 @@ stays still. Chip + slider per control; pinch‑zoom supported.
 
 - **TouchRetouch‑style magic eraser**: brush over an unwanted object; the region is filled
   to blend with its surroundings. Brush size slider; per‑stroke Undo.
+- **Optional CoreML tier**: if a converted LaMa inpainting model is bundled (drop
+  `Inpainting.mlpackage` into `PhotoBrowser/`; see `docs/ml-inpainting.md`), removals run
+  through the generative network first — it understands structure (railings, skin, fabric)
+  that patch copying can only approximate. Any failure falls through to exemplar synthesis;
+  without a model the app builds and behaves identically.
 - On‑device **exemplar‑based patch synthesis** (the TouchRetouch / Content‑Aware‑Fill
   approach): real 9×9 patches of the surrounding image are copied into the hole
   (best‑match SSD search, onion‑peel fill order, locality bias), so the fill carries
@@ -303,7 +308,8 @@ HDR retention, save‑time upscaling.
 | `PhotoEditorMakeup.swift` | `MakeupRenderer` (overlays, freckles) |
 | `PhotoEditorSkin.swift` | `SkinRecolor` (skin‑color cube + tone shift) |
 | `PhotoEditorBrush.swift` | `BrushStroke`, `BrushMask`, `BrushRender` (smooth/paint/teeth/erase) |
-| `PhotoEditorRetouch.swift` | `RetouchMask`, `ObjectRemoval` (exemplar patch synthesis; diffusion fallback) |
+| `PhotoEditorRetouch.swift` | `RetouchMask`, `ObjectRemoval` (optional ML tier → exemplar patch synthesis → diffusion fallback) |
+| `MLInpainter.swift` | Optional CoreML (LaMa‑class) inpainting engine; no‑op unless a model is bundled |
 | `PhotoEditorCutout.swift` | subject mask (`VNGenerateForegroundInstanceMaskRequest`) |
 | `PhotoEditorSticker.swift` | `EditSticker`, HDR sticker decode + cutout |
 
