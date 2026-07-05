@@ -30,11 +30,11 @@ final class Library {
     var aiLabels: Set<String> = Library.migrateBulk("ai", legacyKey: "photoBrowser.ai") {
         Set(UserDefaults.standard.stringArray(forKey: $0) ?? [])
     }
-    /// Custom labels offered inside the "Taylor Swift" folder, keyed labelName →
-    /// set of file paths (an item may carry several).
-    var customLabels: [String: Set<String>] = Library.migrateBulk("customLabels", legacyKey: "photoBrowser.customLabels") {
-        (UserDefaults.standard.dictionary(forKey: $0) as? [String: [String]] ?? [:]).mapValues(Set.init)
-    }
+    /// Custom labels offered inside the "Taylor Swift" / Kardashian folders, keyed
+    /// labelName → set of file paths (an item may carry several). Persisted as one
+    /// file **per label** (see `persistCustomLabels`): at 100k+ labeled photos the
+    /// old single-file store meant every label tap re-encoded ~20MB of JSON.
+    var customLabels: [String: Set<String>] = Library.loadCustomLabels()
     /// People library: person name → set of face IDs ("path#index"). Built by the
     /// approximate on-device "Find People" pass, then renamed/merged by the user.
     var people: [String: Set<String>] = Library.migrateBulk("people", legacyKey: "photoBrowser.people") {
@@ -540,8 +540,78 @@ final class Library {
                                     "Midnights Bodysuit", "Reputation Bodysuit",
                                     "Movie", "AI", "The Life of a Showgirl", "Beach"]
 
+    // MARK: - Custom-label persistence (per-label files, debounced, off-main)
+
+    /// One label's paths, with the (user-facing) name embedded so the hashed
+    /// filename never needs to round-trip back to a label name.
+    private struct LabelFile: Codable { let name: String; let paths: [String] }
+
+    nonisolated private static var labelsDir: URL {
+        let dir = bulkDir.appendingPathComponent("customLabels", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+    nonisolated private static func labelFileURL(_ name: String) -> URL {
+        let digest = SHA256.hash(data: Data(name.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+        return labelsDir.appendingPathComponent(digest).appendingPathExtension("json")
+    }
+    nonisolated private static func saveLabelFile(_ name: String, _ paths: Set<String>) {
+        let url = labelFileURL(name)
+        guard !paths.isEmpty else { try? FileManager.default.removeItem(at: url); return }
+        if let data = try? JSONEncoder().encode(LabelFile(name: name, paths: Array(paths))) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    /// Loads the per-label files; on first run after the update, migrates the old
+    /// monolithic store (bulk file or legacy UserDefaults) into them once.
+    nonisolated static func loadCustomLabels() -> [String: Set<String>] {
+        if let files = try? FileManager.default.contentsOfDirectory(at: labelsDir, includingPropertiesForKeys: nil,
+                                                                    options: [.skipsHiddenFiles]), !files.isEmpty {
+            var out: [String: Set<String>] = [:]
+            for f in files where f.pathExtension == "json" {
+                if let data = try? Data(contentsOf: f),
+                   let lf = try? JSONDecoder().decode(LabelFile.self, from: data) {
+                    out[lf.name] = Set(lf.paths)
+                }
+            }
+            if !out.isEmpty { return out }
+        }
+        let legacy: [String: Set<String>] = migrateBulk("customLabels", legacyKey: "photoBrowser.customLabels") {
+            (UserDefaults.standard.dictionary(forKey: $0) as? [String: [String]] ?? [:]).mapValues(Set.init)
+        }
+        for (name, paths) in legacy { saveLabelFile(name, paths) }
+        try? FileManager.default.removeItem(at: bulkDir.appendingPathComponent("customLabels.json"))
+        return legacy
+    }
+
+    @ObservationIgnored private var dirtyLabels: Set<String> = []
+    @ObservationIgnored private var labelFlushScheduled = false
+
+    /// Marks `names` changed and coalesces their per-label writes onto a detached
+    /// task shortly after — a label tap must never encode 100k+ paths on the main
+    /// actor (each tap used to rewrite the entire store synchronously).
+    private func persistCustomLabels(_ names: some Sequence<String>) {
+        dirtyLabels.formUnion(names)
+        guard !labelFlushScheduled else { return }
+        labelFlushScheduled = true
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard let self else { return }
+            self.labelFlushScheduled = false
+            let toWrite = self.dirtyLabels
+            self.dirtyLabels = []
+            let snapshot = self.customLabels
+            Task.detached(priority: .utility) {
+                for name in toWrite { Self.saveLabelFile(name, snapshot[name] ?? []) }
+            }
+        }
+    }
+
+    /// Persist every label (used by the rare whole-store rewrites: moves, remounts,
+    /// backup duplication, deletions).
     private func persistCustomLabels() {
-        Self.saveBulk(customLabels, "customLabels")
+        persistCustomLabels(customLabels.keys)
     }
 
     // MARK: - People (faces)
@@ -1297,12 +1367,12 @@ final class Library {
     /// Batch-applies custom labels (labelName → paths) in one persist — used by the
     /// Kardashian importer to tag thousands of downloaded photos by category.
     func addLabels(_ pathsByLabel: [String: [String]]) {
-        var changed = false
+        var changed: Set<String> = []
         for (name, paths) in pathsByLabel where !paths.isEmpty {
-            customLabels[name, default: []].formUnion(paths); changed = true
+            customLabels[name, default: []].formUnion(paths); changed.insert(name)
         }
-        guard changed else { return }
-        persistCustomLabels()
+        guard !changed.isEmpty else { return }
+        persistCustomLabels(changed)
         labelsVersion += 1
     }
 
@@ -1345,8 +1415,27 @@ final class Library {
     }
 
     /// All photos/videos under `folder` (recursively) that carry *no* custom
-    /// label yet — backs the "No Label" filter. Walks the tree off the main actor.
-    nonisolated func unlabeledMedia(under folder: URL, labeled: Set<String>, sort: SortKey) async -> [Entry] {
+    /// label yet — backs the "No Label" filter. Derived from the in-memory index
+    /// (an in-memory filter) — the old version re-walked the whole 100k-file
+    /// subtree on the drive every time it ran. Falls back to the walk only before
+    /// the first index build.
+    func unlabeledMedia(under folder: URL, labeled: Set<String>, sort: SortKey) async -> [Entry] {
+        let rootPath = folder.path
+        let idx = index                                    // snapshot on the main actor
+        if !idx.isEmpty {
+            return await Task.detached(priority: .userInitiated) {
+                let result = idx.filter { e in
+                    (e.kind == .image || e.kind == .video)
+                        && !labeled.contains(e.url.path)
+                        && (e.url.path == rootPath || e.url.path.hasPrefix(rootPath + "/"))
+                }
+                return Self.sortEntries(result, by: sort)
+            }.value
+        }
+        return await Self.walkUnlabeled(under: folder, labeled: labeled, sort: sort)
+    }
+
+    nonisolated private static func walkUnlabeled(under folder: URL, labeled: Set<String>, sort: SortKey) async -> [Entry] {
         await Task.detached(priority: .userInitiated) {
             let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
             guard let walker = FileManager.default.enumerator(
@@ -1377,10 +1466,19 @@ final class Library {
     func toggleLabel(_ name: String, on url: URL) { setLabel(name, on: url, !hasLabel(name, url)) }
 
     func setLabel(_ name: String, on url: URL, _ on: Bool) {
+        setLabels(name, on: [url], on)
+    }
+
+    /// Applies one label to many items in a single mutation + one (debounced)
+    /// persist. Looping `setLabel` per item re-encoded the whole store per item —
+    /// O(selection × store size) — which froze the app on large selections.
+    func setLabels(_ name: String, on urls: [URL], _ on: Bool) {
+        guard !urls.isEmpty else { return }
         var paths = customLabels[name] ?? []
-        if on { paths.insert(url.path) } else { paths.remove(url.path) }
+        if on { for u in urls { paths.insert(u.path) } }
+        else { for u in urls { paths.remove(u.path) } }
         customLabels[name] = paths
-        persistCustomLabels()
+        persistCustomLabels([name])
         labelsVersion += 1
     }
 
@@ -1691,21 +1789,47 @@ final class Library {
         return added
     }
 
-    /// Labeled items (favorites or To AI) at or below `folder`, including folders.
-    /// Resolves saved paths directly (no full-tree walk) so it's fast on big drives.
-    nonisolated func labeledEntries(under folder: URL, paths: Set<String>, sort: SortKey) async -> [Entry] {
+    /// Labeled items (favorites / To AI / custom labels) at or below `folder`,
+    /// including folders. Resolves against the in-memory index — a dictionary join,
+    /// no drive I/O — and only stats paths the index doesn't know yet (fresh files,
+    /// or before the first build), bounded-concurrent. The old version stat'ed
+    /// every labeled path serially: tens of seconds over a 100k-photo label set.
+    func labeledEntries(under folder: URL, paths: Set<String>, sort: SortKey) async -> [Entry] {
         guard !paths.isEmpty else { return [] }
         let rootPath = folder.path
-        return await Task.detached(priority: .userInitiated) {
-            let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
+        let idx = index                                    // snapshot on the main actor
+        return await Task.detached(priority: .userInitiated) { () -> [Entry] in
+            let inScope = paths.filter { $0 == rootPath || $0.hasPrefix(rootPath + "/") }
+            guard !inScope.isEmpty else { return [] }
+            var byPath: [String: Entry] = [:]
+            byPath.reserveCapacity(idx.count)
+            for e in idx { byPath[e.url.path] = e }
             var result: [Entry] = []
-            for path in paths where path == rootPath || path.hasPrefix(rootPath + "/") {
-                let url = URL(fileURLWithPath: path)
-                guard let rv = try? url.resourceValues(forKeys: keys) else { continue }
-                result.append(Entry(url: url, name: url.lastPathComponent,
-                                    kind: classify(url: url, isDirectory: rv.isDirectory ?? false),
-                                    size: Int64(rv.fileSize ?? 0),
-                                    modified: rv.contentModificationDate ?? .distantPast))
+            var missing: [String] = []
+            for path in inScope {
+                if let e = byPath[path] { result.append(e) } else { missing.append(path) }
+            }
+            if !missing.isEmpty {
+                let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
+                var slots = [Entry?](repeating: nil, count: missing.count)
+                await withTaskGroup(of: (Int, Entry?).self) { group in
+                    var i = 0
+                    let maxConcurrent = 32
+                    func addNext() {
+                        guard i < missing.count else { return }
+                        let n = i; let url = URL(fileURLWithPath: missing[n]); i += 1
+                        group.addTask {
+                            guard let rv = try? url.resourceValues(forKeys: keys) else { return (n, nil) }
+                            return (n, Entry(url: url, name: url.lastPathComponent,
+                                             kind: classify(url: url, isDirectory: rv.isDirectory ?? false),
+                                             size: Int64(rv.fileSize ?? 0),
+                                             modified: rv.contentModificationDate ?? .distantPast))
+                        }
+                    }
+                    for _ in 0..<min(maxConcurrent, missing.count) { addNext() }
+                    while let (n, e) = await group.next() { slots[n] = e; addNext() }
+                }
+                result.append(contentsOf: slots.compactMap { $0 })
             }
             return Self.sortEntries(result, by: sort)
         }.value

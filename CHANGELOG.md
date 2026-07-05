@@ -4,6 +4,13 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-03
 
+- **Labels are fast at 100k+ photos** — applying a label to a selection is one mutation +
+  one persist (was a full re-encode of the entire ~20MB label store *per selected item*, on
+  the main thread); label persistence is now per-label files, debounced and written off-main,
+  so a label tap is instant. Opening a Kardashian/Taylor Swift label view resolves against
+  the in-memory index (dictionary join) instead of stat'ing every labeled path serially on
+  the drive, and "No Label" filters the index instead of re-walking the whole subtree —
+  Favorites and "To AI" get the same win.
 - **Editor saves match the source format** — PNG in → PNG out (always), SDR JPEG → JPEG,
   HEIC → HEIC; fixes SDR files (e.g. BT.2020-tagged images) coming back as HDR HEICs, which
   came from the HDR detector treating a BT.2020 *gamut* tag as HDR. Genuinely HDR sources —

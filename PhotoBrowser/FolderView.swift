@@ -1933,7 +1933,9 @@ struct FolderView: View {
         let sel = selectedEntries()
         guard !sel.isEmpty else { return }
         let allOn = sel.allSatisfy { library.hasLabel(name, $0.url) }
-        for e in sel { library.setLabel(name, on: e.url, !allOn) }
+        // One mutation + one persist — per-item setLabel re-encoded the whole
+        // label store per selected item, which froze the app on big selections.
+        library.setLabels(name, on: sel.map(\.url), !allOn)
         selecting = false; selection.removeAll()
     }
 
