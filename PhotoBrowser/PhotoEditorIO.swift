@@ -10,7 +10,8 @@ import UniformTypeIdentifiers
 /// with `CGImageDestination` copying those properties — so **all EXIF (incl. `DateTimeOriginal`),
 /// TIFF (`DateTime`), GPS, IPTC and color profile survive, and the capture date is unchanged**. The
 /// edited pixels are baked upright, so the orientation tag is reset to 1 (applied exactly once,
-/// PRD §5.3). The original file is never modified — output goes to a new file.
+/// PRD §5.3). Output always renders to a temp file first; "Save as New" promotes it beside the
+/// original, "Overwrite" swaps it atomically over the original (`overwriteDestination`).
 enum PhotoEditorIO {
     /// One shared GPU context for previews + export (creating a `CIContext` per render is costly).
     static let context = CIContext(options: [.useSoftwareRenderer: false])
@@ -128,11 +129,9 @@ enum PhotoEditorIO {
               CGImageSourceCreateWithURL(tmp as CFURL, nil).flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }) != nil
         else { try? FileManager.default.removeItem(at: tmp); return false }
 
-        try? FileManager.default.removeItem(at: destURL)
-        do { try FileManager.default.moveItem(at: tmp, to: destURL) }
-        catch { try? FileManager.default.removeItem(at: tmp); return false }
-
-        copyFileDates(from: sourceURL, to: destURL)   // keep the browser's timeline stable
+        let dates = fileDates(of: sourceURL)          // before promote — destURL may BE sourceURL
+        guard promote(tmp, to: destURL) else { return false }
+        if !dates.isEmpty { try? FileManager.default.setAttributes(dates, ofItemAtPath: destURL.path) }
         return true
     }
 
@@ -236,20 +235,38 @@ enum PhotoEditorIO {
         guard CGImageSourceCreateWithURL(tmp as CFURL, nil) != nil else {
             try? FileManager.default.removeItem(at: tmp); return false
         }
-        try? FileManager.default.removeItem(at: destURL)
-        do { try FileManager.default.moveItem(at: tmp, to: destURL) }
-        catch { try? FileManager.default.removeItem(at: tmp); return false }
-        copyFileDates(from: sourceURL, to: destURL)
+        let dates = fileDates(of: sourceURL)          // before promote — destURL may BE sourceURL
+        guard promote(tmp, to: destURL) else { return false }
+        if !dates.isEmpty { try? FileManager.default.setAttributes(dates, ofItemAtPath: destURL.path) }
         return true
     }
 
-    /// Copies the original's file creation/modification dates onto the edited file.
-    private static func copyFileDates(from sourceURL: URL, to destURL: URL) {
-        guard let a = try? FileManager.default.attributesOfItem(atPath: sourceURL.path) else { return }
+    /// The original's creation/modification dates, re-applied to the edited file after the write so
+    /// the browser's timeline stays stable. Captured **before** promotion — the overwrite path
+    /// writes over the source itself, and reading afterwards would return the new file's dates.
+    private static func fileDates(of url: URL) -> [FileAttributeKey: Any] {
+        guard let a = try? FileManager.default.attributesOfItem(atPath: url.path) else { return [:] }
         var set: [FileAttributeKey: Any] = [:]
         if let c = a[.creationDate] { set[.creationDate] = c }
         if let m = a[.modificationDate] { set[.modificationDate] = m }
-        if !set.isEmpty { try? FileManager.default.setAttributes(set, ofItemAtPath: destURL.path) }
+        return set
+    }
+
+    /// Moves the finished temp file into place. An existing destination (the overwrite path) is
+    /// swapped atomically via `replaceItemAt`, so the original can never be left deleted-but-not-
+    /// replaced if the save dies between the two steps.
+    private static func promote(_ tmp: URL, to destURL: URL) -> Bool {
+        do {
+            if FileManager.default.fileExists(atPath: destURL.path) {
+                _ = try FileManager.default.replaceItemAt(destURL, withItemAt: tmp)
+            } else {
+                try FileManager.default.moveItem(at: tmp, to: destURL)
+            }
+            return true
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            return false
+        }
     }
 
     /// Picks an export format matching the source: PNG stays PNG, JPEG stays JPEG.
@@ -292,6 +309,22 @@ enum PhotoEditorIO {
         r.highlights = luma > 0.65 ? -0.20 : 0.0
         r.sharpen = max(r.sharpen, 0.15)
         return r
+    }
+
+    /// Where an "Overwrite Existing Photo" save lands: the source path itself when the output
+    /// keeps the same container, else a sibling with the same base name and the new extension
+    /// (e.g. a gain-map JPEG saving as HDR HEIC). In the latter case the caller deletes the
+    /// original and re-keys path-keyed metadata via `library.itemMoved(from:to:)`.
+    static func overwriteDestination(for source: URL, format: ExportFormat) -> URL {
+        if Self.format(forSource: source) == format { return source }
+        let dir = source.deletingLastPathComponent()
+        let base = source.deletingPathExtension().lastPathComponent
+        var candidate = dir.appendingPathComponent("\(base).\(format.ext)")
+        var n = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = dir.appendingPathComponent("\(base) \(n).\(format.ext)"); n += 1
+        }
+        return candidate
     }
 
     /// A new, non-colliding URL beside `source` for the edited copy (e.g. "Photo edited.heic").

@@ -4,6 +4,12 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-05
 
+- **Editor save choices** — saving now offers Overwrite Existing Photo / Overwrite + 2× AI
+  Upscale / Save as New Photo / Save as New + 2× AI Upscale (replacing the old always-new-file
+  save with 1.5×/2× options). Overwrite renders to a temp file and atomically swaps it over the
+  original (`replaceItemAt` — a failed save can't destroy the photo), keeps the original's file
+  dates so the timeline is stable, and keeps labels/captions attached; if the container changes
+  (gain-map JPEG saved as HDR HEIC) the original is removed and path-keyed metadata re-keyed.
 - **Object removal: optional CoreML (LaMa) tier** — if a converted LaMa inpainting model is
   dropped into `PhotoBrowser/` (`Inpainting.mlpackage` / `LaMa.mlpackage` — see
   `docs/ml-inpainting.md` for the 5-minute conversion), removals run through the generative

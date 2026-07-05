@@ -15,9 +15,11 @@ must not be broken*. It is generated from the source under `PhotoBrowser/PhotoEd
 
 These hold for every tool below; violating them is a bug.
 
-1. **Non‑destructive.** The original file is never mutated. A save writes a **new file**
-   beside the original ("`<name> edited.<ext>`"). Editing is a pure function of
-   `(original pixels, EditRecipe, masks/landmarks, stickers)`.
+1. **Temp‑file writes, user‑chosen destiny.** Every save renders to a temp file first; the
+   user picks **Save as New** (a new "`<name> edited.<ext>`" beside the untouched original)
+   or **Overwrite** (atomic swap over the original via `replaceItemAt`; labels/captions stay
+   attached, and a container change re‑keys via `library.itemMoved`). Editing is a pure
+   function of `(original pixels, EditRecipe, masks/landmarks, stickers)`.
 2. **Metadata‑preserving.** Every saved edit carries the original's full metadata —
    EXIF (incl. `DateTimeOriginal`), TIFF, GPS, IPTC, color profile — with the **capture
    date byte‑for‑byte unchanged** (so the browser's timeline/sort is undisturbed).
@@ -246,13 +248,17 @@ the HDR save path are detected on a clamped SDR copy so detection stays accurate
 
 ## 15. Save & export (`FR-SAVE-01`, partial `FR-SAVE-02`)
 
-- **Non‑destructive write** to a new file beside the original; the original is never touched.
+- **Four save choices**: Overwrite Existing Photo · Overwrite + 2× AI Upscale · Save as New
+  Photo · Save as New + 2× AI Upscale. Save‑as‑New writes a fresh file beside the untouched
+  original; Overwrite atomically replaces it (temp file + `replaceItemAt`, so a failed save
+  can't destroy the original) keeping its file dates, labels and captions. When Overwrite
+  changes container (gain‑map JPEG → HDR HEIC), the new extension lands beside the original,
+  the original is removed, and path‑keyed metadata is re‑keyed (`library.itemMoved`).
 - **Metadata preserved** incl. capture date (see §1). Format auto‑matches the source
   (HEIC / JPEG / PNG); a transparent cut‑out forces PNG.
 - **HDR retention** — HDR sources save as 10‑bit HDR HEIC (`heif10Representation`,
   Display P3 PQ) with headroom intact.
-- **Upscale options at save:** None · 1.5× · 2× (AI Upscale — Lanczos + light denoise +
-  sharpen).
+- **2× AI Upscale** — Lanczos + light denoise + sharpen at save time.
 - Saved files are tagged in the library so a folder's **"Edited" filter** can list
   in‑app‑edited photos.
 - *Open from the PRD:* an explicit export‑controls sheet (format/quality picker +

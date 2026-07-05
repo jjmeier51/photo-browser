@@ -129,12 +129,13 @@ struct PhotoEditorView: View {
             scheduleRender()                      // crop tab shows the uncropped frame; others bake the crop
         }
         .confirmationDialog("Save Photo", isPresented: $showSaveOptions, titleVisibility: .visible) {
-            Button("Save") { performSave(.none) }
-            Button("Save at 1.5×") { performSave(.x1_5) }
-            Button("Save at 2× (AI Upscale)") { performSave(.x2) }
+            Button("Overwrite Existing Photo") { performSave(.none, overwrite: true) }
+            Button("Overwrite + 2× AI Upscale") { performSave(.x2, overwrite: true) }
+            Button("Save as New Photo") { performSave(.none, overwrite: false) }
+            Button("Save as New + 2× AI Upscale") { performSave(.x2, overwrite: false) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Upscale the saved photo?")
+            Text("Overwrite replaces the original (labels and captions stay attached). Save as New keeps it and adds an edited copy.")
         }
         .photosPicker(isPresented: $showStickerPicker, selection: $stickerPickerItem, matching: .images)
         .fileImporter(isPresented: $showStickerFiles, allowedContentTypes: [.image],
@@ -1713,7 +1714,7 @@ struct PhotoEditorView: View {
 
     // MARK: - Save
 
-    private func performSave(_ upscale: PhotoEditorIO.Upscale) {
+    private func performSave(_ upscale: PhotoEditorIO.Upscale, overwrite: Bool) {
         guard hasEdits else { dismiss(); return }
         let r = recipe
         let src = entry.url
@@ -1736,12 +1737,23 @@ struct PhotoEditorView: View {
             } else {
                 fmt = PhotoEditorIO.format(forSource: src)
             }
-            let dest = PhotoEditorIO.editedDestination(for: src, format: fmt)
+            let dest = overwrite ? PhotoEditorIO.overwriteDestination(for: src, format: fmt)
+                                 : PhotoEditorIO.editedDestination(for: src, format: fmt)
             let ok = PhotoEditorIO.save(recipe: r, sourceURL: src, to: dest, format: fmt,
                                         upscale: upscale, stickers: placed, retouch: strokes)
+            // Overwrite with a container change (e.g. gain-map JPEG → HDR HEIC) lands
+            // beside the original under a new extension: remove the original so exactly
+            // one file remains.
+            if ok, overwrite, dest != src {
+                try? FileManager.default.removeItem(at: src)
+            }
             await MainActor.run {
                 library.endActivity(id, result: ok ? "Saved edited photo" : "Couldn’t save the edit")
-                if ok { library.markEditedInApp(dest); library.contentDidChange(under: dest.deletingLastPathComponent()) }
+                if ok {
+                    if overwrite, dest != src { library.itemMoved(from: src, to: dest) }
+                    library.markEditedInApp(dest)
+                    library.contentDidChange(under: dest.deletingLastPathComponent())
+                }
             }
         }
     }
