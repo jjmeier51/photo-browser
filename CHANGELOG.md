@@ -4,6 +4,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-03
 
+- **Object removal: strokes are independent** — each removal now inpaints in its own tight
+  working window, incrementally on top of the previous result (and undo/redo replays strokes
+  one at a time; save applies them the same way). A combined all-strokes mask used to connect
+  distant removals into one giant window, dropping the fill resolution and re-synthesizing —
+  visibly changing — earlier, unrelated areas whenever a new removal was made.
 - **Object removal, round 3** — a re-search-and-vote refinement pass (each synthesized patch
   re-matches against the completed fill; overlapping matches average, Gaussian-weighted) blends
   the first-pass patch collage into continuous texture. Retouch UX: zoom no longer resets after

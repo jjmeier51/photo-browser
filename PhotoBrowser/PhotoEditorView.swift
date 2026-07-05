@@ -1445,8 +1445,22 @@ struct PhotoEditorView: View {
     private func applyRetouchStroke(_ points: [CGPoint], radius: CGFloat) {
         guard !points.isEmpty else { return }
         snapshot()                                   // each removal is one undoable step
-        retouchStrokes.append(RetouchStroke(points: points, radius: radius))
-        recomputeEditProxy()
+        let stroke = RetouchStroke(points: points, radius: radius)
+        retouchStrokes.append(stroke)
+        // Incremental: only the NEW stroke inpaints, on top of the existing result —
+        // rebuilding from a combined mask connected distant removals into one giant
+        // working window and re-synthesized (visibly changed) earlier areas.
+        guard let base = editProxy ?? proxy else { return }
+        retouchBusy = true
+        Task.detached(priority: .userInitiated) {
+            let result = RetouchMask.image(for: [stroke], size: base.extent.size)
+                .map { ObjectRemoval.inpaint(base, mask: $0) }
+            await MainActor.run {
+                editProxy = result ?? base
+                retouchBusy = false
+                scheduleRender()
+            }
+        }
     }
 
     /// Removes just the most recent removal (snapshotted, so top-bar Undo restores it).
@@ -1465,15 +1479,21 @@ struct PhotoEditorView: View {
         recomputeEditProxy()
     }
 
-    /// Rebuilds the object-removal proxy from the current strokes (off-main) and re-renders.
+    /// Rebuilds the object-removal proxy from the current strokes (off-main) and
+    /// re-renders — used by undo/redo/clear. Strokes replay **one at a time**, each
+    /// in its own tight working window, matching how they were applied live.
     private func recomputeEditProxy() {
         guard let proxy else { return }
         if retouchStrokes.isEmpty { editProxy = nil; scheduleRender(); return }
         retouchBusy = true
         let strokes = retouchStrokes
         Task.detached(priority: .userInitiated) {
-            let result = RetouchMask.image(for: strokes, size: proxy.extent.size)
-                .map { ObjectRemoval.inpaint(proxy, mask: $0) }
+            var result = proxy
+            for s in strokes {
+                if let mask = RetouchMask.image(for: [s], size: result.extent.size) {
+                    result = ObjectRemoval.inpaint(result, mask: mask)
+                }
+            }
             await MainActor.run {
                 editProxy = result
                 retouchBusy = false

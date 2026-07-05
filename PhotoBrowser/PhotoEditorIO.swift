@@ -137,9 +137,17 @@ enum PhotoEditorIO {
     }
 
     /// Applies object-removal inpainting to `image` if there are retouch strokes (else returns it).
+    /// One stroke at a time, each in its own tight working window — a combined mask
+    /// made distant removals share one giant window (union bbox), dropping the fill
+    /// resolution and re-synthesizing earlier, unrelated areas.
     static func inpaintIfNeeded(_ image: CIImage, _ retouch: [RetouchStroke]) -> CIImage {
-        guard !retouch.isEmpty, let mask = RetouchMask.image(for: retouch, size: image.extent.size) else { return image }
-        return ObjectRemoval.inpaint(image, mask: mask)
+        var out = image
+        for stroke in retouch {
+            if let mask = RetouchMask.image(for: [stroke], size: out.extent.size) {
+                out = ObjectRemoval.inpaint(out, mask: mask)
+            }
+        }
+        return out
     }
 
     /// Detects whichever landmark sets the recipe needs (body shaping and/or makeup). Off-main,
