@@ -4,6 +4,13 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-03
 
+- **Object removal, round 3** — a re-search-and-vote refinement pass (each synthesized patch
+  re-matches against the completed fill; overlapping matches average, Gaussian-weighted) blends
+  the first-pass patch collage into continuous texture. Retouch UX: zoom no longer resets after
+  a removal (the preview scroll view now preserves zoom + center across bounds changes, and the
+  "Removing…" spinner no longer changes the panel height); removals joined the top-bar Undo/Redo
+  history (each stroke = one step); the panel gained "Undo Last" and "Clear All" (removals only —
+  ↺ Reset remains "undo everything").
 - **Object removal, round 2** — adaptive working resolution (small removals like an earring now
   synthesize at near-native resolution — the fixed cap was upscaling the fill and printing square
   patch seams), overlapping patches cross-blend instead of meeting in hard edges, and the mask

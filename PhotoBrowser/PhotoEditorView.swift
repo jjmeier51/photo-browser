@@ -62,10 +62,13 @@ struct PhotoEditorView: View {
     @State private var rendering = false
     @State private var renderPending = false
 
-    // Edit state + history
+    // Edit state + history. A snapshot carries the recipe *and* the object-removal
+    // strokes — strokes live outside the recipe, so the top-bar Undo used to skip
+    // removals entirely (only Reset touched them, wiping all of them at once).
+    private struct EditSnapshot { var recipe: EditRecipe; var retouch: [RetouchStroke] }
     @State private var recipe = EditRecipe()
-    @State private var undoStack: [EditRecipe] = []
-    @State private var redoStack: [EditRecipe] = []
+    @State private var undoStack: [EditSnapshot] = []
+    @State private var redoStack: [EditSnapshot] = []
 
     @State private var tab: Tab = .adjust
     @State private var selected: Adjustment = Adjustment.all[0]
@@ -1423,11 +1426,15 @@ struct PhotoEditorView: View {
     private var retouchPanel: some View {
         VStack(spacing: 10) {
             HStack(spacing: 8) {
-                if retouchBusy { ProgressView().tint(.white) }
+                // Always present (opacity-toggled) so the panel height never changes —
+                // a height change used to reset the preview's zoom.
+                ProgressView().tint(.white).opacity(retouchBusy ? 1 : 0)
                 Text(retouchBusy ? "Removing…" : "Brush over an object to remove it")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button { undoRetouch() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
+                Button { undoRetouch() } label: { Label("Undo Last", systemImage: "arrow.uturn.backward") }
+                    .font(.caption).tint(.white).disabled(retouchStrokes.isEmpty || retouchBusy)
+                Button { clearRetouch() } label: { Label("Clear All", systemImage: "xmark.circle") }
                     .font(.caption).tint(.white).disabled(retouchStrokes.isEmpty || retouchBusy)
             }
             .padding(.horizontal)
@@ -1437,13 +1444,24 @@ struct PhotoEditorView: View {
 
     private func applyRetouchStroke(_ points: [CGPoint], radius: CGFloat) {
         guard !points.isEmpty else { return }
+        snapshot()                                   // each removal is one undoable step
         retouchStrokes.append(RetouchStroke(points: points, radius: radius))
         recomputeEditProxy()
     }
 
+    /// Removes just the most recent removal (snapshotted, so top-bar Undo restores it).
     private func undoRetouch() {
         guard !retouchStrokes.isEmpty else { return }
+        snapshot()
         retouchStrokes.removeLast()
+        recomputeEditProxy()
+    }
+
+    /// Removes every removal stroke at once (also a single undoable step).
+    private func clearRetouch() {
+        guard !retouchStrokes.isEmpty else { return }
+        snapshot()
+        retouchStrokes.removeAll()
         recomputeEditProxy()
     }
 
@@ -1562,21 +1580,25 @@ struct PhotoEditorView: View {
         scheduleRender()
     }
     private func snapshot() {
-        undoStack.append(recipe)
+        undoStack.append(EditSnapshot(recipe: recipe, retouch: retouchStrokes))
         redoStack.removeAll()
         if undoStack.count > 40 { undoStack.removeFirst() }
     }
     private func undo() {
         guard let last = undoStack.popLast() else { return }
-        redoStack.append(recipe)
-        recipe = last
-        scheduleRender()
+        redoStack.append(EditSnapshot(recipe: recipe, retouch: retouchStrokes))
+        apply(last)
     }
     private func redo() {
         guard let next = redoStack.popLast() else { return }
-        undoStack.append(recipe)
-        recipe = next
-        scheduleRender()
+        undoStack.append(EditSnapshot(recipe: recipe, retouch: retouchStrokes))
+        apply(next)
+    }
+    private func apply(_ s: EditSnapshot) {
+        let strokesChanged = s.retouch.count != retouchStrokes.count
+        recipe = s.recipe
+        retouchStrokes = s.retouch
+        if strokesChanged { recomputeEditProxy() } else { scheduleRender() }
     }
     /// Any edit at all — recipe changes, placed stickers, or object removal — gates Save/Reset/Compare.
     private var hasEdits: Bool {
@@ -1589,7 +1611,8 @@ struct PhotoEditorView: View {
         stickers.removeAll(); selectedSticker = nil
         texts.removeAll(); selectedText = nil
         retouchStrokes.removeAll(); editProxy = nil
-        commit { recipe = EditRecipe() }
+        recipe = EditRecipe()
+        scheduleRender()
     }
     private func selectFilter(_ id: String?) {
         commit {
@@ -2024,7 +2047,24 @@ private final class ReshapeScrollView: UIScrollView {
         super.layoutSubviews()
         guard aspect > 0, bounds.width > 0, bounds.height > 0 else { return }
         if !configured || lastBounds != bounds.size {
+            // Preserve the zoom + visible center across a bounds change — the panel
+            // under the preview grows/shrinks (e.g. the retouch "Removing…" spinner),
+            // and re-fitting on that snapped the user back out of their zoom.
+            let keepZoom: CGFloat? = configured ? zoomScale : nil
+            let anchor: CGPoint? = (configured && contentSize.width > 0 && contentSize.height > 0)
+                ? CGPoint(x: (contentOffset.x + bounds.width / 2) / contentSize.width,
+                          y: (contentOffset.y + bounds.height / 2) / contentSize.height)
+                : nil
             configure(); configured = true; lastBounds = bounds.size
+            if let z = keepZoom, z > 1.01 {
+                zoomScale = min(z, maximumZoomScale)
+                if let a = anchor, contentSize.width > 0, contentSize.height > 0 {
+                    let cx = a.x * contentSize.width - bounds.width / 2
+                    let cy = a.y * contentSize.height - bounds.height / 2
+                    contentOffset = CGPoint(x: max(0, min(cx, contentSize.width - bounds.width)),
+                                            y: max(0, min(cy, contentSize.height - bounds.height)))
+                }
+            }
         }
         centerContent()
     }

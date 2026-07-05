@@ -227,6 +227,80 @@ enum ObjectRemoval {
             }
         }
 
+        // --- 5b. Refine: re-search & vote. With the hole now complete, every
+        //        synthesized patch re-finds its best match against *full* patches and
+        //        overlapping matches average in (Gaussian-weighted) — the
+        //        PatchMatch-style EM step that turns a first-pass patch collage into
+        //        continuous texture. This is what makes the fill read as "nothing was
+        //        ever there" instead of a faintly visible repair.
+        do {
+            let synthSum = integral(synth, w: w, h: h)
+            var accR = [Float](repeating: 0, count: total)
+            var accG = [Float](repeating: 0, count: total)
+            var accB = [Float](repeating: 0, count: total)
+            var accW = [Float](repeating: 0, count: total)
+            var lut = [Float](repeating: 0, count: patch * patch)
+            let sigma2 = Float(half * half)
+            for dy in -half...half {
+                for dx in -half...half {
+                    lut[(dy + half) * patch + (dx + half)] = expf(-Float(dx * dx + dy * dy) / (2 * sigma2))
+                }
+            }
+            var cy = half
+            while cy <= h - 1 - half {
+                var cx = half
+                while cx <= w - 1 - half {
+                    defer { cx += 3 }
+                    guard rectSum(synthSum, w: w, h: h, cx - half, cy - half, cx + half, cy + half) > 0 else { continue }
+                    var bestCost = Int.max
+                    var bestIdx = -1
+                    for c in candidates {
+                        let sx = c % w, sy = c / w
+                        let ddx = sx - cx, ddy = sy - cy
+                        var cost = ddx * ddx + ddy * ddy
+                        if cost >= bestCost { continue }
+                        var dy = -half
+                        scan: while dy <= half {
+                            var dx = -half
+                            while dx <= half {
+                                let to = ((cy + dy) * w + (cx + dx)) * 4
+                                let so = ((sy + dy) * w + (sx + dx)) * 4
+                                let dr = Int(rgba[to]) - Int(rgba[so])
+                                let dg = Int(rgba[to + 1]) - Int(rgba[so + 1])
+                                let db = Int(rgba[to + 2]) - Int(rgba[so + 2])
+                                cost += dr * dr + dg * dg + db * db
+                                if cost >= bestCost { break scan }
+                                dx += 1
+                            }
+                            dy += 1
+                        }
+                        if cost < bestCost { bestCost = cost; bestIdx = c }
+                    }
+                    guard bestIdx >= 0 else { continue }
+                    let sx = bestIdx % w, sy = bestIdx / w
+                    for dy in -half...half {
+                        for dx in -half...half {
+                            let tp = (cy + dy) * w + (cx + dx)
+                            guard synth[tp] else { continue }
+                            let wgt = lut[(dy + half) * patch + (dx + half)]
+                            let so = ((sy + dy) * w + (sx + dx)) * 4
+                            accR[tp] += Float(rgba[so]) * wgt
+                            accG[tp] += Float(rgba[so + 1]) * wgt
+                            accB[tp] += Float(rgba[so + 2]) * wgt
+                            accW[tp] += wgt
+                        }
+                    }
+                }
+                cy += 3
+            }
+            for i in 0..<total where synth[i] && accW[i] > 0 {
+                let o = i * 4
+                rgba[o] = UInt8(max(0, min(255, (accR[i] / accW[i]).rounded())))
+                rgba[o + 1] = UInt8(max(0, min(255, (accG[i] / accW[i]).rounded())))
+                rgba[o + 2] = UInt8(max(0, min(255, (accB[i] / accW[i]).rounded())))
+            }
+        }
+
         // --- 6. Paste the synthesized window back, hole-only, with a feathered seam ---
         guard let outCG = makeCG(&rgba, w: w, h: h) else { return nil }
         let placed = CIImage(cgImage: outCG)
