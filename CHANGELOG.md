@@ -4,6 +4,12 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-03
 
+- **Object removal actually removes** — replaced the diffusion fill (whose blur-average of the
+  surroundings was the "fuzzy grey area") with exemplar-based patch synthesis, the TouchRetouch /
+  Content-Aware-Fill approach: real 9×9 patches of surrounding texture are copied into the hole
+  (best-match search, onion-peel order, locality bias), so fills carry genuine texture and
+  structure. Runs in a resolution-capped window around the mask; only the hole + a feathered
+  seam changes. Masks covering most of the image fall back to the old diffusion fill.
 - **Labels are fast at 100k+ photos** — applying a label to a selection is one mutation +
   one persist (was a full re-encode of the entire ~20MB label store *per selected item*, on
   the main thread); label persistence is now per-label files, debounced and written off-main,

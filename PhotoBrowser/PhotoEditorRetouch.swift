@@ -38,20 +38,246 @@ enum RetouchMask {
     }
 }
 
-/// On-device "magic" object removal (TouchRetouch-style) via coarse-to-fine diffusion inpainting:
-/// surrounding pixels are propagated into the masked hole at decreasing blur radii. Only the masked
-/// region changes — the rest of the image is the untouched original at full resolution. Clean on smooth
-/// or gently-textured backgrounds (sky, wall, skin, water, pavement); heavily-textured fills go soft.
+/// On-device "magic" object removal, done the way TouchRetouch and Photoshop's Content-Aware Fill
+/// do it: **exemplar-based patch synthesis**. Real 9×9 patches of the surrounding image are copied
+/// into the hole (best-match search, onion-peel fill order, locality bias), so the fill carries
+/// genuine texture and structure instead of the fuzzy grey average a diffusion fill produces. The
+/// synthesis runs on the CPU inside a working window around the mask (resolution-capped, so it's
+/// fast at any image size), and only the masked region plus a feathered seam is composited back —
+/// every other pixel is the untouched original. Degenerate cases (mask covering most of the image,
+/// render failures) fall back to the old diffusion fill rather than failing.
 enum ObjectRemoval {
     static func inpaint(_ image: CIImage, mask: CIImage) -> CIImage {
         let e = image.extent
         guard e.width >= 4, e.height >= 4 else { return image }
         let m = alignMask(mask, to: e)
+        if let out = exemplarFill(image, mask: m, extent: e) { return out }
+        return diffusionFill(image, mask: m, extent: e)
+    }
+
+    // MARK: - Exemplar synthesis
+
+    private static let patch = 9        // odd; 9 balances texture fidelity vs. search cost
+    private static let half = 4
+
+    private static func exemplarFill(_ image: CIImage, mask m: CIImage, extent e: CGRect) -> CIImage? {
+        // --- 1. Mask bounding box, from a small probe raster ---
+        let probeLong = 256.0
+        let ps = min(1.0, probeLong / Double(max(e.width, e.height)))
+        let pw = max(1, Int((Double(e.width) * ps).rounded()))
+        let ph = max(1, Int((Double(e.height) * ps).rounded()))
+        let maskAtOrigin = m.transformed(by: CGAffineTransform(translationX: -e.minX, y: -e.minY))
+        guard let probe = rasterize(maskAtOrigin.transformed(by: CGAffineTransform(scaleX: CGFloat(ps), y: CGFloat(ps))),
+                                    w: pw, h: ph) else { return nil }
+        var minPX = Int.max, minPY = Int.max, maxPX = -1, maxPY = -1
+        for y in 0..<ph {
+            for x in 0..<pw where probe[(y * pw + x) * 4] > 32 {
+                if x < minPX { minPX = x }; if x > maxPX { maxPX = x }
+                if y < minPY { minPY = y }; if y > maxPY { maxPY = y }
+            }
+        }
+        guard maxPX >= 0 else { return image }               // empty mask — nothing to remove
+
+        // Probe rows are top-down; convert to CI coordinates (bottom-up), then expand
+        // by the bbox's own size on every side so the window holds plenty of source
+        // texture, and clamp to the image.
+        let bx = e.minX + CGFloat(Double(minPX) / ps)
+        let bw = CGFloat(Double(maxPX - minPX + 1) / ps)
+        let by = e.maxY - CGFloat(Double(maxPY + 1) / ps)
+        let bh = CGFloat(Double(maxPY - minPY + 1) / ps)
+        let margin = max(max(bw, bh), CGFloat(48))
+        let roi = CGRect(x: bx - margin, y: by - margin, width: bw + 2 * margin, height: bh + 2 * margin)
+            .intersection(e).integral
+        guard roi.width >= CGFloat(patch * 3), roi.height >= CGFloat(patch * 3) else { return nil }
+
+        // --- 2. Working rasters (image + mask) at capped resolution ---
+        let workLong = 560.0
+        let ws = min(1.0, workLong / Double(max(roi.width, roi.height)))
+        let w = max(patch * 3, Int((Double(roi.width) * ws).rounded()))
+        let h = max(patch * 3, Int((Double(roi.height) * ws).rounded()))
+        func working(_ ci: CIImage) -> CIImage {
+            ci.cropped(to: roi)
+                .transformed(by: CGAffineTransform(translationX: -roi.minX, y: -roi.minY))
+                .transformed(by: CGAffineTransform(scaleX: CGFloat(w) / roi.width, y: CGFloat(h) / roi.height))
+        }
+        guard var rgba = rasterize(working(image), w: w, h: h),
+              let maskBuf = rasterize(working(m), w: w, h: h) else { return nil }
+
+        // --- 3. Unknown map, dilated 2px so the stroke's anti-aliased rim (still
+        //        holding object colour) can't seed the fill ---
+        let total = w * h
+        var raw = [Bool](repeating: false, count: total)
+        for i in 0..<total { raw[i] = maskBuf[i * 4] > 64 }
+        let rawSum = integral(raw, w: w, h: h)
+        var needs = [Bool](repeating: false, count: total)
+        var unknownCount = 0
+        for y in 0..<h {
+            for x in 0..<w where rectSum(rawSum, w: w, h: h, x - 2, y - 2, x + 2, y + 2) > 0 {
+                needs[y * w + x] = true; unknownCount += 1
+            }
+        }
+        guard unknownCount > 0 else { return image }
+        guard unknownCount < total / 2 else { return nil }   // hole too big for exemplar quality
+
+        // --- 4. Source-patch candidates: centers whose full patch is originally known ---
+        let unknownSum = integral(needs, w: w, h: h)
+        var candidates: [Int] = []
+        var stride = 2
+        while true {
+            candidates.removeAll(keepingCapacity: true)
+            var y = half
+            while y <= h - 1 - half {
+                var x = half
+                while x <= w - 1 - half {
+                    if rectSum(unknownSum, w: w, h: h, x - half, y - half, x + half, y + half) == 0 {
+                        candidates.append(y * w + x)
+                    }
+                    x += stride
+                }
+                y += stride
+            }
+            if candidates.count <= 3500 || stride >= 16 { break }
+            stride *= 2
+        }
+        guard candidates.count >= 8 else { return nil }
+
+        // --- 5. Onion-peel fill: highest-confidence boundary patches first, each
+        //        filled from its best-matching (SSD over known pixels, locality-
+        //        biased) source patch ---
+        var remaining = unknownCount
+        var rings = 0
+        while remaining > 0 {
+            rings += 1
+            if rings > 600 { return nil }                    // safety valve → diffusion fallback
+            let needsSum = integral(needs, w: w, h: h)
+            var targets: [(score: Int, idx: Int)] = []
+            for y in 0..<h {
+                for x in 0..<w {
+                    let i = y * w + x
+                    guard needs[i] else { continue }
+                    let onBoundary = (x > 0 && !needs[i - 1]) || (x < w - 1 && !needs[i + 1])
+                        || (y > 0 && !needs[i - w]) || (y < h - 1 && !needs[i + w])
+                    guard onBoundary else { continue }
+                    let known = patch * patch - rectSum(needsSum, w: w, h: h, x - half, y - half, x + half, y + half)
+                    targets.append((known, i))
+                }
+            }
+            if targets.isEmpty { return nil }
+            targets.sort { $0.score > $1.score }
+
+            for t in targets {
+                guard needs[t.idx] else { continue }          // an earlier patch already filled it
+                let tx = t.idx % w, ty = t.idx / w
+                let cx = min(max(tx, half), w - 1 - half)
+                let cy = min(max(ty, half), h - 1 - half)
+                var bestCost = Int.max
+                var bestIdx = -1
+                for c in candidates {
+                    let sx = c % w, sy = c / w
+                    // Locality bias: nearby texture is likelier to belong.
+                    let ddx = sx - cx, ddy = sy - cy
+                    var cost = ddx * ddx + ddy * ddy
+                    if cost >= bestCost { continue }
+                    var dy = -half
+                    scan: while dy <= half {
+                        var dx = -half
+                        while dx <= half {
+                            let tp = (cy + dy) * w + (cx + dx)
+                            if !needs[tp] {
+                                let to = tp * 4, so = ((sy + dy) * w + (sx + dx)) * 4
+                                let dr = Int(rgba[to]) - Int(rgba[so])
+                                let dg = Int(rgba[to + 1]) - Int(rgba[so + 1])
+                                let db = Int(rgba[to + 2]) - Int(rgba[so + 2])
+                                cost += dr * dr + dg * dg + db * db
+                                if cost >= bestCost { break scan }
+                            }
+                            dx += 1
+                        }
+                        dy += 1
+                    }
+                    if cost < bestCost { bestCost = cost; bestIdx = c }
+                }
+                guard bestIdx >= 0 else { continue }
+                let sx = bestIdx % w, sy = bestIdx / w
+                for dy in -half...half {
+                    for dx in -half...half {
+                        let tp = (cy + dy) * w + (cx + dx)
+                        guard needs[tp] else { continue }
+                        let to = tp * 4, so = ((sy + dy) * w + (sx + dx)) * 4
+                        rgba[to] = rgba[so]; rgba[to + 1] = rgba[so + 1]
+                        rgba[to + 2] = rgba[so + 2]; rgba[to + 3] = rgba[so + 3]
+                        needs[tp] = false
+                        remaining -= 1
+                    }
+                }
+            }
+        }
+
+        // --- 6. Paste the synthesized window back, hole-only, with a feathered seam ---
+        guard let outCG = makeCG(&rgba, w: w, h: h) else { return nil }
+        let placed = CIImage(cgImage: outCG)
+            .transformed(by: CGAffineTransform(scaleX: roi.width / CGFloat(w), y: roi.height / CGFloat(h)))
+            .transformed(by: CGAffineTransform(translationX: roi.minX, y: roi.minY))
+        let feather = max(1.0, Double(max(e.width, e.height)) * 0.0015)
+        let soft = m.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: feather]).cropped(to: e)
+        let over = placed.composited(over: image).cropped(to: e)
+        return over.applyingFilter("CIBlendWithMask", parameters: [
+            kCIInputBackgroundImageKey: image, kCIInputMaskImageKey: soft,
+        ]).cropped(to: e)
+    }
+
+    /// Renders `ci` (origin-based, w×h) into a top-down RGBA8 buffer via CoreGraphics,
+    /// so pixel-space orientation is CG-defined in both directions (no flip ambiguity).
+    private static func rasterize(_ ci: CIImage, w: Int, h: Int) -> [UInt8]? {
+        guard let cg = PhotoEditorIO.context.createCGImage(ci, from: CGRect(x: 0, y: 0, width: w, height: h)) else { return nil }
+        var buf = [UInt8](repeating: 0, count: w * h * 4)
+        let ok = buf.withUnsafeMutableBytes { ptr -> Bool in
+            guard let cgctx = CGContext(data: ptr.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                                        bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            cgctx.interpolationQuality = .high
+            cgctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        return ok ? buf : nil
+    }
+
+    private static func makeCG(_ buf: inout [UInt8], w: Int, h: Int) -> CGImage? {
+        buf.withUnsafeMutableBytes { ptr -> CGImage? in
+            guard let cgctx = CGContext(data: ptr.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                                        bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+            return cgctx.makeImage()
+        }
+    }
+
+    /// Summed-area table of a boolean map, (w+1)×(h+1), for O(1) window counts.
+    private static func integral(_ map: [Bool], w: Int, h: Int) -> [Int] {
+        var s = [Int](repeating: 0, count: (w + 1) * (h + 1))
+        for y in 0..<h {
+            var row = 0
+            for x in 0..<w {
+                if map[y * w + x] { row += 1 }
+                s[(y + 1) * (w + 1) + (x + 1)] = s[y * (w + 1) + (x + 1)] + row
+            }
+        }
+        return s
+    }
+
+    /// Count of set pixels in the (clamped) inclusive rect [x0…x1]×[y0…y1].
+    private static func rectSum(_ s: [Int], w: Int, h: Int, _ x0: Int, _ y0: Int, _ x1: Int, _ y1: Int) -> Int {
+        let ax = max(0, x0), ay = max(0, y0)
+        let bx = min(w - 1, x1), by = min(h - 1, y1)
+        guard ax <= bx, ay <= by else { return 0 }
+        let W = w + 1
+        return s[(by + 1) * W + (bx + 1)] - s[ay * W + (bx + 1)] - s[(by + 1) * W + ax] + s[ay * W + ax]
+    }
+
+    // MARK: - Diffusion fallback (the previous engine)
+
+    private static func diffusionFill(_ image: CIImage, mask m: CIImage, extent e: CGRect) -> CIImage {
         var filled = image
         let base = Double(max(e.width, e.height))
-        // Coarse → fine: the largest radii must be big enough to actually bridge the hole and flood it with
-        // surrounding colour — too-small radii leave the object's own pixels behind as a grey smear. The
-        // small radii then tighten the seam.
         let radii = [base * 0.08, base * 0.05, base * 0.03, base * 0.018, base * 0.01, base * 0.005, base * 0.0025]
         for r in radii {
             for _ in 0..<2 {
@@ -62,9 +288,6 @@ enum ObjectRemoval {
                 ]).cropped(to: e)
             }
         }
-        // A diffused fill is too clean — it reads as a soft spot against any textured background. Re-inject
-        // fine grain *only inside the hole*, matched to the local luminance noise around it, so the patch
-        // carries the same micro-texture as its surroundings and stops looking airbrushed.
         if let grained = addMatchedGrain(filled, mask: m, extent: e) {
             filled = grained
         }

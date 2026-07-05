@@ -48,8 +48,8 @@ A full Hypic/Facetune-style editor was built from scratch inside the app.
   `ce49863`)
 
 ### Retouch, brushes, skin, makeup, stickers, text
-- **Object removal** (TouchRetouch-style magic eraser) — on-device coarse-to-fine diffusion inpainting with
-  matched grain to blend. (`e1cda27`, `fa16dc9`)
+- **Object removal** (TouchRetouch-style magic eraser) — on-device exemplar-based patch synthesis
+  (real surrounding patches copied in; diffusion fallback for huge holes). (`e1cda27`, `fa16dc9`, then reworked)
 - **Smooth / Paint / Teeth brushes** — freehand, recipe-stored; Smooth (skin), Paint (any color + eraser),
   Teeth-whiten; persistent size ring; **retroactive opacity** (slider changes already-painted strokes).
   (`122dc06`, `37c1478`, `0e068a1`)
@@ -142,8 +142,9 @@ A full Hypic/Facetune-style editor was built from scratch inside the app.
   possible; body warps move fabric with skin.
 - **Color-based detection** (skin tone, freckle skin-mask) can catch skin-colored clothing, wood tones, or
   reddish hair; and can miss skin near a same-toned hairline.
-- **Object removal can't synthesize texture** — clean on smooth/gently-textured backgrounds (sky, wall,
-  skin), soft on heavily-textured ones. Matched grain only partly hides it.
+- ~~**Object removal can't synthesize texture**~~ — fixed: the remover is now exemplar-based patch
+  synthesis (real surrounding patches copied in, TouchRetouch-style), so textured backgrounds fill
+  with genuine texture. Very large holes still fall back to the diffusion fill.
 - **Makeup/freckles are heuristic** and depend on Vision face sub-landmarks (eyes/brows/lips), which can be
   sparse on tilted/occluded faces.
 

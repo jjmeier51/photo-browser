@@ -166,11 +166,13 @@ stays still. Chip + slider per control; pinch‑zoom supported.
 
 - **TouchRetouch‑style magic eraser**: brush over an unwanted object; the region is filled
   to blend with its surroundings. Brush size slider; per‑stroke Undo.
-- On‑device **coarse‑to‑fine diffusion inpainting** (iterative `CIGaussianBlur` +
-  `CIBlendWithMask`), plus matched micro‑grain so the patch isn't an airbrushed spot.
-- Resolution is preserved everywhere except the masked hole. *Limitation:* clean on smooth
-  or gently textured backgrounds (sky, wall, skin, water, pavement); heavily textured fills
-  go soft (no texture synthesis on‑device).
+- On‑device **exemplar‑based patch synthesis** (the TouchRetouch / Content‑Aware‑Fill
+  approach): real 9×9 patches of the surrounding image are copied into the hole
+  (best‑match SSD search, onion‑peel fill order, locality bias), so the fill carries
+  genuine texture and structure. Runs on the CPU in a resolution‑capped window around the
+  mask; only the hole plus a feathered seam is composited back. Degenerate cases (mask
+  covering most of the image) fall back to the older diffusion fill.
+- Resolution is preserved everywhere except the masked hole.
 
 ---
 
@@ -301,7 +303,7 @@ HDR retention, save‑time upscaling.
 | `PhotoEditorMakeup.swift` | `MakeupRenderer` (overlays, freckles) |
 | `PhotoEditorSkin.swift` | `SkinRecolor` (skin‑color cube + tone shift) |
 | `PhotoEditorBrush.swift` | `BrushStroke`, `BrushMask`, `BrushRender` (smooth/paint/teeth/erase) |
-| `PhotoEditorRetouch.swift` | `RetouchMask`, `ObjectRemoval` (diffusion inpaint) |
+| `PhotoEditorRetouch.swift` | `RetouchMask`, `ObjectRemoval` (exemplar patch synthesis; diffusion fallback) |
 | `PhotoEditorCutout.swift` | subject mask (`VNGenerateForegroundInstanceMaskRequest`) |
 | `PhotoEditorSticker.swift` | `EditSticker`, HDR sticker decode + cutout |
 
