@@ -88,9 +88,11 @@ enum PhotoEditorIO {
                      format: ExportFormat = .heic, quality: Double = 0.92,
                      upscale: Upscale = .none, stickers: [EditSticker] = [],
                      retouch: [RetouchStroke] = []) -> Bool {
-        // HDR retention: when the source carries HDR (gain map / PQ-HLG / RAW) and we aren't forced to
-        // PNG (transparent cut-out), write a 10-bit HDR HEIC keeping the headroom. Falls back to SDR.
-        if format != .png, isHDRSource(sourceURL),
+        // HDR retention: only when the *output* is HEIC (HEIC-family/RAW source) and the
+        // source genuinely carries HDR — write a 10-bit HDR HEIC keeping the headroom.
+        // Never for PNG/JPEG outputs: the container must match the source, and writing
+        // HEIC bytes behind a .png/.jpg name produced mislabeled files.
+        if format == .heic, isHDRSource(sourceURL),
            saveHDR(recipe: recipe, sourceURL: sourceURL, to: destURL, upscale: upscale,
                    stickers: stickers, retouch: retouch) {
             return true
@@ -165,7 +167,10 @@ enum PhotoEditorIO {
            CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, kCGImageAuxiliaryDataTypeISOGainMap) != nil { return true }
         if let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
             let name = ((props[kCGImagePropertyProfileName] as? String) ?? "").uppercased()
-            if name.contains("PQ") || name.contains("HLG") || name.contains("2100") || name.contains("2020") {
+            // PQ/HLG/BT.2100 are HDR *transfer functions*. Plain "2020" is deliberately
+            // NOT matched — BT.2020 is just a gamut, and SDR files tagged with it were
+            // being misdetected as HDR (and saved as HDR HEIC).
+            if name.contains("PQ") || name.contains("HLG") || name.contains("2100") {
                 return true
             }
         }
@@ -239,12 +244,19 @@ enum PhotoEditorIO {
         if !set.isEmpty { try? FileManager.default.setAttributes(set, ofItemAtPath: destURL.path) }
     }
 
-    /// Picks an export format matching the source so an edited JPEG stays a JPEG, etc. (HEIC default).
+    /// Picks an export format matching the source: PNG stays PNG, JPEG stays JPEG.
+    /// Only HEIC-family sources — and RAW, whose scene data needs the 10-bit path —
+    /// map to HEIC. Anything else (webp/tiff/bmp/…) exports as JPEG, so an SDR
+    /// source can never come back as an HDR HEIC.
     static func format(forSource url: URL) -> ExportFormat {
-        switch url.pathExtension.lowercased() {
-        case "png":         return .png
-        case "jpg", "jpeg": return .jpeg
-        default:            return .heic
+        let ext = url.pathExtension.lowercased()
+        switch ext {
+        case "png":                  return .png
+        case "jpg", "jpeg":          return .jpeg
+        case "heic", "heif", "avif": return .heic
+        default:
+            if UTType(filenameExtension: ext)?.conforms(to: .rawImage) == true { return .heic }
+            return .jpeg
         }
     }
 
