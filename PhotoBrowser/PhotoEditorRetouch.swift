@@ -90,9 +90,13 @@ enum ObjectRemoval {
             .intersection(e).integral
         guard roi.width >= CGFloat(patch * 3), roi.height >= CGFloat(patch * 3) else { return nil }
 
-        // --- 2. Working rasters (image + mask) at capped resolution ---
-        let workLong = 560.0
-        let ws = min(1.0, workLong / Double(max(roi.width, roi.height)))
+        // --- 2. Working rasters (image + mask) at adaptive resolution ---
+        // Small removals (an earring, a blemish) run at (near-)native resolution — a
+        // fixed cap upscaled the synthesized window and printed visible square patch
+        // seams. Bigger masks scale down so the fill stays fast.
+        let maskLong = Double(max(bw, bh))
+        let roiLong = Double(max(roi.width, roi.height))
+        let ws = min(1.0, min(320.0 / max(maskLong, 1.0), 896.0 / roiLong))
         let w = max(patch * 3, Int((Double(roi.width) * ws).rounded()))
         let h = max(patch * 3, Int((Double(roi.height) * ws).rounded()))
         func working(_ ci: CIImage) -> CIImage {
@@ -103,8 +107,9 @@ enum ObjectRemoval {
         guard var rgba = rasterize(working(image), w: w, h: h),
               let maskBuf = rasterize(working(m), w: w, h: h) else { return nil }
 
-        // --- 3. Unknown map, dilated 2px so the stroke's anti-aliased rim (still
-        //        holding object colour) can't seed the fill ---
+        // --- 3. Unknown map, dilated 3px so the stroke's anti-aliased rim (still
+        //        holding object colour — the classic leftover-sliver source) can't
+        //        seed the fill or survive it ---
         let total = w * h
         var raw = [Bool](repeating: false, count: total)
         for i in 0..<total { raw[i] = maskBuf[i * 4] > 64 }
@@ -112,7 +117,7 @@ enum ObjectRemoval {
         var needs = [Bool](repeating: false, count: total)
         var unknownCount = 0
         for y in 0..<h {
-            for x in 0..<w where rectSum(rawSum, w: w, h: h, x - 2, y - 2, x + 2, y + 2) > 0 {
+            for x in 0..<w where rectSum(rawSum, w: w, h: h, x - 3, y - 3, x + 3, y + 3) > 0 {
                 needs[y * w + x] = true; unknownCount += 1
             }
         }
@@ -145,6 +150,7 @@ enum ObjectRemoval {
         //        filled from its best-matching (SSD over known pixels, locality-
         //        biased) source patch ---
         var remaining = unknownCount
+        var synth = [Bool](repeating: false, count: total)   // synthesized (vs originally known)
         var rings = 0
         while remaining > 0 {
             rings += 1
@@ -202,12 +208,20 @@ enum ObjectRemoval {
                 for dy in -half...half {
                     for dx in -half...half {
                         let tp = (cy + dy) * w + (cx + dx)
-                        guard needs[tp] else { continue }
                         let to = tp * 4, so = ((sy + dy) * w + (sx + dx)) * 4
-                        rgba[to] = rgba[so]; rgba[to + 1] = rgba[so + 1]
-                        rgba[to + 2] = rgba[so + 2]; rgba[to + 3] = rgba[so + 3]
-                        needs[tp] = false
-                        remaining -= 1
+                        if needs[tp] {
+                            rgba[to] = rgba[so]; rgba[to + 1] = rgba[so + 1]
+                            rgba[to + 2] = rgba[so + 2]; rgba[to + 3] = rgba[so + 3]
+                            needs[tp] = false
+                            synth[tp] = true
+                            remaining -= 1
+                        } else if synth[tp] {
+                            // Cross-blend where this patch overlaps earlier synthesized
+                            // pixels — verbatim copies met in hard square seams.
+                            rgba[to] = UInt8((Int(rgba[to]) * 13 + Int(rgba[so]) * 7) / 20)
+                            rgba[to + 1] = UInt8((Int(rgba[to + 1]) * 13 + Int(rgba[so + 1]) * 7) / 20)
+                            rgba[to + 2] = UInt8((Int(rgba[to + 2]) * 13 + Int(rgba[so + 2]) * 7) / 20)
+                        }
                     }
                 }
             }

@@ -89,7 +89,7 @@ struct PhotoEditorView: View {
     @State private var showStickerFiles = false
     @State private var retouchStrokes: [RetouchStroke] = []   // object-removal brush strokes
     @State private var editProxy: CIImage?                    // proxy with object removal baked in (render source)
-    @State private var retouchBrush: CGFloat = 0.05
+    @State private var retouchBrush: CGFloat = 0.03
     @State private var retouchBusy = false
 
     // Brush tools (smooth / paint / teeth). Sizes are fractions of image width; intensities are 0…1.
@@ -234,7 +234,7 @@ struct PhotoEditorView: View {
                 } else if tab == .retouch {
                     // Pinch-zoom + pan with a one-finger brush to mark objects to remove.
                     BrushCanvas(image: preview, brushRadius: retouchBrush,
-                                strokeColor: UIColor.systemRed.withAlphaComponent(0.5),
+                                strokeColor: UIColor.systemRed.withAlphaComponent(0.5), showSizeRing: true,
                                 onStroke: { pts, r in applyRetouchStroke(pts, radius: r) })
                         .padding(10)
                 } else if tab == .smooth || tab == .paint || tab == .teeth {
@@ -1431,7 +1431,7 @@ struct PhotoEditorView: View {
                     .font(.caption).tint(.white).disabled(retouchStrokes.isEmpty || retouchBusy)
             }
             .padding(.horizontal)
-            labeledSlider("Brush", systemImage: "circle.dashed", value: $retouchBrush, range: 0.02...0.15)
+            labeledSlider("Brush", systemImage: "circle.dashed", value: $retouchBrush, range: 0.008...0.10)
         }
     }
 

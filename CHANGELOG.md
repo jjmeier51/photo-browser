@@ -4,6 +4,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-03
 
+- **Object removal, round 2** — adaptive working resolution (small removals like an earring now
+  synthesize at near-native resolution — the fixed cap was upscaling the fill and printing square
+  patch seams), overlapping patches cross-blend instead of meeting in hard edges, and the mask
+  dilation widened so an object's anti-aliased rim can't survive. Retouch brush: smaller default
+  and range, and the persistent size ring (like Smooth/Paint) now shows on the retouch canvas.
 - **Object removal actually removes** — replaced the diffusion fill (whose blur-average of the
   surroundings was the "fuzzy grey area") with exemplar-based patch synthesis, the TouchRetouch /
   Content-Aware-Fill approach: real 9×9 patches of surrounding texture are copied into the hole
