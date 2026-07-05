@@ -4,10 +4,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-03
 
-- **Editor saves match the source format** — the output container now always follows the
-  source: PNG in → PNG out, JPEG → JPEG; only HEIC-family/RAW sources save as HEIC, and only
-  genuinely HDR ones take the 10-bit HDR path. Fixes SDR files (e.g. BT.2020-tagged images,
-  gain-map screenshots) coming back as HDR HEICs. Transparent cut-outs still force PNG.
+- **Editor saves match the source format** — PNG in → PNG out (always), SDR JPEG → JPEG,
+  HEIC → HEIC; fixes SDR files (e.g. BT.2020-tagged images) coming back as HDR HEICs, which
+  came from the HDR detector treating a BT.2020 *gamut* tag as HDR. Genuinely HDR sources —
+  including gain-map JPEGs — still save as 10-bit HDR HEIC so the headroom survives.
+  Transparent cut-outs still force PNG.
 - **Hide folders** — long-press a folder → "Hide Folder": it vanishes from the grid, the
   bubble row, and search (contents included) without touching the drive. The ⋯ menu's
   "Show Hidden Folders" toggle reveals them dimmed for unhiding. Hidden state follows

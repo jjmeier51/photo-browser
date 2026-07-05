@@ -1680,13 +1680,19 @@ struct PhotoEditorView: View {
         let id = library.beginActivity(title, indeterminate: true)
         dismiss()
         Task.detached(priority: .userInitiated) {
-            // The output container always matches the source: PNG in → PNG out, JPEG →
-            // JPEG. Only HEIC-family/RAW sources save as HEIC, and only *actually* HDR
-            // ones take the 10-bit HDR path (gated inside save()) — an HDR-looking
-            // profile on an SDR file must never flip its format. A transparent
-            // cut-out is the one exception: it needs alpha, so it forces PNG.
-            let fmt: PhotoEditorIO.ExportFormat =
-                r.cutout == .transparent ? .png : PhotoEditorIO.format(forSource: src)
+            // Format policy: PNG stays PNG, always (and a transparent cut-out forces
+            // PNG — it needs alpha). Any other *genuinely* HDR source (gain map,
+            // PQ/HLG — the detector no longer misfires on SDR files) saves as 10-bit
+            // HDR HEIC so the headroom survives, even from a gain-map JPEG. Everything
+            // else matches its source container: JPEG → JPEG, HEIC → HEIC.
+            let fmt: PhotoEditorIO.ExportFormat
+            if r.cutout == .transparent || PhotoEditorIO.format(forSource: src) == .png {
+                fmt = .png
+            } else if PhotoEditorIO.isHDRSource(src) {
+                fmt = .heic
+            } else {
+                fmt = PhotoEditorIO.format(forSource: src)
+            }
             let dest = PhotoEditorIO.editedDestination(for: src, format: fmt)
             let ok = PhotoEditorIO.save(recipe: r, sourceURL: src, to: dest, format: fmt,
                                         upscale: upscale, stickers: placed, retouch: strokes)
