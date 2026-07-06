@@ -139,7 +139,7 @@ enum OnlyFansService {
         return URLSession(configuration: cfg)
     }()
 
-    private enum APIResult { case ok(Any); case authError; case failed }
+    private enum APIResult { case ok(Any); case authError(String); case failed(String) }
 
     // MARK: - Coordination (mirrors FacebookService)
 
@@ -203,9 +203,15 @@ enum OnlyFansService {
             return result
         }
         // Probe /users/me first: it validates the login + signing and gives a precise
-        // "log in again" message instead of a vague "couldn’t open the creator".
-        if case .authError = await apiGet("/users/me", creds: creds, rules: rules) {
-            result.note = "OnlyFans didn’t accept the login. Tap “Log in to OnlyFans”, sign in again, and retry."
+        // reason (the real HTTP status + OnlyFans error) instead of a vague "couldn’t
+        // open the creator", so a failed run points at what actually broke.
+        switch await apiGet("/users/me", creds: creds, rules: rules) {
+        case .ok: break
+        case .authError(let detail):
+            result.note = "OnlyFans didn’t accept the login (\(detail)). Tap “Log in to OnlyFans”, sign in again, and retry."
+            return result
+        case .failed(let detail):
+            result.note = "Couldn’t verify the OnlyFans login (\(detail)). Try again in a moment."
             return result
         }
 
@@ -552,9 +558,11 @@ enum OnlyFansService {
     // MARK: - Networking
 
     /// A signed GET against the OnlyFans API, retrying transient failures with a
-    /// short backoff. 401/403 report as `.authError` so callers can prompt a re-login.
+    /// short backoff. 401/403 (and the `{"error":{"code":0}}` bad-sign envelope)
+    /// report as `.authError`; both failure cases carry a short diagnostic (HTTP
+    /// status + OnlyFans' own error message) so the UI can show what actually broke.
     nonisolated private static func apiGet(_ pathAndQuery: String, creds: Credentials, rules: DynamicRules) async -> APIResult {
-        guard let url = URL(string: apiBase + pathAndQuery) else { return .failed }
+        guard let url = URL(string: apiBase + pathAndQuery) else { return .failed("bad URL") }
         for attempt in 0..<3 {
             if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_500_000_000) }
             await pacer.waitTurn()
@@ -564,20 +572,23 @@ enum OnlyFansService {
             guard let (data, resp) = try? await session.data(for: req) else { continue }
             let status = (resp as? HTTPURLResponse)?.statusCode ?? 200
             if status == 429 || status >= 500 { continue }               // rate-limited / transient
-            if status == 401 || status == 403 { return .authError }
             let obj = try? JSONSerialization.jsonObject(with: data)
-            // A bad signature / expired login comes back as HTTP 400 with a JSON
-            // error envelope (`{"error":{"code":0,…}}`) — detect it before treating
-            // the 400 as a generic failure, so we can prompt a clean re-login.
+            // OnlyFans' own error message (a bad signature / expired login comes back
+            // as HTTP 400 with `{"error":{"code":0,"message":…}}`).
+            var ofCode = Int.min
+            var ofMsg = ""
             if let dict = obj as? [String: Any], let err = dict["error"] as? [String: Any] {
-                let code = (err["code"] as? Int) ?? -1
-                if code == 0 || code == 401 { return .authError }
+                ofCode = (err["code"] as? Int) ?? Int.min
+                ofMsg = (err["message"] as? String) ?? ""
             }
-            if status >= 400 { return .failed }
-            guard let obj else { return .failed }
+            let detail = "HTTP \(status)" + (ofCode != Int.min ? ", error \(ofCode)" : "")
+                + (ofMsg.isEmpty ? "" : ": \(ofMsg)")
+            if status == 401 || status == 403 || ofCode == 0 || ofCode == 401 { return .authError(detail) }
+            if status >= 400 { return .failed(detail) }
+            guard let obj else { return .failed("non-JSON response (HTTP \(status))") }
             return .ok(obj)
         }
-        return .failed
+        return .failed("network error / timeout")
     }
 
     /// Streams a media file straight to disk (no in-memory buffering — source videos

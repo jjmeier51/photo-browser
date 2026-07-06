@@ -219,9 +219,9 @@ private struct OFWebView: UIViewRepresentable {
             // (OnlyFans keeps it under `bcTokenSha`; fall back to any hex-looking
             // token in case the key changes), then re-check the login state.
             let js = """
-            (function(){try{var t=localStorage.getItem('bcTokenSha');if(t)return t;\
-            for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);var v=localStorage.getItem(k);\
-            if(v&&/^[a-f0-9]{40,}$/i.test(v))return v;}}catch(e){}return '';})()
+            (function(){try{var t=localStorage.getItem('bcTokenSha')||localStorage.getItem('bcTokenCache');if(t)return t;\
+            for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);if(/bc/i.test(k)){\
+            var v=localStorage.getItem(k);if(v&&/^[a-f0-9]{20,}$/i.test(v))return v;}}}catch(e){}return '';})()
             """
             webView.evaluateJavaScript(js) { value, _ in
                 if let token = value as? String, !token.isEmpty {
