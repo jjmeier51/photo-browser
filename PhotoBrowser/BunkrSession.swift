@@ -33,17 +33,17 @@ final class BunkrSession: NSObject, WKNavigationDelegate {
     /// Presents the browser at `warmupURL`, waits until a cookie appears on one of
     /// `domains` (or the user dismisses / a timeout fires), then returns the Cookie
     /// header (`name=value; …`) for cookies on those domains — empty if it didn't clear.
-    func warmCookies(warmupURL: String, domains: [String], userAgent: String) async -> String {
+    func warmCookies(warmupURL: String, referer: String?, domains: [String], userAgent: String) async -> String {
         guard let url = URL(string: warmupURL), let top = Self.topVC else { return "" }
         finished = false
         self.domains = domains
         return await withCheckedContinuation { (c: CheckedContinuation<String, Never>) in
             cont = c
-            present(url: url, ua: userAgent, over: top)
+            present(url: url, referer: referer, ua: userAgent, over: top)
         }
     }
 
-    private func present(url: URL, ua: String, over top: UIViewController) {
+    private func present(url: URL, referer: String?, ua: String, over top: UIViewController) {
         let cfg = WKWebViewConfiguration()
         cfg.websiteDataStore = .default()                 // shared store: the cookie persists for downloads
         let w = WKWebView(frame: .zero, configuration: cfg)
@@ -69,7 +69,12 @@ final class BunkrSession: NSObject, WKNavigationDelegate {
         host = nav
 
         top.present(nav, animated: true)
-        w.load(URLRequest(url: url))
+        // Carry the get.bunkrr.su/file/{id} referer on the top-level load so DDoS-Guard
+        // serves its *solvable JS challenge* instead of a bare 403 (a no-referer hit to
+        // the CDN just hard-403s). WebKit honors a Referer set on the initial request.
+        var req = URLRequest(url: url)
+        if let referer { req.setValue(referer, forHTTPHeaderField: "Referer") }
+        w.load(req)
 
         // Auto-finish as soon as the DDoS-Guard cookie lands; hard cap at 45s so a
         // stuck challenge doesn't trap the user (they can also Cancel/Use any time).
