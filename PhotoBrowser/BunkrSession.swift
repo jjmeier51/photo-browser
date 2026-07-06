@@ -4,80 +4,121 @@ import UIKit
 /// Solves bunkr's **DDoS-Guard** challenge so its CDN (`*.cdn.cr`) will serve
 /// downloads. A plain HTTP request to the CDN 403s no matter the Referer, because
 /// the CDN demands the `__ddg*` session cookie that's only granted after a real
-/// browser runs the DDoS-Guard JavaScript. We navigate a **WKWebView** to one of the
-/// resolved CDN URLs — WebKit renders the challenge page, runs its JS, gets the cookie
-/// written to the shared store — then hand those `cdn.cr` cookies to the downloader
-/// for every file in the album.
+/// browser runs the DDoS-Guard JavaScript (and sometimes solves an interactive
+/// check). We present a **visible in-app browser** pointed at one resolved CDN URL:
+/// WebKit renders the challenge, runs its JS — and if it escalates to a CAPTCHA the
+/// user can tap through it — then the `__ddg` cookie lands in the shared store and we
+/// hand those `cdn.cr` cookies to the downloader for every file in the album.
 ///
-/// The web view is **attached to the key window** (offscreen, alpha ~0). This is not
-/// cosmetic: a *detached* WKWebView has its JS timers throttled/suspended by WebKit,
-/// so the challenge never runs and no cookie appears — which is exactly why an earlier
-/// off-window version silently produced nothing. We poll the cookie store until the
-/// `__ddg` cookie lands (or a hard timeout) rather than guessing on `didFinish`, since
-/// the challenge solves on a *second* navigation the first `didFinish` can't see.
+/// Why visible, not hidden: an offscreen/detached WKWebView has its JS timers
+/// throttled by WebKit, so the challenge never runs (an earlier hidden version always
+/// produced `ddg: n`). A foreground, interactive web view is the only reliable way to
+/// clear DDoS-Guard. We auto-dismiss the moment the cookie appears, so the user
+/// usually just sees a brief "checking your browser…" flash.
 ///
-/// MainActor: `WKWebView` and `WKHTTPCookieStore` are main-bound. Best-effort — if the
-/// challenge doesn't solve in time the downloader just tries without the cookie.
+/// MainActor: WebKit is main-bound. Best-effort — Cancel (or a timeout) returns no
+/// cookie and the downloader just tries without it.
 @MainActor
 final class BunkrSession: NSObject, WKNavigationDelegate {
     static let shared = BunkrSession()
-    private var web: WKWebView?
 
-    /// Navigates a WKWebView to `cdnURL` to solve DDoS-Guard, then returns the Cookie
-    /// header (`name=value; …`) for cookies on `cdn.cr` (empty if none appeared).
+    private var web: WKWebView?
+    private var host: UIViewController?
+    private var cont: CheckedContinuation<String, Never>?
+    private var poll: Task<Void, Never>?
+    private var finished = false
+
+    /// Presents the browser at `cdnURL`, waits until the DDoS-Guard cookie appears (or
+    /// the user dismisses / a timeout fires), then returns the Cookie header
+    /// (`name=value; …`) for `cdn.cr` cookies — empty if the challenge didn't clear.
     func cdnCookies(cdnURL: String, userAgent: String) async -> String {
-        guard let url = URL(string: cdnURL) else { return "" }
-        startLoad(url, ua: userAgent)
-        // Poll for up to ~18s: the DDoS-Guard interstitial loads, runs JS for a few
-        // seconds, sets the cookie, then reloads to the real file. Return as soon as
-        // the pass cookie (`__ddg`) is present rather than waiting the full window.
-        var cdn: [HTTPCookie] = []
-        for _ in 0..<18 {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            cdn = await cookies().filter { $0.domain.hasSuffix("cdn.cr") }
-            if cdn.contains(where: { $0.name.lowercased().hasPrefix("__ddg") }) { break }
+        guard let url = URL(string: cdnURL), let top = Self.topVC else { return "" }
+        finished = false
+        return await withCheckedContinuation { (c: CheckedContinuation<String, Never>) in
+            cont = c
+            present(url: url, ua: userAgent, over: top)
         }
-        teardown()
-        return cdn.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
     }
 
-    private func startLoad(_ url: URL, ua: String) {
-        teardown()
+    private func present(url: URL, ua: String, over top: UIViewController) {
         let cfg = WKWebViewConfiguration()
         cfg.websiteDataStore = .default()                 // shared store: the cookie persists for downloads
-        let w = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 400), configuration: cfg)
+        let w = WKWebView(frame: .zero, configuration: cfg)
         w.customUserAgent = ua                            // must match the download UA (DDoS-Guard binds the cookie to it)
         w.navigationDelegate = self
-        // Attach offscreen-but-in-window so WebKit actually schedules the challenge's
-        // JS timers (a detached web view suspends them and the challenge never runs).
-        if let window = Self.keyWindow {
-            w.alpha = 0.02
-            w.isUserInteractionEnabled = false
-            window.addSubview(w)
-        }
         web = w
+
+        let vc = UIViewController()
+        vc.view.backgroundColor = .systemBackground
+        w.translatesAutoresizingMaskIntoConstraints = false
+        vc.view.addSubview(w)
+        NSLayoutConstraint.activate([
+            w.topAnchor.constraint(equalTo: vc.view.safeAreaLayoutGuide.topAnchor),
+            w.leadingAnchor.constraint(equalTo: vc.view.leadingAnchor),
+            w.trailingAnchor.constraint(equalTo: vc.view.trailingAnchor),
+            w.bottomAnchor.constraint(equalTo: vc.view.bottomAnchor),
+        ])
+        vc.title = "Checking your browser…"
+        vc.navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancelTapped))
+        vc.navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Use", style: .done, target: self, action: #selector(useTapped))
+        let nav = UINavigationController(rootViewController: vc)
+        nav.modalPresentationStyle = .fullScreen
+        host = nav
+
+        top.present(nav, animated: true)
         w.load(URLRequest(url: url))
-    }
 
-    private func teardown() {
-        web?.stopLoading()
-        web?.removeFromSuperview()
-        web = nil
-    }
-
-    private func cookies() async -> [HTTPCookie] {
-        await withCheckedContinuation { c in
-            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { c.resume(returning: $0) }
+        // Auto-finish as soon as the DDoS-Guard cookie lands; hard cap at 45s so a
+        // stuck challenge doesn't trap the user (they can also Cancel/Use any time).
+        poll = Task { [weak self] in
+            for _ in 0..<45 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, !self.finished else { return }
+                if (await self.cdnCookies()).contains(where: { $0.name.lowercased().hasPrefix("__ddg") }) {
+                    self.finish(); return
+                }
+            }
+            self?.finish()
         }
     }
 
-    private static var keyWindow: UIWindow? {
-        UIApplication.shared.connectedScenes
+    @objc private func cancelTapped() { finished = true; complete("") }
+    @objc private func useTapped() { finish() }
+
+    /// Harvest whatever cdn.cr cookies exist and complete.
+    private func finish() {
+        guard !finished else { return }
+        finished = true
+        Task { [weak self] in
+            guard let self else { return }
+            let cdn = await self.cdnCookies()
+            let header = cdn.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+            self.complete(header)
+        }
+    }
+
+    private func complete(_ header: String) {
+        poll?.cancel(); poll = nil
+        web?.stopLoading(); web = nil
+        host?.dismiss(animated: true); host = nil
+        cont?.resume(returning: header); cont = nil
+    }
+
+    private func cdnCookies() async -> [HTTPCookie] {
+        await withCheckedContinuation { c in
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { all in
+                c.resume(returning: all.filter { $0.domain.hasSuffix("cdn.cr") })
+            }
+        }
+    }
+
+    private static var topVC: UIViewController? {
+        let root = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap { $0.windows }
-            .first { $0.isKeyWindow }
-        ?? UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap { $0.windows }.first
+            .first { $0.isKeyWindow }?.rootViewController
+        var top = root
+        while let p = top?.presentedViewController { top = p }
+        return top
     }
 }
