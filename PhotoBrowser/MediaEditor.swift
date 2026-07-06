@@ -311,7 +311,7 @@ enum MediaEditing {
     }
 
     /// Rotates a CGImage clockwise by `quarters` × 90° at full resolution.
-    static func rotate(_ image: CGImage, quarters: Int) -> CGImage {
+    nonisolated static func rotate(_ image: CGImage, quarters: Int) -> CGImage {
         let q = ((quarters % 4) + 4) % 4
         if q == 0 { return image }
         let swap = q % 2 == 1
@@ -333,7 +333,9 @@ enum MediaEditing {
     /// Rotates/crops the photo at `url` and writes the result back over the original
     /// file (same name and container), preserving EXIF/GPS so capture date, location
     /// and Age survive the edit. Returns true on success.
-    static func applyPhotoInPlace(url: URL, quarters: Int, crop: CGRect) -> Bool {
+    /// `nonisolated`: called from `Task.detached` save paths — the decode/re-encode
+    /// of a full-resolution photo must never run on the main actor.
+    nonisolated static func applyPhotoInPlace(url: URL, quarters: Int, crop: CGRect) -> Bool {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
               let full = loadFullCGImage(src) else { return false }
         let rotated = rotate(full, quarters: quarters)

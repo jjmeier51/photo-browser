@@ -4,6 +4,19 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-06
 
+- **Fix: watchdog kill after big moves; freezes on editor saves** — re-keying labels after a
+  multi-item move compared every stored path against every moved item (a string concat per
+  check, at 100k-photo scale) and then re-encoded *every* path-keyed collection to JSON — all
+  inline on the main thread. Files finished moving, the bar froze on its last frame (~96%),
+  and iOS killed the app before the success message. The remap is now O(1) per stored path
+  (exact-match table for files, prefix pairs only for folders), and persistence runs on a
+  serial background queue from copy-on-write snapshots (FIFO, so a rapid second move can't be
+  overwritten by a stale earlier snapshot). The same machinery caused the occasional freeze
+  when saving an edited photo: container-change overwrites re-key the path, and every save
+  re-encoded the ever-growing "Edited" set inline — both now persist off-main. The crop
+  editor's full-resolution decode/re-encode (`applyPhotoInPlace`) is also marked
+  `nonisolated` so its `Task.detached` save genuinely leaves the main actor (hard-won
+  constraint #1).
 - **Facebook downloader: complete coverage, faster, upscaled** — discovery now enumerates the
   profile's *real albums* (Timeline/Mobile Uploads, **Profile Pictures**, Cover Photos, custom
   albums) and walks each one, instead of relying only on the classic `pb` virtual set that
