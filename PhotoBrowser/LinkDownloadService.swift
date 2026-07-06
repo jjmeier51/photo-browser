@@ -30,8 +30,15 @@ enum LinkDownloadService {
         let filename: String
         var referer: String?
         var cookie: String?
-        init(url: String, filename: String, referer: String? = nil, cookie: String? = nil) {
+        /// Just-in-time URL resolver. Some hosts (bunkr) *arm* a file's CDN URL for a
+        /// short window from the caller's IP, so it must be fetched **immediately before**
+        /// the download (and re-fetched on retry), not up front — else it 403s stale.
+        /// When set, `downloadOne` calls this per attempt and ignores `url`.
+        var resolve: (@Sendable () async -> String?)?
+        init(url: String, filename: String, referer: String? = nil, cookie: String? = nil,
+             resolve: (@Sendable () async -> String?)? = nil) {
             self.url = url; self.filename = filename; self.referer = referer; self.cookie = cookie
+            self.resolve = resolve
         }
     }
 
@@ -96,8 +103,10 @@ enum LinkDownloadService {
         if !failStatuses.isEmpty {
             diag += "; fail: " + failStatuses.sorted { $0.value > $1.value }
                 .map { "\(statusLabel($0.key))×\($0.value)" }.joined(separator: ", ")
-            if let u = items.first?.url { diag += "; url: \(String(u.prefix(110)))" }   // show what we hit
-            if let c = items.first?.cookie { diag += "; ddg: y(\(c.count))" } else if host.contains("bunkr") || host.contains("cdn.cr") { diag += "; ddg: n" }
+            // Show what we hit — resolve the first item's URL if it's deferred (bunkr).
+            var shownURL = items.first?.url ?? ""
+            if shownURL.isEmpty, let r = items.first?.resolve { shownURL = await r() ?? "" }
+            if !shownURL.isEmpty { diag += "; url: \(String(shownURL.prefix(110)))" }
             if host.contains("bunkr"), let r = items.first?.referer, let rh = URL(string: r)?.host { diag += "; ref: \(rh)" }
         }
         let prefix: String
@@ -122,11 +131,20 @@ enum LinkDownloadService {
     /// Returns 0 on success, else the HTTP status (or a negative marker) so callers
     /// can report *why* a download failed.
     nonisolated private static func downloadOne(_ item: MediaItem, into folder: URL) async -> Int {
-        guard let url = URL(string: item.url) else { return -3 }
         let dest = uniqueDestination(sanitize(item.filename), in: folder)
         var last = -1
         for attempt in 0..<3 {
             if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000) }
+            // Resolve the URL fresh per attempt when a just-in-time resolver is set (bunkr
+            // arms short-lived CDN URLs) — a stale/absent URL is a resolve failure, retry.
+            let urlString: String
+            if let resolve = item.resolve {
+                guard let u = await resolve() else { last = -3; continue }
+                urlString = u
+            } else {
+                urlString = item.url
+            }
+            guard let url = URL(string: urlString) else { last = -3; continue }
             var req = URLRequest(url: url)
             req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             if let referer = item.referer { req.setValue(referer, forHTTPHeaderField: "Referer") }
@@ -241,20 +259,6 @@ enum LinkDownloadService {
 
     // MARK: - bunkr family (album JSON + per-file CDN resolve)
 
-    /// Referer alone (even the exact `get.bunkrr.su/file/{id}` gallery-dl uses) 403s for
-    /// a DDoS-Guard-flagged IP — the CDN then demands the `__ddg` cookie too. We get it
-    /// by loading the CDN URL in a visible browser **with that referer set**, so
-    /// DDoS-Guard serves its solvable JS challenge (a no-referer hit just hard-403s).
-    /// WebKit clears it, and we attach the resulting `cdn.cr` cookie to every download.
-    /// Best-effort — no cookie ⇒ downloads still try with referer alone.
-    nonisolated private static func attachBunkrCookie(_ items: [MediaItem]) async -> [MediaItem] {
-        guard let first = items.first else { return items }
-        let cookie = await BunkrSession.shared.warmCookies(
-            warmupURL: first.url, referer: first.referer, domains: ["cdn.cr"], userAgent: userAgent)
-        guard !cookie.isEmpty else { return items }
-        return items.map { MediaItem(url: $0.url, filename: $0.filename, referer: $0.referer, cookie: cookie) }
-    }
-
     nonisolated private static func bunkr(_ link: String) async -> ([MediaItem], String?, String?) {
         let origin = (URL(string: link)?.scheme).flatMap { s in URL(string: link)?.host.map { "\(s)://\($0)" } } ?? "https://bunkr.cr"
         // Album: the page embeds `window.albumFiles = [ {id, original, slug, …}, … ]`,
@@ -293,14 +297,14 @@ enum LinkDownloadService {
             let marks = "html \(html.count) chars, albumFiles: \(html.contains("albumFiles") ? "y" : "n"), /f/: \(slugs.count), NEXT_DATA: \(html.contains("__NEXT_DATA__") ? "y" : "n")"
 
             if !ids.isEmpty {
-                let items = await bunkrResolveAll(ids, origin: origin)
-                if !items.isEmpty { return (await attachBunkrCookie(items), title, nil) }
+                let items = bunkrResolveAll(ids, origin: origin)
+                if !items.isEmpty { return (items, title, nil) }
                 return ([], title, "[bunkr] \(ids.count) files listed but the CDN resolver returned nothing (\(marks)).")
             }
             // Fallback: resolve each /f/ file page directly (broad slug scrape — any context).
             if !slugs.isEmpty {
                 let items = await bunkrResolveSlugs(slugs, origin: origin)
-                if !items.isEmpty { return (await attachBunkrCookie(items), title, nil) }
+                if !items.isEmpty { return (items, title, nil) }
                 return ([], title, "[bunkr] \(slugs.count) file page(s) found but none resolved (\(marks)).")
             }
             // If the array was located but nothing parsed, show its head so the object
@@ -310,11 +314,12 @@ enum LinkDownloadService {
         }
         // Single file page.
         let single = await bunkrResolveSlugs([firstMatch(link, "/f/([^/?#]+)") ?? link], origin: origin)
-        return (await attachBunkrCookie(single), nil, single.isEmpty ? "[bunkr] couldn’t resolve that file." : nil)
+        return (single, nil, single.isEmpty ? "[bunkr] couldn’t resolve that file." : nil)
     }
 
-    /// Resolves bunkr `/f/{slug}` file pages: fetch each, read its numeric data id,
-    /// then hand it to the CDN resolver.
+    /// Resolves bunkr `/f/{slug}` file pages to items: fetch each page for its numeric
+    /// data id + name (the site page, safe to fetch up front), then attach a **deferred**
+    /// CDN-URL resolver so the arming apidl call fires just before each download.
     nonisolated private static func bunkrResolveSlugs(_ slugs: [String], origin: String) async -> [MediaItem] {
         await withTaskGroup(of: MediaItem?.self) { group in
             var out: [MediaItem] = []
@@ -330,7 +335,8 @@ enum LinkDownloadService {
                         ?? firstMatch(html, "\"id\"\\s*:\\s*\"?(\\d{4,})") else { return nil }
                     let name = firstMatch(html, "<h1[^>]*>\\s*([^<]+?)\\s*</h1>").map(decodeEntities)
                         ?? URL(string: pageURL)?.lastPathComponent ?? id
-                    return await bunkrResolve(id, name: name, referer: pageURL)
+                    return MediaItem(url: "", filename: name, referer: bunkrFileReferer(id),
+                                     resolve: { await bunkrFileURL(id) })
                 }
             }
             for _ in 0..<min(maxConcurrent, slugs.count) { addNext() }
@@ -339,35 +345,30 @@ enum LinkDownloadService {
         }
     }
 
-    /// Resolves each bunkr file id to a direct CDN URL via the `apidl` endpoint,
-    /// concurrently. The endpoint may return the URL XOR-encrypted.
-    nonisolated private static func bunkrResolveAll(_ ids: [(id: String, name: String, slug: String)], origin: String) async -> [MediaItem] {
-        await withTaskGroup(of: MediaItem?.self) { group in
-            var out: [MediaItem] = []
-            var idx = 0
-            let maxConcurrent = 8
-            func addNext() {
-                guard idx < ids.count else { return }
-                let entry = ids[idx]; idx += 1
-                // The CDN hotlink-checks the Referer against the file's own page.
-                let ref = entry.slug.isEmpty ? "\(origin)/" : "\(origin)/f/\(entry.slug)"
-                group.addTask { await bunkrResolve(entry.id, name: entry.name, referer: ref) }
-            }
-            for _ in 0..<min(maxConcurrent, ids.count) { addNext() }
-            while let r = await group.next() { if let r { out.append(r) }; addNext() }
-            return out
+    /// Builds one item per album file with a **deferred** CDN-URL resolver — the apidl
+    /// call runs just before each download (bunkr arms short-lived URLs), not up front.
+    /// No network here; the id + display name already came from the album page parse.
+    nonisolated private static func bunkrResolveAll(_ ids: [(id: String, name: String, slug: String)], origin: String) -> [MediaItem] {
+        ids.map { entry in
+            let id = entry.id
+            return MediaItem(url: "", filename: entry.name, referer: bunkrFileReferer(id),
+                             resolve: { await bunkrFileURL(id) })
         }
     }
 
-    nonisolated private static func bunkrResolve(_ id: String, name: String, referer: String) async -> MediaItem? {
-        // The CDN hotlink-checks the Referer against the file's own hub page —
-        // `get.bunkrr.su/file/{id}`, the *exact* referer the apidl call uses (matching
-        // gallery-dl's working extractor). A bare `get.bunkrr.su/`, the bunkr.cr file
-        // page, or a direct hit all 403 ("Angie" server, no challenge to solve).
-        let fileReferer = "https://get.bunkrr.su/file/\(id)"
-        _ = referer
+    /// The get.bunkrr.su/file/{id} referer the CDN hotlink-checks — the *exact* referer
+    /// the apidl call uses (matching gallery-dl). A bare `get.bunkrr.su/`, the bunkr.cr
+    /// file page, or a direct hit all 403 ("Angie" server, no challenge to solve).
+    nonisolated private static func bunkrFileReferer(_ id: String) -> String {
+        "https://get.bunkrr.su/file/\(id)"
+    }
+
+    /// Fetches a bunkr file's direct CDN URL from apidl. Called **just-in-time** by the
+    /// downloader (bunkr arms this URL for a short window from our IP, so resolving all
+    /// files up front then downloading later 403s them all). Returns nil for a down file.
+    nonisolated private static func bunkrFileURL(_ id: String) async -> String? {
         let body = try? JSONSerialization.data(withJSONObject: ["id": id])
-        let headers = ["Referer": fileReferer, "Origin": "https://get.bunkrr.su",
+        let headers = ["Referer": bunkrFileReferer(id), "Origin": "https://get.bunkrr.su",
                        "Content-Type": "application/json"]
         guard let json = await getJSON("https://apidl.bunkr.ru/api/_001_v2", method: "POST", body: body, headers: headers) as? [String: Any],
               let raw = json["url"] as? String else { return nil }
@@ -378,7 +379,7 @@ enum LinkDownloadService {
         guard url.hasPrefix("http") else { return nil }
         // Bunkr serves a placeholder when a file is down — don't save the maintenance clip.
         if url.hasSuffix("/maint.mp4") || url.hasSuffix("/maintenance-vid.mp4") { return nil }
-        return MediaItem(url: url, filename: name, referer: fileReferer)
+        return url
     }
 
     /// Extracts the first balanced `[ … ]` array assigned to `marker` in `html`
