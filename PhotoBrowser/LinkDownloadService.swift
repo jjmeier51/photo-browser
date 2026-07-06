@@ -149,6 +149,17 @@ enum LinkDownloadService {
             req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             if let referer = item.referer { req.setValue(referer, forHTTPHeaderField: "Referer") }
             if let cookie = item.cookie { req.setValue(cookie, forHTTPHeaderField: "Cookie") }
+            // Send the headers a real browser always includes when navigating to a file
+            // from a page. A request that claims to be Chrome (via User-Agent) but omits
+            // these `Sec-Fetch-*`/`Accept*` headers is a classic bot signature that
+            // hotlink filters (bunkr's CDN) 403 — even with a valid Referer.
+            req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,video/*;q=0.8,*/*;q=0.5", forHTTPHeaderField: "Accept")
+            req.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+            req.setValue("document", forHTTPHeaderField: "Sec-Fetch-Dest")
+            req.setValue("navigate", forHTTPHeaderField: "Sec-Fetch-Mode")
+            req.setValue("cross-site", forHTTPHeaderField: "Sec-Fetch-Site")
+            req.setValue("?1", forHTTPHeaderField: "Sec-Fetch-User")
+            req.setValue("1", forHTTPHeaderField: "Upgrade-Insecure-Requests")
             req.timeoutInterval = 600
             guard let (tmp, resp) = try? await session.download(for: req) else { last = -1; continue }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
