@@ -191,6 +191,36 @@ final class Library {
         UserDefaults.standard.set(lastFacebookURLByFolder, forKey: "photoBrowser.lastFacebookURL")
     }
 
+    // MARK: - OnlyFans creator folders
+
+    /// Folder path → the OnlyFans creator downloaded into it (drives "Get New",
+    /// the blue-ringed bubble, the subtitle, and dedup). Mirrors `facebookFolders`.
+    var onlyfansFolders: [String: OFFolderInfo] = {
+        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.onlyfansFolders"),
+              let m = try? JSONDecoder().decode([String: OFFolderInfo].self, from: data) else { return [:] }
+        return m
+    }()
+    func onlyfansInfo(for folder: URL) -> OFFolderInfo? { onlyfansFolders[folder.path] }
+    func isOnlyFansFolder(_ folder: URL) -> Bool { onlyfansFolders[folder.path] != nil }
+    func setOnlyFansInfo(_ info: OFFolderInfo, for folder: URL) {
+        onlyfansFolders[folder.path] = info
+        persistOnlyFansFolders()
+        changeToken += 1
+    }
+    private func persistOnlyFansFolders() {
+        if let data = try? JSONEncoder().encode(onlyfansFolders) {
+            UserDefaults.standard.set(data, forKey: "photoBrowser.onlyfansFolders")
+        }
+    }
+    /// Person-folder path → the OnlyFans username last downloaded under it, so reruns
+    /// prefill the username and resume the same folder.
+    var lastOnlyFansUsernameByFolder: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.lastOnlyFansUsername") as? [String: String]) ?? [:]
+    func lastOnlyFansUsername(for folder: URL) -> String? { lastOnlyFansUsernameByFolder[folder.path] }
+    func setLastOnlyFansUsername(_ username: String, for folder: URL) {
+        lastOnlyFansUsernameByFolder[folder.path] = username
+        UserDefaults.standard.set(lastOnlyFansUsernameByFolder, forKey: "photoBrowser.lastOnlyFansUsername")
+    }
+
     // MARK: - TikTok profile folders
 
     /// `@handle` folder path → the TikTok profile downloaded into it (drives "Get New
@@ -2105,7 +2135,8 @@ final class Library {
     func ensureRandomCover(for folder: URL) async {
         guard folderCovers[folder.path] == nil else { return }
         // Profile folders show their avatar (set on download), not a random item.
-        guard instagramInfo(for: folder) == nil, tiktokInfo(for: folder) == nil else { return }
+        guard instagramInfo(for: folder) == nil, tiktokInfo(for: folder) == nil,
+              onlyfansInfo(for: folder) == nil else { return }
         guard let pick = await Self.randomMedia(in: folder) else { return }
         let entry = Entry(url: pick, name: pick.lastPathComponent,
                           kind: classify(url: pick, isDirectory: false), size: 0, modified: Date())

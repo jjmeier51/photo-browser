@@ -82,6 +82,7 @@ struct FolderView: View {
     @State private var showAllStories = false
     @State private var showBulkInstagram = false
     @State private var showFacebook = false
+    @State private var showOnlyFans = false
     @State private var showTikTok = false
     @State private var showYouTube = false
     @State private var confirmFixDates = false
@@ -872,6 +873,9 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showFacebook, onDismiss: { Task { await reload() } }) {
                 FacebookImportView(targetFolder: url, existing: library.facebookInfo(for: url)) { Task { await reload() } }
             }
+            .fullScreenCover(isPresented: $showOnlyFans, onDismiss: { Task { await reload() } }) {
+                OnlyFansImportView(targetFolder: url, existing: library.onlyfansInfo(for: url)) { Task { await reload() } }
+            }
             .fullScreenCover(isPresented: $showTikTok, onDismiss: { Task { await reload() } }) {
                 TikTokImportView(targetFolder: url) { Task { await reload() } }
             }
@@ -1259,16 +1263,17 @@ struct FolderView: View {
     private func isBubbleFolder(_ url: URL) -> Bool {
         library.isInstagramFolder(url) || library.isInstagramHighlight(url)
             || library.isAlbumHighlight(url) || library.isFacebookFolder(url)
-            || library.isTikTokFolder(url)
+            || library.isTikTokFolder(url) || library.isOnlyFansFolder(url)
     }
     /// Pin rank: a profile's "Stories" highlight first, then the Instagram profile, the
-    /// Facebook profile, the TikTok profile, and everything else after.
+    /// Facebook profile, the TikTok profile, the OnlyFans creator, and everything else after.
     private func bubbleRank(_ url: URL) -> Int {
         if library.isInstagramHighlight(url) && url.lastPathComponent == "Stories" { return -1 }
         if library.isInstagramFolder(url) { return 0 }
         if library.isFacebookFolder(url) { return 1 }
         if library.isTikTokFolder(url) { return 2 }
-        return 3
+        if library.isOnlyFansFolder(url) { return 3 }
+        return 4
     }
     private var igBubbles: [Entry] {
         let order = library.bubbleOrder(for: url)
@@ -1331,7 +1336,7 @@ struct FolderView: View {
     private func isPinnedBubble(_ url: URL) -> Bool {
         (library.isInstagramHighlight(url) && url.lastPathComponent == "Stories")
             || library.isInstagramFolder(url) || library.isFacebookFolder(url)
-            || library.isTikTokFolder(url)
+            || library.isTikTokFolder(url) || library.isOnlyFansFolder(url)
     }
 
     private func bubble(_ entry: Entry) -> some View {
@@ -1359,6 +1364,7 @@ struct FolderView: View {
         if let ig = library.instagramInfo(for: entry.url) { return "@\(ig.handle)" }
         if let fb = library.facebookInfo(for: entry.url) { return fb.profileName }
         if let tt = library.tiktokInfo(for: entry.url) { return "@\(tt.handle)" }
+        if let of = library.onlyfansInfo(for: entry.url) { return "@\(of.username)" }
         return entry.name
     }
 
@@ -1374,6 +1380,11 @@ struct FolderView: View {
         if library.isTikTokFolder(url) {
             return AnyShapeStyle(LinearGradient(colors: [Color(red: 0.14, green: 0.96, blue: 0.93),   // #25F4EE
                                                          Color(red: 0.99, green: 0.17, blue: 0.33)],  // #FE2C55
+                                                startPoint: .topLeading, endPoint: .bottomTrailing))
+        }
+        if library.isOnlyFansFolder(url) {
+            return AnyShapeStyle(LinearGradient(colors: [Color(red: 0.00, green: 0.69, blue: 0.94),   // #00AFF0
+                                                         Color(red: 0.00, green: 0.83, blue: 1.00)],
                                                 startPoint: .topLeading, endPoint: .bottomTrailing))
         }
         return AnyShapeStyle(LinearGradient(colors: [Color(red: 0.99, green: 0.6, blue: 0.11),
@@ -1418,6 +1429,11 @@ struct FolderView: View {
             let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
             let when = f.string(from: Date(timeIntervalSince1970: fb.lastUpdated))
             return "Last Updated on \(when) · \(fb.photos) Photos and \(fb.videos) Videos"
+        }
+        if let of = library.onlyfansInfo(for: url) {
+            let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
+            let when = f.string(from: Date(timeIntervalSince1970: of.lastUpdated))
+            return "Last Updated on \(when) · \(of.photos) Photos and \(of.videos) Videos"
         }
         let albums = entries.filter { $0.isFolder }.count
         if isRoot || albums > 0 {
@@ -1656,6 +1672,10 @@ struct FolderView: View {
                     Button { showFacebook = true } label: {
                         Label(library.isFacebookFolder(url) ? "Get New Facebook Photos" : "Download Facebook Profile…",
                               systemImage: library.isFacebookFolder(url) ? "arrow.triangle.2.circlepath" : "person.2.fill")
+                    }
+                    Button { showOnlyFans = true } label: {
+                        Label(library.isOnlyFansFolder(url) ? "Get New OnlyFans Posts" : "Download OnlyFans Profile…",
+                              systemImage: library.isOnlyFansFolder(url) ? "arrow.triangle.2.circlepath" : "lock.circle")
                     }
                     Button { showTikTok = true } label: {
                         Label(library.lastTikTokHandle(for: url) != nil ? "Get New TikTok Videos" : "Download TikTok Profile…",

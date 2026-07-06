@@ -23,6 +23,8 @@ struct InfoPanel: View {
 
     /// Item lives in a downloaded-Facebook-profile folder.
     private var isFacebookItem: Bool { library.isFacebookFolder(entry.url.deletingLastPathComponent()) }
+    /// Item lives in a downloaded-OnlyFans-creator folder.
+    private var isOnlyFansItem: Bool { library.isOnlyFansFolder(entry.url.deletingLastPathComponent()) }
 
     var body: some View {
         NavigationStack {
@@ -58,9 +60,9 @@ struct InfoPanel: View {
                         row("Location", String(format: "%.5f, %.5f", c.latitude, c.longitude))
                     }
                     if let savedFrom { row("Saved from", savedFrom) }
-                    // Facebook posters are display names, not @handles.
+                    // Facebook / OnlyFans posters are display names, not @handles.
                     if let poster = library.postedBy(for: entry.url) {
-                        row("Posted by", isFacebookItem ? poster : "@\(poster)")
+                        row("Posted by", (isFacebookItem || isOnlyFansItem) ? poster : "@\(poster)")
                     }
                     if let likes = library.tiktokLikeCount(for: entry.url) { row("Likes", Self.compactCount(likes)) }
                     row("Folder", entry.url.deletingLastPathComponent().lastPathComponent)
@@ -68,7 +70,7 @@ struct InfoPanel: View {
                     let labels = [library.isFavorite(entry.url) ? "Favorite" : nil,
                                   library.isAI(entry.url) ? "To AI" : nil,
                                   library.postedBy(for: entry.url) != nil
-                                      ? (isFacebookItem ? "Facebook" : "Instagram") : nil].compactMap { $0 }
+                                      ? (isFacebookItem ? "Facebook" : (isOnlyFansItem ? "OnlyFans" : "Instagram")) : nil].compactMap { $0 }
                     row("Labels", labels.isEmpty ? "None" : labels.joined(separator: ", "))
                 }
 
