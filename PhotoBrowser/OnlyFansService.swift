@@ -274,7 +274,7 @@ enum OnlyFansService {
 
     // MARK: - Creator
 
-    nonisolated static func resolveCreator(_ username: String, creds: Credentials, rules: DynamicRules) async -> Creator? {
+    nonisolated private static func resolveCreator(_ username: String, creds: Credentials, rules: DynamicRules) async -> Creator? {
         let clean = sanitizeUsername(username)
         guard !clean.isEmpty else { return nil }
         guard case .ok(let json) = await apiGet("/users/\(clean)", creds: creds, rules: rules),
