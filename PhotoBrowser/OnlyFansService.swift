@@ -377,7 +377,11 @@ enum OnlyFansService {
     /// renditions (which are re-encoded and typically SDR) are a last resort only.
     nonisolated private static func mediaURL(_ m: [String: Any], isVideo: Bool) -> String? {
         // `source.source` is the original upload — the highest quality OnlyFans keeps.
-        if let source = m["source"] as? [String: Any], let s = source["source"] as? String, !s.isEmpty { return s }
+        if let source = m["source"] as? [String: Any] {
+            if let s = source["source"] as? String, !s.isEmpty { return s }
+            if let s = source["url"] as? String, !s.isEmpty { return s }
+        }
+        if let s = m["source"] as? String, !s.isEmpty, s.hasPrefix("http") { return s }
         if let files = m["files"] as? [String: Any] {
             // For video the "source" file is the untouched original (keeps HDR); for a
             // photo, "full" is the full-resolution image.
@@ -387,14 +391,34 @@ enum OnlyFansService {
         }
         if let full = m["full"] as? [String: Any], let s = full["url"] as? String, !s.isEmpty { return s }
         if let s = m["full"] as? String, !s.isEmpty { return s }
-        // Transcoded progressive renditions (re-encoded, usually SDR) — last resort.
-        if isVideo, let vs = m["videoSources"] as? [String: Any] {
-            for key in ["1080", "720", "480", "360", "240"] {
-                if let s = vs[key] as? String, !s.isEmpty { return s }
+        // Transcoded progressive renditions. Take the best of *whatever* is present —
+        // single-quality videos (no quality gear on the site) expose just one rendition,
+        // sometimes under a non-standard key, and a fixed key list silently dropped them.
+        if isVideo, let best = bestVideoSource(m["videoSources"]) { return best }
+        for key in ["src", "url"] {
+            if let s = m[key] as? String, !s.isEmpty, s.hasPrefix("http") { return s }
+        }
+        return nil
+    }
+
+    /// Picks the highest-resolution playable URL from a `videoSources` value, which
+    /// may be a `{"720": url, …}` map (keys are resolutions, sometimes non-standard)
+    /// or a `[{height/label, url}]` list. Returns nil if none carry a usable URL.
+    nonisolated private static func bestVideoSource(_ any: Any?) -> String? {
+        var best: (score: Int, url: String)?
+        func consider(_ url: String?, _ score: Int) {
+            guard let u = url, !u.isEmpty, u.hasPrefix("http") else { return }
+            if best == nil || score > best!.score { best = (score, u) }
+        }
+        if let dict = any as? [String: Any] {
+            for (k, v) in dict { consider(v as? String, Int(k.filter(\.isNumber)) ?? 0) }
+        } else if let arr = any as? [[String: Any]] {
+            for e in arr {
+                let score = (e["height"] as? Int) ?? Int(((e["label"] as? String) ?? "").filter(\.isNumber)) ?? 0
+                consider((e["url"] as? String) ?? (e["src"] as? String), score)
             }
         }
-        if let s = m["url"] as? String, !s.isEmpty { return s }
-        return nil
+        return best?.url
     }
 
     /// `{ "list": [...], "hasMore": Bool }` or a bare array — normalize both.
