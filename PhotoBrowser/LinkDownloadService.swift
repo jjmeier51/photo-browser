@@ -239,33 +239,74 @@ enum LinkDownloadService {
     // MARK: - bunkr family (album JSON + per-file CDN resolve)
 
     nonisolated private static func bunkr(_ link: String) async -> ([MediaItem], String?, String?) {
-        // Album: the page embeds `window.albumFiles = [ {id, original, slug, …}, … ]`.
+        let origin = (URL(string: link)?.scheme).flatMap { s in URL(string: link)?.host.map { "\(s)://\($0)" } } ?? "https://bunkr.cr"
+        // Album: the page embeds `window.albumFiles = [ {id, original, slug, …}, … ]`,
+        // but the structure shifts often — try that, then a per-object regex, then just
+        // scraping the /f/ file-page links.
         if firstMatch(link, "/a/([^/?#]+)") != nil {
             let sep = link.contains("?") ? "&" : "?"
-            guard let html = await getText(link + "\(sep)advanced=1") else { return ([], nil, "Couldn’t load that Bunkr album.") }
+            guard let html = await getText(link + "\(sep)advanced=1") else { return ([], nil, "[bunkr] couldn’t load the album (blocked or offline).") }
+            if html.contains("challenge-platform") || html.contains("Just a moment") {
+                return ([], nil, "[bunkr] blocked by Cloudflare — the page needs a browser to load.")
+            }
             let title = firstMatch(html, "<h1[^>]*>\\s*([^<]+?)\\s*</h1>").map(decodeEntities)
-            // The array text isn't terminated by a reliable `];`, and strings inside it
-            // can contain brackets — scan for the balanced `[ … ]` (quote-aware) instead
-            // of a regex, which is what kept failing to read the file list.
-            guard let arrayText = balancedArray(in: html, after: "window.albumFiles"),
-                  let arr = (try? JSONSerialization.jsonObject(with: Data(arrayText.utf8))) as? [[String: Any]] else {
-                return ([], title, "Couldn’t read the Bunkr album’s file list.")
+            var ids: [(id: String, name: String)] = []
+            if let arrayText = balancedArray(in: html, after: "window.albumFiles") {
+                if let arr = (try? JSONSerialization.jsonObject(with: Data(arrayText.utf8))) as? [[String: Any]] {
+                    ids = arr.compactMap { f in idString(f["id"]).map { ($0, (f["original"] as? String) ?? (f["name"] as? String) ?? $0) } }
+                }
+                if ids.isEmpty {        // non-strict JSON → pull id + name from each {…} object
+                    for obj in matches(arrayText, "(\\{[^{}]*\\})").compactMap({ $0.count > 1 ? $0[1] : nil }) {
+                        guard let id = firstMatch(obj, "\"id\"\\s*:\\s*\"?(\\d+)") else { continue }
+                        let name = firstMatch(obj, "\"original\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
+                            ?? firstMatch(obj, "\"name\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"") ?? id
+                        ids.append((id, decodeEntities(name)))
+                    }
+                }
             }
-            let ids: [(id: String, name: String)] = arr.compactMap { f in
-                guard let id = idString(f["id"]) else { return nil }
-                let name = (f["original"] as? String) ?? (f["name"] as? String) ?? id
-                return (id, name)
+            if !ids.isEmpty {
+                let items = await bunkrResolveAll(ids)
+                return (items, title, items.isEmpty ? "[bunkr] found \(ids.count) files but the CDN wouldn’t serve them." : nil)
             }
-            let items = await bunkrResolveAll(ids)
-            return (items, title, items.isEmpty ? "Couldn’t resolve any Bunkr files (the album may be down)." : nil)
+            // Fallback: resolve each /f/ file page directly.
+            var seen = Set<String>()
+            let slugs = matches(html, "href=\"(?:https?://[^\"/]+)?/f/([^\"?#]+)\"").compactMap { $0.count > 1 ? $0[1] : nil }.filter { seen.insert($0).inserted }
+            if !slugs.isEmpty {
+                let items = await bunkrResolveSlugs(slugs, origin: origin)
+                return (items, title, items.isEmpty ? "[bunkr] found \(slugs.count) file pages but couldn’t resolve them." : nil)
+            }
+            let af = html.contains("albumFiles")
+            return ([], title, "[bunkr] no file list found (html \(html.count) chars, albumFiles: \(af ? "yes" : "no"), /f/ links: \(matches(html, "/f/([^\"?#]+)").count)).")
         }
-        // Single file page: pull the data id off the page, then resolve it.
-        if let html = await getText(link), let id = firstMatch(html, "data-file-id=\"([^\"]+)\"") ?? firstMatch(html, "\"id\":\\s*\"?(\\d{4,})") {
-            let name = firstMatch(html, "<h1[^>]*>\\s*([^<]+?)\\s*</h1>").map(decodeEntities) ?? id
-            let items = await bunkrResolveAll([(id, name)])
-            return (items, nil, items.isEmpty ? "Couldn’t resolve that Bunkr file." : nil)
+        // Single file page.
+        let single = await bunkrResolveSlugs([firstMatch(link, "/f/([^/?#]+)") ?? link], origin: origin)
+        return (single, nil, single.isEmpty ? "[bunkr] couldn’t resolve that file." : nil)
+    }
+
+    /// Resolves bunkr `/f/{slug}` file pages: fetch each, read its numeric data id,
+    /// then hand it to the CDN resolver.
+    nonisolated private static func bunkrResolveSlugs(_ slugs: [String], origin: String) async -> [MediaItem] {
+        await withTaskGroup(of: MediaItem?.self) { group in
+            var out: [MediaItem] = []
+            var idx = 0
+            let maxConcurrent = 6
+            func addNext() {
+                guard idx < slugs.count else { return }
+                let slug = slugs[idx]; idx += 1
+                group.addTask {
+                    let pageURL = slug.hasPrefix("http") ? slug : "\(origin)/f/\(slug)"
+                    guard let html = await getText(pageURL) else { return nil }
+                    guard let id = firstMatch(html, "data-file-id=\"([^\"]+)\"")
+                        ?? firstMatch(html, "\"id\"\\s*:\\s*\"?(\\d{4,})") else { return nil }
+                    let name = firstMatch(html, "<h1[^>]*>\\s*([^<]+?)\\s*</h1>").map(decodeEntities)
+                        ?? URL(string: pageURL)?.lastPathComponent ?? id
+                    return await bunkrResolve(id, name: name)
+                }
+            }
+            for _ in 0..<min(maxConcurrent, slugs.count) { addNext() }
+            while let r = await group.next() { if let r { out.append(r) }; addNext() }
+            return out
         }
-        return ([], nil, "Unrecognized Bunkr link.")
     }
 
     /// Resolves each bunkr file id to a direct CDN URL via the `apidl` endpoint,
