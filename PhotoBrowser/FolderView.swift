@@ -83,6 +83,7 @@ struct FolderView: View {
     @State private var showBulkInstagram = false
     @State private var showFacebook = false
     @State private var showOnlyFans = false
+    @State private var showLinkDownload = false
     @State private var showTikTok = false
     @State private var showYouTube = false
     @State private var confirmFixDates = false
@@ -876,6 +877,9 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showOnlyFans, onDismiss: { Task { await reload() } }) {
                 OnlyFansImportView(targetFolder: url, existing: library.onlyfansInfo(for: url)) { Task { await reload() } }
             }
+            .sheet(isPresented: $showLinkDownload, onDismiss: { Task { await reload() } }) {
+                LinkImportView(targetFolder: url) { Task { await reload() } }
+            }
             .fullScreenCover(isPresented: $showTikTok, onDismiss: { Task { await reload() } }) {
                 TikTokImportView(targetFolder: url) { Task { await reload() } }
             }
@@ -1646,6 +1650,9 @@ struct FolderView: View {
                     }
                     Button { showMegaImport = true } label: {
                         Label("Add from MEGA…", systemImage: "arrow.down.circle")
+                    }
+                    Button { showLinkDownload = true } label: {
+                        Label("Download from a Link…", systemImage: "link.badge.plus")
                     }
                     Button { showGoogleDrive = true } label: {
                         Label("Download from Google Drive…", systemImage: "arrow.down.doc")
