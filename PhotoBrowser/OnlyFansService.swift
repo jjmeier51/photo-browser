@@ -135,7 +135,7 @@ enum OnlyFansService {
         cfg.httpShouldSetCookies = false
         cfg.httpCookieStorage = nil
         cfg.timeoutIntervalForRequest = 60
-        cfg.httpMaximumConnectionsPerHost = 10
+        cfg.httpMaximumConnectionsPerHost = 16      // wide CDN pipe for fast parallel downloads
         return URLSession(configuration: cfg)
     }()
 
@@ -244,7 +244,10 @@ enum OnlyFansService {
         let creatorName = creator.name.isEmpty ? creator.username : creator.name
         await withTaskGroup(of: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String).self) { group in
             var active = 0
-            let maxConcurrent = 6
+            // Downloads stream straight to disk (no in-memory buffering), so a wide
+            // fan-out is safe even for large source videos — 12-wide roughly doubles
+            // throughput over the previous 6.
+            let maxConcurrent = 12
             func apply(_ r: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String)) {
                 if r.ok {
                     if r.isVideo { result.videos += 1 } else { result.photos += 1 }
@@ -367,19 +370,24 @@ enum OnlyFansService {
         }
     }
 
-    /// The best (source / original) media URL from a media object.
+    /// The best (source / original) media URL from a media object. Always prefers the
+    /// untouched original upload so quality — **including HDR for video** — is kept:
+    /// the file is streamed to disk byte-for-byte (no transcode), so whatever colour
+    /// space / HDR the creator uploaded survives intact. Transcoded `videoSources`
+    /// renditions (which are re-encoded and typically SDR) are a last resort only.
     nonisolated private static func mediaURL(_ m: [String: Any], isVideo: Bool) -> String? {
         // `source.source` is the original upload — the highest quality OnlyFans keeps.
-        if let source = m["source"] as? [String: Any] {
-            if let s = source["source"] as? String, !s.isEmpty { return s }
-        }
+        if let source = m["source"] as? [String: Any], let s = source["source"] as? String, !s.isEmpty { return s }
         if let files = m["files"] as? [String: Any] {
-            if let full = files["full"] as? [String: Any], let s = full["url"] as? String, !s.isEmpty { return s }
-            if let src = files["source"] as? [String: Any], let s = src["url"] as? String, !s.isEmpty { return s }
+            // For video the "source" file is the untouched original (keeps HDR); for a
+            // photo, "full" is the full-resolution image.
+            for key in (isVideo ? ["source", "full"] : ["full", "source"]) {
+                if let d = files[key] as? [String: Any], let s = d["url"] as? String, !s.isEmpty { return s }
+            }
         }
         if let full = m["full"] as? [String: Any], let s = full["url"] as? String, !s.isEmpty { return s }
         if let s = m["full"] as? String, !s.isEmpty { return s }
-        // Progressive video renditions, best first.
+        // Transcoded progressive renditions (re-encoded, usually SDR) — last resort.
         if isVideo, let vs = m["videoSources"] as? [String: Any] {
             for key in ["1080", "720", "480", "360", "240"] {
                 if let s = vs[key] as? String, !s.isEmpty { return s }
@@ -420,7 +428,9 @@ enum OnlyFansService {
             return (false, item.isVideo, item.id, nil, "")
         }
         // Photos: write the caption + capture date into the file's EXIF/IPTC so the
-        // post text and date travel with it (videos get the date via file attrs).
+        // post text and date travel with it. Videos are left byte-identical to the
+        // source download (never re-encoded) so their HDR / colour space is preserved;
+        // they only get the post date stamped via file attributes below.
         if !item.isVideo { writeImageMeta(date: item.date, caption: item.caption, to: dest) }
         setFileDate(dest, item.date)     // set the post date as the item's capture/file date
         return (true, item.isVideo, item.id, dest.path, item.caption)
