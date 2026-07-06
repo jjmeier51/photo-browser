@@ -96,6 +96,7 @@ enum LinkDownloadService {
         if !failStatuses.isEmpty {
             diag += "; fail: " + failStatuses.sorted { $0.value > $1.value }
                 .map { "\(statusLabel($0.key))×\($0.value)" }.joined(separator: ", ")
+            if let u = items.first?.url { diag += "; url: \(String(u.prefix(110)))" }   // show what we hit
         }
         let prefix: String
         if result.downloaded == 0 { prefix = "Couldn’t download any files (the host may be blocking access or the link may have expired). " }
