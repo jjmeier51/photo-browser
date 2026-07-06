@@ -264,19 +264,23 @@ enum LinkDownloadService {
                     }
                 }
             }
+            // Page markers, for a definitive diagnostic if things come up short.
+            var seen = Set<String>()
+            let slugs = matches(html, "/f/([A-Za-z0-9]{4,})").compactMap { $0.count > 1 ? $0[1] : nil }.filter { seen.insert($0).inserted }
+            let marks = "html \(html.count) chars, albumFiles: \(html.contains("albumFiles") ? "y" : "n"), /f/: \(slugs.count), NEXT_DATA: \(html.contains("__NEXT_DATA__") ? "y" : "n")"
+
             if !ids.isEmpty {
                 let items = await bunkrResolveAll(ids)
-                return (items, title, items.isEmpty ? "[bunkr] found \(ids.count) files but the CDN wouldn’t serve them." : nil)
+                if !items.isEmpty { return (items, title, nil) }
+                return ([], title, "[bunkr] \(ids.count) files listed but the CDN resolver returned nothing (\(marks)).")
             }
-            // Fallback: resolve each /f/ file page directly.
-            var seen = Set<String>()
-            let slugs = matches(html, "href=\"(?:https?://[^\"/]+)?/f/([^\"?#]+)\"").compactMap { $0.count > 1 ? $0[1] : nil }.filter { seen.insert($0).inserted }
+            // Fallback: resolve each /f/ file page directly (broad slug scrape — any context).
             if !slugs.isEmpty {
                 let items = await bunkrResolveSlugs(slugs, origin: origin)
-                return (items, title, items.isEmpty ? "[bunkr] found \(slugs.count) file pages but couldn’t resolve them." : nil)
+                if !items.isEmpty { return (items, title, nil) }
+                return ([], title, "[bunkr] \(slugs.count) file page(s) found but none resolved (\(marks)).")
             }
-            let af = html.contains("albumFiles")
-            return ([], title, "[bunkr] no file list found (html \(html.count) chars, albumFiles: \(af ? "yes" : "no"), /f/ links: \(matches(html, "/f/([^\"?#]+)").count)).")
+            return ([], title, "[bunkr] no file list found (\(marks)).")
         }
         // Single file page.
         let single = await bunkrResolveSlugs([firstMatch(link, "/f/([^/?#]+)") ?? link], origin: origin)
