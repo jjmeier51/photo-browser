@@ -98,6 +98,7 @@ enum LinkDownloadService {
                 .map { "\(statusLabel($0.key))×\($0.value)" }.joined(separator: ", ")
             if let u = items.first?.url { diag += "; url: \(String(u.prefix(110)))" }   // show what we hit
             if let c = items.first?.cookie { diag += "; ddg: y(\(c.count))" } else if host.contains("bunkr") || host.contains("cdn.cr") { diag += "; ddg: n" }
+            if host.contains("bunkr"), let r = items.first?.referer, let rh = URL(string: r)?.host { diag += "; ref: \(rh)" }
         }
         let prefix: String
         if result.downloaded == 0 { prefix = "Couldn’t download any files (the host may be blocking access or the link may have expired). " }
@@ -240,14 +241,16 @@ enum LinkDownloadService {
 
     // MARK: - bunkr family (album JSON + per-file CDN resolve)
 
-    /// Warms up bunkr's DDoS-Guard challenge in an offscreen WKWebView (so the CDN
-    /// grants the `__ddg*` session cookie) and attaches that cookie to every item.
-    /// The CDN (`*.cdn.cr`) 403s a plain request no matter the Referer; only a real
-    /// browser session gets through. Best-effort — if the challenge doesn't solve,
-    /// the items pass through unchanged and the download just tries without it.
+    /// Clears bunkr's download-hub protection so the CDN will serve. The CDN itself
+    /// (`*.cdn.cr`) hard-403s with no challenge — it's *referer-gated to
+    /// `get.bunkrr.su`*, which is the domain that actually runs DDoS-Guard. So we solve
+    /// the challenge on `get.bunkrr.su` in a visible browser, harvest its session cookie,
+    /// and send it (plus the get.bunkrr.su referer, already set on each item) with every
+    /// download. Best-effort — if it doesn't solve, downloads still try with the referer.
     nonisolated private static func attachBunkrCookie(_ items: [MediaItem]) async -> [MediaItem] {
-        guard let first = items.first else { return items }
-        let cookie = await BunkrSession.shared.cdnCookies(cdnURL: first.url, userAgent: userAgent)
+        guard !items.isEmpty else { return items }
+        let cookie = await BunkrSession.shared.warmCookies(
+            warmupURL: "https://get.bunkrr.su/", domains: ["bunkrr.su", "cdn.cr"], userAgent: userAgent)
         guard !cookie.isEmpty else { return items }
         return items.map { MediaItem(url: $0.url, filename: $0.filename, referer: $0.referer, cookie: cookie) }
     }
@@ -369,9 +372,12 @@ enum LinkDownloadService {
         guard url.hasPrefix("http") else { return nil }
         // Bunkr serves a placeholder when a file is down — don't save the maintenance clip.
         if url.hasSuffix("/maint.mp4") || url.hasSuffix("/maintenance-vid.mp4") { return nil }
-        // The CDN hotlink-checks the Referer against the file's page (bunkr.cr/f/{slug}) —
-        // a bare domain or the wrong host 403s.
-        return MediaItem(url: url, filename: name, referer: referer)
+        // The CDN hotlink-checks the Referer against **get.bunkrr.su** (bunkr's download
+        // hub — the origin the apidl call itself uses), not the bunkr.cr file page. A
+        // direct hit or the file-page referer 403s ("Angie" server, no challenge). The
+        // `referer` arg (the file page) is kept only for diagnostics/back-compat.
+        _ = referer
+        return MediaItem(url: url, filename: name, referer: "https://get.bunkrr.su/")
     }
 
     /// Extracts the first balanced `[ … ]` array assigned to `marker` in `html`
