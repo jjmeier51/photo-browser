@@ -1,7 +1,5 @@
 import Foundation
 import ImageIO
-import UniformTypeIdentifiers
-import CoreLocation
 import WebKit
 
 /// Per-folder record for a downloaded Facebook profile (drives "Get New Facebook
@@ -38,14 +36,24 @@ enum FacebookAuth {
 }
 
 /// Downloads a Facebook profile's photos/videos (uploaded, profile pictures, and
-/// tagged) using the user's own logged-in session, via Facebook's lightweight
-/// `mbasic` HTML site (the GraphQL API needs per-session fb_dtsg/lsd tokens and is
-/// heavily obfuscated). Best-effort and download-only, like the Instagram/MEGA
-/// features — Facebook actively fights scraping, so HTML parsing is defensive and
-/// failures are surfaced as notes. All `nonisolated`: networking + parsing + writes.
+/// tagged) using the user's own logged-in session, by parsing the **JSON that
+/// www.facebook.com embeds in its pages** — the approach maintained scrapers use
+/// since Facebook retired the old `mbasic` HTML site. Media sets are walked photo
+/// by photo via each page's "next media" pointer (no GraphQL doc_ids to go stale),
+/// and every photo page hands us the full-resolution URL, the exact `created_time`,
+/// and the caption. Best-effort and download-only, like the Instagram/MEGA
+/// features — Facebook actively fights scraping, so parsing is defensive, failures
+/// are surfaced as notes, and a login wall is reported as exactly that.
+/// All `nonisolated`: networking + parsing + writes.
 enum FacebookService {
     struct Credentials: Sendable { let cookie: String }
-    struct Profile: Sendable { let id: String; let name: String; let url: String; let picURL: String }
+    struct Profile: Sendable {
+        let id: String              // numeric when resolvable (tagged set needs it)
+        let vanity: String?         // username path component, when the URL has one
+        let name: String
+        let url: String
+        let picURL: String
+    }
     struct Progress: Sendable { var phase: String; var fraction: Double; var done: Int; var total: Int }
     struct DownloadResult: Sendable {
         var photos = 0, videos = 0, failed = 0
@@ -57,12 +65,19 @@ enum FacebookService {
         var note: String?
     }
 
-    /// A photo/video page to fetch the full media + metadata from.
-    private struct Ref: Sendable, Hashable { let id: String; let isVideo: Bool; let page: String }
+    /// One discovered media item: id + direct full-res URL + metadata, ready to download.
+    private struct Item: Sendable {
+        let id: String
+        let isVideo: Bool
+        let url: String
+        let caption: String
+        let date: Date?
+    }
 
-    nonisolated static let host = "https://mbasic.facebook.com/"
-    // A basic UA so Facebook serves the simple mbasic HTML rather than the JS app.
-    nonisolated static let userAgent = "Mozilla/5.0 (Linux; Android 7.0; SM-G930V) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0 Mobile Safari/537.36"
+    nonisolated static let host = "https://www.facebook.com/"
+    // Desktop Safari: www serves full pages (with the embedded JSON we parse) to a
+    // desktop browser; mobile UAs get shunted to the JS-only app shell.
+    nonisolated static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
 
     nonisolated static let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
@@ -84,37 +99,43 @@ enum FacebookService {
             return result
         }
         result.profile = profile
-        result.profilePic = await downloadData(profile.picURL, creds: creds)
+        if !profile.picURL.isEmpty { result.profilePic = await downloadData(profile.picURL, creds: creds) }
 
-        // Collect photo/video page references from the profile's sections.
-        var refs: [Ref] = []; var seen = Set<String>()
-        func gather(_ list: [Ref], phase: String) {
-            progress(Progress(phase: phase, fraction: 0, done: refs.count, total: 0))
-            for r in list where seen.insert(r.id).inserted && !alreadyDownloaded.contains(r.id) { refs.append(r) }
+        // Discover media: the profile's own photos, tagged photos, and videos.
+        var items: [Item] = []; var seen = Set<String>()
+        var loginWall = false
+        func add(_ found: (items: [Item], loginWall: Bool)) {
+            loginWall = loginWall || found.loginWall
+            for i in found.items where seen.insert(i.id).inserted && !alreadyDownloaded.contains(i.id) {
+                items.append(i)
+            }
         }
-        gather(await collect(path: "\(profile.id)/photos", creds: creds, isVideo: false), phase: "Finding uploaded photos…")
-        gather(await collect(path: "profile.php?id=\(profile.id)&v=photos", creds: creds, isVideo: false), phase: "Finding photos…")
-        gather(await collect(path: "\(profile.id)/photos_of", creds: creds, isVideo: false), phase: "Finding tagged photos…")
-        gather(await collect(path: "\(profile.id)/videos", creds: creds, isVideo: true), phase: "Finding videos…")
+        add(await collectPhotos(profile, tab: "photos_by", fallbackToken: "pb.\(profile.id).-2207520000",
+                                skip: alreadyDownloaded, creds: creds, progress: progress, phase: "Finding photos"))
+        add(await collectPhotos(profile, tab: "photos_of", fallbackToken: "t.\(profile.id)",
+                                skip: alreadyDownloaded, creds: creds, progress: progress, phase: "Finding tagged photos"))
+        add(await collectVideos(profile, skip: alreadyDownloaded, creds: creds, progress: progress))
 
-        guard !refs.isEmpty else {
-            result.note = alreadyDownloaded.isEmpty
-                ? "No downloadable photos or videos found (Facebook may be blocking access)."
-                : "No new photos or videos."
+        guard !items.isEmpty else {
+            result.note = loginWall
+                ? "Facebook asked for a fresh login. Tap “Log in to Facebook”, sign in again, and retry."
+                : (alreadyDownloaded.isEmpty
+                    ? "No downloadable photos or videos found (the profile may be private, empty, or Facebook may be blocking access)."
+                    : "No new photos or videos.")
             return result
         }
 
-        // Fetch each item's full media + metadata, then download.
-        let total = refs.count
+        // Download the discovered media concurrently.
+        let total = items.count
         var done = 0
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         await withTaskGroup(of: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String).self) { group in
             var idx = 0
             let maxConcurrent = 5
             func addNext() {
-                guard idx < refs.count else { return }
-                let ref = refs[idx]; idx += 1
-                group.addTask { await fetchAndDownload(ref, into: folder, poster: profile.name, creds: creds) }
+                guard idx < items.count else { return }
+                let item = items[idx]; idx += 1
+                group.addTask { await download(item, into: folder, poster: profile.name, creds: creds) }
             }
             for _ in 0..<min(maxConcurrent, total) { addNext() }
             while let r = await group.next() {
@@ -140,142 +161,203 @@ enum FacebookService {
 
     // MARK: - Profile
 
-    /// Resolves a profile/share URL to its id, name, and picture. Share links
-    /// (`facebook.com/share/…`) only redirect on the real mobile site, so we follow
-    /// the link there first to learn the canonical profile, then read its details
-    /// from mbasic.
+    /// Resolves a profile/share URL to its id, vanity name, display name, and picture,
+    /// from the www page's stable markers (`fb://` deep-link metas, `og:` metas).
     nonisolated static func resolveProfile(_ profileURL: String, creds: Credentials) async -> Profile? {
-        // 1. Follow the link on m.facebook.com (handles /share/ redirects); capture
-        //    where it lands.
         var start = profileURL.trimmingCharacters(in: .whitespaces)
-        if !start.hasPrefix("http") { start = "https://m.facebook.com/" + start.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
-        start = start.replacingOccurrences(of: "www.facebook.com", with: "m.facebook.com")
-        guard let (firstHTML, finalURL) = await fetchHTML(start, creds: creds) else { return nil }
+        if !start.hasPrefix("http") { start = host + start.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+        for m in ["m.facebook.com", "mbasic.facebook.com", "web.facebook.com", "touch.facebook.com"] {
+            start = start.replacingOccurrences(of: m, with: "www.facebook.com")
+        }
+        guard let (html, finalURL) = await fetchHTML(start, creds: creds), !looksLikeLogin(html, finalURL) else { return nil }
 
-        // 2. Identify the profile by numeric id (from the redirected URL or page) or by
-        //    vanity username (from the URL path).
-        let pid = matches(finalURL, "[?&]id=(\\d{6,})").first?[1]
-            ?? matches(finalURL, "facebook\\.com/(\\d{8,})").first?[1]
-            ?? matches(firstHTML, "\"(?:userID|owner_id|profile_id)\":\"?(\\d{6,})").first?[1]
-        let username = vanityName(from: finalURL)
-        guard pid != nil || username != nil else { return nil }
+        // Numeric id: the fb:// app deep-link metas are the most stable marker; the
+        // embedded-JSON owner fields cover profiles those metas are missing on.
+        // ("userID" is deliberately NOT used — it's the *viewer's* id.)
+        let pid = firstMatch(html, "fb://profile/(\\d+)")
+            ?? firstMatch(html, "fb://page/\\?id=(\\d+)")
+            ?? firstMatch(html, "\"delegate_page\":\\{\"id\":\"(\\d+)\"")
+            ?? firstMatch(html, "\"owner\":\\{\"__typename\":\"(?:User|Page)\",\"id\":\"(\\d+)\"")
+            ?? firstMatch(html, "\"profile_id\":\"?(\\d{6,})")
+            ?? firstMatch(finalURL, "[?&]id=(\\d{6,})")
+        let vanity = vanityName(from: finalURL)
+        guard pid != nil || vanity != nil else { return nil }
 
-        // 3. Read name + picture (+ confirm the id) from the mbasic profile page.
-        let profilePath = pid.map { "profile.php?id=\($0)" } ?? (username ?? "")
-        let html = await fetchHTML(host + profilePath, creds: creds)?.html ?? firstHTML
-        let id = pid
-            ?? firstMatch(html, "owner_id=(\\d{6,})")
-            ?? firstMatch(html, "[?&]id=(\\d{6,})")
-            ?? username ?? ""
-        let name = firstMatch(html, "<title>([^<]+)</title>").map(decode)
-            ?? firstMatch(firstHTML, "<title>([^<]+)</title>").map(decode)
+        let name = meta(html, "og:title").map(decode)
+            ?? firstMatch(html, "<title>([^<]+)</title>").map(decode)
             ?? "Facebook Profile"
-        let pic = firstMatch(html, "<img[^>]+src=\"(https://[^\"]*scontent[^\"]+)\"").map(decode)
-            ?? firstMatch(firstHTML, "<img[^>]+src=\"(https://[^\"]*scontent[^\"]+)\"").map(decode) ?? ""
-        return Profile(id: id, name: cleanName(name), url: finalURL, picURL: pic)
+        let pic = meta(html, "og:image").map(decode) ?? ""
+        return Profile(id: pid ?? vanity ?? "", vanity: vanity, name: cleanName(name), url: finalURL, picURL: pic)
+    }
+
+    /// `<meta property="og:…" content="…">`, either attribute order.
+    nonisolated private static func meta(_ html: String, _ property: String) -> String? {
+        firstMatch(html, "<meta[^>]+property=\"\(property)\"[^>]+content=\"([^\"]+)\"")
+            ?? firstMatch(html, "<meta[^>]+content=\"([^\"]+)\"[^>]+property=\"\(property)\"")
     }
 
     nonisolated private static func vanityName(from url: String) -> String? {
         guard let comps = URLComponents(string: url), let host = comps.host, host.contains("facebook.com") else { return nil }
         let path = comps.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let first = path.split(separator: "/").first.map(String.init) ?? ""
-        let reserved = ["profile.php", "photo.php", "story.php", "share", "people", "pages", "watch", ""]
+        let reserved = ["profile.php", "photo.php", "photo", "story.php", "share", "people", "pages", "watch", "media", "login", ""]
         return reserved.contains(first) ? nil : first
     }
 
     nonisolated private static func cleanName(_ s: String) -> String {
-        s.replacingOccurrences(of: " | Facebook", with: "")
-            .replacingOccurrences(of: "Facebook", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var name = s
+        for junk in [" | Facebook", "| Facebook", "Facebook"] { name = name.replacingOccurrences(of: junk, with: "") }
+        name = name.replacingOccurrences(of: "^\\(\\d+\\)\\s*", with: "", options: .regularExpression)   // "(3) Name" unread badge
+        return name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    // MARK: - Collecting media references
+    // MARK: - Collecting media
 
-    /// Walks a section (uploaded/tagged/videos), following mbasic's "see more"
-    /// pagination, and returns photo/video page references.
-    nonisolated private static func collect(path: String, creds: Credentials, isVideo: Bool, maxPages: Int = 40) async -> [Ref] {
-        var out: [Ref] = []; var seen = Set<String>()
-        var next: String? = path
-        var pages = 0
-        while let p = next, pages < maxPages {
-            pages += 1
-            guard let (html, _) = await fetchHTML(p.hasPrefix("http") ? p : host + p, creds: creds) else { break }
-            // Photo links carry an fbid (photo.php?fbid=…, /…/photos/…/PID, etc.); video
-            // links go through /…/videos/PID. Match the id wherever it appears in the href.
-            let pat = isVideo ? "href=\"(/[^\"]*?/videos/(\\d+)[^\"]*)\""
-                              : "href=\"(/[^\"]*?(?:fbid=|/photos/[^\"]*?/)(\\d{6,})[^\"]*)\""
-            for g in matches(html, pat) {
-                let id = g[2]
-                guard seen.insert(id).inserted else { continue }
-                out.append(Ref(id: id, isVideo: isVideo, page: decode(g[1])))
+    /// The profile's photo tab (`photos_by` = uploads, `photos_of` = tagged) names a
+    /// media-set token; the set is then walked photo by photo. When the tab won't
+    /// reveal a token the classic constructed token is tried — worst case the walk
+    /// finds no first photo and returns empty.
+    nonisolated private static func collectPhotos(_ profile: Profile, tab: String, fallbackToken: String,
+                                                  skip: Set<String>, creds: Credentials,
+                                                  progress: @escaping @Sendable (Progress) -> Void,
+                                                  phase: String) async -> (items: [Item], loginWall: Bool) {
+        progress(Progress(phase: "\(phase)…", fraction: 0, done: 0, total: 0))
+        var token = fallbackToken
+        var firstID: String?
+        if let (html, finalURL) = await fetchHTML(host + tabPath(profile, tab), creds: creds) {
+            if looksLikeLogin(html, finalURL) { return ([], true) }
+            if let t = firstMatch(html, "\"media_?set_?token\":\"([^\"]+)\"")
+                ?? firstMatch(html, "set=((?:a|pb|t)\\.[0-9A-Za-z%.\\-]+)") {
+                token = decode(t)
             }
-            // Pagination: an anchor whose text is "See more" / "Show more" or a cursor link.
-            next = firstMatch(html, "href=\"(/[^\"]*(?:cursor|more|pages/?)[^\"]*)\"[^>]*>\\s*(?:See [Mm]ore|Show more|More)")
-                ?? firstMatch(html, "href=\"([^\"]*&cursor=[^\"]+)\"")
-            if let n = next, seen.contains(n) { break } else if let n = next { seen.insert(n) }
+            firstID = firstPhotoID(html)
         }
-        return out
+        return await walkSet(token, firstID: firstID, skip: skip, creds: creds, progress: progress, phase: phase)
     }
 
-    // MARK: - Per-item fetch + download
-
-    nonisolated private static func fetchAndDownload(_ ref: Ref, into folder: URL, poster: String,
-                                                     creds: Credentials) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
-        guard let (html, _) = await fetchHTML(ref.page.hasPrefix("http") ? ref.page : host + ref.page, creds: creds) else {
-            return (false, ref.isVideo, ref.id, nil, "")
+    /// Walks a media set photo by photo: each photo page embeds the full-res image
+    /// URL, caption, exact post time, **and the id of the next photo** — so
+    /// pagination needs no volatile GraphQL doc_ids. Newest-first: on a "Get New"
+    /// run the walk stops after a stretch of already-downloaded ids.
+    nonisolated private static func walkSet(_ token: String, firstID: String?, skip: Set<String>,
+                                            creds: Credentials,
+                                            progress: @escaping @Sendable (Progress) -> Void,
+                                            phase: String, maxItems: Int = 2000) async -> (items: [Item], loginWall: Bool) {
+        var nextID = firstID
+        if nextID == nil {
+            guard let (html, finalURL) = await fetchHTML(host + "media/set/?set=\(token)", creds: creds) else { return ([], false) }
+            if looksLikeLogin(html, finalURL) { return ([], true) }
+            nextID = firstPhotoID(html)
         }
-        // Highest-quality media URL: the "View full size" link for photos, the source
-        // for videos. Several fallbacks because mbasic markup varies.
-        let mediaURL: String?
-        if ref.isVideo {
-            mediaURL = firstMatch(html, "<source[^>]+src=\"([^\"]+)\"").map(decode)
-                ?? firstMatch(html, "href=\"(https://[^\"]+\\.mp4[^\"]*)\"").map(decode)
-        } else {
-            mediaURL = firstMatch(html, "href=\"(https://[^\"]*scontent[^\"]+)\"[^>]*>\\s*View full size").map(decode)
-                ?? firstMatch(html, "<a[^>]+href=\"(https://[^\"]*scontent[^\"]+\\.(?:jpg|jpeg|png|webp)[^\"]*)\"").map(decode)
-                ?? firstMatch(html, "<img[^>]+src=\"(https://[^\"]*scontent[^\"]+)\"").map(decode)
-        }
-        guard let urlString = mediaURL, let data = await downloadData(urlString, creds: creds), data.count >= 512 else {
-            return (false, ref.isVideo, ref.id, nil, "")
-        }
-        let caption = decode(firstMatch(html, "<div[^>]*>([^<]{3,400})</div>\\s*</div>\\s*<[^>]*>\\s*(?:Like|Comment)") ?? "")
-        let date = parsePostDate(html)
-        let coord = parsePlace(html)
-
-        let ext = ref.isVideo ? "mp4" : "jpg"
-        let dest = uniqueDestination("FB_\(ref.id).\(ext)", in: folder)
-        guard (try? data.write(to: dest, options: .atomic)) != nil else { return (false, ref.isVideo, ref.id, nil, "") }
-        if ref.isVideo {
-            setFileDate(dest, date)
-        } else {
-            writeImageMeta(date: date, caption: caption, poster: poster, lat: coord?.lat, lng: coord?.lng, to: dest)
-            setFileDate(dest, date)
-        }
-        return (true, ref.isVideo, ref.id, dest.path, caption)
-    }
-
-    /// Post date: an absolute date in the page, else nil (so the caller keeps EXIF /
-    /// sets the file date). mbasic shows dates like "June 5, 2026" or "5 June 2026".
-    nonisolated private static func parsePostDate(_ html: String) -> Date? {
-        let text = stripTags(html)
-        let formats = ["MMMM d, yyyy", "d MMMM yyyy", "MMM d, yyyy", "yyyy-MM-dd"]
-        for pat in ["([A-Z][a-z]+ \\d{1,2}, \\d{4})", "(\\d{1,2} [A-Z][a-z]+ \\d{4})", "(\\d{4}-\\d{2}-\\d{2})"] {
-            for g in matches(text, pat) {
-                for fmt in formats {
-                    let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = fmt
-                    if let d = f.date(from: g[1]) { return d }
+        var out: [Item] = []; var visited = Set<String>()
+        var knownStreak = 0
+        while let id = nextID, visited.count < maxItems, visited.insert(id).inserted {
+            guard let (html, finalURL) = await fetchHTML(host + "photo/?fbid=\(id)&set=\(token)", creds: creds) else { break }
+            if looksLikeLogin(html, finalURL) { return (out, true) }
+            if skip.contains(id) {
+                knownStreak += 1
+                if knownStreak >= 30 { break }               // deep into already-downloaded territory
+            } else {
+                knownStreak = 0
+                if let url = firstJSONString(html, "\"image\":\\{\"uri\":") {
+                    out.append(Item(id: id, isVideo: false, url: url,
+                                    caption: photoCaption(html), date: createdTime(html)))
+                    if out.count % 5 == 0 {
+                        progress(Progress(phase: "\(phase)… \(out.count)", fraction: 0, done: out.count, total: 0))
+                    }
                 }
             }
+            nextID = firstMatch(html, "\"nextMediaAfterNodeId\":\\{\"__typename\":\"Photo\",\"id\":\"(\\d+)\"")
+                ?? firstMatch(html, "\"nextMedia\":\\{\"edges\":\\[\\{\"node\":\\{\"__typename\":\"Photo\",\"id\":\"(\\d+)\"")
+            try? await Task.sleep(nanoseconds: 120_000_000)   // stay gentle; FB rate-limits aggressively
         }
-        return nil
+        return (out, false)
     }
 
-    nonisolated private static func parsePlace(_ html: String) -> (lat: Double, lng: Double)? { nil }   // best-effort: not in mbasic
+    /// The videos tab lists permalinks; each watch page embeds direct HD/SD URLs.
+    nonisolated private static func collectVideos(_ profile: Profile, skip: Set<String>, creds: Credentials,
+                                                  progress: @escaping @Sendable (Progress) -> Void) async -> (items: [Item], loginWall: Bool) {
+        progress(Progress(phase: "Finding videos…", fraction: 0, done: 0, total: 0))
+        guard let (html, finalURL) = await fetchHTML(host + tabPath(profile, "videos"), creds: creds) else { return ([], false) }
+        if looksLikeLogin(html, finalURL) { return ([], true) }
+        var ids: [String] = []; var seen = Set<String>()
+        for g in matches(html, "videos\\\\?/(\\d{8,})") where seen.insert(g[1]).inserted { ids.append(g[1]) }
+        for g in matches(html, "\"video_?id\":\"(\\d{8,})\"") where seen.insert(g[1]).inserted { ids.append(g[1]) }
+
+        var out: [Item] = []
+        for id in ids where !skip.contains(id) {
+            guard let (page, pageURL) = await fetchHTML(host + "watch/?v=\(id)", creds: creds) else { continue }
+            if looksLikeLogin(page, pageURL) { return (out, true) }
+            guard let url = firstJSONString(page, "\"browser_native_hd_url\":")
+                ?? firstJSONString(page, "\"playable_url_quality_hd\":")
+                ?? firstJSONString(page, "\"browser_native_sd_url\":")
+                ?? firstJSONString(page, "\"playable_url\":") else { continue }
+            out.append(Item(id: id, isVideo: true, url: url, caption: photoCaption(page), date: createdTime(page)))
+            progress(Progress(phase: "Finding videos… \(out.count)", fraction: 0, done: out.count, total: 0))
+            try? await Task.sleep(nanoseconds: 120_000_000)
+        }
+        return (out, false)
+    }
+
+    nonisolated private static func tabPath(_ profile: Profile, _ tab: String) -> String {
+        if let v = profile.vanity { return "\(v)/\(tab)" }
+        return "profile.php?id=\(profile.id)&sk=\(tab)"
+    }
+
+    // MARK: - Page parsing
+
+    nonisolated private static func firstPhotoID(_ html: String) -> String? {
+        firstMatch(html, "\\{\"__typename\":\"Photo\",\"id\":\"(\\d+)\"")
+            ?? firstMatch(html, "\"__isMedia\":\"Photo\"[^{}]*?\"id\":\"(\\d+)\"")
+            ?? firstMatch(html, "fbid=(\\d{6,})")
+    }
+
+    /// The post text: the first `"message":{…"text":"…"}` blob (the post's own
+    /// message comes before comments in the payload).
+    nonisolated private static func photoCaption(_ html: String) -> String {
+        guard let raw = firstMatch(html, "\"message\":\\{[^{}]*?\"text\":\"((?:[^\"\\\\]|\\\\.)*)\"") else { return "" }
+        let text = unescapeJSON(raw)
+        return text.count > 800 ? String(text.prefix(800)) : text
+    }
+
+    nonisolated private static func createdTime(_ html: String) -> Date? {
+        guard let s = firstMatch(html, "\"(?:created_time|creation_time|publish_time)\":(\\d{9,11})"),
+              let t = TimeInterval(s) else { return nil }
+        return Date(timeIntervalSince1970: t)
+    }
+
+    /// Extracts the JSON string value following `prefixPattern` (e.g. `"image":{"uri":`)
+    /// and fully unescapes it (`\/`, `\uXXXX`, …).
+    nonisolated private static func firstJSONString(_ html: String, _ prefixPattern: String) -> String? {
+        firstMatch(html, prefixPattern + "\"((?:[^\"\\\\]|\\\\.)+)\"").map(unescapeJSON)
+    }
+
+    // MARK: - Per-item download
+
+    nonisolated private static func download(_ item: Item, into folder: URL, poster: String,
+                                             creds: Credentials) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
+        guard let data = await downloadData(item.url, creds: creds), data.count >= 512 else {
+            return (false, item.isVideo, item.id, nil, "")
+        }
+        let ext = item.isVideo ? "mp4" : imageExt(of: item.url)
+        let dest = uniqueDestination("FB_\(item.id).\(ext)", in: folder)
+        guard (try? data.write(to: dest, options: .atomic)) != nil else { return (false, item.isVideo, item.id, nil, "") }
+        if !item.isVideo {
+            writeImageMeta(date: item.date, caption: item.caption, poster: poster, to: dest)
+        }
+        setFileDate(dest, item.date)
+        return (true, item.isVideo, item.id, dest.path, item.caption)
+    }
+
+    nonisolated private static func imageExt(of urlString: String) -> String {
+        let path = URLComponents(string: urlString)?.path.lowercased() ?? ""
+        for ext in ["jpg", "jpeg", "png", "webp", "gif", "heic"] where path.hasSuffix("." + ext) { return ext == "jpeg" ? "jpg" : ext }
+        return "jpg"
+    }
 
     // MARK: - Metadata writing
 
-    nonisolated private static func writeImageMeta(date: Date?, caption: String, poster: String,
-                                                   lat: Double?, lng: Double?, to url: URL) {
+    nonisolated private static func writeImageMeta(date: Date?, caption: String, poster: String, to url: URL) {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
               let type = CGImageSourceGetType(src) else { return }
         var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
@@ -295,12 +377,6 @@ enum FacebookService {
         if !caption.isEmpty { iptc[kCGImagePropertyIPTCCaptionAbstract] = caption }
         if !poster.isEmpty { iptc[kCGImagePropertyIPTCByline] = poster }
         props[kCGImagePropertyIPTCDictionary] = iptc
-        if let lat, let lng {
-            props[kCGImagePropertyGPSDictionary] = [
-                kCGImagePropertyGPSLatitude: abs(lat), kCGImagePropertyGPSLatitudeRef: lat >= 0 ? "N" : "S",
-                kCGImagePropertyGPSLongitude: abs(lng), kCGImagePropertyGPSLongitudeRef: lng >= 0 ? "E" : "W"
-            ] as [CFString: Any]
-        }
         let tmp = url.deletingLastPathComponent().appendingPathComponent(".fbmeta_\(UUID().uuidString).\(url.pathExtension)")
         guard let dst = CGImageDestinationCreateWithURL(tmp as CFURL, type, 1, nil) else { return }
         CGImageDestinationAddImageFromSource(dst, src, 0, props as CFDictionary)
@@ -324,11 +400,27 @@ enum FacebookService {
         return req
     }
 
-    nonisolated private static func fetchHTML(_ urlString: String, creds: Credentials) async -> (html: String, finalURL: String)? {
+    /// Fetches a page, following one JavaScript `window.location.replace` hop —
+    /// www answers many requests (canonical-case, share links) with a tiny JS
+    /// redirect stub instead of an HTTP redirect.
+    nonisolated private static func fetchHTML(_ urlString: String, creds: Credentials, hops: Int = 1) async -> (html: String, finalURL: String)? {
         guard let url = URL(string: urlString) else { return nil }
         guard let (data, resp) = try? await session.data(for: request(url, creds: creds, html: true)),
+              (resp as? HTTPURLResponse).map({ $0.statusCode < 400 }) ?? true,
               let s = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else { return nil }
-        return (s, resp.url?.absoluteString ?? urlString)
+        let finalURL = resp.url?.absoluteString ?? urlString
+        if hops > 0, s.count < 4096,
+           let target = firstMatch(s, "window\\.location\\.replace\\(\"((?:[^\"\\\\]|\\\\.)+)\"\\)").map(unescapeJSON),
+           target.hasPrefix("https://"), target != finalURL {
+            return await fetchHTML(target, creds: creds, hops: hops - 1)
+        }
+        return (s, finalURL)
+    }
+
+    /// True when Facebook answered with a login wall instead of the page.
+    nonisolated private static func looksLikeLogin(_ html: String, _ finalURL: String) -> Bool {
+        if finalURL.contains("/login") || finalURL.contains("login_via") || finalURL.contains("/checkpoint") { return true }
+        return html.contains("id=\"login_form\"") || html.contains("name=\"login\"") && html.contains("name=\"pass\"")
     }
 
     nonisolated private static func downloadData(_ urlString: String, creds: Credentials) async -> Data? {
@@ -353,9 +445,13 @@ enum FacebookService {
         let m = matches(s, pattern).first
         return (m?.count ?? 0) > 1 ? m?[1] : nil
     }
-    nonisolated private static func stripTags(_ s: String) -> String {
-        (try? NSRegularExpression(pattern: "<[^>]+>"))
-            .map { $0.stringByReplacingMatches(in: s, range: NSRange(location: 0, length: (s as NSString).length), withTemplate: " ") } ?? s
+    /// Unescapes a raw JSON string body (`\/`, `\uXXXX` incl. surrogate pairs, `\n`, …).
+    nonisolated private static func unescapeJSON(_ s: String) -> String {
+        if let data = "\"\(s)\"".data(using: .utf8),
+           let decoded = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? String {
+            return decoded
+        }
+        return decode(s)
     }
     nonisolated private static func decode(_ s: String) -> String {
         s.replacingOccurrences(of: "&amp;", with: "&")

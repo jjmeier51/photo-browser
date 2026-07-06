@@ -2,6 +2,18 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-06
+
+- **Facebook downloader works again** — rebuilt on www.facebook.com's embedded JSON after
+  Facebook retired the `mbasic` HTML site the old scraper depended on (every request there now
+  hits a login interstitial, which is why downloads found nothing). Media sets are walked photo
+  by photo via each page's "next media" pointer (no volatile GraphQL doc_ids), which also brings
+  real improvements: full-resolution originals, exact post timestamps from `created_time`
+  (previously fuzzy text parsing), cleaner captions, an early stop for "Get New" runs once it
+  hits a stretch of already-downloaded items, and a login-wall detector so an expired session
+  says "log in again" instead of "no photos found". Also fixes the profile resolver matching
+  `"userID"` — the *viewer's* id, not the profile's.
+
 ## 2026-07-05
 
 - **Editor save choices** — saving now offers Overwrite Existing Photo / Overwrite + 2× AI

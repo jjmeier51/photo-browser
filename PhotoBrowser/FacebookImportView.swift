@@ -203,7 +203,8 @@ private struct FBWebView: UIViewRepresentable {
         cfg.websiteDataStore = .default()
         let web = WKWebView(frame: .zero, configuration: cfg)
         web.navigationDelegate = context.coordinator
-        web.customUserAgent = FacebookService.userAgent
+        // System (mobile) UA: the login page renders phone-sized, and the captured
+        // cookies are UA-independent — the service then uses them with a desktop UA.
         if let url = URL(string: "https://m.facebook.com/login/") { web.load(URLRequest(url: url)) }
         return web
     }
