@@ -251,22 +251,23 @@ enum LinkDownloadService {
                 return ([], nil, "[bunkr] blocked by Cloudflare — the page needs a browser to load.")
             }
             let title = firstMatch(html, "<h1[^>]*>\\s*([^<]+?)\\s*</h1>").map(decodeEntities)
-            var ids: [(id: String, name: String)] = []
+            var ids: [(id: String, name: String, slug: String)] = []
             let arrayText = balancedArray(in: html, after: "albumFiles")
             if let arrayText {
                 if let arr = (try? JSONSerialization.jsonObject(with: Data(arrayText.utf8))) as? [[String: Any]] {
-                    ids = arr.compactMap { f in idString(f["id"]).map { ($0, (f["original"] as? String) ?? (f["name"] as? String) ?? $0) } }
+                    ids = arr.compactMap { f in idString(f["id"]).map { ($0, (f["original"] as? String) ?? (f["name"] as? String) ?? $0, (f["slug"] as? String) ?? "") } }
                 }
                 if ids.isEmpty {
-                    // bunkr uses **unquoted** JS keys (id: 5.., original: "..") so it's
-                    // not JSON — pull id + original from each {…} object, tolerating
-                    // quoted keys too. `[,{\s]` anchors the key to a delimiter so "id"
-                    // inside another word (e.g. "video") can't false-match.
+                    // bunkr uses **unquoted** JS keys (id: 5.., original: "..", slug: "..")
+                    // so it's not JSON — pull id + original + slug from each {…} object,
+                    // tolerating quoted keys too. `[,{\s]` anchors the key to a delimiter
+                    // so "id" inside another word (e.g. "video") can't false-match.
                     for obj in matches(arrayText, "(\\{[^{}]*\\})").compactMap({ $0.count > 1 ? $0[1] : nil }) {
                         guard let id = firstMatch(obj, "[,{\\s]\"?id\"?\\s*:\\s*\"?(\\d+)") else { continue }
                         let name = firstMatch(obj, "[,{\\s]\"?original\"?\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
                             ?? firstMatch(obj, "[,{\\s]\"?name\"?\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"") ?? id
-                        ids.append((id, decodeEntities(name)))
+                        let slug = firstMatch(obj, "[,{\\s]\"?slug\"?\\s*:\\s*\"([^\"]+)\"") ?? ""
+                        ids.append((id, decodeEntities(name), slug))
                     }
                 }
             }
@@ -313,7 +314,7 @@ enum LinkDownloadService {
                         ?? firstMatch(html, "\"id\"\\s*:\\s*\"?(\\d{4,})") else { return nil }
                     let name = firstMatch(html, "<h1[^>]*>\\s*([^<]+?)\\s*</h1>").map(decodeEntities)
                         ?? URL(string: pageURL)?.lastPathComponent ?? id
-                    return await bunkrResolve(id, name: name, origin: origin)
+                    return await bunkrResolve(id, name: name, referer: pageURL)
                 }
             }
             for _ in 0..<min(maxConcurrent, slugs.count) { addNext() }
@@ -324,7 +325,7 @@ enum LinkDownloadService {
 
     /// Resolves each bunkr file id to a direct CDN URL via the `apidl` endpoint,
     /// concurrently. The endpoint may return the URL XOR-encrypted.
-    nonisolated private static func bunkrResolveAll(_ ids: [(id: String, name: String)], origin: String) async -> [MediaItem] {
+    nonisolated private static func bunkrResolveAll(_ ids: [(id: String, name: String, slug: String)], origin: String) async -> [MediaItem] {
         await withTaskGroup(of: MediaItem?.self) { group in
             var out: [MediaItem] = []
             var idx = 0
@@ -332,7 +333,9 @@ enum LinkDownloadService {
             func addNext() {
                 guard idx < ids.count else { return }
                 let entry = ids[idx]; idx += 1
-                group.addTask { await bunkrResolve(entry.id, name: entry.name, origin: origin) }
+                // The CDN hotlink-checks the Referer against the file's own page.
+                let ref = entry.slug.isEmpty ? "\(origin)/" : "\(origin)/f/\(entry.slug)"
+                group.addTask { await bunkrResolve(entry.id, name: entry.name, referer: ref) }
             }
             for _ in 0..<min(maxConcurrent, ids.count) { addNext() }
             while let r = await group.next() { if let r { out.append(r) }; addNext() }
@@ -340,7 +343,7 @@ enum LinkDownloadService {
         }
     }
 
-    nonisolated private static func bunkrResolve(_ id: String, name: String, origin: String) async -> MediaItem? {
+    nonisolated private static func bunkrResolve(_ id: String, name: String, referer: String) async -> MediaItem? {
         let body = try? JSONSerialization.data(withJSONObject: ["id": id])
         let headers = ["Referer": "https://get.bunkrr.su/file/\(id)", "Origin": "https://get.bunkrr.su",
                        "Content-Type": "application/json"]
@@ -353,9 +356,9 @@ enum LinkDownloadService {
         guard url.hasPrefix("http") else { return nil }
         // Bunkr serves a placeholder when a file is down — don't save the maintenance clip.
         if url.hasSuffix("/maint.mp4") || url.hasSuffix("/maintenance-vid.mp4") { return nil }
-        // The gigachad-cdn hotlink-checks the Referer against the site the album is on
-        // (bunkr.cr, not the old get.bunkrr.su) — a mismatch 403s every file.
-        return MediaItem(url: url, filename: name, referer: "\(origin)/")
+        // The CDN hotlink-checks the Referer against the file's page (bunkr.cr/f/{slug}) —
+        // a bare domain or the wrong host 403s.
+        return MediaItem(url: url, filename: name, referer: referer)
     }
 
     /// Extracts the first balanced `[ … ]` array assigned to `marker` in `html`
