@@ -346,8 +346,14 @@ enum LinkDownloadService {
     }
 
     nonisolated private static func bunkrResolve(_ id: String, name: String, referer: String) async -> MediaItem? {
+        // The CDN hotlink-checks the Referer against the file's own hub page —
+        // `get.bunkrr.su/file/{id}`, the *exact* referer the apidl call uses (matching
+        // gallery-dl's working extractor). A bare `get.bunkrr.su/`, the bunkr.cr file
+        // page, or a direct hit all 403 ("Angie" server, no challenge to solve).
+        let fileReferer = "https://get.bunkrr.su/file/\(id)"
+        _ = referer
         let body = try? JSONSerialization.data(withJSONObject: ["id": id])
-        let headers = ["Referer": "https://get.bunkrr.su/file/\(id)", "Origin": "https://get.bunkrr.su",
+        let headers = ["Referer": fileReferer, "Origin": "https://get.bunkrr.su",
                        "Content-Type": "application/json"]
         guard let json = await getJSON("https://apidl.bunkr.ru/api/_001_v2", method: "POST", body: body, headers: headers) as? [String: Any],
               let raw = json["url"] as? String else { return nil }
@@ -358,12 +364,7 @@ enum LinkDownloadService {
         guard url.hasPrefix("http") else { return nil }
         // Bunkr serves a placeholder when a file is down — don't save the maintenance clip.
         if url.hasSuffix("/maint.mp4") || url.hasSuffix("/maintenance-vid.mp4") { return nil }
-        // The CDN hotlink-checks the Referer against **get.bunkrr.su** (bunkr's download
-        // hub — the origin the apidl call itself uses), not the bunkr.cr file page. A
-        // direct hit or the file-page referer 403s ("Angie" server, no challenge). The
-        // `referer` arg (the file page) is kept only for diagnostics/back-compat.
-        _ = referer
-        return MediaItem(url: url, filename: name, referer: "https://get.bunkrr.su/")
+        return MediaItem(url: url, filename: name, referer: fileReferer)
     }
 
     /// Extracts the first balanced `[ … ]` array assigned to `marker` in `html`
