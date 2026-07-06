@@ -256,11 +256,15 @@ enum LinkDownloadService {
                 if let arr = (try? JSONSerialization.jsonObject(with: Data(arrayText.utf8))) as? [[String: Any]] {
                     ids = arr.compactMap { f in idString(f["id"]).map { ($0, (f["original"] as? String) ?? (f["name"] as? String) ?? $0) } }
                 }
-                if ids.isEmpty {        // non-strict JSON → pull id + name from each {…} object
+                if ids.isEmpty {
+                    // bunkr uses **unquoted** JS keys (id: 5.., original: "..") so it's
+                    // not JSON — pull id + original from each {…} object, tolerating
+                    // quoted keys too. `[,{\s]` anchors the key to a delimiter so "id"
+                    // inside another word (e.g. "video") can't false-match.
                     for obj in matches(arrayText, "(\\{[^{}]*\\})").compactMap({ $0.count > 1 ? $0[1] : nil }) {
-                        guard let id = firstMatch(obj, "\"id\"\\s*:\\s*\"?(\\d+)") else { continue }
-                        let name = firstMatch(obj, "\"original\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
-                            ?? firstMatch(obj, "\"name\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"") ?? id
+                        guard let id = firstMatch(obj, "[,{\\s]\"?id\"?\\s*:\\s*\"?(\\d+)") else { continue }
+                        let name = firstMatch(obj, "[,{\\s]\"?original\"?\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
+                            ?? firstMatch(obj, "[,{\\s]\"?name\"?\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"") ?? id
                         ids.append((id, decodeEntities(name)))
                     }
                 }
