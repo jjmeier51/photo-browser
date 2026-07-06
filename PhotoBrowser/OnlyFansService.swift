@@ -170,7 +170,7 @@ enum OnlyFansService {
         private(set) var hitLoginWall = false
         // Coverage counters (surfaced in the result note so missing media is diagnosable).
         private var postsScanned = 0, messagesScanned = 0, mediaSeen = 0
-        private var skipLocked = 0, skipAudio = 0, skipNoURL = 0
+        private var skipLocked = 0, skipAudio = 0, skipDRM = 0, skipHLS = 0, skipOther = 0
 
         init(already: Set<String>, continuation: AsyncStream<Item>.Continuation,
              progress: @escaping @Sendable (Progress) -> Void) {
@@ -187,9 +187,11 @@ enum OnlyFansService {
         func sawMedia() { mediaSeen += 1 }
         func skippedLocked() { skipLocked += 1 }
         func skippedAudio() { skipAudio += 1 }
-        func skippedNoURL() { skipNoURL += 1 }
+        func skippedDRM() { skipDRM += 1 }
+        func skippedHLS() { skipHLS += 1 }
+        func skippedOther() { skipOther += 1 }
         var diagnostics: String {
-            "posts \(postsScanned), msgs \(messagesScanned); media \(mediaSeen) → new \(foundCount), skipped \(skipLocked) locked / \(skipAudio) audio / \(skipNoURL) no-url"
+            "posts \(postsScanned), msgs \(messagesScanned); media \(mediaSeen) → new \(foundCount), skipped \(skipLocked) locked / \(skipAudio) audio / no-url: \(skipDRM) drm, \(skipHLS) hls, \(skipOther) other"
         }
         func loginWalled() { hitLoginWall = true }
         func discoveryFinished() { finding = false; continuation.finish(); report() }
@@ -389,7 +391,14 @@ enum OnlyFansService {
             // Video when the type says so, or when it carries video-only fields.
             let isVideo = type == "video" || type == "gif"
                 || (type != "photo" && (m["videoSources"] != nil || (m["source"] as? [String: Any])?["source"] != nil))
-            guard let url = mediaURL(m, isVideo: isVideo) else { await hub.skippedNoURL(); continue }
+            guard let url = mediaURL(m, isVideo: isVideo) else {
+                switch noURLReason(m) {                 // classify so we know what's unreachable
+                case .drm: await hub.skippedDRM()
+                case .hls: await hub.skippedHLS()
+                case .other: await hub.skippedOther()
+                }
+                continue
+            }
             await hub.emit(Item(id: mid, isVideo: isVideo, url: url, caption: caption, date: date))
         }
     }
@@ -419,8 +428,36 @@ enum OnlyFansService {
         // single-quality videos (no quality gear on the site) expose just one rendition,
         // sometimes under a non-standard key, and a fixed key list silently dropped them.
         if isVideo, let best = bestVideoSource(m["videoSources"]) { return best }
-        for key in ["src", "url"] {
+        for key in ["src", "url", "videoUrl", "video", "link"] {
             if let s = m[key] as? String, !s.isEmpty, s.hasPrefix("http") { return s }
+        }
+        // Deep catch-all: a direct progressive file (mp4/mov/…) hiding anywhere in the
+        // object. Manifests (m3u8/mpd) are deliberately excluded — they can't be saved
+        // as a playable file byte-for-byte (and are usually DRM anyway).
+        if isVideo, let deep = deepFindURL(m, exts: ["mp4", "mov", "m4v", "webm"]) { return deep }
+        return nil
+    }
+
+    /// Why a video had no downloadable URL — DRM (encrypted manifest only), a plain
+    /// HLS/DASH stream (a manifest we don't yet mux), or something else.
+    private enum NoURLReason { case drm, hls, other }
+    nonisolated private static func noURLReason(_ m: [String: Any]) -> NoURLReason {
+        let files = m["files"] as? [String: Any]
+        if files?["drm"] != nil || m["drm"] != nil || (m["hasDrm"] as? Bool) == true { return .drm }
+        if deepFindURL(m, exts: ["m3u8", "mpd"]) != nil { return .hls }
+        return .other
+    }
+
+    /// Recursively finds the first http string whose path ends in one of `exts`.
+    nonisolated private static func deepFindURL(_ any: Any, exts: [String]) -> String? {
+        if let s = any as? String, s.hasPrefix("http") {
+            let path = (URLComponents(string: s)?.path ?? "").lowercased()
+            return exts.contains { path.hasSuffix("." + $0) } ? s : nil
+        }
+        if let dict = any as? [String: Any] {
+            for (_, v) in dict { if let f = deepFindURL(v, exts: exts) { return f } }
+        } else if let arr = any as? [Any] {
+            for v in arr { if let f = deepFindURL(v, exts: exts) { return f } }
         }
         return nil
     }
@@ -435,7 +472,11 @@ enum OnlyFansService {
             if best == nil || score > best!.score { best = (score, u) }
         }
         if let dict = any as? [String: Any] {
-            for (k, v) in dict { consider(v as? String, Int(k.filter(\.isNumber)) ?? 0) }
+            for (k, v) in dict {
+                let score = Int(k.filter(\.isNumber)) ?? 0
+                // The value may be the URL string, or a nested {url/src: …} object.
+                consider((v as? String) ?? (v as? [String: Any]).flatMap { ($0["url"] as? String) ?? ($0["src"] as? String) }, score)
+            }
         } else if let arr = any as? [[String: Any]] {
             for e in arr {
                 let score = (e["height"] as? Int) ?? Int(((e["label"] as? String) ?? "").filter(\.isNumber)) ?? 0
