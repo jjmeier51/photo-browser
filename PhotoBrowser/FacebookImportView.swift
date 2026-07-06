@@ -4,10 +4,11 @@ import WebKit
 
 /// "Download Facebook Profile" / "Get New Facebook Photos": logs in via a real
 /// in-app web view (only the session cookie is kept), then pulls a profile's
-/// photos/videos — uploaded, profile pictures, and tagged — into a folder shown as
-/// a blue-ringed highlight bubble. Capture date, location, caption, and the
-/// poster's name are set where available. Best-effort, opt-in, download-only;
-/// Facebook fights scraping, so this is experimental.
+/// photos/videos — every album (uploads, profile pictures, cover photos), tagged
+/// photos, and videos — into a folder shown as a blue-ringed highlight bubble.
+/// Capture date, caption, and the poster's name are set where available, and
+/// photos can run through the app's 2× AI Upscale as they land. Best-effort,
+/// opt-in, download-only; Facebook fights scraping, so this is experimental.
 struct FacebookImportView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
@@ -16,6 +17,7 @@ struct FacebookImportView: View {
     let onFinished: () -> Void
 
     @State private var profileURL = ""
+    @State private var upscale2x = true
     @State private var running = false
     @State private var loggedIn = false
     @State private var showLogin = false
@@ -37,6 +39,12 @@ struct FacebookImportView: View {
                             .keyboardType(.URL).disabled(running)
                     } header: { Text("Facebook profile") }
                     footer: { Text("Paste a profile or share link (e.g. facebook.com/share/…). Downloads into a new folder inside “\(targetFolder.lastPathComponent)”. Nothing is uploaded.") }
+                }
+
+                Section {
+                    Toggle("2× AI Upscale photos", isOn: $upscale2x).disabled(running)
+                } footer: {
+                    Text("Every downloaded photo is enhanced with the app’s 2× AI Upscale — denoise, sharpen, and double the resolution.")
                 }
 
                 if !loggedIn {
@@ -88,7 +96,7 @@ struct FacebookImportView: View {
     }
 
     private var progressLine: String {
-        progress.total > 0 ? "Downloading \(progress.done) of \(progress.total)…" : progress.phase
+        progress.phase.isEmpty ? "Starting…" : progress.phase
     }
 
     private func summary(_ r: FacebookService.DownloadResult) -> String {
@@ -134,7 +142,8 @@ struct FacebookImportView: View {
                 }
             }
 
-            let r = await FacebookService.run(profileURL: link, into: dest, alreadyDownloaded: already, creds: creds) { p in
+            let r = await FacebookService.run(profileURL: link, into: dest, alreadyDownloaded: already,
+                                              creds: creds, upscalePhotos: upscale2x) { p in
                 Task { @MainActor in progress = p }
             }
             library.setCaptions(r.captions)

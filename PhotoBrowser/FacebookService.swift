@@ -38,13 +38,18 @@ enum FacebookAuth {
 /// Downloads a Facebook profile's photos/videos (uploaded, profile pictures, and
 /// tagged) using the user's own logged-in session, by parsing the **JSON that
 /// www.facebook.com embeds in its pages** — the approach maintained scrapers use
-/// since Facebook retired the old `mbasic` HTML site. Media sets are walked photo
-/// by photo via each page's "next media" pointer (no GraphQL doc_ids to go stale),
-/// and every photo page hands us the full-resolution URL, the exact `created_time`,
-/// and the caption. Best-effort and download-only, like the Instagram/MEGA
-/// features — Facebook actively fights scraping, so parsing is defensive, failures
-/// are surfaced as notes, and a login wall is reported as exactly that.
-/// All `nonisolated`: networking + parsing + writes.
+/// since Facebook retired the old `mbasic` HTML site. Coverage comes from the
+/// profile's **real albums** (Timeline/Mobile Uploads, Profile Pictures, Cover
+/// Photos, custom albums) plus the tagged set — the classic `pb` virtual set is
+/// only a fallback because Facebook truncates it around 100 photos. Media sets are
+/// walked photo by photo via each page's "next media" pointer (no GraphQL doc_ids
+/// to go stale), and every photo page hands us the full-resolution URL, the exact
+/// `created_time`, the caption, and the actual poster. Discovery walks run
+/// concurrently (throttled through one shared pacer) and downloads start while
+/// discovery is still going. Best-effort and download-only, like the
+/// Instagram/MEGA features — Facebook actively fights scraping, so parsing is
+/// defensive, failures are surfaced as notes, and a login wall is reported as
+/// exactly that. All `nonisolated`: networking + parsing + writes.
 enum FacebookService {
     struct Credentials: Sendable { let cookie: String }
     struct Profile: Sendable {
@@ -72,6 +77,7 @@ enum FacebookService {
         let url: String
         let caption: String
         let date: Date?
+        let poster: String          // the item's actual owner ("" → the profile)
     }
 
     nonisolated static let host = "https://www.facebook.com/"
@@ -84,14 +90,65 @@ enum FacebookService {
         cfg.httpShouldSetCookies = false
         cfg.httpCookieStorage = nil
         cfg.timeoutIntervalForRequest = 60
-        cfg.httpMaximumConnectionsPerHost = 6
+        cfg.httpMaximumConnectionsPerHost = 10
         return URLSession(configuration: cfg)
     }()
+
+    // MARK: - Coordination
+
+    /// Spaces www page fetches globally — every concurrent walk draws from the one
+    /// budget, so parallel discovery stays as gentle on Facebook's rate limiting as
+    /// the old sequential walk while overlapping all the request latency.
+    private actor Pacer {
+        private var next = ContinuousClock.now
+        func waitTurn() async {
+            let now = ContinuousClock.now
+            let slot = max(next, now)
+            next = slot + .milliseconds(150)
+            if slot > now { try? await Task.sleep(until: slot, clock: .continuous) }
+        }
+    }
+    nonisolated private static let pacer = Pacer()
+
+    /// Cross-collector hub: dedups discovered ids (albums overlap the tagged set),
+    /// feeds accepted items into the download stream, aggregates progress, and
+    /// remembers whether any collector hit a login wall.
+    private actor Hub {
+        private let already: Set<String>
+        private let continuation: AsyncStream<Item>.Continuation
+        private let progress: @Sendable (Progress) -> Void
+        private var ids = Set<String>()
+        private var finding = true
+        private var saved = 0
+        private(set) var foundCount = 0
+        private(set) var hitLoginWall = false
+
+        init(already: Set<String>, continuation: AsyncStream<Item>.Continuation,
+             progress: @escaping @Sendable (Progress) -> Void) {
+            self.already = already; self.continuation = continuation; self.progress = progress
+        }
+        func emit(_ item: Item) {
+            guard ids.insert(item.id).inserted, !already.contains(item.id) else { return }
+            foundCount += 1
+            continuation.yield(item)
+            report()
+        }
+        func loginWalled() { hitLoginWall = true }
+        func discoveryFinished() { finding = false; continuation.finish(); report() }
+        func savedOne() { saved += 1; report() }
+        private func report() {
+            let phase = finding ? "Found \(foundCount) — downloaded \(saved)…"
+                                : "Downloading \(saved) of \(foundCount)…"
+            progress(Progress(phase: phase, fraction: foundCount > 0 ? Double(saved) / Double(foundCount) : 0,
+                              done: saved, total: foundCount))
+        }
+    }
 
     // MARK: - Orchestration
 
     nonisolated static func run(profileURL: String, into folder: URL, alreadyDownloaded: Set<String>,
-                                creds: Credentials, progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
+                                creds: Credentials, upscalePhotos: Bool,
+                                progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
         progress(Progress(phase: "Loading profile…", fraction: 0, done: 0, total: 0))
         guard let profile = await resolveProfile(profileURL, creds: creds) else {
@@ -101,61 +158,72 @@ enum FacebookService {
         result.profile = profile
         if !profile.picURL.isEmpty { result.profilePic = await downloadData(profile.picURL, creds: creds) }
 
-        // Discover media: the profile's own photos, tagged photos, and videos.
-        var items: [Item] = []; var seen = Set<String>()
-        var loginWall = false
-        func add(_ found: (items: [Item], loginWall: Bool)) {
-            loginWall = loginWall || found.loginWall
-            for i in found.items where seen.insert(i.id).inserted && !alreadyDownloaded.contains(i.id) {
-                items.append(i)
-            }
-        }
-        add(await collectPhotos(profile, tab: "photos_by", fallbackToken: "pb.\(profile.id).-2207520000",
-                                skip: alreadyDownloaded, creds: creds, progress: progress, phase: "Finding photos"))
-        add(await collectPhotos(profile, tab: "photos_of", fallbackToken: "t.\(profile.id)",
-                                skip: alreadyDownloaded, creds: creds, progress: progress, phase: "Finding tagged photos"))
-        add(await collectVideos(profile, skip: alreadyDownloaded, creds: creds, progress: progress))
-
-        guard !items.isEmpty else {
-            result.note = loginWall
-                ? "Facebook asked for a fresh login. Tap “Log in to Facebook”, sign in again, and retry."
-                : (alreadyDownloaded.isEmpty
-                    ? "No downloadable photos or videos found (the profile may be private, empty, or Facebook may be blocking access)."
-                    : "No new photos or videos.")
-            return result
-        }
-
-        // Download the discovered media concurrently.
-        let total = items.count
-        var done = 0
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        await withTaskGroup(of: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String).self) { group in
-            var idx = 0
-            let maxConcurrent = 5
-            func addNext() {
-                guard idx < items.count else { return }
-                let item = items[idx]; idx += 1
-                group.addTask { await download(item, into: folder, poster: profile.name, creds: creds) }
+
+        // Discovery and download overlap: collectors walk concurrently and feed the
+        // hub (which dedups across sets) into the stream; the consumer below starts
+        // downloading the first photo while the walks are still finding the rest.
+        let (stream, continuation) = AsyncStream.makeStream(of: Item.self)
+        let hub = Hub(already: alreadyDownloaded, continuation: continuation, progress: progress)
+
+        let discovery = Task {
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    // Real albums cover every upload including profile/cover photos;
+                    // the classic pb set (which truncates ~100 in) is only a fallback.
+                    if !(await collectAlbums(profile, skip: alreadyDownloaded, creds: creds, hub: hub)) {
+                        await collectPhotos(profile, tab: "photos_by", fallbackToken: "pb.\(profile.id).-2207520000",
+                                            skip: alreadyDownloaded, creds: creds, hub: hub)
+                    }
+                }
+                group.addTask {
+                    await collectPhotos(profile, tab: "photos_of", fallbackToken: "t.\(profile.id)",
+                                        skip: alreadyDownloaded, creds: creds, hub: hub)
+                }
+                group.addTask { await collectVideos(profile, skip: alreadyDownloaded, creds: creds, hub: hub) }
             }
-            for _ in 0..<min(maxConcurrent, total) { addNext() }
-            while let r = await group.next() {
-                done += 1
+            await hub.discoveryFinished()
+        }
+
+        // Download consumer: bounded-width group fed straight off the stream.
+        let posterFallback = profile.name
+        await withTaskGroup(of: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String).self) { group in
+            var active = 0
+            let maxConcurrent = 8
+            func apply(_ r: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String)) {
                 if r.ok {
                     if r.isVideo { result.videos += 1 } else { result.photos += 1 }
                     result.newIDs.append(r.id)
                     if let path = r.path {
-                        result.postedBy[path] = profile.name
+                        result.postedBy[path] = r.poster
                         if !r.caption.isEmpty { result.captions[path] = r.caption }
                     }
                 } else { result.failed += 1 }
-                if done % 4 == 0 || done == total {
-                    progress(Progress(phase: "Downloading", fraction: Double(done) / Double(total), done: done, total: total))
-                }
-                addNext()
             }
+            for await item in stream {
+                if active >= maxConcurrent, let r = await group.next() {
+                    active -= 1; apply(r); await hub.savedOne()
+                }
+                group.addTask {
+                    await download(item, into: folder, posterFallback: posterFallback, creds: creds, upscale: upscalePhotos)
+                }
+                active += 1
+            }
+            while let r = await group.next() { apply(r); await hub.savedOne() }
         }
-        if result.photos + result.videos == 0 { result.note = "Couldn’t download any media (Facebook may be blocking access)." }
-        else if result.failed > 0 { result.note = "\(result.failed) item(s) couldn’t be downloaded." }
+        await discovery.value
+
+        if await hub.foundCount == 0 {
+            result.note = await hub.hitLoginWall
+                ? "Facebook asked for a fresh login. Tap “Log in to Facebook”, sign in again, and retry."
+                : (alreadyDownloaded.isEmpty
+                    ? "No downloadable photos or videos found (the profile may be private, empty, or Facebook may be blocking access)."
+                    : "No new photos or videos.")
+        } else if result.photos + result.videos == 0 {
+            result.note = "Couldn’t download any media (Facebook may be blocking access)."
+        } else if result.failed > 0 {
+            result.note = "\(result.failed) item(s) couldn’t be downloaded."
+        }
         return result
     }
 
@@ -183,11 +251,17 @@ enum FacebookService {
         let vanity = vanityName(from: finalURL)
         guard pid != nil || vanity != nil else { return nil }
 
-        let name = meta(html, "og:title").map(decode)
-            ?? firstMatch(html, "<title>([^<]+)</title>").map(decode)
-            ?? "Facebook Profile"
+        // Display name: og:title, the embedded-JSON owner name (the *owner's*, never
+        // the viewer's "user"/"userID" blobs), then the title tag. cleanName can
+        // legitimately empty a candidate (a bare "Facebook" title), so fall through
+        // to the next one — an empty name is what made "Posted by" render as just "@".
+        let name = [meta(html, "og:title").map(decode).map(cleanName),
+                    firstJSONString(html, "\"owner\":\\{[^{}]*?\"name\":")?.trimmingCharacters(in: .whitespacesAndNewlines),
+                    firstMatch(html, "<title>([^<]+)</title>").map(decode).map(cleanName)]
+            .compactMap { $0 }.first { !$0.isEmpty }
+            ?? vanity ?? "Facebook Profile"
         let pic = meta(html, "og:image").map(decode) ?? ""
-        return Profile(id: pid ?? vanity ?? "", vanity: vanity, name: cleanName(name), url: finalURL, picURL: pic)
+        return Profile(id: pid ?? vanity ?? "", vanity: vanity, name: name, url: finalURL, picURL: pic)
     }
 
     /// `<meta property="og:…" content="…">`, either attribute order.
@@ -213,90 +287,129 @@ enum FacebookService {
 
     // MARK: - Collecting media
 
-    /// The profile's photo tab (`photos_by` = uploads, `photos_of` = tagged) names a
-    /// media-set token; the set is then walked photo by photo. When the tab won't
-    /// reveal a token the classic constructed token is tried — worst case the walk
-    /// finds no first photo and returns empty.
+    /// Enumerates the profile's real albums (Timeline/Mobile Uploads, Profile
+    /// Pictures, Cover Photos, custom albums) from the albums tab and walks each
+    /// one — this is what makes coverage complete, and the only route to profile
+    /// pictures. Returns false when no albums could be found so the caller can
+    /// fall back to the classic `pb` set walk (true on a login wall: the fallback
+    /// would only hit the same wall).
+    nonisolated private static func collectAlbums(_ profile: Profile, skip: Set<String>,
+                                                  creds: Credentials, hub: Hub) async -> Bool {
+        guard let (html, finalURL) = await fetchHTML(host + tabPath(profile, "photos_albums"), creds: creds) else { return false }
+        if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return true }
+        var tokens: [String] = []; var seen = Set<String>()
+        for g in matches(html, "set=a\\.(\\d+)") where seen.insert(g[1]).inserted { tokens.append("a.\(g[1])") }
+        for g in matches(html, "\"__typename\":\"Album\",\"id\":\"(\\d+)\"") where seen.insert(g[1]).inserted { tokens.append("a.\(g[1])") }
+        guard !tokens.isEmpty else { return false }
+        await withTaskGroup(of: Void.self) { group in
+            var idx = 0
+            let maxConcurrent = 3        // walks already share the global pacer
+            func addNext() {
+                guard idx < tokens.count else { return }
+                let token = tokens[idx]; idx += 1
+                // No early stop: unlike the newest-first pb/t sets, albums can be
+                // user-ordered (oldest first), so a "Get New" run must walk through
+                // known items to reach new ones appended at the end.
+                group.addTask { await walkSet(token, firstID: nil, skip: skip, creds: creds, hub: hub, earlyStop: false) }
+            }
+            for _ in 0..<min(maxConcurrent, tokens.count) { addNext() }
+            while await group.next() != nil { addNext() }
+        }
+        return true
+    }
+
+    /// A photo tab (`photos_by` = uploads, `photos_of` = tagged) names a media-set
+    /// token; the set is then walked photo by photo. When the tab won't reveal a
+    /// token the classic constructed token is tried — worst case the walk finds no
+    /// first photo and emits nothing.
     nonisolated private static func collectPhotos(_ profile: Profile, tab: String, fallbackToken: String,
-                                                  skip: Set<String>, creds: Credentials,
-                                                  progress: @escaping @Sendable (Progress) -> Void,
-                                                  phase: String) async -> (items: [Item], loginWall: Bool) {
-        progress(Progress(phase: "\(phase)…", fraction: 0, done: 0, total: 0))
+                                                  skip: Set<String>, creds: Credentials, hub: Hub) async {
         var token = fallbackToken
         var firstID: String?
         if let (html, finalURL) = await fetchHTML(host + tabPath(profile, tab), creds: creds) {
-            if looksLikeLogin(html, finalURL) { return ([], true) }
+            if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return }
             if let t = firstMatch(html, "\"media_?set_?token\":\"([^\"]+)\"")
                 ?? firstMatch(html, "set=((?:a|pb|t)\\.[0-9A-Za-z%.\\-]+)") {
                 token = decode(t)
             }
             firstID = firstPhotoID(html)
         }
-        return await walkSet(token, firstID: firstID, skip: skip, creds: creds, progress: progress, phase: phase)
+        await walkSet(token, firstID: firstID, skip: skip, creds: creds, hub: hub)
     }
 
     /// Walks a media set photo by photo: each photo page embeds the full-res image
-    /// URL, caption, exact post time, **and the id of the next photo** — so
-    /// pagination needs no volatile GraphQL doc_ids. Newest-first: on a "Get New"
-    /// run the walk stops after a stretch of already-downloaded ids.
+    /// URL, caption, exact post time, the actual owner, **and the id of the next
+    /// photo** — so pagination needs no volatile GraphQL doc_ids. With `earlyStop`
+    /// (newest-first pb/t sets) a "Get New" run stops after a stretch of
+    /// already-downloaded ids; album sets walk to the end.
+    /// A page that yields neither an image nor a next pointer is retried via the
+    /// alternate `photo.php` form — one flaky page used to silently end discovery
+    /// for the whole set (the old ~100-photo ceiling).
     nonisolated private static func walkSet(_ token: String, firstID: String?, skip: Set<String>,
-                                            creds: Credentials,
-                                            progress: @escaping @Sendable (Progress) -> Void,
-                                            phase: String, maxItems: Int = 2000) async -> (items: [Item], loginWall: Bool) {
+                                            creds: Credentials, hub: Hub, earlyStop: Bool = true,
+                                            maxItems: Int = 10_000) async {
         var nextID = firstID
         if nextID == nil {
-            guard let (html, finalURL) = await fetchHTML(host + "media/set/?set=\(token)", creds: creds) else { return ([], false) }
-            if looksLikeLogin(html, finalURL) { return ([], true) }
+            guard let (html, finalURL) = await fetchHTML(host + "media/set/?set=\(token)", creds: creds) else { return }
+            if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return }
             nextID = firstPhotoID(html)
         }
-        var out: [Item] = []; var visited = Set<String>()
+        var visited = Set<String>()
         var knownStreak = 0
         while let id = nextID, visited.count < maxItems, visited.insert(id).inserted {
-            guard let (html, finalURL) = await fetchHTML(host + "photo/?fbid=\(id)&set=\(token)", creds: creds) else { break }
-            if looksLikeLogin(html, finalURL) { return (out, true) }
+            var page: (html: String, finalURL: String)?
+            for form in ["photo/?fbid=\(id)&set=\(token)", "photo.php?fbid=\(id)&set=\(token)"] {
+                page = await fetchHTML(host + form, creds: creds)
+                if let p = page, photoPageLooksComplete(p.html) || looksLikeLogin(p.html, p.finalURL) { break }
+            }
+            guard let (html, finalURL) = page else { break }
+            if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return }
             if skip.contains(id) {
                 knownStreak += 1
-                if knownStreak >= 30 { break }               // deep into already-downloaded territory
+                if earlyStop, knownStreak >= 30 { break }    // deep into already-downloaded territory
             } else {
                 knownStreak = 0
                 if let url = firstJSONString(html, "\"image\":\\{\"uri\":") {
-                    out.append(Item(id: id, isVideo: false, url: url,
-                                    caption: photoCaption(html), date: createdTime(html)))
-                    if out.count % 5 == 0 {
-                        progress(Progress(phase: "\(phase)… \(out.count)", fraction: 0, done: out.count, total: 0))
-                    }
+                    await hub.emit(Item(id: id, isVideo: false, url: url, caption: photoCaption(html),
+                                        date: createdTime(html), poster: photoOwner(html)))
                 }
             }
-            nextID = firstMatch(html, "\"nextMediaAfterNodeId\":\\{\"__typename\":\"Photo\",\"id\":\"(\\d+)\"")
-                ?? firstMatch(html, "\"nextMedia\":\\{\"edges\":\\[\\{\"node\":\\{\"__typename\":\"Photo\",\"id\":\"(\\d+)\"")
-            try? await Task.sleep(nanoseconds: 120_000_000)   // stay gentle; FB rate-limits aggressively
+            nextID = nextPhotoID(html)
         }
-        return (out, false)
     }
 
     /// The videos tab lists permalinks; each watch page embeds direct HD/SD URLs.
-    nonisolated private static func collectVideos(_ profile: Profile, skip: Set<String>, creds: Credentials,
-                                                  progress: @escaping @Sendable (Progress) -> Void) async -> (items: [Item], loginWall: Bool) {
-        progress(Progress(phase: "Finding videos…", fraction: 0, done: 0, total: 0))
-        guard let (html, finalURL) = await fetchHTML(host + tabPath(profile, "videos"), creds: creds) else { return ([], false) }
-        if looksLikeLogin(html, finalURL) { return ([], true) }
+    /// Watch pages resolve a few at a time through the shared pacer.
+    nonisolated private static func collectVideos(_ profile: Profile, skip: Set<String>,
+                                                  creds: Credentials, hub: Hub) async {
+        guard let (html, finalURL) = await fetchHTML(host + tabPath(profile, "videos"), creds: creds) else { return }
+        if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return }
         var ids: [String] = []; var seen = Set<String>()
         for g in matches(html, "videos\\\\?/(\\d{8,})") where seen.insert(g[1]).inserted { ids.append(g[1]) }
         for g in matches(html, "\"video_?id\":\"(\\d{8,})\"") where seen.insert(g[1]).inserted { ids.append(g[1]) }
-
-        var out: [Item] = []
-        for id in ids where !skip.contains(id) {
-            guard let (page, pageURL) = await fetchHTML(host + "watch/?v=\(id)", creds: creds) else { continue }
-            if looksLikeLogin(page, pageURL) { return (out, true) }
-            guard let url = firstJSONString(page, "\"browser_native_hd_url\":")
-                ?? firstJSONString(page, "\"playable_url_quality_hd\":")
-                ?? firstJSONString(page, "\"browser_native_sd_url\":")
-                ?? firstJSONString(page, "\"playable_url\":") else { continue }
-            out.append(Item(id: id, isVideo: true, url: url, caption: photoCaption(page), date: createdTime(page)))
-            progress(Progress(phase: "Finding videos… \(out.count)", fraction: 0, done: out.count, total: 0))
-            try? await Task.sleep(nanoseconds: 120_000_000)
+        for g in matches(html, "watch/\\?v=(\\d{8,})") where seen.insert(g[1]).inserted { ids.append(g[1]) }
+        let targets = ids.filter { !skip.contains($0) }
+        guard !targets.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            var idx = 0
+            let maxConcurrent = 3
+            func addNext() {
+                guard idx < targets.count else { return }
+                let id = targets[idx]; idx += 1
+                group.addTask {
+                    guard let (page, pageURL) = await fetchHTML(host + "watch/?v=\(id)", creds: creds) else { return }
+                    if looksLikeLogin(page, pageURL) { await hub.loginWalled(); return }
+                    guard let url = firstJSONString(page, "\"browser_native_hd_url\":")
+                        ?? firstJSONString(page, "\"playable_url_quality_hd\":")
+                        ?? firstJSONString(page, "\"browser_native_sd_url\":")
+                        ?? firstJSONString(page, "\"playable_url\":") else { return }
+                    await hub.emit(Item(id: id, isVideo: true, url: url, caption: photoCaption(page),
+                                        date: createdTime(page), poster: photoOwner(page)))
+                }
+            }
+            for _ in 0..<min(maxConcurrent, targets.count) { addNext() }
+            while await group.next() != nil { addNext() }
         }
-        return (out, false)
     }
 
     nonisolated private static func tabPath(_ profile: Profile, _ tab: String) -> String {
@@ -310,6 +423,24 @@ enum FacebookService {
         firstMatch(html, "\\{\"__typename\":\"Photo\",\"id\":\"(\\d+)\"")
             ?? firstMatch(html, "\"__isMedia\":\"Photo\"[^{}]*?\"id\":\"(\\d+)\"")
             ?? firstMatch(html, "fbid=(\\d{6,})")
+    }
+
+    nonisolated private static func nextPhotoID(_ html: String) -> String? {
+        firstMatch(html, "\"nextMediaAfterNodeId\":\\{\"__typename\":\"Photo\",\"id\":\"(\\d+)\"")
+            ?? firstMatch(html, "\"nextMedia\":\\{\"edges\":\\[\\{\"node\":\\{\"__typename\":\"Photo\",\"id\":\"(\\d+)\"")
+    }
+
+    /// A photo page that carries neither an image URL nor a next pointer is a
+    /// rate-limit / error shell worth refetching, not the end of the set.
+    nonisolated private static func photoPageLooksComplete(_ html: String) -> Bool {
+        html.contains("\"image\":{\"uri\":") || nextPhotoID(html) != nil
+    }
+
+    /// The item's actual owner — for tagged photos that's the *poster*, not the
+    /// profile being downloaded.
+    nonisolated private static func photoOwner(_ html: String) -> String {
+        firstJSONString(html, "\"owner\":\\{[^{}]*?\"name\":")?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     /// The post text: the first `"message":{…"text":"…"}` blob (the post's own
@@ -334,19 +465,26 @@ enum FacebookService {
 
     // MARK: - Per-item download
 
-    nonisolated private static func download(_ item: Item, into folder: URL, poster: String,
-                                             creds: Credentials) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
+    nonisolated private static func download(_ item: Item, into folder: URL, posterFallback: String, creds: Credentials,
+                                             upscale: Bool) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String) {
+        let poster = item.poster.isEmpty ? posterFallback : item.poster
         guard let data = await downloadData(item.url, creds: creds), data.count >= 512 else {
-            return (false, item.isVideo, item.id, nil, "")
+            return (false, item.isVideo, item.id, nil, "", poster)
         }
         let ext = item.isVideo ? "mp4" : imageExt(of: item.url)
         let dest = uniqueDestination("FB_\(item.id).\(ext)", in: folder)
-        guard (try? data.write(to: dest, options: .atomic)) != nil else { return (false, item.isVideo, item.id, nil, "") }
+        guard (try? data.write(to: dest, options: .atomic)) != nil else { return (false, item.isVideo, item.id, nil, "", poster) }
         if !item.isVideo {
             writeImageMeta(date: item.date, caption: item.caption, poster: poster, to: dest)
+            // The app's 2× AI Upscale (Lanczos ×2 + denoise + sharpen), metadata
+            // carried through. Formats CGImageDestination can't round-trip
+            // (webp/gif — the latter would flatten an animation) are left alone.
+            if upscale, ["jpg", "png", "heic"].contains(ext) {
+                _ = MediaEditing.enhancePhotoInPlace(url: dest, scale: 2)
+            }
         }
-        setFileDate(dest, item.date)
-        return (true, item.isVideo, item.id, dest.path, item.caption)
+        setFileDate(dest, item.date)   // after the upscale swap, which resets file dates
+        return (true, item.isVideo, item.id, dest.path, item.caption, poster)
     }
 
     nonisolated private static func imageExt(of urlString: String) -> String {
@@ -400,21 +538,31 @@ enum FacebookService {
         return req
     }
 
-    /// Fetches a page, following one JavaScript `window.location.replace` hop —
-    /// www answers many requests (canonical-case, share links) with a tiny JS
-    /// redirect stub instead of an HTTP redirect.
+    /// Fetches a page through the shared pacer, retrying transient failures
+    /// (network errors, 429/5xx) with a short backoff — a momentary blip used to
+    /// end a set walk for good. Follows one JavaScript `window.location.replace`
+    /// hop: www answers many requests (canonical-case, share links) with a tiny
+    /// JS redirect stub instead of an HTTP redirect.
     nonisolated private static func fetchHTML(_ urlString: String, creds: Credentials, hops: Int = 1) async -> (html: String, finalURL: String)? {
         guard let url = URL(string: urlString) else { return nil }
-        guard let (data, resp) = try? await session.data(for: request(url, creds: creds, html: true)),
-              (resp as? HTTPURLResponse).map({ $0.statusCode < 400 }) ?? true,
-              let s = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else { return nil }
-        let finalURL = resp.url?.absoluteString ?? urlString
-        if hops > 0, s.count < 4096,
-           let target = firstMatch(s, "window\\.location\\.replace\\(\"((?:[^\"\\\\]|\\\\.)+)\"\\)").map(unescapeJSON),
-           target.hasPrefix("https://"), target != finalURL {
-            return await fetchHTML(target, creds: creds, hops: hops - 1)
+        for attempt in 0..<3 {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_500_000_000) }
+            await pacer.waitTurn()
+            guard let (data, resp) = try? await session.data(for: request(url, creds: creds, html: true)) else { continue }
+            if let code = (resp as? HTTPURLResponse)?.statusCode {
+                if code == 429 || code >= 500 { continue }       // rate-limited / transient
+                if code >= 400 { return nil }
+            }
+            guard let s = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else { return nil }
+            let finalURL = resp.url?.absoluteString ?? urlString
+            if hops > 0, s.count < 4096,
+               let target = firstMatch(s, "window\\.location\\.replace\\(\"((?:[^\"\\\\]|\\\\.)+)\"\\)").map(unescapeJSON),
+               target.hasPrefix("https://"), target != finalURL {
+                return await fetchHTML(target, creds: creds, hops: hops - 1)
+            }
+            return (s, finalURL)
         }
-        return (s, finalURL)
+        return nil
     }
 
     /// True when Facebook answered with a login wall instead of the page.
@@ -423,11 +571,20 @@ enum FacebookService {
         return html.contains("id=\"login_form\"") || html.contains("name=\"login\"") && html.contains("name=\"pass\"")
     }
 
+    /// Media bytes from the CDN (no pacing — a different host than www), with the
+    /// same transient-failure retry as page fetches.
     nonisolated private static func downloadData(_ urlString: String, creds: Credentials) async -> Data? {
-        guard let url = URL(string: urlString),
-              let (data, resp) = try? await session.data(for: request(url, creds: creds, html: false)),
-              (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true else { return nil }
-        return data
+        guard let url = URL(string: urlString) else { return nil }
+        for attempt in 0..<3 {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000) }
+            guard let (data, resp) = try? await session.data(for: request(url, creds: creds, html: false)) else { continue }
+            if let code = (resp as? HTTPURLResponse)?.statusCode {
+                if code == 429 || code >= 500 { continue }
+                if code >= 400 { return nil }
+            }
+            return data
+        }
+        return nil
     }
 
     // MARK: - Small helpers

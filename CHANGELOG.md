@@ -4,6 +4,22 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-06
 
+- **Facebook downloader: complete coverage, faster, upscaled** — discovery now enumerates the
+  profile's *real albums* (Timeline/Mobile Uploads, **Profile Pictures**, Cover Photos, custom
+  albums) and walks each one, instead of relying on the classic `pb` virtual set that Facebook
+  truncates around 100 photos (the "only 99 downloaded" ceiling); the `pb` walk remains as a
+  fallback when no albums are visible, and tagged photos/videos are walked as before. A photo
+  page that returns without an image or next-pointer is retried (and refetched via the
+  alternate `photo.php` form) rather than silently ending the set, and page fetches retry
+  transient failures (429/5xx) with backoff. Speed: all set walks run concurrently through one
+  shared pacer (so the aggregate request rate stays polite), downloads start while discovery is
+  still walking (streamed pipeline, width 8, CDN retries), and the per-page sleep is gone.
+  Downloaded photos can run through the app's **2× AI Upscale** (denoise + sharpen + double
+  resolution, on by default, metadata preserved). "Posted by" is fixed — the profile-name
+  resolver no longer produces an empty name (og:title → embedded-JSON owner name → title →
+  vanity fallbacks), each photo credits its *actual* poster (tagged photos are posted by
+  someone else), and the info panel shows Facebook posters as plain names (no "@") with a
+  "Facebook" label instead of "Instagram".
 - **Facebook downloader works again** — rebuilt on www.facebook.com's embedded JSON after
   Facebook retired the `mbasic` HTML site the old scraper depended on (every request there now
   hits a login interstitial, which is why downloads found nothing). Media sets are walked photo
