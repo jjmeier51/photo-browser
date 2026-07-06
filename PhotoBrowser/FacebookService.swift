@@ -90,7 +90,7 @@ enum FacebookService {
         cfg.httpShouldSetCookies = false
         cfg.httpCookieStorage = nil
         cfg.timeoutIntervalForRequest = 60
-        cfg.httpMaximumConnectionsPerHost = 10
+        cfg.httpMaximumConnectionsPerHost = 16      // wider CDN pipe for faster downloads
         return URLSession(configuration: cfg)
     }()
 
@@ -110,21 +110,6 @@ enum FacebookService {
     }
     nonisolated private static let pacer = Pacer()
 
-    /// Bounds concurrent 2× upscales independently of the download width — each
-    /// render holds full-resolution images in memory, and eight at once (the
-    /// network width) would flirt with a jetsam kill on older devices.
-    private actor UpscaleGate {
-        private var active = 0
-        private var waiters: [CheckedContinuation<Void, Never>] = []
-        func acquire() async {
-            if active < 2 { active += 1; return }
-            await withCheckedContinuation { waiters.append($0) }   // slot handed over by release()
-        }
-        func release() {
-            if waiters.isEmpty { active -= 1 } else { waiters.removeFirst().resume() }
-        }
-    }
-    nonisolated private static let upscaleGate = UpscaleGate()
 
     /// Cross-collector hub: dedups discovered ids (albums overlap the tagged set),
     /// feeds accepted items into the download stream, aggregates progress, and
@@ -207,18 +192,23 @@ enum FacebookService {
             await hub.discoveryFinished()
         }
 
-        // Download consumer: bounded-width group fed straight off the stream.
+        // Download consumer: a wide, purely-network group fed straight off the stream.
+        // Upscaling is intentionally *not* done here — it's CPU/RAM-heavy and would
+        // hold a network slot, throttling throughput — so downloads run 16-wide and
+        // any 2× upscale is a separate pass afterward (see below).
         let posterFallback = profile.name
-        await withTaskGroup(of: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String).self) { group in
+        var upscaleTargets: [(path: String, date: Date?)] = []
+        await withTaskGroup(of: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String, date: Date?).self) { group in
             var active = 0
-            let maxConcurrent = 8
-            func apply(_ r: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String)) {
+            let maxConcurrent = 16
+            func apply(_ r: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String, date: Date?)) {
                 if r.ok {
                     if r.isVideo { result.videos += 1 } else { result.photos += 1 }
                     result.newIDs.append(r.id)
                     if let path = r.path {
                         result.postedBy[path] = r.poster
                         if !r.caption.isEmpty { result.captions[path] = r.caption }
+                        if !r.isVideo, upscalePhotos { upscaleTargets.append((path, r.date)) }
                     }
                 } else { result.failed += 1 }
             }
@@ -227,13 +217,24 @@ enum FacebookService {
                     active -= 1; apply(r); await hub.savedOne()
                 }
                 group.addTask {
-                    await download(item, into: folder, posterFallback: posterFallback, creds: creds, upscale: upscalePhotos)
+                    await download(item, into: folder, posterFallback: posterFallback, creds: creds)
                 }
                 active += 1
             }
             while let r = await group.next() { apply(r); await hub.savedOne() }
         }
         await discovery.value
+
+        // 2× AI Upscale pass: runs after the fast download stage so it never starves
+        // the network. Bounded to 2 concurrent renders (each holds full-res images in
+        // memory; more risks a jetsam kill), re-stamping the post date the in-place
+        // swap resets.
+        if upscalePhotos, !upscaleTargets.isEmpty {
+            await upscalePhotos2x(upscaleTargets) { done, total in
+                progress(Progress(phase: "Upscaling \(done) of \(total)…",
+                                  fraction: total > 0 ? Double(done) / Double(total) : 0, done: done, total: total))
+            }
+        }
 
         if await hub.foundCount == 0 {
             result.note = await hub.hitLoginWall
@@ -399,11 +400,17 @@ enum FacebookService {
                 if earlyStop, knownStreak >= 30 { break }    // deep into already-downloaded territory
             } else {
                 knownStreak = 0
+                // Only tagged sets credit the page's owner blob — on a profile's own
+                // uploads the first "owner" can be a crossposted entity.
+                let poster = ownerFromPage ? photoOwner(html) : ""
                 if let url = imageURL(html) {
-                    // Only tagged sets credit the page's owner blob — on a profile's
-                    // own uploads the first "owner" can be a crossposted entity.
                     await hub.emit(Item(id: id, isVideo: false, url: url, caption: photoCaption(html),
-                                        date: createdTime(html), poster: ownerFromPage ? photoOwner(html) : ""))
+                                        date: createdTime(html), poster: poster))
+                } else if let url = videoURL(html) {
+                    // A video sitting in the set (common among tagged media) — grab it
+                    // too, so tagged coverage isn't photos-only.
+                    await hub.emit(Item(id: id, isVideo: true, url: url, caption: photoCaption(html),
+                                        date: createdTime(html), poster: poster))
                 }
             }
             nextID = nextPhotoID(html)
@@ -432,10 +439,7 @@ enum FacebookService {
                     if await hub.hitLoginWall { return }     // stop hammering a known wall
                     guard let (page, pageURL) = await fetchHTML(host + "watch/?v=\(id)", creds: creds) else { return }
                     if looksLikeLogin(page, pageURL) { await hub.loginWalled(); return }
-                    guard let url = firstJSONString(page, "\"browser_native_hd_url\":")
-                        ?? firstJSONString(page, "\"playable_url_quality_hd\":")
-                        ?? firstJSONString(page, "\"browser_native_sd_url\":")
-                        ?? firstJSONString(page, "\"playable_url\":") else { return }
+                    guard let url = videoURL(page) else { return }
                     await hub.emit(Item(id: id, isVideo: true, url: url, caption: photoCaption(page),
                                         date: createdTime(page), poster: ""))
                 }
@@ -452,15 +456,24 @@ enum FacebookService {
 
     // MARK: - Page parsing
 
+    /// The first media id in a set page. Accepts **Photo or Video** nodes: tagged
+    /// sets interleave both, and anchoring on Photo alone made a set that opened on
+    /// a video start empty.
     nonisolated private static func firstPhotoID(_ html: String) -> String? {
-        firstMatch(html, "\\{\"__typename\":\"Photo\",\"id\":\"(\\d+)\"")
-            ?? firstMatch(html, "\"__isMedia\":\"Photo\"[^{}]*?\"id\":\"(\\d+)\"")
+        firstMatch(html, "\\{\"__typename\":\"(?:Photo|Video)\",\"id\":\"(\\d+)\"")
+            ?? firstMatch(html, "\"__isMedia\":\"(?:Photo|Video)\"[^{}]*?\"id\":\"(\\d+)\"")
             ?? firstMatch(html, "fbid=(\\d{6,})")
     }
 
+    /// The **next media id** in the set (the pagination pointer each page carries).
+    /// Must accept **Video** nodes as well as photos — otherwise the walk dead-ends
+    /// at the first tagged video and silently drops every item after it, which was
+    /// why tagged coverage kept truncating. Falls back to a typename-agnostic match
+    /// so an unexpected node type still advances the chain.
     nonisolated private static func nextPhotoID(_ html: String) -> String? {
-        firstMatch(html, "\"nextMediaAfterNodeId\":\\{\"__typename\":\"Photo\",\"id\":\"(\\d+)\"")
-            ?? firstMatch(html, "\"nextMedia\":\\{\"edges\":\\[\\{\"node\":\\{\"__typename\":\"Photo\",\"id\":\"(\\d+)\"")
+        firstMatch(html, "\"nextMediaAfterNodeId\":\\{\"__typename\":\"(?:Photo|Video)\",\"id\":\"(\\d+)\"")
+            ?? firstMatch(html, "\"nextMedia\":\\{\"edges\":\\[\\{\"node\":\\{\"__typename\":\"(?:Photo|Video)\",\"id\":\"(\\d+)\"")
+            ?? firstMatch(html, "\"nextMediaAfterNodeId\":\\{[^{}]*?\"id\":\"(\\d+)\"")
     }
 
     /// The full-res image URL from a photo page (`"image":{…"uri":"…"}` — the uri
@@ -469,10 +482,19 @@ enum FacebookService {
         firstJSONString(html, "\"image\":\\{[^{}]*?\"uri\":")
     }
 
-    /// A photo page that carries neither an image URL nor a next pointer is a
+    /// A direct video URL embedded in a media/watch page (best rendition first).
+    /// Shared by the videos tab and the set walk (a tagged item can be a video).
+    nonisolated private static func videoURL(_ html: String) -> String? {
+        firstJSONString(html, "\"browser_native_hd_url\":")
+            ?? firstJSONString(html, "\"playable_url_quality_hd\":")
+            ?? firstJSONString(html, "\"browser_native_sd_url\":")
+            ?? firstJSONString(html, "\"playable_url\":")
+    }
+
+    /// A media page that carries no image, no video, and no next pointer is a
     /// rate-limit / error shell worth refetching, not the end of the set.
     nonisolated private static func photoPageLooksComplete(_ html: String) -> Bool {
-        nextPhotoID(html) != nil || imageURL(html) != nil
+        nextPhotoID(html) != nil || imageURL(html) != nil || videoURL(html) != nil
     }
 
     /// The item's actual owner — for tagged photos that's the *poster*, not the
@@ -505,28 +527,48 @@ enum FacebookService {
 
     // MARK: - Per-item download
 
-    nonisolated private static func download(_ item: Item, into folder: URL, posterFallback: String, creds: Credentials,
-                                             upscale: Bool) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String) {
+    /// Downloads one item and writes its metadata. Pure network + file I/O — no
+    /// upscaling (that's a separate pass), so the download group stays wide and fast.
+    nonisolated private static func download(_ item: Item, into folder: URL, posterFallback: String,
+                                             creds: Credentials) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String, date: Date?) {
         let poster = item.poster.isEmpty ? posterFallback : item.poster
         guard let data = await downloadData(item.url, creds: creds), data.count >= 512 else {
-            return (false, item.isVideo, item.id, nil, "", poster)
+            return (false, item.isVideo, item.id, nil, "", poster, nil)
         }
         let ext = item.isVideo ? "mp4" : imageExt(of: item.url)
         let dest = uniqueDestination("FB_\(item.id).\(ext)", in: folder)
-        guard (try? data.write(to: dest, options: .atomic)) != nil else { return (false, item.isVideo, item.id, nil, "", poster) }
-        if !item.isVideo {
-            writeImageMeta(date: item.date, caption: item.caption, poster: poster, to: dest)
-            // The app's 2× AI Upscale (Lanczos ×2 + denoise + sharpen), metadata
-            // carried through. Formats CGImageDestination can't round-trip
-            // (webp/gif — the latter would flatten an animation) are left alone.
-            if upscale, ["jpg", "png", "heic"].contains(ext) {
-                await upscaleGate.acquire()
-                _ = MediaEditing.enhancePhotoInPlace(url: dest, scale: 2)
-                await upscaleGate.release()
+        guard (try? data.write(to: dest, options: .atomic)) != nil else { return (false, item.isVideo, item.id, nil, "", poster, nil) }
+        if !item.isVideo { writeImageMeta(date: item.date, caption: item.caption, poster: poster, to: dest) }
+        setFileDate(dest, item.date)
+        return (true, item.isVideo, item.id, dest.path, item.caption, poster, item.date)
+    }
+
+    /// 2× AI Upscale (Lanczos ×2 + denoise + sharpen) of the downloaded photos, in
+    /// place, metadata carried through. Bounded to 2 concurrent renders and run as
+    /// its own pass so it never competes with the network stage. Formats
+    /// `CGImageDestination` can't round-trip (webp/gif — the latter would flatten an
+    /// animation) are skipped; the post date is re-stamped after each in-place swap.
+    nonisolated private static func upscalePhotos2x(_ targets: [(path: String, date: Date?)],
+                                                    progress: @escaping @Sendable (Int, Int) -> Void) async {
+        let ups = targets.filter { ["jpg", "png", "heic"].contains(URL(fileURLWithPath: $0.path).pathExtension.lowercased()) }
+        let total = ups.count
+        guard total > 0 else { return }
+        await withTaskGroup(of: Void.self) { group in
+            var idx = 0
+            let maxConcurrent = 2
+            func addNext() {
+                guard idx < ups.count else { return }
+                let t = ups[idx]; idx += 1
+                group.addTask {
+                    let url = URL(fileURLWithPath: t.path)
+                    _ = MediaEditing.enhancePhotoInPlace(url: url, scale: 2)
+                    setFileDate(url, t.date)   // the in-place swap resets file dates
+                }
             }
+            for _ in 0..<min(maxConcurrent, ups.count) { addNext() }
+            var done = 0
+            while await group.next() != nil { done += 1; progress(done, total); addNext() }
         }
-        setFileDate(dest, item.date)   // after the upscale swap, which resets file dates
-        return (true, item.isVideo, item.id, dest.path, item.caption, poster)
     }
 
     nonisolated private static func imageExt(of urlString: String) -> String {
