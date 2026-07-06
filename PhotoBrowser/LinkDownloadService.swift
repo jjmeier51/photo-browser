@@ -251,7 +251,8 @@ enum LinkDownloadService {
             }
             let title = firstMatch(html, "<h1[^>]*>\\s*([^<]+?)\\s*</h1>").map(decodeEntities)
             var ids: [(id: String, name: String)] = []
-            if let arrayText = balancedArray(in: html, after: "window.albumFiles") {
+            let arrayText = balancedArray(in: html, after: "albumFiles")
+            if let arrayText {
                 if let arr = (try? JSONSerialization.jsonObject(with: Data(arrayText.utf8))) as? [[String: Any]] {
                     ids = arr.compactMap { f in idString(f["id"]).map { ($0, (f["original"] as? String) ?? (f["name"] as? String) ?? $0) } }
                 }
@@ -280,6 +281,9 @@ enum LinkDownloadService {
                 if !items.isEmpty { return (items, title, nil) }
                 return ([], title, "[bunkr] \(slugs.count) file page(s) found but none resolved (\(marks)).")
             }
+            // If the array was located but nothing parsed, show its head so the object
+            // keys are visible (the parser can then be matched to the real shape).
+            if let arrayText { return ([], title, "[bunkr] albumFiles found but 0 parsed. head: \(String(arrayText.prefix(240)))") }
             return ([], title, "[bunkr] no file list found (\(marks)).")
         }
         // Single file page.
@@ -348,11 +352,14 @@ enum LinkDownloadService {
         return MediaItem(url: url, filename: name, referer: "https://get.bunkrr.su/file/\(id)")
     }
 
-    /// Extracts the first balanced `[ … ]` array that follows `marker` in `html`,
-    /// respecting quoted strings and escapes (JS arrays aren't cleanly regex-able).
+    /// Extracts the first balanced `[ … ]` array assigned to `marker` in `html`
+    /// (`marker = [ … ]`, allowing `const`/`let`/`var`/`window.` before it), respecting
+    /// quoted strings and escapes (JS arrays aren't cleanly regex-able).
     nonisolated private static func balancedArray(in html: String, after marker: String) -> String? {
-        guard let mr = html.range(of: marker),
-              let open = html[mr.upperBound...].firstIndex(of: "[") else { return nil }
+        guard let re = try? NSRegularExpression(pattern: "\(marker)\\s*=\\s*\\["),
+              let m = re.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+              let full = Range(m.range, in: html) else { return nil }
+        let open = html.index(before: full.upperBound)   // the '[' is the match's last char
         var depth = 0, inString = false, escaped = false
         var i = open
         while i < html.endIndex {
