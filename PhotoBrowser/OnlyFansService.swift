@@ -475,6 +475,12 @@ enum OnlyFansService {
             guard let url = URL(string: urlString) else { continue }
             var req = URLRequest(url: url)
             req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            // Always revalidate: OnlyFans rotates its signing scheme often, and a
+            // CDN-cached (stale) rules file would sign with an outdated static_param
+            // → "Please refresh the page".
+            req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            req.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+            req.setValue("no-cache", forHTTPHeaderField: "Pragma")
             req.timeoutInterval = 30
             guard let (data, resp) = try? await session.data(for: req) else { continue }
             if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 400 { continue }
@@ -520,9 +526,14 @@ enum OnlyFansService {
             "user-agent": userAgent,
             "x-bc": creds.xbc,
         ]
-        // The rules can mark headers to omit (e.g. "user-id" — still used in the
-        // signed message above, just not sent). Signing/cookie headers are kept.
-        for h in rules.removeHeaders where !["sign", "time", "cookie", "x-bc", "app-token"].contains(h) {
+        // `remove_headers` can list headers to omit, but we keep everything the
+        // signature depends on. Critically `user-id` is part of the signed message,
+        // and OnlyFans re-signs the request server-side using the `user-id` header —
+        // dropping it produces a "Please refresh the page" sign mismatch. So the
+        // essentials (and user-id) are never removed; only a genuinely-extra header
+        // the rules flag would be.
+        let essential: Set<String> = ["sign", "time", "cookie", "x-bc", "app-token", "user-id", "user-agent", "accept"]
+        for h in rules.removeHeaders where !essential.contains(h) {
             headers.removeValue(forKey: h)
         }
         return headers
