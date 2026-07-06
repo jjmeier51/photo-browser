@@ -82,6 +82,8 @@ struct LinkImportView: View {
         let where_ = r.albumName.map { " from “\($0)”" } ?? ""
         var s = "Downloaded \(r.downloaded) file\(r.downloaded == 1 ? "" : "s")\(where_)"
         if r.failed > 0 { s += "; \(r.failed) failed" }
-        return s + "."
+        s += "."
+        if let note = r.note, !note.isEmpty { s += " " + note }   // diagnostic
+        return s
     }
 }

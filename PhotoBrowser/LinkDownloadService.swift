@@ -63,43 +63,65 @@ enum LinkDownloadService {
         progress(Progress(phase: "Resolving link…", fraction: 0, done: 0, total: 0))
         let (items, albumName, note) = await resolve(link)
         result.albumName = albumName
+        let host = URL(string: link.hasPrefix("http") ? link : "https://\(link.trimmingCharacters(in: .whitespaces))")?.host ?? "link"
         guard !items.isEmpty else {
-            result.note = note ?? "Couldn’t find any downloadable files at that link."
+            result.note = "[\(host)] " + (note ?? "Couldn’t find any downloadable files at that link.")
             return result
         }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
         let total = items.count
-        await withTaskGroup(of: Bool.self) { group in
+        var failStatuses: [Int: Int] = [:]     // status → count, for the diagnostic
+        await withTaskGroup(of: Int.self) { group in
             var active = 0
             let maxConcurrent = 12          // streams straight to disk — as wide as OnlyFans
             var done = 0
-            func report() {
+            func tally(_ status: Int) {
+                done += 1
+                if status == 0 { result.downloaded += 1 } else { result.failed += 1; failStatuses[status, default: 0] += 1 }
                 progress(Progress(phase: "Downloading \(done) of \(total)…",
                                   fraction: total > 0 ? Double(done) / Double(total) : 0, done: done, total: total))
             }
             for item in items {
-                if active >= maxConcurrent, let ok = await group.next() {
-                    active -= 1; done += 1; if ok { result.downloaded += 1 } else { result.failed += 1 }; report()
-                }
+                if active >= maxConcurrent, let s = await group.next() { active -= 1; tally(s) }
                 group.addTask { await downloadOne(item, into: folder) }
                 active += 1
             }
-            while let ok = await group.next() { done += 1; if ok { result.downloaded += 1 } else { result.failed += 1 }; report() }
+            while let s = await group.next() { tally(s) }
         }
 
-        if result.downloaded == 0 {
-            result.note = "Couldn’t download any files (the host may be blocking access or the link may have expired)."
-        } else if result.failed > 0 {
-            result.note = "\(result.failed) file(s) couldn’t be downloaded."
+        // Always surface a short diagnostic (files found + failure statuses) so a
+        // host that resolves but won't download can be traced.
+        var diag = "found \(total)"
+        if !failStatuses.isEmpty {
+            diag += "; fail: " + failStatuses.sorted { $0.value > $1.value }
+                .map { "\(statusLabel($0.key))×\($0.value)" }.joined(separator: ", ")
         }
+        let prefix: String
+        if result.downloaded == 0 { prefix = "Couldn’t download any files (the host may be blocking access or the link may have expired). " }
+        else if result.failed > 0 { prefix = "\(result.failed) file(s) couldn’t be downloaded. " }
+        else { prefix = "" }
+        result.note = "\(prefix)[\(host): \(diag)]"
         return result
     }
 
+    nonisolated private static func statusLabel(_ s: Int) -> String {
+        switch s {
+        case 1...: return "HTTP \(s)"
+        case -1: return "network"
+        case -2: return "empty"
+        case -3: return "bad-url"
+        default: return "write-err"
+        }
+    }
+
     /// Streams one file to disk byte-for-byte (no re-encode → EXIF/HDR preserved).
-    nonisolated private static func downloadOne(_ item: MediaItem, into folder: URL) async -> Bool {
-        guard let url = URL(string: item.url) else { return false }
+    /// Returns 0 on success, else the HTTP status (or a negative marker) so callers
+    /// can report *why* a download failed.
+    nonisolated private static func downloadOne(_ item: MediaItem, into folder: URL) async -> Int {
+        guard let url = URL(string: item.url) else { return -3 }
         let dest = uniqueDestination(sanitize(item.filename), in: folder)
+        var last = -1
         for attempt in 0..<3 {
             if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000) }
             var req = URLRequest(url: url)
@@ -107,20 +129,20 @@ enum LinkDownloadService {
             if let referer = item.referer { req.setValue(referer, forHTTPHeaderField: "Referer") }
             if let cookie = item.cookie { req.setValue(cookie, forHTTPHeaderField: "Cookie") }
             req.timeoutInterval = 600
-            guard let (tmp, resp) = try? await session.download(for: req) else { continue }
-            if let code = (resp as? HTTPURLResponse)?.statusCode {
-                if code == 429 || code >= 500 { continue }
-                if code >= 400 { return false }
-            }
+            guard let (tmp, resp) = try? await session.download(for: req) else { last = -1; continue }
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
+            if code == 429 || code >= 500 { last = code; continue }
+            if code >= 400 { return code }
             do {
                 try? FileManager.default.removeItem(at: dest)
                 try FileManager.default.moveItem(at: tmp, to: dest)
-                let ok = (try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0 >= 64
-                if !ok { try? FileManager.default.removeItem(at: dest) }
-                return ok
-            } catch { return false }
+                let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                if size >= 64 { return 0 }
+                try? FileManager.default.removeItem(at: dest)
+                return -2
+            } catch { return -4 }
         }
-        return false
+        return last
     }
 
     // MARK: - Host dispatch
@@ -195,6 +217,12 @@ enum LinkDownloadService {
         guard let json = await getJSON("https://api.gofile.io/contents/\(contentID)?wt=\(wt)", headers: headers) as? [String: Any],
               let data = json["data"] as? [String: Any] else { return }
         if albumName == nil { albumName = data["name"] as? String }
+        // A single-file link resolves to a file node directly (no children).
+        if (data["type"] as? String) == "file", let dl = data["link"] as? String {
+            let name = (data["name"] as? String) ?? URL(string: dl)?.lastPathComponent ?? "gofile"
+            items.append(MediaItem(url: dl, filename: name, referer: "https://gofile.io/", cookie: cookie))
+            return
+        }
         guard let children = data["children"] as? [String: Any] else { return }
         for (_, value) in children {
             guard let child = value as? [String: Any] else { continue }
