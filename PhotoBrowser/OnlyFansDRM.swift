@@ -33,7 +33,9 @@ enum OnlyFansDRM {
         func get(_ id: String) -> String? { map[id] }
         func set(_ key: String, _ id: String) { map[id] = key; UserDefaults.standard.set(map, forKey: "photoBrowser.ofDrmKeys") }
     }
-    nonisolated static let keyCache = KeyCache()
+    nonisolated private static let keyCache = KeyCache()
+    nonisolated static func cachedKey(for id: String) async -> String? { await keyCache.get(id) }
+    nonisolated static func cacheKey(_ key: String, for id: String) async { await keyCache.set(key, id) }
 
     /// The Widevine PSSH (base64) from a DASH manifest. A manifest usually carries
     /// several `<cenc:pssh>` boxes (PlayReady, Widevine, common-enc) — grab them all

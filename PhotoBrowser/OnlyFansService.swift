@@ -599,7 +599,7 @@ enum OnlyFansService {
         // A key we already extracted (e.g. a prior run that failed at decrypt) is reused
         // — never spend a cdmpool quota unit twice on the same video.
         let key: String
-        if let cached = await OnlyFansDRM.keyCache.get(item.id) {
+        if let cached = await OnlyFansDRM.cachedKey(for: item.id) {
             key = cached
         } else {
             if await hub.drmQuotaHit { return await fail("cdmpool daily quota reached (5/day) — skipping remaining DRM") }
@@ -611,7 +611,7 @@ enum OnlyFansService {
                                                   cookies: cookies, mpdURL: drm.mpdURL)
             if kr.quota { await hub.noteDRMQuota() }        // stop hammering a spent quota
             guard let k = kr.key else { return await fail(kr.error ?? "key extraction failed") }
-            await OnlyFansDRM.keyCache.set(k, item.id)
+            await OnlyFansDRM.cacheKey(k, for: item.id)
             key = k
         }
         // Download the encrypted media ourselves (with the CloudFront cookies) into the
