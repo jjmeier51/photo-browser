@@ -11,6 +11,7 @@ struct SettingsView: View {
         uniqueKeysWithValues: AIExtend.AIModel.allCases.map { ($0, String(AIExtend.tuneID(for: $0))) })
     @State private var flux = String(AIExtend.fluxTune)
     @State private var prompt = AIExtend.extendPrompt
+    @State private var cdmpoolToken = OnlyFansDRM.token
 
     var body: some View {
         NavigationStack {
@@ -58,6 +59,15 @@ struct SettingsView: View {
                     TextField("Prompt", text: $prompt, axis: .vertical).font(.callout)
                     Button("Reset to default") { prompt = AIExtend.defaultPrompt }
                 }
+
+                Section {
+                    SecureField("CDMPOOL API token", text: $cdmpoolToken)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                } header: {
+                    Text("OnlyFans DRM")
+                } footer: {
+                    Text("Optional. Lets the OnlyFans downloader decrypt DRM-protected videos using your cdmpool.xyz account: the app fetches the manifest, and cdmpool runs the Widevine license handshake to return the key (decryption uses FFmpegKit, which must be added to the project). Note: this relays your OnlyFans license headers through cdmpool. Leave blank to skip DRM videos.")
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -72,6 +82,7 @@ struct SettingsView: View {
                         }
                         if let id = Int(flux.trimmingCharacters(in: .whitespaces)) { AIExtend.setFluxTune(id) }
                         AIExtend.save(apiKey: key, defaultModel: model, prompt: prompt)
+                        OnlyFansDRM.setToken(cdmpoolToken)
                         dismiss()
                     }
                 }

@@ -62,4 +62,31 @@ enum VideoTranscoder {
         return false
         #endif
     }
+
+    /// Downloads an encrypted DASH manifest (with the given CDN `cookie`) and decrypts
+    /// its Widevine CENC video+audio with `keyHex` (a 32-char content key) into a plain
+    /// MP4 — used by the OnlyFans DRM path once cdmpool has returned the key. Copies
+    /// streams (no re-encode) so quality/HDR is preserved. Returns false without
+    /// FFmpegKit (the caller then reports that DRM needs it).
+    nonisolated static func decryptDASH(mpdURL: String, cookie: String, keyHex: String,
+                                        userAgent: String, date: Date, to dest: URL) async -> Bool {
+        #if canImport(ffmpegkit)
+        return await Task.detached(priority: .userInitiated) { () -> Bool in
+            try? FileManager.default.removeItem(at: dest)
+            var cmd = "-y"
+            if !cookie.isEmpty { cmd += " -headers \"Cookie: \(cookie)\r\n\"" }
+            cmd += " -user_agent \"\(userAgent)\""
+            cmd += " -decryption_key \(keyHex)"          // CENC (AES-CTR) content key
+            cmd += " -i \"\(mpdURL)\""
+            cmd += " -map 0:v:0 -map 0:a:0? -c copy -movflags +faststart"
+            cmd += " -metadata creation_time=\"\(ISO8601DateFormatter().string(from: date))\""
+            cmd += " \"\(dest.path)\""
+            let session = FFmpegKit.execute(cmd)
+            let ok = ReturnCode.isSuccess(session?.getReturnCode())
+            return ok && FileManager.default.fileExists(atPath: dest.path)
+        }.value
+        #else
+        return false
+        #endif
+    }
 }

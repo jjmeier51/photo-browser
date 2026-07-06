@@ -104,6 +104,14 @@ enum OnlyFansService {
         let removeHeaders: [String]       // headers the current rules say to omit (e.g. "user-id")
     }
 
+    /// DRM (Widevine) info for an encrypted item — its DASH manifest, the CloudFront
+    /// cookies to fetch it, and the OnlyFans license URL to sign. Present only when
+    /// cdmpool is configured and FFmpegKit is available.
+    private struct DRMInfo: Sendable {
+        let mpdURL: String
+        let cfCookie: String
+        let licenseURL: String
+    }
     /// One discovered media item: id + direct source URL + metadata, ready to download.
     private struct Item: Sendable {
         let id: String
@@ -111,6 +119,7 @@ enum OnlyFansService {
         let url: String
         let caption: String
         let date: Date?
+        var drm: DRMInfo? = nil
     }
 
     nonisolated static let apiBase = "https://onlyfans.com/api2/v2"
@@ -156,6 +165,17 @@ enum OnlyFansService {
     }
     nonisolated private static let pacer = Pacer()
 
+    /// Bounds concurrent FFmpegKit DRM decrypts to 2 — each is a full download+decode
+    /// session, and the 18-wide download group would otherwise fire many at once and
+    /// jetsam-kill the app.
+    private actor DecryptGate {
+        private var active = 0
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func acquire() async { if active < 2 { active += 1; return }; await withCheckedContinuation { waiters.append($0) } }
+        func release() { if waiters.isEmpty { active -= 1 } else { waiters.removeFirst().resume() } }
+    }
+    nonisolated private static let decryptGate = DecryptGate()
+
     /// Cross-collector hub: dedups discovered media ids (a post and a message can
     /// carry the same media), feeds accepted items into the download stream,
     /// aggregates progress, and remembers whether a collector hit an auth wall.
@@ -171,6 +191,7 @@ enum OnlyFansService {
         // Coverage counters (surfaced in the result note so missing media is diagnosable).
         private var postsScanned = 0, messagesScanned = 0, mediaSeen = 0
         private var skipLocked = 0, skipAudio = 0, skipDRM = 0, skipHLS = 0, skipOther = 0
+        private var drmError: String?
 
         init(already: Set<String>, continuation: AsyncStream<Item>.Continuation,
              progress: @escaping @Sendable (Progress) -> Void) {
@@ -193,8 +214,13 @@ enum OnlyFansService {
         }
         func scanned(posts: Int) { postsScanned += posts }
         func scanned(messages: Int) { messagesScanned += messages }
+        func noteDRMError(_ s: String) { if drmError == nil { drmError = s } }
         var diagnostics: String {
-            "posts \(postsScanned), msgs \(messagesScanned); media \(mediaSeen) → new \(foundCount), skipped \(skipLocked) locked / \(skipAudio) audio / no-url: \(skipDRM) drm, \(skipHLS) hls, \(skipOther) other"
+            var s = "posts \(postsScanned), msgs \(messagesScanned); media \(mediaSeen) → new \(foundCount), skipped \(skipLocked) locked / \(skipAudio) audio / no-url: \(skipDRM) drm, \(skipHLS) hls, \(skipOther) other"
+            if skipDRM > 0, OnlyFansDRM.isEnabled, !VideoTranscoder.isAvailable { s += " (DRM needs FFmpegKit)" }
+            if skipDRM > 0, !OnlyFansDRM.isEnabled { s += " (set a cdmpool token in Settings for DRM)" }
+            if let drmError { s += "; drm error: \(drmError)" }
+            return s
         }
         func loginWalled() { hitLoginWall = true }
         func discoveryFinished() { finding = false; continuation.finish(); report() }
@@ -279,7 +305,7 @@ enum OnlyFansService {
                 if active >= maxConcurrent, let r = await group.next() {
                     active -= 1; apply(r); await hub.savedOne()
                 }
-                group.addTask { await download(item, into: folder, creds: creds) }
+                group.addTask { await download(item, into: folder, creds: creds, rules: rules, hub: hub) }
                 active += 1
             }
             while let r = await group.next() { apply(r); await hub.savedOne() }
@@ -347,7 +373,7 @@ enum OnlyFansService {
             let (list, hasMore) = normalize(json)
             if list.isEmpty { return }
             await hub.scanned(posts: list.count)
-            for post in list { await emitMedia(from: post, hub: hub) }
+            for post in list { await emitMedia(from: post, source: "post", hub: hub) }
             guard let last = list.last, let marker = stringify(last["postedAtPrecise"]),
                   seenMarkers.insert(marker).inserted else { return }
             if !hasMore { return }
@@ -369,7 +395,7 @@ enum OnlyFansService {
             let (list, hasMore) = normalize(json)
             if list.isEmpty { return }
             await hub.scanned(messages: list.count)
-            for msg in list { await emitMedia(from: msg, hub: hub) }
+            for msg in list { await emitMedia(from: msg, source: "message", hub: hub) }
             guard let last = list.last, let lid = idString(last["id"]), lid != lastID else { return }
             if !hasMore { return }
             lastID = lid
@@ -381,9 +407,10 @@ enum OnlyFansService {
     /// `canView` or `type` is treated as viewable so single-rendition or untyped
     /// videos aren't silently dropped; `mediaURL` (which returns nil for anything
     /// without a real file) is the real gate.
-    nonisolated private static func emitMedia(from container: [String: Any], hub: Hub) async {
+    nonisolated private static func emitMedia(from container: [String: Any], source: String, hub: Hub) async {
         let caption = stripHTML(container["text"] as? String ?? "")
         let date = postDate(container)
+        let postID = idString(container["id"]) ?? ""
         guard let media = container["media"] as? [[String: Any]] else { return }
         var items: [Item] = []
         var t = Hub.Tally()
@@ -393,6 +420,16 @@ enum OnlyFansService {
             if type == "audio" { t.audio += 1; continue }
             if (m["canView"] as? Bool) == false { t.locked += 1; continue }   // only explicit locks
             guard let mid = idString(m["id"]) else { continue }
+            // DRM (encrypted DASH): downloadable only via cdmpool + FFmpegKit.
+            if let files = m["files"] as? [String: Any], let drm = files["drm"] as? [String: Any] {
+                if OnlyFansDRM.isEnabled, VideoTranscoder.isAvailable,
+                   let di = drmInfo(drm, mediaId: mid, source: source, postID: postID) {
+                    items.append(Item(id: mid, isVideo: true, url: di.mpdURL, caption: caption, date: date, drm: di))
+                } else {
+                    t.drm += 1        // no cdmpool token / no FFmpegKit → can't handle it
+                }
+                continue
+            }
             // Video when the type says so, or when it carries video-only fields.
             let isVideo = type == "video" || type == "gif"
                 || (type != "photo" && (m["videoSources"] != nil || (m["source"] as? [String: Any])?["source"] != nil))
@@ -492,6 +529,20 @@ enum OnlyFansService {
         return best?.url
     }
 
+    /// Builds `DRMInfo` from a media's `files.drm`: the DASH manifest, the CloudFront
+    /// cookies that authorize fetching it, and the OnlyFans license URL to sign.
+    nonisolated private static func drmInfo(_ drm: [String: Any], mediaId: String, source: String, postID: String) -> DRMInfo? {
+        guard let manifest = drm["manifest"] as? [String: Any],
+              let mpd = manifest["dash"] as? String, !mpd.isEmpty else { return nil }
+        var cf = ""
+        if let sig = drm["signature"] as? [String: Any], let dash = sig["dash"] as? [String: Any] {
+            cf = ["CloudFront-Policy", "CloudFront-Signature", "CloudFront-Key-Pair-Id"]
+                .compactMap { k in (dash[k] as? String).map { "\(k)=\($0)" } }.joined(separator: "; ")
+        }
+        let license = "\(apiBase)/users/media/\(mediaId)/drm/\(source)/\(postID)?type=widevine"
+        return DRMInfo(mpdURL: mpd, cfCookie: cf, licenseURL: license)
+    }
+
     /// `{ "list": [...], "hasMore": Bool }` or a bare array — normalize both.
     nonisolated private static func normalize(_ json: Any) -> (list: [[String: Any]], hasMore: Bool) {
         if let arr = json as? [[String: Any]] { return (arr, arr.count >= pageLimit) }
@@ -515,8 +566,9 @@ enum OnlyFansService {
 
     // MARK: - Per-item download
 
-    nonisolated private static func download(_ item: Item, into folder: URL,
-                                             creds: Credentials) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
+    nonisolated private static func download(_ item: Item, into folder: URL, creds: Credentials,
+                                             rules: DynamicRules, hub: Hub) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
+        if let drm = item.drm { return await downloadDRM(item, drm: drm, into: folder, creds: creds, rules: rules, hub: hub) }
         let ext = fileExt(of: item.url, isVideo: item.isVideo)
         let dest = uniqueDestination("OF_\(item.id).\(ext)", in: folder)
         guard await downloadFile(item.url, to: dest, creds: creds) else {
@@ -529,6 +581,57 @@ enum OnlyFansService {
         if !item.isVideo { writeImageMeta(date: item.date, caption: item.caption, to: dest) }
         setFileDate(dest, item.date)     // set the post date as the item's capture/file date
         return (true, item.isVideo, item.id, dest.path, item.caption)
+    }
+
+    /// DRM pipeline: fetch the manifest → pull the Widevine PSSH → have cdmpool run
+    /// the OnlyFans license handshake (with our signed headers) for the content key →
+    /// FFmpegKit downloads + decrypts the DASH to a plain MP4. Each failure stage is
+    /// reported to the hub so the result note says exactly where it stopped.
+    nonisolated private static func downloadDRM(_ item: Item, drm: DRMInfo, into folder: URL, creds: Credentials,
+                                                rules: DynamicRules, hub: Hub) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
+        func fail(_ why: String) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
+            await hub.noteDRMError(why); return (false, true, item.id, nil, "")
+        }
+        guard let mpd = await fetchText(drm.mpdURL, cookie: drm.cfCookie) else { return await fail("manifest fetch failed") }
+        guard let pssh = OnlyFansDRM.widevinePSSH(fromMPD: mpd) else { return await fail("no PSSH in manifest") }
+        guard let licURL = URL(string: drm.licenseURL) else { return await fail("bad license URL") }
+        var headers = signedHeaders(for: licURL, creds: creds, rules: rules)
+        let cookies = cookieDict(creds.cookie)
+        headers.removeValue(forKey: "cookie")          // cdmpool takes cookies separately
+        let kr = await OnlyFansDRM.extractKey(pssh: pssh, licenseURL: drm.licenseURL, headers: headers,
+                                              cookies: cookies, mpdURL: drm.mpdURL)
+        guard let key = kr.key else { return await fail(kr.error ?? "key extraction failed") }
+        let dest = uniqueDestination("OF_\(item.id).mp4", in: folder)
+        await decryptGate.acquire()
+        let ok = await VideoTranscoder.decryptDASH(mpdURL: drm.mpdURL, cookie: drm.cfCookie, keyHex: key,
+                                                   userAgent: userAgent, date: item.date ?? Date(), to: dest)
+        await decryptGate.release()
+        guard ok else { return await fail("decrypt failed (FFmpegKit)") }
+        setFileDate(dest, item.date)
+        return (true, true, item.id, dest.path, item.caption)
+    }
+
+    /// A simple authenticated GET returning text (for the DRM manifest, fetched with
+    /// the CloudFront cookies rather than the API session).
+    nonisolated private static func fetchText(_ urlString: String, cookie: String) async -> String? {
+        guard let url = URL(string: urlString) else { return nil }
+        var req = URLRequest(url: url)
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        if !cookie.isEmpty { req.setValue(cookie, forHTTPHeaderField: "Cookie") }
+        req.setValue(referer, forHTTPHeaderField: "Referer")
+        guard let (data, resp) = try? await session.data(for: req) else { return nil }
+        if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 400 { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Parses a `k=v; k=v` cookie header into a dict (cdmpool wants cookies as JSON).
+    nonisolated private static func cookieDict(_ header: String) -> [String: String] {
+        var d: [String: String] = [:]
+        for pair in header.split(separator: ";") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            if kv.count == 2 { d[kv[0].trimmingCharacters(in: .whitespaces)] = kv[1].trimmingCharacters(in: .whitespaces) }
+        }
+        return d
     }
 
     nonisolated private static func imageExt(of urlString: String) -> String {
