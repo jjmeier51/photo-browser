@@ -22,7 +22,18 @@ enum OnlyFansDRM {
     /// DRM downloading is available only when a token is set.
     nonisolated static var isEnabled: Bool { !token.isEmpty }
 
-    struct KeyResult: Sendable { let key: String?; let error: String? }
+    struct KeyResult: Sendable { let key: String?; let error: String?; var quota: Bool = false }
+
+    /// Caches extracted content keys (media id → key hex) so a re-run — or a retry
+    /// after a *decrypt* failure — never re-spends a cdmpool quota unit on a video
+    /// whose key we already have. Persisted; an actor so concurrent writes don't race.
+    private actor KeyCache {
+        private var map: [String: String]
+        init() { map = (UserDefaults.standard.dictionary(forKey: "photoBrowser.ofDrmKeys") as? [String: String]) ?? [:] }
+        func get(_ id: String) -> String? { map[id] }
+        func set(_ key: String, _ id: String) { map[id] = key; UserDefaults.standard.set(map, forKey: "photoBrowser.ofDrmKeys") }
+    }
+    nonisolated static let keyCache = KeyCache()
 
     /// The Widevine PSSH (base64) from a DASH manifest. A manifest usually carries
     /// several `<cenc:pssh>` boxes (PlayReady, Widevine, common-enc) — grab them all
@@ -59,7 +70,7 @@ enum OnlyFansDRM {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = body
         req.timeoutInterval = 60
-        guard let (data, _) = try? await URLSession.shared.data(for: req),
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return KeyResult(key: nil, error: "cdmpool unreachable")
         }
@@ -67,9 +78,11 @@ enum OnlyFansDRM {
            let key = keys.first?["key"] as? String, !key.isEmpty {
             return KeyResult(key: key, error: nil)
         }
-        let code = (json["error_code"] as? String).map { "\($0) " } ?? ""
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        let rawCode = (json["error_code"] as? String) ?? ""
         let hint = (json["hint"] as? String) ?? (json["error"] as? String) ?? "extract failed"
-        return KeyResult(key: nil, error: "cdmpool \(code)\(hint)")
+        let quota = status == 429 || rawCode.uppercased().contains("QUOTA")
+        return KeyResult(key: nil, error: "cdmpool \(rawCode.isEmpty ? "" : rawCode + " ")\(hint)", quota: quota)
     }
 
     /// The encrypted media file URLs from the manifest — the video representation's

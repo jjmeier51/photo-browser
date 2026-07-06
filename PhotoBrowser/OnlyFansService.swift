@@ -192,6 +192,8 @@ enum OnlyFansService {
         private var postsScanned = 0, messagesScanned = 0, mediaSeen = 0
         private var skipLocked = 0, skipAudio = 0, skipDRM = 0, skipHLS = 0, skipOther = 0
         private var drmError: String?
+        private(set) var drmQuotaHit = false
+        func noteDRMQuota() { drmQuotaHit = true }
 
         init(already: Set<String>, continuation: AsyncStream<Item>.Continuation,
              progress: @escaping @Sendable (Progress) -> Void) {
@@ -594,13 +596,24 @@ enum OnlyFansService {
         }
         guard let mpd = await fetchText(drm.mpdURL, cookie: drm.cfCookie) else { return await fail("manifest fetch failed") }
         guard let pssh = OnlyFansDRM.widevinePSSH(fromMPD: mpd) else { return await fail("no PSSH in manifest") }
-        guard let licURL = URL(string: drm.licenseURL) else { return await fail("bad license URL") }
-        var headers = signedHeaders(for: licURL, creds: creds, rules: rules)
-        let cookies = cookieDict(creds.cookie)
-        headers.removeValue(forKey: "cookie")          // cdmpool takes cookies separately
-        let kr = await OnlyFansDRM.extractKey(pssh: pssh, licenseURL: drm.licenseURL, headers: headers,
-                                              cookies: cookies, mpdURL: drm.mpdURL)
-        guard let key = kr.key else { return await fail(kr.error ?? "key extraction failed") }
+        // A key we already extracted (e.g. a prior run that failed at decrypt) is reused
+        // — never spend a cdmpool quota unit twice on the same video.
+        let key: String
+        if let cached = await OnlyFansDRM.keyCache.get(item.id) {
+            key = cached
+        } else {
+            if await hub.drmQuotaHit { return await fail("cdmpool daily quota reached (5/day) — skipping remaining DRM") }
+            guard let licURL = URL(string: drm.licenseURL) else { return await fail("bad license URL") }
+            var headers = signedHeaders(for: licURL, creds: creds, rules: rules)
+            let cookies = cookieDict(creds.cookie)
+            headers.removeValue(forKey: "cookie")          // cdmpool takes cookies separately
+            let kr = await OnlyFansDRM.extractKey(pssh: pssh, licenseURL: drm.licenseURL, headers: headers,
+                                                  cookies: cookies, mpdURL: drm.mpdURL)
+            if kr.quota { await hub.noteDRMQuota() }        // stop hammering a spent quota
+            guard let k = kr.key else { return await fail(kr.error ?? "key extraction failed") }
+            await OnlyFansDRM.keyCache.set(k, item.id)
+            key = k
+        }
         // Download the encrypted media ourselves (with the CloudFront cookies) into the
         // app's temp dir, then hand FFmpeg local files — `-decryption_key` works on the
         // mov demuxer but not through the DASH demuxer, and our own download guarantees
