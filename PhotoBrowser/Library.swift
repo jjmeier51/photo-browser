@@ -701,7 +701,10 @@ final class Library {
     }
     func markEditedInApp(_ url: URL) {
         editedInAppPaths.insert(url.path)
-        Self.saveBulk(editedInAppPaths, "editedInApp")
+        // Off-main: this set grows with every edit, and re-encoding it inline on
+        // each save eventually hitched the UI.
+        let snapshot = editedInAppPaths
+        Self.persistQueue.async { Self.saveBulk(snapshot, "editedInApp") }
         labelsVersion += 1
     }
     func isEditedInApp(_ url: URL) -> Bool { editedInAppPaths.contains(url.path) }
@@ -1501,25 +1504,39 @@ final class Library {
         labelsVersion += 1
     }
 
-    /// Keeps Favorite / To AI labels and captions attached to an item after it's
-    /// moved or renamed within the app. Rewrites the stored path (and, when a
-    /// folder moves, every label/caption for items underneath it).
     /// Keeps labels, captions, covers, etc. attached to an item after it's moved or
     /// renamed within the app, by rewriting the stored path (and, for a folder, every
     /// path underneath it).
     func itemMoved(from oldURL: URL, to newURL: URL) {
-        let old = oldURL.path, new = newURL.path
-        applyRemap { p in (p == old || p.hasPrefix(old + "/")) ? new + p.dropFirst(old.count) : p }
+        itemsMoved([(from: oldURL, to: newURL)])
     }
 
-    /// Batch version: re-keys all moved items in a single pass with one persist, so
-    /// moving a large selection doesn't do N×(serialize + write) on the main thread
-    /// (which froze/killed the app).
+    /// Batch version: re-keys all moved items in a single pass with one persist.
+    /// The remap is O(1) per stored path — an exact-match table for files, prefix
+    /// pairs only for folders (subtree re-key). Comparing every stored path against
+    /// every moved item (with a string concat per check) stalled the main thread
+    /// for seconds at 100k-photo scale, so a big move froze on the last progress
+    /// frame and the watchdog killed the app before the success message.
     func itemsMoved(_ moves: [(from: URL, to: URL)]) {
         guard !moves.isEmpty else { return }
-        let pairs = moves.map { (old: $0.from.path, new: $0.to.path) }
+        var exact: [String: String] = [:]
+        var folders: [(old: String, oldSlash: String, new: String)] = []
+        for m in moves {
+            let old = m.from.path, new = m.to.path
+            exact[old] = new
+            // Directory-ness: trust the URL flag when set, else ask the filesystem —
+            // the just-moved destination is hot in the attribute cache, and a folder
+            // misread as a file (e.g. a dotted name off an unmarked URL) would orphan
+            // every label underneath it.
+            var isDir: ObjCBool = false
+            if m.from.hasDirectoryPath
+                || (FileManager.default.fileExists(atPath: new, isDirectory: &isDir) && isDir.boolValue) {
+                folders.append((old, old + "/", new))
+            }
+        }
         applyRemap { p in
-            for pr in pairs where p == pr.old || p.hasPrefix(pr.old + "/") { return pr.new + p.dropFirst(pr.old.count) }
+            if let n = exact[p] { return n }
+            for f in folders where p.hasPrefix(f.oldSlash) { return f.new + p.dropFirst(f.old.count) }
             return p
         }
     }
@@ -1571,36 +1588,64 @@ final class Library {
         }
         FaceStore.shared.remap(remap)
 
-        Self.saveBulk(favorites, "favorites")
-        Self.saveBulk(aiLabels, "ai")
-        Self.saveBulk(editedInAppPaths, "editedInApp")
-        Self.saveBulk(aiGeneratedPaths, "aiGenerated")
-        Self.saveBulk(cleanupReviewed, "cleanupReviewed")
-        Self.saveBulk(notDuplicatePairs, "notDuplicates")
-        Self.saveBulk(people, "people")
-        UserDefaults.standard.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
-        UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
-        UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
-        UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
-        UserDefaults.standard.set(Array(hiddenFolders), forKey: "photoBrowser.hiddenFolders")
-        Self.saveBulk(captions, "captions")
-        UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
-        Self.saveBulk(photoOrigins, "photoOrigins")
-        Self.saveBulk(igPostedBy, "igPostedBy")
-        UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
-        UserDefaults.standard.set(storyLinks, forKey: "photoBrowser.storyLinks")
-        UserDefaults.standard.set(folderBirthdays, forKey: "photoBrowser.birthdays")
-        UserDefaults.standard.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
-        UserDefaults.standard.set(lastTikTokHandleByFolder, forKey: "photoBrowser.lastTikTokHandle")
-        persistCustomLabels()
-        persistInstagramFolders()
-        persistFacebookFolders()
-        persistTikTokFolders()
-        persistTikTokLikes()
-        if let data = try? JSONEncoder().encode(accessKardashian) {
-            UserDefaults.standard.set(data, forKey: "photoBrowser.accessKardashian")
-        }
+        persistCustomLabels()          // already coalesced onto a later turn
+        persistAllPathKeyed()
         labelsVersion += 1
+    }
+
+    /// Serial background queue for persisting the path-keyed collections. Encoding
+    /// hundreds of thousands of paths to JSON inline on the main thread (the other
+    /// half of the post-move freeze) blocked the UI long enough for the watchdog to
+    /// kill the app; FIFO ordering keeps a rapid second remap from being overwritten
+    /// by a stale earlier snapshot.
+    nonisolated private static let persistQueue = DispatchQueue(label: "photoBrowser.persistPathKeyed", qos: .utility)
+
+    /// Snapshots every path-keyed collection (cheap — copy-on-write) and writes them
+    /// on the persist queue. `saveBulk` and `UserDefaults` are both thread-safe.
+    private func persistAllPathKeyed() {
+        let favorites = self.favorites, aiLabels = self.aiLabels
+        let editedInAppPaths = self.editedInAppPaths, aiGeneratedPaths = self.aiGeneratedPaths
+        let cleanupReviewed = self.cleanupReviewed, notDuplicatePairs = self.notDuplicatePairs
+        let people = self.people
+        let framesFolders = self.framesFolders, kardashianFolders = self.kardashianFolders
+        let instagramHighlights = self.instagramHighlights, albumHighlights = self.albumHighlights
+        let hiddenFolders = self.hiddenFolders
+        let captions = self.captions, folderCovers = self.folderCovers, photoOrigins = self.photoOrigins
+        let igPostedBy = self.igPostedBy, igLastHandle = self.igLastHandle, storyLinks = self.storyLinks
+        let folderBirthdays = self.folderBirthdays, bubbleOrders = self.bubbleOrders
+        let lastTikTokHandleByFolder = self.lastTikTokHandleByFolder
+        let instagramFolders = self.instagramFolders, facebookFolders = self.facebookFolders
+        let tiktokFolders = self.tiktokFolders, tiktokLikes = self.tiktokLikes
+        let accessKardashian = self.accessKardashian
+        Self.persistQueue.async {
+            Self.saveBulk(favorites, "favorites")
+            Self.saveBulk(aiLabels, "ai")
+            Self.saveBulk(editedInAppPaths, "editedInApp")
+            Self.saveBulk(aiGeneratedPaths, "aiGenerated")
+            Self.saveBulk(cleanupReviewed, "cleanupReviewed")
+            Self.saveBulk(notDuplicatePairs, "notDuplicates")
+            Self.saveBulk(people, "people")
+            Self.saveBulk(captions, "captions")
+            Self.saveBulk(photoOrigins, "photoOrigins")
+            Self.saveBulk(igPostedBy, "igPostedBy")
+            let ud = UserDefaults.standard
+            ud.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
+            ud.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
+            ud.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
+            ud.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
+            ud.set(Array(hiddenFolders), forKey: "photoBrowser.hiddenFolders")
+            ud.set(folderCovers, forKey: "photoBrowser.folderCovers")
+            ud.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
+            ud.set(storyLinks, forKey: "photoBrowser.storyLinks")
+            ud.set(folderBirthdays, forKey: "photoBrowser.birthdays")
+            ud.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
+            ud.set(lastTikTokHandleByFolder, forKey: "photoBrowser.lastTikTokHandle")
+            ud.set(tiktokLikes, forKey: "photoBrowser.tiktokLikes")
+            if let data = try? JSONEncoder().encode(instagramFolders) { ud.set(data, forKey: "photoBrowser.instagramFolders") }
+            if let data = try? JSONEncoder().encode(facebookFolders) { ud.set(data, forKey: "photoBrowser.facebookFolders") }
+            if let data = try? JSONEncoder().encode(tiktokFolders) { ud.set(data, forKey: "photoBrowser.tiktokFolders") }
+            if let data = try? JSONEncoder().encode(accessKardashian) { ud.set(data, forKey: "photoBrowser.accessKardashian") }
+        }
     }
 
     private func remapKeys<V>(_ dict: [String: V], _ remap: (String) -> String) -> [String: V] {

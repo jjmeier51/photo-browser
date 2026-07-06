@@ -311,7 +311,7 @@ enum MediaEditing {
     }
 
     /// Rotates a CGImage clockwise by `quarters` × 90° at full resolution.
-    static func rotate(_ image: CGImage, quarters: Int) -> CGImage {
+    nonisolated static func rotate(_ image: CGImage, quarters: Int) -> CGImage {
         let q = ((quarters % 4) + 4) % 4
         if q == 0 { return image }
         let swap = q % 2 == 1
@@ -333,7 +333,9 @@ enum MediaEditing {
     /// Rotates/crops the photo at `url` and writes the result back over the original
     /// file (same name and container), preserving EXIF/GPS so capture date, location
     /// and Age survive the edit. Returns true on success.
-    static func applyPhotoInPlace(url: URL, quarters: Int, crop: CGRect) -> Bool {
+    /// `nonisolated`: called from `Task.detached` save paths — the decode/re-encode
+    /// of a full-resolution photo must never run on the main actor.
+    nonisolated static func applyPhotoInPlace(url: URL, quarters: Int, crop: CGRect) -> Bool {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
               let full = loadFullCGImage(src) else { return false }
         let rotated = rotate(full, quarters: quarters)
@@ -418,7 +420,9 @@ enum MediaEditing {
     /// while preserving metadata (EXIF capture date, GPS, …). Writes to a temp file and verifies
     /// it decodes before replacing the original, so it can't corrupt the photo. SDR pixels only
     /// (an HDR gain map isn't carried). Returns true on success.
-    static func enhancePhotoInPlace(url: URL, scale: CGFloat = 1.5) -> Bool {
+    /// `nonisolated`: called from download pipelines (Facebook) and detached tasks — the
+    /// pixel work must never run on the main actor.
+    nonisolated static func enhancePhotoInPlace(url: URL, scale: CGFloat = 1.5) -> Bool {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
               let full = loadFullCGImage(src) else { return false }
         let s = max(1, scale)
@@ -508,7 +512,7 @@ enum MediaEditing {
     }
 
     /// Full-resolution, upright CGImage from an open image source.
-    private static func loadFullCGImage(_ src: CGImageSource) -> CGImage? {
+    nonisolated private static func loadFullCGImage(_ src: CGImageSource) -> CGImage? {
         let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
         let w = props?[kCGImagePropertyPixelWidth] as? Int ?? 4096
         let h = props?[kCGImagePropertyPixelHeight] as? Int ?? 4096
@@ -523,7 +527,7 @@ enum MediaEditing {
 
     /// Atomically swaps `temp` in for `original`, keeping the original's name and
     /// location. Falls back to remove-then-move if the volume rejects replace.
-    static func replaceInPlace(original: URL, temp: URL) -> Bool {
+    nonisolated static func replaceInPlace(original: URL, temp: URL) -> Bool {
         let fm = FileManager.default
         if (try? fm.replaceItemAt(original, withItemAt: temp)) != nil { return true }
         do {

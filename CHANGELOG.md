@@ -4,6 +4,35 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-06
 
+- **Fix: watchdog kill after big moves; freezes on editor saves** — re-keying labels after a
+  multi-item move compared every stored path against every moved item (a string concat per
+  check, at 100k-photo scale) and then re-encoded *every* path-keyed collection to JSON — all
+  inline on the main thread. Files finished moving, the bar froze on its last frame (~96%),
+  and iOS killed the app before the success message. The remap is now O(1) per stored path
+  (exact-match table for files, prefix pairs only for folders), and persistence runs on a
+  serial background queue from copy-on-write snapshots (FIFO, so a rapid second move can't be
+  overwritten by a stale earlier snapshot). The same machinery caused the occasional freeze
+  when saving an edited photo: container-change overwrites re-key the path, and every save
+  re-encoded the ever-growing "Edited" set inline — both now persist off-main. The crop
+  editor's full-resolution decode/re-encode (`applyPhotoInPlace`) is also marked
+  `nonisolated` so its `Task.detached` save genuinely leaves the main actor (hard-won
+  constraint #1).
+- **Facebook downloader: complete coverage, faster, upscaled** — discovery now enumerates the
+  profile's *real albums* (Timeline/Mobile Uploads, **Profile Pictures**, Cover Photos, custom
+  albums) and walks each one, instead of relying only on the classic `pb` virtual set that
+  Facebook truncates around 100 photos (the "only 99 downloaded" ceiling); the `pb` and tagged
+  sets are still walked too, with everything deduped by media id. A photo
+  page that returns without an image or next-pointer is retried (and refetched via the
+  alternate `photo.php` form) rather than silently ending the set, and page fetches retry
+  transient failures (429/5xx) with backoff. Speed: all set walks run concurrently through one
+  shared pacer (so the aggregate request rate stays polite), downloads start while discovery is
+  still walking (streamed pipeline, width 8, CDN retries), and the per-page sleep is gone.
+  Downloaded photos can run through the app's **2× AI Upscale** (denoise + sharpen + double
+  resolution, on by default, metadata preserved). "Posted by" is fixed — the profile-name
+  resolver no longer produces an empty name (og:title → embedded-JSON owner name → title →
+  vanity fallbacks), each photo credits its *actual* poster (tagged photos are posted by
+  someone else), and the info panel shows Facebook posters as plain names (no "@") with a
+  "Facebook" label instead of "Instagram".
 - **Facebook downloader works again** — rebuilt on www.facebook.com's embedded JSON after
   Facebook retired the `mbasic` HTML site the old scraper depended on (every request there now
   hits a login interstitial, which is why downloads found nothing). Media sets are walked photo
