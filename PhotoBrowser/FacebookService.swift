@@ -180,12 +180,15 @@ enum FacebookService {
                 group.addTask { await collectAlbums(profile, skip: alreadyDownloaded, creds: creds, hub: hub) }
                 group.addTask {
                     await collectPhotos(profile, tab: "photos_by", fallbackToken: "pb.\(profile.id).-2207520000",
-                                        skip: alreadyDownloaded, creds: creds, hub: hub)
+                                        tokenPrefixes: ["pb.", "a."], skip: alreadyDownloaded, creds: creds, hub: hub)
                 }
                 group.addTask {
                     // Tagged photos are posted by someone else — credit the page owner.
+                    // Pin to the `t.` (Photos-of) set so the walk can't wander into a
+                    // poster's album and drag in their non-tagged uploads.
                     await collectPhotos(profile, tab: "photos_of", fallbackToken: "t.\(profile.id)",
-                                        skip: alreadyDownloaded, creds: creds, hub: hub, ownerFromPage: true)
+                                        tokenPrefixes: ["t."], skip: alreadyDownloaded, creds: creds, hub: hub,
+                                        ownerFromPage: true)
                 }
                 group.addTask { await collectVideos(profile, skip: alreadyDownloaded, creds: creds, hub: hub) }
             }
@@ -348,15 +351,25 @@ enum FacebookService {
     /// token; the set is then walked photo by photo. When the tab won't reveal a
     /// token the classic constructed token is tried — worst case the walk finds no
     /// first photo and emits nothing.
+    ///
+    /// `tokenPrefixes` pins the token to the expected **set family**: the walk
+    /// paginates within whatever `set=` it's handed, so on the tagged tab we must
+    /// only accept a `t.` (Photos-of-X) token. A thumbnail on that page links each
+    /// photo to *its own owning album* (`a.`/`pb.`, owned by whoever posted it);
+    /// grabbing one of those sent the walk into that person's whole album and pulled
+    /// in every non-tagged upload. Constraining the family (else keeping the `t.`
+    /// fallback) keeps tagged discovery to photos the profile is actually in.
     nonisolated private static func collectPhotos(_ profile: Profile, tab: String, fallbackToken: String,
-                                                  skip: Set<String>, creds: Credentials, hub: Hub,
-                                                  ownerFromPage: Bool = false) async {
+                                                  tokenPrefixes: [String], skip: Set<String>, creds: Credentials,
+                                                  hub: Hub, ownerFromPage: Bool = false) async {
         var token = fallbackToken
         var firstID: String?
         if let (html, finalURL) = await fetchHTML(host + tabPath(profile, tab), creds: creds) {
             if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return }
-            if let t = firstMatch(html, "\"media_?set_?token\":\"([^\"]+)\"")
-                ?? firstMatch(html, "set=((?:a|pb|t)\\.[0-9A-Za-z%.\\-]+)") {
+            // `t.` → `t\.`, etc., so the dot is a literal in the alternation.
+            let alt = tokenPrefixes.map { $0.replacingOccurrences(of: ".", with: "\\.") }.joined(separator: "|")
+            if let t = firstMatch(html, "\"media_?set_?token\":\"((?:\(alt))[^\"]+)\"")
+                ?? firstMatch(html, "set=((?:\(alt))[0-9A-Za-z%.\\-]+)") {
                 token = decode(t)
             }
             firstID = firstPhotoID(html)
