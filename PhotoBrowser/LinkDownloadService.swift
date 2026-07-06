@@ -239,6 +239,18 @@ enum LinkDownloadService {
 
     // MARK: - bunkr family (album JSON + per-file CDN resolve)
 
+    /// Warms up bunkr's DDoS-Guard challenge in an offscreen WKWebView (so the CDN
+    /// grants the `__ddg*` session cookie) and attaches that cookie to every item.
+    /// The CDN (`*.cdn.cr`) 403s a plain request no matter the Referer; only a real
+    /// browser session gets through. Best-effort — if the challenge doesn't solve,
+    /// the items pass through unchanged and the download just tries without it.
+    nonisolated private static func attachBunkrCookie(_ items: [MediaItem]) async -> [MediaItem] {
+        guard let first = items.first else { return items }
+        let cookie = await BunkrSession.shared.cdnCookies(cdnURL: first.url, userAgent: userAgent)
+        guard !cookie.isEmpty else { return items }
+        return items.map { MediaItem(url: $0.url, filename: $0.filename, referer: $0.referer, cookie: cookie) }
+    }
+
     nonisolated private static func bunkr(_ link: String) async -> ([MediaItem], String?, String?) {
         let origin = (URL(string: link)?.scheme).flatMap { s in URL(string: link)?.host.map { "\(s)://\($0)" } } ?? "https://bunkr.cr"
         // Album: the page embeds `window.albumFiles = [ {id, original, slug, …}, … ]`,
@@ -278,13 +290,13 @@ enum LinkDownloadService {
 
             if !ids.isEmpty {
                 let items = await bunkrResolveAll(ids, origin: origin)
-                if !items.isEmpty { return (items, title, nil) }
+                if !items.isEmpty { return (await attachBunkrCookie(items), title, nil) }
                 return ([], title, "[bunkr] \(ids.count) files listed but the CDN resolver returned nothing (\(marks)).")
             }
             // Fallback: resolve each /f/ file page directly (broad slug scrape — any context).
             if !slugs.isEmpty {
                 let items = await bunkrResolveSlugs(slugs, origin: origin)
-                if !items.isEmpty { return (items, title, nil) }
+                if !items.isEmpty { return (await attachBunkrCookie(items), title, nil) }
                 return ([], title, "[bunkr] \(slugs.count) file page(s) found but none resolved (\(marks)).")
             }
             // If the array was located but nothing parsed, show its head so the object
@@ -294,7 +306,7 @@ enum LinkDownloadService {
         }
         // Single file page.
         let single = await bunkrResolveSlugs([firstMatch(link, "/f/([^/?#]+)") ?? link], origin: origin)
-        return (single, nil, single.isEmpty ? "[bunkr] couldn’t resolve that file." : nil)
+        return (await attachBunkrCookie(single), nil, single.isEmpty ? "[bunkr] couldn’t resolve that file." : nil)
     }
 
     /// Resolves bunkr `/f/{slug}` file pages: fetch each, read its numeric data id,
