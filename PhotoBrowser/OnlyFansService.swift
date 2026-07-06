@@ -135,7 +135,7 @@ enum OnlyFansService {
         cfg.httpShouldSetCookies = false
         cfg.httpCookieStorage = nil
         cfg.timeoutIntervalForRequest = 60
-        cfg.httpMaximumConnectionsPerHost = 16      // wide CDN pipe for fast parallel downloads
+        cfg.httpMaximumConnectionsPerHost = 24      // wide CDN pipe for fast parallel downloads
         return URLSession(configuration: cfg)
     }()
 
@@ -150,7 +150,7 @@ enum OnlyFansService {
         func waitTurn() async {
             let now = ContinuousClock.now
             let slot = max(next, now)
-            next = slot + .milliseconds(120)
+            next = slot + .milliseconds(100)
             if slot > now { try? await Task.sleep(until: slot, clock: .continuous) }
         }
     }
@@ -176,20 +176,23 @@ enum OnlyFansService {
              progress: @escaping @Sendable (Progress) -> Void) {
             self.already = already; self.continuation = continuation; self.progress = progress
         }
-        func emit(_ item: Item) {
-            guard ids.insert(item.id).inserted, !already.contains(item.id) else { return }
-            foundCount += 1
-            continuation.yield(item)
-            if foundCount <= 5 || foundCount % 10 == 0 { report() }
+        /// Counts tallied locally per post/message, folded in once — one actor hop per
+        /// container instead of one per media item (that per-item hopping is what made
+        /// discovery slow).
+        struct Tally: Sendable { var seen = 0, locked = 0, audio = 0, drm = 0, hls = 0, other = 0 }
+        func ingest(_ items: [Item], tally t: Tally) {
+            mediaSeen += t.seen; skipLocked += t.locked; skipAudio += t.audio
+            skipDRM += t.drm; skipHLS += t.hls; skipOther += t.other
+            var yielded = false
+            for item in items where ids.insert(item.id).inserted && !already.contains(item.id) {
+                foundCount += 1
+                continuation.yield(item)
+                yielded = true
+            }
+            if yielded, foundCount <= 5 || foundCount % 10 == 0 { report() }
         }
         func scanned(posts: Int) { postsScanned += posts }
         func scanned(messages: Int) { messagesScanned += messages }
-        func sawMedia() { mediaSeen += 1 }
-        func skippedLocked() { skipLocked += 1 }
-        func skippedAudio() { skipAudio += 1 }
-        func skippedDRM() { skipDRM += 1 }
-        func skippedHLS() { skipHLS += 1 }
-        func skippedOther() { skipOther += 1 }
         var diagnostics: String {
             "posts \(postsScanned), msgs \(messagesScanned); media \(mediaSeen) → new \(foundCount), skipped \(skipLocked) locked / \(skipAudio) audio / no-url: \(skipDRM) drm, \(skipHLS) hls, \(skipOther) other"
         }
@@ -261,7 +264,7 @@ enum OnlyFansService {
             // Downloads stream straight to disk (no in-memory buffering), so a wide
             // fan-out is safe even for large source videos — 12-wide roughly doubles
             // throughput over the previous 6.
-            let maxConcurrent = 12
+            let maxConcurrent = 18
             func apply(_ r: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String)) {
                 if r.ok {
                     if r.isVideo { result.videos += 1 } else { result.photos += 1 }
@@ -382,25 +385,28 @@ enum OnlyFansService {
         let caption = stripHTML(container["text"] as? String ?? "")
         let date = postDate(container)
         guard let media = container["media"] as? [[String: Any]] else { return }
+        var items: [Item] = []
+        var t = Hub.Tally()
         for m in media {
-            await hub.sawMedia()
+            t.seen += 1
             let type = (m["type"] as? String ?? "").lowercased()
-            if type == "audio" { await hub.skippedAudio(); continue }
-            if (m["canView"] as? Bool) == false { await hub.skippedLocked(); continue }   // only explicit locks
+            if type == "audio" { t.audio += 1; continue }
+            if (m["canView"] as? Bool) == false { t.locked += 1; continue }   // only explicit locks
             guard let mid = idString(m["id"]) else { continue }
             // Video when the type says so, or when it carries video-only fields.
             let isVideo = type == "video" || type == "gif"
                 || (type != "photo" && (m["videoSources"] != nil || (m["source"] as? [String: Any])?["source"] != nil))
             guard let url = mediaURL(m, isVideo: isVideo) else {
                 switch noURLReason(m) {                 // classify so we know what's unreachable
-                case .drm: await hub.skippedDRM()
-                case .hls: await hub.skippedHLS()
-                case .other: await hub.skippedOther()
+                case .drm: t.drm += 1
+                case .hls: t.hls += 1
+                case .other: t.other += 1
                 }
                 continue
             }
-            await hub.emit(Item(id: mid, isVideo: isVideo, url: url, caption: caption, date: date))
+            items.append(Item(id: mid, isVideo: isVideo, url: url, caption: caption, date: date))
         }
+        await hub.ingest(items, tally: t)
     }
 
     /// The best (source / original) media URL from a media object. Always prefers the

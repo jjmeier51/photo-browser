@@ -244,7 +244,10 @@ enum LinkDownloadService {
             let sep = link.contains("?") ? "&" : "?"
             guard let html = await getText(link + "\(sep)advanced=1") else { return ([], nil, "Couldn’t load that Bunkr album.") }
             let title = firstMatch(html, "<h1[^>]*>\\s*([^<]+?)\\s*</h1>").map(decodeEntities)
-            guard let arrayText = firstMatch(html, "window\\.albumFiles\\s*=\\s*(\\[[\\s\\S]*?\\]);"),
+            // The array text isn't terminated by a reliable `];`, and strings inside it
+            // can contain brackets — scan for the balanced `[ … ]` (quote-aware) instead
+            // of a regex, which is what kept failing to read the file list.
+            guard let arrayText = balancedArray(in: html, after: "window.albumFiles"),
                   let arr = (try? JSONSerialization.jsonObject(with: Data(arrayText.utf8))) as? [[String: Any]] else {
                 return ([], title, "Couldn’t read the Bunkr album’s file list.")
             }
@@ -285,7 +288,8 @@ enum LinkDownloadService {
 
     nonisolated private static func bunkrResolve(_ id: String, name: String) async -> MediaItem? {
         let body = try? JSONSerialization.data(withJSONObject: ["id": id])
-        let headers = ["Referer": "https://get.bunkrr.su/file/\(id)", "Content-Type": "application/json"]
+        let headers = ["Referer": "https://get.bunkrr.su/file/\(id)", "Origin": "https://get.bunkrr.su",
+                       "Content-Type": "application/json"]
         guard let json = await getJSON("https://apidl.bunkr.ru/api/_001_v2", method: "POST", body: body, headers: headers) as? [String: Any],
               let raw = json["url"] as? String else { return nil }
         var url = raw
@@ -293,7 +297,31 @@ enum LinkDownloadService {
             url = bunkrDecrypt(raw, timestamp: ts) ?? raw
         }
         guard url.hasPrefix("http") else { return nil }
-        return MediaItem(url: url, filename: name, referer: "https://bunkr.cr/")
+        // Bunkr serves a placeholder when a file is down — don't save the maintenance clip.
+        if url.hasSuffix("/maint.mp4") || url.hasSuffix("/maintenance-vid.mp4") { return nil }
+        // The CDN hotlink-checks the Referer against the file page (a bare domain 403s).
+        return MediaItem(url: url, filename: name, referer: "https://get.bunkrr.su/file/\(id)")
+    }
+
+    /// Extracts the first balanced `[ … ]` array that follows `marker` in `html`,
+    /// respecting quoted strings and escapes (JS arrays aren't cleanly regex-able).
+    nonisolated private static func balancedArray(in html: String, after marker: String) -> String? {
+        guard let mr = html.range(of: marker),
+              let open = html[mr.upperBound...].firstIndex(of: "[") else { return nil }
+        var depth = 0, inString = false, escaped = false
+        var i = open
+        while i < html.endIndex {
+            let c = html[i]
+            if escaped { escaped = false }
+            else if c == "\\" { escaped = true }
+            else if c == "\"" { inString.toggle() }
+            else if !inString {
+                if c == "[" { depth += 1 }
+                else if c == "]" { depth -= 1; if depth == 0 { return String(html[open...i]) } }
+            }
+            i = html.index(after: i)
+        }
+        return nil
     }
 
     /// XOR-decrypts a base64 URL with the time-bucketed key `SECRET_KEY_{ts/3600}`.
