@@ -97,10 +97,11 @@ enum OnlyFansService {
     /// The signing recipe, fetched from the community "dynamic rules" feed.
     private struct DynamicRules: Sendable {
         let staticParam: String
-        let format: String                // e.g. "abc:{}:{:x}:def" — {} = sha1, next = checksum
+        let format: String                // e.g. "60953:{}:{:x}:6a3431b5" — {} = sha1, {:x} = checksum in hex
         let checksumIndexes: [Int]
         let checksumConstant: Int
         let appToken: String
+        let removeHeaders: [String]       // headers the current rules say to omit (e.g. "user-id")
     }
 
     /// One discovered media item: id + direct source URL + metadata, ready to download.
@@ -120,12 +121,13 @@ enum OnlyFansService {
     nonisolated static let defaultAppToken = "33d57ade8c02dbc5a333db99ff9ae26a"
     nonisolated static let pageLimit = 50
 
-    /// Community-maintained signing rules. They rotate as OnlyFans changes its
-    /// scheme, so we try a few mirrors in order and use the first that parses.
+    /// Community-maintained signing rules (DATAHOARDERS is the currently-active
+    /// feed; the jsdelivr CDN is a second host in case raw.githubusercontent is
+    /// blocked). They rotate as OnlyFans changes its scheme, so we try each in order
+    /// and use the first that parses.
     nonisolated static let dynamicRuleURLs = [
-        "https://raw.githubusercontent.com/deviint/onlyfans-dynamic-rules/main/dynamicRules.json",
-        "https://raw.githubusercontent.com/DIGITALCRIMINALS/dynamic-rules/main/dynamicRules.json",
-        "https://raw.githubusercontent.com/riha-scripts/of-dynamic-rules/main/dynamicRules.json",
+        "https://raw.githubusercontent.com/DATAHOARDERS/dynamic-rules/main/onlyfans.json",
+        "https://cdn.jsdelivr.net/gh/DATAHOARDERS/dynamic-rules@main/onlyfans.json",
     ]
 
     nonisolated static let session: URLSession = {
@@ -482,8 +484,10 @@ enum OnlyFansService {
                 if !start.isEmpty || !end.isEmpty { format = "\(start):{}:{:x}:\(end)" }
             }
             guard let fmt = format else { continue }
+            let removeHeaders = (obj["remove_headers"] as? [String])?.map { $0.lowercased() } ?? []
             return DynamicRules(staticParam: staticParam, format: fmt,
-                                checksumIndexes: indexes, checksumConstant: constant, appToken: appToken)
+                                checksumIndexes: indexes, checksumConstant: constant,
+                                appToken: appToken, removeHeaders: removeHeaders)
         }
         return nil
     }
@@ -500,7 +504,7 @@ enum OnlyFansService {
             (i >= 0 && i < ascii.count) ? sum + Int(ascii[i]) : sum
         } + rules.checksumConstant
         let sign = applyFormat(rules.format, sha1: sha1, checksum: abs(checksum))
-        return [
+        var headers = [
             "accept": "application/json, text/plain, */*",
             "app-token": rules.appToken,
             "cookie": creds.cookie,
@@ -510,6 +514,12 @@ enum OnlyFansService {
             "user-agent": userAgent,
             "x-bc": creds.xbc,
         ]
+        // The rules can mark headers to omit (e.g. "user-id" — still used in the
+        // signed message above, just not sent). Signing/cookie headers are kept.
+        for h in rules.removeHeaders where !["sign", "time", "cookie", "x-bc", "app-token"].contains(h) {
+            headers.removeValue(forKey: h)
+        }
+        return headers
     }
 
     /// Substitutes the format's placeholders: the first `{}` gets the SHA-1 hex, the
