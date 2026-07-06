@@ -6,9 +6,9 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 - **Facebook downloader: complete coverage, faster, upscaled** — discovery now enumerates the
   profile's *real albums* (Timeline/Mobile Uploads, **Profile Pictures**, Cover Photos, custom
-  albums) and walks each one, instead of relying on the classic `pb` virtual set that Facebook
-  truncates around 100 photos (the "only 99 downloaded" ceiling); the `pb` walk remains as a
-  fallback when no albums are visible, and tagged photos/videos are walked as before. A photo
+  albums) and walks each one, instead of relying only on the classic `pb` virtual set that
+  Facebook truncates around 100 photos (the "only 99 downloaded" ceiling); the `pb` and tagged
+  sets are still walked too, with everything deduped by media id. A photo
   page that returns without an image or next-pointer is retried (and refetched via the
   alternate `photo.php` form) rather than silently ending the set, and page fetches retry
   transient failures (429/5xx) with backoff. Speed: all set walks run concurrently through one

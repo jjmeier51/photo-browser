@@ -38,10 +38,10 @@ enum FacebookAuth {
 /// Downloads a Facebook profile's photos/videos (uploaded, profile pictures, and
 /// tagged) using the user's own logged-in session, by parsing the **JSON that
 /// www.facebook.com embeds in its pages** — the approach maintained scrapers use
-/// since Facebook retired the old `mbasic` HTML site. Coverage comes from the
+/// since Facebook retired the old `mbasic` HTML site. Coverage is the union of the
 /// profile's **real albums** (Timeline/Mobile Uploads, Profile Pictures, Cover
-/// Photos, custom albums) plus the tagged set — the classic `pb` virtual set is
-/// only a fallback because Facebook truncates it around 100 photos. Media sets are
+/// Photos, custom albums), the classic `pb` uploads set (which alone truncates
+/// around 100 photos), and the tagged set — deduped by media id. Media sets are
 /// walked photo by photo via each page's "next media" pointer (no GraphQL doc_ids
 /// to go stale), and every photo page hands us the full-resolution URL, the exact
 /// `created_time`, the caption, and the actual poster. Discovery walks run
@@ -110,6 +110,22 @@ enum FacebookService {
     }
     nonisolated private static let pacer = Pacer()
 
+    /// Bounds concurrent 2× upscales independently of the download width — each
+    /// render holds full-resolution images in memory, and eight at once (the
+    /// network width) would flirt with a jetsam kill on older devices.
+    private actor UpscaleGate {
+        private var active = 0
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func acquire() async {
+            if active < 2 { active += 1; return }
+            await withCheckedContinuation { waiters.append($0) }   // slot handed over by release()
+        }
+        func release() {
+            if waiters.isEmpty { active -= 1 } else { waiters.removeFirst().resume() }
+        }
+    }
+    nonisolated private static let upscaleGate = UpscaleGate()
+
     /// Cross-collector hub: dedups discovered ids (albums overlap the tagged set),
     /// feeds accepted items into the download stream, aggregates progress, and
     /// remembers whether any collector hit a login wall.
@@ -131,16 +147,21 @@ enum FacebookService {
             guard ids.insert(item.id).inserted, !already.contains(item.id) else { return }
             foundCount += 1
             continuation.yield(item)
-            report()
+            // Coalesced: thousands of items would otherwise mean a MainActor hop each.
+            if foundCount <= 5 || foundCount % 10 == 0 { report() }
         }
         func loginWalled() { hitLoginWall = true }
         func discoveryFinished() { finding = false; continuation.finish(); report() }
-        func savedOne() { saved += 1; report() }
+        func savedOne() { saved += 1; if saved % 4 == 0 || saved == foundCount { report() } }
         private func report() {
+            // While finding, the denominator is still growing — the bar stays idle
+            // (total 0) and the phase text carries the live counts; once discovery
+            // ends the bar fills monotonically.
             let phase = finding ? "Found \(foundCount) — downloaded \(saved)…"
                                 : "Downloading \(saved) of \(foundCount)…"
-            progress(Progress(phase: phase, fraction: foundCount > 0 ? Double(saved) / Double(foundCount) : 0,
-                              done: saved, total: foundCount))
+            progress(Progress(phase: phase,
+                              fraction: !finding && foundCount > 0 ? Double(saved) / Double(foundCount) : 0,
+                              done: saved, total: finding ? 0 : foundCount))
         }
     }
 
@@ -168,17 +189,18 @@ enum FacebookService {
 
         let discovery = Task {
             await withTaskGroup(of: Void.self) { group in
+                // Albums cover profile/cover pictures and paginate past the ~100-photo
+                // ceiling of the pb virtual set; the pb walk still runs alongside for
+                // uploads not filed under an enumerable album — the hub dedups overlap.
+                group.addTask { await collectAlbums(profile, skip: alreadyDownloaded, creds: creds, hub: hub) }
                 group.addTask {
-                    // Real albums cover every upload including profile/cover photos;
-                    // the classic pb set (which truncates ~100 in) is only a fallback.
-                    if !(await collectAlbums(profile, skip: alreadyDownloaded, creds: creds, hub: hub)) {
-                        await collectPhotos(profile, tab: "photos_by", fallbackToken: "pb.\(profile.id).-2207520000",
-                                            skip: alreadyDownloaded, creds: creds, hub: hub)
-                    }
+                    await collectPhotos(profile, tab: "photos_by", fallbackToken: "pb.\(profile.id).-2207520000",
+                                        skip: alreadyDownloaded, creds: creds, hub: hub)
                 }
                 group.addTask {
+                    // Tagged photos are posted by someone else — credit the page owner.
                     await collectPhotos(profile, tab: "photos_of", fallbackToken: "t.\(profile.id)",
-                                        skip: alreadyDownloaded, creds: creds, hub: hub)
+                                        skip: alreadyDownloaded, creds: creds, hub: hub, ownerFromPage: true)
                 }
                 group.addTask { await collectVideos(profile, skip: alreadyDownloaded, creds: creds, hub: hub) }
             }
@@ -251,13 +273,19 @@ enum FacebookService {
         let vanity = vanityName(from: finalURL)
         guard pid != nil || vanity != nil else { return nil }
 
-        // Display name: og:title, the embedded-JSON owner name (the *owner's*, never
-        // the viewer's "user"/"userID" blobs), then the title tag. cleanName can
-        // legitimately empty a candidate (a bare "Facebook" title), so fall through
-        // to the next one — an empty name is what made "Posted by" render as just "@".
+        // Display name: og:title, an owner blob anchored to the resolved profile id,
+        // the title tag, then any owner blob as a last resort (the first one on the
+        // page can belong to a crossposted entity; the viewer's "user"/"userID"
+        // blobs are never used). cleanName can legitimately empty a candidate (a
+        // bare "Facebook" title), so fall through to the next one — an empty name
+        // is what made "Posted by" render as just "@".
+        let anchoredOwner = pid.flatMap {
+            firstJSONString(html, "\"owner\":\\{(?:[^{}]|\\{[^{}]*\\})*?\"id\":\"\($0)\"[^{}]*?\"name\":")
+        }
         let name = [meta(html, "og:title").map(decode).map(cleanName),
-                    firstJSONString(html, "\"owner\":\\{[^{}]*?\"name\":")?.trimmingCharacters(in: .whitespacesAndNewlines),
-                    firstMatch(html, "<title>([^<]+)</title>").map(decode).map(cleanName)]
+                    anchoredOwner,
+                    firstMatch(html, "<title>([^<]+)</title>").map(decode).map(cleanName),
+                    photoOwner(html)]
             .compactMap { $0 }.first { !$0.isEmpty }
             ?? vanity ?? "Facebook Profile"
         let pic = meta(html, "og:image").map(decode) ?? ""
@@ -290,17 +318,15 @@ enum FacebookService {
     /// Enumerates the profile's real albums (Timeline/Mobile Uploads, Profile
     /// Pictures, Cover Photos, custom albums) from the albums tab and walks each
     /// one — this is what makes coverage complete, and the only route to profile
-    /// pictures. Returns false when no albums could be found so the caller can
-    /// fall back to the classic `pb` set walk (true on a login wall: the fallback
-    /// would only hit the same wall).
+    /// pictures.
     nonisolated private static func collectAlbums(_ profile: Profile, skip: Set<String>,
-                                                  creds: Credentials, hub: Hub) async -> Bool {
-        guard let (html, finalURL) = await fetchHTML(host + tabPath(profile, "photos_albums"), creds: creds) else { return false }
-        if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return true }
+                                                  creds: Credentials, hub: Hub) async {
+        guard let (html, finalURL) = await fetchHTML(host + tabPath(profile, "photos_albums"), creds: creds) else { return }
+        if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return }
         var tokens: [String] = []; var seen = Set<String>()
         for g in matches(html, "set=a\\.(\\d+)") where seen.insert(g[1]).inserted { tokens.append("a.\(g[1])") }
         for g in matches(html, "\"__typename\":\"Album\",\"id\":\"(\\d+)\"") where seen.insert(g[1]).inserted { tokens.append("a.\(g[1])") }
-        guard !tokens.isEmpty else { return false }
+        guard !tokens.isEmpty else { return }
         await withTaskGroup(of: Void.self) { group in
             var idx = 0
             let maxConcurrent = 3        // walks already share the global pacer
@@ -315,7 +341,6 @@ enum FacebookService {
             for _ in 0..<min(maxConcurrent, tokens.count) { addNext() }
             while await group.next() != nil { addNext() }
         }
-        return true
     }
 
     /// A photo tab (`photos_by` = uploads, `photos_of` = tagged) names a media-set
@@ -323,7 +348,8 @@ enum FacebookService {
     /// token the classic constructed token is tried — worst case the walk finds no
     /// first photo and emits nothing.
     nonisolated private static func collectPhotos(_ profile: Profile, tab: String, fallbackToken: String,
-                                                  skip: Set<String>, creds: Credentials, hub: Hub) async {
+                                                  skip: Set<String>, creds: Credentials, hub: Hub,
+                                                  ownerFromPage: Bool = false) async {
         var token = fallbackToken
         var firstID: String?
         if let (html, finalURL) = await fetchHTML(host + tabPath(profile, tab), creds: creds) {
@@ -334,7 +360,7 @@ enum FacebookService {
             }
             firstID = firstPhotoID(html)
         }
-        await walkSet(token, firstID: firstID, skip: skip, creds: creds, hub: hub)
+        await walkSet(token, firstID: firstID, skip: skip, creds: creds, hub: hub, ownerFromPage: ownerFromPage)
     }
 
     /// Walks a media set photo by photo: each photo page embeds the full-res image
@@ -347,7 +373,7 @@ enum FacebookService {
     /// for the whole set (the old ~100-photo ceiling).
     nonisolated private static func walkSet(_ token: String, firstID: String?, skip: Set<String>,
                                             creds: Credentials, hub: Hub, earlyStop: Bool = true,
-                                            maxItems: Int = 10_000) async {
+                                            ownerFromPage: Bool = false, maxItems: Int = 10_000) async {
         var nextID = firstID
         if nextID == nil {
             guard let (html, finalURL) = await fetchHTML(host + "media/set/?set=\(token)", creds: creds) else { return }
@@ -357,10 +383,14 @@ enum FacebookService {
         var visited = Set<String>()
         var knownStreak = 0
         while let id = nextID, visited.count < maxItems, visited.insert(id).inserted {
+            if await hub.hitLoginWall { return }             // another walk hit the wall; stop hammering it
+            // Keep the best page seen: a failed alternate fetch must not throw away
+            // a primary page that still carried the next pointer.
             var page: (html: String, finalURL: String)?
             for form in ["photo/?fbid=\(id)&set=\(token)", "photo.php?fbid=\(id)&set=\(token)"] {
-                page = await fetchHTML(host + form, creds: creds)
-                if let p = page, photoPageLooksComplete(p.html) || looksLikeLogin(p.html, p.finalURL) { break }
+                guard let p = await fetchHTML(host + form, creds: creds) else { continue }
+                page = p
+                if photoPageLooksComplete(p.html) || looksLikeLogin(p.html, p.finalURL) { break }
             }
             guard let (html, finalURL) = page else { break }
             if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return }
@@ -369,9 +399,11 @@ enum FacebookService {
                 if earlyStop, knownStreak >= 30 { break }    // deep into already-downloaded territory
             } else {
                 knownStreak = 0
-                if let url = firstJSONString(html, "\"image\":\\{\"uri\":") {
+                if let url = imageURL(html) {
+                    // Only tagged sets credit the page's owner blob — on a profile's
+                    // own uploads the first "owner" can be a crossposted entity.
                     await hub.emit(Item(id: id, isVideo: false, url: url, caption: photoCaption(html),
-                                        date: createdTime(html), poster: photoOwner(html)))
+                                        date: createdTime(html), poster: ownerFromPage ? photoOwner(html) : ""))
                 }
             }
             nextID = nextPhotoID(html)
@@ -397,6 +429,7 @@ enum FacebookService {
                 guard idx < targets.count else { return }
                 let id = targets[idx]; idx += 1
                 group.addTask {
+                    if await hub.hitLoginWall { return }     // stop hammering a known wall
                     guard let (page, pageURL) = await fetchHTML(host + "watch/?v=\(id)", creds: creds) else { return }
                     if looksLikeLogin(page, pageURL) { await hub.loginWalled(); return }
                     guard let url = firstJSONString(page, "\"browser_native_hd_url\":")
@@ -404,7 +437,7 @@ enum FacebookService {
                         ?? firstJSONString(page, "\"browser_native_sd_url\":")
                         ?? firstJSONString(page, "\"playable_url\":") else { return }
                     await hub.emit(Item(id: id, isVideo: true, url: url, caption: photoCaption(page),
-                                        date: createdTime(page), poster: photoOwner(page)))
+                                        date: createdTime(page), poster: ""))
                 }
             }
             for _ in 0..<min(maxConcurrent, targets.count) { addNext() }
@@ -430,16 +463,23 @@ enum FacebookService {
             ?? firstMatch(html, "\"nextMedia\":\\{\"edges\":\\[\\{\"node\":\\{\"__typename\":\"Photo\",\"id\":\"(\\d+)\"")
     }
 
+    /// The full-res image URL from a photo page (`"image":{…"uri":"…"}` — the uri
+    /// need not be the object's first key).
+    nonisolated private static func imageURL(_ html: String) -> String? {
+        firstJSONString(html, "\"image\":\\{[^{}]*?\"uri\":")
+    }
+
     /// A photo page that carries neither an image URL nor a next pointer is a
     /// rate-limit / error shell worth refetching, not the end of the set.
     nonisolated private static func photoPageLooksComplete(_ html: String) -> Bool {
-        html.contains("\"image\":{\"uri\":") || nextPhotoID(html) != nil
+        nextPhotoID(html) != nil || imageURL(html) != nil
     }
 
     /// The item's actual owner — for tagged photos that's the *poster*, not the
-    /// profile being downloaded.
+    /// profile being downloaded. Tolerates one level of nested object (e.g. a
+    /// profile_picture blob) before the name field.
     nonisolated private static func photoOwner(_ html: String) -> String {
-        firstJSONString(html, "\"owner\":\\{[^{}]*?\"name\":")?
+        firstJSONString(html, "\"owner\":\\{(?:[^{}]|\\{[^{}]*\\})*?\"name\":")?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
@@ -480,7 +520,9 @@ enum FacebookService {
             // carried through. Formats CGImageDestination can't round-trip
             // (webp/gif — the latter would flatten an animation) are left alone.
             if upscale, ["jpg", "png", "heic"].contains(ext) {
+                await upscaleGate.acquire()
                 _ = MediaEditing.enhancePhotoInPlace(url: dest, scale: 2)
+                await upscaleGate.release()
             }
         }
         setFileDate(dest, item.date)   // after the upscale swap, which resets file dates
@@ -589,8 +631,17 @@ enum FacebookService {
 
     // MARK: - Small helpers
 
+    /// Compiled-pattern cache: every photo page runs the same half-dozen constant
+    /// patterns, and a 10k-photo walk would otherwise recompile them per page.
+    nonisolated private static let regexCache = NSCache<NSString, NSRegularExpression>()
+    nonisolated private static func regex(_ pattern: String) -> NSRegularExpression? {
+        if let cached = regexCache.object(forKey: pattern as NSString) { return cached }
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else { return nil }
+        regexCache.setObject(re, forKey: pattern as NSString)
+        return re
+    }
     nonisolated private static func matches(_ s: String, _ pattern: String) -> [[String]] {
-        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else { return [] }
+        guard let re = regex(pattern) else { return [] }
         let ns = s as NSString
         return re.matches(in: s, range: NSRange(location: 0, length: ns.length)).map { m in
             (0..<m.numberOfRanges).map { i in
@@ -598,9 +649,15 @@ enum FacebookService {
             }
         }
     }
+    /// Stops at the first hit — these run against multi-MB pages where patterns
+    /// like the caption blob can match dozens of times.
     nonisolated private static func firstMatch(_ s: String, _ pattern: String) -> String? {
-        let m = matches(s, pattern).first
-        return (m?.count ?? 0) > 1 ? m?[1] : nil
+        guard let re = regex(pattern) else { return nil }
+        let ns = s as NSString
+        guard let m = re.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)),
+              m.numberOfRanges > 1 else { return nil }
+        let r = m.range(at: 1)
+        return r.location == NSNotFound ? nil : ns.substring(with: r)
     }
     /// Unescapes a raw JSON string body (`\/`, `\uXXXX` incl. surrogate pairs, `\n`, …).
     nonisolated private static func unescapeJSON(_ s: String) -> String {
