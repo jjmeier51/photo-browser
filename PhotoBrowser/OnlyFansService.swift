@@ -601,22 +601,36 @@ enum OnlyFansService {
         let kr = await OnlyFansDRM.extractKey(pssh: pssh, licenseURL: drm.licenseURL, headers: headers,
                                               cookies: cookies, mpdURL: drm.mpdURL)
         guard let key = kr.key else { return await fail(kr.error ?? "key extraction failed") }
-        // FFmpeg decrypts into the app's temp dir (fast, reliable), then the finished
-        // file is moved onto the drive in one step — a killed/failed decrypt can't
-        // leave a half-written file corrupting the external drive's directory.
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("of_drm_\(item.id)_\(UUID().uuidString).mp4")
+        // Download the encrypted media ourselves (with the CloudFront cookies) into the
+        // app's temp dir, then hand FFmpeg local files — `-decryption_key` works on the
+        // mov demuxer but not through the DASH demuxer, and our own download guarantees
+        // the segment cookies are sent.
+        let mf = OnlyFansDRM.mediaFiles(mpd, mpdURL: drm.mpdURL)
+        guard !mf.video.isEmpty else { return await fail("manifest not a single-file DASH (\(mf.note))") }
+        let tmpDir = FileManager.default.temporaryDirectory
+        let vEnc = tmpDir.appendingPathComponent("of_v_\(item.id)_\(UUID().uuidString).mp4")
+        var aEnc: URL? = tmpDir.appendingPathComponent("of_a_\(item.id)_\(UUID().uuidString).mp4")
+        func cleanup() { try? FileManager.default.removeItem(at: vEnc); if let aEnc { try? FileManager.default.removeItem(at: aEnc) } }
+        guard await downloadToFile(mf.video, cookie: drm.cfCookie, to: vEnc) else { cleanup(); return await fail("encrypted video download failed") }
+        if let a = mf.audio, let aURL = aEnc {
+            if !(await downloadToFile(a, cookie: drm.cfCookie, to: aURL)) { aEnc = nil }   // fall back to muxed audio
+        } else { aEnc = nil }
+
+        let out = tmpDir.appendingPathComponent("of_drm_\(item.id)_\(UUID().uuidString).mp4")
         await decryptGate.acquire()
-        let ok = await VideoTranscoder.decryptDASH(mpdURL: drm.mpdURL, cookie: drm.cfCookie, keyHex: key,
-                                                   userAgent: userAgent, date: item.date ?? Date(), to: tmp)
+        let ok = await VideoTranscoder.decryptMux(videoEnc: vEnc, audioEnc: aEnc, keyHex: key, date: item.date ?? Date(), to: out)
         await decryptGate.release()
-        guard ok else { try? FileManager.default.removeItem(at: tmp); return await fail("decrypt failed (FFmpegKit)") }
+        cleanup()
+        guard ok else { try? FileManager.default.removeItem(at: out); return await fail("decrypt failed (FFmpegKit)") }
+        // Move the finished MP4 onto the drive in one step (a failed/killed decrypt
+        // never leaves a half-written file corrupting the external drive's directory).
         let dest = uniqueDestination("OF_\(item.id).mp4", in: folder)
-        do { try FileManager.default.moveItem(at: tmp, to: dest) }
+        do { try FileManager.default.moveItem(at: out, to: dest) }
         catch {
-            guard (try? FileManager.default.copyItem(at: tmp, to: dest)) != nil else {   // cross-volume
-                try? FileManager.default.removeItem(at: tmp); return await fail("couldn’t save decrypted file")
+            guard (try? FileManager.default.copyItem(at: out, to: dest)) != nil else {
+                try? FileManager.default.removeItem(at: out); return await fail("couldn’t save decrypted file")
             }
-            try? FileManager.default.removeItem(at: tmp)
+            try? FileManager.default.removeItem(at: out)
         }
         setFileDate(dest, item.date)
         return (true, true, item.id, dest.path, item.caption)
@@ -633,6 +647,28 @@ enum OnlyFansService {
         guard let (data, resp) = try? await session.data(for: req) else { return nil }
         if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 400 { return nil }
         return String(data: data, encoding: .utf8)
+    }
+
+    /// Streams a (DRM-encrypted) media file to disk using CDN cookies rather than the
+    /// API session — retried, like the other downloads.
+    nonisolated private static func downloadToFile(_ urlString: String, cookie: String, to dest: URL) async -> Bool {
+        guard let url = URL(string: urlString) else { return false }
+        for attempt in 0..<3 {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000) }
+            var req = URLRequest(url: url)
+            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            if !cookie.isEmpty { req.setValue(cookie, forHTTPHeaderField: "Cookie") }
+            req.setValue(referer, forHTTPHeaderField: "Referer")
+            req.timeoutInterval = 600
+            guard let (tmp, resp) = try? await session.download(for: req) else { continue }
+            if let code = (resp as? HTTPURLResponse)?.statusCode {
+                if code == 429 || code >= 500 { continue }
+                if code >= 400 { return false }
+            }
+            try? FileManager.default.removeItem(at: dest)
+            do { try FileManager.default.moveItem(at: tmp, to: dest); return true } catch { return false }
+        }
+        return false
     }
 
     /// Parses a `k=v; k=v` cookie header into a dict (cdmpool wants cookies as JSON).

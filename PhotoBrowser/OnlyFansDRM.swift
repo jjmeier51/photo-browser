@@ -72,6 +72,48 @@ enum OnlyFansDRM {
         return KeyResult(key: nil, error: "cdmpool \(code)\(hint)")
     }
 
+    /// The encrypted media file URLs from the manifest — the video representation's
+    /// file (best bandwidth) and, if audio is a separate AdaptationSet, its file.
+    /// OnlyFans packages each representation as one CloudFront-signed file (SegmentBase),
+    /// so a whole-file download is a valid encrypted fragmented MP4 for FFmpeg to
+    /// decrypt. `note` records the manifest's segmenting style for diagnostics.
+    nonisolated static func mediaFiles(_ mpd: String, mpdURL: String) -> (video: String, audio: String?, note: String) {
+        let base = firstMatch(mpd, "<BaseURL>\\s*([^<]+?)\\s*</BaseURL>").map { resolve($0, base: mpdURL) } ?? mpdURL
+        let note = mpd.contains("SegmentTemplate") ? "SegmentTemplate"
+                 : (mpd.contains("SegmentTimeline") ? "SegmentTimeline" : "BaseURL")
+        func file(_ kind: String) -> String? {
+            guard let set = adaptationSet(mpd, kind) else { return nil }
+            let reps = blocks(set, "Representation")
+            let best = reps.max { bandwidth($0) < bandwidth($1) } ?? reps.first ?? set
+            if let bu = firstMatch(best, "<BaseURL>\\s*([^<]+?)\\s*</BaseURL>")
+                ?? firstMatch(set, "<BaseURL>\\s*([^<]+?)\\s*</BaseURL>") {
+                return resolve(bu, base: base)
+            }
+            return nil
+        }
+        return (file("video") ?? "", file("audio"), note)
+    }
+
+    /// Resolves a possibly-relative URL against a base.
+    nonisolated static func resolve(_ u: String, base: String) -> String {
+        u.hasPrefix("http") ? u : (URL(string: u, relativeTo: URL(string: base))?.absoluteString ?? u)
+    }
+
+    /// The `<AdaptationSet>` block whose head declares the given media `kind`.
+    nonisolated private static func adaptationSet(_ mpd: String, _ kind: String) -> String? {
+        for b in blocks(mpd, "AdaptationSet") {
+            let head = String(b.prefix(500)).lowercased()
+            if head.contains("\(kind)/mp4") || head.contains("contenttype=\"\(kind)\"") || head.contains("mimetype=\"\(kind)") {
+                return b
+            }
+        }
+        return nil
+    }
+    nonisolated private static func blocks(_ s: String, _ tag: String) -> [String] {
+        allMatches(s, "(<\(tag)\\b[^>]*?(?:/>|>[\\s\\S]*?</\(tag)>))")
+    }
+    nonisolated private static func bandwidth(_ s: String) -> Int { Int(firstMatch(s, "bandwidth=\"(\\d+)\"") ?? "0") ?? 0 }
+
     nonisolated private static func firstMatch(_ s: String, _ pattern: String) -> String? {
         guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
         let ns = s as NSString
