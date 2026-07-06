@@ -150,7 +150,9 @@ struct OnlyFansImportView: View {
         guard n > 0 else { return r.note ?? "No new content for @\(handle)." }
         var s = "@\(handle): downloaded \(r.photos) photo\(r.photos == 1 ? "" : "s") and \(r.videos) video\(r.videos == 1 ? "" : "s")"
         if r.failed > 0 { s += "; \(r.failed) failed" }
-        return s + "."
+        s += "."
+        if let note = r.note, !note.isEmpty { s += " " + note }   // coverage diagnostic
+        return s
     }
 
     private func firstItemThumbnail(in dir: URL) async -> UIImage? {

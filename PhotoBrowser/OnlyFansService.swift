@@ -168,6 +168,9 @@ enum OnlyFansService {
         private var saved = 0
         private(set) var foundCount = 0
         private(set) var hitLoginWall = false
+        // Coverage counters (surfaced in the result note so missing media is diagnosable).
+        private var postsScanned = 0, messagesScanned = 0, mediaSeen = 0
+        private var skipLocked = 0, skipAudio = 0, skipNoURL = 0
 
         init(already: Set<String>, continuation: AsyncStream<Item>.Continuation,
              progress: @escaping @Sendable (Progress) -> Void) {
@@ -178,6 +181,15 @@ enum OnlyFansService {
             foundCount += 1
             continuation.yield(item)
             if foundCount <= 5 || foundCount % 10 == 0 { report() }
+        }
+        func scanned(posts: Int) { postsScanned += posts }
+        func scanned(messages: Int) { messagesScanned += messages }
+        func sawMedia() { mediaSeen += 1 }
+        func skippedLocked() { skipLocked += 1 }
+        func skippedAudio() { skipAudio += 1 }
+        func skippedNoURL() { skipNoURL += 1 }
+        var diagnostics: String {
+            "posts \(postsScanned), msgs \(messagesScanned); media \(mediaSeen) → new \(foundCount), skipped \(skipLocked) locked / \(skipAudio) audio / \(skipNoURL) no-url"
         }
         func loginWalled() { hitLoginWall = true }
         func discoveryFinished() { finding = false; continuation.finish(); report() }
@@ -269,16 +281,20 @@ enum OnlyFansService {
         }
         await discovery.value
 
+        let diag = await hub.diagnostics
         if await hub.foundCount == 0 {
-            result.note = await hub.hitLoginWall
+            let base = await hub.hitLoginWall
                 ? "OnlyFans asked for a fresh login. Tap “Log in to OnlyFans”, sign in again, and retry."
                 : (alreadyDownloaded.isEmpty
                     ? "No downloadable posts or messages found (are you subscribed to this creator?)."
                     : "No new posts or messages.")
-        } else if result.photos + result.videos == 0 {
-            result.note = "Couldn’t download any media (OnlyFans may be blocking access)."
-        } else if result.failed > 0 {
-            result.note = "\(result.failed) item(s) couldn’t be downloaded."
+            result.note = "\(base) [\(diag)]"
+        } else {
+            // Always surface the coverage diagnostic so any missing media can be traced.
+            var prefix = ""
+            if result.photos + result.videos == 0 { prefix = "Couldn’t download any media (OnlyFans may be blocking access). " }
+            else if result.failed > 0 { prefix = "\(result.failed) item(s) couldn’t be downloaded. " }
+            result.note = "\(prefix)[\(diag)]"
         }
         return result
     }
@@ -325,6 +341,7 @@ enum OnlyFansService {
             guard case .ok(let json) = res else { return }
             let (list, hasMore) = normalize(json)
             if list.isEmpty { return }
+            await hub.scanned(posts: list.count)
             for post in list { await emitMedia(from: post, hub: hub) }
             guard let last = list.last, let marker = stringify(last["postedAtPrecise"]),
                   seenMarkers.insert(marker).inserted else { return }
@@ -346,6 +363,7 @@ enum OnlyFansService {
             guard case .ok(let json) = res else { return }   // .authError/.failed: stop, don't wall the whole run
             let (list, hasMore) = normalize(json)
             if list.isEmpty { return }
+            await hub.scanned(messages: list.count)
             for msg in list { await emitMedia(from: msg, hub: hub) }
             guard let last = list.last, let lid = idString(last["id"]), lid != lastID else { return }
             if !hasMore { return }
@@ -353,19 +371,25 @@ enum OnlyFansService {
         }
     }
 
-    /// Emits every viewable photo/video/gif in a post or message. Locked previews
-    /// (`canView == false`) and audio are skipped. Prefers the **source** rendition.
+    /// Emits every viewable image/video in a post or message. Only **explicitly**
+    /// locked media (`canView == false`) and audio are skipped — an absent/odd
+    /// `canView` or `type` is treated as viewable so single-rendition or untyped
+    /// videos aren't silently dropped; `mediaURL` (which returns nil for anything
+    /// without a real file) is the real gate.
     nonisolated private static func emitMedia(from container: [String: Any], hub: Hub) async {
         let caption = stripHTML(container["text"] as? String ?? "")
         let date = postDate(container)
         guard let media = container["media"] as? [[String: Any]] else { return }
         for m in media {
-            guard (m["canView"] as? Bool) ?? false else { continue }
+            await hub.sawMedia()
             let type = (m["type"] as? String ?? "").lowercased()
-            guard type == "photo" || type == "video" || type == "gif" else { continue }
+            if type == "audio" { await hub.skippedAudio(); continue }
+            if (m["canView"] as? Bool) == false { await hub.skippedLocked(); continue }   // only explicit locks
             guard let mid = idString(m["id"]) else { continue }
-            let isVideo = (type == "video" || type == "gif")
-            guard let url = mediaURL(m, isVideo: isVideo) else { continue }
+            // Video when the type says so, or when it carries video-only fields.
+            let isVideo = type == "video" || type == "gif"
+                || (type != "photo" && (m["videoSources"] != nil || (m["source"] as? [String: Any])?["source"] != nil))
+            guard let url = mediaURL(m, isVideo: isVideo) else { await hub.skippedNoURL(); continue }
             await hub.emit(Item(id: mid, isVideo: isVideo, url: url, caption: caption, date: date))
         }
     }
@@ -446,7 +470,7 @@ enum OnlyFansService {
 
     nonisolated private static func download(_ item: Item, into folder: URL,
                                              creds: Credentials) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
-        let ext = item.isVideo ? "mp4" : imageExt(of: item.url)
+        let ext = fileExt(of: item.url, isVideo: item.isVideo)
         let dest = uniqueDestination("OF_\(item.id).\(ext)", in: folder)
         guard await downloadFile(item.url, to: dest, creds: creds) else {
             return (false, item.isVideo, item.id, nil, "")
@@ -466,6 +490,16 @@ enum OnlyFansService {
             return ext == "jpeg" ? "jpg" : ext
         }
         return "jpg"
+    }
+
+    /// The file extension from the URL when it carries one (so an odd/untyped video
+    /// still gets `.mp4`/`.mov` etc.), else `mp4` for video / `jpg` for a photo.
+    nonisolated private static func fileExt(of urlString: String, isVideo: Bool) -> String {
+        let path = URLComponents(string: urlString)?.path.lowercased() ?? ""
+        for ext in ["jpg", "jpeg", "png", "webp", "gif", "heic", "mp4", "mov", "m4v", "webm", "mkv"] where path.hasSuffix("." + ext) {
+            return ext == "jpeg" ? "jpg" : ext
+        }
+        return isVideo ? "mp4" : "jpg"
     }
 
     // MARK: - Metadata writing (mirrors FacebookService)
