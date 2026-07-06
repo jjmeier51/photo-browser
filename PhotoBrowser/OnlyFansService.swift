@@ -144,7 +144,7 @@ enum OnlyFansService {
         cfg.httpShouldSetCookies = false
         cfg.httpCookieStorage = nil
         cfg.timeoutIntervalForRequest = 60
-        cfg.httpMaximumConnectionsPerHost = 24      // wide CDN pipe for fast parallel downloads
+        cfg.httpMaximumConnectionsPerHost = 16      // wide CDN pipe for fast parallel downloads
         return URLSession(configuration: cfg)
     }()
 
@@ -287,10 +287,10 @@ enum OnlyFansService {
         let creatorName = creator.name.isEmpty ? creator.username : creator.name
         await withTaskGroup(of: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String).self) { group in
             var active = 0
-            // Downloads stream straight to disk (no in-memory buffering), so a wide
-            // fan-out is safe even for large source videos — 12-wide roughly doubles
-            // throughput over the previous 6.
-            let maxConcurrent = 18
+            // Downloads stream straight to disk (no in-memory buffering). 12-wide is
+            // the sweet spot — fast, but not so many concurrent writes to a slow
+            // external drive that a jetsam kill risks corrupting its directory.
+            let maxConcurrent = 12
             func apply(_ r: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String)) {
                 if r.ok {
                     if r.isVideo { result.videos += 1 } else { result.photos += 1 }
@@ -601,12 +601,23 @@ enum OnlyFansService {
         let kr = await OnlyFansDRM.extractKey(pssh: pssh, licenseURL: drm.licenseURL, headers: headers,
                                               cookies: cookies, mpdURL: drm.mpdURL)
         guard let key = kr.key else { return await fail(kr.error ?? "key extraction failed") }
-        let dest = uniqueDestination("OF_\(item.id).mp4", in: folder)
+        // FFmpeg decrypts into the app's temp dir (fast, reliable), then the finished
+        // file is moved onto the drive in one step — a killed/failed decrypt can't
+        // leave a half-written file corrupting the external drive's directory.
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("of_drm_\(item.id)_\(UUID().uuidString).mp4")
         await decryptGate.acquire()
         let ok = await VideoTranscoder.decryptDASH(mpdURL: drm.mpdURL, cookie: drm.cfCookie, keyHex: key,
-                                                   userAgent: userAgent, date: item.date ?? Date(), to: dest)
+                                                   userAgent: userAgent, date: item.date ?? Date(), to: tmp)
         await decryptGate.release()
-        guard ok else { return await fail("decrypt failed (FFmpegKit)") }
+        guard ok else { try? FileManager.default.removeItem(at: tmp); return await fail("decrypt failed (FFmpegKit)") }
+        let dest = uniqueDestination("OF_\(item.id).mp4", in: folder)
+        do { try FileManager.default.moveItem(at: tmp, to: dest) }
+        catch {
+            guard (try? FileManager.default.copyItem(at: tmp, to: dest)) != nil else {   // cross-volume
+                try? FileManager.default.removeItem(at: tmp); return await fail("couldn’t save decrypted file")
+            }
+            try? FileManager.default.removeItem(at: tmp)
+        }
         setFileDate(dest, item.date)
         return (true, true, item.id, dest.path, item.caption)
     }

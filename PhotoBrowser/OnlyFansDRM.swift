@@ -24,15 +24,21 @@ enum OnlyFansDRM {
 
     struct KeyResult: Sendable { let key: String?; let error: String? }
 
-    /// The Widevine PSSH (base64) from a DASH manifest — prefer the Widevine
-    /// ContentProtection block (scheme `edef8ba9-79d6-4ace-a3c8-27dcd51d21ed`),
-    /// falling back to the first `cenc:pssh` on the page.
+    /// The Widevine PSSH (base64) from a DASH manifest. A manifest usually carries
+    /// several `<cenc:pssh>` boxes (PlayReady, Widevine, common-enc) — grab them all
+    /// and pick the one whose pssh-box **SystemID** is Widevine, so we never hand
+    /// cdmpool a PlayReady PSSH by mistake (which is what E_PSSH_DRM_MISMATCH was).
     nonisolated static func widevinePSSH(fromMPD mpd: String) -> String? {
-        if let block = firstMatch(mpd, "<ContentProtection[^>]*edef8ba9-79d6-4ace-a3c8-27dcd51d21ed[\\s\\S]*?</ContentProtection>"),
-           let pssh = firstMatch(block, "<cenc:pssh[^>]*>\\s*([A-Za-z0-9+/=]+)\\s*</cenc:pssh>") {
-            return pssh
+        // Widevine SystemID: edef8ba9-79d6-4ace-a3c8-27dcd51d21ed
+        let widevine: [UInt8] = [0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce,
+                                 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed]
+        for b64 in allMatches(mpd, "<cenc:pssh[^>]*>\\s*([A-Za-z0-9+/=\\s]+?)\\s*</cenc:pssh>") {
+            guard let data = Data(base64Encoded: b64.replacingOccurrences(of: "\\s", with: "", options: .regularExpression)) else { continue }
+            let bytes = [UInt8](data)
+            // pssh box: [size 4][ 'pssh' 4][version+flags 4][SystemID 16] …
+            if bytes.count >= 28, Array(bytes[12..<28]) == widevine { return b64.replacingOccurrences(of: "\\s", with: "", options: .regularExpression) }
         }
-        return firstMatch(mpd, "<cenc:pssh[^>]*>\\s*([A-Za-z0-9+/=]+)\\s*</cenc:pssh>")
+        return nil        // no Widevine PSSH — don't fall back to a PlayReady one
     }
 
     /// Extracts the content key via cdmpool's one-shot `/api/extract`. cdmpool calls
@@ -72,5 +78,14 @@ enum OnlyFansDRM {
         guard let m = re.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)), m.numberOfRanges > 1 else { return nil }
         let r = m.range(at: 1)
         return r.location == NSNotFound ? nil : ns.substring(with: r).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    nonisolated private static func allMatches(_ s: String, _ pattern: String) -> [String] {
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else { return [] }
+        let ns = s as NSString
+        return re.matches(in: s, range: NSRange(location: 0, length: ns.length)).compactMap { m in
+            guard m.numberOfRanges > 1 else { return nil }
+            let r = m.range(at: 1)
+            return r.location == NSNotFound ? nil : ns.substring(with: r).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
     }
 }
