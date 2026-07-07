@@ -58,31 +58,24 @@ enum ObjectRemoval {
         let m = alignMask(mask, to: e)
         guard let bbox = maskBounds(of: m, extent: e) else { return image }   // empty mask
 
-        // HDR: the fill synthesizes through 8-bit RGBA rasters, which clamp extended-range
-        // (>1.0) pixels — so the hole came back SDR-dark against HDR-bright surroundings
-        // (the "shadow"). Normalize the image into [0,1] by the local peak around the hole,
-        // fill, then restore the peak, so the fill keeps the same headroom as its
-        // neighbours. Strictly a no-op for SDR (peak ≈ 1) and self-disabling if the peak
-        // can't be read, so it can never regress the SDR path.
-        let peak = hdrPeak(around: bbox, in: image, extent: e)
-        if peak > 1.01 {
-            let down = scaleRGB(image, 1 / peak).cropped(to: e)
-            let filled = inpaintCore(down, mask: m, extent: e, bbox: bbox)
-            return scaleRGB(filled, peak).cropped(to: e)
+        // HDR: the ML/exemplar fills synthesize through **8-bit** RGBA rasters, which clamp
+        // extended-range (>1.0) pixels — that clamp is the grey "shadow"/over-exposed patch
+        // on HDR photos (a bright HDR background can't be reproduced in 8 bits). The
+        // diffusion fill is pure CoreImage (CIGaussianBlur/CIBlendWithMask), stays in float
+        // and keeps the surrounding headroom, so route HDR sources straight to it. SDR keeps
+        // the higher-fidelity patch synthesis, untouched.
+        if isExtendedRange(image, around: bbox, extent: e) {
+            return diffusionFill(image, mask: m, extent: e, grain: false)
         }
-        return inpaintCore(image, mask: m, extent: e, bbox: bbox)
-    }
-
-    private static func inpaintCore(_ image: CIImage, mask m: CIImage, extent e: CGRect, bbox: CGRect) -> CIImage {
         if let out = mlFill(image, mask: m, extent: e, bbox: bbox) { return out }
         if let out = exemplarFill(image, mask: m, extent: e, bbox: bbox) { return out }
         return diffusionFill(image, mask: m, extent: e)
     }
 
-    /// Peak RGB value in the neighbourhood the fill samples from (the mask bbox grown by
-    /// its own size). >1 means the source is HDR-expanded and the 8-bit fill would clip.
-    /// Returns 1 (→ no normalization) if it can't read a sane, finite headroom.
-    private static func hdrPeak(around bbox: CGRect, in image: CIImage, extent e: CGRect) -> CGFloat {
+    /// True when the source carries HDR headroom (peak RGB > 1) in the neighbourhood the
+    /// fill would sample from — i.e. the 8-bit patch synthesis would clip it. Reads the max
+    /// in extended-linear float; returns false if it can't read a sane, finite value.
+    private static func isExtendedRange(_ image: CIImage, around bbox: CGRect, extent e: CGRect) -> Bool {
         let margin = max(max(bbox.width, bbox.height), 48)
         let roi = bbox.insetBy(dx: -margin, dy: -margin).intersection(e)
         let region = (roi.isNull || roi.isEmpty) ? e : roi
@@ -93,18 +86,8 @@ enum ObjectRemoval {
         PhotoEditorIO.context.render(maxImg, toBitmap: &px, rowBytes: 16,
                                      bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
                                      format: .RGBAf, colorSpace: space)
-        let peak = CGFloat(max(px[0], max(px[1], px[2])))
-        guard peak.isFinite, peak > 1.01, peak < 64 else { return 1 }
-        return peak
-    }
-
-    /// Multiplies R/G/B by `k` (used to normalize HDR headroom into [0,1] and back).
-    private static func scaleRGB(_ image: CIImage, _ k: CGFloat) -> CIImage {
-        image.applyingFilter("CIColorMatrix", parameters: [
-            "inputRVector": CIVector(x: k, y: 0, z: 0, w: 0),
-            "inputGVector": CIVector(x: 0, y: k, z: 0, w: 0),
-            "inputBVector": CIVector(x: 0, y: 0, z: k, w: 0),
-        ])
+        let peak = max(px[0], max(px[1], px[2]))
+        return peak.isFinite && peak > 1.02
     }
 
     // MARK: - ML inpainting (tier 1, only when a model is bundled)
@@ -448,7 +431,7 @@ enum ObjectRemoval {
 
     // MARK: - Diffusion fallback (the previous engine)
 
-    private static func diffusionFill(_ image: CIImage, mask m: CIImage, extent e: CGRect) -> CIImage {
+    private static func diffusionFill(_ image: CIImage, mask m: CIImage, extent e: CGRect, grain: Bool = true) -> CIImage {
         var filled = image
         let base = Double(max(e.width, e.height))
         let radii = [base * 0.08, base * 0.05, base * 0.03, base * 0.018, base * 0.01, base * 0.005, base * 0.0025]
@@ -461,7 +444,9 @@ enum ObjectRemoval {
                 ]).cropped(to: e)
             }
         }
-        if let grained = addMatchedGrain(filled, mask: m, extent: e) {
+        // Grain uses a soft-light blend that misbehaves on extended-range (>1) HDR pixels,
+        // so the HDR path skips it (a smooth diffused fill is what HDR backgrounds want anyway).
+        if grain, let grained = addMatchedGrain(filled, mask: m, extent: e) {
             filled = grained
         }
         return filled
