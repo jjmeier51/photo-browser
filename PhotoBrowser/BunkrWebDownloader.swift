@@ -186,32 +186,33 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
     // ddos-guard.net hosts, so the hub falls through to `.allow` and loads normally.
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        let url = navigationResponse.response.url
-        let cdnHost = URL(string: cdnURL)?.host
-        let isCDN = (url?.host == cdnHost) || (url?.host?.contains("cdn") ?? false)
-        if isCDN {
-            let mime = navigationResponse.response.mimeType ?? ""
-            let status = (navigationResponse.response as? HTTPURLResponse)?.statusCode ?? 200
-            // One-shot: record the URL + status the handler actually navigated to (bare vs
-            // tokenized), plus how many cdn.cr cookies we hold at that moment — a 0 there
-            // means Safari's session cookie is what we're missing.
-            if BunkrWebDownloader.respDebug.isEmpty, let u = url?.absoluteString {
-                BunkrWebDownloader.respDebug = "hit \(status) \(String(u.prefix(80)))"
-                WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
-                    let cdn = cookies.filter { $0.domain.contains("cdn") }
-                    BunkrWebDownloader.respDebug += " cdnCookies=\(cdn.count)"
-                }
-            }
-            if let http = navigationResponse.response as? HTTPURLResponse, http.statusCode >= 400 {
-                decisionHandler(.cancel); finish(http.statusCode); return
-            }
-            if mime.contains("html") { decisionHandler(.cancel); finish(409); return }
-            downloadStarted = true; clicker?.cancel(); clicker = nil   // stop re-clicking mid-download
-            // The 45s startup cap shouldn't kill an in-flight transfer; give the download
-            // its own, longer window.
+        let resp = navigationResponse.response
+        let http = resp as? HTTPURLResponse
+        let status = http?.statusCode ?? 200
+        let disposition = (http?.value(forHTTPHeaderField: "Content-Disposition") ?? "").lowercased()
+        let url = resp.url
+
+        // Record the last CDN response we see, for diagnostics if the run comes up short.
+        if let u = url?.absoluteString, u.contains("cdn") {
+            BunkrWebDownloader.respDebug = "cdn \(status) \(disposition.contains("attachment") ? "attach " : "")\(String(u.prefix(70)))"
+        }
+
+        // The bunkr download is a two-step dance (user-confirmed): the button first hits
+        // the CDN, which redirects and sets a DDoS-Guard cookie and *bounces back* to the
+        // file page, and only then is the file served with `Content-Disposition: attachment`.
+        // Previously we forced EVERY cdn.cr response to download, which intercepted that
+        // priming redirect and 403'd it. So: only the actual **attachment** (or a type
+        // WebKit can't display, e.g. octet-stream) becomes a download — every other
+        // navigation (the priming hit, the redirect, the file page, ddos-guard interstitials)
+        // is allowed to proceed so the cookie gets set and the real download can start.
+        let isFile = disposition.contains("attachment") || !navigationResponse.canShowMIMEType
+        if isFile {
+            if status >= 400 { decisionHandler(.cancel); finish(status); return }
+            if (resp.mimeType ?? "").contains("html") { decisionHandler(.cancel); finish(409); return }
+            downloadStarted = true; clicker?.cancel(); clicker = nil     // stop re-clicking mid-download
             watchdog?.cancel()
             watchdog = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 300_000_000_000)   // ≤ 5 min per file transfer
+                try? await Task.sleep(nanoseconds: 300_000_000_000)      // ≤ 5 min per file transfer
                 self?.finish(408)
             }
             decisionHandler(.download); return
