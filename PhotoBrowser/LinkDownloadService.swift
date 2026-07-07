@@ -67,15 +67,21 @@ enum LinkDownloadService {
     nonisolated static func run(link: String, into folder: URL,
                                 progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
-        progress(Progress(phase: "Resolving link…", fraction: 0, done: 0, total: 0))
-        let (items, albumName, note) = await resolve(link)
-        result.albumName = albumName
         let host = URL(string: link.hasPrefix("http") ? link : "https://\(link.trimmingCharacters(in: .whitespaces))")?.host ?? "link"
+        // Verbose per-run log written into the download folder (link-download-log.txt) so
+        // failures can be inspected and shared. Best-effort, never affects the download.
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let log = DownloadLog(folder: folder, kind: "link-download")
+        await log.begin("\(host) — \(link)")
+        progress(Progress(phase: "Resolving link…", fraction: 0, done: 0, total: 0))
+        let (items, albumName, note) = await resolve(link, log: log)
+        result.albumName = albumName
+        await log.log("resolved \(items.count) item(s)\(note.map { "; note: \($0)" } ?? "")")
         guard !items.isEmpty else {
             result.note = "[\(host)] " + (note ?? "Couldn’t find any downloadable files at that link.")
+            await log.finish("no items — \(result.note ?? "")")
             return result
         }
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
         let total = items.count
         var failStatuses: [Int: Int] = [:]     // status → count, for the diagnostic
@@ -87,7 +93,8 @@ enum LinkDownloadService {
         // via URLSession as usual.
         var webDebug = ""
         if items.first?.resolve != nil {
-            let r = await BunkrWebDownloader.download(items, into: folder) { done in
+            await log.log("bunkr WebKit path: \(total) file(s), hub ref \(items.first?.referer ?? "?")")
+            let r = await BunkrWebDownloader.download(items, into: folder, log: log) { done in
                 progress(Progress(phase: "Downloading \(done) of \(total)…",
                                   fraction: total > 0 ? Double(done) / Double(total) : 0, done: done, total: total))
             }
@@ -106,7 +113,7 @@ enum LinkDownloadService {
             }
             for item in items {
                 if active >= maxConcurrent, let s = await group.next() { active -= 1; tally(s) }
-                group.addTask { await downloadOne(item, into: folder) }
+                group.addTask { await downloadOne(item, into: folder, log: log) }
                 active += 1
             }
             while let s = await group.next() { tally(s) }
@@ -131,6 +138,7 @@ enum LinkDownloadService {
         else if result.failed > 0 { prefix = "\(result.failed) file(s) couldn’t be downloaded. " }
         else { prefix = "" }
         result.note = "\(prefix)[\(host): \(diag)]"
+        await log.finish("downloaded \(result.downloaded), failed \(result.failed); \(diag)")
         return result
     }
 
@@ -147,7 +155,7 @@ enum LinkDownloadService {
     /// Streams one file to disk byte-for-byte (no re-encode → EXIF/HDR preserved).
     /// Returns 0 on success, else the HTTP status (or a negative marker) so callers
     /// can report *why* a download failed.
-    nonisolated private static func downloadOne(_ item: MediaItem, into folder: URL) async -> Int {
+    nonisolated private static func downloadOne(_ item: MediaItem, into folder: URL, log: DownloadLog? = nil) async -> Int {
         let dest = uniqueDestination(sanitize(item.filename), in: folder)
         var last = -1
         for attempt in 0..<3 {
@@ -156,12 +164,12 @@ enum LinkDownloadService {
             // arms short-lived CDN URLs) — a stale/absent URL is a resolve failure, retry.
             let urlString: String
             if let resolve = item.resolve {
-                guard let u = await resolve() else { last = -3; continue }
+                guard let u = await resolve() else { last = -3; await log?.log("• \(item.filename): resolve returned no URL (attempt \(attempt + 1))"); continue }
                 urlString = u
             } else {
                 urlString = item.url
             }
-            guard let url = URL(string: urlString) else { last = -3; continue }
+            guard let url = URL(string: urlString) else { last = -3; await log?.log("• \(item.filename): bad URL '\(urlString.prefix(120))'"); continue }
             var req = URLRequest(url: url)
             req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             if let referer = item.referer { req.setValue(referer, forHTTPHeaderField: "Referer") }
@@ -178,35 +186,40 @@ enum LinkDownloadService {
             req.setValue("?1", forHTTPHeaderField: "Sec-Fetch-User")
             req.setValue("1", forHTTPHeaderField: "Upgrade-Insecure-Requests")
             req.timeoutInterval = 600
-            guard let (tmp, resp) = try? await session.download(for: req) else { last = -1; continue }
+            guard let (tmp, resp) = try? await session.download(for: req) else {
+                last = -1; await log?.log("• \(item.filename): network error (attempt \(attempt + 1)) \(url.host ?? "")"); continue
+            }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
-            if code == 429 || code >= 500 { last = code; continue }
-            if code >= 400 { return code }
+            if code == 429 || code >= 500 { last = code; await log?.log("• \(item.filename): HTTP \(code) (attempt \(attempt + 1)), retrying"); continue }
+            if code >= 400 { await log?.log("• \(item.filename): HTTP \(code) — giving up. url \(urlString.prefix(120))"); return code }
             do {
                 // Commit through the serialized drive writer so concurrent downloads never
                 // update the (exFAT) directory at the same time and each is flushed to disk.
                 try await DriveWriter.shared.commit(tmp, to: dest)
                 let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                if size >= 64 { return 0 }
+                if size >= 64 { await log?.log("✓ \(item.filename): saved (\(size) bytes)"); return 0 }
                 try? FileManager.default.removeItem(at: dest)
+                await log?.log("• \(item.filename): downloaded but too small (\(size) bytes) — discarded")
                 return -2
-            } catch { return -4 }
+            } catch { await log?.log("• \(item.filename): couldn’t write to drive — \(error.localizedDescription)"); return -4 }
         }
+        await log?.log("• \(item.filename): failed after 3 attempts (last \(last))")
         return last
     }
 
     // MARK: - Host dispatch
 
-    nonisolated private static func resolve(_ link: String) async -> (items: [MediaItem], albumName: String?, note: String?) {
+    nonisolated private static func resolve(_ link: String, log: DownloadLog? = nil) async -> (items: [MediaItem], albumName: String?, note: String?) {
         let clean = link.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let host = URL(string: clean.hasPrefix("http") ? clean : "https://\(clean)")?.host?.lowercased() else {
             return ([], nil, "That doesn’t look like a valid link.")
         }
         let url = clean.hasPrefix("http") ? clean : "https://\(clean)"
+        await log?.log("dispatch host=\(host)")
         if host.contains("pixeldrain")                                   { return await pixeldrain(url) }
-        if host.contains("gofile")                                       { return await gofile(url) }
+        if host.contains("gofile")                                       { return await gofile(url, log: log) }
         if host.contains("cyberdrop")                                    { return await cyberdrop(url, host: host) }
-        if host.contains("bunkr") || host.contains("turbo.") || host.contains("goonbox") { return await bunkr(url) }
+        if host.contains("bunkr") || host.contains("turbo.") || host.contains("goonbox") { return await bunkr(url, log: log) }
         if host.contains("pixl.")                                        { return await chevereto(url) }
         return await generic(url)     // cyberfile.me, filester.gg, or any unrecognized host
     }
@@ -236,18 +249,25 @@ enum LinkDownloadService {
 
     // MARK: - gofile (guest token + dynamic website token)
 
-    nonisolated private static func gofile(_ link: String) async -> ([MediaItem], String?, String?) {
+    nonisolated private static func gofile(_ link: String, log: DownloadLog? = nil) async -> ([MediaItem], String?, String?) {
         guard let contentID = firstMatch(link, "gofile\\.io/(?:d|w)/([A-Za-z0-9\\-]+)")
-            ?? firstMatch(link, "[?&]c=([A-Za-z0-9\\-]+)") else { return ([], nil, "Unrecognized Gofile link.") }
+            ?? firstMatch(link, "[?&]c=([A-Za-z0-9\\-]+)") else {
+            await log?.log("gofile: unrecognized link shape")
+            return ([], nil, "Unrecognized Gofile link.")
+        }
+        await log?.log("gofile: contentID=\(contentID); requesting guest account token")
         // A guest account token is required for the contents API and the download cookie.
         guard let acc = await getJSON("https://api.gofile.io/accounts", method: "POST") as? [String: Any],
               let data = acc["data"] as? [String: Any], let token = data["token"] as? String else {
+            await log?.log("gofile: FAILED to obtain guest token (accounts API blocked or changed)")
             return ([], nil, "Couldn’t start a Gofile session.")
         }
         let wt = gofileWebsiteToken(token: token)
+        await log?.log("gofile: got token; wt=\(wt.prefix(12))…; walking contents")
         var items: [MediaItem] = []
         var albumName: String?
-        await gofileCollect(contentID, token: token, wt: wt, cookie: "accountToken=\(token)", items: &items, albumName: &albumName)
+        await gofileCollect(contentID, token: token, wt: wt, cookie: "accountToken=\(token)", items: &items, albumName: &albumName, log: log)
+        await log?.log("gofile: collected \(items.count) file(s) from '\(albumName ?? "?")'")
         return (items, albumName, items.isEmpty ? "No files found (the Gofile link may be private or expired)." : nil)
     }
 
@@ -261,11 +281,15 @@ enum LinkDownloadService {
     }
 
     nonisolated private static func gofileCollect(_ contentID: String, token: String, wt: String, cookie: String,
-                                                  items: inout [MediaItem], albumName: inout String?, depth: Int = 0) async {
+                                                  items: inout [MediaItem], albumName: inout String?, depth: Int = 0,
+                                                  log: DownloadLog? = nil) async {
         guard depth < 6 else { return }
         let headers = ["Authorization": "Bearer \(token)", "X-Website-Token": wt]
         guard let json = await getJSON("https://api.gofile.io/contents/\(contentID)?wt=\(wt)", headers: headers) as? [String: Any],
-              let data = json["data"] as? [String: Any] else { return }
+              let data = json["data"] as? [String: Any] else {
+            await log?.log("gofile: contents/\(contentID) returned no data (token/wt rejected or empty)")
+            return
+        }
         if albumName == nil { albumName = data["name"] as? String }
         // A single-file link resolves to a file node directly (no children).
         if (data["type"] as? String) == "file", let dl = data["link"] as? String {
@@ -278,7 +302,7 @@ enum LinkDownloadService {
             guard let child = value as? [String: Any] else { continue }
             let type = child["type"] as? String
             if type == "folder", let sub = child["id"] as? String {
-                await gofileCollect(sub, token: token, wt: wt, cookie: cookie, items: &items, albumName: &albumName, depth: depth + 1)
+                await gofileCollect(sub, token: token, wt: wt, cookie: cookie, items: &items, albumName: &albumName, depth: depth + 1, log: log)
             } else if let dl = child["link"] as? String {
                 let name = (child["name"] as? String) ?? URL(string: dl)?.lastPathComponent ?? "gofile"
                 items.append(MediaItem(url: dl, filename: name, referer: "https://gofile.io/", cookie: cookie))
@@ -288,19 +312,24 @@ enum LinkDownloadService {
 
     // MARK: - bunkr family (album JSON + per-file CDN resolve)
 
-    nonisolated private static func bunkr(_ link: String) async -> ([MediaItem], String?, String?) {
+    nonisolated private static func bunkr(_ link: String, log: DownloadLog? = nil) async -> ([MediaItem], String?, String?) {
         let origin = (URL(string: link)?.scheme).flatMap { s in URL(string: link)?.host.map { "\(s)://\($0)" } } ?? "https://bunkr.cr"
         // Bunkr's live download hub is `dl.{album-host}` (e.g. dl.bunkr.cr) — the page a
         // manual download actually lands on, and the Referer the CDN hotlink-checks.
         // (`get.bunkrr.su` is a dead legacy hub and 403s.)
         let hub = (URL(string: link)?.host).map { "https://dl.\($0)" } ?? "https://dl.bunkr.cr"
+        await log?.log("bunkr: origin=\(origin), hub=\(hub)")
         // Album: the page embeds `window.albumFiles = [ {id, original, slug, …}, … ]`,
         // but the structure shifts often — try that, then a per-object regex, then just
         // scraping the /f/ file-page links.
         if firstMatch(link, "/a/([^/?#]+)") != nil {
             let sep = link.contains("?") ? "&" : "?"
-            guard let html = await getText(link + "\(sep)advanced=1") else { return ([], nil, "[bunkr] couldn’t load the album (blocked or offline).") }
+            guard let html = await getText(link + "\(sep)advanced=1") else {
+                await log?.log("bunkr: album page didn’t load (blocked or offline)")
+                return ([], nil, "[bunkr] couldn’t load the album (blocked or offline).")
+            }
             if html.contains("challenge-platform") || html.contains("Just a moment") {
+                await log?.log("bunkr: album page is a Cloudflare challenge")
                 return ([], nil, "[bunkr] blocked by Cloudflare — the page needs a browser to load.")
             }
             let title = firstMatch(html, "<h1[^>]*>\\s*([^<]+?)\\s*</h1>").map(decodeEntities)
@@ -328,6 +357,7 @@ enum LinkDownloadService {
             var seen = Set<String>()
             let slugs = matches(html, "/f/([A-Za-z0-9]{4,})").compactMap { $0.count > 1 ? $0[1] : nil }.filter { seen.insert($0).inserted }
             let marks = "html \(html.count) chars, albumFiles: \(html.contains("albumFiles") ? "y" : "n"), /f/: \(slugs.count), NEXT_DATA: \(html.contains("__NEXT_DATA__") ? "y" : "n")"
+            await log?.log("bunkr: album '\(title ?? "?")' — parsed \(ids.count) id(s), \(slugs.count) /f/ slug(s); \(marks)")
 
             if !ids.isEmpty {
                 let items = bunkrResolveAll(ids, hub: hub)
@@ -336,6 +366,7 @@ enum LinkDownloadService {
             }
             // Fallback: resolve each /f/ file page directly (broad slug scrape — any context).
             if !slugs.isEmpty {
+                await log?.log("bunkr: no albumFiles ids — falling back to \(slugs.count) file-page slug(s)")
                 let items = await bunkrResolveSlugs(slugs, origin: origin, hub: hub)
                 if !items.isEmpty { return (items, title, nil) }
                 return ([], title, "[bunkr] \(slugs.count) file page(s) found but none resolved (\(marks)).")

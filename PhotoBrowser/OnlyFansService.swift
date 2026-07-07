@@ -242,33 +242,41 @@ enum OnlyFansService {
                                 creds: Credentials, includeMessages: Bool,
                                 progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        // Verbose per-run log written into the creator's folder (onlyfans-log.txt) so
+        // failures can be inspected and shared. Best-effort, never affects the download.
+        let log = DownloadLog(folder: folder, kind: "onlyfans")
+        await log.begin("@\(username) — messages=\(includeMessages), known=\(alreadyDownloaded.count)")
         progress(Progress(phase: "Loading OnlyFans signing rules…", fraction: 0, done: 0, total: 0))
         guard let rules = await fetchDynamicRules() else {
             result.note = "Couldn’t load OnlyFans’ signing rules (the network may be blocked). Try again later."
+            await log.finish("FAILED: couldn’t load signing rules")
             return result
         }
         // Probe /users/me first: it validates the login + signing and gives a precise
         // reason (the real HTTP status + OnlyFans error) instead of a vague "couldn’t
         // open the creator", so a failed run points at what actually broke.
         switch await apiGet("/users/me", creds: creds, rules: rules) {
-        case .ok: break
+        case .ok: await log.log("auth OK (/users/me)")
         case .authError(let detail):
             result.note = "OnlyFans didn’t accept the login (\(detail)). Tap “Log in to OnlyFans”, sign in again, and retry."
+            await log.finish("FAILED: auth rejected — \(detail)")
             return result
         case .failed(let detail):
             result.note = "Couldn’t verify the OnlyFans login (\(detail)). Try again in a moment."
+            await log.finish("FAILED: couldn’t verify login — \(detail)")
             return result
         }
 
         progress(Progress(phase: "Loading @\(username)…", fraction: 0, done: 0, total: 0))
         guard let creator = await resolveCreator(username, creds: creds, rules: rules) else {
             result.note = "Couldn’t open @\(username). Check the username, that you’re logged in, and that you subscribe to them."
+            await log.finish("FAILED: couldn’t resolve creator @\(username)")
             return result
         }
         result.creator = creator
+        await log.log("creator id=\(creator.id), name=\(creator.name.isEmpty ? creator.username : creator.name)")
         if !creator.avatarURL.isEmpty { result.profilePic = await downloadData(creator.avatarURL, creds: creds) }
-
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
         // Discovery and download overlap: collectors walk posts (and messages)
         // concurrently and feed the hub (which dedups) into the stream; the consumer
@@ -307,7 +315,7 @@ enum OnlyFansService {
                 if active >= maxConcurrent, let r = await group.next() {
                     active -= 1; apply(r); await hub.savedOne()
                 }
-                group.addTask { await download(item, into: folder, creds: creds, rules: rules, hub: hub) }
+                group.addTask { await download(item, into: folder, creds: creds, rules: rules, hub: hub, log: log) }
                 active += 1
             }
             while let r = await group.next() { apply(r); await hub.savedOne() }
@@ -329,6 +337,7 @@ enum OnlyFansService {
             else if result.failed > 0 { prefix = "\(result.failed) item(s) couldn’t be downloaded. " }
             result.note = "\(prefix)[\(diag)]"
         }
+        await log.finish("photos \(result.photos), videos \(result.videos), failed \(result.failed) — \(diag)")
         return result
     }
 
@@ -569,13 +578,15 @@ enum OnlyFansService {
     // MARK: - Per-item download
 
     nonisolated private static func download(_ item: Item, into folder: URL, creds: Credentials,
-                                             rules: DynamicRules, hub: Hub) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
-        if let drm = item.drm { return await downloadDRM(item, drm: drm, into: folder, creds: creds, rules: rules, hub: hub) }
+                                             rules: DynamicRules, hub: Hub, log: DownloadLog? = nil) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
+        if let drm = item.drm { return await downloadDRM(item, drm: drm, into: folder, creds: creds, rules: rules, hub: hub, log: log) }
         let ext = fileExt(of: item.url, isVideo: item.isVideo)
         let dest = uniqueDestination("OF_\(item.id).\(ext)", in: folder)
         guard await downloadFile(item.url, to: dest, creds: creds) else {
+            await log?.log("• \(item.isVideo ? "video" : "photo") \(item.id): download failed. url \(String(item.url.prefix(110)))")
             return (false, item.isVideo, item.id, nil, "")
         }
+        await log?.log("✓ \(item.isVideo ? "video" : "photo") \(item.id): saved OF_\(item.id).\(ext)")
         // Photos: write the caption + capture date into the file's EXIF/IPTC so the
         // post text and date travel with it. Videos are left byte-identical to the
         // source download (never re-encoded) so their HDR / colour space is preserved;
@@ -590,8 +601,9 @@ enum OnlyFansService {
     /// FFmpegKit downloads + decrypts the DASH to a plain MP4. Each failure stage is
     /// reported to the hub so the result note says exactly where it stopped.
     nonisolated private static func downloadDRM(_ item: Item, drm: DRMInfo, into folder: URL, creds: Credentials,
-                                                rules: DynamicRules, hub: Hub) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
+                                                rules: DynamicRules, hub: Hub, log: DownloadLog? = nil) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
         func fail(_ why: String) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
+            await log?.log("• DRM video \(item.id): \(why)")
             await hub.noteDRMError(why); return (false, true, item.id, nil, "")
         }
         guard let mpd = await fetchText(drm.mpdURL, cookie: drm.cfCookie) else { return await fail("manifest fetch failed") }
@@ -648,6 +660,7 @@ enum OnlyFansService {
             try? FileManager.default.removeItem(at: out)
         }
         setFileDate(dest, item.date)
+        await log?.log("✓ DRM video \(item.id): decrypted + saved OF_\(item.id).mp4")
         return (true, true, item.id, dest.path, item.caption)
     }
 

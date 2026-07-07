@@ -28,7 +28,7 @@ enum BunkrWebDownloader {
     static var pageDebug = ""
     static var respDebug = ""
 
-    static func download(_ items: [LinkDownloadService.MediaItem], into folder: URL,
+    static func download(_ items: [LinkDownloadService.MediaItem], into folder: URL, log: DownloadLog? = nil,
                          onProgress: @escaping @MainActor (Int) -> Void)
         async -> (downloaded: Int, failed: Int, statuses: [Int: Int], debug: String) {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -42,7 +42,7 @@ enum BunkrWebDownloader {
             func addNext() {
                 guard idx < items.count else { return }
                 let item = items[idx]; idx += 1
-                group.addTask { @MainActor in await BunkrWebJob().run(item, into: folder) }
+                group.addTask { @MainActor in await BunkrWebJob().run(item, into: folder, log: log) }
             }
             for _ in 0..<min(maxConcurrent, items.count) { addNext() }
             while let status = await group.next() {
@@ -76,13 +76,20 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
     private var watchdog: Task<Void, Never>?
     private var clicker: Task<Void, Never>?
     private var pendingTemp: URL?
+    private var log: DownloadLog?
+    private var name = ""
 
-    func run(_ item: LinkDownloadService.MediaItem, into folder: URL) async -> Int {
-        guard let hub = item.referer, let hubURL = URL(string: hub) else { return 404 }
+    func run(_ item: LinkDownloadService.MediaItem, into folder: URL, log: DownloadLog? = nil) async -> Int {
+        self.log = log
+        name = item.filename
+        guard let hub = item.referer, let hubURL = URL(string: hub) else {
+            await log?.log("• \(name): no hub URL"); return 404
+        }
         // A best-effort CDN URL only sharpens the "is this the CDN response?" host check;
         // we no longer navigate to it (bunkr's own button does), so a resolve miss is fine.
         if let resolve = item.resolve { cdnURL = await resolve() ?? "" }
         else { cdnURL = item.url }
+        await log?.log("· \(name): loading hub \(hub); resolved CDN \(cdnURL.isEmpty ? "(none)" : String(cdnURL.prefix(90)))")
         dest = LinkDownloadService.uniqueDestination(
             LinkDownloadService.sanitize(item.filename), in: folder)
 
@@ -269,6 +276,21 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
         watchdog?.cancel(); watchdog = nil
         clicker?.cancel(); clicker = nil
         web?.stopLoading(); web?.removeFromSuperview(); web = nil
+        if let log {
+            let reason: String
+            switch status {
+            case 0: reason = "saved"
+            case 404: reason = "no CDN url"
+            case 408: reason = "timeout (hub/button never produced a download)"
+            case 409: reason = "CDN returned HTML (block/challenge, not media)"
+            case 410: reason = "download error"
+            case 411: reason = "empty file"
+            default: reason = "CDN HTTP \(status)"
+            }
+            let mark = status == 0 ? "✓" : "•"
+            let nm = name
+            Task { await log.log("\(mark) \(nm): \(reason)") }
+        }
         cont?.resume(returning: status); cont = nil
     }
 
