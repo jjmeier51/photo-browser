@@ -185,10 +185,15 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
         if isCDN {
             let mime = navigationResponse.response.mimeType ?? ""
             let status = (navigationResponse.response as? HTTPURLResponse)?.statusCode ?? 200
-            // One-shot: record the URL + status the handler actually navigated to, so we
-            // can see whether it's tokenized (has a query) or the bare hotlink URL.
+            // One-shot: record the URL + status the handler actually navigated to (bare vs
+            // tokenized), plus how many cdn.cr cookies we hold at that moment — a 0 there
+            // means Safari's session cookie is what we're missing.
             if BunkrWebDownloader.respDebug.isEmpty, let u = url?.absoluteString {
-                BunkrWebDownloader.respDebug = "hit \(status) \(String(u.prefix(90)))"
+                BunkrWebDownloader.respDebug = "hit \(status) \(String(u.prefix(80)))"
+                WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+                    let cdn = cookies.filter { $0.domain.contains("cdn") }
+                    BunkrWebDownloader.respDebug += " cdnCookies=\(cdn.count)"
+                }
             }
             if let http = navigationResponse.response as? HTTPURLResponse, http.statusCode >= 400 {
                 decisionHandler(.cancel); finish(http.statusCode); return
