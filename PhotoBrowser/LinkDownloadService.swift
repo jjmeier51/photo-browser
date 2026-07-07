@@ -80,16 +80,6 @@ enum LinkDownloadService {
         let total = items.count
         var failStatuses: [Int: Int] = [:]     // status → count, for the diagnostic
 
-        // Bunkr's CDN fingerprints the TLS/HTTP client and hard-403s anything that isn't
-        // a real browser engine — no header/referer/cookie replay through URLSession can
-        // pass it (only Safari/WebKit works). Route those files through WebKit instead.
-        if items.first?.referer?.contains("get.bunkrr.su") == true {
-            let r = await BunkrWebDownloader.download(items, into: folder) { done in
-                progress(Progress(phase: "Downloading \(done) of \(total)…",
-                                  fraction: total > 0 ? Double(done) / Double(total) : 0, done: done, total: total))
-            }
-            result.downloaded = r.downloaded; result.failed = r.failed; failStatuses = r.statuses
-        } else {
         await withTaskGroup(of: Int.self) { group in
             var active = 0
             let maxConcurrent = 12          // streams straight to disk — as wide as OnlyFans
@@ -106,7 +96,6 @@ enum LinkDownloadService {
                 active += 1
             }
             while let s = await group.next() { tally(s) }
-        }
         }
 
         // Always surface a short diagnostic (files found + failure statuses) so a
@@ -284,6 +273,10 @@ enum LinkDownloadService {
 
     nonisolated private static func bunkr(_ link: String) async -> ([MediaItem], String?, String?) {
         let origin = (URL(string: link)?.scheme).flatMap { s in URL(string: link)?.host.map { "\(s)://\($0)" } } ?? "https://bunkr.cr"
+        // Bunkr's live download hub is `dl.{album-host}` (e.g. dl.bunkr.cr) — the page a
+        // manual download actually lands on, and the Referer the CDN hotlink-checks.
+        // (`get.bunkrr.su` is a dead legacy hub and 403s.)
+        let hub = (URL(string: link)?.host).map { "https://dl.\($0)" } ?? "https://dl.bunkr.cr"
         // Album: the page embeds `window.albumFiles = [ {id, original, slug, …}, … ]`,
         // but the structure shifts often — try that, then a per-object regex, then just
         // scraping the /f/ file-page links.
@@ -320,13 +313,13 @@ enum LinkDownloadService {
             let marks = "html \(html.count) chars, albumFiles: \(html.contains("albumFiles") ? "y" : "n"), /f/: \(slugs.count), NEXT_DATA: \(html.contains("__NEXT_DATA__") ? "y" : "n")"
 
             if !ids.isEmpty {
-                let items = bunkrResolveAll(ids, origin: origin)
+                let items = bunkrResolveAll(ids, hub: hub)
                 if !items.isEmpty { return (items, title, nil) }
                 return ([], title, "[bunkr] \(ids.count) files listed but the CDN resolver returned nothing (\(marks)).")
             }
             // Fallback: resolve each /f/ file page directly (broad slug scrape — any context).
             if !slugs.isEmpty {
-                let items = await bunkrResolveSlugs(slugs, origin: origin)
+                let items = await bunkrResolveSlugs(slugs, origin: origin, hub: hub)
                 if !items.isEmpty { return (items, title, nil) }
                 return ([], title, "[bunkr] \(slugs.count) file page(s) found but none resolved (\(marks)).")
             }
@@ -336,14 +329,14 @@ enum LinkDownloadService {
             return ([], title, "[bunkr] no file list found (\(marks)).")
         }
         // Single file page.
-        let single = await bunkrResolveSlugs([firstMatch(link, "/f/([^/?#]+)") ?? link], origin: origin)
+        let single = await bunkrResolveSlugs([firstMatch(link, "/f/([^/?#]+)") ?? link], origin: origin, hub: hub)
         return (single, nil, single.isEmpty ? "[bunkr] couldn’t resolve that file." : nil)
     }
 
     /// Resolves bunkr `/f/{slug}` file pages to items: fetch each page for its numeric
     /// data id + name (the site page, safe to fetch up front), then attach a **deferred**
     /// CDN-URL resolver so the arming apidl call fires just before each download.
-    nonisolated private static func bunkrResolveSlugs(_ slugs: [String], origin: String) async -> [MediaItem] {
+    nonisolated private static func bunkrResolveSlugs(_ slugs: [String], origin: String, hub: String) async -> [MediaItem] {
         await withTaskGroup(of: MediaItem?.self) { group in
             var out: [MediaItem] = []
             var idx = 0
@@ -358,8 +351,8 @@ enum LinkDownloadService {
                         ?? firstMatch(html, "\"id\"\\s*:\\s*\"?(\\d{4,})") else { return nil }
                     let name = firstMatch(html, "<h1[^>]*>\\s*([^<]+?)\\s*</h1>").map(decodeEntities)
                         ?? URL(string: pageURL)?.lastPathComponent ?? id
-                    return MediaItem(url: "", filename: name, referer: bunkrFileReferer(id),
-                                     resolve: { await bunkrFileURL(id) })
+                    return MediaItem(url: "", filename: name, referer: bunkrFileReferer(id, hub: hub),
+                                     resolve: { await bunkrFileURL(id, hub: hub) })
                 }
             }
             for _ in 0..<min(maxConcurrent, slugs.count) { addNext() }
@@ -371,27 +364,27 @@ enum LinkDownloadService {
     /// Builds one item per album file with a **deferred** CDN-URL resolver — the apidl
     /// call runs just before each download (bunkr arms short-lived URLs), not up front.
     /// No network here; the id + display name already came from the album page parse.
-    nonisolated private static func bunkrResolveAll(_ ids: [(id: String, name: String, slug: String)], origin: String) -> [MediaItem] {
+    nonisolated private static func bunkrResolveAll(_ ids: [(id: String, name: String, slug: String)], hub: String) -> [MediaItem] {
         ids.map { entry in
             let id = entry.id
-            return MediaItem(url: "", filename: entry.name, referer: bunkrFileReferer(id),
-                             resolve: { await bunkrFileURL(id) })
+            return MediaItem(url: "", filename: entry.name, referer: bunkrFileReferer(id, hub: hub),
+                             resolve: { await bunkrFileURL(id, hub: hub) })
         }
     }
 
-    /// The get.bunkrr.su/file/{id} referer the CDN hotlink-checks — the *exact* referer
-    /// the apidl call uses (matching gallery-dl). A bare `get.bunkrr.su/`, the bunkr.cr
-    /// file page, or a direct hit all 403 ("Angie" server, no challenge to solve).
-    nonisolated private static func bunkrFileReferer(_ id: String) -> String {
-        "https://get.bunkrr.su/file/\(id)"
+    /// The `dl.{host}/file/{id}` referer the CDN hotlink-checks — the live download-hub
+    /// page a manual download lands on (e.g. dl.bunkr.cr/file/{id}). A stale hub, a bare
+    /// domain, or a direct hit all 403 ("Angie" server, no challenge to solve).
+    nonisolated private static func bunkrFileReferer(_ id: String, hub: String) -> String {
+        "\(hub)/file/\(id)"
     }
 
     /// Fetches a bunkr file's direct CDN URL from apidl. Called **just-in-time** by the
     /// downloader (bunkr arms this URL for a short window from our IP, so resolving all
     /// files up front then downloading later 403s them all). Returns nil for a down file.
-    nonisolated private static func bunkrFileURL(_ id: String) async -> String? {
+    nonisolated private static func bunkrFileURL(_ id: String, hub: String) async -> String? {
         let body = try? JSONSerialization.data(withJSONObject: ["id": id])
-        let headers = ["Referer": bunkrFileReferer(id), "Origin": "https://get.bunkrr.su",
+        let headers = ["Referer": bunkrFileReferer(id, hub: hub), "Origin": hub,
                        "Content-Type": "application/json"]
         guard let json = await getJSON("https://apidl.bunkr.ru/api/_001_v2", method: "POST", body: body, headers: headers) as? [String: Any],
               let raw = json["url"] as? String else { return nil }
