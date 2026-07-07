@@ -80,6 +80,18 @@ enum LinkDownloadService {
         let total = items.count
         var failStatuses: [Int: Int] = [:]     // status → count, for the diagnostic
 
+        // Bunkr's CDN fingerprints the TLS/HTTP client and hard-403s anything that isn't a
+        // real browser engine — proven: even with the correct dl.bunkr.cr referer, every
+        // URLSession request 403s while Safari downloads fine. Only bunkr items carry a
+        // just-in-time `resolve`, so route those through WebKit; everything else streams
+        // via URLSession as usual.
+        if items.first?.resolve != nil {
+            let r = await BunkrWebDownloader.download(items, into: folder) { done in
+                progress(Progress(phase: "Downloading \(done) of \(total)…",
+                                  fraction: total > 0 ? Double(done) / Double(total) : 0, done: done, total: total))
+            }
+            result.downloaded = r.downloaded; result.failed = r.failed; failStatuses = r.statuses
+        } else {
         await withTaskGroup(of: Int.self) { group in
             var active = 0
             let maxConcurrent = 12          // streams straight to disk — as wide as OnlyFans
@@ -96,6 +108,7 @@ enum LinkDownloadService {
                 active += 1
             }
             while let s = await group.next() { tally(s) }
+        }
         }
 
         // Always surface a short diagnostic (files found + failure statuses) so a
