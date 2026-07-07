@@ -369,6 +369,13 @@ struct FolderView: View {
 
     private var mediaItems: [Entry] { filtered.filter { $0.isViewable } }
 
+    /// Cheap "does this folder hold any playable media?" for menu enable-state. Using
+    /// `mediaItems.isEmpty` here forced the whole `filtered` pipeline (search, place-name
+    /// lookups, resolution specs, sort) to recompute several times the instant the toolbar
+    /// menu opened — the 2–3s stall before it became scrollable. This short-circuits over
+    /// the raw entries with no filtering.
+    private var hasViewableMedia: Bool { entries.contains { $0.isViewable } }
+
     /// Clean-up queue: every viewable item in this folder, stably name-sorted (so the
     /// review order is consistent across sessions regardless of the active sort/filter).
     private var cleanupItems: [Entry] {
@@ -1619,17 +1626,17 @@ struct FolderView: View {
                     } label: {
                         Label(cleanupAction.title, systemImage: "wand.and.sparkles")
                     }
-                    .disabled(cleanupItems.isEmpty)
+                    .disabled(!hasViewableMedia)
                     Button {
                         if case .rerun = cleanupAction { library.resetCleanup(url) }   // fresh random pass
                         showRandomCleanup = true
                     } label: {
                         Label("Randomized Clean Up", systemImage: "shuffle")
                     }
-                    .disabled(cleanupItems.isEmpty)
+                    .disabled(!hasViewableMedia)
                     Divider()
                     Button { playSlideshow() } label: { Label("Play Slideshow", systemImage: "play.rectangle") }
-                        .disabled(mediaItems.isEmpty)
+                        .disabled(!hasViewableMedia)
                     Button { showNewFolder = true } label: { Label("New Folder", systemImage: "folder.badge.plus") }
                     Toggle(isOn: $showHiddenFolders) { Label("Show Hidden Folders", systemImage: "eye.slash") }
                     Button { showDuplicates = true } label: { Label("Find Duplicates", systemImage: "doc.on.doc") }
@@ -1637,7 +1644,7 @@ struct FolderView: View {
                     Button { runTextIndex() } label: { Label("Index Text in Photos", systemImage: "text.viewfinder") }
                     Button { runLocationIndex() } label: { Label("Index Locations", systemImage: "location.viewfinder") }
                     Button { confirmPhoneCheck = true } label: { Label("Check if on iPhone", systemImage: "iphone") }
-                        .disabled(mediaItems.isEmpty)
+                        .disabled(!hasViewableMedia)
                     Button { showPeople = true } label: { Label("People", systemImage: "person.2.crop.square.stack") }
                     Button { showSettings = true } label: { Label("Settings", systemImage: "gearshape") }
                     Button { photosLibraryMoves = false; showPhotosLibrary = true } label: { Label("Photos Library", systemImage: "photo.stack") }

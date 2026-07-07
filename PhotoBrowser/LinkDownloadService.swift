@@ -183,8 +183,9 @@ enum LinkDownloadService {
             if code == 429 || code >= 500 { last = code; continue }
             if code >= 400 { return code }
             do {
-                try? FileManager.default.removeItem(at: dest)
-                try FileManager.default.moveItem(at: tmp, to: dest)
+                // Commit through the serialized drive writer so concurrent downloads never
+                // update the (exFAT) directory at the same time and each is flushed to disk.
+                try await DriveWriter.shared.commit(tmp, to: dest)
                 let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
                 if size >= 64 { return 0 }
                 try? FileManager.default.removeItem(at: dest)

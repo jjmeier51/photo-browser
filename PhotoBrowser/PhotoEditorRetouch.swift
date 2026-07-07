@@ -57,9 +57,54 @@ enum ObjectRemoval {
         guard e.width >= 4, e.height >= 4 else { return image }
         let m = alignMask(mask, to: e)
         guard let bbox = maskBounds(of: m, extent: e) else { return image }   // empty mask
+
+        // HDR: the fill synthesizes through 8-bit RGBA rasters, which clamp extended-range
+        // (>1.0) pixels — so the hole came back SDR-dark against HDR-bright surroundings
+        // (the "shadow"). Normalize the image into [0,1] by the local peak around the hole,
+        // fill, then restore the peak, so the fill keeps the same headroom as its
+        // neighbours. Strictly a no-op for SDR (peak ≈ 1) and self-disabling if the peak
+        // can't be read, so it can never regress the SDR path.
+        let peak = hdrPeak(around: bbox, in: image, extent: e)
+        if peak > 1.01 {
+            let down = scaleRGB(image, 1 / peak).cropped(to: e)
+            let filled = inpaintCore(down, mask: m, extent: e, bbox: bbox)
+            return scaleRGB(filled, peak).cropped(to: e)
+        }
+        return inpaintCore(image, mask: m, extent: e, bbox: bbox)
+    }
+
+    private static func inpaintCore(_ image: CIImage, mask m: CIImage, extent e: CGRect, bbox: CGRect) -> CIImage {
         if let out = mlFill(image, mask: m, extent: e, bbox: bbox) { return out }
         if let out = exemplarFill(image, mask: m, extent: e, bbox: bbox) { return out }
         return diffusionFill(image, mask: m, extent: e)
+    }
+
+    /// Peak RGB value in the neighbourhood the fill samples from (the mask bbox grown by
+    /// its own size). >1 means the source is HDR-expanded and the 8-bit fill would clip.
+    /// Returns 1 (→ no normalization) if it can't read a sane, finite headroom.
+    private static func hdrPeak(around bbox: CGRect, in image: CIImage, extent e: CGRect) -> CGFloat {
+        let margin = max(max(bbox.width, bbox.height), 48)
+        let roi = bbox.insetBy(dx: -margin, dy: -margin).intersection(e)
+        let region = (roi.isNull || roi.isEmpty) ? e : roi
+        let maxImg = image.applyingFilter("CIAreaMaximum",
+                                          parameters: [kCIInputExtentKey: CIVector(cgRect: region)])
+        var px = [Float](repeating: 0, count: 4)
+        let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+        PhotoEditorIO.context.render(maxImg, toBitmap: &px, rowBytes: 16,
+                                     bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                                     format: .RGBAf, colorSpace: space)
+        let peak = CGFloat(max(px[0], max(px[1], px[2])))
+        guard peak.isFinite, peak > 1.01, peak < 64 else { return 1 }
+        return peak
+    }
+
+    /// Multiplies R/G/B by `k` (used to normalize HDR headroom into [0,1] and back).
+    private static func scaleRGB(_ image: CIImage, _ k: CGFloat) -> CIImage {
+        image.applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: k, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: k, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: k, w: 0),
+        ])
     }
 
     // MARK: - ML inpainting (tier 1, only when a model is bundled)

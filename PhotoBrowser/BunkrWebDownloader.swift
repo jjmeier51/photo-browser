@@ -248,9 +248,12 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
         guard let dest, let tmp = pendingTemp else { finish(410); return }
         let size = (try? tmp.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
         if size < 64 { try? FileManager.default.removeItem(at: tmp); finish(411); return }
-        try? FileManager.default.removeItem(at: dest)
-        do { try FileManager.default.moveItem(at: tmp, to: dest); finish(0) }
-        catch { try? FileManager.default.removeItem(at: tmp); finish(410) }
+        // Commit via the serialized drive writer (avoids concurrent exFAT directory writes
+        // across the pool of jobs, and flushes to disk).
+        Task { [weak self] in
+            do { try await DriveWriter.shared.commit(tmp, to: dest); self?.finish(0) }
+            catch { try? FileManager.default.removeItem(at: tmp); self?.finish(410) }
+        }
     }
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {

@@ -638,7 +638,9 @@ enum OnlyFansService {
         // Move the finished MP4 onto the drive in one step (a failed/killed decrypt
         // never leaves a half-written file corrupting the external drive's directory).
         let dest = uniqueDestination("OF_\(item.id).mp4", in: folder)
-        do { try FileManager.default.moveItem(at: out, to: dest) }
+        // Serialized, flushed commit so concurrent OnlyFans downloads + FFmpegKit writes
+        // can't corrupt the exFAT directory (this path was the reported corruption source).
+        do { try await DriveWriter.shared.commit(out, to: dest) }
         catch {
             guard (try? FileManager.default.copyItem(at: out, to: dest)) != nil else {
                 try? FileManager.default.removeItem(at: out); return await fail("couldn’t save decrypted file")
@@ -678,8 +680,7 @@ enum OnlyFansService {
                 if code == 429 || code >= 500 { continue }
                 if code >= 400 { return false }
             }
-            try? FileManager.default.removeItem(at: dest)
-            do { try FileManager.default.moveItem(at: tmp, to: dest); return true } catch { return false }
+            do { try await DriveWriter.shared.commit(tmp, to: dest); return true } catch { return false }
         }
         return false
     }
@@ -897,8 +898,7 @@ enum OnlyFansService {
                 if code >= 400 { return false }
             }
             do {
-                try? FileManager.default.removeItem(at: dest)
-                try FileManager.default.moveItem(at: tmp, to: dest)
+                try await DriveWriter.shared.commit(tmp, to: dest)
                 return (try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0 >= 128
             } catch { return false }
         }

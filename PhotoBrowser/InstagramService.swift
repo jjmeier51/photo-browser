@@ -474,7 +474,8 @@ enum InstagramService {
 
     nonisolated private static func downloadFile(_ urlString: String, to dest: URL) async -> Bool {
         guard let tmp = await downloadToTemp(urlString) else { return false }
-        do { try FileManager.default.moveItem(at: tmp, to: dest); return true }
+        // Serialized, flushed commit — keeps concurrent downloads from corrupting the exFAT directory.
+        do { try await DriveWriter.shared.commit(tmp, to: dest); return true }
         catch { try? FileManager.default.removeItem(at: tmp); return false }
     }
 
