@@ -52,7 +52,7 @@ enum BunkrWebDownloader {
 /// A fresh instance per file keeps the navigation/download delegate state isolated so the
 /// pool's concurrent jobs don't interfere.
 @MainActor
-private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDelegate {
+private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDelegate, WKUIDelegate {
     // Failure codes are HTTP-shaped so the caller's diagnostic renders them as "HTTP N",
     // telling us *where* it broke: 0 ok · 404 no CDN url · 408 timeout (hub/trigger never
     // fired) · 409 CDN served HTML (block/challenge, not media) · 410 download error ·
@@ -63,17 +63,17 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
     private var cdnURL: String = ""
     private var triggered = false
     private var settled = false
+    private var downloadStarted = false
     private var watchdog: Task<Void, Never>?
+    private var clicker: Task<Void, Never>?
     private var pendingTemp: URL?
 
     func run(_ item: LinkDownloadService.MediaItem, into folder: URL) async -> Int {
         guard let hub = item.referer, let hubURL = URL(string: hub) else { return 404 }
-        // Resolve the CDN URL fresh (bunkr arms it briefly) right before driving the browser.
-        let resolved: String?
-        if let resolve = item.resolve { resolved = await resolve() }
-        else { resolved = item.url.isEmpty ? nil : item.url }
-        guard let cdn = resolved else { return 404 }
-        cdnURL = cdn
+        // A best-effort CDN URL only sharpens the "is this the CDN response?" host check;
+        // we no longer navigate to it (bunkr's own button does), so a resolve miss is fine.
+        if let resolve = item.resolve { cdnURL = await resolve() ?? "" }
+        else { cdnURL = item.url }
         dest = LinkDownloadService.uniqueDestination(
             LinkDownloadService.sanitize(item.filename), in: folder)
 
@@ -82,6 +82,7 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
         let w = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 400), configuration: cfg)
         w.customUserAgent = LinkDownloadService.userAgent
         w.navigationDelegate = self
+        w.uiDelegate = self               // so a target=_blank download opens in this view, not a dropped popup
         if let window = Self.keyWindow {          // in-window so WebKit runs the challenge JS
             w.alpha = 0.02; w.isUserInteractionEnabled = false
             window.addSubview(w)
@@ -98,22 +99,41 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
         }
     }
 
-    // Hub page (dl.{host}/file/{id}) finished loading (DDoS-Guard cleared). Navigate to the
-    // CDN URL *from here* so the request inherits this page's referrer + WebKit's
-    // fingerprint. Only the bunkr hub host matches (the CDN is *.cdn.cr, ddos-guard
-    // interstitials are on ddos-guard.net) so we trigger exactly once, on the real hub page.
+    // Hub page (dl.{host}/file/{id}) finished loading (DDoS-Guard cleared). Click bunkr's
+    // *own* Download control and let its JS mint the authorized download in-session — do
+    // NOT inject our apidl URL (that URL was fetched by the flagged URLSession client and
+    // the CDN 403s it even through WebKit; bunkr's page produces a fresh one that works).
+    // Retry every 2s because these pages often gate the button behind a short countdown.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard !triggered, let host = webView.url?.host, host.contains("bunkr") else { return }
         triggered = true
-        // referrerPolicy=unsafe-url so the CDN sees the full /file/{id} referrer (browsers
-        // strip the path cross-origin by default; gallery-dl confirms the full path works).
-        let js = """
-        (function(){var a=document.createElement('a');a.href="\(cdnURL)";\
-        a.referrerPolicy="unsafe-url";a.rel="noopener";\
-        document.body.appendChild(a);setTimeout(function(){a.click();},600);})();
-        """
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        clicker = Task { [weak self] in
+            for _ in 0..<20 {
+                guard let self, !self.settled, !self.downloadStarted else { return }
+                self.web?.evaluateJavaScript(Self.clickDownloadJS, completionHandler: nil)
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
     }
+
+    /// Finds and clicks bunkr's real download control: an anchor/button whose href points
+    /// at a CDN, or whose text/class/id says "download". Clicking runs the page's own
+    /// handler (which sets `location`/opens a tab to the authorized CDN URL).
+    private static let clickDownloadJS = """
+    (function(){
+      var els=document.querySelectorAll('a,button');
+      for(var i=0;i<els.length;i++){var e=els[i];
+        var t=(e.textContent||'').trim().toLowerCase();
+        var h=(e.getAttribute('href')||'').toLowerCase();
+        var c=((e.className||'')+' '+(e.id||'')).toLowerCase();
+        if(h.indexOf('.cdn.')>-1||h.indexOf('cdn.')>-1||h.indexOf('/download')>-1||
+           t==='download'||t.indexOf('download ')>-1||c.indexOf('download')>-1){
+          try{e.removeAttribute('target');}catch(x){}  /* stay in-frame so the referrer survives */
+          e.click();return 'ok';}
+      }
+      return 'none';
+    })();
+    """
 
     // The CDN response: force it to download (WebKit would otherwise try to *play* the
     // video). Match by CDN host (so a 30x to another CDN node still counts), and treat a
@@ -131,6 +151,14 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
                 decisionHandler(.cancel); finish(http.statusCode); return
             }
             if mime.contains("html") { decisionHandler(.cancel); finish(409); return }
+            downloadStarted = true; clicker?.cancel(); clicker = nil   // stop re-clicking mid-download
+            // The 45s startup cap shouldn't kill an in-flight transfer; give the download
+            // its own, longer window.
+            watchdog?.cancel()
+            watchdog = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 300_000_000_000)   // ≤ 5 min per file transfer
+                self?.finish(408)
+            }
             decisionHandler(.download); return
         }
         decisionHandler(.allow)
@@ -139,6 +167,15 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
     func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse,
                  didBecome download: WKDownload) {
         download.delegate = self
+    }
+
+    // If bunkr's button still opens a new tab, funnel it back into this view so the CDN
+    // navigation goes through decidePolicyFor (and becomes a WKDownload) instead of being
+    // dropped as an unhandled popup.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url { webView.load(URLRequest(url: url)) }
+        return nil
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {}
@@ -177,6 +214,7 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
         guard !settled else { return }
         settled = true
         watchdog?.cancel(); watchdog = nil
+        clicker?.cancel(); clicker = nil
         web?.stopLoading(); web?.removeFromSuperview(); web = nil
         cont?.resume(returning: status); cont = nil
     }
