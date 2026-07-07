@@ -41,8 +41,10 @@ enum BunkrWebDownloader {
             var idx = 0
             func addNext() {
                 guard idx < items.count else { return }
-                let item = items[idx]; idx += 1
-                group.addTask { @MainActor in await BunkrWebJob().run(item, into: folder, log: log) }
+                let item = items[idx]; let verbose = idx == 0; idx += 1
+                // The first file logs its full navigation sequence so we can see whether the
+                // c1fr-b priming round-trip happens (it's the step that sets the CDN cookie).
+                group.addTask { @MainActor in await BunkrWebJob().run(item, into: folder, log: log, verbose: verbose) }
             }
             for _ in 0..<min(maxConcurrent, items.count) { addNext() }
             while let status = await group.next() {
@@ -78,9 +80,11 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
     private var pendingTemp: URL?
     private var log: DownloadLog?
     private var name = ""
+    private var verbose = false
 
-    func run(_ item: LinkDownloadService.MediaItem, into folder: URL, log: DownloadLog? = nil) async -> Int {
+    func run(_ item: LinkDownloadService.MediaItem, into folder: URL, log: DownloadLog? = nil, verbose: Bool = false) async -> Int {
         self.log = log
+        self.verbose = verbose
         name = item.filename
         guard let hub = item.referer, let hubURL = URL(string: hub) else {
             await log?.log("• \(name): no hub URL"); return 404
@@ -196,6 +200,10 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
         if let u = url?.absoluteString, u.contains("cdn") {
             BunkrWebDownloader.respDebug = "cdn \(status) \(disposition.contains("attachment") ? "attach " : "")\(String(u.prefix(70)))"
         }
+        if verbose, let u = url?.absoluteString {
+            let l = log
+            Task { await l?.log("    ← resp \(status)\(disposition.contains("attachment") ? " [attachment]" : ""): \(String(u.prefix(90)))") }
+        }
 
         // The bunkr download is a two-step dance (user-confirmed): the button first hits
         // the CDN, which redirects and sets a DDoS-Guard cookie and *bounces back* to the
@@ -216,6 +224,17 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
                 self?.finish(408)
             }
             decisionHandler(.download); return
+        }
+        decisionHandler(.allow)
+    }
+
+    // Verbose (first file only): log every navigation the button triggers, so the priming
+    // sequence (hub → c1fr-b → back → prxp-b) is visible in the log.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if verbose, let u = navigationAction.request.url?.absoluteString {
+            let l = log
+            Task { await l?.log("    → nav \(navigationAction.navigationType.rawValue): \(String(u.prefix(95)))") }
         }
         decisionHandler(.allow)
     }
