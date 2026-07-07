@@ -278,11 +278,25 @@ enum OnlyFansService {
         await log.log("creator id=\(creator.id), name=\(creator.name.isEmpty ? creator.username : creator.name)")
         if !creator.avatarURL.isEmpty { result.profilePic = await downloadData(creator.avatarURL, creds: creds) }
 
+        // Dedup: the caller's persisted id list, PLUS every OF_<id>.* file already sitting
+        // in the folder. The on-disk scan is a belt-and-suspenders guard so a stale or lost
+        // persisted list can never cause the whole set to re-download as duplicates — the
+        // files already present are recognised regardless.
+        var already = alreadyDownloaded
+        if let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) {
+            var onDisk = 0
+            for n in names where n.hasPrefix("OF_") {
+                let id = n.dropFirst(3).prefix { $0.isNumber }   // OF_<id>.<ext> / "OF_<id> 2.ext"
+                if !id.isEmpty, already.insert(String(id)).inserted { onDisk += 1 }
+            }
+            await log.log("dedup: \(alreadyDownloaded.count) persisted + \(onDisk) more from files on disk = \(already.count) known")
+        }
+
         // Discovery and download overlap: collectors walk posts (and messages)
         // concurrently and feed the hub (which dedups) into the stream; the consumer
         // starts downloading the first item while the walks find the rest.
         let (stream, continuation) = AsyncStream.makeStream(of: Item.self)
-        let hub = Hub(already: alreadyDownloaded, continuation: continuation, progress: progress)
+        let hub = Hub(already: already, continuation: continuation, progress: progress)
 
         let discovery = Task {
             await withTaskGroup(of: Void.self) { group in

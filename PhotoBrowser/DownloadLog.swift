@@ -1,18 +1,21 @@
 import Foundation
 
-/// Appends timestamped diagnostic lines to a `<kind>-log.txt` file **in the download
-/// folder**, so a run's decisions and failures can be inspected after the fact and shared.
+/// Collects timestamped diagnostic lines for one download run and writes them to a
+/// `<kind>-log.txt` file **in the download folder** exactly once, at the end — so a run's
+/// decisions and failures can be inspected afterwards and shared.
 ///
-/// An actor, so the many concurrent download tasks serialize their writes instead of
-/// interleaving. Writes are buffered and flushed in chunks (and on `finish`) via a single
-/// appending file handle — appending to one growing file is safe on exFAT (unlike the
-/// concurrent *new-file* churn `DriveWriter` guards), and keeps log I/O off the hot path.
-/// Every call is best-effort and never throws into the download flow. Successive runs
-/// append under a dated session header, so recent history is preserved.
+/// Why buffer-then-write-once: the drive is usually a file-provider/exFAT volume, and
+/// *repeated* coordinated writes to a held-open file (FileHandle/createFile) leave `.sb-…`
+/// staging items that exFAT can corrupt into unopenable "folders". So we accumulate lines
+/// in memory (an actor, so concurrent download tasks don't race), then on `finish` write the
+/// whole thing to the app's temp dir and do a single `removeItem`+`moveItem` onto the drive
+/// — one plain file, no held handle, no atomic-replace staging. Best-effort throughout; a
+/// logging failure never touches the download. Trade-off: a crash mid-run loses the log.
 actor DownloadLog {
-    private let url: URL
-    private var handle: FileHandle?
-    private var buffer = Data()
+    private let folder: URL
+    private let kind: String
+    private var header = ""
+    private var lines: [String] = []
 
     private static let time: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f
@@ -22,41 +25,33 @@ actor DownloadLog {
     }()
 
     init(folder: URL, kind: String) {
-        url = folder.appendingPathComponent("\(kind)-log.txt")
+        self.folder = folder
+        self.kind = kind
     }
 
-    /// Writes the dated session header + an opening line. Call once, first.
+    /// Records the dated session header + opening line. Call once, first.
     func begin(_ header: String) {
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        write("\n===== \(Self.full.string(from: Date())) — \(header) =====")
+        self.header = "===== \(Self.full.string(from: Date())) — \(header) ====="
     }
 
-    /// Appends one timestamped line.
-    func log(_ s: String) { write(s) }
+    /// Buffers one timestamped line (in memory; nothing is written until `finish`).
+    func log(_ s: String) {
+        lines.append("\(Self.time.string(from: Date()))  \(s)")
+    }
 
-    /// Appends an optional final summary and flushes/closes.
+    /// Appends an optional final summary and writes the whole log to the folder in one shot.
     func finish(_ summary: String? = nil) {
-        if let summary { write("SUMMARY: \(summary)") }
-        flush()
-        try? handle?.close()
-        handle = nil
-    }
-
-    private func write(_ s: String) {
-        buffer.append(Data("\(Self.time.string(from: Date()))  \(s)\n".utf8))
-        if buffer.count >= 4096 { flush() }
-    }
-
-    private func flush() {
-        guard !buffer.isEmpty else { return }
-        if handle == nil {
-            if !FileManager.default.fileExists(atPath: url.path) {
-                FileManager.default.createFile(atPath: url.path, contents: nil)
-            }
-            handle = try? FileHandle(forWritingTo: url)
-            try? handle?.seekToEnd()
-        }
-        try? handle?.write(contentsOf: buffer)
-        buffer.removeAll(keepingCapacity: true)
+        if let summary { log("SUMMARY: \(summary)") }
+        let text = ([header] + lines).filter { !$0.isEmpty }.joined(separator: "\n") + "\n"
+        let fm = FileManager.default
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        // Write to app-local temp (fast, no drive coordination), then a single move onto the
+        // drive — overwriting any prior log via remove+move (not atomic-replace, which stages
+        // a `.sb-` item on the drive).
+        let tmp = fm.temporaryDirectory.appendingPathComponent("\(kind)-\(UUID().uuidString).txt")
+        guard (try? text.write(to: tmp, atomically: true, encoding: .utf8)) != nil else { return }
+        let dest = folder.appendingPathComponent("\(kind)-log.txt")
+        try? fm.removeItem(at: dest)
+        do { try fm.moveItem(at: tmp, to: dest) } catch { try? fm.removeItem(at: tmp) }
     }
 }
