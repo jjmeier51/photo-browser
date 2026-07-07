@@ -58,18 +58,16 @@ enum ObjectRemoval {
         let m = alignMask(mask, to: e)
         guard let bbox = maskBounds(of: m, extent: e) else { return image }   // empty mask
 
-        // HDR: the ML/exemplar fills synthesize through **8-bit** RGBA rasters, which clamp
-        // extended-range (>1.0) pixels — that clamp is the grey "shadow"/over-exposed patch
-        // on HDR photos (a bright HDR background can't be reproduced in 8 bits). The
-        // diffusion fill is pure CoreImage (CIGaussianBlur/CIBlendWithMask), stays in float
-        // and keeps the surrounding headroom, so route HDR sources straight to it. SDR keeps
-        // the higher-fidelity patch synthesis, untouched.
-        if isExtendedRange(image, around: bbox, extent: e) {
-            return diffusionFill(image, mask: m, extent: e, grain: false)
-        }
-        if let out = mlFill(image, mask: m, extent: e, bbox: bbox) { return out }
+        // `exemplarFill` synthesizes in a **float** raster, so it copies real texture *and*
+        // keeps HDR headroom — a bright HDR background reproduces cleanly instead of clamping
+        // to the grey "shadow" an 8-bit fill left. The ML fill still rasters to 8-bit, so
+        // skip it for HDR. Diffusion is the last-ditch fallback (it bleeds high-contrast
+        // edges, so it's a poor primary), with grain skipped on HDR (its soft-light blend
+        // misbehaves on values >1).
+        let hdr = isExtendedRange(image, around: bbox, extent: e)
+        if !hdr, let out = mlFill(image, mask: m, extent: e, bbox: bbox) { return out }
         if let out = exemplarFill(image, mask: m, extent: e, bbox: bbox) { return out }
-        return diffusionFill(image, mask: m, extent: e)
+        return diffusionFill(image, mask: m, extent: e, grain: !hdr)
     }
 
     /// True when the source carries HDR headroom (peak RGB > 1) in the neighbourhood the
@@ -166,7 +164,9 @@ enum ObjectRemoval {
                 .transformed(by: CGAffineTransform(translationX: -roi.minX, y: -roi.minY))
                 .transformed(by: CGAffineTransform(scaleX: CGFloat(w) / roi.width, y: CGFloat(h) / roi.height))
         }
-        guard var rgba = rasterize(working(image), w: w, h: h),
+        // Image raster is **float** (extended-linear) so HDR headroom survives the synthesis
+        // and the fill never clamps to grey; the mask stays 8-bit (it's plain black/white).
+        guard var rgba = rasterizeFloat(working(image), w: w, h: h),
               let maskBuf = rasterize(working(m), w: w, h: h) else { return nil }
 
         // --- 3. Unknown map, dilated 3px so the stroke's anti-aliased rim (still
@@ -238,13 +238,15 @@ enum ObjectRemoval {
                 let tx = t.idx % w, ty = t.idx / w
                 let cx = min(max(tx, half), w - 1 - half)
                 let cy = min(max(ty, half), h - 1 - half)
-                var bestCost = Int.max
+                var bestCost = Float.greatestFiniteMagnitude
                 var bestIdx = -1
                 for c in candidates {
                     let sx = c % w, sy = c / w
-                    // Locality bias: nearby texture is likelier to belong.
+                    // Locality bias: nearby texture is likelier to belong. Colour diffs are
+                    // ×255 so their scale (and the colour-vs-locality balance) matches the
+                    // original 8-bit tuning; for HDR the >1 values just weigh proportionally.
                     let ddx = sx - cx, ddy = sy - cy
-                    var cost = ddx * ddx + ddy * ddy
+                    var cost = Float(ddx * ddx + ddy * ddy)
                     if cost >= bestCost { continue }
                     var dy = -half
                     scan: while dy <= half {
@@ -253,9 +255,9 @@ enum ObjectRemoval {
                             let tp = (cy + dy) * w + (cx + dx)
                             if !needs[tp] {
                                 let to = tp * 4, so = ((sy + dy) * w + (sx + dx)) * 4
-                                let dr = Int(rgba[to]) - Int(rgba[so])
-                                let dg = Int(rgba[to + 1]) - Int(rgba[so + 1])
-                                let db = Int(rgba[to + 2]) - Int(rgba[so + 2])
+                                let dr = (rgba[to] - rgba[so]) * 255
+                                let dg = (rgba[to + 1] - rgba[so + 1]) * 255
+                                let db = (rgba[to + 2] - rgba[so + 2]) * 255
                                 cost += dr * dr + dg * dg + db * db
                                 if cost >= bestCost { break scan }
                             }
@@ -280,9 +282,9 @@ enum ObjectRemoval {
                         } else if synth[tp] {
                             // Cross-blend where this patch overlaps earlier synthesized
                             // pixels — verbatim copies met in hard square seams.
-                            rgba[to] = UInt8((Int(rgba[to]) * 13 + Int(rgba[so]) * 7) / 20)
-                            rgba[to + 1] = UInt8((Int(rgba[to + 1]) * 13 + Int(rgba[so + 1]) * 7) / 20)
-                            rgba[to + 2] = UInt8((Int(rgba[to + 2]) * 13 + Int(rgba[so + 2]) * 7) / 20)
+                            rgba[to] = (rgba[to] * 13 + rgba[so] * 7) / 20
+                            rgba[to + 1] = (rgba[to + 1] * 13 + rgba[so + 1] * 7) / 20
+                            rgba[to + 2] = (rgba[to + 2] * 13 + rgba[so + 2] * 7) / 20
                         }
                     }
                 }
@@ -314,12 +316,12 @@ enum ObjectRemoval {
                 while cx <= w - 1 - half {
                     defer { cx += 3 }
                     guard rectSum(synthSum, w: w, h: h, cx - half, cy - half, cx + half, cy + half) > 0 else { continue }
-                    var bestCost = Int.max
+                    var bestCost = Float.greatestFiniteMagnitude
                     var bestIdx = -1
                     for c in candidates {
                         let sx = c % w, sy = c / w
                         let ddx = sx - cx, ddy = sy - cy
-                        var cost = ddx * ddx + ddy * ddy
+                        var cost = Float(ddx * ddx + ddy * ddy)
                         if cost >= bestCost { continue }
                         var dy = -half
                         scan: while dy <= half {
@@ -327,9 +329,9 @@ enum ObjectRemoval {
                             while dx <= half {
                                 let to = ((cy + dy) * w + (cx + dx)) * 4
                                 let so = ((sy + dy) * w + (sx + dx)) * 4
-                                let dr = Int(rgba[to]) - Int(rgba[so])
-                                let dg = Int(rgba[to + 1]) - Int(rgba[so + 1])
-                                let db = Int(rgba[to + 2]) - Int(rgba[so + 2])
+                                let dr = (rgba[to] - rgba[so]) * 255
+                                let dg = (rgba[to + 1] - rgba[so + 1]) * 255
+                                let db = (rgba[to + 2] - rgba[so + 2]) * 255
                                 cost += dr * dr + dg * dg + db * db
                                 if cost >= bestCost { break scan }
                                 dx += 1
@@ -346,9 +348,9 @@ enum ObjectRemoval {
                             guard synth[tp] else { continue }
                             let wgt = lut[(dy + half) * patch + (dx + half)]
                             let so = ((sy + dy) * w + (sx + dx)) * 4
-                            accR[tp] += Float(rgba[so]) * wgt
-                            accG[tp] += Float(rgba[so + 1]) * wgt
-                            accB[tp] += Float(rgba[so + 2]) * wgt
+                            accR[tp] += rgba[so] * wgt
+                            accG[tp] += rgba[so + 1] * wgt
+                            accB[tp] += rgba[so + 2] * wgt
                             accW[tp] += wgt
                         }
                     }
@@ -357,14 +359,14 @@ enum ObjectRemoval {
             }
             for i in 0..<total where synth[i] && accW[i] > 0 {
                 let o = i * 4
-                rgba[o] = UInt8(max(0, min(255, (accR[i] / accW[i]).rounded())))
-                rgba[o + 1] = UInt8(max(0, min(255, (accG[i] / accW[i]).rounded())))
-                rgba[o + 2] = UInt8(max(0, min(255, (accB[i] / accW[i]).rounded())))
+                rgba[o] = accR[i] / accW[i]           // float: no clamp to 255 — HDR headroom stays
+                rgba[o + 1] = accG[i] / accW[i]
+                rgba[o + 2] = accB[i] / accW[i]
             }
         }
 
         // --- 6. Paste the synthesized window back, hole-only, with a feathered seam ---
-        guard let outCG = makeCG(&rgba, w: w, h: h) else { return nil }
+        guard let outCG = makeCGFloat(&rgba, w: w, h: h) else { return nil }
         let placed = CIImage(cgImage: outCG)
             .transformed(by: CGAffineTransform(scaleX: roi.width / CGFloat(w), y: roi.height / CGFloat(h)))
             .transformed(by: CGAffineTransform(translationX: roi.minX, y: roi.minY))
@@ -403,6 +405,37 @@ enum ObjectRemoval {
             guard let cgctx = CGContext(data: ptr.baseAddress, width: w, height: h, bitsPerComponent: 8,
                                         bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
                                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+            return cgctx.makeImage()
+        }
+    }
+
+    /// Extended-linear (HDR-capable) space for the float rasters, so headroom above 1.0
+    /// survives the patch synthesis. Falls back to device RGB if unavailable.
+    private static let floatSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+    private static let floatBitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        | CGBitmapInfo.floatComponents.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+
+    /// Float (32-bit/channel) counterpart of `rasterize`, keeping HDR values >1. Same
+    /// createCGImage-then-draw approach, so pixel orientation matches the 8-bit path.
+    private static func rasterizeFloat(_ ci: CIImage, w: Int, h: Int) -> [Float]? {
+        guard let cg = PhotoEditorIO.context.createCGImage(
+            ci, from: CGRect(x: 0, y: 0, width: w, height: h),
+            format: .RGBAf, colorSpace: floatSpace) else { return nil }
+        var buf = [Float](repeating: 0, count: w * h * 4)
+        let ok = buf.withUnsafeMutableBytes { ptr -> Bool in
+            guard let cgctx = CGContext(data: ptr.baseAddress, width: w, height: h, bitsPerComponent: 32,
+                                        bytesPerRow: w * 16, space: floatSpace, bitmapInfo: floatBitmapInfo) else { return false }
+            cgctx.interpolationQuality = .high
+            cgctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        return ok ? buf : nil
+    }
+
+    private static func makeCGFloat(_ buf: inout [Float], w: Int, h: Int) -> CGImage? {
+        buf.withUnsafeMutableBytes { ptr -> CGImage? in
+            guard let cgctx = CGContext(data: ptr.baseAddress, width: w, height: h, bitsPerComponent: 32,
+                                        bytesPerRow: w * 16, space: floatSpace, bitmapInfo: floatBitmapInfo) else { return nil }
             return cgctx.makeImage()
         }
     }
