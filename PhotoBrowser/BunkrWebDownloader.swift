@@ -21,10 +21,16 @@ enum BunkrWebDownloader {
     /// called as each finishes. Returns success/failure counts and a status histogram
     /// (0 = ok; see `BunkrWebJob` for the failure codes) so the caller's diagnostic shows
     /// *why* it failed rather than a blanket 403.
+    /// One-shot diagnostic: the first job records the download-candidate elements it finds
+    /// on the hub page here, so we can see bunkr's real button markup and target it
+    /// precisely instead of guessing. Surfaced in the failure popup.
+    static var pageDebug = ""
+
     static func download(_ items: [LinkDownloadService.MediaItem], into folder: URL,
                          onProgress: @escaping @MainActor (Int) -> Void)
-        async -> (downloaded: Int, failed: Int, statuses: [Int: Int]) {
+        async -> (downloaded: Int, failed: Int, statuses: [Int: Int], debug: String) {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        pageDebug = ""
         var downloaded = 0, failed = 0, statuses: [Int: Int] = [:]
         var done = 0
         let maxConcurrent = 4
@@ -44,7 +50,7 @@ enum BunkrWebDownloader {
                 addNext()
             }
         }
-        return (downloaded, failed, statuses)
+        return (downloaded, failed, statuses, pageDebug)
     }
 }
 
@@ -109,6 +115,13 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard !triggered, let host = webView.url?.host, host.contains("bunkr") else { return }
         triggered = true
+        // One-shot: snapshot the hub page's download-candidate elements so we can see the
+        // real button markup in the popup (only if not already captured by another job).
+        if BunkrWebDownloader.pageDebug.isEmpty {
+            webView.evaluateJavaScript(Self.inspectJS) { result, _ in
+                if BunkrWebDownloader.pageDebug.isEmpty, let s = result as? String { BunkrWebDownloader.pageDebug = s }
+            }
+        }
         clicker = Task { [weak self] in
             for _ in 0..<20 {
                 guard let self, !self.settled, !self.downloadStarted else { return }
@@ -117,6 +130,25 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
             }
         }
     }
+
+    /// Reports the hub page's download-candidate elements (tag/id/class/href/text) — or,
+    /// if none match, the page's link/button counts and title — so the real markup is
+    /// visible for targeting.
+    private static let inspectJS = """
+    (function(){
+      var out=[],els=document.querySelectorAll('a,button');
+      for(var i=0;i<els.length&&out.length<6;i++){var e=els[i];
+        var t=(e.textContent||'').trim(),h=(e.getAttribute('href')||'');
+        var c=((e.className||'')+' '+(e.id||'')).toLowerCase();
+        if(h.toLowerCase().indexOf('cdn')>-1||h.toLowerCase().indexOf('download')>-1||
+           t.toLowerCase().indexOf('download')>-1||c.indexOf('download')>-1){
+          out.push(e.tagName+(e.id?'#'+e.id:'')+'.'+String(e.className||'').split(' ')[0]+
+                   '['+h.slice(0,55)+'] "'+t.slice(0,18)+'"');}
+      }
+      return out.length?out.join(' || '):('none; a='+document.querySelectorAll('a').length+
+             ' btn='+document.querySelectorAll('button').length+' t='+document.title.slice(0,40));
+    })();
+    """
 
     /// Finds and clicks bunkr's real download control: an anchor/button whose href points
     /// at a CDN, or whose text/class/id says "download". Clicking runs the page's own

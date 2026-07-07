@@ -85,12 +85,14 @@ enum LinkDownloadService {
         // URLSession request 403s while Safari downloads fine. Only bunkr items carry a
         // just-in-time `resolve`, so route those through WebKit; everything else streams
         // via URLSession as usual.
+        var webDebug = ""
         if items.first?.resolve != nil {
             let r = await BunkrWebDownloader.download(items, into: folder) { done in
                 progress(Progress(phase: "Downloading \(done) of \(total)…",
                                   fraction: total > 0 ? Double(done) / Double(total) : 0, done: done, total: total))
             }
             result.downloaded = r.downloaded; result.failed = r.failed; failStatuses = r.statuses
+            webDebug = r.debug
         } else {
         await withTaskGroup(of: Int.self) { group in
             var active = 0
@@ -122,6 +124,7 @@ enum LinkDownloadService {
             // misleading — show the referer host instead.
             if let u = items.first?.url, !u.isEmpty { diag += "; url: \(String(u.prefix(110)))" }
             if host.contains("bunkr"), let r = items.first?.referer, let rh = URL(string: r)?.host { diag += "; ref: \(rh)" }
+            if !webDebug.isEmpty { diag += "; dl-el: \(webDebug)" }
         }
         let prefix: String
         if result.downloaded == 0 { prefix = "Couldn’t download any files (the host may be blocking access or the link may have expired). " }
