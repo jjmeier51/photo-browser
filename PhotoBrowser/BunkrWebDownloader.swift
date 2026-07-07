@@ -21,16 +21,18 @@ enum BunkrWebDownloader {
     /// called as each finishes. Returns success/failure counts and a status histogram
     /// (0 = ok; see `BunkrWebJob` for the failure codes) so the caller's diagnostic shows
     /// *why* it failed rather than a blanket 403.
-    /// One-shot diagnostic: the first job records the download-candidate elements it finds
-    /// on the hub page here, so we can see bunkr's real button markup and target it
-    /// precisely instead of guessing. Surfaced in the failure popup.
+    /// One-shot diagnostics surfaced in the failure popup: the hub page's download-element
+    /// markup (`pageDebug`) and the first CDN response the click produced — its status +
+    /// URL (`respDebug`) — so we can see whether the handler's URL is tokenized and where
+    /// it 403s.
     static var pageDebug = ""
+    static var respDebug = ""
 
     static func download(_ items: [LinkDownloadService.MediaItem], into folder: URL,
                          onProgress: @escaping @MainActor (Int) -> Void)
         async -> (downloaded: Int, failed: Int, statuses: [Int: Int], debug: String) {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        pageDebug = ""
+        pageDebug = ""; respDebug = ""
         var downloaded = 0, failed = 0, statuses: [Int: Int] = [:]
         var done = 0
         let maxConcurrent = 4
@@ -50,7 +52,8 @@ enum BunkrWebDownloader {
                 addNext()
             }
         }
-        return (downloaded, failed, statuses, pageDebug)
+        let debug = [pageDebug, respDebug].filter { !$0.isEmpty }.joined(separator: "; ")
+        return (downloaded, failed, statuses, debug)
     }
 }
 
@@ -181,6 +184,12 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
         let isCDN = (url?.host == cdnHost) || (url?.host?.contains("cdn") ?? false)
         if isCDN {
             let mime = navigationResponse.response.mimeType ?? ""
+            let status = (navigationResponse.response as? HTTPURLResponse)?.statusCode ?? 200
+            // One-shot: record the URL + status the handler actually navigated to, so we
+            // can see whether it's tokenized (has a query) or the bare hotlink URL.
+            if BunkrWebDownloader.respDebug.isEmpty, let u = url?.absoluteString {
+                BunkrWebDownloader.respDebug = "hit \(status) \(String(u.prefix(90)))"
+            }
             if let http = navigationResponse.response as? HTTPURLResponse, http.statusCode >= 400 {
                 decisionHandler(.cancel); finish(http.statusCode); return
             }
@@ -208,7 +217,9 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
     // dropped as an unhandled popup.
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = navigationAction.request.url { webView.load(URLRequest(url: url)) }
+        // Load the popup's *original request* (keeps its Referer) in this view, rather than
+        // a bare new request that would drop the referrer and get hotlink-403'd.
+        if navigationAction.request.url != nil { webView.load(navigationAction.request) }
         return nil
     }
 
