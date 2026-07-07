@@ -50,15 +50,35 @@ final class AIProgressActivity {
 
 /// Thin wrapper over `UNUserNotificationCenter` for the "AI images received" alert.
 enum AINotifications {
+    /// Retained delegate that lets the completion alert appear **while the app is in the
+    /// foreground**. Without it iOS silently drops immediate notifications whenever the app
+    /// is active — the cause of the "only fires ~50% of the time" behaviour (it showed only
+    /// when the AI job happened to finish after the user had left the app).
+    private static let presenter = ForegroundPresenter()
+
     static func requestAuthorization() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        let center = UNUserNotificationCenter.current()
+        center.delegate = presenter        // must be set before any notification is posted
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
     static func post(title: String, body: String) {
+        // Ensure the presenter is installed even if `post` is somehow reached without a
+        // prior `requestAuthorization` (belt-and-braces so foreground alerts never drop).
+        UNUserNotificationCenter.current().delegate = presenter
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))   // nil = deliver now
+    }
+}
+
+/// Presents AI completion notifications even when the app is foregrounded.
+private final class ForegroundPresenter: NSObject, UNUserNotificationCenterDelegate {
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .list, .sound])
     }
 }

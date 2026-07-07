@@ -28,33 +28,44 @@ struct AIEditView: View {
                 }
                 if !library.aiPromptHistory.isEmpty {
                     Section {
-                        ForEach(library.aiPromptHistory, id: \.self) { past in
-                            // Tap = paste it into the prompt box above.
-                            Button { prompt = past } label: {
-                                HStack {
-                                    Text(past).lineLimit(2).foregroundStyle(.primary)
-                                    Spacer()
-                                    Image(systemName: "arrow.up.circle")
-                                        .font(.callout).foregroundStyle(.secondary)
-                                }
-                            }
-                            .contextMenu {
-                                Button { prompt = past } label: {
-                                    Label("Use as Prompt", systemImage: "text.insert")
-                                }
-                                Button { UIPasteboard.general.string = past } label: {
-                                    Label("Copy", systemImage: "doc.on.doc")
-                                }
-                                Button(role: .destructive) { library.deleteAIPrompt(past) } label: {
-                                    Label("Remove from History", systemImage: "trash")
+                        // A self-contained scroll region so a long history doesn't push the
+                        // Model / image-count settings far down the form. Caps at ~4 rows
+                        // and scrolls internally; sizes to content when the list is short.
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                ForEach(library.aiPromptHistory, id: \.self) { past in
+                                    // Tap = paste it into the prompt box above.
+                                    Button { prompt = past } label: {
+                                        HStack {
+                                            Text(past).lineLimit(2).foregroundStyle(.primary)
+                                            Spacer()
+                                            Image(systemName: "arrow.up.circle")
+                                                .font(.callout).foregroundStyle(.secondary)
+                                        }
+                                        .padding(.vertical, 10)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .contextMenu {
+                                        Button { prompt = past } label: {
+                                            Label("Use as Prompt", systemImage: "text.insert")
+                                        }
+                                        Button { UIPasteboard.general.string = past } label: {
+                                            Label("Copy", systemImage: "doc.on.doc")
+                                        }
+                                        Button(role: .destructive) { library.deleteAIPrompt(past) } label: {
+                                            Label("Remove from History", systemImage: "trash")
+                                        }
+                                    }
+                                    if past != library.aiPromptHistory.last { Divider() }
                                 }
                             }
                         }
-                        .onDelete { library.deleteAIPrompts(at: $0) }
+                        .frame(height: min(CGFloat(library.aiPromptHistory.count) * 52, 220))
                     } header: {
                         Text("Previous prompts")
                     } footer: {
-                        Text("Tap a prompt to use it again. Long-press to copy it, or swipe to remove it.")
+                        Text("Tap a prompt to use it again. Long-press to copy it or remove it.")
                     }
                 }
                 Section("Model") {
