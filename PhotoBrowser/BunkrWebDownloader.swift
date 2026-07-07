@@ -38,20 +38,17 @@ enum BunkrWebDownloader {
         var done = 0
         let maxConcurrent = 4
 
-        // Unlock step: present a VISIBLE browser for the first file. A real user tap on
-        // bunkr's Download button carries the user-activation that our synthetic click
-        // can't — that's what runs the c1fr-b priming and sets the CDN cookie. We capture
-        // that first file, then auto-download the rest through the (now cookie-warmed) pool.
-        var pool = items
-        if albumURL != nil, let first = items.first {
-            await log?.log("unlock: presenting first file — waiting for a manual Download tap…")
-            let ok = await BunkrLiveBrowser().run(first, into: folder, log: log)
-            done += 1
-            if ok { downloaded += 1 } else { failed += 1; statuses[499, default: 0] += 1 }
-            onProgress(done)
+        // Unlock step: present a VISIBLE browser at the ALBUM page. The user browses it
+        // like Safari (tap a video → its page → Download), building a real interactive
+        // session inside our WebView. We save whatever they download, and the session/CDN
+        // cookie it establishes then lets the rest download automatically.
+        let pool = items
+        if let album = albumURL {
+            await log?.log("unlock: presenting album browser — download a file manually to unlock…")
+            let saved = await BunkrLiveBrowser().browse(albumURL: album, into: folder, log: log)
+            downloaded += saved
             let cdn = await BunkrWebSupport.cookieCount("cdn")
-            await log?.log("after tap: cdn cookies:\(cdn); auto-downloading remaining \(items.count - 1)")
-            pool = Array(items.dropFirst())
+            await log?.log("after manual browse: saved \(saved) manually; cdn cookies:\(cdn); now auto-downloading \(pool.count)")
         }
 
         await withTaskGroup(of: Int.self) { group in
@@ -366,73 +363,77 @@ enum BunkrWebSupport {
     }
 }
 
-/// A **visible** browser for the album's first file. bunkr's Download button only runs
-/// its `c1fr-b` priming (which sets the CDN cookie) for a *real* user tap — a synthetic
-/// click lacks the user-activation. So we show the file page, the user taps Download once,
-/// and WebKit does the full priming→download. We save that file; the cookie it set then
-/// lets the rest of the album download automatically.
+/// A **visible** browser opened at the album page, so the user can browse bunkr exactly
+/// like Safari (tap a video → its page → Download) and build a real interactive session
+/// inside our WebView. We capture whatever they download, and the session/CDN cookie it
+/// establishes then lets the rest of the album download automatically. Returns how many
+/// files the user saved manually.
 @MainActor
 private final class BunkrLiveBrowser: NSObject, WKNavigationDelegate, WKDownloadDelegate, WKUIDelegate {
     private var web: WKWebView?
+    private weak var vc: UIViewController?
     private var host: UIViewController?
-    private var cont: CheckedContinuation<Bool, Never>?
-    private var dest: URL?
-    private var pendingTemp: URL?
+    private var cont: CheckedContinuation<Int, Never>?
+    private var folder = URL(fileURLWithPath: "/")
+    private var saved = 0
+    private var temps: [ObjectIdentifier: URL] = [:]
+    private var dests: [ObjectIdentifier: URL] = [:]
     private var settled = false
-    private var watchdog: Task<Void, Never>?
     private var log: DownloadLog?
 
-    func run(_ item: LinkDownloadService.MediaItem, into folder: URL, log: DownloadLog?) async -> Bool {
-        self.log = log
-        guard let hub = item.referer, let hubURL = URL(string: hub), let top = BunkrWebSupport.topVC else { return false }
-        dest = LinkDownloadService.uniqueDestination(LinkDownloadService.sanitize(item.filename), in: folder)
+    func browse(albumURL: String, into folder: URL, log: DownloadLog?) async -> Int {
+        self.log = log; self.folder = folder
+        guard let url = URL(string: albumURL), let top = BunkrWebSupport.topVC else { return 0 }
 
         let cfg = WKWebViewConfiguration()
         cfg.websiteDataStore = .default()
         let w = WKWebView(frame: .zero, configuration: cfg)   // native UA + real interaction
         w.navigationDelegate = self
         w.uiDelegate = self
+        w.allowsBackForwardNavigationGestures = true
         w.translatesAutoresizingMaskIntoConstraints = false
         web = w
 
         let banner = UILabel()
-        banner.text = "Tap the file's “Download” button once to unlock this album. The rest will download automatically after."
+        banner.text = "Open a video and tap its “Download” button to save it. Do one to unlock the album, then tap Done — the rest download automatically."
         banner.numberOfLines = 0
-        banner.font = .preferredFont(forTextStyle: .callout)
+        banner.font = .preferredFont(forTextStyle: .footnote)
         banner.textAlignment = .center
         banner.translatesAutoresizingMaskIntoConstraints = false
 
         let vc = UIViewController()
         vc.view.backgroundColor = .systemBackground
-        vc.title = "Unlock bunkr album"
         vc.view.addSubview(banner)
         vc.view.addSubview(w)
         NSLayoutConstraint.activate([
-            banner.topAnchor.constraint(equalTo: vc.view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            banner.topAnchor.constraint(equalTo: vc.view.safeAreaLayoutGuide.topAnchor, constant: 6),
             banner.leadingAnchor.constraint(equalTo: vc.view.leadingAnchor, constant: 14),
             banner.trailingAnchor.constraint(equalTo: vc.view.trailingAnchor, constant: -14),
-            w.topAnchor.constraint(equalTo: banner.bottomAnchor, constant: 8),
+            w.topAnchor.constraint(equalTo: banner.bottomAnchor, constant: 6),
             w.leadingAnchor.constraint(equalTo: vc.view.leadingAnchor),
             w.trailingAnchor.constraint(equalTo: vc.view.trailingAnchor),
             w.bottomAnchor.constraint(equalTo: vc.view.bottomAnchor),
         ])
-        vc.navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancelTapped))
+        vc.navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(finishTapped))
+        vc.navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Done", style: .done, target: self, action: #selector(finishTapped))
+        self.vc = vc
+        updateTitle()
         let nav = UINavigationController(rootViewController: vc)
         nav.modalPresentationStyle = .fullScreen
         host = nav
 
-        return await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+        return await withCheckedContinuation { (c: CheckedContinuation<Int, Never>) in
             cont = c
             top.present(nav, animated: true)
-            w.load(URLRequest(url: hubURL))
-            watchdog = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 180_000_000_000)   // 3 min for the user to tap
-                self?.finish(false)
-            }
+            w.load(URLRequest(url: url))
         }
     }
 
-    @objc private func cancelTapped() { finish(false) }
+    private func updateTitle() {
+        vc?.title = saved == 0 ? "Unlock bunkr album" : "Saved \(saved) — tap Done"
+    }
+
+    @objc private func finishTapped() { finish() }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
@@ -454,32 +455,38 @@ private final class BunkrLiveBrowser: NSObject, WKNavigationDelegate, WKDownload
 
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse,
                   suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
-        guard let dest else { completionHandler(nil); return }
+        let base = suggestedFilename.isEmpty ? (response.suggestedFilename ?? "bunkr-file") : suggestedFilename
+        let dest = LinkDownloadService.uniqueDestination(LinkDownloadService.sanitize(base), in: folder)
         let tmp = dest.deletingLastPathComponent().appendingPathComponent(".dl-\(UUID().uuidString)")
-        pendingTemp = tmp
+        let key = ObjectIdentifier(download)
+        dests[key] = dest; temps[key] = tmp
         completionHandler(tmp)
     }
     func downloadDidFinish(_ download: WKDownload) {
-        guard let dest, let tmp = pendingTemp else { finish(false); return }
+        let key = ObjectIdentifier(download)
+        guard let dest = dests[key], let tmp = temps[key] else { return }
+        dests[key] = nil; temps[key] = nil
         Task { [weak self] in
-            do { try await DriveWriter.shared.commit(tmp, to: dest); self?.finish(true) }
-            catch { try? FileManager.default.removeItem(at: tmp); self?.finish(false) }
+            do {
+                try await DriveWriter.shared.commit(tmp, to: dest)
+                self?.saved += 1
+                self?.updateTitle()
+                let l = self?.log; let n = dest.lastPathComponent
+                await l?.log("✓ manual download saved: \(n)")
+            } catch { try? FileManager.default.removeItem(at: tmp) }
         }
     }
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
-        if let tmp = pendingTemp { try? FileManager.default.removeItem(at: tmp) }
-        finish(false)
+        let key = ObjectIdentifier(download)
+        if let tmp = temps[key] { try? FileManager.default.removeItem(at: tmp) }
+        dests[key] = nil; temps[key] = nil
     }
 
-    private func finish(_ ok: Bool) {
+    private func finish() {
         guard !settled else { return }
         settled = true
-        watchdog?.cancel(); watchdog = nil
         web?.stopLoading(); web = nil
-        let l = log
-        Task { await l?.log(ok ? "✓ first file saved via manual tap — CDN cookie should now be set"
-                               : "• first file not saved (cancelled / timed out)") }
         host?.dismiss(animated: true); host = nil
-        cont?.resume(returning: ok); cont = nil
+        cont?.resume(returning: saved); cont = nil
     }
 }
