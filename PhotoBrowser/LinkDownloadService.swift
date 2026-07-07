@@ -94,7 +94,7 @@ enum LinkDownloadService {
         var webDebug = ""
         if items.first?.resolve != nil {
             await log.log("bunkr WebKit path: \(total) file(s), hub ref \(items.first?.referer ?? "?")")
-            let r = await BunkrWebDownloader.download(items, into: folder, log: log) { done in
+            let r = await BunkrWebDownloader.download(items, into: folder, albumURL: link, log: log) { done in
                 progress(Progress(phase: "Downloading \(done) of \(total)…",
                                   fraction: total > 0 ? Double(done) / Double(total) : 0, done: done, total: total))
             }

@@ -28,7 +28,8 @@ enum BunkrWebDownloader {
     static var pageDebug = ""
     static var respDebug = ""
 
-    static func download(_ items: [LinkDownloadService.MediaItem], into folder: URL, log: DownloadLog? = nil,
+    static func download(_ items: [LinkDownloadService.MediaItem], into folder: URL, albumURL: String? = nil,
+                         log: DownloadLog? = nil,
                          onProgress: @escaping @MainActor (Int) -> Void)
         async -> (downloaded: Int, failed: Int, statuses: [Int: Int], debug: String) {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -36,6 +37,17 @@ enum BunkrWebDownloader {
         var downloaded = 0, failed = 0, statuses: [Int: Int] = [:]
         var done = 0
         let maxConcurrent = 4
+
+        // Warm the session first: load the album page like a real browser so the shared
+        // cookie store picks up the DDoS-Guard / CDN cookies the download server checks
+        // (our un-browsed session is exactly what it 403s).
+        if let album = albumURL, let url = URL(string: album) {
+            await log?.log("warm-up: browsing album to accumulate session cookies…")
+            await BunkrWarmup().warm(url)
+            let bunkr = await BunkrWebSupport.cookieCount("bunkr")
+            let cdn = await BunkrWebSupport.cookieCount("cdn")
+            await log?.log("warm-up done; cookies now — bunkr:\(bunkr) cdn:\(cdn)")
+        }
 
         await withTaskGroup(of: Int.self) { group in
             var idx = 0
@@ -314,7 +326,16 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
         cont?.resume(returning: status); cont = nil
     }
 
-    private static var keyWindow: UIWindow? {
+    private static var keyWindow: UIWindow? { BunkrWebSupport.keyWindow }
+}
+
+/// Shared helpers for the bunkr WebKit path: the key window (so offscreen web views run
+/// their JS) and the session **warm-up** — loading the album page once, like a real
+/// browsing session, so the shared cookie store accumulates the DDoS-Guard / CDN cookies
+/// Safari has before any download runs (our fresh, un-browsed session is what the CDN 403s).
+@MainActor
+enum BunkrWebSupport {
+    static var keyWindow: UIWindow? {
         UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap { $0.windows }
@@ -322,5 +343,53 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
         ?? UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap { $0.windows }.first
+    }
+
+    /// Count of cookies whose domain contains `needle` (for the warm-up diagnostic).
+    static func cookieCount(_ needle: String) async -> Int {
+        await withCheckedContinuation { c in
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { all in
+                c.resume(returning: all.filter { $0.domain.contains(needle) }.count)
+            }
+        }
+    }
+}
+
+/// Loads the album page in an offscreen web view and lets it fully settle (DDoS-Guard
+/// challenge + CDN-served thumbnails), so the shared cookie store is warmed before the
+/// per-file downloads run.
+@MainActor
+private final class BunkrWarmup: NSObject, WKNavigationDelegate {
+    private var web: WKWebView?
+    private var cont: CheckedContinuation<Void, Never>?
+    private var settled = false
+
+    func warm(_ url: URL) async {
+        let cfg = WKWebViewConfiguration()
+        cfg.websiteDataStore = .default()
+        let w = WKWebView(frame: CGRect(x: 0, y: 0, width: 402, height: 700), configuration: cfg)
+        w.navigationDelegate = self          // native UA, like the download jobs
+        if let win = BunkrWebSupport.keyWindow {
+            w.alpha = 0.02; w.isUserInteractionEnabled = false
+            win.addSubview(w)
+        }
+        web = w
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            cont = c
+            w.load(URLRequest(url: url))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in self?.finish() }
+        }
+        web?.stopLoading(); web?.removeFromSuperview(); web = nil
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // Give the challenge JS + the CDN thumbnail subresources a beat to load and set cookies.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.finish() }
+    }
+
+    private func finish() {
+        guard !settled else { return }
+        settled = true
+        cont?.resume(); cont = nil
     }
 }
