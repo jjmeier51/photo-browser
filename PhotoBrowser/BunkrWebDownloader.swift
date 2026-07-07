@@ -80,7 +80,9 @@ private final class BunkrWebJob: NSObject, WKNavigationDelegate, WKDownloadDeleg
         let cfg = WKWebViewConfiguration()
         cfg.websiteDataStore = .default()
         let w = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 400), configuration: cfg)
-        w.customUserAgent = LinkDownloadService.userAgent
+        // Do NOT set a custom User-Agent: a WebKit engine advertising a Windows-Chrome UA
+        // is a UA/TLS-fingerprint mismatch that DDoS-Guard blocks. The native iOS Safari
+        // UA matches WebKit's fingerprint — exactly what a working Safari download sends.
         w.navigationDelegate = self
         w.uiDelegate = self               // so a target=_blank download opens in this view, not a dropped popup
         if let window = Self.keyWindow {          // in-window so WebKit runs the challenge JS

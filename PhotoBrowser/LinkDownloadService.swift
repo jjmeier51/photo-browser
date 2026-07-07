@@ -117,10 +117,10 @@ enum LinkDownloadService {
         if !failStatuses.isEmpty {
             diag += "; fail: " + failStatuses.sorted { $0.value > $1.value }
                 .map { "\(statusLabel($0.key))×\($0.value)" }.joined(separator: ", ")
-            // Show what we hit — resolve the first item's URL if it's deferred (bunkr).
-            var shownURL = items.first?.url ?? ""
-            if shownURL.isEmpty, let r = items.first?.resolve { shownURL = await r() ?? "" }
-            if !shownURL.isEmpty { diag += "; url: \(String(shownURL.prefix(110)))" }
+            // Show the actual URL we hit only for non-deferred hosts. Bunkr resolves its
+            // URL inside WebKit per file, so displaying a separately-fetched one here is
+            // misleading — show the referer host instead.
+            if let u = items.first?.url, !u.isEmpty { diag += "; url: \(String(u.prefix(110)))" }
             if host.contains("bunkr"), let r = items.first?.referer, let rh = URL(string: r)?.host { diag += "; ref: \(rh)" }
         }
         let prefix: String
