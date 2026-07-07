@@ -44,6 +44,11 @@ enum LinkDownloadService {
 
     nonisolated static let userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+    /// TEMPORARY: caps how many bunkr files the WebKit path attempts, so diagnosing its
+    /// protection takes seconds instead of ~20 min. Raise to a large number (e.g. 10000)
+    /// once bunkr downloads work, to restore whole-album downloads.
+    nonisolated static let bunkrTestCap = 3
+
     nonisolated static let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.httpShouldSetCookies = false
@@ -93,10 +98,15 @@ enum LinkDownloadService {
         // via URLSession as usual.
         var webDebug = ""
         if items.first?.resolve != nil {
-            await log.log("bunkr WebKit path: \(total) file(s), hub ref \(items.first?.referer ?? "?")")
-            let r = await BunkrWebDownloader.download(items, into: folder, albumURL: link, log: log) { done in
-                progress(Progress(phase: "Downloading \(done) of \(total)…",
-                                  fraction: total > 0 ? Double(done) / Double(total) : 0, done: done, total: total))
+            // TEST CAP: while diagnosing bunkr's protection, only run the first few files so
+            // a failed run takes seconds, not ~20 min. Remove `.prefix(bunkrTestCap)` (or set
+            // bunkrTestCap high) once bunkr works to download whole albums again.
+            let batch = Array(items.prefix(bunkrTestCap))
+            let batchTotal = batch.count
+            await log.log("bunkr WebKit path: TEST CAP \(batchTotal) of \(total) file(s), hub ref \(items.first?.referer ?? "?")")
+            let r = await BunkrWebDownloader.download(batch, into: folder, albumURL: link, log: log) { done in
+                progress(Progress(phase: "Downloading \(done) of \(batchTotal)…",
+                                  fraction: batchTotal > 0 ? Double(done) / Double(batchTotal) : 0, done: done, total: batchTotal))
             }
             result.downloaded = r.downloaded; result.failed = r.failed; failStatuses = r.statuses
             webDebug = r.debug
