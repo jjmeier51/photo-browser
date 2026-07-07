@@ -79,6 +79,17 @@ enum LinkDownloadService {
 
         let total = items.count
         var failStatuses: [Int: Int] = [:]     // status → count, for the diagnostic
+
+        // Bunkr's CDN fingerprints the TLS/HTTP client and hard-403s anything that isn't
+        // a real browser engine — no header/referer/cookie replay through URLSession can
+        // pass it (only Safari/WebKit works). Route those files through WebKit instead.
+        if items.first?.referer?.contains("get.bunkrr.su") == true {
+            let r = await BunkrWebDownloader.download(items, into: folder) { done in
+                progress(Progress(phase: "Downloading \(done) of \(total)…",
+                                  fraction: total > 0 ? Double(done) / Double(total) : 0, done: done, total: total))
+            }
+            result.downloaded = r.downloaded; result.failed = r.failed; failStatuses = r.statuses
+        } else {
         await withTaskGroup(of: Int.self) { group in
             var active = 0
             let maxConcurrent = 12          // streams straight to disk — as wide as OnlyFans
@@ -95,6 +106,7 @@ enum LinkDownloadService {
                 active += 1
             }
             while let s = await group.next() { tally(s) }
+        }
         }
 
         // Always surface a short diagnostic (files found + failure statuses) so a
@@ -633,13 +645,13 @@ enum LinkDownloadService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
     /// A filesystem-safe filename, keeping the extension.
-    nonisolated private static func sanitize(_ name: String) -> String {
+    nonisolated static func sanitize(_ name: String) -> String {
         let cleaned = name.components(separatedBy: CharacterSet(charactersIn: "/\\:?%*|\"<>")).joined(separator: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let capped = String(cleaned.prefix(120))
         return capped.isEmpty ? "file" : capped
     }
-    nonisolated private static func uniqueDestination(_ name: String, in folder: URL) -> URL {
+    nonisolated static func uniqueDestination(_ name: String, in folder: URL) -> URL {
         let fm = FileManager.default
         var dest = folder.appendingPathComponent(name)
         let base = dest.deletingPathExtension().lastPathComponent, ext = dest.pathExtension
