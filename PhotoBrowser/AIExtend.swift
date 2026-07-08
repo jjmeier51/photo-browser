@@ -1,4 +1,5 @@
 import Foundation
+import CoreImage
 import ImageIO
 import UniformTypeIdentifiers
 import UIKit
@@ -172,7 +173,41 @@ enum AIExtend {
     // MARK: - Preparing input + saving results
 
     /// A photo as an upload JPEG (long side <= `maxPixel`), with its pixel size.
+    ///
+    /// Rendered as a **tone-mapped SDR sRGB** JPEG. HDR photos otherwise upload with their
+    /// HDR gain baked in (the `CGImageSource` thumbnail applies the gain map on modern iOS),
+    /// so Astria — which treats the input as ordinary SDR — returns washed-out, over-exposed
+    /// results. `CIImage(contentsOf:)` loads the **base SDR image** (gain map *not* applied)
+    /// for gain-map HEICs; clamping the extended range then handles PQ/HLG too, and encoding
+    /// in sRGB gives a file any service interprets correctly.
     nonisolated static func uploadJPEG(of url: URL, maxPixel: CGFloat) -> (data: Data, width: Int, height: Int)? {
+        guard var ci = CIImage(contentsOf: url) else { return uploadJPEGViaThumbnail(of: url, maxPixel: maxPixel) }
+        // CIImage(contentsOf:) keeps raw sensor orientation — bake the EXIF orientation in.
+        if let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+           let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+           let o = props[kCGImagePropertyOrientation] as? UInt32, o != 1 {
+            ci = ci.oriented(forExifOrientation: Int32(o))
+        }
+        let long = max(ci.extent.width, ci.extent.height)
+        if long > maxPixel, long > 0 {
+            let s = maxPixel / long
+            ci = ci.transformed(by: CGAffineTransform(scaleX: s, y: s))
+        }
+        // Clamp HDR headroom (>1) so highlights don't blow out when read back as SDR sRGB.
+        ci = ci.applyingFilter("CIColorClamp").cropped(to: ci.extent)
+        guard !ci.extent.isInfinite, !ci.extent.isNull else { return uploadJPEGViaThumbnail(of: url, maxPixel: maxPixel) }
+        let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let opts: [CIImageRepresentationOption: Any] = [
+            CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.92]
+        guard let data = PhotoEditorIO.context.jpegRepresentation(of: ci, colorSpace: space, options: opts) else {
+            return uploadJPEGViaThumbnail(of: url, maxPixel: maxPixel)
+        }
+        return (data, Int(ci.extent.width.rounded()), Int(ci.extent.height.rounded()))
+    }
+
+    /// Fallback upload encoder (used if the CoreImage path can't load the file): the prior
+    /// thumbnail-based route. Doesn't tone-map HDR, but keeps uploads working.
+    private nonisolated static func uploadJPEGViaThumbnail(of url: URL, maxPixel: CGFloat) -> (data: Data, width: Int, height: Int)? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,

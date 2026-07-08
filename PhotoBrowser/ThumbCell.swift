@@ -75,7 +75,7 @@ struct EntryCell: View {
                 }
             }
             .overlay { if selecting { selectionOverlay } }
-            .clipShape(Rectangle())
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))   // ever-so-slightly rounded
             .contentShape(Rectangle())
             .task(id: entry.id) {
                 guard entry.kind == .image || entry.kind == .video || entry.kind == .pdf else { return }

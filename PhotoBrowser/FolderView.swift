@@ -394,11 +394,14 @@ struct FolderView: View {
         }
     }
 
-    /// What the clean-up button should do for this folder, given its current items.
+    /// What the clean-up button should do for this folder, given its current items. Scans
+    /// `entries` directly (no sort) — `cleanupItems` sorts every viewable item with a slow
+    /// locale-aware compare, and running that just to build the toolbar menu's label was the
+    /// ~1s stall when opening the “…” menu in a large folder.
     private var cleanupAction: CleanupAction {
         let reviewed = library.reviewedInCleanup(url)
         if reviewed.isEmpty { return .start }
-        return cleanupItems.contains { !reviewed.contains($0.url.path) } ? .resume : .rerun
+        return entries.contains { $0.isViewable && !reviewed.contains($0.url.path) } ? .resume : .rerun
     }
 
     private var availableYears: [Int] {
@@ -1146,7 +1149,7 @@ struct FolderView: View {
             .toolbar { toolbar }
         )
         let loaders = AnyView(chrome
-            .task(id: library.sort) { await reload() }
+            .task(id: library.sort) { await resort() }
             .onChange(of: library.changeToken) { Task { await reload() } }
             // Re-list on return to foreground, so folders created/changed while the app was backgrounded
             // (e.g. a stories run finishing, or a change made in the Files app) show up.
@@ -2003,6 +2006,21 @@ struct FolderView: View {
         let all = selectableEntries
         if selection.count == all.count { selection.removeAll() }
         else { selection = Set(all.map(\.url)) }
+    }
+
+    /// Re-orders the already-loaded entries **in memory** when the sort changes — no
+    /// filesystem re-read. Re-reading the directory (via `reload`) on every sort change was
+    /// the multi-second lag on large folders. Falls back to a full load when nothing is
+    /// loaded yet. Age/likes/duration sorts are applied in `filtered`, so they only need
+    /// the re-render this triggers; name/size/kind/smart/date sort the entries here.
+    private func resort() async {
+        guard loaded, !entries.isEmpty else { await reload(); return }
+        entries = Library.sortEntries(entries, by: library.sort)
+        // Capture-date sorts refine the modified-date order with real EXIF dates.
+        if [SortKey.smart, .dateDesc, .dateAsc].contains(library.sort) {
+            if captureDates.isEmpty { captureDates = await library.captureDates(for: entries) }
+            entries = sortedByCaptureDate(entries)
+        }
     }
 
     private func reload() async {

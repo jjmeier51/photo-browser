@@ -80,10 +80,9 @@ enum ObjectRemoval {
         let maxImg = image.applyingFilter("CIAreaMaximum",
                                           parameters: [kCIInputExtentKey: CIVector(cgRect: region)])
         var px = [Float](repeating: 0, count: 4)
-        let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) ?? CGColorSpaceCreateDeviceRGB()
         PhotoEditorIO.context.render(maxImg, toBitmap: &px, rowBytes: 16,
                                      bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-                                     format: .RGBAf, colorSpace: space)
+                                     format: .RGBAf, colorSpace: floatSpace)
         let peak = max(px[0], max(px[1], px[2]))
         return peak.isFinite && peak > 1.02
     }
@@ -409,9 +408,12 @@ enum ObjectRemoval {
         }
     }
 
-    /// Extended-linear (HDR-capable) space for the float rasters, so headroom above 1.0
-    /// survives the patch synthesis. Falls back to device RGB if unavailable.
-    private static let floatSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+    /// Extended-**sRGB** (HDR-capable) space for the float rasters. Crucially it's the
+    /// sRGB *gamma* curve (just allowing values beyond [0,1] for HDR headroom), NOT linear:
+    /// the rest of the editor pipeline is gamma sRGB, so a linear-tagged fill made
+    /// CoreImage render the whole composite in linear space — lifting/blowing out the
+    /// entire preview. Matching gamma keeps everything outside the hole pixel-identical.
+    private static let floatSpace = CGColorSpace(name: CGColorSpace.extendedSRGB) ?? CGColorSpaceCreateDeviceRGB()
     private static let floatBitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
         | CGBitmapInfo.floatComponents.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
 
