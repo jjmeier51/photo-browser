@@ -25,9 +25,30 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
     private var inFlight: [String: Task<UIImage?, Never>] = [:]
 
     init() {
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        diskDir = caches.appendingPathComponent("thumbs", isDirectory: true)
-        try? FileManager.default.createDirectory(at: diskDir, withIntermediateDirectories: true)
+        // Thumbnails live in Application Support, NOT Caches. iOS is free to purge
+        // anything under Caches/ whenever storage is tight — which is why the disk
+        // cache used to evaporate and the whole library re-thumbnailed itself a few
+        // times a day. Application Support is never auto-purged, so a generated
+        // thumbnail stays generated until the file itself changes. We exclude the
+        // directory from iCloud/iTunes backups (it's derived data, regenerable) so
+        // persisting it doesn't bloat the user's backups.
+        let fm = FileManager.default
+        let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        var dir = support.appendingPathComponent("thumbs", isDirectory: true)
+
+        // One-time migration: fold the old Caches/thumbs cache into the new home so
+        // users keep the thumbnails they've already built instead of regenerating
+        // everything once on the update that ships this change.
+        let legacy = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("thumbs", isDirectory: true)
+        if fm.fileExists(atPath: legacy.path), !fm.fileExists(atPath: dir.path) {
+            try? fm.moveItem(at: legacy, to: dir)
+        }
+
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        var values = URLResourceValues(); values.isExcludedFromBackup = true
+        try? dir.setResourceValues(values)
+        diskDir = dir
         // Bound by actual memory, not count — NSCache only evicts cost-tracked entries
         // proactively. Generous so a whole folder's tiles stay resident and re-opening /
         // scrolling back is instant.

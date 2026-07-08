@@ -161,9 +161,12 @@ Change-notification counters that views observe:
 - `LibraryView.swift` — flat all-photos/videos view across the whole index,
   filterable by year, newest-first.
 - `ThumbCell.swift` / `Thumbnailer.swift` — tiles and the thumbnail engine.
-  `Thumbnailer` is a singleton with memory (`NSCache`) + disk (Caches/`thumbs`)
-  caching, in-flight de-duplication, and QuickLook generation off the main
-  thread. Disk cache key = SHA256 of `path|mtime|size`.
+  `Thumbnailer` is a singleton with memory (`NSCache`) + disk
+  (Application Support/`thumbs`, excluded from backup) caching, in-flight
+  de-duplication, and QuickLook generation off the main thread. Disk cache key =
+  SHA256 of `path|mtime|size`. The disk cache lives in Application Support (not
+  Caches) on purpose: iOS auto-purges Caches under storage pressure, which was
+  making the whole library re-thumbnail itself a few times a day.
 - `ViewerView.swift` — full-screen one-item-at-a-time viewer; swipes are handled
   inside each page (UIKit) for reliability over the zoom scroll view.
   `ZoomableImageView.swift` (photos) and `VideoPage.swift` (Photos-style player)
