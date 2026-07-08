@@ -2,6 +2,23 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-08
+
+- **Thumbnail cache is now permanent** — the on-disk thumbnail cache moved from
+  `Library/Caches/thumbs` (which iOS purges under storage pressure — the cause of the library
+  re-thumbnailing itself a few times a day) to `Library/Application Support/thumbs`, which the
+  OS never auto-purges. The directory is excluded from iCloud/iTunes backup since it's
+  regenerable derived data, and a one-time migration folds the old cache into the new home so
+  nothing regenerates on the update.
+- **Safe removal for the external drive** — physically pulling an exFAT drive mid-write can tear
+  the FAT (no journaling), the same reason desktops make you "Eject" first. Two additions close
+  that gap without slowing downloads: the app now flushes the drive to a consistent, `fsync`'d
+  baseline whenever it backgrounds (a no-op for active download windows — they keep committing
+  at full speed), and a new **Prepare Drive for Removal…** action (root "…" menu) drains any
+  in-flight write, pauses new ones, and confirms **Safe to Disconnect** before you unplug. Both
+  build on the existing `DriveWriter`, which already serializes and flushes every file placement
+  so at most one directory entry is ever in flight.
+
 ## 2026-07-06
 
 - **Fix: watchdog kill after big moves; freezes on editor saves** — re-keying labels after a

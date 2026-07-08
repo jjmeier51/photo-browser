@@ -120,6 +120,7 @@ struct FolderView: View {
     @State private var showTaylorBrowser = false
     @State private var showAccessKardashian = false
     @State private var showTaylorCrossRef = false
+    @State private var showEject = false
     @State private var importing = false
     @State private var editEntry: Entry?
     @State private var studioEntry: Entry?
@@ -840,6 +841,7 @@ struct FolderView: View {
             .sheet(item: $aiEditEntry) { e in AIEditView(entry: e) }
             .fullScreenCover(isPresented: $showPeople) { PeopleView(folder: url) }
             .sheet(isPresented: $showSettings) { SettingsView() }
+            .sheet(isPresented: $showEject) { EjectDriveView(root: library.rootURL) }
         )
         let g4 = AnyView(g3
             .fullScreenCover(isPresented: $showPhotosLibrary) {
@@ -1718,6 +1720,10 @@ struct FolderView: View {
                     }
                     if isRoot {
                         Button { pickFolder(.open) } label: { Label("Open Folder…", systemImage: "externaldrive") }
+                        Divider()
+                        Button { showEject = true } label: {
+                            Label("Prepare Drive for Removal…", systemImage: "eject")
+                        }
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")

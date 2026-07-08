@@ -20,6 +20,18 @@ struct PhotoBrowserApp: App {
                     if phase == .active {
                         library.reconnectIfNeeded()
                         library.processPendingTikTok()
+                    } else if phase == .background {
+                        // Arm the drive's "safe to remove" state on the way out. This drains
+                        // any commit already in flight and flushes the drive root, so if the
+                        // user unplugs while the app is suspended, the last thing that touched
+                        // the exFAT directory was a completed, fsync'd write — not a torn one.
+                        // It does NOT pause active downloads: a background-task download window
+                        // keeps committing at full speed; this just guarantees a flushed
+                        // baseline the moment we background.
+                        let root = library.rootURL
+                        Task.detached(priority: .utility) {
+                            await DriveWriter.shared.quiesce(root: root)
+                        }
                     }
                 }
         }
