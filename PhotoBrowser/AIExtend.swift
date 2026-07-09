@@ -34,6 +34,35 @@ enum AIExtend {
         fileprivate var tuneKey: String { "photoBrowser.astriaTune.\(rawValue)" }
     }
 
+    /// Output resolution the user picks in the Edit-with-AI sheet. Astria's gallery tunes
+    /// reject explicit sizes larger than ~2048 ("use aspect_ratio instead"), so higher
+    /// resolution is requested by (a) uploading a larger input where allowed and (b) asking
+    /// Astria to super-resolve the result rather than by sending a bigger `w`/`h`.
+    enum OutputResolution: String, CaseIterable, Identifiable, Sendable {
+        case k1 = "1K", k2 = "2K", k4 = "4K"
+        var id: String { rawValue }
+        /// Long side (px) of the uploaded input. Capped at 2048 — the tune limit.
+        var uploadLongSide: CGFloat { self == .k1 ? 1024 : 2048 }
+        /// 4K asks Astria to super-resolve the result (~2×), since we can't upload larger.
+        var superResolution: Bool { self == .k4 }
+    }
+
+    /// Output shape the user picks. `.original` keeps the source photo's aspect (the prior
+    /// behaviour); the others force a fixed ratio that `aspectRatio(_:_:)`'s supported set maps.
+    enum OutputAspect: String, CaseIterable, Identifiable, Sendable {
+        case original = "Original", square = "1:1", portrait = "4:5", story = "9:16"
+        var id: String { rawValue }
+        /// Explicit ratio to send, or nil to derive it from the source image's dimensions.
+        var ratio: String? {
+            switch self {
+            case .original: return nil
+            case .square:   return "1:1"
+            case .portrait: return "4:5"
+            case .story:    return "9:16"
+            }
+        }
+    }
+
     enum AIError: Error { case notConfigured, badImage, network, badResult, server(String) }
 
     // MARK: - Config
@@ -79,7 +108,8 @@ enum AIExtend {
     /// Creates a prompt against `model`'s tune (img2img from `imageData`), polls
     /// until Astria finishes, and downloads the result image(s).
     nonisolated static func generate(model: AIModel, prompt: String, imageData: Data,
-                                     count: Int, width: Int?, height: Int?) async -> Result<[Data], AIError> {
+                                     count: Int, width: Int?, height: Int?,
+                                     aspectOverride: String? = nil, superResolution: Bool = false) async -> Result<[Data], AIError> {
         guard isConfigured else { return .failure(.notConfigured) }
         let tune = tuneID(for: model)
         guard let url = URL(string: "\(base)/tunes/\(tune)/prompts") else { return .failure(.server("Bad endpoint URL.")) }
@@ -88,8 +118,16 @@ enum AIExtend {
             "prompt[text]": prompt,
             "prompt[num_images]": String(min(max(count, 1), 8))
         ]
-        if let width, let height {
+        // An explicit aspect (the user picked a fixed shape) wins; otherwise derive it from
+        // the source image so "Original" keeps the photo's proportions.
+        if let aspectOverride {
+            fields["prompt[aspect_ratio]"] = aspectOverride
+        } else if let width, let height {
             fields["prompt[aspect_ratio]"] = aspectRatio(width, height)
+        }
+        if superResolution {
+            fields["prompt[super_resolution]"] = "true"
+            fields["prompt[hires_fix]"] = "true"
         }
         let files: [(name: String, filename: String, mime: String, data: Data)] = [
             ("prompt[input_image]", "input.jpg", "image/jpeg", imageData)
@@ -193,8 +231,11 @@ enum AIExtend {
             let s = maxPixel / long
             ci = ci.transformed(by: CGAffineTransform(scaleX: s, y: s))
         }
-        // Clamp HDR headroom (>1) so highlights don't blow out when read back as SDR sRGB.
-        ci = ci.applyingFilter("CIColorClamp").cropped(to: ci.extent)
+        // Tone-map HDR headroom (>1) down to SDR range. A hard clamp slams every highlight
+        // above 1.0 to flat white (the "washed-out / over-exposed" look); a soft rolloff
+        // keeps midtones intact and gently compresses the highlights toward white so their
+        // detail survives. Falls back to the old hard clamp if the curve can't be built.
+        ci = (softClip(ci) ?? ci.applyingFilter("CIColorClamp")).cropped(to: ci.extent)
         guard !ci.extent.isInfinite, !ci.extent.isNull else { return uploadJPEGViaThumbnail(of: url, maxPixel: maxPixel) }
         let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         let opts: [CIImageRepresentationOption: Any] = [
@@ -288,6 +329,32 @@ enum AIExtend {
     }
 
     // MARK: - Helpers
+
+    /// A soft highlight rolloff for HDR uploads. Builds a per-channel tone curve over the
+    /// extended-range domain [0, headroom] that is identity through the midtones and
+    /// asymptotes toward white above the knee, so highlights above 1.0 keep their gradient
+    /// instead of clipping to flat white. Uses stock `CIColorCurves` (which, unlike a plain
+    /// clamp, accepts an input domain past 1.0); returns nil if the filter can't be built so
+    /// the caller can fall back to a hard clamp.
+    private nonisolated static func softClip(_ image: CIImage) -> CIImage? {
+        let n = 64
+        let knee: Float = 0.9, headroom: Float = 4.0
+        var data = [Float](); data.reserveCapacity(n * 3)
+        for i in 0..<n {
+            let v = headroom * Float(i) / Float(n - 1)
+            let out = v <= knee ? v : knee + (1 - knee) * (1 - expf(-(v - knee) / (1 - knee)))
+            let c = min(max(out, 0), 1)
+            data.append(c); data.append(c); data.append(c)
+        }
+        let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let curves = CIFilter(name: "CIColorCurves", parameters: [
+            kCIInputImageKey: image,
+            "inputCurvesData": Data(bytes: data, count: data.count * MemoryLayout<Float>.size),
+            "inputCurvesDomain": CIVector(x: 0, y: CGFloat(headroom)),
+            "inputColorSpace": space
+        ])
+        return curves?.outputImage
+    }
 
     /// Astria's gallery tunes control output shape via `aspect_ratio` (they reject
     /// explicit small `w`/`h` — "requires at least 1920×1920, use aspect_ratio

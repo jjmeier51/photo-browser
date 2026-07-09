@@ -42,6 +42,15 @@ struct PhotoBrowserApp: App {
 /// downloads can finish while the app is suspended or closed.
 final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // Install the notification delegate before launch completes so AI-completion alerts
+        // present reliably while the app is foreground (iOS only fires `willPresent` when the
+        // delegate is set this early).
+        AINotifications.configureAtLaunch()
+        return true
+    }
+
+    func application(_ application: UIApplication,
                      handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
         BackgroundDownloader.shared.backgroundCompletion = completionHandler

@@ -194,6 +194,30 @@ enum OnlyFansService {
         private var drmError: String?
         private(set) var drmQuotaHit = false
         func noteDRMQuota() { drmQuotaHit = true }
+        // DRM decrypt outcomes (items we actually attempted, i.e. token + FFmpegKit present),
+        // so the run summary can state plainly how many DRM videos there were and what became
+        // of them — decrypted vs. skipped for the daily extraction limit vs. failed — instead
+        // of folding the daily-limit skips into a generic "N failed".
+        private var drmSeen = 0, drmDone = 0, drmSkipped = 0, drmFailed = 0
+        func noteDRMSeen() { drmSeen += 1 }
+        func noteDRMDone() { drmDone += 1 }
+        func noteDRMResult(quota: Bool) { if quota { drmSkipped += 1 } else { drmFailed += 1 } }
+
+        /// A one-line, human summary of DRM-protected videos in this run, or nil if there
+        /// were none. Kept separate from the raw diagnostics so it can lead the result note.
+        var drmSummary: String? {
+            let total = drmSeen + skipDRM        // attempted + couldn't-attempt (no token/FFmpeg)
+            guard total > 0 else { return nil }
+            if !OnlyFansDRM.isEnabled {
+                return "\(total) DRM-protected video\(total == 1 ? "" : "s") skipped — add a cdmpool token in Settings to download them"
+            }
+            var parts: [String] = []
+            if drmDone > 0 { parts.append("\(drmDone) decrypted") }
+            if drmSkipped > 0 { parts.append("\(drmSkipped) skipped (daily 5/day extraction limit)") }
+            if drmFailed > 0 { parts.append("\(drmFailed) failed") }
+            if skipDRM > 0 { parts.append("\(skipDRM) not decryptable") }
+            return "\(total) DRM-protected video\(total == 1 ? "" : "s"): " + parts.joined(separator: ", ")
+        }
 
         init(already: Set<String>, continuation: AsyncStream<Item>.Continuation,
              progress: @escaping @Sendable (Progress) -> Void) {
@@ -337,6 +361,7 @@ enum OnlyFansService {
         await discovery.value
 
         let diag = await hub.diagnostics
+        let drmNote = await hub.drmSummary
         if await hub.foundCount == 0 {
             let base = await hub.hitLoginWall
                 ? "OnlyFans asked for a fresh login. Tap “Log in to OnlyFans”, sign in again, and retry."
@@ -349,9 +374,12 @@ enum OnlyFansService {
             var prefix = ""
             if result.photos + result.videos == 0 { prefix = "Couldn’t download any media (OnlyFans may be blocking access). " }
             else if result.failed > 0 { prefix = "\(result.failed) item(s) couldn’t be downloaded. " }
-            result.note = "\(prefix)[\(diag)]"
+            // Lead with the DRM breakdown so daily-limit skips read as expected, not failures.
+            let drm = drmNote.map { $0 + ". " } ?? ""
+            result.note = "\(prefix)\(drm)[\(diag)]"
         }
-        await log.finish("photos \(result.photos), videos \(result.videos), failed \(result.failed) — \(diag)")
+        await log.finish("photos \(result.photos), videos \(result.videos), failed \(result.failed)"
+                         + (drmNote.map { " — \($0)" } ?? "") + " — \(diag)")
         return result
     }
 
@@ -616,10 +644,12 @@ enum OnlyFansService {
     /// reported to the hub so the result note says exactly where it stopped.
     nonisolated private static func downloadDRM(_ item: Item, drm: DRMInfo, into folder: URL, creds: Credentials,
                                                 rules: DynamicRules, hub: Hub, log: DownloadLog? = nil) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
-        func fail(_ why: String) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
+        func fail(_ why: String, quota: Bool = false) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String) {
             await log?.log("• DRM video \(item.id): \(why)")
-            await hub.noteDRMError(why); return (false, true, item.id, nil, "")
+            await hub.noteDRMError(why); await hub.noteDRMResult(quota: quota)
+            return (false, true, item.id, nil, "")
         }
+        await hub.noteDRMSeen()
         guard let mpd = await fetchText(drm.mpdURL, cookie: drm.cfCookie) else { return await fail("manifest fetch failed") }
         guard let pssh = OnlyFansDRM.widevinePSSH(fromMPD: mpd) else { return await fail("no PSSH in manifest") }
         // A key we already extracted (e.g. a prior run that failed at decrypt) is reused
@@ -628,7 +658,7 @@ enum OnlyFansService {
         if let cached = await OnlyFansDRM.cachedKey(for: item.id) {
             key = cached
         } else {
-            if await hub.drmQuotaHit { return await fail("cdmpool daily quota reached (5/day) — skipping remaining DRM") }
+            if await hub.drmQuotaHit { return await fail("cdmpool daily quota reached (5/day) — skipping remaining DRM", quota: true) }
             guard let licURL = URL(string: drm.licenseURL) else { return await fail("bad license URL") }
             var headers = signedHeaders(for: licURL, creds: creds, rules: rules)
             let cookies = cookieDict(creds.cookie)
@@ -636,7 +666,7 @@ enum OnlyFansService {
             let kr = await OnlyFansDRM.extractKey(pssh: pssh, licenseURL: drm.licenseURL, headers: headers,
                                                   cookies: cookies, mpdURL: drm.mpdURL)
             if kr.quota { await hub.noteDRMQuota() }        // stop hammering a spent quota
-            guard let k = kr.key else { return await fail(kr.error ?? "key extraction failed") }
+            guard let k = kr.key else { return await fail(kr.error ?? "key extraction failed", quota: kr.quota) }
             await OnlyFansDRM.cacheKey(k, for: item.id)
             key = k
         }
@@ -674,6 +704,7 @@ enum OnlyFansService {
             try? FileManager.default.removeItem(at: out)
         }
         setFileDate(dest, item.date)
+        await hub.noteDRMDone()
         await log?.log("✓ DRM video \(item.id): decrypted + saved OF_\(item.id).mp4")
         return (true, true, item.id, dest.path, item.caption)
     }

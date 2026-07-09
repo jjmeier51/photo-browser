@@ -56,6 +56,16 @@ enum AINotifications {
     /// when the AI job happened to finish after the user had left the app).
     private static let presenter = ForegroundPresenter()
 
+    /// Installs the presenter delegate and requests permission **at app launch**. iOS only
+    /// guarantees the `willPresent` foreground callback fires when the delegate is set before
+    /// the app finishes launching; setting it lazily at job time left a window where a result
+    /// that arrived right as the app came foreground didn't present — the residual "~30% of
+    /// the time it doesn't fire". Call once from the app delegate's didFinishLaunching.
+    static func configureAtLaunch() {
+        UNUserNotificationCenter.current().delegate = presenter
+        requestAuthorization()
+    }
+
     static func requestAuthorization() {
         let center = UNUserNotificationCenter.current()
         center.delegate = presenter        // must be set before any notification is posted

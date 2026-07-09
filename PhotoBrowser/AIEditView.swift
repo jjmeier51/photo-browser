@@ -12,6 +12,8 @@ struct AIEditView: View {
     @State private var prompt = ""
     @State private var count = 1
     @State private var model = AIExtend.defaultModel
+    @State private var resolution = AIExtend.OutputResolution.k2
+    @State private var aspect = AIExtend.OutputAspect.original
     @State private var running = false
     @State private var results: [Data]?
     @State private var error: String?
@@ -74,12 +76,22 @@ struct AIEditView: View {
                     }
                     .labelsHidden().pickerStyle(.segmented)
                 }
+                Section("Output") {
+                    Picker("Resolution", selection: $resolution) {
+                        ForEach(AIExtend.OutputResolution.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    Picker("Dimensions", selection: $aspect) {
+                        ForEach(AIExtend.OutputAspect.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                }
                 Section {
                     Picker("Images to generate", selection: $count) {
                         ForEach(counts, id: \.self) { Text("\($0)").tag($0) }
                     }
                 } footer: {
-                    Text("Uploads the photo to Astria to generate edits. Results are reviewed before anything is saved (to an “AI” subfolder, keeping the original's EXIF).")
+                    Text("Uploads the photo to Astria to generate edits. “4K” super-resolves the result; “Original” keeps the photo's shape. Results are reviewed before anything is saved (to an “AI” subfolder, keeping the original's EXIF).")
                 }
                 if let error {
                     Section { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange).font(.callout) }
@@ -119,16 +131,18 @@ struct AIEditView: View {
         library.recordAIPrompt(prompt)     // history, newest first (reuse moves it to the top)
         running = true; error = nil
         let url = entry.url, p = prompt, n = count, m = model
+        let res = resolution, asp = aspect
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Edit")
         let activity = AIProgressActivity()
         activity.begin(title: "AI Edit", detail: "Generating with Astria…")
         Task {
-            guard let prep = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url, maxPixel: m.maxLongSide) }.value else {
+            guard let prep = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url, maxPixel: res.uploadLongSide) }.value else {
                 running = false; bg.end(); error = "Couldn’t read the photo."
                 activity.finish(success: false, message: "Couldn’t read the photo."); return
             }
             let result = await AIExtend.generate(model: m, prompt: p, imageData: prep.data, count: n,
-                                                 width: prep.width, height: prep.height)
+                                                 width: prep.width, height: prep.height,
+                                                 aspectOverride: asp.ratio, superResolution: res.superResolution)
             running = false; bg.end()
             switch result {
             case .success(let data):

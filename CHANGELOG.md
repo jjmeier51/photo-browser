@@ -2,6 +2,30 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-09
+
+- **Edit with AI: pick output resolution and dimensions** — the Edit-with-AI sheet now has an
+  Output section: **Resolution** (1K / 2K / 4K) and **Dimensions** (Original / 1:1 / 4:5 / 9:16).
+  Resolution sets the uploaded input size and, at 4K, asks Astria to super-resolve the result
+  (the gallery tunes reject explicit sizes over ~2048, so 4K is reached via super-resolution
+  rather than a larger upload). Dimensions forces a fixed aspect ratio, or keeps the photo's
+  own shape on "Original".
+- **HDR uploads to Astria: softer highlight tone-mapping** — HDR photos were still reading a
+  touch washed-out/over-exposed because the upload hard-clamped every value above 1.0 to flat
+  white. The upload now applies a soft highlight rolloff (a `CIColorCurves` tone curve over the
+  extended range) that keeps midtones intact and compresses highlights toward white so their
+  detail survives, falling back to the old clamp if the curve can't be built. (Astria itself
+  only ever returns SDR — there's no way to make it hand back an HDR/gain-map image — so this
+  is about sending it the best-looking SDR rendition.)
+- **AI-completion notifications fire reliably** — the notification delegate is now installed at
+  app launch instead of lazily when a job starts. iOS only guarantees the foreground-present
+  callback when the delegate is set that early, which was the residual cause of alerts landing
+  only some of the time.
+- **OnlyFans: DRM videos are called out in the run summary** — DRM-protected videos are now
+  reported as their own line ("N DRM-protected videos: X decrypted, Y skipped (daily 5/day
+  extraction limit), …") in both the result note and the log, instead of the daily-limit skips
+  disappearing into a generic "N failed" count.
+
 ## 2026-07-08
 
 - **Thumbnail cache is now permanent** — the on-disk thumbnail cache moved from
