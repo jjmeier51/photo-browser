@@ -2,6 +2,13 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-09b
+
+- **Home page: highlights wrap instead of scroll** — on the Home page only, the album
+  highlights now lay out as a wrapping grid (max 5 per line, sorted A–Z) so all of them are
+  visible at once rather than in a horizontal scroller. Bubbles are slightly smaller there so
+  five fit a phone's width. Every other folder keeps the horizontal, drag-arrangeable row.
+
 ## 2026-07-09
 
 - **Edit with AI: pick output resolution and dimensions** — the Edit-with-AI sheet now has an

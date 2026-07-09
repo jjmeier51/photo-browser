@@ -1138,7 +1138,12 @@ struct FolderView: View {
         let core = AnyView(
             VStack(spacing: 0) {
                 header
-                if showBubbles { instagramBubbleRow }
+                if showBubbles {
+                    // On the Home page the highlights wrap into rows (max 5 across, A–Z) so
+                    // they're all visible at once; everywhere else they stay a horizontal
+                    // scroller with the user's drag-arranged order.
+                    if isRoot { albumHighlightGrid } else { instagramBubbleRow }
+                }
                 if !entries.isEmpty { filterBar }
                 grid
             }
@@ -1323,10 +1328,29 @@ struct FolderView: View {
         .task(id: igBubbles.map(\.url)) { bubbleItems = igBubbles }
     }
 
+    /// Home-page highlights: sorted A–Z by album name (the Home page ignores the
+    /// drag-arranged order the horizontal scroller uses elsewhere).
+    private var homeBubbles: [Entry] {
+        igBubbles.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    /// The Home-only highlights layout: a wrapping grid, max 5 per line, so every album
+    /// highlight is visible without scrolling. Bubbles are a touch smaller so five fit a
+    /// phone's width, and they aren't drag-reorderable here (the order is alphabetical).
+    private var albumHighlightGrid: some View {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 6, alignment: .top), count: 5)
+        return LazyVGrid(columns: columns, spacing: 12) {
+            ForEach(homeBubbles) { entry in
+                bubbleCell(entry, diameter: 56, draggable: false)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+
     /// One highlight bubble. Long-press initiates a drag to rearrange (the Instagram
     /// bubble is pinned first, so it isn't draggable and can't be displaced).
-    @ViewBuilder private func bubbleCell(_ entry: Entry) -> some View {
-        let button = Button { tap(entry) } label: { bubble(entry) }      // select-aware (toggle vs open)
+    @ViewBuilder private func bubbleCell(_ entry: Entry, diameter: CGFloat = 72, draggable: Bool = true) -> some View {
+        let button = Button { tap(entry) } label: { bubble(entry, diameter: diameter) }      // select-aware (toggle vs open)
             .buttonStyle(.plain)
             .contextMenu { if !selecting { contextMenu(for: entry) } }
             // Fill a missing bubble thumbnail (e.g. a highlight/Stories folder) from a random
@@ -1334,8 +1358,8 @@ struct FolderView: View {
             .task(id: entry.url) {
                 if library.coverURL(for: entry.url) == nil { await library.ensureRandomCover(for: entry.url) }
             }
-        if selecting || isPinnedBubble(entry.url) {
-            button                                              // Stories, Instagram + Facebook are pinned
+        if !draggable || selecting || isPinnedBubble(entry.url) {
+            button                                              // Home grid (A–Z), Stories, Instagram + Facebook are pinned
         } else {
             button
                 .opacity(draggingBubble == entry ? 0.4 : 1)
@@ -1355,24 +1379,26 @@ struct FolderView: View {
             || library.isTikTokFolder(url) || library.isOnlyFansFolder(url)
     }
 
-    private func bubble(_ entry: Entry) -> some View {
+    private func bubble(_ entry: Entry, diameter: CGFloat = 72) -> some View {
         let isSel = selection.contains(entry.url)
+        let inner = diameter - 10
+        let badgeOffset = diameter / 2 - 14
         return VStack(spacing: 5) {
             ZStack {
                 Circle()
                     .strokeBorder(bubbleRing(entry.url), lineWidth: 2.5)
-                    .frame(width: 72, height: 72)
-                bubbleImage(entry).frame(width: 62, height: 62).clipShape(Circle())
+                    .frame(width: diameter, height: diameter)
+                bubbleImage(entry).frame(width: inner, height: inner).clipShape(Circle())
                     .overlay { if selecting && !isSel { Circle().fill(.black.opacity(0.4)) } }
                 if selecting {
                     Image(systemName: isSel ? "checkmark.circle.fill" : "circle")
                         .font(.body).foregroundStyle(isSel ? Color.accentColor : .white)
                         .background(Circle().fill(.black.opacity(0.4)))
-                        .offset(x: 22, y: 22)
+                        .offset(x: badgeOffset, y: badgeOffset)
                 }
             }
             Text(bubbleLabel(entry))
-                .font(.caption2).lineLimit(1).frame(maxWidth: 76)
+                .font(.caption2).lineLimit(1).frame(maxWidth: diameter + 4)
         }
     }
 
