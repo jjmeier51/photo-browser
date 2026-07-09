@@ -166,6 +166,14 @@ enum FacebookService {
 
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
+        // A per-run diagnostic log written into the folder, so an incomplete download can be
+        // traced set by set (which media-set tokens were found, how many each walk emitted,
+        // and why each walk stopped) without a debugger against live Facebook.
+        let log = DownloadLog(folder: folder, kind: "facebook")
+        await log.begin("Facebook download — \(profile.name)")
+        await log.log("profile: name=\(profile.name), id=\(profile.id), vanity=\(profile.vanity ?? "—"), url=\(profile.url)")
+        await log.log("already downloaded: \(alreadyDownloaded.count) id(s) (skipped for dedup)")
+
         // Discovery and download overlap: collectors walk concurrently and feed the
         // hub (which dedups across sets) into the stream; the consumer below starts
         // downloading the first photo while the walks are still finding the rest.
@@ -177,10 +185,10 @@ enum FacebookService {
                 // Albums cover profile/cover pictures and paginate past the ~100-photo
                 // ceiling of the pb virtual set; the pb walk still runs alongside for
                 // uploads not filed under an enumerable album — the hub dedups overlap.
-                group.addTask { await collectAlbums(profile, skip: alreadyDownloaded, creds: creds, hub: hub) }
+                group.addTask { await collectAlbums(profile, skip: alreadyDownloaded, creds: creds, hub: hub, log: log) }
                 group.addTask {
                     await collectPhotos(profile, tab: "photos_by", fallbackToken: "pb.\(profile.id).-2207520000",
-                                        tokenPrefixes: ["pb.", "a."], skip: alreadyDownloaded, creds: creds, hub: hub)
+                                        tokenPrefixes: ["pb.", "a."], skip: alreadyDownloaded, creds: creds, hub: hub, log: log)
                 }
                 group.addTask {
                     // Tagged photos are posted by someone else — credit the page owner.
@@ -188,9 +196,9 @@ enum FacebookService {
                     // poster's album and drag in their non-tagged uploads.
                     await collectPhotos(profile, tab: "photos_of", fallbackToken: "t.\(profile.id)",
                                         tokenPrefixes: ["t."], skip: alreadyDownloaded, creds: creds, hub: hub,
-                                        ownerFromPage: true)
+                                        ownerFromPage: true, log: log)
                 }
-                group.addTask { await collectVideos(profile, skip: alreadyDownloaded, creds: creds, hub: hub) }
+                group.addTask { await collectVideos(profile, skip: alreadyDownloaded, creds: creds, hub: hub, log: log) }
             }
             await hub.discoveryFinished()
         }
@@ -239,8 +247,10 @@ enum FacebookService {
             }
         }
 
-        if await hub.foundCount == 0 {
-            result.note = await hub.hitLoginWall
+        let discovered = await hub.foundCount
+        let loginWall = await hub.hitLoginWall
+        if discovered == 0 {
+            result.note = loginWall
                 ? "Facebook asked for a fresh login. Tap “Log in to Facebook”, sign in again, and retry."
                 : (alreadyDownloaded.isEmpty
                     ? "No downloadable photos or videos found (the profile may be private, empty, or Facebook may be blocking access)."
@@ -250,6 +260,8 @@ enum FacebookService {
         } else if result.failed > 0 {
             result.note = "\(result.failed) item(s) couldn’t be downloaded."
         }
+        await log.log("hub: discovered \(discovered) new item(s) across all sets; login wall hit: \(loginWall)")
+        await log.finish("photos \(result.photos), videos \(result.videos), failed \(result.failed), discovered \(discovered)")
         return result
     }
 
@@ -324,12 +336,19 @@ enum FacebookService {
     /// one — this is what makes coverage complete, and the only route to profile
     /// pictures.
     nonisolated private static func collectAlbums(_ profile: Profile, skip: Set<String>,
-                                                  creds: Credentials, hub: Hub) async {
-        guard let (html, finalURL) = await fetchHTML(host + tabPath(profile, "photos_albums"), creds: creds) else { return }
-        if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return }
+                                                  creds: Credentials, hub: Hub, log: DownloadLog? = nil) async {
+        guard let (html, finalURL) = await fetchHTML(host + tabPath(profile, "photos_albums"), creds: creds) else {
+            await log?.log("albums tab: fetch failed"); return
+        }
+        if looksLikeLogin(html, finalURL) { await log?.log("albums tab: login wall"); await hub.loginWalled(); return }
         var tokens: [String] = []; var seen = Set<String>()
         for g in matches(html, "set=a\\.(\\d+)") where seen.insert(g[1]).inserted { tokens.append("a.\(g[1])") }
         for g in matches(html, "\"__typename\":\"Album\",\"id\":\"(\\d+)\"") where seen.insert(g[1]).inserted { tokens.append("a.\(g[1])") }
+        // Extra album-id shapes the page can use — a foreign/stale id just walks to nothing
+        // (deduped by the hub), so casting a wider net only helps coverage.
+        for g in matches(html, "\"album_?id\":\"(\\d+)\"") where seen.insert(g[1]).inserted { tokens.append("a.\(g[1])") }
+        for g in matches(html, "albums\\\\?/(\\d{6,})") where seen.insert(g[1]).inserted { tokens.append("a.\(g[1])") }
+        await log?.log("albums tab: found \(tokens.count) album token(s)\(tokens.isEmpty ? " (none — the album list may be JS-only; uploads then rely on the pb walk)" : ": \(tokens.joined(separator: ", "))")")
         guard !tokens.isEmpty else { return }
         await withTaskGroup(of: Void.self) { group in
             var idx = 0
@@ -340,7 +359,7 @@ enum FacebookService {
                 // No early stop: unlike the newest-first pb/t sets, albums can be
                 // user-ordered (oldest first), so a "Get New" run must walk through
                 // known items to reach new ones appended at the end.
-                group.addTask { await walkSet(token, firstID: nil, skip: skip, creds: creds, hub: hub, earlyStop: false) }
+                group.addTask { await walkSet(token, firstID: nil, skip: skip, creds: creds, hub: hub, earlyStop: false, label: "album \(token)", log: log) }
             }
             for _ in 0..<min(maxConcurrent, tokens.count) { addNext() }
             while await group.next() != nil { addNext() }
@@ -361,20 +380,24 @@ enum FacebookService {
     /// fallback) keeps tagged discovery to photos the profile is actually in.
     nonisolated private static func collectPhotos(_ profile: Profile, tab: String, fallbackToken: String,
                                                   tokenPrefixes: [String], skip: Set<String>, creds: Credentials,
-                                                  hub: Hub, ownerFromPage: Bool = false) async {
+                                                  hub: Hub, ownerFromPage: Bool = false, log: DownloadLog? = nil) async {
         var token = fallbackToken
+        var resolvedToken = false
         var firstID: String?
         if let (html, finalURL) = await fetchHTML(host + tabPath(profile, tab), creds: creds) {
-            if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return }
+            if looksLikeLogin(html, finalURL) { await log?.log("[\(tab)] login wall"); await hub.loginWalled(); return }
             // `t.` → `t\.`, etc., so the dot is a literal in the alternation.
             let alt = tokenPrefixes.map { $0.replacingOccurrences(of: ".", with: "\\.") }.joined(separator: "|")
             if let t = firstMatch(html, "\"media_?set_?token\":\"((?:\(alt))[^\"]+)\"")
                 ?? firstMatch(html, "set=((?:\(alt))[0-9A-Za-z%.\\-]+)") {
-                token = decode(t)
+                token = decode(t); resolvedToken = true
             }
             firstID = firstPhotoID(html)
+        } else {
+            await log?.log("[\(tab)] tab fetch failed")
         }
-        await walkSet(token, firstID: firstID, skip: skip, creds: creds, hub: hub, ownerFromPage: ownerFromPage)
+        await log?.log("[\(tab)] token=\(token)\(resolvedToken ? "" : " (fallback — not found on page)") firstID=\(firstID ?? "nil")")
+        await walkSet(token, firstID: firstID, skip: skip, creds: creds, hub: hub, ownerFromPage: ownerFromPage, label: tab, log: log)
     }
 
     /// Walks a media set photo by photo: each photo page embeds the full-res image
@@ -387,17 +410,26 @@ enum FacebookService {
     /// for the whole set (the old ~100-photo ceiling).
     nonisolated private static func walkSet(_ token: String, firstID: String?, skip: Set<String>,
                                             creds: Credentials, hub: Hub, earlyStop: Bool = true,
-                                            ownerFromPage: Bool = false, maxItems: Int = 10_000) async {
+                                            ownerFromPage: Bool = false, maxItems: Int = 10_000,
+                                            label: String = "", log: DownloadLog? = nil) async {
         var nextID = firstID
         if nextID == nil {
-            guard let (html, finalURL) = await fetchHTML(host + "media/set/?set=\(token)", creds: creds) else { return }
-            if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return }
+            guard let (html, finalURL) = await fetchHTML(host + "media/set/?set=\(token)", creds: creds) else {
+                await log?.log("[\(label)] set-page fetch failed — 0 emitted"); return
+            }
+            if looksLikeLogin(html, finalURL) { await log?.log("[\(label)] login wall"); await hub.loginWalled(); return }
             nextID = firstPhotoID(html)
         }
         var visited = Set<String>()
         var knownStreak = 0
-        while let id = nextID, visited.count < maxItems, visited.insert(id).inserted {
-            if await hub.hitLoginWall { return }             // another walk hit the wall; stop hammering it
+        var emitted = 0
+        // Distinguish "genuinely reached the end of the chain" from "the chain broke while a
+        // page still had a photo" — the latter is the truncation signature (a stale next-id
+        // pattern), the single most useful clue when a set comes up short.
+        var stop = "end of chain (no next pointer)"
+        while let id = nextID, visited.insert(id).inserted {
+            if visited.count > maxItems { stop = "hit maxItems (\(maxItems))"; break }
+            if await hub.hitLoginWall { stop = "another walk hit the login wall"; return }
             // Keep the best page seen: a failed alternate fetch must not throw away
             // a primary page that still carried the next pointer.
             var page: (html: String, finalURL: String)?
@@ -406,11 +438,11 @@ enum FacebookService {
                 page = p
                 if photoPageLooksComplete(p.html) || looksLikeLogin(p.html, p.finalURL) { break }
             }
-            guard let (html, finalURL) = page else { break }
-            if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return }
+            guard let (html, finalURL) = page else { stop = "page fetch failed at id \(id)"; break }
+            if looksLikeLogin(html, finalURL) { stop = "login wall at id \(id)"; await hub.loginWalled(); return }
             if skip.contains(id) {
                 knownStreak += 1
-                if earlyStop, knownStreak >= 30 { break }    // deep into already-downloaded territory
+                if earlyStop, knownStreak >= 30 { stop = "early-stop (30 consecutive known ids)"; break }
             } else {
                 knownStreak = 0
                 // Only tagged sets credit the page's owner blob — on a profile's own
@@ -418,29 +450,37 @@ enum FacebookService {
                 let poster = ownerFromPage ? photoOwner(html) : ""
                 if let url = imageURL(html) {
                     await hub.emit(Item(id: id, isVideo: false, url: url, caption: photoCaption(html),
-                                        date: createdTime(html), poster: poster))
+                                        date: createdTime(html), poster: poster)); emitted += 1
                 } else if let url = videoURL(html) {
                     // A video sitting in the set (common among tagged media) — grab it
                     // too, so tagged coverage isn't photos-only.
                     await hub.emit(Item(id: id, isVideo: true, url: url, caption: photoCaption(html),
-                                        date: createdTime(html), poster: poster))
+                                        date: createdTime(html), poster: poster)); emitted += 1
                 }
             }
-            nextID = nextPhotoID(html)
+            let advance = nextPhotoID(html)
+            if advance == nil, imageURL(html) != nil {
+                stop = "chain broke at id \(id) — page HAD a photo but no next pointer (likely truncation, not the real end)"
+            }
+            nextID = advance
         }
+        if !label.isEmpty { await log?.log("[\(label)] set=\(token): walked \(visited.count) page(s), emitted \(emitted), stop: \(stop)") }
     }
 
     /// The videos tab lists permalinks; each watch page embeds direct HD/SD URLs.
     /// Watch pages resolve a few at a time through the shared pacer.
     nonisolated private static func collectVideos(_ profile: Profile, skip: Set<String>,
-                                                  creds: Credentials, hub: Hub) async {
-        guard let (html, finalURL) = await fetchHTML(host + tabPath(profile, "videos"), creds: creds) else { return }
-        if looksLikeLogin(html, finalURL) { await hub.loginWalled(); return }
+                                                  creds: Credentials, hub: Hub, log: DownloadLog? = nil) async {
+        guard let (html, finalURL) = await fetchHTML(host + tabPath(profile, "videos"), creds: creds) else {
+            await log?.log("videos tab: fetch failed"); return
+        }
+        if looksLikeLogin(html, finalURL) { await log?.log("videos tab: login wall"); await hub.loginWalled(); return }
         var ids: [String] = []; var seen = Set<String>()
         for g in matches(html, "videos\\\\?/(\\d{8,})") where seen.insert(g[1]).inserted { ids.append(g[1]) }
         for g in matches(html, "\"video_?id\":\"(\\d{8,})\"") where seen.insert(g[1]).inserted { ids.append(g[1]) }
         for g in matches(html, "watch/\\?v=(\\d{8,})") where seen.insert(g[1]).inserted { ids.append(g[1]) }
         let targets = ids.filter { !skip.contains($0) }
+        await log?.log("videos tab: \(ids.count) id(s) found, \(targets.count) new to fetch")
         guard !targets.isEmpty else { return }
         await withTaskGroup(of: Void.self) { group in
             var idx = 0

@@ -2,6 +2,16 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-09c
+
+- **Facebook downloader: per-run diagnostic log + wider album discovery** — a Facebook run now
+  writes `facebook-log.txt` into the folder detailing every media set it walked: which album
+  tokens were found, how many items each set (uploads/tagged/albums/videos) emitted, and why
+  each walk stopped — crucially distinguishing "reached the real end" from "the next-photo
+  chain broke while a page still had a photo" (the truncation signature). Album discovery also
+  now recognizes more album-id shapes on the albums tab, so uploads don't fall back to the
+  truncation-prone `pb` walk when the album list is parsed in a different form.
+
 ## 2026-07-09b
 
 - **Home page: highlights wrap instead of scroll** — on the Home page only, the album
