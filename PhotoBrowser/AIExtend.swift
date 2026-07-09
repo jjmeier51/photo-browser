@@ -125,9 +125,11 @@ enum AIExtend {
         } else if let width, let height {
             fields["prompt[aspect_ratio]"] = aspectRatio(width, height)
         }
+        // Note: only `super_resolution` here — the partner gallery tunes (Seedream / Nano
+        // Banana) reject `hires_fix` ("not supported on Partner"); that flag is Flux-only and
+        // lives on the Extend path instead.
         if superResolution {
             fields["prompt[super_resolution]"] = "true"
-            fields["prompt[hires_fix]"] = "true"
         }
         let files: [(name: String, filename: String, mime: String, data: Data)] = [
             ("prompt[input_image]", "input.jpg", "image/jpeg", imageData)
