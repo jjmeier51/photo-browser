@@ -361,11 +361,16 @@ struct FolderView: View {
         }
     }
 
-    /// Search matches filename, caption, or an indexed place name.
+    /// Search matches filename, caption, an indexed place name, or the AI model/prompt
+    /// used to generate the item.
     private func matches(_ entry: Entry, _ q: String) -> Bool {
-        entry.name.lowercased().contains(q)
+        if entry.name.lowercased().contains(q)
             || effectiveCaption(for: entry).lowercased().contains(q)
-            || (MetadataLoader.placeTextCached(for: entry)?.contains(q) ?? false)
+            || (MetadataLoader.placeTextCached(for: entry)?.contains(q) ?? false) { return true }
+        if let ai = library.aiGeneration(for: entry.url) {
+            return ai.model.lowercased().contains(q) || ai.prompt.lowercased().contains(q)
+        }
+        return false
     }
 
     private var mediaItems: [Entry] { filtered.filter { $0.isViewable } }
@@ -1338,13 +1343,13 @@ struct FolderView: View {
     /// highlight is visible without scrolling. Bubbles are a touch smaller so five fit a
     /// phone's width, and they aren't drag-reorderable here (the order is alphabetical).
     private var albumHighlightGrid: some View {
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 6, alignment: .top), count: 5)
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 4, alignment: .top), count: 5)
         return LazyVGrid(columns: columns, spacing: 12) {
             ForEach(homeBubbles) { entry in
-                bubbleCell(entry, diameter: 56, draggable: false)
+                bubbleCell(entry, diameter: 62, draggable: false)   // 10% larger than the initial 56
             }
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
+        .padding(.horizontal, 10).padding(.vertical, 8)
     }
 
     /// One highlight bubble. Long-press initiates a drag to rearrange (the Instagram

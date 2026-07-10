@@ -8,6 +8,8 @@ struct AIResultsView: View {
     @Environment(\.dismiss) private var dismiss
     let original: URL
     let results: [Data]
+    var model: String? = nil       // AI model used (e.g. "Seedream 4.5"), for metadata + search
+    var prompt: String? = nil      // the edit prompt used
 
     private enum Decision { case kept, deleted }
     @State private var decided: [Int: Decision] = [:]
@@ -56,11 +58,13 @@ struct AIResultsView: View {
     }
 
     private func keep(_ i: Int) {
-        let data = results[i], orig = original
+        let data = results[i], orig = original, m = model, p = prompt
         Task {
-            let url = await Task.detached(priority: .userInitiated) { AIExtend.saveToAIFolder(data, basedOn: orig) }.value
+            let url = await Task.detached(priority: .userInitiated) {
+                AIExtend.saveToAIFolder(data, basedOn: orig, model: m, prompt: p)
+            }.value
             decided[i] = .kept
-            if let url { savedAny = true; library.markAIGenerated(url) }
+            if let url { savedAny = true; library.markAIGenerated(url, model: m, prompt: p) }
             finishIfDone()
         }
     }

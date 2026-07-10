@@ -290,7 +290,8 @@ enum AIExtend {
     /// Saves a generated image into an "AI" subfolder beside `original`, carrying the
     /// original's EXIF/GPS and forcing its capture date (EXIF + the file's own date)
     /// so it sorts correctly. Tags it AI-generated. Returns the new URL.
-    nonisolated static func saveToAIFolder(_ data: Data, basedOn original: URL) -> URL? {
+    nonisolated static func saveToAIFolder(_ data: Data, basedOn original: URL,
+                                           model: String? = nil, prompt: String? = nil) -> URL? {
         guard let resultSrc = CGImageSourceCreateWithData(data as CFData, nil),
               let resultCG = CGImageSourceCreateImageAtIndex(resultSrc, 0, nil) else { return nil }
         let aiDir = original.deletingLastPathComponent().appendingPathComponent("AI", isDirectory: true)
@@ -309,13 +310,23 @@ enum AIExtend {
             var exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
             exif[kCGImagePropertyExifDateTimeOriginal] = stamp
             exif[kCGImagePropertyExifDateTimeDigitized] = stamp
-            exif[kCGImagePropertyExifUserComment] = "AI-generated"
             props[kCGImagePropertyExifDictionary] = exif
             var tiff = (props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
             tiff[kCGImagePropertyTIFFDateTime] = stamp
-            tiff[kCGImagePropertyTIFFSoftware] = "PhotoBrowser AI"
             props[kCGImagePropertyTIFFDictionary] = tiff
         }
+        // Embed the model + prompt so the provenance travels with the file (readable by
+        // any EXIF viewer, and re-derivable if the app's side store is ever lost). The
+        // UserComment carries the prompt; the Software tag names the model.
+        let trimmedPrompt = (prompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        var exifBlob = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
+        exifBlob[kCGImagePropertyExifUserComment] = trimmedPrompt.isEmpty
+            ? "AI-generated" : "AI-generated · Prompt: \(trimmedPrompt)"
+        props[kCGImagePropertyExifDictionary] = exifBlob
+        var tiffBlob = (props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
+        tiffBlob[kCGImagePropertyTIFFSoftware] = (model?.isEmpty == false)
+            ? "PhotoBrowser AI — \(model!)" : "PhotoBrowser AI"
+        props[kCGImagePropertyTIFFDictionary] = tiffBlob
         props[kCGImagePropertyOrientation] = 1
         props[kCGImagePropertyPixelWidth] = resultCG.width
         props[kCGImagePropertyPixelHeight] = resultCG.height

@@ -14,6 +14,8 @@ struct AIEditView: View {
     @State private var model = AIExtend.defaultModel
     @State private var resolution = AIExtend.OutputResolution.k2
     @State private var aspect = AIExtend.OutputAspect.original
+    @State private var lastPrompt = ""                       // prompt/model actually sent, for result metadata
+    @State private var lastModel = AIExtend.defaultModel
     @State private var running = false
     @State private var results: [Data]?
     @State private var error: String?
@@ -121,7 +123,8 @@ struct AIEditView: View {
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(item: Binding(get: { results.map { ResultsBox(data: $0) } }, set: { results = $0?.data })) { box in
-                AIResultsView(original: entry.url, results: box.data)
+                AIResultsView(original: entry.url, results: box.data,
+                              model: lastModel.rawValue, prompt: lastPrompt)
             }
         }
     }
@@ -131,6 +134,7 @@ struct AIEditView: View {
         library.recordAIPrompt(prompt)     // history, newest first (reuse moves it to the top)
         running = true; error = nil
         let url = entry.url, p = prompt, n = count, m = model
+        lastPrompt = p; lastModel = m       // snapshot for the results sheet's metadata
         let res = resolution, asp = aspect
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Edit")
         let activity = AIProgressActivity()

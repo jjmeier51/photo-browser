@@ -2,6 +2,17 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-09d
+
+- **Edit with AI records model + prompt (searchable, tap-to-copy)** — a kept AI edit now stores
+  the model used (e.g. "Seedream 4.5") and the exact prompt, both embedded in the file's
+  metadata (EXIF UserComment / Software) and in a path-keyed app store that follows the file on
+  move/rename. The info panel shows an "Edited with AI" section with the model and a
+  tap-to-copy prompt field, and both fields are matched by search (folder view + the whole-index
+  search).
+- **Home highlights 10% larger** — the Home-page album-highlight bubbles grew from 56 to 62 pt
+  (still five per line).
+
 ## 2026-07-09c
 
 - **Facebook downloader: per-run diagnostic log + wider album discovery** — a Facebook run now

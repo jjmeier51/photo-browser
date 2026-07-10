@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreLocation
+import UIKit
 
 /// The swipe-up details sheet — like the iOS Photos info card.
 struct InfoPanel: View {
@@ -12,6 +13,7 @@ struct InfoPanel: View {
     @State private var placeName: String?
     @State private var showCaptionEditor = false
     @State private var captionDraft = ""
+    @State private var promptCopied = false
 
     /// App override wins (incl. "" = cleared); otherwise the file's embedded caption.
     private var effectiveCaption: String {
@@ -74,6 +76,33 @@ struct InfoPanel: View {
                     row("Labels", labels.isEmpty ? "None" : labels.joined(separator: ", "))
                 }
 
+                // Provenance for an AI-edited image: the model, and the prompt as a
+                // tap-to-copy field.
+                if let ai = library.aiGeneration(for: entry.url), !(ai.model.isEmpty && ai.prompt.isEmpty) {
+                    Section("Edited with AI") {
+                        if !ai.model.isEmpty { row("Model", ai.model) }
+                        if !ai.prompt.isEmpty {
+                            Button {
+                                UIPasteboard.general.string = ai.prompt
+                                promptCopied = true
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Text("Prompt").foregroundStyle(.secondary)
+                                        Spacer(minLength: 16)
+                                        Label(promptCopied ? "Copied" : "Tap to copy",
+                                              systemImage: promptCopied ? "checkmark" : "doc.on.doc")
+                                            .font(.caption).foregroundStyle(.tint).labelStyle(.titleAndIcon)
+                                    }
+                                    Text(ai.prompt).foregroundStyle(.primary)
+                                        .multilineTextAlignment(.leading).textSelection(.enabled)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
                 // A collected "Today's Instagram Stories" item links back to the person's
                 // own Stories folder (where the rest of their stories live).
                 if let storiesURL = library.storyLink(for: entry.url) {
@@ -134,6 +163,7 @@ struct InfoPanel: View {
         // (a huge photo, a damaged video, a stalled xattr on an external drive)
         // can't delay the others or hang the panel.
         .task(id: entry.id) {
+            promptCopied = false
             // Core metadata first, then paint it before anything riskier runs.
             let loaded = await MetadataLoader.load(for: entry)
             info = loaded

@@ -716,9 +716,31 @@ final class Library {
     var aiGeneratedPaths: Set<String> = Library.migrateBulk("aiGenerated", legacyKey: "photoBrowser.aiGenerated") {
         Set(UserDefaults.standard.stringArray(forKey: $0) ?? [])
     }
-    func markAIGenerated(_ url: URL) {
+    /// What produced an AI image — the model and the exact prompt — so the info panel can
+    /// show them and search can match on them. Path-keyed like captions; JSON in UserDefaults.
+    struct AIGenInfo: Codable, Sendable, Hashable { var model: String; var prompt: String }
+    var aiGenerations: [String: AIGenInfo] = {
+        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.aiGenerations"),
+              let m = try? JSONDecoder().decode([String: AIGenInfo].self, from: data) else { return [:] }
+        return m
+    }()
+    private func persistAIGenerations() {
+        if let data = try? JSONEncoder().encode(aiGenerations) {
+            UserDefaults.standard.set(data, forKey: "photoBrowser.aiGenerations")
+        }
+    }
+    func aiGeneration(for url: URL) -> AIGenInfo? { aiGenerations[url.path] }
+
+    func markAIGenerated(_ url: URL, model: String? = nil, prompt: String? = nil) {
         aiGeneratedPaths.insert(url.path)
         Self.saveBulk(aiGeneratedPaths, "aiGenerated")
+        if let model, let prompt {
+            let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !model.isEmpty || !p.isEmpty {
+                aiGenerations[url.path] = AIGenInfo(model: model, prompt: p)
+                persistAIGenerations()
+            }
+        }
         labelsVersion += 1
     }
     func isAIGenerated(_ url: URL) -> Bool { aiGeneratedPaths.contains(url.path) }
@@ -1600,6 +1622,7 @@ final class Library {
             if nf != state.folderPath { state.folderPath = nf; accessKardashian[name] = state }
         }
         aiGeneratedPaths = Set(aiGeneratedPaths.map(remap))
+        aiGenerations = remapKeys(aiGenerations, remap)
         cleanupReviewed = Dictionary(cleanupReviewed.map { (remap($0.key), $0.value.map(remap)) }, uniquingKeysWith: { a, _ in a })
         notDuplicatePairs = Set(notDuplicatePairs.map { pair in
             let parts = pair.split(separator: "\n", maxSplits: 1).map(String.init)
@@ -1647,6 +1670,7 @@ final class Library {
         let instagramFolders = self.instagramFolders, facebookFolders = self.facebookFolders
         let tiktokFolders = self.tiktokFolders, tiktokLikes = self.tiktokLikes
         let accessKardashian = self.accessKardashian
+        let aiGenerations = self.aiGenerations
         Self.persistQueue.async {
             Self.saveBulk(favorites, "favorites")
             Self.saveBulk(aiLabels, "ai")
@@ -1675,6 +1699,7 @@ final class Library {
             if let data = try? JSONEncoder().encode(facebookFolders) { ud.set(data, forKey: "photoBrowser.facebookFolders") }
             if let data = try? JSONEncoder().encode(tiktokFolders) { ud.set(data, forKey: "photoBrowser.tiktokFolders") }
             if let data = try? JSONEncoder().encode(accessKardashian) { ud.set(data, forKey: "photoBrowser.accessKardashian") }
+            if let data = try? JSONEncoder().encode(aiGenerations) { ud.set(data, forKey: "photoBrowser.aiGenerations") }
         }
     }
 
@@ -2204,7 +2229,8 @@ final class Library {
             guard p == base || p.hasPrefix(base + "/") else { continue }
             if e.name.lowercased().contains(q) || (captions[p]?.lowercased().contains(q) ?? false)
                 || (MetadataLoader.ocrTextCached(for: e)?.contains(q) ?? false)       // text inside photos
-                || (MetadataLoader.placeTextCached(for: e)?.contains(q) ?? false) {   // indexed place names
+                || (MetadataLoader.placeTextCached(for: e)?.contains(q) ?? false)     // indexed place names
+                || (aiGenerations[p].map { $0.model.lowercased().contains(q) || $0.prompt.lowercased().contains(q) } ?? false) {  // AI model / prompt
                 if seen.insert(p).inserted { matches.append(e) }
             }
             parents.insert((p as NSString).deletingLastPathComponent)
