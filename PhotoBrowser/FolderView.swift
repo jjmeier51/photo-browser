@@ -666,6 +666,12 @@ struct FolderView: View {
                 }
             }
             if entry.kind == .video {
+                Menu {
+                    Button { aiUpscaleVideo(entry, to: 1080, label: "1080p") } label: { Text("1080p") }
+                    Button { aiUpscaleVideo(entry, to: 2160, label: "4K") } label: { Text("4K") }
+                } label: {
+                    Label("AI Upscale", systemImage: "wand.and.rays")
+                }
                 Button {
                     let e = entry
                     DispatchQueue.main.async { exportTarget = e }   // defer so the menu dismissal doesn't swallow the sheet
@@ -1960,6 +1966,27 @@ struct FolderView: View {
             editProgress = 1
             editProcessing = false; bg.end()
             resultMessage = ok ? "Upscaled “\(entry.name)”." : "Couldn’t upscale “\(entry.name)”."
+            library.contentDidChange(under: url)
+            await reload()
+        }
+    }
+
+    /// "AI Upscale" a single video from the long-press menu — the HDR-preserving enhance
+    /// path (denoise + sharpen while rescaling; HDR videos fall back to a plain rescale so
+    /// their transfer isn't tone-mapped). Metadata/labels/date preserved.
+    private func aiUpscaleVideo(_ entry: Entry, to target: CGFloat, label: String) {
+        editLabel = "AI Upscaling to \(label)…"; editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder(); bg.begin(name: "AI Upscale Video")
+        Task {
+            let outcome = await MediaEditing.enhanceVideo(url: entry.url, targetShort: target, progress: { f in
+                Task { @MainActor in editProgress = f }
+            })
+            editProgress = 1; editProcessing = false; bg.end()
+            switch outcome {
+            case .upscaled: resultMessage = "Upscaled “\(entry.name)” to \(label)."
+            case .skipped:  resultMessage = "“\(entry.name)” is already ≥\(label)."
+            case .failed:   resultMessage = "Couldn’t upscale “\(entry.name)”."
+            }
             library.contentDidChange(under: url)
             await reload()
         }

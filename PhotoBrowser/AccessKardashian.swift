@@ -120,8 +120,15 @@ enum AccessKardashian {
         // so a slow run shows *where* the time went (fetch vs stall/retry vs write).
         let log = AKLog(in: folder.deletingLastPathComponent(), member: member.name)
         log.add("config: overwrite=\(overwrite) refreshIndex=\(refreshIndex) concurrency=22 idleTimeout=20s")
-        log.add("free space — drive: \(freeSpace(at: folder)?.sizeString ?? "?"), phone: \(freeSpace(at: FileManager.default.temporaryDirectory)?.sizeString ?? "?")")
+        let driveFree = freeSpace(at: folder)
+        log.add("free space — drive: \(driveFree?.sizeString ?? "?"), phone: \(freeSpace(at: FileManager.default.temporaryDirectory)?.sizeString ?? "?")")
         defer { log.flush() }
+        // A (nearly) full drive is the #1 cause of a "crawling" run: exFAT thrashes to place
+        // each file when there's no free space, so writes take seconds and some fail — but the
+        // failures are intermittent, so the consecutive-failure circuit breaker never trips and
+        // it grinds on silently. Detect it up front and say so plainly.
+        let lowSpace = (driveFree ?? .max) < 200_000_000        // < ~200 MB
+        if lowSpace { log.add("WARNING: drive is full/almost full (\(driveFree?.sizeString ?? "0")) — writes will be slow and may fail; free up space on the drive") }
 
         // Reuse the cached album index unless a refresh was asked for — this is what
         // makes Resume/Re-download skip the (slow) crawl that was stalling on "Listing".
@@ -281,6 +288,12 @@ enum AccessKardashian {
         result.cancelled = isCancelled()
         if result.downloaded == 0 && result.skipped == 0 { result.note = "Nothing could be downloaded from the gallery." }
         else if result.failed > 0 { result.note = "\(result.failed) photo(s) couldn’t be downloaded." }
+        // A full drive dominates everything else — lead with it, since it's the fix.
+        if lowSpace {
+            result.note = "The drive is full (\(driveFree?.sizeString ?? "0") free) — that's why it's slow and photos fail to save. "
+                + "Free up space on the drive (or use a larger one), then run this again. "
+                + (result.note ?? "")
+        }
         return result
     }
 
