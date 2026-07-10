@@ -734,9 +734,27 @@ enum MediaEditing {
         let cropT = CGAffineTransform(translationX: -cx, y: -cy)
         let full = pt.concatenating(rot).concatenating(cropT)
 
+        // Detect the source's HDR transfer function so the rotate/crop re-encode keeps HDR
+        // (HLG or PQ/HDR10) instead of tone-mapping it to SDR — otherwise rotating an HDR
+        // video silently stripped its HDR. Same handling as `upscaleVideo`.
+        var isPQ = false, isHLG = false
+        if let fd = (try? await track.load(.formatDescriptions))?.first,
+           let ext = CMFormatDescriptionGetExtensions(fd) as? [CFString: Any] {
+            let tf = ext[kCMFormatDescriptionExtension_TransferFunction] as? String
+            isPQ = tf == (kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String)
+            isHLG = tf == (kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG as String)
+        }
+        let isHDR = isPQ || isHLG
+
         let videoComposition = AVMutableVideoComposition()
         videoComposition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(fps.rounded(), 1)))
         videoComposition.renderSize = CGSize(width: cw, height: ch)
+        if isHDR {
+            videoComposition.colorPrimaries = AVVideoColorPrimaries_ITU_R_2020
+            videoComposition.colorTransferFunction = isPQ ? AVVideoTransferFunction_SMPTE_ST_2084_PQ
+                                                          : AVVideoTransferFunction_ITU_R_2100_HLG
+            videoComposition.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_2020
+        }
         let instruction = AVMutableVideoCompositionInstruction()
         instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
         let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
@@ -746,9 +764,11 @@ enum MediaEditing {
 
         // Export to a sibling temp file (same volume → atomic replace) in the
         // QuickTime container, then swap it in for the original (which keeps its name).
+        // HEVC (10-bit) for HDR so the wide gamut/transfer survives; H.264 otherwise.
         let folder = url.deletingLastPathComponent()
         let tmp = folder.appendingPathComponent(".\(UUID().uuidString).mov")
-        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else { return false }
+        let preset = isHDR ? AVAssetExportPresetHEVCHighestQuality : AVAssetExportPresetHighestQuality
+        guard let export = AVAssetExportSession(asset: asset, presetName: preset) else { return false }
         export.videoComposition = videoComposition
         export.outputURL = tmp
         export.outputFileType = .mov
