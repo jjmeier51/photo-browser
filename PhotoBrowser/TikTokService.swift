@@ -29,9 +29,11 @@ enum TikTokService {
     nonisolated static let apiBase = "https://www.tikwm.com"
 
     struct Progress: Sendable { var phase: String; var fraction: Double; var done: Int; var total: Int }
-    /// A video ready to download: a direct best-quality URL plus the metadata to stamp on it.
-    struct ResolvedVideo: Sendable { let id: String; let url: String; let createTime: Date; let desc: String; let likes: Int }
-    private struct Video: Sendable { let id: String; let hd: String; let sd: String; let createTime: Date; let desc: String; let likes: Int }
+    /// A post ready to download: either a direct best-quality video `url`, or — for a
+    /// photo/slideshow post — a list of `images` (both never set at once). Plus the metadata
+    /// to stamp on the file(s).
+    struct ResolvedVideo: Sendable { let id: String; let url: String; let images: [String]; let createTime: Date; let desc: String; let likes: Int }
+    private struct Video: Sendable { let id: String; let hd: String; let sd: String; let images: [String]; let createTime: Date; let desc: String; let likes: Int }
 
     nonisolated static let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
@@ -77,6 +79,13 @@ enum TikTokService {
         for (i, v) in pending.enumerated() {
             if Task.isCancelled { break }
             progress(Progress(phase: "Preparing HD links — \(i + 1) of \(pending.count)…", fraction: 0, done: 0, total: 0))
+            // Photo/slideshow post: the image URLs are direct — no HD resolution needed.
+            if !v.images.isEmpty {
+                onResolved(ResolvedVideo(id: v.id, url: "", images: v.images.map { absolute($0) },
+                                         createTime: v.createTime, desc: v.desc, likes: v.likes))
+                resolved += 1
+                continue
+            }
             var best = v.hd
             if best.isEmpty {
                 // No HD in the listing — ask the single-video endpoint for it (rate-limited).
@@ -84,7 +93,7 @@ enum TikTokService {
                 try? await Task.sleep(nanoseconds: 1_100_000_000)
             }
             guard !best.isEmpty else { continue }
-            onResolved(ResolvedVideo(id: v.id, url: absolute(best), createTime: v.createTime, desc: v.desc, likes: v.likes))
+            onResolved(ResolvedVideo(id: v.id, url: absolute(best), images: [], createTime: v.createTime, desc: v.desc, likes: v.likes))
             resolved += 1
         }
         return (listing.authorId, listing.nickname, listing.videos.count, resolved, allStats, listing.newest,
@@ -124,9 +133,11 @@ enum TikTokService {
                 guard seen.insert(id).inserted else { continue }
                 let hd = (v["hdplay"] as? String) ?? ""
                 let sd = (v["play"] as? String) ?? (v["wmplay"] as? String) ?? ""
-                guard !(hd.isEmpty && sd.isEmpty) else { continue }
+                // Photo/slideshow posts carry an `images` array instead of a video URL.
+                let images = ((v["images"] as? [String]) ?? []).filter { !$0.isEmpty }
+                guard !(hd.isEmpty && sd.isEmpty && images.isEmpty) else { continue }
                 let likes = intValue(v["digg_count"]) ?? 0          // tikwm: likes (hearts)
-                all.append(Video(id: id, hd: hd, sd: sd, createTime: Date(timeIntervalSince1970: ctSecs),
+                all.append(Video(id: id, hd: hd, sd: sd, images: images, createTime: Date(timeIntervalSince1970: ctSecs),
                                  desc: (v["title"] as? String) ?? "", likes: likes))
             }
             progress(Progress(phase: cutoff > 0 ? "Found \(all.count) new…" : "Found \(all.count) videos…",

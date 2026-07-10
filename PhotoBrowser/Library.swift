@@ -316,7 +316,10 @@ final class Library {
         setCaptions(captionUpdates)
         for (folder, ids) in idsByFolder {
             guard var info = tiktokFolders[folder] else { continue }
-            let fresh = ids.filter { !info.downloaded.contains($0) }
+            // Dedup within the batch: a photo/slideshow post files several images that all
+            // carry the same post id, so it must count (and be recorded) once, not per file.
+            var seenFresh = Set<String>()
+            let fresh = ids.filter { !info.downloaded.contains($0) && seenFresh.insert($0).inserted }
             info.downloaded.append(contentsOf: fresh)
             info.videos += fresh.count
             info.lastUpdated = Date().timeIntervalSince1970

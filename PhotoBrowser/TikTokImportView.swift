@@ -119,11 +119,26 @@ struct TikTokImportView: View {
                     }
                 },
                 onResolved: { v in
-                    guard let url = URL(string: v.url) else { return }
-                    let meta = BackgroundDownloader.Meta(dest: dest.appendingPathComponent("\(v.id).mp4").path,
-                                                         createTime: v.createTime.timeIntervalSince1970,
-                                                         caption: v.desc, folder: destPath, id: v.id, likes: v.likes)
-                    BackgroundDownloader.shared.enqueue(url: url, meta: meta)
+                    // A photo/slideshow post → one file per image (`{id}_1.jpg`, …); a video
+                    // post → one `{id}.mp4`. Both share the post id so dedup stays per-post.
+                    var enqueued = 0
+                    if !v.images.isEmpty {
+                        for (n, imgStr) in v.images.enumerated() {
+                            guard let url = URL(string: imgStr) else { continue }
+                            let meta = BackgroundDownloader.Meta(dest: dest.appendingPathComponent("\(v.id)_\(n + 1).jpg").path,
+                                                                 createTime: v.createTime.timeIntervalSince1970,
+                                                                 caption: v.desc, folder: destPath, id: v.id, likes: v.likes)
+                            BackgroundDownloader.shared.enqueue(url: url, meta: meta)
+                            enqueued += 1
+                        }
+                    } else if let url = URL(string: v.url) {
+                        let meta = BackgroundDownloader.Meta(dest: dest.appendingPathComponent("\(v.id).mp4").path,
+                                                             createTime: v.createTime.timeIntervalSince1970,
+                                                             caption: v.desc, folder: destPath, id: v.id, likes: v.likes)
+                        BackgroundDownloader.shared.enqueue(url: url, meta: meta)
+                        enqueued += 1
+                    }
+                    guard enqueued > 0 else { return }
                     Task { @MainActor in
                         // On the first resolved video, register the profile (pinned bubble +
                         // remembered handle) and create its folder so the bubble can appear.
@@ -137,7 +152,7 @@ struct TikTokImportView: View {
                             library.setLastTikTokHandle(user, for: parent)
                             library.contentDidChange()           // surface the new @handle bubble
                         }
-                        queued += 1                               // `remaining` is owned by the monitor poll
+                        queued += enqueued                        // count files; `remaining` is owned by the monitor poll
                     }
                 },
                 progress: { p in Task { @MainActor in phase = p.phase } })
