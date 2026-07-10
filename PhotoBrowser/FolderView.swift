@@ -85,6 +85,7 @@ struct FolderView: View {
     @State private var showOnlyFans = false
     @State private var showLinkDownload = false
     @State private var showTikTok = false
+    @State private var showVSCO = false
     @State private var showYouTube = false
     @State private var confirmFixDates = false
     @State private var fixingDates = false
@@ -908,6 +909,9 @@ struct FolderView: View {
             }
             .sheet(isPresented: $showYouTube, onDismiss: { Task { await reload() } }) {
                 YouTubeImportView(targetFolder: url) { Task { await reload() } }
+            }
+            .sheet(isPresented: $showVSCO, onDismiss: { Task { await reload() } }) {
+                VSCOImportView(targetFolder: url) { Task { await reload() } }
             }
         )
         return AnyView(g4
@@ -1736,6 +1740,11 @@ struct FolderView: View {
                     Button { showTikTok = true } label: {
                         Label(library.lastTikTokHandle(for: url) != nil ? "Get New TikTok Videos" : "Download TikTok Profile…",
                               systemImage: "music.note")
+                    }
+                    Button { showVSCO = true } label: {
+                        Label(library.isVSCOFolder(url) || library.lastVSCOUsername(for: url) != nil
+                              ? "Get New VSCO Photos" : "Download VSCO Profile…",
+                              systemImage: "camera.aperture")
                     }
                     Button { showYouTube = true } label: {
                         Label("Download YouTube Video Here…", systemImage: "play.rectangle.fill")

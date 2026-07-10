@@ -270,6 +270,34 @@ final class Library {
         UserDefaults.standard.set(lastTikTokHandleByFolder, forKey: "photoBrowser.lastTikTokHandle")
     }
 
+    // MARK: - VSCO profile folders
+
+    /// Profile folder path → the VSCO profile downloaded into it (drives "Get New VSCO
+    /// Photos" and dedup).
+    var vscoFolders: [String: VSCOFolderInfo] = {
+        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.vscoFolders"),
+              let m = try? JSONDecoder().decode([String: VSCOFolderInfo].self, from: data) else { return [:] }
+        return m
+    }()
+    func vscoInfo(for folder: URL) -> VSCOFolderInfo? { vscoFolders[folder.path] }
+    func isVSCOFolder(_ folder: URL) -> Bool { vscoFolders[folder.path] != nil }
+    func setVSCOInfo(_ info: VSCOFolderInfo, for folder: URL) {
+        vscoFolders[folder.path] = info
+        persistVSCOFolders()
+    }
+    private func persistVSCOFolders() {
+        if let data = try? JSONEncoder().encode(vscoFolders) {
+            UserDefaults.standard.set(data, forKey: "photoBrowser.vscoFolders")
+        }
+    }
+    /// Person-folder path → the VSCO username last downloaded under it (prefills the sheet).
+    var lastVSCOUsernameByFolder: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.lastVSCOUsername") as? [String: String]) ?? [:]
+    func lastVSCOUsername(for folder: URL) -> String? { lastVSCOUsernameByFolder[folder.path] }
+    func setLastVSCOUsername(_ handle: String, for folder: URL) {
+        lastVSCOUsernameByFolder[folder.path] = handle
+        UserDefaults.standard.set(lastVSCOUsernameByFolder, forKey: "photoBrowser.lastVSCOUsername")
+    }
+
     /// Files TikTok videos that finished downloading in the background (in the app inbox) onto
     /// the actual drive folder: moves each into place, stamps its capture date, attaches its
     /// caption, and updates the profile record's count/dedup set. Runs in the foreground (drive
@@ -1619,6 +1647,8 @@ final class Library {
         tiktokFolders = remapKeys(tiktokFolders, remap)
         tiktokLikes = remapKeys(tiktokLikes, remap)
         lastTikTokHandleByFolder = remapKeys(lastTikTokHandleByFolder, remap)
+        vscoFolders = remapKeys(vscoFolders, remap)
+        lastVSCOUsernameByFolder = remapKeys(lastVSCOUsernameByFolder, remap)
         bubbleOrders = Dictionary(bubbleOrders.map { (remap($0.key), $0.value.map(remap)) }, uniquingKeysWith: { a, _ in a })
         for (name, var state) in accessKardashian {
             let nf = remap(state.folderPath)
@@ -1674,6 +1704,7 @@ final class Library {
         let tiktokFolders = self.tiktokFolders, tiktokLikes = self.tiktokLikes
         let accessKardashian = self.accessKardashian
         let aiGenerations = self.aiGenerations
+        let vscoFolders = self.vscoFolders, lastVSCOUsernameByFolder = self.lastVSCOUsernameByFolder
         Self.persistQueue.async {
             Self.saveBulk(favorites, "favorites")
             Self.saveBulk(aiLabels, "ai")
@@ -1703,6 +1734,8 @@ final class Library {
             if let data = try? JSONEncoder().encode(tiktokFolders) { ud.set(data, forKey: "photoBrowser.tiktokFolders") }
             if let data = try? JSONEncoder().encode(accessKardashian) { ud.set(data, forKey: "photoBrowser.accessKardashian") }
             if let data = try? JSONEncoder().encode(aiGenerations) { ud.set(data, forKey: "photoBrowser.aiGenerations") }
+            if let data = try? JSONEncoder().encode(vscoFolders) { ud.set(data, forKey: "photoBrowser.vscoFolders") }
+            ud.set(lastVSCOUsernameByFolder, forKey: "photoBrowser.lastVSCOUsername")
         }
     }
 

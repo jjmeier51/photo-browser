@@ -2,6 +2,25 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-10
+
+- **New: VSCO downloader** — "Download VSCO Profile…" (root "…" menu): enter a public VSCO
+  username and pull the whole gallery (photos + videos, full resolution) into a "username"
+  folder. EXIF is preserved verbatim; a photo with no capture date gets VSCO's posting date
+  (capture_date, else upload_date) written into EXIF and stamped on the file. Runs as a
+  background activity like the other downloaders, dedups by media id for "Get New VSCO Photos",
+  and writes a `vsco-log.txt` diagnostic. Uses VSCO's public web API (no login); best-effort.
+- **TikTok: downloads photo/slideshow posts** — photo posts (image carousels) were dropped
+  because the listing required a video URL; they now download one image per slide. (Downloads
+  already ran on a true background URLSession.)
+- **Rotating an HDR video keeps its HDR** — the rotate/crop re-encode now detects PQ/HLG and
+  renders BT.2020 10-bit HEVC instead of tone-mapping to SDR.
+- **AI Upscale for videos in the long-press menu** — long-pressing a video now offers AI
+  Upscale (1080p / 4K) via the HDR-preserving path, matching the photo menu.
+- **accessKardashian: full-drive warning** — a (nearly) full drive is now detected up front and
+  called out in the result note and log (it's the cause of a "crawling" run — exFAT thrashes to
+  place files on a 0-free volume).
+
 ## 2026-07-09d
 
 - **Edit with AI records model + prompt (searchable, tap-to-copy)** — a kept AI edit now stores
