@@ -2,6 +2,14 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-10b
+
+- **Exported frames pre-warm their thumbnails** — "Export all frames" now generates each
+  frame's grid thumbnail from the frame it already has in memory and writes it straight to the
+  local thumbnail cache. Opening a huge frames folder (e.g. 6,000 frames) afterward reads small
+  cached JPEGs from local storage instead of decoding every full HEIC off the external drive —
+  eliminating the multi-minute thumbnail stall.
+
 ## 2026-07-10
 
 - **New: VSCO downloader** — "Download VSCO Profile…" (root "…" menu): enter a public VSCO

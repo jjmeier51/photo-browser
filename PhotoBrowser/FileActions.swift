@@ -1137,7 +1137,14 @@ enum FileActions {
                                     // Count only frames actually on disk — counting before the
                                     // write made a run whose writes all failed (missing folder,
                                     // yanked drive) report "Exported N frames" with nothing saved.
-                                    do { try data.write(to: dest); written += 1 }
+                                    do {
+                                        try data.write(to: dest); written += 1
+                                        // Warm the folder's thumbnail from the frame we already
+                                        // have in memory, so opening a 6k-frame folder later reads
+                                        // small cached JPEGs from local storage instead of decoding
+                                        // every full HEIC off the drive (the ~15-min stall).
+                                        Thumbnailer.shared.prewarm(imageData: data, for: dest)
+                                    }
                                     catch { if writeError == nil { writeError = error.localizedDescription } }
                                 } else {
                                     encodeFailures += 1

@@ -159,7 +159,41 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
 
     private func cacheKey(for entry: Entry) -> String {
         let raw = "\(entry.url.stableCacheID)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)"
-        let digest = SHA256.hash(data: Data(raw.utf8))
-        return digest.map { String(format: "%02x", $0) }.joined()
+        return sha(raw)
+    }
+
+    /// The disk-cache key for a file on disk, read from its current mtime/size — matches the
+    /// key `cacheKey(for:)` computes from a folder listing's `Entry`. Nil if it can't be stat'd.
+    private func cacheKey(forFileAt url: URL) -> String? {
+        guard let rv = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else { return nil }
+        let mtime = Int((rv.contentModificationDate ?? .distantPast).timeIntervalSince1970)
+        return sha("\(url.stableCacheID)|\(mtime)|\(rv.fileSize ?? 0)")
+    }
+
+    private func sha(_ s: String) -> String {
+        SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Pre-generates the disk-cache thumbnail for a file whose full-size bytes we already have
+    /// in memory (e.g. a video frame the exporter just wrote), so the folder never has to decode
+    /// the full file off the drive later. Keyed exactly like a normal tile request, so the grid
+    /// hits it. Generates at the largest scale a tile can ask for (the key ignores size, so one
+    /// stored thumbnail satisfies every request). Synchronous + best-effort — the caller runs it
+    /// off the main thread and gets natural backpressure (no unbounded queue of frame data).
+    func prewarm(imageData: Data, for url: URL) {
+        guard let key = cacheKey(forFileAt: url) else { return }
+        let diskURL = diskDir.appendingPathComponent(key).appendingPathExtension("jpg")
+        guard !FileManager.default.fileExists(atPath: diskURL.path) else { return }   // already cached (e.g. a resumed export)
+        let maxPixel = 110.0 * 3.0                                   // grid tile (110pt) at up to @3x
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxPixel)
+        ]
+        guard let src = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return }
+        if let data = UIImage(cgImage: cg).jpegData(compressionQuality: 0.8) {
+            try? data.write(to: diskURL, options: .atomic)
+        }
     }
 }
