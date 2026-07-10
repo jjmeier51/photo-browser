@@ -60,3 +60,8 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+
+# Standalone helper scripts (not part of the iOS app)
+hilaryduff_download.py
+__pycache__/
+*.pyc
