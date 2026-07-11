@@ -17,6 +17,7 @@ enum AIExtend {
     /// ids for these newest versions aren't published, so each has a best-known
     /// default that the user can override in Settings.
     enum AIModel: String, CaseIterable, Identifiable, Sendable {
+        case seedream5Pro = "Seedream 5.0 Pro"
         case seedream45 = "Seedream 4.5"
         case nanoBanana2 = "Nano Banana 2"
         case nanoBananaPro = "Nano Banana Pro"
@@ -25,6 +26,7 @@ enum AIExtend {
         /// Banana 2's tune until its own id is known; override in Settings).
         var fallbackTune: Int {
             switch self {
+            case .seedream5Pro:  return 5236038
             case .seedream45:    return 3691308
             case .nanoBanana2:   return 4180298
             case .nanoBananaPro: return 4180298
@@ -78,7 +80,7 @@ enum AIExtend {
         let v = UserDefaults.standard.string(forKey: promptKey) ?? ""
         return v.isEmpty ? defaultPrompt : v
     }
-    static var defaultModel: AIModel { AIModel(rawValue: UserDefaults.standard.string(forKey: modelKey) ?? "") ?? .seedream45 }
+    static var defaultModel: AIModel { AIModel(rawValue: UserDefaults.standard.string(forKey: modelKey) ?? "") ?? .seedream5Pro }
 
     static func tuneID(for model: AIModel) -> Int {
         let v = UserDefaults.standard.integer(forKey: model.tuneKey)
