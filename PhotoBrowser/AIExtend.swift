@@ -54,10 +54,11 @@ enum AIExtend {
     enum OutputAspect: String, CaseIterable, Identifiable, Sendable {
         case original = "Original", square = "1:1", portrait = "4:5", story = "9:16"
         var id: String { rawValue }
-        /// Explicit ratio to send, or nil to derive it from the source image's dimensions.
+        /// Value sent as `prompt[aspect_ratio]`. "Original" sends **auto** so Astria keeps the
+        /// source's own proportions/size instead of snapping to a fixed ratio (e.g. 2:3).
         var ratio: String? {
             switch self {
-            case .original: return nil
+            case .original: return "auto"
             case .square:   return "1:1"
             case .portrait: return "4:5"
             case .story:    return "9:16"
@@ -80,7 +81,17 @@ enum AIExtend {
         let v = UserDefaults.standard.string(forKey: promptKey) ?? ""
         return v.isEmpty ? defaultPrompt : v
     }
-    static var defaultModel: AIModel { AIModel(rawValue: UserDefaults.standard.string(forKey: modelKey) ?? "") ?? .seedream5Pro }
+    static var defaultModel: AIModel {
+        let d = UserDefaults.standard
+        // One-time migration to the new default: a previously-saved default (the old auto-default
+        // "Seedream 4.5") would otherwise keep winning. Bump the stored default to Seedream 5.0
+        // Pro once; the Settings picker can still change it afterward.
+        if !d.bool(forKey: "photoBrowser.astriaDefault5Pro") {
+            d.set(true, forKey: "photoBrowser.astriaDefault5Pro")
+            d.set(AIModel.seedream5Pro.rawValue, forKey: modelKey)
+        }
+        return AIModel(rawValue: d.string(forKey: modelKey) ?? "") ?? .seedream5Pro
+    }
 
     static func tuneID(for model: AIModel) -> Int {
         let v = UserDefaults.standard.integer(forKey: model.tuneKey)
@@ -235,11 +246,17 @@ enum AIExtend {
             let s = maxPixel / long
             ci = ci.transformed(by: CGAffineTransform(scaleX: s, y: s))
         }
-        // Tone-map HDR headroom (>1) down to SDR range. A hard clamp slams every highlight
-        // above 1.0 to flat white (the "washed-out / over-exposed" look); a soft rolloff
-        // keeps midtones intact and gently compresses the highlights toward white so their
-        // detail survives. Falls back to the old hard clamp if the curve can't be built.
-        ci = (softClip(ci) ?? ci.applyingFilter("CIColorClamp")).cropped(to: ci.extent)
+        // Tone-map ONLY genuine HDR headroom. An ordinary SDR photo — including the SDR base of
+        // a gain-map HEIC, which is what `CIImage(contentsOf:)` gives us — already sits in [0,1];
+        // running the rolloff on it just lowers the white point and washes it out (the bug on
+        // HEIC uploads). So: measure the peak, and only extended-range images (peak > 1) get the
+        // gentle highlight rolloff; everything else is just clamped and left alone.
+        let peak = peakValue(ci)
+        if peak > 1.02, let rolled = softClip(ci, peak: peak) {
+            ci = rolled.cropped(to: ci.extent)
+        } else {
+            ci = ci.applyingFilter("CIColorClamp").cropped(to: ci.extent)
+        }
         guard !ci.extent.isInfinite, !ci.extent.isNull else { return uploadJPEGViaThumbnail(of: url, maxPixel: maxPixel) }
         let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         let opts: [CIImageRepresentationOption: Any] = [
@@ -351,13 +368,16 @@ enum AIExtend {
     /// instead of clipping to flat white. Uses stock `CIColorCurves` (which, unlike a plain
     /// clamp, accepts an input domain past 1.0); returns nil if the filter can't be built so
     /// the caller can fall back to a hard clamp.
-    private nonisolated static func softClip(_ image: CIImage) -> CIImage? {
+    private nonisolated static func softClip(_ image: CIImage, peak: CGFloat) -> CIImage? {
         let n = 64
-        let knee: Float = 0.9, headroom: Float = 4.0
+        let knee: Float = 0.95                          // leave the SDR range essentially untouched
+        let hi = max(Float(peak), knee + 0.001)
         var data = [Float](); data.reserveCapacity(n * 3)
         for i in 0..<n {
-            let v = headroom * Float(i) / Float(n - 1)
-            let out = v <= knee ? v : knee + (1 - knee) * (1 - expf(-(v - knee) / (1 - knee)))
+            let v = hi * Float(i) / Float(n - 1)
+            // Identity below the knee; linearly compress [knee, peak] into [knee, 1] so the peak
+            // maps to white and highlights keep their gradient instead of clipping.
+            let out = v <= knee ? v : knee + (1 - knee) * ((v - knee) / (hi - knee))
             let c = min(max(out, 0), 1)
             data.append(c); data.append(c); data.append(c)
         }
@@ -365,10 +385,24 @@ enum AIExtend {
         let curves = CIFilter(name: "CIColorCurves", parameters: [
             kCIInputImageKey: image,
             "inputCurvesData": Data(bytes: data, count: data.count * MemoryLayout<Float>.size),
-            "inputCurvesDomain": CIVector(x: 0, y: CGFloat(headroom)),
+            "inputCurvesDomain": CIVector(x: 0, y: CGFloat(hi)),
             "inputColorSpace": space
         ])
         return curves?.outputImage
+    }
+
+    /// The image's peak component value (read in extended sRGB), so we can distinguish genuine
+    /// HDR headroom (> 1) from an ordinary SDR photo whose values already sit within [0, 1].
+    private nonisolated static func peakValue(_ image: CIImage) -> CGFloat {
+        guard !image.extent.isInfinite, !image.extent.isNull else { return 1 }
+        let maxImg = image.applyingFilter("CIAreaMaximum",
+                                          parameters: [kCIInputExtentKey: CIVector(cgRect: image.extent)])
+        var px = [Float](repeating: 0, count: 4)
+        let space = CGColorSpace(name: CGColorSpace.extendedSRGB) ?? CGColorSpaceCreateDeviceRGB()
+        PhotoEditorIO.context.render(maxImg, toBitmap: &px, rowBytes: 16,
+                                     bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                                     format: .RGBAf, colorSpace: space)
+        return CGFloat(max(px[0], max(px[1], px[2])))
     }
 
     /// Astria's gallery tunes control output shape via `aspect_ratio` (they reject
