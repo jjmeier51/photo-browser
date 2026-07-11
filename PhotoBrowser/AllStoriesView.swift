@@ -124,7 +124,11 @@ struct AllStoriesView: View {
 
             await withTaskGroup(of: ProfileOutcome?.self) { group in
                 var idx = 0
-                let maxConcurrent = 3        // modest — avoid tripping Instagram's rate limiting
+                // Gentle on purpose: fetching many profiles fast (and in parallel) is exactly the
+                // burst pattern Instagram flags as automation. Keep only 2 in flight, and each
+                // profile waits a short randomized beat before it starts (see `fetchStories`), so
+                // the sweep looks paced/human rather than a lockstep scrape.
+                let maxConcurrent = 2
                 func addNext() {
                     guard idx < folders.count else { return }
                     let f = folders[idx]; idx += 1
@@ -185,6 +189,10 @@ struct AllStoriesView: View {
     nonisolated private static func fetchStories(
         folder: (url: URL, info: IGFolderInfo, hasCover: Bool),
         creds: InstagramService.Credentials, tempPath: String) async -> ProfileOutcome? {
+        // A short randomized pause before each profile spaces the requests out (and, with the
+        // 2-wide group, staggers the two in-flight fetches) so the sweep isn't a rapid burst —
+        // the main thing that trips Instagram's automation detection.
+        try? await Task.sleep(nanoseconds: UInt64(Double.random(in: 1.5...4.0) * 1_000_000_000))
         var userID = folder.info.userID
         if userID.isEmpty { userID = await InstagramService.fetchProfile(handle: folder.info.handle, creds: creds)?.userID ?? "" }
         guard !userID.isEmpty else { return nil }
