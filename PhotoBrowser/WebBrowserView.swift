@@ -284,6 +284,9 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     /// Fired when a downloadable file is discovered (long-pressed link or an attachment response).
     var onFileDownload: ((PendingFile) -> Void)?
 
+    /// Reused + pre-warmed so the long-press haptic doesn't cold-start the Taptic Engine (a hitch).
+    private let haptic = UINotificationFeedbackGenerator()
+
     /// The last page visited, so re-opening the browser resumes where you left off.
     static var lastSavedURL: String? {
         get { UserDefaults.standard.string(forKey: "photoBrowser.webBrowserLastURL") }
@@ -378,15 +381,6 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         return Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: d) ?? d
     }
 
-    /// Stamp a saved download with `date`: real EXIF/metadata for images & videos (via a lossless
-    /// rewrite) plus the filesystem creation/modification date.
-    private func applyPageDate(_ date: Date?, to outcome: WebVideoDownloader.Outcome, id: UUID) async {
-        guard let date, case .saved(let url) = outcome else { return }
-        update(id) { $0.progress = 1; $0.phase = "Setting date…" }
-        _ = await FileActions.applyMetadata(date: date, location: nil, removeLocation: false, to: url)
-        try? FileManager.default.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: url.path)
-    }
-
     lazy var webView: WKWebView = {
         let cfg = WKWebViewConfiguration()
         cfg.allowsInlineMediaPlayback = true
@@ -453,7 +447,8 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
             func run() async -> WebVideoDownloader.Outcome {
                 await WebVideoDownloader.download(
                     urlString: urlString, pageURL: pageURL, cookieHeader: cookie, into: folder,
-                    suggestedName: sName, authHeader: self.authHeader(forURLString: urlString)) { p in
+                    suggestedName: sName, authHeader: self.authHeader(forURLString: urlString),
+                    captureDate: pageDate) { p in
                         Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
                     }
             }
@@ -462,7 +457,6 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
                 self.update(id) { $0.phase = "Signing in…" }
                 outcome = await run()
             }
-            await self.applyPageDate(pageDate, to: outcome, id: id)
             self.finish(id, outcome)
             if let done = self.downloads.first(where: { $0.id == id }) { onComplete(done) }
         }
@@ -492,7 +486,8 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
             func run() async -> WebVideoDownloader.Outcome {
                 await WebVideoDownloader.downloadFile(
                     urlString: urlString, pageURL: pageURL, cookieHeader: cookie,
-                    authHeader: self.authHeader(forURLString: urlString), into: folder, suggestedName: fname) { p in
+                    authHeader: self.authHeader(forURLString: urlString), into: folder, suggestedName: fname,
+                    captureDate: pageDate) { p in
                         Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
                     }
             }
@@ -501,7 +496,6 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
                 self.update(id) { $0.phase = "Signing in…" }
                 outcome = await run()
             }
-            await self.applyPageDate(pageDate, to: outcome, id: id)
             self.finish(id, outcome)
             if let done = self.downloads.first(where: { $0.id == id }) { onComplete(done) }
         }
@@ -650,6 +644,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     @objc private func handleLongPress(_ g: UILongPressGestureRecognizer) {
         guard g.state == .began else { return }
+        haptic.prepare()                     // warm the engine while the JS hit-test round-trips
         let p = g.location(in: webView)
         let js = "window.__pbHitAt ? window.__pbHitAt(\(Int(p.x)),\(Int(p.y))) : null"
         webView.evaluateJavaScript(js) { [weak self] result, _ in
@@ -676,13 +671,13 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
             // A video under the finger (or the page's known video) takes priority.
             let effectiveSrc = src ?? self.playingSrc
             if let best = Self.pickBest(src: effectiveSrc, media: media) {
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                self.haptic.notificationOccurred(.success)
                 self.onVideoLongPress?(FoundVideo(url: best, pageURL: self.currentURLString))
                 return
             }
             // Otherwise, offer to download a file the long-pressed link points to.
             if let href = linkHref, href.hasPrefix("http"), linkForced || Self.looksDownloadable(href) {
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                self.haptic.notificationOccurred(.success)
                 self.onFileDownload?(PendingFile(url: href, pageURL: self.currentURLString, filename: linkName))
             }
           }

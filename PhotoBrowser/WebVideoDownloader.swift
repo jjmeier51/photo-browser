@@ -1,5 +1,6 @@
 import Foundation
 import ImageIO
+import AVFoundation
 
 /// Downloads a video discovered in the in-app web browser (`WebBrowserView`) to a folder.
 ///
@@ -40,15 +41,25 @@ enum WebVideoDownloader {
     /// the Referer; `cookieHeader` is the browser's cookies for the media host.
     nonisolated static func download(urlString: String, pageURL: String, cookieHeader: String,
                                      into folder: URL, suggestedName: String?, authHeader: String? = nil,
+                                     captureDate: Date? = nil,
                                      progress: @escaping @Sendable (Progress) -> Void) async -> Outcome {
         guard let url = URL(string: urlString) else { return .failed("That video URL couldn’t be read.") }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let outcome: Outcome
         if isHLS(url) {
-            return await downloadHLS(url, pageURL: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
-                                     into: folder, suggestedName: suggestedName, progress: progress)
+            outcome = await downloadHLS(url, pageURL: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
+                                        into: folder, suggestedName: suggestedName, progress: progress)
+        } else {
+            outcome = await downloadDirect(url, pageURL: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
+                                           into: folder, suggestedName: suggestedName, progress: progress)
         }
-        return await downloadDirect(url, pageURL: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
-                                    into: folder, suggestedName: suggestedName, progress: progress)
+        // Stamp the page-provided capture date off the main actor (a video re-mux / image rewrite
+        // here would freeze the UI if it ran on the main thread).
+        if case .saved(let dest) = outcome, let captureDate {
+            progress(Progress(fraction: 1, phase: "Setting date…"))
+            await stampCaptureDate(captureDate, to: dest)
+        }
+        return outcome
     }
 
     nonisolated static func isHLS(_ url: URL) -> Bool {
@@ -98,6 +109,7 @@ enum WebVideoDownloader {
     /// members-only downloads work the same way the page did.
     nonisolated static func downloadFile(urlString: String, pageURL: String, cookieHeader: String,
                                          authHeader: String? = nil, into folder: URL, suggestedName: String?,
+                                         captureDate: Date? = nil,
                                          progress: @escaping @Sendable (Progress) -> Void) async -> Outcome {
         guard let url = URL(string: urlString) else { return .failed("That link couldn’t be read.") }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -122,10 +134,15 @@ enum WebVideoDownloader {
             try? FileManager.default.removeItem(at: tmp)
             return .failed("Couldn’t save to the folder.")
         }
-        // The bytes are copied verbatim, so any embedded EXIF/metadata is already intact; also set
-        // the file's own date from the image's EXIF capture date (falling back to now) so the app's
-        // Age / date features are correct rather than showing the download time.
-        stampFromMetadata(dest)
+        // The bytes are copied verbatim, so any embedded EXIF/metadata is already intact. If the page
+        // gave us a capture date, write that (real EXIF for images); otherwise set the file's own date
+        // from its EXIF so Age/date are correct rather than showing the download time.
+        if let captureDate {
+            progress(Progress(fraction: 1, phase: "Setting date…"))
+            await stampCaptureDate(captureDate, to: dest)
+        } else {
+            stampFromMetadata(dest)
+        }
         progress(Progress(fraction: 1, phase: "Saved"))
         return .saved(dest)
     }
@@ -436,6 +453,67 @@ enum WebVideoDownloader {
     nonisolated private static func stampFromMetadata(_ url: URL) {
         let date = exifCaptureDate(url) ?? Date()
         try? FileManager.default.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: url.path)
+    }
+
+    /// Write a known capture `date` into a saved download — real EXIF for images, a lossless
+    /// passthrough metadata re-mux for videos — plus the filesystem creation/modification date.
+    /// All off the main actor (this whole type is `nonisolated`).
+    nonisolated private static func stampCaptureDate(_ date: Date, to url: URL) async {
+        switch classify(url: url, isDirectory: false) {
+        case .image: writeExifDate(date, to: url)
+        case .video: await writeVideoDate(date, to: url)
+        default:     break
+        }
+        try? FileManager.default.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: url.path)
+    }
+
+    /// Lossless EXIF rewrite: the encoded image is copied, only the date fields change.
+    nonisolated private static func writeExifDate(_ date: Date, to url: URL) {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil), let type = CGImageSourceGetType(src) else { return }
+        var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        let f = DateFormatter(); f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = .current
+        let stamp = f.string(from: date)
+        var exif = (props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
+        exif[kCGImagePropertyExifDateTimeOriginal] = stamp
+        exif[kCGImagePropertyExifDateTimeDigitized] = stamp
+        props[kCGImagePropertyExifDictionary] = exif
+        var tiff = (props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
+        tiff[kCGImagePropertyTIFFDateTime] = stamp
+        props[kCGImagePropertyTIFFDictionary] = tiff
+        let tmp = url.deletingLastPathComponent()
+            .appendingPathComponent(".pbtmp_" + UUID().uuidString).appendingPathExtension(url.pathExtension)
+        guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL, type, 1, nil) else { return }
+        CGImageDestinationAddImageFromSource(dest, src, 0, props as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { try? FileManager.default.removeItem(at: tmp); return }
+        _ = try? FileManager.default.replaceItemAt(url, withItemAt: tmp)
+    }
+
+    /// Passthrough export (no re-encode) that writes the creation date into a video's metadata, then
+    /// swaps it in — the app reads a video's date from embedded metadata, not the file date.
+    nonisolated private static func writeVideoDate(_ date: Date, to url: URL) async {
+        let asset = AVURLAsset(url: url)
+        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else { return }
+        var meta = ((try? await asset.load(.metadata)) ?? []).filter { item in
+            item.commonKey != .commonKeyCreationDate
+                && item.identifier != .quickTimeMetadataCreationDate
+                && item.identifier != .commonIdentifierCreationDate
+        }
+        let iso = ISO8601DateFormatter().string(from: date)
+        for id in [AVMetadataIdentifier.commonIdentifierCreationDate, .quickTimeMetadataCreationDate] {
+            let item = AVMutableMetadataItem(); item.identifier = id; item.value = iso as NSString; meta.append(item)
+        }
+        export.metadata = meta
+        let ext = url.pathExtension.lowercased()
+        let fileType: AVFileType = ext == "mp4" ? .mp4 : (ext == "m4v" ? .m4v : .mov)
+        let tmp = url.deletingLastPathComponent()
+            .appendingPathComponent(".pbtmp_" + UUID().uuidString).appendingPathExtension(ext.isEmpty ? "mov" : ext)
+        export.outputURL = tmp
+        export.outputFileType = fileType
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            export.exportAsynchronously { cont.resume() }
+        }
+        guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return }
+        _ = try? FileManager.default.replaceItemAt(url, withItemAt: tmp)
     }
 
     nonisolated private static func exifCaptureDate(_ url: URL) -> Date? {

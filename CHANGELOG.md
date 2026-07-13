@@ -30,7 +30,9 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 - **Capture date from the page HTML** — when a download's own file metadata has no capture date and
   the page prints one (e.g. hotwiferio's `<div class="cell update_date"> 06/30/2003 </div>`), the
   browser reads that date and stamps the saved media with it — real EXIF for photos, a lossless
-  metadata re-mux for videos, plus the file date — so it sorts and ages by the right day.
+  metadata re-mux for videos, plus the file date — so it sorts and ages by the right day. The
+  stamping runs off the main thread, so it no longer briefly freezes the UI when a download
+  finishes; the long-press haptic is also pre-warmed to avoid a hitch.
 - **Web browser: video playback is off by default, with a toolbar toggle** — a new ▶ button in the
   top-right turns video playback on/off. Off by default so a page's video can't autoplay or expand
   over what you're trying to download; tap it to watch. `WebController.setVideoPlayback`.
