@@ -34,6 +34,10 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   and writes it as the media's caption (IPTC CaptionAbstract for images, the description metadata for
   videos, and the app's own caption). The stamping runs off the main thread, so it no longer briefly
   freezes the UI when a download finishes; the long-press haptic is also pre-warmed to avoid a hitch.
+- **Faster top-right "…" menu** — it was building all ~45 items eagerly on every open (a 1–2s stall);
+  the many web/service downloaders now live in a "Download from the Web…" submenu and the index/check
+  tools in a "Maintenance…" submenu, which SwiftUI builds lazily only when opened — so the menu opens
+  instantly. Same actions, one tap deeper.
 - **Unzip hardened for external drives** — extraction now claims security-scoped access to the
   archive, reads it without fragile memory-mapping, uses the streaming inflate path (more robust than
   the one-shot buffer, which could return bad data) with output-size validation, and understands
