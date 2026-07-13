@@ -71,7 +71,7 @@ enum FileActions {
         guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL, type, 1, nil) else { return false }
         CGImageDestinationAddImageFromSource(dest, src, 0, props as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { try? FileManager.default.removeItem(at: tmp); return false }
-        do { _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp); return true }
+        do { _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp); DriveWriter.fullSyncFileAndParent(url); return true }
         catch { try? FileManager.default.removeItem(at: tmp); return false }
     }
 
@@ -120,7 +120,7 @@ enum FileActions {
             export.exportAsynchronously { cont.resume() }
         }
         guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return false }
-        do { _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp); return true }
+        do { _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp); DriveWriter.fullSyncFileAndParent(url); return true }
         catch { try? FileManager.default.removeItem(at: tmp); return false }
     }
 
@@ -138,7 +138,7 @@ enum FileActions {
             let ext = e.url.pathExtension
             let name = ext.isEmpty ? "\(base) copy" : "\(base) copy.\(ext)"
             let dest = uniqueDestination(for: name, in: folder)
-            if (try? FileManager.default.copyItem(at: e.url, to: dest)) != nil { count += 1 }
+            if (try? FileManager.default.copyItem(at: e.url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); count += 1 }
         }
         return count
     }
@@ -204,7 +204,7 @@ enum FileActions {
                     outcome.skipped.append(name); continue
                 }
                 let dest = uniqueDest(name, in: folder)
-                if (try? fm.copyItem(at: url, to: dest)) != nil { outcome.copied.append((from: url, to: dest)) }
+                if (try? fm.copyItem(at: url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); outcome.copied.append((from: url, to: dest)) }
                 else { outcome.skipped.append(name) }
             }
             return outcome
@@ -213,8 +213,8 @@ enum FileActions {
 
     private nonisolated static func moveOne(_ url: URL, to dest: URL) -> Bool {
         let fm = FileManager.default
-        if (try? fm.moveItem(at: url, to: dest)) != nil { return true }
-        if (try? fm.copyItem(at: url, to: dest)) != nil { try? fm.removeItem(at: url); return true }
+        if (try? fm.moveItem(at: url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); return true }
+        if (try? fm.copyItem(at: url, to: dest)) != nil { try? fm.removeItem(at: url); DriveWriter.fullSyncFileAndParent(dest); return true }
         return false
     }
 
@@ -268,8 +268,8 @@ enum FileActions {
     /// Moves one item, falling back to copy-then-delete across volumes.
     private static func moveItem(_ url: URL, to dest: URL) -> Bool {
         let fm = FileManager.default
-        if (try? fm.moveItem(at: url, to: dest)) != nil { return true }
-        if (try? fm.copyItem(at: url, to: dest)) != nil { try? fm.removeItem(at: url); return true }
+        if (try? fm.moveItem(at: url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); return true }
+        if (try? fm.copyItem(at: url, to: dest)) != nil { try? fm.removeItem(at: url); DriveWriter.fullSyncFileAndParent(dest); return true }
         return false
     }
 
@@ -282,7 +282,7 @@ enum FileActions {
         var copied: [(from: URL, to: URL)] = []
         for url in urls {
             let dest = uniqueDestination(for: url.lastPathComponent, in: folder)
-            if (try? FileManager.default.copyItem(at: url, to: dest)) != nil { copied.append((url, dest)) }
+            if (try? FileManager.default.copyItem(at: url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); copied.append((url, dest)) }
         }
         return copied
     }
@@ -363,6 +363,7 @@ enum FileActions {
                         if move { try fm.moveItem(at: file, to: target) }
                         else { try fm.copyItem(at: file, to: target) }
                         await preserveCaptureDate(target)   // keep capture date, not the copy time
+                        DriveWriter.fullSyncFileAndParent(target)   // durable per file so the transfer survives an unplug
                         return (true, file.lastPathComponent)
                     } catch { return (false, file.lastPathComponent) }
                 }
@@ -723,6 +724,7 @@ enum FileActions {
             if fm.fileExists(atPath: final.path) { try fm.removeItem(at: final) }   // overwrite source/target
             try fm.moveItem(at: tmp, to: final)
             restoreFileDates(originalDates, to: final)   // keep the original capture date, not today
+            DriveWriter.fullSyncFileAndParent(final)
             return true
         } catch { try? fm.removeItem(at: tmp); return false }
     }
@@ -749,10 +751,11 @@ enum FileActions {
 
     private nonisolated static func replaceItem(_ tmp: URL, onto dest: URL) -> Bool {
         let fm = FileManager.default
-        if (try? fm.replaceItemAt(dest, withItemAt: tmp)) != nil { return true }
+        if (try? fm.replaceItemAt(dest, withItemAt: tmp)) != nil { DriveWriter.fullSyncFileAndParent(dest); return true }
         do {
             if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
             try fm.moveItem(at: tmp, to: dest)
+            DriveWriter.fullSyncFileAndParent(dest)
             return true
         } catch { try? fm.removeItem(at: tmp); return false }
     }

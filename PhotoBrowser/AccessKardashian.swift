@@ -754,7 +754,7 @@ enum AccessKardashian {
             let needCoord: Coord? = have.hasGPS ? nil : coord
             if needDate != nil || needCoord != nil,
                writeImage(src: src, type: type, to: dest, date: needDate, coord: needCoord) {
-                setFileDate(dest, effectiveDate); return nil
+                setFileDate(dest, effectiveDate); DriveWriter.fullSyncFileAndParent(dest); return nil
             }
         }
         // Nothing to embed (or embedding failed) — write the bytes as-is. This raw
@@ -762,6 +762,7 @@ enum AccessKardashian {
         do { try data.write(to: dest, options: .atomic) }
         catch { return error.localizedDescription }
         setFileDate(dest, effectiveDate)
+        DriveWriter.fullSyncFileAndParent(dest)
         return nil
     }
 

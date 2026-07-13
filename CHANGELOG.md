@@ -4,6 +4,24 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-13
 
+- **exFAT corruption fix — durable writes to the external drive.** The SSD was getting the classic
+  "clusters marked used but not referenced" corruption (leaked clusters) roughly daily, needing a Mac
+  repair. Root cause: files were written to the drive but their metadata wasn't durably flushed
+  before the drive was unplugged or the app was quit mid-download — and Apple's plain `fsync` only
+  pushes data to the drive's *volatile cache*, not the physical media. Two changes:
+  - `DriveWriter` now uses **`F_FULLFSYNC`** (falling back to `fsync`), which forces the drive to
+    commit its cache to stable storage — the only flush that actually protects a journal-less exFAT
+    volume from an interrupted write. Every download that already routed through `DriveWriter.commit`
+    (Instagram, OnlyFans, VSCO, Bunkr, Link, the web browser, …) gets this for free.
+  - Every remaining write path that placed files on the drive directly now flushes the file **and**
+    its directory to media right after writing: MEGA (was writing large files straight to the drive
+    with no flush), in-place photo/video edits, copy / duplicate / move, the metadata editor,
+    cross-drive transfer, unzip, zip creation, and the Facebook / TikTok-poster / Google Drive /
+    YouTube / accessKardashian / taylorpictures downloaders.
+  Net effect: after any save returns, that file is durably on the drive, so unplugging or quitting
+  can no longer leak its clusters. (Ejecting via "Prepare Drive for Removal" is still safest for a
+  deliberate unplug.)
+
 - **New: in-app web browser with long-press-to-download video** (root "…" menu → "Browse the
   Web & Download Video…"), modeled on Aloha Browser's core feature. Browse any site; an injected
   script watches page traffic for media (direct `.mp4`/`.m4v`/`.mov`/`.webm` and `.m3u8` HLS

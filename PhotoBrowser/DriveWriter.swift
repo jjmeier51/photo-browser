@@ -96,13 +96,31 @@ actor DriveWriter {
         }
     }
 
-    /// Best-effort `fsync` of a file or directory. Failure is non-fatal — some
+    /// Best-effort full flush of a file or directory. Failure is non-fatal — some
     /// file-provider volumes don't permit opening a directory fd; the serialization
     /// alone still prevents overlapping directory writes.
-    private func flush(_ url: URL) {
+    private func flush(_ url: URL) { Self.fullSync(url) }
+
+    /// Force a file (or directory) all the way out to the physical media.
+    ///
+    /// This uses `F_FULLFSYNC`, **not** plain `fsync`: on Apple platforms `fsync` only pushes data
+    /// to the drive's own write cache and returns — the drive may still hold it in volatile RAM. For
+    /// an external exFAT SSD with no journal, that cache is exactly where "clusters marked used but
+    /// not referenced" corruption comes from when the drive is unplugged. `F_FULLFSYNC` asks the
+    /// drive to commit its cache to stable storage, closing that window. Falls back to `fsync` on the
+    /// rare volume that rejects it. `nonisolated static` so any write path (in-place edits, unzip,
+    /// service downloads) can flush without hopping onto the actor.
+    nonisolated static func fullSync(_ url: URL) {
         let fd = open(url.path, O_RDONLY)
         guard fd >= 0 else { return }
-        fsync(fd)
+        if fcntl(fd, F_FULLFSYNC) == -1 { fsync(fd) }
         close(fd)
+    }
+
+    /// Flush a just-written file **and** the directory entry that names it — the pair that must
+    /// agree for exFAT to stay consistent. Use from non-`commit` write paths (edits, unzip, etc.).
+    nonisolated static func fullSyncFileAndParent(_ url: URL) {
+        fullSync(url)
+        fullSync(url.deletingLastPathComponent())
     }
 }

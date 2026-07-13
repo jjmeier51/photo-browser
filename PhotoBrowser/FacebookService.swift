@@ -593,6 +593,7 @@ enum FacebookService {
         guard (try? data.write(to: dest, options: .atomic)) != nil else { return (false, item.isVideo, item.id, nil, "", poster, nil) }
         if !item.isVideo { writeImageMeta(date: item.date, caption: item.caption, poster: poster, to: dest) }
         setFileDate(dest, item.date)
+        DriveWriter.fullSyncFileAndParent(dest)   // exFAT: force the file+dir to media so an unplug can't leak clusters
         return (true, item.isVideo, item.id, dest.path, item.caption, poster, item.date)
     }
 

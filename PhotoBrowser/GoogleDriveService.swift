@@ -133,6 +133,7 @@ enum GoogleDrive {
         try? fm.removeItem(at: dest)
         guard (try? fm.moveItem(at: tmp, to: dest)) != nil else { try? fm.removeItem(at: tmp); return false }
         if let modified { try? fm.setAttributes([.modificationDate: modified], ofItemAtPath: dest.path) }
+        DriveWriter.fullSyncFileAndParent(dest)
         return true
     }
 
@@ -353,6 +354,7 @@ enum GoogleDrive {
         let fm = FileManager.default
         let dest = uniqueChild(named: filename(from: http) ?? "drive-\(id)", in: folder)
         guard (try? fm.moveItem(at: tmp, to: dest)) != nil else { try? fm.removeItem(at: tmp); return false }
+        DriveWriter.fullSyncFileAndParent(dest)
         return true
     }
 

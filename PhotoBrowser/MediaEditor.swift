@@ -529,10 +529,14 @@ enum MediaEditing {
     /// location. Falls back to remove-then-move if the volume rejects replace.
     nonisolated static func replaceInPlace(original: URL, temp: URL) -> Bool {
         let fm = FileManager.default
-        if (try? fm.replaceItemAt(original, withItemAt: temp)) != nil { return true }
+        if (try? fm.replaceItemAt(original, withItemAt: temp)) != nil {
+            DriveWriter.fullSyncFileAndParent(original)   // durably commit the swap so a later unplug can't leak clusters
+            return true
+        }
         do {
             if fm.fileExists(atPath: original.path) { try fm.removeItem(at: original) }
             try fm.moveItem(at: temp, to: original)
+            DriveWriter.fullSyncFileAndParent(original)
             return true
         } catch {
             try? fm.removeItem(at: temp)

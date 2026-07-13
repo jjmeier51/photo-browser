@@ -206,6 +206,7 @@ enum YouTubeService {
         }
         guard FileManager.default.fileExists(atPath: dest.path) else { return nil }
         try? FileManager.default.setAttributes([.creationDate: r.date, .modificationDate: r.date], ofItemAtPath: dest.path)
+        DriveWriter.fullSyncFileAndParent(dest)
         return dest
     }
 

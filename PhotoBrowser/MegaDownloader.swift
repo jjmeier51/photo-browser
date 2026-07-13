@@ -281,15 +281,27 @@ enum MegaDownloader {
         while iv.count < 16 { iv.append(0) }
         let baseIV = Array(iv.prefix(16))
 
-        // Big files: download in parallel byte-range chunks (CTR is seekable, so each
-        // chunk decrypts on its own) — this is what makes a single large video fast,
-        // like the MEGA app. Small files: one request, then stream-decrypt to disk.
-        if size > chunkThreshold {
-            try await downloadChunked(url: url, size: size, key: node.aesKey, baseIV: baseIV, to: dest)
-        } else {
-            let (encrypted, _) = try await URLSession.shared.download(from: url)
-            defer { try? FileManager.default.removeItem(at: encrypted) }
-            try MegaCrypto.decryptCTR(input: encrypted, output: dest, key: node.aesKey, iv: baseIV)
+        // Decrypt into a sibling temp on the same volume, then hand the final placement to
+        // DriveWriter so the rename is serialized against every other download and F_FULLFSYNC'd.
+        // Writing straight to `dest` (as before) left a large file's clusters allocated but its
+        // directory entry unflushed — exactly the "used but not referenced" exFAT corruption that
+        // showed up after an unplug mid-download.
+        let tmp = dest.deletingLastPathComponent().appendingPathComponent(".pbtmp_" + UUID().uuidString)
+        do {
+            // Big files: download in parallel byte-range chunks (CTR is seekable, so each
+            // chunk decrypts on its own) — this is what makes a single large video fast,
+            // like the MEGA app. Small files: one request, then stream-decrypt to disk.
+            if size > chunkThreshold {
+                try await downloadChunked(url: url, size: size, key: node.aesKey, baseIV: baseIV, to: tmp)
+            } else {
+                let (encrypted, _) = try await URLSession.shared.download(from: url)
+                defer { try? FileManager.default.removeItem(at: encrypted) }
+                try MegaCrypto.decryptCTR(input: encrypted, output: tmp, key: node.aesKey, iv: baseIV)
+            }
+            try await DriveWriter.shared.commit(tmp, to: dest)
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            throw error
         }
     }
 

@@ -497,7 +497,7 @@ enum WebVideoDownloader {
         guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL, type, 1, nil) else { return }
         CGImageDestinationAddImageFromSource(dest, src, 0, props as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { try? FileManager.default.removeItem(at: tmp); return }
-        _ = try? FileManager.default.replaceItemAt(url, withItemAt: tmp)
+        if (try? FileManager.default.replaceItemAt(url, withItemAt: tmp)) != nil { DriveWriter.fullSyncFileAndParent(url) }
     }
 
     /// Passthrough export (no re-encode) that writes the creation date and/or description into a
@@ -537,7 +537,7 @@ enum WebVideoDownloader {
             export.exportAsynchronously { cont.resume() }
         }
         guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return }
-        _ = try? FileManager.default.replaceItemAt(url, withItemAt: tmp)
+        if (try? FileManager.default.replaceItemAt(url, withItemAt: tmp)) != nil { DriveWriter.fullSyncFileAndParent(url) }
     }
 
     nonisolated private static func exifCaptureDate(_ url: URL) -> Date? {

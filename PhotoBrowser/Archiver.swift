@@ -40,6 +40,7 @@ enum Archiver {
             do {
                 if FileManager.default.fileExists(atPath: dest.path) { try FileManager.default.removeItem(at: dest) }
                 try FileManager.default.copyItem(at: tmpZip, to: dest)
+                DriveWriter.fullSyncFileAndParent(dest)
             } catch { thrown = error }
         }
         if let e = coordErr { throw e }
@@ -189,6 +190,7 @@ enum Archiver {
         try FileManager.default.createDirectory(at: outURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try raw.write(to: outURL, options: .atomic)                     // verbatim bytes → EXIF intact
         applyDate(e, to: outURL)
+        DriveWriter.fullSyncFileAndParent(outURL)                       // durable per file — no leaked clusters on unplug
     }
 
     // MARK: - Inflate (raw DEFLATE via Compression)

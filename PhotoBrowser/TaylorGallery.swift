@@ -156,15 +156,16 @@ enum TaylorGallery {
                 tiff[kCGImagePropertyTIFFDateTime] = s; props[kCGImagePropertyTIFFDictionary] = tiff
                 if let d = CGImageDestinationCreateWithURL(dest as CFURL, type, 1, nil) {
                     CGImageDestinationAddImageFromSource(d, src, 0, props as CFDictionary)
-                    if CGImageDestinationFinalize(d) { setFileDate(dest, date); return true }
+                    if CGImageDestinationFinalize(d) { setFileDate(dest, date); DriveWriter.fullSyncFileAndParent(dest); return true }
                 }
             }
             // Already had a date (keep its bytes) or embedding failed — fall through.
-            if (try? data.write(to: dest, options: .atomic)) != nil { setFileDate(dest, existing ?? date); return true }
+            if (try? data.write(to: dest, options: .atomic)) != nil { setFileDate(dest, existing ?? date); DriveWriter.fullSyncFileAndParent(dest); return true }
             return false
         }
         guard (try? data.write(to: dest, options: .atomic)) != nil else { return false }
         setFileDate(dest, date)
+        DriveWriter.fullSyncFileAndParent(dest)
         return true
     }
 
