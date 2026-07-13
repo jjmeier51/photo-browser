@@ -32,6 +32,7 @@ struct FolderView: View {
     @State private var viewerPresentation: ViewerPresentation?
 
     @State private var previewItem: PreviewItem?
+    @State private var pendingArchive: Entry?      // a tapped .zip → offer Extract / Quick Look
     @State private var confirmDelete = false
     @State private var showExporter = false
     @State private var exportURLs: [URL] = []
@@ -843,6 +844,13 @@ struct FolderView: View {
                 Button("Rename") { performRename() }
                 Button("Cancel", role: .cancel) { renameTarget = nil }
             }
+            .confirmationDialog("“\(pendingArchive?.name ?? "")”",
+                                isPresented: Binding(get: { pendingArchive != nil }, set: { if !$0 { pendingArchive = nil } }),
+                                titleVisibility: .visible, presenting: pendingArchive) { archive in
+                Button("Extract Here") { extractZip(archive) }
+                Button("Quick Look") { previewItem = PreviewItem(url: archive.url) }
+                Button("Cancel", role: .cancel) {}
+            } message: { _ in Text("Unzip this archive into a new folder here?") }
         )
         let g3 = AnyView(g2
             .sheet(item: $infoEntry) { e in InfoPanel(entry: e) }
@@ -2155,6 +2163,8 @@ struct FolderView: View {
             let media = mediaItems
             viewerPresentation = ViewerPresentation(items: media,
                                                     startIndex: media.firstIndex(of: entry) ?? 0)
+        } else if entry.url.pathExtension.lowercased() == "zip" {
+            pendingArchive = entry                      // a zip → offer to extract (or preview)
         } else {
             previewItem = PreviewItem(url: entry.url)   // PDFs and other files open in QuickLook
         }

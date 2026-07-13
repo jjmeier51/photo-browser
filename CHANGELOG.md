@@ -31,8 +31,9 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   top-right turns video playback on/off. Off by default so a page's video can't autoplay or expand
   over what you're trying to download; tap it to watch. `WebController.setVideoPlayback`.
 - **New: zip / unzip in the app** — long-press any file or folder (or select several) → "Compress
-  to Zip" to create a `.zip` in the current folder; long-press a `.zip` → "Extract Here" to unzip
-  into a new subfolder. Contents are copied byte-for-byte so **all EXIF/metadata is preserved**, and
+  to Zip" to create a `.zip` in the current folder. To unzip, **just tap a `.zip`** (or long-press it)
+  → "Extract Here" unzips into a new subfolder. Contents are copied byte-for-byte so **all
+  EXIF/metadata is preserved**, and
   extracted files get their archived modification dates back. Pure Apple frameworks —
   `NSFileCoordinator` for zipping, a hand-rolled ZIP reader + the `Compression` framework for
   unzipping (no third-party library). `Archiver.swift`.
