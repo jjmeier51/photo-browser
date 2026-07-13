@@ -1,6 +1,7 @@
 import SwiftUI
 import WebKit
 import UIKit
+import Combine
 
 /// An in-app web browser with **long-press-to-download video**, like Aloha Browser's core
 /// feature. Browse any site; when a video is playing, long-press it and the app offers to save
