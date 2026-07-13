@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 
 /// Downloads a video discovered in the in-app web browser (`WebBrowserView`) to a folder.
 ///
@@ -18,7 +19,9 @@ import Foundation
 /// surfaced as a note rather than a crash.
 enum WebVideoDownloader {
     struct Progress: Sendable { var fraction: Double; var phase: String }
-    enum Outcome: Sendable { case saved(URL); case failed(String) }
+    /// `authRequired` means the server returned 401 and we sent no credentials — the caller should
+    /// prompt for a username/password and retry. The associated value is the host to sign in to.
+    enum Outcome: Sendable { case saved(URL); case failed(String); case authRequired(String) }
 
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
@@ -67,8 +70,9 @@ enum WebVideoDownloader {
         }
         if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 400 {
             try? FileManager.default.removeItem(at: tmp)
+            if code == 401, authHeader == nil { return .authRequired(url.host ?? "") }
             if code == 401 || code == 403 {
-                return .failed("The server refused the download (HTTP \(code)). If this is a members-only site, sign in through the browser first — the password prompt lets the download reuse your login.")
+                return .failed("The server refused the download (HTTP \(code)). The saved login may be wrong or expired — sign in through the browser again.")
             }
             return .failed("The server refused the download (HTTP \(code)).")
         }
@@ -105,8 +109,9 @@ enum WebVideoDownloader {
         }
         if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 400 {
             try? FileManager.default.removeItem(at: tmp)
+            if code == 401, authHeader == nil { return .authRequired(url.host ?? "") }
             if code == 401 || code == 403 {
-                return .failed("The server refused the download (HTTP \(code)). If this is a members-only site, sign in through the browser first — the password prompt lets the download reuse your login.")
+                return .failed("The server refused the download (HTTP \(code)). The saved login may be wrong or expired — sign in through the browser again.")
             }
             return .failed("The server refused the download (HTTP \(code)).")
         }
@@ -117,7 +122,10 @@ enum WebVideoDownloader {
             try? FileManager.default.removeItem(at: tmp)
             return .failed("Couldn’t save to the folder.")
         }
-        stampNow(dest)
+        // The bytes are copied verbatim, so any embedded EXIF/metadata is already intact; also set
+        // the file's own date from the image's EXIF capture date (falling back to now) so the app's
+        // Age / date features are correct rather than showing the download time.
+        stampFromMetadata(dest)
         progress(Progress(fraction: 1, phase: "Saved"))
         return .saved(dest)
     }
@@ -421,6 +429,27 @@ enum WebVideoDownloader {
     nonisolated private static func stampNow(_ url: URL) {
         let now = Date()
         try? FileManager.default.setAttributes([.creationDate: now, .modificationDate: now], ofItemAtPath: url.path)
+    }
+
+    /// Set the file's creation/modification date from its embedded EXIF capture date when it's an
+    /// image that has one; otherwise stamp "now". The EXIF bytes themselves are never touched.
+    nonisolated private static func stampFromMetadata(_ url: URL) {
+        let date = exifCaptureDate(url) ?? Date()
+        try? FileManager.default.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: url.path)
+    }
+
+    nonisolated private static func exifCaptureDate(_ url: URL) -> Date? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return nil }
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        guard let s = (exif?[kCGImagePropertyExifDateTimeOriginal] as? String)
+                ?? (exif?[kCGImagePropertyExifDateTimeDigitized] as? String)
+                ?? (tiff?[kCGImagePropertyTIFFDateTime] as? String) else { return nil }
+        let f = DateFormatter()
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f.date(from: s)
     }
 
     nonisolated private static func hexData(_ hex: String) -> Data? {

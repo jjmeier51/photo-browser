@@ -622,6 +622,9 @@ struct FolderView: View {
                           systemImage: library.isAlbumHighlight(entry.url) ? "circle.badge.minus" : "circle.dashed.inset.filled")
                 }
             }
+            Button { compress([entry]) } label: {
+                Label("Compress to Zip", systemImage: "archivebox")
+            }
         } else {
             if entry.isViewable {
                 Button { infoEntry = entry } label: {
@@ -681,10 +684,17 @@ struct FolderView: View {
                     Label("Export all frames", systemImage: "square.stack.3d.down.right")
                 }
             }
-            if entry.isViewable {
-                Button(role: .destructive) { startSingleDelete(entry) } label: {
-                    Label("Delete", systemImage: "trash")
+            // File utilities for every file, including non-viewable ones (e.g. a downloaded .zip).
+            if entry.url.pathExtension.lowercased() == "zip" {
+                Button { extractZip(entry) } label: {
+                    Label("Extract Here", systemImage: "tray.and.arrow.up")
                 }
+            }
+            Button { compress([entry]) } label: {
+                Label("Compress to Zip", systemImage: "archivebox")
+            }
+            Button(role: .destructive) { startSingleDelete(entry) } label: {
+                Label("Delete", systemImage: "trash")
             }
         }
     }
@@ -1811,6 +1821,73 @@ struct FolderView: View {
         }
     }
 
+    // MARK: - Zip / unzip
+
+    /// Zip the given items into a new `.zip` in the current folder — a single item becomes
+    /// "<name>.zip", several become "Archive.zip". Contents are copied byte-for-byte, so any
+    /// embedded EXIF/metadata is preserved exactly. The originals are left untouched.
+    private func compress(_ entries: [Entry]) {
+        let items = entries.map(\.url)
+        guard !items.isEmpty else { resultMessage = "Select one or more items to compress."; return }
+        selecting = false; selection.removeAll()
+        let folder = url
+        let single = items.count == 1
+        let baseName = single ? items[0].deletingPathExtension().lastPathComponent : "Archive"
+        editLabel = "Compressing…"; editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Compress")
+        Task {
+            let outcome: (url: URL?, error: String?) = await Task.detached { () -> (URL?, String?) in
+                let fm = FileManager.default
+                var d = folder.appendingPathComponent("\(baseName).zip")
+                var n = 1
+                while fm.fileExists(atPath: d.path) { d = folder.appendingPathComponent("\(baseName) \(n).zip"); n += 1 }
+                do {
+                    if single { try Archiver.zip(items[0], to: d) }
+                    else { try Archiver.zip(items: items, to: d, stagingName: baseName) }
+                    return (d, nil)
+                } catch { return (nil, error.localizedDescription) }
+            }.value
+            editProgress = 1; editProcessing = false; bg.end()
+            if let dest = outcome.url {
+                resultMessage = "Created “\(dest.lastPathComponent)”."
+                library.contentDidChange(under: folder)
+                await reload()
+            } else {
+                resultMessage = outcome.error ?? "Couldn’t create the zip."
+            }
+        }
+    }
+
+    /// Extract a `.zip` into a new subfolder of the current folder. Files are written verbatim
+    /// (EXIF kept) and each gets its archived modification date back.
+    private func extractZip(_ entry: Entry) {
+        let archive = entry.url
+        let folder = url
+        let destName = archive.deletingPathExtension().lastPathComponent
+        editLabel = "Extracting…"; editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Extract Zip")
+        Task {
+            let outcome: (url: URL?, error: String?) = await Task.detached { () -> (URL?, String?) in
+                let fm = FileManager.default
+                var d = folder.appendingPathComponent(destName, isDirectory: true)
+                var n = 1
+                while fm.fileExists(atPath: d.path) { d = folder.appendingPathComponent("\(destName) \(n)", isDirectory: true); n += 1 }
+                do {
+                    try Archiver.unzip(archive, to: d) { f in Task { @MainActor in editProgress = f } }
+                    return (d, nil)
+                } catch { return (nil, error.localizedDescription) }
+            }.value
+            editProgress = 1; editProcessing = false; bg.end()
+            if let dest = outcome.url {
+                resultMessage = "Extracted to “\(dest.lastPathComponent)”."
+                library.contentDidChange(under: folder)
+                await reload()
+            } else {
+                resultMessage = outcome.error ?? "Couldn’t extract the archive."
+            }
+        }
+    }
+
     // MARK: - Selection action bar
 
     private var selectionBar: some View {
@@ -1848,6 +1925,7 @@ struct FolderView: View {
                     Button { bulkEnhance(to: 1080, label: "1080p") } label: { Label("AI Enhance to 1080p", systemImage: "wand.and.stars") }
                 } label: { Label("Upscale Video", systemImage: "arrow.up.right.video") }
                 Button { duplicateEntries(selectedEntries()) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
+                Button { compress(selectedEntries()) } label: { Label("Compress to Zip", systemImage: "archivebox") }
                 Button { showCopyPicker = true } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
                 if let tsRoot = taylorSwiftRoot {
                     Button { performMove(to: tsRoot) } label: { Label("Move to “Taylor Swift”", systemImage: "music.mic") }

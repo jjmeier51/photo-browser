@@ -21,7 +21,21 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   tab, keeping the server-suggested filename + extension. `WebVideoDownloader.downloadFile`.
 - **Web-browser downloads carry a members-only login** — the username/password entered at a site's
   HTTP Basic-Auth prompt is remembered per host and sent as an `Authorization` header on the
-  download request, so `.htpasswd`-protected videos/files save instead of failing with a 401.
+  download request, so `.htpasswd`-protected videos/files save instead of failing with a 401. If a
+  download still hits a 401 with no stored login (WKWebView can be silently authenticated from a
+  prior session), it now shows a "Sign In to Download" prompt and retries with what you enter.
+- **Downloaded files keep their EXIF** — the browser writes downloaded bytes verbatim (EXIF was
+  never stripped); it now also sets an image's file date from its EXIF capture date so Age/date are
+  right, rather than stamping the download time.
+- **Web browser: video playback is off by default, with a toolbar toggle** — a new ▶ button in the
+  top-right turns video playback on/off. Off by default so a page's video can't autoplay or expand
+  over what you're trying to download; tap it to watch. `WebController.setVideoPlayback`.
+- **New: zip / unzip in the app** — long-press any file or folder (or select several) → "Compress
+  to Zip" to create a `.zip` in the current folder; long-press a `.zip` → "Extract Here" to unzip
+  into a new subfolder. Contents are copied byte-for-byte so **all EXIF/metadata is preserved**, and
+  extracted files get their archived modification dates back. Pure Apple frameworks —
+  `NSFileCoordinator` for zipping, a hand-rolled ZIP reader + the `Compression` framework for
+  unzipping (no third-party library). `Archiver.swift`.
 
 ## 2026-07-10b
 

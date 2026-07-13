@@ -45,6 +45,14 @@ struct WebBrowserView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button { controller.setVideoPlayback(!controller.videoPlaybackEnabled) } label: {
+                        Image(systemName: controller.videoPlaybackEnabled ? "play.circle.fill" : "play.slash.fill")
+                            .foregroundStyle(controller.videoPlaybackEnabled ? Color.green : Color.secondary)
+                    }
+                    .accessibilityLabel(controller.videoPlaybackEnabled ? "Video playback on — tap to disable"
+                                                                        : "Video playback off — tap to watch")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     if controller.hasVideo {
                         Image(systemName: "video.badge.checkmark").foregroundStyle(.green)
                             .accessibilityLabel("A downloadable video is playing")
@@ -119,7 +127,8 @@ struct WebBrowserView: View {
     private var bottomBar: some View {
         VStack(spacing: 4) {
             Text(controller.hasVideo ? "Video detected — long-press it, or tap ⬇︎ to download"
-                                     : "Long-press a video or file link to download • download buttons work too")
+                 : controller.videoPlaybackEnabled ? "Long-press a video or file link to download • download buttons work too"
+                                                    : "Long-press a video or file link to download • tap ▶ to watch video")
                 .font(.caption2).foregroundStyle(controller.hasVideo ? .green : .secondary)
             HStack {
                 Button { controller.goBack() } label: { Image(systemName: "chevron.left") }.disabled(!controller.canGoBack)
@@ -265,6 +274,9 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     @Published var isLoading = false
     @Published var hasVideo = false
     @Published var downloads: [DownloadEntry] = []
+    /// Whether videos are allowed to play. Off by default so a page's video can't autoplay/expand
+    /// and get in the way of long-pressing things to download; the toolbar toggle turns it on.
+    @Published var videoPlaybackEnabled = false
 
     var activeDownloads: Int { downloads.filter { $0.state == .downloading }.count }
 
@@ -289,16 +301,49 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     override init() { super.init() }
 
     /// The `Authorization: Basic …` header for a media host, if the user has signed in there.
+    /// First checks credentials captured from our own Sign-In prompt, then falls back to the shared
+    /// `URLCredentialStorage` — WKWebView can satisfy a Basic-Auth challenge silently (from a prior
+    /// login) without ever calling our prompt, which is why a members video could still 401.
     func authHeader(forURLString urlString: String) -> String? {
-        guard let host = URL(string: urlString)?.host, let c = basicCreds[host],
-              let data = "\(c.user):\(c.pass)".data(using: .utf8) else { return nil }
-        return "Basic " + data.base64EncodedString()
+        guard let host = URL(string: urlString)?.host else { return nil }
+        func basic(_ user: String, _ pass: String) -> String? {
+            ("\(user):\(pass)".data(using: .utf8)).map { "Basic " + $0.base64EncodedString() }
+        }
+        if let c = basicCreds[host] { return basic(c.user, c.pass) }
+        for (space, creds) in URLCredentialStorage.shared.allCredentials where space.host == host {
+            let m = space.authenticationMethod
+            guard m == NSURLAuthenticationMethodHTTPBasic || m == NSURLAuthenticationMethodDefault else { continue }
+            if let cred = creds.values.first(where: { $0.user != nil && $0.password != nil }),
+               let u = cred.user, let p = cred.password { return basic(u, p) }
+        }
+        return nil
+    }
+
+    /// Ask for a username/password for `host` (used when a download hits 401 and we have no stored
+    /// login — WKWebView can be silently authenticated from a prior session so our page prompt never
+    /// fired). Stores what's entered in `basicCreds` and reports whether a username was given.
+    private func promptSignIn(host: String) async -> Bool {
+        await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            let alert = UIAlertController(title: "Sign In to Download",
+                                          message: "“\(host)” needs a username and password to download this.",
+                                          preferredStyle: .alert)
+            alert.addTextField { $0.placeholder = "Username"; $0.autocapitalizationType = .none; $0.autocorrectionType = .no; $0.keyboardType = .emailAddress }
+            alert.addTextField { $0.placeholder = "Password"; $0.isSecureTextEntry = true }
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in cont.resume(returning: false) })
+            alert.addAction(UIAlertAction(title: "Sign In", style: .default) { [weak self] _ in
+                let u = alert.textFields?[0].text ?? "", p = alert.textFields?[1].text ?? ""
+                if !u.isEmpty { self?.basicCreds[host] = (u, p) }
+                cont.resume(returning: !u.isEmpty)
+            })
+            present(alert)
+        }
     }
 
     lazy var webView: WKWebView = {
         let cfg = WKWebViewConfiguration()
         cfg.allowsInlineMediaPlayback = true
-        cfg.mediaTypesRequiringUserActionForPlayback = []     // let videos play so they're detectable
+        cfg.mediaTypesRequiringUserActionForPlayback = .all   // no autoplay; the injected script also
+                                                              // blocks playback until the user opts in
         cfg.websiteDataStore = .default()                     // persistent cookies (logins / hotlink gates)
         let ucc = WKUserContentController()
         ucc.add(WeakScriptHandler(self), name: "pb")          // weak: avoid the config→handler→config retain cycle
@@ -330,6 +375,13 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     func reload() { webView.reload() }
     func stop() { webView.stopLoading() }
 
+    /// Turn video playback on/off. When off, the injected script pauses any playing video and
+    /// rejects `play()`, so nothing expands over the page while you're trying to download.
+    func setVideoPlayback(_ on: Bool) {
+        videoPlaybackEnabled = on
+        webView.evaluateJavaScript("window.__pbSetPlayback && window.__pbSetPlayback(\(on))") { _, _ in }
+    }
+
     /// The best downloadable URL currently known (video src or captured media).
     func bestVideo() -> FoundVideo? {
         guard let url = Self.pickBest(src: playingSrc, media: captured) else { return nil }
@@ -347,21 +399,33 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         downloads.insert(entry, at: 0)
         let id = entry.id
         let urlString = v.url, pageURL = v.pageURL, sName = suggestedName
-        let auth = authHeader(forURLString: urlString)
         Task {
             let cookie = await cookieHeader(forURLString: urlString)
-            let outcome = await WebVideoDownloader.download(
-                urlString: urlString, pageURL: pageURL, cookieHeader: cookie, into: folder,
-                suggestedName: sName, authHeader: auth) { p in
-                    Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
-                }
-            self.update(id) { e in
-                switch outcome {
-                case .saved(let u): e.state = .done; e.progress = 1; e.dest = u; e.phase = "Saved"
-                case .failed(let m): e.state = .failed; e.message = m; e.phase = "Failed"
-                }
+            func run() async -> WebVideoDownloader.Outcome {
+                await WebVideoDownloader.download(
+                    urlString: urlString, pageURL: pageURL, cookieHeader: cookie, into: folder,
+                    suggestedName: sName, authHeader: self.authHeader(forURLString: urlString)) { p in
+                        Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
+                    }
             }
+            var outcome = await run()
+            if case .authRequired(let host) = outcome, await self.promptSignIn(host: host) {
+                self.update(id) { $0.phase = "Signing in…" }
+                outcome = await run()
+            }
+            self.finish(id, outcome)
             if let done = self.downloads.first(where: { $0.id == id }) { onComplete(done) }
+        }
+    }
+
+    /// Map a download outcome onto its Downloads-tab row.
+    private func finish(_ id: UUID, _ outcome: WebVideoDownloader.Outcome) {
+        update(id) { e in
+            switch outcome {
+            case .saved(let u): e.state = .done; e.progress = 1; e.dest = u; e.phase = "Saved"
+            case .failed(let m): e.state = .failed; e.message = m; e.phase = "Failed"
+            case .authRequired: e.state = .failed; e.message = "This download needs a members login."; e.phase = "Failed"
+            }
         }
     }
 
@@ -372,20 +436,21 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         downloads.insert(entry, at: 0)
         let id = entry.id
         let urlString = f.url, pageURL = f.pageURL, fname = f.filename
-        let auth = authHeader(forURLString: urlString)
         Task {
             let cookie = await cookieHeader(forURLString: urlString)
-            let outcome = await WebVideoDownloader.downloadFile(
-                urlString: urlString, pageURL: pageURL, cookieHeader: cookie, authHeader: auth,
-                into: folder, suggestedName: fname) { p in
-                    Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
-                }
-            self.update(id) { e in
-                switch outcome {
-                case .saved(let u): e.state = .done; e.progress = 1; e.dest = u; e.phase = "Saved"
-                case .failed(let m): e.state = .failed; e.message = m; e.phase = "Failed"
-                }
+            func run() async -> WebVideoDownloader.Outcome {
+                await WebVideoDownloader.downloadFile(
+                    urlString: urlString, pageURL: pageURL, cookieHeader: cookie,
+                    authHeader: self.authHeader(forURLString: urlString), into: folder, suggestedName: fname) { p in
+                        Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
+                    }
             }
+            var outcome = await run()
+            if case .authRequired(let host) = outcome, await self.promptSignIn(host: host) {
+                self.update(id) { $0.phase = "Signing in…" }
+                outcome = await run()
+            }
+            self.finish(id, outcome)
             if let done = self.downloads.first(where: { $0.id == id }) { onComplete(done) }
         }
     }
@@ -420,6 +485,11 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         captured.removeAll(); playingSrc = nil; hasVideo = false
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // The detector re-injects with playback off at document start; re-assert the user's choice.
+        setVideoPlayback(videoPlaybackEnabled)
     }
 
     /// Catch file downloads: when a response can't be rendered inline (a `.zip`, an installer, …) or
@@ -658,6 +728,29 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
       document.addEventListener('playing', function(e){
         var v=e.target; if(v && v.tagName==='VIDEO'){ add(v.currentSrc||v.src); post({type:'playing', url: v.currentSrc||v.src||''}); }
       }, true);
+      // Playback gate: off by default so videos can't autoplay/expand while you're downloading.
+      if (window.__pbAllowPlay === undefined) window.__pbAllowPlay = false;
+      try {
+        var proto = HTMLMediaElement.prototype;
+        if (!proto.__pbPatched) {
+          proto.__pbPatched = true;
+          var origPlay = proto.play;
+          proto.play = function(){
+            if (!window.__pbAllowPlay && this.tagName === 'VIDEO'){
+              try{ this.pause(); }catch(e){}
+              return Promise.reject(new DOMException('Playback disabled','AbortError'));
+            }
+            return origPlay.apply(this, arguments);
+          };
+        }
+      } catch(e){}
+      document.addEventListener('play', function(e){
+        var v=e.target; if(v && v.tagName==='VIDEO' && !window.__pbAllowPlay){ try{ v.pause(); }catch(e){} }
+      }, true);
+      window.__pbSetPlayback = function(on){
+        window.__pbAllowPlay = !!on;
+        if(!on){ var vids=document.querySelectorAll('video'); for(var i=0;i<vids.length;i++){ try{ vids[i].pause(); }catch(e){} } }
+      };
       function videoAt(x,y){
         var el = document.elementFromPoint(x,y), v=null, n=el;
         while(n){ if(n.tagName==='VIDEO'){ v=n; break; } n=n.parentElement; }
