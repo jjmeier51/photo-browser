@@ -1665,6 +1665,10 @@ struct FolderView: View {
             if selecting {
                 Button(selection.count == selectableEntries.count ? "None" : "All") { toggleAll() }
             } else {
+                if WebController.shared.hasSession {
+                    Button { showWebBrowser = true } label: { Image(systemName: "safari.fill") }
+                        .accessibilityLabel("Back to Browser")
+                }
                 if !isRoot {
                     Button { library.goHome() } label: { Image(systemName: "house") }
                 }
@@ -1909,6 +1913,22 @@ struct FolderView: View {
                 resultMessage = outcome.error ?? "Couldn’t extract the archive."
             }
         }
+    }
+
+    /// Repair a download that was saved without a file extension (a "data" tile): rename it to the
+    /// extension its bytes actually are, re-key its labels/caption to the new path, and reload so it's
+    /// recognized (a photo becomes viewable, a PDF opens, etc.).
+    private func repairExtension(of entry: Entry, to ext: String) async {
+        let dest = entry.url.deletingPathExtension().appendingPathExtension(ext)
+        guard dest != entry.url, !FileManager.default.fileExists(atPath: dest.path),
+              let newURL = FileActions.rename(entry.url, to: dest.lastPathComponent) else {
+            previewItem = PreviewItem(url: entry.url); return
+        }
+        DriveWriter.fullSyncFileAndParent(newURL)
+        library.itemMoved(from: entry.url, to: newURL)
+        library.contentDidChange(under: url)
+        await reload()
+        resultMessage = "“\(entry.name)” was saved without an extension — renamed to .\(ext) so it opens now."
     }
 
     // MARK: - Selection action bar
@@ -2181,11 +2201,14 @@ struct FolderView: View {
         } else if entry.url.pathExtension.lowercased() == "zip" {
             pendingArchive = entry                      // a zip → offer to extract (or preview)
         } else if entry.kind == .other {
-            // Might be a zip saved without a .zip extension (shows as a "data" tile) — sniff the
-            // magic bytes off-main, then offer to extract; otherwise fall back to Quick Look.
+            // An extension-less "data" tile is usually a download that lost its suffix. Sniff the
+            // real type off-main: a zip → offer to extract; a photo/video/pdf → repair the extension
+            // so it opens; anything else → Quick Look.
             let e = entry
             Task {
-                if await Task.detached(operation: { Archiver.isZip(e.url) }).value { pendingArchive = e }
+                let ext = await Task.detached(operation: { WebVideoDownloader.magicExtension(forFileAt: e.url) }).value
+                if ext == "zip" { pendingArchive = e }
+                else if let ext { await repairExtension(of: e, to: ext) }
                 else { previewItem = PreviewItem(url: e.url) }
             }
         } else {

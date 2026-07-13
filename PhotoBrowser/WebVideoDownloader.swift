@@ -73,10 +73,8 @@ enum WebVideoDownloader {
                                                    authHeader: String?, into folder: URL, suggestedName: String?,
                                                    progress: @escaping @Sendable (Progress) -> Void) async -> Outcome {
         progress(Progress(fraction: 0, phase: "Downloading video…"))
-        let req = request(url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader)
-        // A delegate download gives real byte-progress (unlike `session.download(for:)`).
-        let dl = ProgressDownloadDelegate { f in progress(Progress(fraction: f, phase: "Downloading video…")) }
-        guard let (tmp, resp) = await dl.run(req) else {
+        guard let (tmp, resp) = await downloadToTemp(url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
+                                                     progress: { f in progress(Progress(fraction: f, phase: "Downloading video…")) }) else {
             return .failed("The download failed (the video may be protected or the link expired).")
         }
         if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 400 {
@@ -87,7 +85,7 @@ enum WebVideoDownloader {
             }
             return .failed("The server refused the download (HTTP \(code)).")
         }
-        let ext = fileExtension(url: url, response: resp, fallback: "mp4")
+        let ext = magicExtension(forFileAt: tmp) ?? fileExtension(url: url, response: resp, fallback: "mp4")
         let dest = uniqueDestination(name: baseName(suggestedName, url: url, ext: ext), in: folder)
         do {
             try await DriveWriter.shared.commit(tmp, to: dest)
@@ -114,9 +112,8 @@ enum WebVideoDownloader {
         guard let url = URL(string: urlString) else { return .failed("That link couldn’t be read.") }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         progress(Progress(fraction: 0, phase: "Downloading file…"))
-        let req = request(url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader)
-        let dl = ProgressDownloadDelegate { f in progress(Progress(fraction: f, phase: "Downloading file…")) }
-        guard let (tmp, resp) = await dl.run(req) else {
+        guard let (tmp, resp) = await downloadToTemp(url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
+                                                     progress: { f in progress(Progress(fraction: f, phase: "Downloading file…")) }) else {
             return .failed("The download failed (the link may be protected or expired).")
         }
         if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 400 {
@@ -127,7 +124,8 @@ enum WebVideoDownloader {
             }
             return .failed("The server refused the download (HTTP \(code)).")
         }
-        let dest = uniqueDestination(name: fileName(suggested: suggestedName, url: url, response: resp), in: folder)
+        let sniffed = magicExtension(forFileAt: tmp)   // trust the actual bytes for the extension
+        let dest = uniqueDestination(name: fileName(suggested: suggestedName, url: url, response: resp, sniffedExt: sniffed), in: folder)
         do {
             try await DriveWriter.shared.commit(tmp, to: dest)
         } catch {
@@ -359,11 +357,115 @@ enum WebVideoDownloader {
         return nil
     }
 
+    // MARK: - Fast download (parallel HTTP range requests)
+
+    private static let rangeChunk: Int64 = 4 << 20        // 4 MB per range request
+    private static let rangeConcurrency = 6               // parallel connections
+    private static let rangeMinSize: Int64 = 6 << 20      // only parallelize files bigger than this
+
+    /// Downloads `url` to a temp file. When the server supports HTTP range requests and the file is
+    /// large, it's pulled in parallel 4 MB chunks over several connections (a big speed-up for the
+    /// members video/zip downloads, the same trick the MEGA downloader uses); otherwise it streams
+    /// over a single connection. Returns the temp file + the response (for status / MIME).
+    nonisolated private static func downloadToTemp(_ url: URL, referer: String, cookieHeader: String, authHeader: String?,
+                                                   progress: @escaping @Sendable (Double) -> Void) async -> (URL, URLResponse)? {
+        // HEAD probe: learn the size + whether ranges are supported, WITHOUT pulling any body (a
+        // ranged-GET probe would download the whole file if the server ignored the Range header).
+        var head = request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader)
+        head.httpMethod = "HEAD"
+        if let (_, hresp) = try? await session.data(for: head), let http = hresp as? HTTPURLResponse, http.statusCode == 200 {
+            let acceptsRanges = (http.value(forHTTPHeaderField: "Accept-Ranges") ?? "").lowercased().contains("bytes")
+            let total = http.expectedContentLength
+            if acceptsRanges, total > rangeMinSize,
+               let out = await rangedDownload(url, total: total, referer: referer, cookieHeader: cookieHeader,
+                                              authHeader: authHeader, response: http, progress: progress) {
+                return out
+            }
+        }
+        // Single-connection fallback (small file, no range support, HEAD unsupported, or a mid-download
+        // failure). This path also carries the 4xx/auth response through so the caller can prompt + retry.
+        let req = request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader)
+        let dl = ProgressDownloadDelegate { progress($0) }
+        return await dl.run(req)
+    }
+
+    /// Parallel range download of a known-size file into a temp. Fails (returns nil → single-stream
+    /// fallback) if any chunk can't be fetched as a 206 partial.
+    nonisolated private static func rangedDownload(_ url: URL, total: Int64, referer: String, cookieHeader: String,
+                                                   authHeader: String?, response: URLResponse,
+                                                   progress: @escaping @Sendable (Double) -> Void) async -> (URL, URLResponse)? {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("webdl_\(UUID().uuidString)")
+        guard FileManager.default.createFile(atPath: tmp.path, contents: nil),
+              let fh = try? FileHandle(forWritingTo: tmp) else { return nil }
+        let writer = RangeWriter(fh)
+        let prog = RangeProgress(total: total, report: progress)
+        let ok = await withTaskGroup(of: Bool.self) { group -> Bool in
+            var offset: Int64 = 0
+            var active = 0
+            func addNext() {
+                guard offset < total else { return }
+                let start = offset, end = min(start + rangeChunk, total) - 1
+                offset = end + 1
+                active += 1
+                group.addTask {
+                    var req = request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader)
+                    req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+                    for _ in 0..<3 {
+                        guard let (data, resp) = try? await session.data(for: req) else { continue }
+                        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                        if code == 206, !data.isEmpty {
+                            try? await writer.write(data, at: start)
+                            await prog.add(Int64(data.count))
+                            return true
+                        }
+                        if code == 429 || code >= 500 { continue }   // transient — retry
+                        return false                                  // 200 (no range support) / 4xx — bail to fallback
+                    }
+                    return false
+                }
+            }
+            for _ in 0..<rangeConcurrency { addNext() }
+            var allOK = true
+            while active > 0 { if let r = await group.next() { active -= 1; if !r { allOK = false }; addNext() } }
+            return allOK
+        }
+        await writer.close()
+        guard ok else { try? FileManager.default.removeItem(at: tmp); return nil }
+        return (tmp, response)
+    }
+
     // MARK: - Helpers
 
     nonisolated private static func resolve(_ uri: String, base: URL) -> URL? {
         if uri.hasPrefix("http") { return URL(string: uri) }
         return URL(string: uri, relativeTo: base)?.absoluteURL
+    }
+
+    /// The real file extension inferred from a file's leading magic bytes — trusted over a server's
+    /// Content-Disposition / MIME / URL, which for these "high-res" downloads gave no extension at all
+    /// (the files showed up as a "data" tile and couldn't be recognized as zips). Reads 16 bytes.
+    nonisolated static func magicExtension(forFileAt url: URL) -> String? {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? h.close() }
+        guard let d = try? h.read(upToCount: 16), d.count >= 4 else { return nil }
+        let b = [UInt8](d)
+        func has(_ sig: [UInt8], at off: Int = 0) -> Bool {
+            guard b.count >= off + sig.count else { return false }
+            for (i, v) in sig.enumerated() where b[off + i] != v { return false }
+            return true
+        }
+        if has([0x50, 0x4B, 0x03, 0x04]) || has([0x50, 0x4B, 0x05, 0x06]) || has([0x50, 0x4B, 0x07, 0x08]) { return "zip" }
+        if has([0xFF, 0xD8, 0xFF]) { return "jpg" }
+        if has([0x89, 0x50, 0x4E, 0x47]) { return "png" }
+        if has([0x47, 0x49, 0x46, 0x38]) { return "gif" }
+        if has([0x25, 0x50, 0x44, 0x46]) { return "pdf" }
+        if has([0x52, 0x49, 0x46, 0x46]), has([0x57, 0x45, 0x42, 0x50], at: 8) { return "webp" }
+        if has([0x66, 0x74, 0x79, 0x70], at: 4) { return "mp4" }        // ....ftyp
+        if has([0x1A, 0x45, 0xDF, 0xA3]) { return "webm" }             // Matroska/WebM (EBML)
+        if has([0x52, 0x61, 0x72, 0x21]) { return "rar" }
+        if has([0x37, 0x7A, 0xBC, 0xAF]) { return "7z" }
+        if has([0x1F, 0x8B]) { return "gz" }
+        return nil
     }
 
     nonisolated private static func fileExtension(url: URL, response: URLResponse?, fallback: String) -> String {
@@ -392,13 +494,17 @@ enum WebVideoDownloader {
     /// `Content-Disposition` header, else synthesized from the URL) wins because it carries the
     /// correct extension; a long-press `download` attribute name is the next choice; the URL's own
     /// last path component is the fallback. A missing extension is filled from the MIME type.
-    nonisolated private static func fileName(suggested: String?, url: URL, response: URLResponse?) -> String {
+    nonisolated private static func fileName(suggested: String?, url: URL, response: URLResponse?, sniffedExt: String? = nil) -> String {
         var name = (suggested?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
         if name == nil, let s = response?.suggestedFilename, !s.isEmpty { name = s }
         if name == nil { let last = url.lastPathComponent; name = last.isEmpty ? nil : last }
         var out = sanitize(name ?? "download")
         if out.isEmpty { out = "download" }
-        if (out as NSString).pathExtension.isEmpty {
+        if let sniffedExt {
+            // The bytes are authoritative — a server that named the file "…highres" with no extension
+            // still gets a real ".zip"/".jpg"/… so it's recognizable and (for zips) extractable.
+            out = "\((out as NSString).deletingPathExtension).\(sniffedExt)"
+        } else if (out as NSString).pathExtension.isEmpty {
             let ext = !url.pathExtension.isEmpty ? url.pathExtension : mimeExtension(response?.mimeType)
             out += ".\(ext)"
         }
@@ -619,4 +725,25 @@ private final class ProgressDownloadDelegate: NSObject, URLSessionDownloadDelega
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if error != nil { continuation?.resume(returning: nil); continuation = nil }
     }
+}
+
+/// Serializes seek+write of range chunks into the temp file (concurrent chunks write different
+/// offsets, but a `FileHandle` isn't safe to touch from several tasks at once).
+private actor RangeWriter {
+    private let handle: FileHandle
+    init(_ handle: FileHandle) { self.handle = handle }
+    func write(_ data: Data, at offset: Int64) throws {
+        try handle.seek(toOffset: UInt64(offset))
+        try handle.write(contentsOf: data)
+    }
+    func close() { try? handle.close() }
+}
+
+/// Accumulates bytes across concurrent range chunks and reports an aggregate 0…1 fraction.
+private actor RangeProgress {
+    private var done: Int64 = 0
+    private let total: Int64
+    private let report: @Sendable (Double) -> Void
+    init(total: Int64, report: @escaping @Sendable (Double) -> Void) { self.total = total; self.report = report }
+    func add(_ n: Int64) { done += n; report(total > 0 ? min(1, Double(done) / Double(total)) : 0) }
 }

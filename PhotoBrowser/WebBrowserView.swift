@@ -300,6 +300,10 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     /// being dismissed and re-opened (folder → back to browser keeps your back button working).
     static let shared = WebController()
 
+    /// True once the browser has loaded a real page this session — drives the folder view's quick
+    /// "Back to Browser" button so you can jump back in without the "…" menu.
+    var hasSession: Bool { currentURLString.hasPrefix("http") }
+
     /// Reused + pre-warmed so the long-press haptic doesn't cold-start the Taptic Engine (a hitch).
     private let haptic = UINotificationFeedbackGenerator()
 

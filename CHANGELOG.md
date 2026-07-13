@@ -4,6 +4,18 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-13
 
+- **Faster browser downloads + "Back to Browser" + fixes for "data" files.**
+  - **Parallel downloads:** a large members video/zip is now pulled in parallel 4 MB chunks over
+    several connections (a `HEAD` probe checks for range support first), the same trick the MEGA
+    downloader uses — much faster than the old single connection. Small files / servers without range
+    support fall back to a single stream automatically.
+  - **Back to Browser:** once you've opened the browser, a Safari button appears in a folder's top bar
+    so you can jump straight back into your session — no more digging through the "…" menu.
+  - **Correct file types:** downloads are named from their actual **magic bytes**, not just the
+    server's (often extension-less) filename — so a downloaded zip is saved as `.zip` (recognizable +
+    extractable) and a photo as `.jpg`, instead of an unusable "data" tile. Tapping an existing
+    extension-less "data" file now sniffs it too: a zip offers **Extract**, a photo/video/PDF is
+    renamed to its real extension so it opens.
 - **In-app browser keeps its session.** The browser's web view is now app-lifetime, so leaving the
   browser (to a folder, say) and re-opening it keeps the exact page you were on **and its back/forward
   history** — the back button still walks through the pages you visited. The Downloads list persists
