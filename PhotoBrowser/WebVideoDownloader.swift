@@ -36,16 +36,16 @@ enum WebVideoDownloader {
     /// Downloads `urlString` (a direct media URL or an `.m3u8`) into `folder`. `pageURL` becomes
     /// the Referer; `cookieHeader` is the browser's cookies for the media host.
     nonisolated static func download(urlString: String, pageURL: String, cookieHeader: String,
-                                     into folder: URL, suggestedName: String?,
+                                     into folder: URL, suggestedName: String?, authHeader: String? = nil,
                                      progress: @escaping @Sendable (Progress) -> Void) async -> Outcome {
         guard let url = URL(string: urlString) else { return .failed("That video URL couldn’t be read.") }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         if isHLS(url) {
-            return await downloadHLS(url, pageURL: pageURL, cookieHeader: cookieHeader, into: folder,
-                                     suggestedName: suggestedName, progress: progress)
+            return await downloadHLS(url, pageURL: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
+                                     into: folder, suggestedName: suggestedName, progress: progress)
         }
-        return await downloadDirect(url, pageURL: pageURL, cookieHeader: cookieHeader, into: folder,
-                                    suggestedName: suggestedName, progress: progress)
+        return await downloadDirect(url, pageURL: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
+                                    into: folder, suggestedName: suggestedName, progress: progress)
     }
 
     nonisolated static func isHLS(_ url: URL) -> Bool {
@@ -56,10 +56,10 @@ enum WebVideoDownloader {
     // MARK: - Direct file
 
     nonisolated private static func downloadDirect(_ url: URL, pageURL: String, cookieHeader: String,
-                                                   into folder: URL, suggestedName: String?,
+                                                   authHeader: String?, into folder: URL, suggestedName: String?,
                                                    progress: @escaping @Sendable (Progress) -> Void) async -> Outcome {
         progress(Progress(fraction: 0, phase: "Downloading video…"))
-        let req = request(url, referer: pageURL, cookieHeader: cookieHeader)
+        let req = request(url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader)
         // A delegate download gives real byte-progress (unlike `session.download(for:)`).
         let dl = ProgressDownloadDelegate { f in progress(Progress(fraction: f, phase: "Downloading video…")) }
         guard let (tmp, resp) = await dl.run(req) else {
@@ -67,6 +67,9 @@ enum WebVideoDownloader {
         }
         if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 400 {
             try? FileManager.default.removeItem(at: tmp)
+            if code == 401 || code == 403 {
+                return .failed("The server refused the download (HTTP \(code)). If this is a members-only site, sign in through the browser first — the password prompt lets the download reuse your login.")
+            }
             return .failed("The server refused the download (HTTP \(code)).")
         }
         let ext = fileExtension(url: url, response: resp, fallback: "mp4")
@@ -85,17 +88,17 @@ enum WebVideoDownloader {
     // MARK: - HLS
 
     nonisolated private static func downloadHLS(_ manifestURL: URL, pageURL: String, cookieHeader: String,
-                                                into folder: URL, suggestedName: String?,
+                                                authHeader: String?, into folder: URL, suggestedName: String?,
                                                 progress: @escaping @Sendable (Progress) -> Void) async -> Outcome {
         progress(Progress(fraction: 0, phase: "Reading stream…"))
-        guard var text = await fetchText(manifestURL, referer: pageURL, cookieHeader: cookieHeader) else {
+        guard var text = await fetchText(manifestURL, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) else {
             return .failed("Couldn’t read the video stream (m3u8).")
         }
         var playlistURL = manifestURL
         // Master playlist → pick the highest-bandwidth variant, then fetch it.
         if text.contains("#EXT-X-STREAM-INF") {
             guard let variant = bestVariant(text, base: manifestURL),
-                  let vtext = await fetchText(variant, referer: pageURL, cookieHeader: cookieHeader) else {
+                  let vtext = await fetchText(variant, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) else {
                 return .failed("Couldn’t read the stream’s quality list.")
             }
             playlistURL = variant; text = vtext
@@ -103,7 +106,7 @@ enum WebVideoDownloader {
 
         let segs = parseSegments(text, base: playlistURL)
         guard !segs.isEmpty else { return .failed("The stream had no downloadable segments.") }
-        let key = await resolveKey(text, base: playlistURL, referer: pageURL, cookieHeader: cookieHeader)
+        let key = await resolveKey(text, base: playlistURL, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader)
         if key == nil, text.contains("#EXT-X-KEY"), !text.uppercased().contains("METHOD=NONE") {
             // A key line exists but we couldn't fetch/parse it (or it's SAMPLE-AES / DRM).
             return .failed("This video is encrypted in a way that can’t be saved (DRM-protected).")
@@ -123,7 +126,7 @@ enum WebVideoDownloader {
                 guard idx < segs.count else { return }
                 let i = idx; let seg = segs[i]; idx += 1
                 group.addTask {
-                    guard var d = await fetchData(seg.url, referer: pageURL, cookieHeader: cookieHeader) else { return (i, nil) }
+                    guard var d = await fetchData(seg.url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) else { return (i, nil) }
                     if let key { d = aesCBCDecrypt(d, key: key.key, iv: seg.iv ?? key.iv(forSequence: i)) ?? d }
                     return (i, d)
                 }
@@ -147,7 +150,7 @@ enum WebVideoDownloader {
         let ext = isFMP4 ? "mp4" : "ts"
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("webvid_\(UUID().uuidString).\(ext)")
         guard let handle = createFile(tmp) else { return .failed("Couldn’t assemble the video file.") }
-        if let initSeg, let initData = await fetchData(initSeg, referer: pageURL, cookieHeader: cookieHeader) {
+        if let initSeg, let initData = await fetchData(initSeg, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) {
             try? handle.write(contentsOf: initData)
         }
         for d in datas { if let d { try? handle.write(contentsOf: d) } }
@@ -228,11 +231,11 @@ enum WebVideoDownloader {
 
     /// The AES-128 content key (+ optional pinned IV) for an encrypted playlist, or nil if the
     /// stream is unencrypted (METHOD=NONE) or uses an unsupported method (SAMPLE-AES / DRM).
-    nonisolated private static func resolveKey(_ playlist: String, base: URL, referer: String, cookieHeader: String) async -> HLSKey? {
+    nonisolated private static func resolveKey(_ playlist: String, base: URL, referer: String, cookieHeader: String, authHeader: String?) async -> HLSKey? {
         guard let line = playlist.components(separatedBy: .newlines).first(where: { $0.hasPrefix("#EXT-X-KEY") }) else { return nil }
         let method = firstMatch(line, "METHOD=([A-Z0-9-]+)") ?? "NONE"
         guard method == "AES-128", let uri = firstMatch(line, "URI=\"([^\"]+)\""), let keyURL = resolve(uri, base: base),
-              let keyData = await fetchData(keyURL, referer: referer, cookieHeader: cookieHeader), keyData.count == 16 else {
+              let keyData = await fetchData(keyURL, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader), keyData.count == 16 else {
             return nil
         }
         let iv = firstMatch(line, "IV=0x([0-9A-Fa-f]+)").flatMap { hexData($0) }
@@ -265,25 +268,26 @@ enum WebVideoDownloader {
 
     // MARK: - HTTP
 
-    nonisolated private static func request(_ url: URL, referer: String, cookieHeader: String) -> URLRequest {
+    nonisolated private static func request(_ url: URL, referer: String, cookieHeader: String, authHeader: String? = nil) -> URLRequest {
         var req = URLRequest(url: url)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("*/*", forHTTPHeaderField: "Accept")
         if !referer.isEmpty { req.setValue(referer, forHTTPHeaderField: "Referer") }
         if let host = url.host, let scheme = url.scheme { req.setValue("\(scheme)://\(host)/", forHTTPHeaderField: "Origin") }
         if !cookieHeader.isEmpty { req.setValue(cookieHeader, forHTTPHeaderField: "Cookie") }
+        if let authHeader, !authHeader.isEmpty { req.setValue(authHeader, forHTTPHeaderField: "Authorization") }
         return req
     }
 
-    nonisolated private static func fetchText(_ url: URL, referer: String, cookieHeader: String) async -> String? {
-        guard let d = await fetchData(url, referer: referer, cookieHeader: cookieHeader) else { return nil }
+    nonisolated private static func fetchText(_ url: URL, referer: String, cookieHeader: String, authHeader: String? = nil) async -> String? {
+        guard let d = await fetchData(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader) else { return nil }
         return String(data: d, encoding: .utf8)
     }
 
-    nonisolated private static func fetchData(_ url: URL, referer: String, cookieHeader: String) async -> Data? {
+    nonisolated private static func fetchData(_ url: URL, referer: String, cookieHeader: String, authHeader: String? = nil) async -> Data? {
         for attempt in 0..<3 {
             if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 500_000_000) }
-            guard let (data, resp) = try? await session.data(for: request(url, referer: referer, cookieHeader: cookieHeader)) else { continue }
+            guard let (data, resp) = try? await session.data(for: request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader)) else { continue }
             if let code = (resp as? HTTPURLResponse)?.statusCode {
                 if code == 429 || code >= 500 { continue }
                 if code >= 400 { return nil }

@@ -255,8 +255,18 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     private var captured: [String] = []
     /// The `<video>` element's own current source (may be a `blob:` for MSE).
     private var playingSrc: String?
+    /// HTTP Basic-Auth credentials the user entered, keyed by host — reused so a download of a
+    /// members-only (`.htpasswd`-protected) video carries the same login the page used.
+    private var basicCreds: [String: (user: String, pass: String)] = [:]
 
     override init() { super.init() }
+
+    /// The `Authorization: Basic …` header for a media host, if the user has signed in there.
+    func authHeader(forURLString urlString: String) -> String? {
+        guard let host = URL(string: urlString)?.host, let c = basicCreds[host],
+              let data = "\(c.user):\(c.pass)".data(using: .utf8) else { return nil }
+        return "Basic " + data.base64EncodedString()
+    }
 
     lazy var webView: WKWebView = {
         let cfg = WKWebViewConfiguration()
@@ -310,10 +320,12 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         downloads.insert(entry, at: 0)
         let id = entry.id
         let urlString = v.url, pageURL = v.pageURL, sName = suggestedName
+        let auth = authHeader(forURLString: urlString)
         Task {
             let cookie = await cookieHeader(forURLString: urlString)
             let outcome = await WebVideoDownloader.download(
-                urlString: urlString, pageURL: pageURL, cookieHeader: cookie, into: folder, suggestedName: sName) { p in
+                urlString: urlString, pageURL: pageURL, cookieHeader: cookie, into: folder,
+                suggestedName: sName, authHeader: auth) { p in
                     Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
                 }
             self.update(id) { e in
@@ -372,8 +384,11 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         alert.addTextField { $0.placeholder = "Username"; $0.autocapitalizationType = .none; $0.autocorrectionType = .no; $0.keyboardType = .emailAddress }
         alert.addTextField { $0.placeholder = "Password"; $0.isSecureTextEntry = true }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(.cancelAuthenticationChallenge, nil) })
-        alert.addAction(UIAlertAction(title: "Sign In", style: .default) { _ in
+        alert.addAction(UIAlertAction(title: "Sign In", style: .default) { [weak self] _ in
             let u = alert.textFields?[0].text ?? "", p = alert.textFields?[1].text ?? ""
+            // Remember the credential so the separate download URLSession (which does not
+            // share WKWebView's protection space) can send it as an Authorization header.
+            self?.basicCreds[host] = (u, p)
             completionHandler(.useCredential, URLCredential(user: u, password: p, persistence: .forSession))
         })
         present(alert)
