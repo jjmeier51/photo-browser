@@ -18,14 +18,26 @@ import Compression
 /// aren't handled and surface as a thrown error rather than a crash.
 enum Archiver {
     enum ArchiveError: LocalizedError {
-        case notAZip, unsupportedEntry(String), corrupt
+        case notAZip, unsupportedEntry(String), corrupt, driveWrite
         var errorDescription: String? {
             switch self {
             case .notAZip: return "That file isn’t a readable .zip archive."
             case .unsupportedEntry(let n): return "“\(n)” uses an unsupported compression or is encrypted."
-            case .corrupt: return "The archive is incomplete or corrupt."
+            case .corrupt: return "The archive is incomplete or corrupt — the download may have been cut off. Try downloading it again."
+            case .driveWrite: return "The drive wouldn’t accept the extracted files (it kept refusing the write). The archive itself is fine — this is the drive: make sure the SSD is firmly connected and the phone has enough battery (a bus-powered SSD browns out on a low battery), then try again. If it persists, run a repair on the drive."
             }
         }
+    }
+
+    /// Retry a filesystem op a few times — external/exFAT file-provider volumes intermittently reject
+    /// a `createDirectory`/write that succeeds a moment later (especially when power is marginal).
+    private nonisolated static func retrying(_ attempts: Int = 4, _ op: () throws -> Void) throws {
+        var last: Error?
+        for i in 0..<attempts {
+            do { try op(); return }
+            catch { last = error; if i < attempts - 1 { usleep(200_000) } }   // 200 ms
+        }
+        throw last ?? ArchiveError.driveWrite
     }
 
     // MARK: - Zip
@@ -81,7 +93,9 @@ enum Archiver {
         defer { if scoped { archive.stopAccessingSecurityScopedResource() } }
         let data = try Data(contentsOf: archive)
         let entries = try centralDirectory(data)
-        try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
+        do { try retrying { try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true) } }
+        catch { throw ArchiveError.driveWrite }
+        DriveWriter.fullSync(destDir)
         let total = max(entries.count, 1)
         for (i, e) in entries.enumerated() {
             // Skip macOS resource-fork sidecars that clutter every Finder-made zip.
@@ -188,9 +202,13 @@ enum Archiver {
         default: throw ArchiveError.unsupportedEntry(e.name)
         }
         let parent = outURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
-        DriveWriter.fullSync(parent)                                    // commit the new dir before writing into it
-        try writeFile(raw, to: outURL)                                  // verbatim bytes → EXIF intact
+        do {
+            try retrying { try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true) }
+            DriveWriter.fullSync(parent)                                // commit the new dir before writing into it
+            try retrying { try writeFile(raw, to: outURL) }            // verbatim bytes → EXIF intact
+        } catch {
+            throw ArchiveError.driveWrite                               // the drive refused it, not a bad archive
+        }
         applyDate(e, to: outURL)
         DriveWriter.fullSyncFileAndParent(outURL)                       // durable per file — no leaked clusters on unplug
     }

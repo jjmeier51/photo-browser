@@ -73,6 +73,12 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   the many web/service downloaders now live in a "Download from the Web…" submenu and the index/check
   tools in a "Maintenance…" submenu, which SwiftUI builds lazily only when opened — so the menu opens
   instantly. Same actions, one tap deeper.
+- **Unzip resilience + honest errors** — external/exFAT file-provider volumes intermittently refuse a
+  `createDirectory`/write that succeeds a moment later (worse when the SSD is under-powered), which was
+  surfacing as the opaque "couldn't be saved in the folder". Extraction now retries each directory /
+  file write a few times, and cleanly separates *archive* problems (a cut-off download → "download it
+  again") from *drive* problems (repeated write refusals → a message that says it's the drive: check the
+  connection/battery, then repair). A valid zip no longer looks like a broken one.
 - **Unzip hardened for external drives** — extraction now claims security-scoped access to the
   archive, reads it without fragile memory-mapping, uses the streaming inflate path (more robust than
   the one-shot buffer, which could return bad data) with output-size validation, and understands
