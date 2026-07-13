@@ -18,14 +18,37 @@ import Compression
 /// aren't handled and surface as a thrown error rather than a crash.
 enum Archiver {
     enum ArchiveError: LocalizedError {
-        case notAZip, unsupportedEntry(String), corrupt, driveWrite
+        case notAZip, unsupportedEntry(String), corrupt, driveWrite(String)
         var errorDescription: String? {
             switch self {
             case .notAZip: return "That file isn’t a readable .zip archive."
             case .unsupportedEntry(let n): return "“\(n)” uses an unsupported compression or is encrypted."
             case .corrupt: return "The archive is incomplete or corrupt — the download may have been cut off. Try downloading it again."
-            case .driveWrite: return "The drive wouldn’t accept the extracted files (it kept refusing the write). The archive itself is fine — this is the drive: make sure the SSD is firmly connected and the phone has enough battery (a bus-powered SSD browns out on a low battery), then try again. If it persists, run a repair on the drive."
+            case .driveWrite(let why):
+                return "The drive refused the write. The archive is fine — this is the drive. \(why)"
             }
+        }
+    }
+
+    /// A concise, actionable read of why a filesystem write failed — turns the opaque Cocoa
+    /// "couldn't be saved" into the real cause (read-only mount, permissions, out of space, I/O).
+    private nonisolated static func writeFailureReason(_ error: Error) -> String {
+        let ns = error as NSError
+        // The real errno is usually on the underlying POSIX error.
+        let posix = (ns.userInfo[NSUnderlyingErrorKey] as? NSError).flatMap { $0.domain == NSPOSIXErrorDomain ? Int32($0.code) : nil }
+            ?? (ns.domain == NSPOSIXErrorDomain ? Int32(ns.code) : nil)
+        switch posix ?? 0 {
+        case EROFS:
+            return "The drive is mounted read-only. Re-eject it from your Mac cleanly (don’t just unplug it) so exFAT clears its “dirty” flag, then reconnect it to the phone."
+        case ENOSPC:
+            return "The drive is out of space."
+        case EPERM, EACCES:
+            return "iOS denied write permission to this folder. Reconnect the drive (Add Folder again) so the app re-authorizes it."
+        case EIO:
+            return "The drive reported an I/O error — check the cable/connection and power (a bus-powered SSD needs a well-charged phone or a powered hub)."
+        default:
+            let code = posix.map { "errno \($0)" } ?? "\(ns.domain) \(ns.code)"
+            return "Reconnect the SSD (Add Folder again) and make sure it’s well powered, then try again. [\(code)]"
         }
     }
 
@@ -37,7 +60,7 @@ enum Archiver {
             do { try op(); return }
             catch { last = error; if i < attempts - 1 { usleep(200_000) } }   // 200 ms
         }
-        throw last ?? ArchiveError.driveWrite
+        throw last ?? ArchiveError.driveWrite("The write failed repeatedly.")
     }
 
     // MARK: - Zip
@@ -94,7 +117,7 @@ enum Archiver {
         let data = try Data(contentsOf: archive)
         let entries = try centralDirectory(data)
         do { try retrying { try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true) } }
-        catch { throw ArchiveError.driveWrite }
+        catch { throw ArchiveError.driveWrite(writeFailureReason(error)) }
         DriveWriter.fullSync(destDir)
         let total = max(entries.count, 1)
         for (i, e) in entries.enumerated() {
@@ -206,8 +229,10 @@ enum Archiver {
             try retrying { try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true) }
             DriveWriter.fullSync(parent)                                // commit the new dir before writing into it
             try retrying { try writeFile(raw, to: outURL) }            // verbatim bytes → EXIF intact
+        } catch let err as ArchiveError {
+            throw err
         } catch {
-            throw ArchiveError.driveWrite                               // the drive refused it, not a bad archive
+            throw ArchiveError.driveWrite(writeFailureReason(error))    // the drive refused it, not a bad archive
         }
         applyDate(e, to: outURL)
         DriveWriter.fullSyncFileAndParent(outURL)                       // durable per file — no leaked clusters on unplug
