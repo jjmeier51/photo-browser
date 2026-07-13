@@ -4,6 +4,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-13
 
+- **Browser bookmarks.** Save favorite sites: tap the ☆ in the address bar to bookmark the current
+  page (★ when saved), and open the "Bookmarks" list from the browser's "…" menu to revisit or
+  swipe-delete them. Bookmarks persist across launches. `WebController.bookmarks`.
+- **Extracting a zip removes it afterward.** A successful "Extract Here" now deletes the source `.zip`
+  (only on full success), so you're left with just the extracted folder.
 - **Faster browser downloads + "Back to Browser" + fixes for "data" files.**
   - **Parallel downloads:** a large members video/zip is now pulled in parallel 4 MB chunks over
     several connections (a `HEAD` probe checks for range support first), the same trick the MEGA

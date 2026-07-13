@@ -29,6 +29,7 @@ struct WebBrowserView: View {
     @State private var pending: WebController.FoundVideo?
     @State private var pendingFile: WebController.PendingFile?
     @State private var showDownloads = false
+    @State private var showBookmarks = false
 
     var body: some View {
         NavigationStack {
@@ -106,6 +107,7 @@ struct WebBrowserView: View {
             Text((f.filename.map { "\($0)\n" } ?? "") + f.url)
         }
         .sheet(isPresented: $showDownloads) { DownloadsSheet(controller: controller) }
+        .sheet(isPresented: $showBookmarks) { BookmarksSheet(controller: controller) { controller.load($0) } }
     }
 
     private var addressBar: some View {
@@ -117,6 +119,12 @@ struct WebBrowserView: View {
                 .keyboardType(.webSearch).submitLabel(.go)
                 .onSubmit { controller.load(address); editingAddress = false }
                 .onTapGesture { editingAddress = true }
+            Button { controller.toggleBookmark() } label: {
+                Image(systemName: controller.isCurrentBookmarked ? "star.fill" : "star")
+                    .foregroundStyle(controller.isCurrentBookmarked ? Color.yellow : Color.secondary)
+            }
+            .disabled(!controller.hasSession)
+            .accessibilityLabel(controller.isCurrentBookmarked ? "Remove bookmark" : "Add bookmark")
             if controller.isLoading {
                 Button { controller.stop() } label: { Image(systemName: "xmark") }
             } else {
@@ -148,6 +156,11 @@ struct WebBrowserView: View {
                 Spacer()
                 Menu {
                     Button { controller.load("https://www.google.com") } label: { Label("Home", systemImage: "house") }
+                    Button { controller.toggleBookmark() } label: {
+                        Label(controller.isCurrentBookmarked ? "Remove Bookmark" : "Add Bookmark",
+                              systemImage: controller.isCurrentBookmarked ? "star.slash" : "star")
+                    }.disabled(!controller.hasSession)
+                    Button { showBookmarks = true } label: { Label("Bookmarks", systemImage: "book") }
                     Button { UIPasteboard.general.string = controller.currentURLString } label: { Label("Copy Page Link", systemImage: "doc.on.doc") }
                 } label: { Image(systemName: "ellipsis.circle") }
             }
@@ -175,6 +188,46 @@ struct WebBrowserView: View {
             if entry.state == .done {
                 if let c = entry.caption, let dest = entry.dest { library.setCaption(c, for: dest) }
                 library.contentDidChange(under: folder)
+            }
+        }
+    }
+}
+
+/// Saved sites. Tap a row to open it (and dismiss); swipe to delete.
+private struct BookmarksSheet: View {
+    @ObservedObject var controller: WebController
+    let onOpen: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if controller.bookmarks.isEmpty {
+                    ContentUnavailableView("No Bookmarks", systemImage: "star",
+                                           description: Text("Tap the ☆ in the address bar to save the current site."))
+                } else {
+                    List {
+                        ForEach(controller.bookmarks) { b in
+                            Button { onOpen(b.url); dismiss() } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(b.title.isEmpty ? b.url : b.title)
+                                        .font(.callout.weight(.medium)).foregroundStyle(.primary).lineLimit(1)
+                                    Text(b.url).font(.caption2).foregroundStyle(.secondary)
+                                        .lineLimit(1).truncationMode(.middle)
+                                }
+                            }
+                        }
+                        .onDelete { controller.removeBookmarks(at: $0) }
+                    }
+                }
+            }
+            .navigationTitle("Bookmarks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                if !controller.bookmarks.isEmpty {
+                    ToolbarItem(placement: .topBarTrailing) { EditButton() }
+                }
             }
         }
     }
@@ -311,6 +364,42 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     static var lastSavedURL: String? {
         get { UserDefaults.standard.string(forKey: "photoBrowser.webBrowserLastURL") }
         set { UserDefaults.standard.set(newValue, forKey: "photoBrowser.webBrowserLastURL") }
+    }
+
+    // MARK: - Bookmarks (saved/favorited sites, persisted across launches)
+
+    struct Bookmark: Identifiable, Codable, Equatable { var id = UUID(); var title: String; var url: String }
+
+    @Published var bookmarks: [Bookmark] = WebController.loadBookmarks()
+
+    private static let bookmarksKey = "photoBrowser.webBookmarks"
+    private static func loadBookmarks() -> [Bookmark] {
+        guard let data = UserDefaults.standard.data(forKey: bookmarksKey),
+              let list = try? JSONDecoder().decode([Bookmark].self, from: data) else { return [] }
+        return list
+    }
+    private func saveBookmarks() {
+        if let data = try? JSONEncoder().encode(bookmarks) { UserDefaults.standard.set(data, forKey: Self.bookmarksKey) }
+    }
+
+    /// Whether the current page is already bookmarked (drives the ☆/★ toggle).
+    var isCurrentBookmarked: Bool { bookmarks.contains { $0.url == currentURLString } }
+
+    /// Bookmark (or un-bookmark) the current page.
+    func toggleBookmark() {
+        let u = currentURLString
+        guard u.hasPrefix("http") else { return }
+        if let i = bookmarks.firstIndex(where: { $0.url == u }) {
+            bookmarks.remove(at: i)
+        } else {
+            bookmarks.insert(Bookmark(title: pageTitle.isEmpty ? u : pageTitle, url: u), at: 0)
+        }
+        saveBookmarks()
+    }
+
+    func removeBookmarks(at offsets: IndexSet) {
+        bookmarks.remove(atOffsets: offsets)
+        saveBookmarks()
     }
 
     /// Media URLs the page has requested (direct files + `.m3u8`), newest last.

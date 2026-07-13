@@ -1906,7 +1906,12 @@ struct FolderView: View {
             }.value
             editProgress = 1; editProcessing = false; bg.end()
             if let dest = outcome.url {
-                resultMessage = "Extracted to “\(dest.lastPathComponent)”."
+                // Extraction fully succeeded → remove the now-redundant archive and drop its labels.
+                await Task.detached {
+                    try? FileManager.default.removeItem(at: archive)
+                    DriveWriter.fullSync(folder)
+                }.value
+                resultMessage = "Extracted to “\(dest.lastPathComponent)” and removed the .zip."
                 library.contentDidChange(under: folder)
                 await reload()
             } else {
