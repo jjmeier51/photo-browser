@@ -156,7 +156,10 @@ struct WebBrowserView: View {
         let folder = targetFolder
         showDownloads = true            // surface the Downloads tab so its real progress is visible
         controller.startDownload(v, into: folder, suggestedName: controller.pageTitle) { entry in
-            if entry.state == .done { library.contentDidChange(under: folder) }
+            if entry.state == .done {
+                if let c = entry.caption, let dest = entry.dest { library.setCaption(c, for: dest) }
+                library.contentDidChange(under: folder)
+            }
         }
     }
 
@@ -164,7 +167,10 @@ struct WebBrowserView: View {
         let folder = targetFolder
         showDownloads = true
         controller.startFileDownload(f, into: folder) { entry in
-            if entry.state == .done { library.contentDidChange(under: folder) }
+            if entry.state == .done {
+                if let c = entry.caption, let dest = entry.dest { library.setCaption(c, for: dest) }
+                library.contentDidChange(under: folder)
+            }
         }
     }
 }
@@ -264,6 +270,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         var state: State = .downloading
         var dest: URL?
         var message: String?
+        var caption: String?          // page-provided caption to apply to the saved file
     }
 
     @Published var currentURLString = ""
@@ -342,20 +349,32 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         }
     }
 
-    /// Some sites print the media's real date in the page HTML (e.g. hotwiferio's
-    /// `<div class="cell update_date"> 06/30/2003 </div>`). Read it so a download whose own file
-    /// metadata has no capture date can still be stamped correctly. Returns nil if none is found.
-    func pageCaptureDate() async -> Date? {
+    /// The date + caption a site prints in the page HTML — hotwiferio uses
+    /// `<div class="cell update_date"> 06/30/2003 </div>` for the date and
+    /// `<span class="update_description">…</span>` for the caption. Both are used to fill in metadata
+    /// the downloaded file lacks. Either may be nil.
+    struct PageMedia: Sendable { var date: Date?; var caption: String? }
+
+    func pageMediaInfo() async -> PageMedia {
         let js = """
         (function(){
-          var el = document.querySelector('.update_date') || document.querySelector('[class*="update_date"]');
-          return el ? (el.textContent||'').trim() : '';
+          function t(sel){ var el=document.querySelector(sel); return el ? (el.textContent||'').trim() : ''; }
+          return JSON.stringify({ date: t('.update_date') || t('[class*="update_date"]'),
+                                  caption: t('.update_description') || t('[class*="update_description"]') });
         })()
         """
-        let text: String = await withCheckedContinuation { cont in
+        let json: String = await withCheckedContinuation { cont in
             webView.evaluateJavaScript(js) { result, _ in cont.resume(returning: (result as? String) ?? "") }
         }
-        return Self.parseCaptureDate(text)
+        var info = PageMedia()
+        if let d = json.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+            if let ds = obj["date"] as? String, !ds.isEmpty { info.date = Self.parseCaptureDate(ds) }
+            if let cs = obj["caption"] as? String {
+                let trimmed = cs.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { info.caption = String(trimmed.prefix(2000)) }
+            }
+        }
+        return info
     }
 
     /// Pull a date out of page text ("06/30/2003", "2003-06-30", possibly with a label around it) and
@@ -443,12 +462,13 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         let urlString = v.url, pageURL = v.pageURL, sName = suggestedName
         Task {
             let cookie = await cookieHeader(forURLString: urlString)
-            let pageDate = await self.pageCaptureDate()   // read while the page is still loaded
+            let info = await self.pageMediaInfo()         // read while the page is still loaded
+            self.update(id) { $0.caption = info.caption }
             func run() async -> WebVideoDownloader.Outcome {
                 await WebVideoDownloader.download(
                     urlString: urlString, pageURL: pageURL, cookieHeader: cookie, into: folder,
                     suggestedName: sName, authHeader: self.authHeader(forURLString: urlString),
-                    captureDate: pageDate) { p in
+                    captureDate: info.date, caption: info.caption) { p in
                         Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
                     }
             }
@@ -482,12 +502,13 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         let urlString = f.url, pageURL = f.pageURL, fname = f.filename
         Task {
             let cookie = await cookieHeader(forURLString: urlString)
-            let pageDate = await self.pageCaptureDate()   // read while the page is still loaded
+            let info = await self.pageMediaInfo()         // read while the page is still loaded
+            self.update(id) { $0.caption = info.caption }
             func run() async -> WebVideoDownloader.Outcome {
                 await WebVideoDownloader.downloadFile(
                     urlString: urlString, pageURL: pageURL, cookieHeader: cookie,
                     authHeader: self.authHeader(forURLString: urlString), into: folder, suggestedName: fname,
-                    captureDate: pageDate) { p in
+                    captureDate: info.date, caption: info.caption) { p in
                         Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
                     }
             }

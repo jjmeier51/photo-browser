@@ -27,12 +27,17 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 - **Downloaded files keep their EXIF** — the browser writes downloaded bytes verbatim (EXIF was
   never stripped); it now also sets an image's file date from its EXIF capture date so Age/date are
   right, rather than stamping the download time.
-- **Capture date from the page HTML** — when a download's own file metadata has no capture date and
-  the page prints one (e.g. hotwiferio's `<div class="cell update_date"> 06/30/2003 </div>`), the
-  browser reads that date and stamps the saved media with it — real EXIF for photos, a lossless
-  metadata re-mux for videos, plus the file date — so it sorts and ages by the right day. The
-  stamping runs off the main thread, so it no longer briefly freezes the UI when a download
-  finishes; the long-press haptic is also pre-warmed to avoid a hitch.
+- **Capture date + caption from the page HTML** — when a download's own file metadata has no capture
+  date and the page prints one (e.g. hotwiferio's `<div class="cell update_date"> 06/30/2003 </div>`),
+  the browser reads that date and stamps the saved media with it — real EXIF for photos, a lossless
+  metadata re-mux for videos, plus the file date. It also reads a `<span class="update_description">`
+  and writes it as the media's caption (IPTC CaptionAbstract for images, the description metadata for
+  videos, and the app's own caption). The stamping runs off the main thread, so it no longer briefly
+  freezes the UI when a download finishes; the long-press haptic is also pre-warmed to avoid a hitch.
+- **Unzip hardened for external drives** — extraction now claims security-scoped access to the
+  archive, reads it without fragile memory-mapping, uses the streaming inflate path (more robust than
+  the one-shot buffer, which could return bad data) with output-size validation, and understands
+  ZIP64 archives (over 4 GB or 65535+ files) — fixing "Extract" on large exFAT SSD zips.
 - **Web browser: video playback is off by default, with a toolbar toggle** — a new ▶ button in the
   top-right turns video playback on/off. Off by default so a page's video can't autoplay or expand
   over what you're trying to download; tap it to watch. `WebController.setVideoPlayback`.

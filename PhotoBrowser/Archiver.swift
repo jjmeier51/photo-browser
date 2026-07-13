@@ -74,7 +74,11 @@ enum Archiver {
 
     /// Extract `archive` into `destDir` (created if needed), reporting 0…1 progress per entry.
     nonisolated static func unzip(_ archive: URL, to destDir: URL, progress: (@Sendable (Double) -> Void)? = nil) throws {
-        let data = try Data(contentsOf: archive, options: .mappedIfSafe)
+        // The archive lives on the security-scoped external drive — claim access for the read (the
+        // root's access usually covers it, but claiming the file directly is safe on exFAT/file-provider).
+        let scoped = archive.startAccessingSecurityScopedResource()
+        defer { if scoped { archive.stopAccessingSecurityScopedResource() } }
+        let data = try Data(contentsOf: archive)
         let entries = try centralDirectory(data)
         try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
         let total = max(entries.count, 1)
@@ -94,8 +98,21 @@ enum Archiver {
         let minI = max(0, data.count - 22 - 0xFFFF)
         while i >= minI, le32(data, i) != eocdSig { i -= 1 }
         guard i >= minI, le32(data, i) == eocdSig else { throw ArchiveError.notAZip }
-        let count = le16(data, i + 10)
-        let cdOffset = le32(data, i + 16)
+        var count = le16(data, i + 10)
+        var cdOffset = le32(data, i + 16)
+        // ZIP64 (archives >4 GB or >65535 entries — likely for a big SSD zip): the EOCD holds
+        // 0xFFFF/0xFFFFFFFF placeholders and the real values live in the ZIP64 EOCD, located via the
+        // ZIP64 locator that sits just before the regular EOCD.
+        if count == 0xFFFF || cdOffset == 0xFFFFFFFF {
+            let locOff = i - 20
+            if locOff >= 0, le32(data, locOff) == 0x07064b50 {
+                let z64 = le64(data, locOff + 8)
+                if z64 >= 0, z64 + 56 <= data.count, le32(data, z64) == 0x06064b50 {
+                    count = le64(data, z64 + 32)
+                    cdOffset = le64(data, z64 + 48)
+                }
+            }
+        }
         guard cdOffset >= 0, cdOffset < data.count else { throw ArchiveError.corrupt }
 
         var p = cdOffset
@@ -104,21 +121,46 @@ enum Archiver {
             guard p + 46 <= data.count, le32(data, p) == cdSig else { break }
             let method = le16(data, p + 10)
             let mtime = le16(data, p + 12), mdate = le16(data, p + 14)
-            let compSize = le32(data, p + 20)
-            let uncompSize = le32(data, p + 24)
+            var compSize = le32(data, p + 20)
+            var uncompSize = le32(data, p + 24)
             let nameLen = le16(data, p + 28)
             let extraLen = le16(data, p + 30)
             let commentLen = le16(data, p + 32)
-            let localOff = le32(data, p + 42)
-            guard p + 46 + nameLen <= data.count else { throw ArchiveError.corrupt }
+            var localOff = le32(data, p + 42)
+            guard p + 46 + nameLen + extraLen <= data.count else { throw ArchiveError.corrupt }
             let nameData = data.subdata(in: (p + 46)..<(p + 46 + nameLen))
             let name = String(data: nameData, encoding: .utf8) ?? String(decoding: nameData, as: UTF8.self)
+            // Per-entry ZIP64 extra field overrides any 0xFFFFFFFF size/offset placeholder.
+            if compSize == 0xFFFFFFFF || uncompSize == 0xFFFFFFFF || localOff == 0xFFFFFFFF {
+                zip64Extra(data, at: p + 46 + nameLen, len: extraLen,
+                           uncomp: &uncompSize, comp: &compSize, localOff: &localOff)
+            }
             entries.append(CDEntry(name: name, method: method, compSize: compSize, uncompSize: uncompSize,
                                    localOffset: localOff, mtime: mtime, mdate: mdate))
             p += 46 + nameLen + extraLen + commentLen
         }
         guard !entries.isEmpty else { throw ArchiveError.corrupt }
         return entries
+    }
+
+    /// Read the ZIP64 extended-information extra field (id 0x0001), filling in only the fields that
+    /// were 0xFFFFFFFF placeholders, in the spec's order: uncompressed, compressed, local offset.
+    private nonisolated static func zip64Extra(_ data: Data, at extraStart: Int, len: Int,
+                                               uncomp: inout Int, comp: inout Int, localOff: inout Int) {
+        var p = extraStart
+        let extraEnd = extraStart + len
+        while p + 4 <= extraEnd {
+            let id = le16(data, p), size = le16(data, p + 2)
+            let fieldStart = p + 4, fieldEnd = min(fieldStart + size, extraEnd)
+            if id == 0x0001 {
+                var q = fieldStart
+                if uncomp == 0xFFFFFFFF, q + 8 <= fieldEnd { uncomp = le64(data, q); q += 8 }
+                if comp == 0xFFFFFFFF, q + 8 <= fieldEnd { comp = le64(data, q); q += 8 }
+                if localOff == 0xFFFFFFFF, q + 8 <= fieldEnd { localOff = le64(data, q) }
+                return
+            }
+            p = fieldStart + size
+        }
     }
 
     private nonisolated static func extract(_ e: CDEntry, from data: Data, into destDir: URL) throws {
@@ -151,18 +193,13 @@ enum Archiver {
 
     // MARK: - Inflate (raw DEFLATE via Compression)
 
+    /// Inflate a ZIP method-8 (raw DEFLATE) payload. Uses the streaming API — the same approach
+    /// shipping ZIP libraries rely on — because the one-shot `compression_decode_buffer` can return
+    /// short/incorrect results on some streams. Validates against the expected size when known.
     private nonisolated static func inflate(_ input: Data, expected: Int) -> Data? {
-        if expected <= 0 { return inflateStreaming(input) }
-        var out = Data(count: expected)
-        let written = out.withUnsafeMutableBytes { dstRaw -> Int in
-            input.withUnsafeBytes { srcRaw -> Int in
-                guard let dst = dstRaw.bindMemory(to: UInt8.self).baseAddress,
-                      let src = srcRaw.bindMemory(to: UInt8.self).baseAddress else { return 0 }
-                return compression_decode_buffer(dst, expected, src, input.count, nil, COMPRESSION_ZLIB)
-            }
-        }
-        guard written > 0 else { return inflateStreaming(input) }
-        return written == expected ? out : out.prefix(written)
+        guard let out = inflateStreaming(input) else { return nil }
+        if expected > 0, out.count != expected { return nil }
+        return out
     }
 
     /// Streaming fallback when the uncompressed size isn't known up front (data-descriptor entries).
@@ -184,10 +221,11 @@ enum Archiver {
                 streamPtr.pointee.dst_ptr = dst
                 streamPtr.pointee.dst_size = bufSize
                 let status = compression_stream_process(streamPtr, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
-                output.append(dst, count: bufSize - streamPtr.pointee.dst_size)
+                let produced = bufSize - streamPtr.pointee.dst_size
+                output.append(dst, count: produced)
                 switch status {
                 case COMPRESSION_STATUS_END: return output
-                case COMPRESSION_STATUS_OK:  continue
+                case COMPRESSION_STATUS_OK:  if produced == 0 { return nil }   // no progress → malformed
                 default:                     return nil
                 }
             }
@@ -196,9 +234,16 @@ enum Archiver {
 
     // MARK: - Helpers
 
-    private nonisolated static func le16(_ d: Data, _ o: Int) -> Int { Int(d[o]) | (Int(d[o + 1]) << 8) }
+    private nonisolated static func le16(_ d: Data, _ o: Int) -> Int { Int(d[d.startIndex + o]) | (Int(d[d.startIndex + o + 1]) << 8) }
     private nonisolated static func le32(_ d: Data, _ o: Int) -> Int {
-        Int(d[o]) | (Int(d[o + 1]) << 8) | (Int(d[o + 2]) << 16) | (Int(d[o + 3]) << 24)
+        let b = d.startIndex + o
+        return Int(d[b]) | (Int(d[b + 1]) << 8) | (Int(d[b + 2]) << 16) | (Int(d[b + 3]) << 24)
+    }
+    private nonisolated static func le64(_ d: Data, _ o: Int) -> Int {
+        let b = d.startIndex + o
+        var v = 0
+        for k in 0..<8 { v |= Int(d[b + k]) << (8 * k) }
+        return v
     }
 
     /// Reject path-traversal / absolute names; return a clean relative path or nil to skip the entry.
