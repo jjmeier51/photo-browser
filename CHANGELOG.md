@@ -27,6 +27,10 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 - **Downloaded files keep their EXIF** — the browser writes downloaded bytes verbatim (EXIF was
   never stripped); it now also sets an image's file date from its EXIF capture date so Age/date are
   right, rather than stamping the download time.
+- **Capture date from the page HTML** — when a download's own file metadata has no capture date and
+  the page prints one (e.g. hotwiferio's `<div class="cell update_date"> 06/30/2003 </div>`), the
+  browser reads that date and stamps the saved media with it — real EXIF for photos, a lossless
+  metadata re-mux for videos, plus the file date — so it sorts and ages by the right day.
 - **Web browser: video playback is off by default, with a toolbar toggle** — a new ▶ button in the
   top-right turns video playback on/off. Off by default so a page's video can't autoplay or expand
   over what you're trying to download; tap it to watch. `WebController.setVideoPlayback`.

@@ -339,6 +339,54 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         }
     }
 
+    /// Some sites print the media's real date in the page HTML (e.g. hotwiferio's
+    /// `<div class="cell update_date"> 06/30/2003 </div>`). Read it so a download whose own file
+    /// metadata has no capture date can still be stamped correctly. Returns nil if none is found.
+    func pageCaptureDate() async -> Date? {
+        let js = """
+        (function(){
+          var el = document.querySelector('.update_date') || document.querySelector('[class*="update_date"]');
+          return el ? (el.textContent||'').trim() : '';
+        })()
+        """
+        let text: String = await withCheckedContinuation { cont in
+            webView.evaluateJavaScript(js) { result, _ in cont.resume(returning: (result as? String) ?? "") }
+        }
+        return Self.parseCaptureDate(text)
+    }
+
+    /// Pull a date out of page text ("06/30/2003", "2003-06-30", possibly with a label around it) and
+    /// anchor it at local noon so the calendar day is stable regardless of time zone.
+    static func parseCaptureDate(_ raw: String) -> Date? {
+        func firstMatch(_ pattern: String) -> String? {
+            guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
+            let ns = raw as NSString
+            guard let m = re.firstMatch(in: raw, range: NSRange(location: 0, length: ns.length)) else { return nil }
+            return ns.substring(with: m.range)
+        }
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = .current
+        var found: Date?
+        if let s = firstMatch("\\d{1,2}/\\d{1,2}/\\d{4}") {
+            for fmt in ["MM/dd/yyyy", "M/d/yyyy"] { f.dateFormat = fmt; if let d = f.date(from: s) { found = d; break } }
+        }
+        if found == nil, let s = firstMatch("\\d{4}-\\d{1,2}-\\d{1,2}") {
+            f.dateFormat = "yyyy-MM-dd"; found = f.date(from: s)
+        }
+        guard let d = found else { return nil }
+        // Sanity window: 1970 … tomorrow — ignore garbage like a "00/00/0000".
+        guard d > Date(timeIntervalSince1970: 0), d < Date().addingTimeInterval(86_400) else { return nil }
+        return Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: d) ?? d
+    }
+
+    /// Stamp a saved download with `date`: real EXIF/metadata for images & videos (via a lossless
+    /// rewrite) plus the filesystem creation/modification date.
+    private func applyPageDate(_ date: Date?, to outcome: WebVideoDownloader.Outcome, id: UUID) async {
+        guard let date, case .saved(let url) = outcome else { return }
+        update(id) { $0.progress = 1; $0.phase = "Setting date…" }
+        _ = await FileActions.applyMetadata(date: date, location: nil, removeLocation: false, to: url)
+        try? FileManager.default.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: url.path)
+    }
+
     lazy var webView: WKWebView = {
         let cfg = WKWebViewConfiguration()
         cfg.allowsInlineMediaPlayback = true
@@ -401,6 +449,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         let urlString = v.url, pageURL = v.pageURL, sName = suggestedName
         Task {
             let cookie = await cookieHeader(forURLString: urlString)
+            let pageDate = await self.pageCaptureDate()   // read while the page is still loaded
             func run() async -> WebVideoDownloader.Outcome {
                 await WebVideoDownloader.download(
                     urlString: urlString, pageURL: pageURL, cookieHeader: cookie, into: folder,
@@ -413,6 +462,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
                 self.update(id) { $0.phase = "Signing in…" }
                 outcome = await run()
             }
+            await self.applyPageDate(pageDate, to: outcome, id: id)
             self.finish(id, outcome)
             if let done = self.downloads.first(where: { $0.id == id }) { onComplete(done) }
         }
@@ -438,6 +488,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         let urlString = f.url, pageURL = f.pageURL, fname = f.filename
         Task {
             let cookie = await cookieHeader(forURLString: urlString)
+            let pageDate = await self.pageCaptureDate()   // read while the page is still loaded
             func run() async -> WebVideoDownloader.Outcome {
                 await WebVideoDownloader.downloadFile(
                     urlString: urlString, pageURL: pageURL, cookieHeader: cookie,
@@ -450,6 +501,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
                 self.update(id) { $0.phase = "Signing in…" }
                 outcome = await run()
             }
+            await self.applyPageDate(pageDate, to: outcome, id: id)
             self.finish(id, outcome)
             if let done = self.downloads.first(where: { $0.id == id }) { onComplete(done) }
         }
