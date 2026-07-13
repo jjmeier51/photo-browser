@@ -4,6 +4,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-13
 
+- **In-app browser keeps its session.** The browser's web view is now app-lifetime, so leaving the
+  browser (to a folder, say) and re-opening it keeps the exact page you were on **and its back/forward
+  history** — the back button still walks through the pages you visited. The Downloads list persists
+  too, and re-opening is instant (the web view no longer cold-starts each time). Media is paused when
+  you leave so nothing keeps playing in the background.
 - **exFAT corruption fix — durable writes to the external drive.** The SSD was getting the classic
   "clusters marked used but not referenced" corruption (leaked clusters) roughly daily, needing a Mac
   repair. Root cause: files were written to the drive but their metadata wasn't durably flushed

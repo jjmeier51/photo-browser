@@ -20,7 +20,10 @@ struct WebBrowserView: View {
     @Environment(\.dismiss) private var dismiss
     let targetFolder: URL
 
-    @StateObject private var controller = WebController()
+    // Shared, app-lifetime controller so the WKWebView (and its back/forward history) survives
+    // dismissing the browser and re-opening it — navigating to a folder and back doesn't reset the
+    // session. `@ObservedObject` (not `@StateObject`): the view observes the singleton, it doesn't own it.
+    @ObservedObject private var controller = WebController.shared
     @State private var address = ""
     @State private var editingAddress = false
     @State private var pending: WebController.FoundVideo?
@@ -82,7 +85,9 @@ struct WebBrowserView: View {
                 controller.load(WebController.lastSavedURL ?? "https://www.google.com")
             }
         }
-        .onDisappear { controller.teardown() }
+        // Keep the controller + WKWebView alive across dismissals (that's what preserves the
+        // session); just pause any playing media so audio doesn't continue in the background.
+        .onDisappear { controller.pauseMedia() }
         .confirmationDialog("Download video?", isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
                             titleVisibility: .visible, presenting: pending) { v in
             Button("Download to “\(targetFolder.lastPathComponent)”") { startDownload(v) }
@@ -291,6 +296,10 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     /// Fired when a downloadable file is discovered (long-pressed link or an attachment response).
     var onFileDownload: ((PendingFile) -> Void)?
 
+    /// App-lifetime instance so the WKWebView and its navigation history persist across the browser
+    /// being dismissed and re-opened (folder → back to browser keeps your back button working).
+    static let shared = WebController()
+
     /// Reused + pre-warmed so the long-press haptic doesn't cold-start the Taptic Engine (a hitch).
     private let haptic = UINotificationFeedbackGenerator()
 
@@ -435,6 +444,12 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     func goForward() { webView.goForward() }
     func reload() { webView.reload() }
     func stop() { webView.stopLoading() }
+
+    /// Pause any playing audio/video without tearing anything down — called when the browser view
+    /// disappears so media doesn't keep playing while the web view is kept alive for the session.
+    func pauseMedia() {
+        webView.evaluateJavaScript("document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})") { _, _ in }
+    }
 
     /// Turn video playback on/off. When off, the injected script pauses any playing video and
     /// rejects `play()`, so nothing expands over the page while you're trying to download.
