@@ -85,6 +85,43 @@ enum WebVideoDownloader {
         return .saved(dest)
     }
 
+    // MARK: - Arbitrary file (zip, pdf, image, apk, …)
+
+    /// Downloads any non-streaming file discovered in the browser — a link the user long-pressed,
+    /// or a response the web view can't render inline (a `Content-Disposition: attachment`). Unlike
+    /// the video path there's no HLS/segment handling: a single authenticated GET streamed to disk,
+    /// keeping the server-suggested filename + extension. Carries cookies / Referer / Basic-Auth so
+    /// members-only downloads work the same way the page did.
+    nonisolated static func downloadFile(urlString: String, pageURL: String, cookieHeader: String,
+                                         authHeader: String? = nil, into folder: URL, suggestedName: String?,
+                                         progress: @escaping @Sendable (Progress) -> Void) async -> Outcome {
+        guard let url = URL(string: urlString) else { return .failed("That link couldn’t be read.") }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        progress(Progress(fraction: 0, phase: "Downloading file…"))
+        let req = request(url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader)
+        let dl = ProgressDownloadDelegate { f in progress(Progress(fraction: f, phase: "Downloading file…")) }
+        guard let (tmp, resp) = await dl.run(req) else {
+            return .failed("The download failed (the link may be protected or expired).")
+        }
+        if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 400 {
+            try? FileManager.default.removeItem(at: tmp)
+            if code == 401 || code == 403 {
+                return .failed("The server refused the download (HTTP \(code)). If this is a members-only site, sign in through the browser first — the password prompt lets the download reuse your login.")
+            }
+            return .failed("The server refused the download (HTTP \(code)).")
+        }
+        let dest = uniqueDestination(name: fileName(suggested: suggestedName, url: url, response: resp), in: folder)
+        do {
+            try await DriveWriter.shared.commit(tmp, to: dest)
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            return .failed("Couldn’t save to the folder.")
+        }
+        stampNow(dest)
+        progress(Progress(fraction: 1, phase: "Saved"))
+        return .saved(dest)
+    }
+
     // MARK: - HLS
 
     nonisolated private static func downloadHLS(_ manifestURL: URL, pageURL: String, cookieHeader: String,
@@ -324,6 +361,47 @@ enum WebVideoDownloader {
             name = "Web Video \(f.string(from: Date()))"
         }
         return "\(String(name.prefix(120))).\(ext)"
+    }
+
+    /// A safe on-disk filename for an arbitrary download. The server's suggested filename (from a
+    /// `Content-Disposition` header, else synthesized from the URL) wins because it carries the
+    /// correct extension; a long-press `download` attribute name is the next choice; the URL's own
+    /// last path component is the fallback. A missing extension is filled from the MIME type.
+    nonisolated private static func fileName(suggested: String?, url: URL, response: URLResponse?) -> String {
+        var name = (suggested?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+        if name == nil, let s = response?.suggestedFilename, !s.isEmpty { name = s }
+        if name == nil { let last = url.lastPathComponent; name = last.isEmpty ? nil : last }
+        var out = sanitize(name ?? "download")
+        if out.isEmpty { out = "download" }
+        if (out as NSString).pathExtension.isEmpty {
+            let ext = !url.pathExtension.isEmpty ? url.pathExtension : mimeExtension(response?.mimeType)
+            out += ".\(ext)"
+        }
+        return String(out.prefix(160))
+    }
+
+    /// Strip path separators and characters exFAT/HFS reject from a candidate filename.
+    nonisolated private static func sanitize(_ s: String) -> String {
+        s.components(separatedBy: CharacterSet(charactersIn: "/\\:?%*|\"<>")).joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// A file extension for a MIME type when neither the filename nor the URL carries one.
+    nonisolated private static func mimeExtension(_ mime: String?) -> String {
+        switch (mime ?? "").lowercased() {
+        case let m where m.contains("zip"): return "zip"
+        case let m where m.contains("pdf"): return "pdf"
+        case let m where m.contains("jpeg"): return "jpg"
+        case let m where m.contains("png"): return "png"
+        case let m where m.contains("gif"): return "gif"
+        case let m where m.contains("mp4"): return "mp4"
+        case let m where m.contains("mpeg"): return "mp3"
+        case let m where m.contains("gzip"): return "gz"
+        case let m where m.contains("x-7z"): return "7z"
+        case let m where m.contains("rar"): return "rar"
+        case let m where m.contains("plain"): return "txt"
+        default: return "bin"
+        }
     }
 
     nonisolated private static func uniqueDestination(name: String, in folder: URL) -> URL {

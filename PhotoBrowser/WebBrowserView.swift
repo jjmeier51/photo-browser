@@ -3,15 +3,18 @@ import WebKit
 import UIKit
 import Combine
 
-/// An in-app web browser with **long-press-to-download video**, like Aloha Browser's core
-/// feature. Browse any site; when a video is playing, long-press it and the app offers to save
-/// it into the current folder.
+/// An in-app web browser with **long-press-to-download**, like Aloha Browser's core feature.
+/// Browse any site; when a video is playing, long-press it to save it into the current folder.
+/// Beyond video it also downloads ordinary files: long-press a file link (`.zip`, `.pdf`, an
+/// image, …) or just tap a site's download button — any response the web view can't render inline
+/// (or that's marked `Content-Disposition: attachment`) is intercepted and offered as a download.
 ///
 /// Detection mirrors how these downloaders work: an injected script (a) hooks `fetch`/`XHR` to
 /// capture media URLs the page requests (direct files and `.m3u8` HLS playlists), and (b) reports
-/// the `<video>` under a long-press point. `WebVideoDownloader` then fetches + assembles the
-/// video (carrying the browser's cookies + Referer). DRM (Widevine/FairPlay) and pure-`blob:`
-/// MSE with no discoverable manifest can't be captured — the same limits Aloha has.
+/// the `<video>` or `<a>` link under a long-press point. `WebVideoDownloader` then fetches +
+/// assembles the file (carrying the browser's cookies + Referer + any Basic-Auth login). DRM
+/// (Widevine/FairPlay) and pure-`blob:` MSE with no discoverable manifest can't be captured — the
+/// same limits Aloha has.
 struct WebBrowserView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
@@ -21,6 +24,7 @@ struct WebBrowserView: View {
     @State private var address = ""
     @State private var editingAddress = false
     @State private var pending: WebController.FoundVideo?
+    @State private var pendingFile: WebController.PendingFile?
     @State private var showDownloads = false
 
     var body: some View {
@@ -65,6 +69,7 @@ struct WebBrowserView: View {
         }
         .onAppear {
             controller.onVideoLongPress = { found in pending = found }
+            controller.onFileDownload = { file in pendingFile = file }
             if controller.currentURLString.isEmpty {
                 controller.load(WebController.lastSavedURL ?? "https://www.google.com")
             }
@@ -78,6 +83,14 @@ struct WebBrowserView: View {
         } message: { v in
             // Show the actual video URL that would be downloaded.
             Text((v.isHLS ? "Streaming video (segments will be merged):\n" : "") + v.url)
+        }
+        .confirmationDialog("Download file?", isPresented: Binding(get: { pendingFile != nil }, set: { if !$0 { pendingFile = nil } }),
+                            titleVisibility: .visible, presenting: pendingFile) { f in
+            Button("Download to “\(targetFolder.lastPathComponent)”") { startFileDownload(f) }
+            Button("Copy Link") { UIPasteboard.general.string = f.url }
+            Button("Cancel", role: .cancel) {}
+        } message: { f in
+            Text((f.filename.map { "\($0)\n" } ?? "") + f.url)
         }
         .sheet(isPresented: $showDownloads) { DownloadsSheet(controller: controller) }
     }
@@ -106,7 +119,7 @@ struct WebBrowserView: View {
     private var bottomBar: some View {
         VStack(spacing: 4) {
             Text(controller.hasVideo ? "Video detected — long-press it, or tap ⬇︎ to download"
-                                     : "Long-press a playing video to download it")
+                                     : "Long-press a video or file link to download • download buttons work too")
                 .font(.caption2).foregroundStyle(controller.hasVideo ? .green : .secondary)
             HStack {
                 Button { controller.goBack() } label: { Image(systemName: "chevron.left") }.disabled(!controller.canGoBack)
@@ -137,6 +150,14 @@ struct WebBrowserView: View {
             if entry.state == .done { library.contentDidChange(under: folder) }
         }
     }
+
+    private func startFileDownload(_ f: WebController.PendingFile) {
+        let folder = targetFolder
+        showDownloads = true
+        controller.startFileDownload(f, into: folder) { entry in
+            if entry.state == .done { library.contentDidChange(under: folder) }
+        }
+    }
 }
 
 /// The Downloads tab: live rows with a real progress bar + % for each video the browser is saving.
@@ -149,7 +170,7 @@ private struct DownloadsSheet: View {
             Group {
                 if controller.downloads.isEmpty {
                     ContentUnavailableView("No downloads yet", systemImage: "arrow.down.circle",
-                                           description: Text("Long-press a video in the browser to download it. Its progress shows here."))
+                                           description: Text("Long-press a video or file link — or tap a site's download button. Progress shows here."))
                 } else {
                     List {
                         ForEach(controller.downloads) { d in
@@ -219,6 +240,10 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         var isHLS: Bool { url.lowercased().contains(".m3u8") }
     }
 
+    /// A non-streaming file the browser offers to save — either a link the user long-pressed or a
+    /// response the web view can't render inline (a `Content-Disposition: attachment`).
+    struct PendingFile: Identifiable { let id = UUID(); let url: String; let pageURL: String; let filename: String? }
+
     /// One row in the Downloads tab.
     struct DownloadEntry: Identifiable {
         enum State { case downloading, done, failed }
@@ -244,6 +269,8 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     var activeDownloads: Int { downloads.filter { $0.state == .downloading }.count }
 
     var onVideoLongPress: ((FoundVideo) -> Void)?
+    /// Fired when a downloadable file is discovered (long-pressed link or an attachment response).
+    var onFileDownload: ((PendingFile) -> Void)?
 
     /// The last page visited, so re-opening the browser resumes where you left off.
     static var lastSavedURL: String? {
@@ -338,6 +365,31 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         }
     }
 
+    /// Starts a plain file download (zip, pdf, image, …), tracked in `downloads` like a video.
+    func startFileDownload(_ f: PendingFile, into folder: URL, onComplete: @escaping (DownloadEntry) -> Void) {
+        let name = (f.filename.flatMap { $0.isEmpty ? nil : $0 }) ?? URL(string: f.url)?.lastPathComponent ?? "file"
+        let entry = DownloadEntry(name: name, urlString: f.url)
+        downloads.insert(entry, at: 0)
+        let id = entry.id
+        let urlString = f.url, pageURL = f.pageURL, fname = f.filename
+        let auth = authHeader(forURLString: urlString)
+        Task {
+            let cookie = await cookieHeader(forURLString: urlString)
+            let outcome = await WebVideoDownloader.downloadFile(
+                urlString: urlString, pageURL: pageURL, cookieHeader: cookie, authHeader: auth,
+                into: folder, suggestedName: fname) { p in
+                    Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
+                }
+            self.update(id) { e in
+                switch outcome {
+                case .saved(let u): e.state = .done; e.progress = 1; e.dest = u; e.phase = "Saved"
+                case .failed(let m): e.state = .failed; e.message = m; e.phase = "Failed"
+                }
+            }
+            if let done = self.downloads.first(where: { $0.id == id }) { onComplete(done) }
+        }
+    }
+
     func clearFinishedDownloads() { downloads.removeAll { $0.state != .downloading } }
 
     private func update(_ id: UUID, _ mutate: (inout DownloadEntry) -> Void) {
@@ -368,6 +420,24 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         captured.removeAll(); playingSrc = nil; hasVideo = false
+    }
+
+    /// Catch file downloads: when a response can't be rendered inline (a `.zip`, an installer, …) or
+    /// is explicitly `Content-Disposition: attachment`, cancel the navigation and offer to save it.
+    /// This is the "tap a Download button → a save prompt appears" path.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        let resp = navigationResponse.response
+        let disposition = (resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Disposition")?.lowercased()
+        let isAttachment = disposition?.contains("attachment") ?? false
+        if (navigationResponse.canShowMIMEType == false || isAttachment),
+           let url = resp.url?.absoluteString, url.hasPrefix("http") {
+            decisionHandler(.cancel)
+            let file = PendingFile(url: url, pageURL: currentURLString, filename: resp.suggestedFilename)
+            onFileDownload?(file)
+            return
+        }
+        decisionHandler(.allow)
     }
 
     /// HTTP Basic/Digest/NTLM auth — present the classic username/password prompt.
@@ -459,24 +529,50 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     @objc private func handleLongPress(_ g: UILongPressGestureRecognizer) {
         guard g.state == .began else { return }
         let p = g.location(in: webView)
-        let js = "window.__pbVideoAt ? window.__pbVideoAt(\(Int(p.x)),\(Int(p.y))) : null"
+        let js = "window.__pbHitAt ? window.__pbHitAt(\(Int(p.x)),\(Int(p.y))) : null"
         webView.evaluateJavaScript(js) { [weak self] result, _ in
           MainActor.assumeIsolated {
             guard let self else { return }
             var src: String?
             var media: [String] = self.captured
+            var linkHref: String?
+            var linkForced = false          // <a download> — an explicit download link
+            var linkName: String?
             if let json = result as? String, let data = json.data(using: .utf8),
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                src = obj["src"] as? String
-                if let m = obj["media"] as? [String] { media = self.captured + m }
+                if let vid = obj["video"] as? [String: Any] {
+                    src = vid["src"] as? String
+                    if let m = vid["media"] as? [String] { media = self.captured + m }
+                }
+                if let link = obj["link"] as? [String: Any] {
+                    linkHref = link["href"] as? String
+                    linkForced = (link["download"] as? Bool) ?? false
+                    let n = (link["name"] as? String) ?? ""
+                    linkName = n.isEmpty ? nil : n
+                }
             }
-            // Fall back to the page's known video if the hit-test missed but media exists.
+            // A video under the finger (or the page's known video) takes priority.
             let effectiveSrc = src ?? self.playingSrc
-            guard let best = Self.pickBest(src: effectiveSrc, media: media) else { return }
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-            self.onVideoLongPress?(FoundVideo(url: best, pageURL: self.currentURLString))
+            if let best = Self.pickBest(src: effectiveSrc, media: media) {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                self.onVideoLongPress?(FoundVideo(url: best, pageURL: self.currentURLString))
+                return
+            }
+            // Otherwise, offer to download a file the long-pressed link points to.
+            if let href = linkHref, href.hasPrefix("http"), linkForced || Self.looksDownloadable(href) {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                self.onFileDownload?(PendingFile(url: href, pageURL: self.currentURLString, filename: linkName))
+            }
           }
         }
+    }
+
+    /// True when a link's path ends in a file extension that isn't an ordinary web page — i.e. it's
+    /// worth offering to download (`.zip`, `.pdf`, `.jpg`, `.apk`, …) rather than navigate to.
+    static func looksDownloadable(_ urlString: String) -> Bool {
+        guard let ext = URL(string: urlString)?.pathExtension.lowercased(), !ext.isEmpty else { return false }
+        let pages: Set<String> = ["html", "htm", "php", "asp", "aspx", "jsp", "cgi", "do", "action"]
+        return !pages.contains(ext)
     }
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
@@ -562,7 +658,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
       document.addEventListener('playing', function(e){
         var v=e.target; if(v && v.tagName==='VIDEO'){ add(v.currentSrc||v.src); post({type:'playing', url: v.currentSrc||v.src||''}); }
       }, true);
-      window.__pbVideoAt = function(x,y){
+      function videoAt(x,y){
         var el = document.elementFromPoint(x,y), v=null, n=el;
         while(n){ if(n.tagName==='VIDEO'){ v=n; break; } n=n.parentElement; }
         if(!v){ var vids=document.querySelectorAll('video'); if(vids.length===1) v=vids[0]; else {
@@ -570,8 +666,17 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         if(!v) return null;
         var srcs=[]; if(v.currentSrc) srcs.push(v.currentSrc); if(v.src) srcs.push(v.src);
         var ss=v.querySelectorAll('source'); for(var j=0;j<ss.length;j++){ if(ss[j].src) srcs.push(ss[j].src); }
-        return JSON.stringify({ src: v.currentSrc||v.src||'', media: srcs });
-      };
+        return { src: v.currentSrc||v.src||'', media: srcs };
+      }
+      function linkAt(x,y){
+        var el = document.elementFromPoint(x,y), a=null, n=el;
+        while(n){ if(n.tagName==='A' && n.href){ a=n; break; } n=n.parentElement; }
+        if(!a) return null;
+        return { href: a.href, download: a.hasAttribute('download'), name: a.getAttribute('download')||'' };
+      }
+      window.__pbVideoAt = function(x,y){ var v=videoAt(x,y); return v ? JSON.stringify(v) : null; };
+      // Combined hit-test for long-press: a video and/or an anchor link under the finger.
+      window.__pbHitAt = function(x,y){ return JSON.stringify({ video: videoAt(x,y), link: linkAt(x,y) }); };
     })();
     """
 }

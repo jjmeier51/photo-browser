@@ -14,6 +14,14 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   Requests carry the browser's cookies + Referer so hotlink-/login-gated media saves the same way
   it played. DRM (Widevine/FairPlay) and pure-`blob:` MSE with no discoverable manifest can't be
   captured — the same limits Aloha has. `WebBrowserView` + `WebVideoDownloader`.
+- **Web browser also downloads files, not just video** — long-press a file link (`.zip`, `.pdf`,
+  an image, an installer, …) to save it, and any response the web view can't render inline (or that
+  the server marks `Content-Disposition: attachment`) is intercepted and offered as a download, so
+  a site's "Download" button works. Files stream to disk with true byte-progress in the Downloads
+  tab, keeping the server-suggested filename + extension. `WebVideoDownloader.downloadFile`.
+- **Web-browser downloads carry a members-only login** — the username/password entered at a site's
+  HTTP Basic-Auth prompt is remembered per host and sent as an `Authorization` header on the
+  download request, so `.htpasswd`-protected videos/files save instead of failing with a 401.
 
 ## 2026-07-10b
 
