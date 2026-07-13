@@ -187,10 +187,38 @@ enum Archiver {
         case 8:  guard let inf = inflate(payload, expected: e.uncompSize) else { throw ArchiveError.corrupt }; raw = inf
         default: throw ArchiveError.unsupportedEntry(e.name)
         }
-        try FileManager.default.createDirectory(at: outURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try raw.write(to: outURL, options: .atomic)                     // verbatim bytes → EXIF intact
+        let parent = outURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        DriveWriter.fullSync(parent)                                    // commit the new dir before writing into it
+        try writeFile(raw, to: outURL)                                  // verbatim bytes → EXIF intact
         applyDate(e, to: outURL)
         DriveWriter.fullSyncFileAndParent(outURL)                       // durable per file — no leaked clusters on unplug
+    }
+
+    /// Write extracted bytes to the drive. Uses a **non-atomic** write: `Data.write(options:.atomic)`
+    /// creates a hidden temp in the same directory and renames it, and that temp/rename step is
+    /// exactly what an exFAT/file-provider volume rejects (surfacing as "couldn't be saved in the
+    /// folder"). A direct write, with an explicit file-handle fallback, is what these volumes accept.
+    private nonisolated static func writeFile(_ data: Data, to url: URL) throws {
+        do {
+            try data.write(to: url)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            guard FileManager.default.createFile(atPath: url.path, contents: nil),
+                  let h = try? FileHandle(forWritingTo: url) else { throw error }
+            defer { try? h.close() }
+            try h.write(contentsOf: data)
+        }
+    }
+
+    /// True when the file starts with a ZIP local/EOCD/spanned signature ("PK…"), regardless of its
+    /// extension — a download saved without a `.zip` suffix (shown as a "data" file) is still a zip.
+    /// Reads only the first 4 bytes.
+    nonisolated static func isZip(_ url: URL) -> Bool {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? h.close() }
+        guard let s = try? h.read(upToCount: 4), s.count == 4 else { return false }
+        return s[0] == 0x50 && s[1] == 0x4B && (s[2] == 0x03 || s[2] == 0x05 || s[2] == 0x07)
     }
 
     // MARK: - Inflate (raw DEFLATE via Compression)

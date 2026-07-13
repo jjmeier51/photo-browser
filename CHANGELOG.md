@@ -59,7 +59,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 - **Unzip hardened for external drives** — extraction now claims security-scoped access to the
   archive, reads it without fragile memory-mapping, uses the streaming inflate path (more robust than
   the one-shot buffer, which could return bad data) with output-size validation, and understands
-  ZIP64 archives (over 4 GB or 65535+ files) — fixing "Extract" on large exFAT SSD zips.
+  ZIP64 archives (over 4 GB or 65535+ files). It also writes each extracted file **non-atomically**:
+  the default atomic write creates a hidden temp and renames it, which exFAT/file-provider volumes
+  reject with "the file couldn't be saved in the folder" — a direct write (with a file-handle
+  fallback) is what they accept. And a **zip saved without a `.zip` extension** (it shows as a "data"
+  tile) is now recognized by its contents: tapping or long-pressing it offers "Extract Here" anyway.
 - **Web browser: video playback is off by default, with a toolbar toggle** — a new ▶ button in the
   top-right turns video playback on/off. Off by default so a page's video can't autoplay or expand
   over what you're trying to download; tap it to watch. `WebController.setVideoPlayback`.

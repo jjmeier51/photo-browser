@@ -686,7 +686,9 @@ struct FolderView: View {
                 }
             }
             // File utilities for every file, including non-viewable ones (e.g. a downloaded .zip).
-            if entry.url.pathExtension.lowercased() == "zip" {
+            // Offer Extract for a .zip, or any extension-less "data" file (a zip saved without a
+            // suffix) — the extractor validates the contents and reports cleanly if it isn't one.
+            if ["zip", ""].contains(entry.url.pathExtension.lowercased()) {
                 Button { extractZip(entry) } label: {
                     Label("Extract Here", systemImage: "tray.and.arrow.up")
                 }
@@ -2178,6 +2180,14 @@ struct FolderView: View {
                                                     startIndex: media.firstIndex(of: entry) ?? 0)
         } else if entry.url.pathExtension.lowercased() == "zip" {
             pendingArchive = entry                      // a zip → offer to extract (or preview)
+        } else if entry.kind == .other {
+            // Might be a zip saved without a .zip extension (shows as a "data" tile) — sniff the
+            // magic bytes off-main, then offer to extract; otherwise fall back to Quick Look.
+            let e = entry
+            Task {
+                if await Task.detached(operation: { Archiver.isZip(e.url) }).value { pendingArchive = e }
+                else { previewItem = PreviewItem(url: e.url) }
+            }
         } else {
             previewItem = PreviewItem(url: entry.url)   // PDFs and other files open in QuickLook
         }
