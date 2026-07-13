@@ -2,6 +2,19 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-13
+
+- **New: in-app web browser with long-press-to-download video** (root "…" menu → "Browse the
+  Web & Download Video…"), modeled on Aloha Browser's core feature. Browse any site; an injected
+  script watches page traffic for media (direct `.mp4`/`.m4v`/`.mov`/`.webm` and `.m3u8` HLS
+  playlists) and reports the `<video>` under your finger. **Long-press a playing video** → the app
+  offers to download it into the current folder. Direct files stream to disk; HLS streams fetch
+  every segment (bounded-concurrent), decrypt AES-128 on the fly (CommonCrypto), and merge —
+  fMP4/CMAF into a clean `.mp4`, MPEG-TS into `.ts` (remuxed to `.mp4` when FFmpegKit is present).
+  Requests carry the browser's cookies + Referer so hotlink-/login-gated media saves the same way
+  it played. DRM (Widevine/FairPlay) and pure-`blob:` MSE with no discoverable manifest can't be
+  captured — the same limits Aloha has. `WebBrowserView` + `WebVideoDownloader`.
+
 ## 2026-07-10b
 
 - **Exported frames pre-warm their thumbnails** — "Export all frames" now generates each

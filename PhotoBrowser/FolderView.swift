@@ -87,6 +87,7 @@ struct FolderView: View {
     @State private var showTikTok = false
     @State private var showVSCO = false
     @State private var showYouTube = false
+    @State private var showWebBrowser = false
     @State private var confirmFixDates = false
     @State private var fixingDates = false
     @State private var indexingText = false
@@ -912,6 +913,9 @@ struct FolderView: View {
             }
             .sheet(isPresented: $showVSCO, onDismiss: { Task { await reload() } }) {
                 VSCOImportView(targetFolder: url) { Task { await reload() } }
+            }
+            .fullScreenCover(isPresented: $showWebBrowser, onDismiss: { Task { await reload() } }) {
+                WebBrowserView(targetFolder: url)
             }
         )
         return AnyView(g4
@@ -1748,6 +1752,9 @@ struct FolderView: View {
                     }
                     Button { showYouTube = true } label: {
                         Label("Download YouTube Video Here…", systemImage: "play.rectangle.fill")
+                    }
+                    Button { showWebBrowser = true } label: {
+                        Label("Browse the Web & Download Video…", systemImage: "safari")
                     }
                     Button { showTaylorBrowser = true } label: {
                         Label("Browse taylorpictures.net…", systemImage: "globe")
