@@ -243,13 +243,15 @@ enum WebVideoDownloader {
         guard key.count == kCCKeySizeAES128, iv.count == kCCBlockSizeAES128 else { return nil }
         var out = Data(count: data.count + kCCBlockSizeAES128)
         var moved = 0
-        let status = out.withUnsafeMutableBytes { o in
+        // Use each buffer pointer's own `.count` (not the Data's) inside the closures — reading
+        // `out.count` while `out` is mutably borrowed by withUnsafeMutableBytes is overlapping access.
+        let status: Int32 = out.withUnsafeMutableBytes { o in
             data.withUnsafeBytes { i in
                 key.withUnsafeBytes { k in
                     iv.withUnsafeBytes { v in
                         CCCrypt(CCOperation(kCCDecrypt), CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionPKCS7Padding),
-                                k.baseAddress, key.count, v.baseAddress,
-                                i.baseAddress, data.count, o.baseAddress, out.count, &moved)
+                                k.baseAddress, k.count, v.baseAddress,
+                                i.baseAddress, i.count, o.baseAddress, o.count, &moved)
                     }
                 }
             }
