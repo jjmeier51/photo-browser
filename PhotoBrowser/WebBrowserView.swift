@@ -21,6 +21,7 @@ struct WebBrowserView: View {
     @State private var address = ""
     @State private var editingAddress = false
     @State private var pending: WebController.FoundVideo?
+    @State private var showDownloads = false
 
     var body: some View {
         NavigationStack {
@@ -45,11 +46,28 @@ struct WebBrowserView: View {
                             .accessibilityLabel("A downloadable video is playing")
                     }
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showDownloads = true } label: {
+                        Image(systemName: "arrow.down.circle")
+                            .overlay(alignment: .topTrailing) {
+                                if controller.activeDownloads > 0 {
+                                    Text("\(controller.activeDownloads)")
+                                        .font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
+                                        .padding(3).background(Circle().fill(.red)).offset(x: 6, y: -6)
+                                } else if !controller.downloads.isEmpty {
+                                    Circle().fill(.green).frame(width: 7, height: 7).offset(x: 4, y: -4)
+                                }
+                            }
+                    }
+                    .accessibilityLabel("Downloads")
+                }
             }
         }
         .onAppear {
             controller.onVideoLongPress = { found in pending = found }
-            if controller.currentURLString.isEmpty { controller.load("https://www.google.com") }
+            if controller.currentURLString.isEmpty {
+                controller.load(WebController.lastSavedURL ?? "https://www.google.com")
+            }
         }
         .onDisappear { controller.teardown() }
         .confirmationDialog("Download video?", isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
@@ -58,9 +76,10 @@ struct WebBrowserView: View {
             Button("Copy Video Link") { UIPasteboard.general.string = v.url }
             Button("Cancel", role: .cancel) {}
         } message: { v in
-            Text(v.isHLS ? "This is a streaming video — it’ll be fetched and merged into one file."
-                         : "Save this video into your folder.")
+            // Show the actual video URL that would be downloaded.
+            Text((v.isHLS ? "Streaming video (segments will be merged):\n" : "") + v.url)
         }
+        .sheet(isPresented: $showDownloads) { DownloadsSheet(controller: controller) }
     }
 
     private var addressBar: some View {
@@ -113,23 +132,74 @@ struct WebBrowserView: View {
 
     private func startDownload(_ v: WebController.FoundVideo) {
         let folder = targetFolder
-        let id = library.beginActivity("Downloading video", indeterminate: true)
-        library.setActivity(id, status: "Starting…")
-        let title = controller.pageTitle
-        Task {
-            let cookieHeader = await controller.cookieHeader(forURLString: v.url)
-            let outcome = await WebVideoDownloader.download(
-                urlString: v.url, pageURL: v.pageURL, cookieHeader: cookieHeader,
-                into: folder, suggestedName: title) { p in
-                    Task { @MainActor in library.setActivity(id, status: p.phase, fraction: p.fraction > 0 ? p.fraction : nil) }
+        showDownloads = true            // surface the Downloads tab so its real progress is visible
+        controller.startDownload(v, into: folder, suggestedName: controller.pageTitle) { entry in
+            if entry.state == .done { library.contentDidChange(under: folder) }
+        }
+    }
+}
+
+/// The Downloads tab: live rows with a real progress bar + % for each video the browser is saving.
+private struct DownloadsSheet: View {
+    @ObservedObject var controller: WebController
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if controller.downloads.isEmpty {
+                    ContentUnavailableView("No downloads yet", systemImage: "arrow.down.circle",
+                                           description: Text("Long-press a video in the browser to download it. Its progress shows here."))
+                } else {
+                    List {
+                        ForEach(controller.downloads) { d in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Image(systemName: icon(d.state)).foregroundStyle(color(d.state))
+                                    Text(d.name).lineLimit(1).font(.callout.weight(.medium))
+                                    Spacer()
+                                    if d.state == .downloading { Text("\(Int(d.progress * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
+                                }
+                                if d.state == .downloading {
+                                    ProgressView(value: d.progress).tint(.accentColor)
+                                    Text(d.phase).font(.caption2).foregroundStyle(.secondary)
+                                } else if d.state == .failed {
+                                    Text(d.message ?? "Download failed.").font(.caption2).foregroundStyle(.orange)
+                                } else {
+                                    Text("Saved").font(.caption2).foregroundStyle(.green)
+                                }
+                                Text(d.urlString).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
                 }
-            switch outcome {
-            case .saved:
-                library.endActivity(id, result: "Saved the video to “\(folder.lastPathComponent)”.")
-                library.contentDidChange(under: folder)
-            case .failed(let msg):
-                library.endActivity(id, result: msg)
             }
+            .navigationTitle("Downloads")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if controller.downloads.contains(where: { $0.state != .downloading }) {
+                        Button("Clear") { controller.clearFinishedDownloads() }
+                    }
+                }
+            }
+        }
+    }
+
+    private func icon(_ s: WebController.DownloadEntry.State) -> String {
+        switch s {
+        case .downloading: return "arrow.down.circle"
+        case .done: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        }
+    }
+    private func color(_ s: WebController.DownloadEntry.State) -> Color {
+        switch s {
+        case .downloading: return .accentColor
+        case .done: return .green
+        case .failed: return .orange
         }
     }
 }
@@ -144,9 +214,22 @@ private struct WebViewContainer: UIViewRepresentable {
 /// Owns and drives the `WKWebView`: navigation state, injected media-detection script, the
 /// long-press handler, and cookie extraction for downloads.
 @MainActor
-final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMessageHandler, UIGestureRecognizerDelegate {
+final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, UIGestureRecognizerDelegate {
     struct FoundVideo: Identifiable { let id = UUID(); let url: String; let pageURL: String
         var isHLS: Bool { url.lowercased().contains(".m3u8") }
+    }
+
+    /// One row in the Downloads tab.
+    struct DownloadEntry: Identifiable {
+        enum State { case downloading, done, failed }
+        let id = UUID()
+        var name: String
+        var urlString: String
+        var progress: Double = 0
+        var phase: String = "Starting…"
+        var state: State = .downloading
+        var dest: URL?
+        var message: String?
     }
 
     @Published var currentURLString = ""
@@ -156,8 +239,17 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKS
     @Published var progress: Double = 0
     @Published var isLoading = false
     @Published var hasVideo = false
+    @Published var downloads: [DownloadEntry] = []
+
+    var activeDownloads: Int { downloads.filter { $0.state == .downloading }.count }
 
     var onVideoLongPress: ((FoundVideo) -> Void)?
+
+    /// The last page visited, so re-opening the browser resumes where you left off.
+    static var lastSavedURL: String? {
+        get { UserDefaults.standard.string(forKey: "photoBrowser.webBrowserLastURL") }
+        set { UserDefaults.standard.set(newValue, forKey: "photoBrowser.webBrowserLastURL") }
+    }
 
     /// Media URLs the page has requested (direct files + `.m3u8`), newest last.
     private var captured: [String] = []
@@ -177,6 +269,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKS
         cfg.userContentController = ucc
         let web = WKWebView(frame: .zero, configuration: cfg)
         web.navigationDelegate = self
+        web.uiDelegate = self
         web.allowsBackForwardNavigationGestures = true
         web.customUserAgent = WebVideoDownloader.userAgent
         for kp in ["estimatedProgress", "title", "URL", "canGoBack", "canGoForward", "loading"] {
@@ -206,6 +299,39 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKS
         return FoundVideo(url: url, pageURL: currentURLString)
     }
 
+    // MARK: Downloads
+
+    /// Starts a download, tracking it in `downloads` with real progress; `onComplete` fires on the
+    /// main actor when it finishes (so the view can refresh the folder).
+    func startDownload(_ v: FoundVideo, into folder: URL, suggestedName: String?,
+                       onComplete: @escaping (DownloadEntry) -> Void) {
+        let name = (suggestedName.flatMap { $0.isEmpty ? nil : $0 }) ?? URL(string: v.url)?.lastPathComponent ?? "video"
+        let entry = DownloadEntry(name: name, urlString: v.url)
+        downloads.insert(entry, at: 0)
+        let id = entry.id
+        let urlString = v.url, pageURL = v.pageURL, sName = suggestedName
+        Task {
+            let cookie = await cookieHeader(forURLString: urlString)
+            let outcome = await WebVideoDownloader.download(
+                urlString: urlString, pageURL: pageURL, cookieHeader: cookie, into: folder, suggestedName: sName) { p in
+                    Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
+                }
+            self.update(id) { e in
+                switch outcome {
+                case .saved(let u): e.state = .done; e.progress = 1; e.dest = u; e.phase = "Saved"
+                case .failed(let m): e.state = .failed; e.message = m; e.phase = "Failed"
+                }
+            }
+            if let done = self.downloads.first(where: { $0.id == id }) { onComplete(done) }
+        }
+    }
+
+    func clearFinishedDownloads() { downloads.removeAll { $0.state != .downloading } }
+
+    private func update(_ id: UUID, _ mutate: (inout DownloadEntry) -> Void) {
+        if let i = downloads.firstIndex(where: { $0.id == id }) { mutate(&downloads[i]) }
+    }
+
     // MARK: KVO → published state
 
     nonisolated override func observeValue(forKeyPath keyPath: String?, of object: Any?,
@@ -215,7 +341,9 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKS
             switch keyPath {
             case "estimatedProgress": progress = webView.estimatedProgress
             case "title": pageTitle = webView.title ?? ""
-            case "URL": currentURLString = webView.url?.absoluteString ?? currentURLString
+            case "URL":
+                currentURLString = webView.url?.absoluteString ?? currentURLString
+                if let u = webView.url?.absoluteString, u.hasPrefix("http") { Self.lastSavedURL = u }
             case "canGoBack": canGoBack = webView.canGoBack
             case "canGoForward": canGoForward = webView.canGoForward
             case "loading": isLoading = webView.isLoading
@@ -228,6 +356,69 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKS
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         captured.removeAll(); playingSrc = nil; hasVideo = false
+    }
+
+    /// HTTP Basic/Digest/NTLM auth — present the classic username/password prompt.
+    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                 completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let method = challenge.protectionSpace.authenticationMethod
+        guard method == NSURLAuthenticationMethodHTTPBasic
+                || method == NSURLAuthenticationMethodHTTPDigest
+                || method == NSURLAuthenticationMethodNTLM else {
+            completionHandler(.performDefaultHandling, nil); return
+        }
+        let host = challenge.protectionSpace.host
+        let alert = UIAlertController(title: "Sign In", message: "“\(host)” requires a username and password.", preferredStyle: .alert)
+        alert.addTextField { $0.placeholder = "Username"; $0.autocapitalizationType = .none; $0.autocorrectionType = .no; $0.keyboardType = .emailAddress }
+        alert.addTextField { $0.placeholder = "Password"; $0.isSecureTextEntry = true }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(.cancelAuthenticationChallenge, nil) })
+        alert.addAction(UIAlertAction(title: "Sign In", style: .default) { _ in
+            let u = alert.textFields?[0].text ?? "", p = alert.textFields?[1].text ?? ""
+            completionHandler(.useCredential, URLCredential(user: u, password: p, persistence: .forSession))
+        })
+        present(alert)
+    }
+
+    // MARK: WKUIDelegate — popups (target=_blank), and JS alert/confirm/prompt login dialogs
+
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        // Open “_blank”/popup links in this same web view instead of dropping them.
+        if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
+            webView.load(URLRequest(url: url))
+        }
+        return nil
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        let a = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+        a.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler() })
+        present(a)
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        let a = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+        a.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(false) })
+        a.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(true) })
+        present(a)
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+        let a = UIAlertController(title: nil, message: prompt, preferredStyle: .alert)
+        a.addTextField { $0.text = defaultText }
+        a.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(nil) })
+        a.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(a.textFields?.first?.text) })
+        present(a)
+    }
+
+    /// Present a UIKit alert over the browser (topmost view controller in the web view's window).
+    private func present(_ alert: UIAlertController) {
+        var vc = webView.window?.rootViewController
+        while let p = vc?.presentedViewController { vc = p }
+        vc?.present(alert, animated: true)
     }
 
     // MARK: WKScriptMessageHandler — media capture

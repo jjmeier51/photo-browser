@@ -60,7 +60,9 @@ enum WebVideoDownloader {
                                                    progress: @escaping @Sendable (Progress) -> Void) async -> Outcome {
         progress(Progress(fraction: 0, phase: "Downloading video…"))
         let req = request(url, referer: pageURL, cookieHeader: cookieHeader)
-        guard let (tmp, resp) = try? await session.download(for: req) else {
+        // A delegate download gives real byte-progress (unlike `session.download(for:)`).
+        let dl = ProgressDownloadDelegate { f in progress(Progress(fraction: f, phase: "Downloading video…")) }
+        guard let (tmp, resp) = await dl.run(req) else {
             return .failed("The download failed (the video may be protected or the link expired).")
         }
         if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 400 {
@@ -356,5 +358,52 @@ enum WebVideoDownloader {
         guard let m = re.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)), m.numberOfRanges > 1 else { return nil }
         let r = m.range(at: 1)
         return r.location == NSNotFound ? nil : ns.substring(with: r)
+    }
+}
+
+/// A one-shot download that reports real byte-progress (`didWriteData`) and hands back the temp
+/// file + response. Used for direct-file downloads so the browser's Downloads tab shows a true %.
+private final class ProgressDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let onProgress: @Sendable (Double) -> Void
+    private var continuation: CheckedContinuation<(URL, URLResponse)?, Never>?
+    private var session: URLSession!
+    private var lastReport = 0.0
+
+    init(onProgress: @escaping @Sendable (Double) -> Void) {
+        self.onProgress = onProgress
+        super.init()
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.httpShouldSetCookies = false            // our manual Cookie header is authoritative
+        cfg.httpCookieStorage = nil
+        cfg.timeoutIntervalForRequest = 60
+        session = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
+    }
+
+    func run(_ req: URLRequest) async -> (URL, URLResponse)? {
+        await withCheckedContinuation { c in
+            continuation = c
+            session.downloadTask(with: req).resume()
+        }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
+                    totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let f = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        if f - lastReport >= 0.01 || f >= 1 { lastReport = f; onProgress(min(f, 1)) }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        // The temp file is removed as soon as this returns — move it somewhere stable synchronously.
+        let dst = FileManager.default.temporaryDirectory.appendingPathComponent("webdl_\(UUID().uuidString)")
+        do { try FileManager.default.moveItem(at: location, to: dst) }
+        catch { try? FileManager.default.copyItem(at: location, to: dst) }
+        let resp = downloadTask.response ?? URLResponse()
+        let result: (URL, URLResponse)? = FileManager.default.fileExists(atPath: dst.path) ? (dst, resp) : nil
+        continuation?.resume(returning: result); continuation = nil
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if error != nil { continuation?.resume(returning: nil); continuation = nil }
     }
 }
