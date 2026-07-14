@@ -4,15 +4,16 @@ import UIKit
 import Combine
 
 /// An in-app web browser with **long-press-to-download**, like Aloha Browser's core feature.
-/// Browse any site; when a video is playing, long-press it to save it into the current folder.
-/// Beyond video it also downloads ordinary files: long-press a file link (`.zip`, `.pdf`, an
-/// image, …) or just tap a site's download button — any response the web view can't render inline
-/// (or that's marked `Content-Disposition: attachment`) is intercepted and offered as a download.
+/// Browse any site (videos play normally, inline or full-screen); long-press a **video**, an
+/// **image**, or a **file link** (`.zip`, `.pdf`, …) to save it — and each download asks whether to
+/// put it in the current folder or another one. A site's download button works too: any response the
+/// web view can't render inline (or that's marked `Content-Disposition: attachment`) is intercepted
+/// and offered as a download. Downloads keep their EXIF (bytes are written verbatim).
 ///
 /// Detection mirrors how these downloaders work: an injected script (a) hooks `fetch`/`XHR` to
 /// capture media URLs the page requests (direct files and `.m3u8` HLS playlists), and (b) reports
-/// the `<video>` or `<a>` link under a long-press point. `WebVideoDownloader` then fetches +
-/// assembles the file (carrying the browser's cookies + Referer + any Basic-Auth login). DRM
+/// the `<video>`, `<img>`, or `<a>` link under a long-press point. `WebVideoDownloader` then fetches
+/// + assembles the file (carrying the browser's cookies + Referer + any Basic-Auth login). DRM
 /// (Widevine/FairPlay) and pure-`blob:` MSE with no discoverable manifest can't be captured — the
 /// same limits Aloha has.
 struct WebBrowserView: View {
@@ -30,6 +31,10 @@ struct WebBrowserView: View {
     @State private var pendingFile: WebController.PendingFile?
     @State private var showDownloads = false
     @State private var showBookmarks = false
+    // "Download to Another Folder…" flow: stash what to download, then present a folder picker.
+    @State private var videoForPicker: WebController.FoundVideo?
+    @State private var fileForPicker: WebController.PendingFile?
+    @State private var showDownloadFolderPicker = false
 
     var body: some View {
         NavigationStack {
@@ -48,14 +53,6 @@ struct WebBrowserView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { controller.setVideoPlayback(!controller.videoPlaybackEnabled) } label: {
-                        Image(systemName: controller.videoPlaybackEnabled ? "play.circle.fill" : "play.slash.fill")
-                            .foregroundStyle(controller.videoPlaybackEnabled ? Color.green : Color.secondary)
-                    }
-                    .accessibilityLabel(controller.videoPlaybackEnabled ? "Video playback on — tap to disable"
-                                                                        : "Video playback off — tap to watch")
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     if controller.hasVideo {
                         Image(systemName: "video.badge.checkmark").foregroundStyle(.green)
@@ -91,7 +88,9 @@ struct WebBrowserView: View {
         .onDisappear { controller.pauseMedia() }
         .confirmationDialog("Download video?", isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
                             titleVisibility: .visible, presenting: pending) { v in
-            Button("Download to “\(targetFolder.lastPathComponent)”") { startDownload(v) }
+            Button("Download to “\(targetFolder.lastPathComponent)”") { startDownload(v, into: targetFolder) }
+            Button("Download to Another Folder…") { videoForPicker = v; fileForPicker = nil
+                DispatchQueue.main.async { showDownloadFolderPicker = true } }   // defer so the dialog dismissal doesn't swallow the sheet
             Button("Copy Video Link") { UIPasteboard.general.string = v.url }
             Button("Cancel", role: .cancel) {}
         } message: { v in
@@ -100,11 +99,20 @@ struct WebBrowserView: View {
         }
         .confirmationDialog("Download file?", isPresented: Binding(get: { pendingFile != nil }, set: { if !$0 { pendingFile = nil } }),
                             titleVisibility: .visible, presenting: pendingFile) { f in
-            Button("Download to “\(targetFolder.lastPathComponent)”") { startFileDownload(f) }
+            Button("Download to “\(targetFolder.lastPathComponent)”") { startFileDownload(f, into: targetFolder) }
+            Button("Download to Another Folder…") { fileForPicker = f; videoForPicker = nil
+                DispatchQueue.main.async { showDownloadFolderPicker = true } }   // defer so the dialog dismissal doesn't swallow the sheet
             Button("Copy Link") { UIPasteboard.general.string = f.url }
             Button("Cancel", role: .cancel) {}
         } message: { f in
             Text((f.filename.map { "\($0)\n" } ?? "") + f.url)
+        }
+        .sheet(isPresented: $showDownloadFolderPicker) {
+            FolderPicker(root: library.rootURL ?? targetFolder, confirmTitle: "Download Here", startAt: targetFolder) { folder in
+                if let v = videoForPicker { startDownload(v, into: folder) }
+                if let f = fileForPicker { startFileDownload(f, into: folder) }
+                videoForPicker = nil; fileForPicker = nil
+            }
         }
         .sheet(isPresented: $showDownloads) { DownloadsSheet(controller: controller) }
         .sheet(isPresented: $showBookmarks) { BookmarksSheet(controller: controller) { controller.load($0) } }
@@ -140,8 +148,7 @@ struct WebBrowserView: View {
     private var bottomBar: some View {
         VStack(spacing: 4) {
             Text(controller.hasVideo ? "Video detected — long-press it, or tap ⬇︎ to download"
-                 : controller.videoPlaybackEnabled ? "Long-press a video or file link to download • download buttons work too"
-                                                    : "Long-press a video or file link to download • tap ▶ to watch video")
+                                     : "Long-press a video, image, or file link to download it")
                 .font(.caption2).foregroundStyle(controller.hasVideo ? .green : .secondary)
             HStack {
                 Button { controller.goBack() } label: { Image(systemName: "chevron.left") }.disabled(!controller.canGoBack)
@@ -170,8 +177,7 @@ struct WebBrowserView: View {
         .background(.ultraThinMaterial)
     }
 
-    private func startDownload(_ v: WebController.FoundVideo) {
-        let folder = targetFolder
+    private func startDownload(_ v: WebController.FoundVideo, into folder: URL) {
         showDownloads = true            // surface the Downloads tab so its real progress is visible
         controller.startDownload(v, into: folder, suggestedName: controller.pageTitle) { entry in
             if entry.state == .done {
@@ -181,8 +187,7 @@ struct WebBrowserView: View {
         }
     }
 
-    private func startFileDownload(_ f: WebController.PendingFile) {
-        let folder = targetFolder
+    private func startFileDownload(_ f: WebController.PendingFile, into folder: URL) {
         showDownloads = true
         controller.startFileDownload(f, into: folder) { entry in
             if entry.state == .done {
@@ -339,9 +344,6 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     @Published var isLoading = false
     @Published var hasVideo = false
     @Published var downloads: [DownloadEntry] = []
-    /// Whether videos are allowed to play. Off by default so a page's video can't autoplay/expand
-    /// and get in the way of long-pressing things to download; the toolbar toggle turns it on.
-    @Published var videoPlaybackEnabled = false
 
     var activeDownloads: Int { downloads.filter { $0.state == .downloading }.count }
 
@@ -504,9 +506,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     lazy var webView: WKWebView = {
         let cfg = WKWebViewConfiguration()
-        cfg.allowsInlineMediaPlayback = true
-        cfg.mediaTypesRequiringUserActionForPlayback = .all   // no autoplay; the injected script also
-                                                              // blocks playback until the user opts in
+        cfg.allowsInlineMediaPlayback = true                  // videos play inline (and can go full-screen)
         cfg.websiteDataStore = .default()                     // persistent cookies (logins / hotlink gates)
         let ucc = WKUserContentController()
         ucc.add(WeakScriptHandler(self), name: "pb")          // weak: avoid the config→handler→config retain cycle
@@ -542,13 +542,6 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     /// disappears so media doesn't keep playing while the web view is kept alive for the session.
     func pauseMedia() {
         webView.evaluateJavaScript("document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})") { _, _ in }
-    }
-
-    /// Turn video playback on/off. When off, the injected script pauses any playing video and
-    /// rejects `play()`, so nothing expands over the page while you're trying to download.
-    func setVideoPlayback(_ on: Bool) {
-        videoPlaybackEnabled = on
-        webView.evaluateJavaScript("window.__pbSetPlayback && window.__pbSetPlayback(\(on))") { _, _ in }
     }
 
     /// The best downloadable URL currently known (video src or captured media).
@@ -662,10 +655,6 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         captured.removeAll(); playingSrc = nil; hasVideo = false
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        // The detector re-injects with playback off at document start; re-assert the user's choice.
-        setVideoPlayback(videoPlaybackEnabled)
-    }
 
     /// Catch file downloads: when a response can't be rendered inline (a `.zip`, an installer, …) or
     /// is explicitly `Content-Disposition: attachment`, cancel the navigation and offer to save it.
@@ -784,6 +773,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
             var linkHref: String?
             var linkForced = false          // <a download> — an explicit download link
             var linkName: String?
+            var imageSrc: String?
             if let json = result as? String, let data = json.data(using: .utf8),
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if let vid = obj["video"] as? [String: Any] {
@@ -796,6 +786,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
                     let n = (link["name"] as? String) ?? ""
                     linkName = n.isEmpty ? nil : n
                 }
+                imageSrc = obj["image"] as? String
             }
             // A video under the finger (or the page's known video) takes priority.
             let effectiveSrc = src ?? self.playingSrc
@@ -804,10 +795,17 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
                 self.onVideoLongPress?(FoundVideo(url: best, pageURL: self.currentURLString))
                 return
             }
-            // Otherwise, offer to download a file the long-pressed link points to.
+            // A link that points at a downloadable file (e.g. a gallery's full-size <a href="…jpg">)
+            // — prefer it over the displayed <img>, which is often just a thumbnail.
             if let href = linkHref, href.hasPrefix("http"), linkForced || Self.looksDownloadable(href) {
                 self.haptic.notificationOccurred(.success)
                 self.onFileDownload?(PendingFile(url: href, pageURL: self.currentURLString, filename: linkName))
+                return
+            }
+            // Otherwise, the image under the finger.
+            if let img = imageSrc, img.hasPrefix("http") {
+                self.haptic.notificationOccurred(.success)
+                self.onFileDownload?(PendingFile(url: img, pageURL: self.currentURLString, filename: nil))
             }
           }
         }
@@ -904,29 +902,6 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
       document.addEventListener('playing', function(e){
         var v=e.target; if(v && v.tagName==='VIDEO'){ add(v.currentSrc||v.src); post({type:'playing', url: v.currentSrc||v.src||''}); }
       }, true);
-      // Playback gate: off by default so videos can't autoplay/expand while you're downloading.
-      if (window.__pbAllowPlay === undefined) window.__pbAllowPlay = false;
-      try {
-        var proto = HTMLMediaElement.prototype;
-        if (!proto.__pbPatched) {
-          proto.__pbPatched = true;
-          var origPlay = proto.play;
-          proto.play = function(){
-            if (!window.__pbAllowPlay && this.tagName === 'VIDEO'){
-              try{ this.pause(); }catch(e){}
-              return Promise.reject(new DOMException('Playback disabled','AbortError'));
-            }
-            return origPlay.apply(this, arguments);
-          };
-        }
-      } catch(e){}
-      document.addEventListener('play', function(e){
-        var v=e.target; if(v && v.tagName==='VIDEO' && !window.__pbAllowPlay){ try{ v.pause(); }catch(e){} }
-      }, true);
-      window.__pbSetPlayback = function(on){
-        window.__pbAllowPlay = !!on;
-        if(!on){ var vids=document.querySelectorAll('video'); for(var i=0;i<vids.length;i++){ try{ vids[i].pause(); }catch(e){} } }
-      };
       function videoAt(x,y){
         var el = document.elementFromPoint(x,y), v=null, n=el;
         while(n){ if(n.tagName==='VIDEO'){ v=n; break; } n=n.parentElement; }
@@ -943,9 +918,22 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         if(!a) return null;
         return { href: a.href, download: a.hasAttribute('download'), name: a.getAttribute('download')||'' };
       }
+      function imageAt(x,y){
+        var el = document.elementFromPoint(x,y), n=el;
+        // The <img> under the finger, or its full-size src via a data-/srcset attribute.
+        while(n){ if(n.tagName==='IMG'){
+            var src = n.currentSrc || n.src || n.getAttribute('data-src') || '';
+            return src && src.indexOf('data:')!==0 ? src : null;
+          }
+          // CSS background image (many galleries render photos as a div background).
+          if(n.nodeType===1){ var bg = getComputedStyle(n).backgroundImage||''; var m = bg.match(/url\\(["']?([^"')]+)["']?\\)/);
+            if(m && m[1] && m[1].indexOf('data:')!==0) return m[1]; }
+          n=n.parentElement; }
+        return null;
+      }
       window.__pbVideoAt = function(x,y){ var v=videoAt(x,y); return v ? JSON.stringify(v) : null; };
-      // Combined hit-test for long-press: a video and/or an anchor link under the finger.
-      window.__pbHitAt = function(x,y){ return JSON.stringify({ video: videoAt(x,y), link: linkAt(x,y) }); };
+      // Combined hit-test for long-press: a video, an anchor link, and/or an image under the finger.
+      window.__pbHitAt = function(x,y){ return JSON.stringify({ video: videoAt(x,y), link: linkAt(x,y), image: imageAt(x,y) }); };
     })();
     """
 }

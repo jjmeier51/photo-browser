@@ -4,6 +4,16 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-13
 
+- **Web browser download tweaks.**
+  - **Choose the folder:** every download now offers "Download to “<current folder>”" *or* "Download
+    to Another Folder…" (a folder picker), so you're no longer locked to the folder you opened the
+    browser from.
+  - **Long-press an image to download it** (in addition to videos and file links). It grabs the
+    `<img>` under your finger — or, if the image is a thumbnail linking to a full-size file, that
+    full-size — and, like all downloads, keeps its EXIF (bytes written verbatim, extension inferred
+    from the real magic bytes).
+  - **Full-screen video is back.** The earlier "playback off by default" gate is removed — videos
+    play normally (inline or full-screen). Long-press still works to download the one you're watching.
 - **Set a custom thumbnail for any photo or video.** In the full-screen viewer's "…" menu →
   "Set as Thumbnail" opens the same square cropper as "Use as Album Cover" (for a video it uses the
   frame you're paused on), and the crop becomes that item's grid tile. "Reset Thumbnail" reverts to
