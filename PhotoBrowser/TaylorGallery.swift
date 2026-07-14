@@ -135,13 +135,15 @@ enum TaylorGallery {
               (response as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true,
               data.count >= 256 else { return false }
         let dest = uniqueDestination(for: sanitize(image.filename), in: folder)
-        return saveImage(data, to: dest, date: albumDate)
+        return await saveImage(data, to: dest, date: albumDate)
     }
 
     /// Writes the bytes, embedding the album date as the capture date when the image
     /// has no EXIF date of its own (the usual case for gallery JPGs) and stamping the
     /// file's dates so it never shows up as "today".
-    nonisolated private static func saveImage(_ data: Data, to dest: URL, date: Date?) -> Bool {
+    nonisolated private static func saveImage(_ data: Data, to dest: URL, date: Date?) async -> Bool {
+        var outData = data          // final bytes (possibly re-encoded to carry the album date)
+        var stampDate = date
         if let src = CGImageSourceCreateWithData(data as CFData, nil), let type = CGImageSourceGetType(src) {
             let existing = exifDate(src)
             if existing == nil, let date {
@@ -154,18 +156,20 @@ enum TaylorGallery {
                 props[kCGImagePropertyExifDictionary] = exif
                 var tiff = (props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
                 tiff[kCGImagePropertyTIFFDateTime] = s; props[kCGImagePropertyTIFFDictionary] = tiff
-                if let d = CGImageDestinationCreateWithURL(dest as CFURL, type, 1, nil) {
+                // Re-encode with the date IN MEMORY, then do a single durable write — no writing the
+                // image straight onto the exFAT drive (which left partial/`.sb-*` files on a brown-out).
+                let md = NSMutableData()
+                if let d = CGImageDestinationCreateWithData(md as CFMutableData, type, 1, nil) {
                     CGImageDestinationAddImageFromSource(d, src, 0, props as CFDictionary)
-                    if CGImageDestinationFinalize(d) { setFileDate(dest, date); DriveWriter.fullSyncFileAndParent(dest); return true }
+                    if CGImageDestinationFinalize(d), md.length > 0 { outData = md as Data }
                 }
+            } else {
+                stampDate = existing ?? date
             }
-            // Already had a date (keep its bytes) or embedding failed — fall through.
-            if (try? data.write(to: dest, options: .atomic)) != nil { setFileDate(dest, existing ?? date); DriveWriter.fullSyncFileAndParent(dest); return true }
-            return false
         }
-        guard (try? data.write(to: dest, options: .atomic)) != nil else { return false }
-        setFileDate(dest, date)
-        DriveWriter.fullSyncFileAndParent(dest)
+        do { try await DriveWriter.shared.writeData(outData, to: dest) }
+        catch { return false }
+        if let stampDate { setFileDate(dest, stampDate) }
         return true
     }
 

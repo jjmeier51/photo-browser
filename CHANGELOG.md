@@ -4,6 +4,14 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-13
 
+- **No more `.sb-*` junk files from interrupted downloads.** A brown-out / disconnect during a
+  download's `Data.write(options:.atomic)` left the hidden `.sb-*` temp orphaned on the exFAT drive
+  (the real photo never landed), and the Files/exFAT provider was showing those dot-files as tiles.
+  Now: the folder listing hides ALL dot-files (our own transients + macOS's `.sb-*`) and sweeps away
+  stale `.sb-*`/`.pbtmp_*` orphans (older than 2 min, so an in-flight write is never touched); and the
+  Taylorpictures downloader writes through a new durable path (`DriveWriter.writeData`) that stages a
+  controlled temp, forces it to media, then renames it into place — so no `.sb-*` is ever created and
+  a partial download can't masquerade as a finished photo (re-running correctly re-fetches it).
 - **Browser bookmarks.** Save favorite sites: tap the ☆ in the address bar to bookmark the current
   page (★ when saved), and open the "Bookmarks" list from the browser's "…" menu to revisit or
   swipe-delete them. Bookmarks persist across launches. `WebController.bookmarks`.

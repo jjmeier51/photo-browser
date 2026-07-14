@@ -55,6 +55,34 @@ actor DriveWriter {
         flush(dest.deletingLastPathComponent())       // …and the directory entry that names it
     }
 
+    /// Durable, serialized write of in-memory `data` to `dest` on the drive.
+    ///
+    /// Deliberately does NOT use `Data.write(options:.atomic)`: on an exFAT volume that creates a
+    /// hidden `.sb-*` temp on the drive, and a brown-out mid-write leaves that orphan behind (the junk
+    /// that was cluttering download folders) while the real file never lands. Instead it writes to a
+    /// **controlled** `.pbtmp_*` temp (which the folder listing hides + sweeps), forces the bytes to
+    /// media, then does a same-volume rename into place. So: no stray `.sb-*`, the payload is durable
+    /// before the file becomes visible, and `dest` only ever appears complete — a partial download
+    /// can't masquerade as a finished photo (a re-run correctly re-fetches it).
+    func writeData(_ data: Data, to dest: URL) async throws {
+        while paused { await waitForResume() }
+        inFlight += 1
+        defer { inFlight -= 1 }
+        let fm = FileManager.default
+        let tmp = dest.deletingLastPathComponent().appendingPathComponent(".pbtmp_" + UUID().uuidString)
+        do {
+            try data.write(to: tmp)                       // plain write → no `.sb-*` atomic temp
+            Self.fullSync(tmp)                            // payload durable on media BEFORE it's named
+            if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
+            try fm.moveItem(at: tmp, to: dest)            // same-volume rename = atomic
+            flush(dest)
+            flush(dest.deletingLastPathComponent())
+        } catch {
+            try? fm.removeItem(at: tmp)
+            throw error
+        }
+    }
+
     /// Flushes the drive root at an inter-commit boundary. Because the actor runs one job at
     /// a time and this method has no interior `await`, it can only execute *between* commits —
     /// never mid-write — so when it runs, whatever committed last has already finished its

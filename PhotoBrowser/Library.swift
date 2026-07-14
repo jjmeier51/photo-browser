@@ -2589,8 +2589,28 @@ final class Library {
         // the difference between a folder opening instantly and taking 5–30s; on a local
         // SSD it's neutral. The directory read itself stays on a detached task.
         let urls: [URL] = await Task.detached(priority: .userInitiated) {
-            (try? FileManager.default.contentsOfDirectory(
-                at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+            let fm = FileManager.default
+            let all = (try? fm.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? []
+            // The Files / exFAT file-provider often ignores `.skipsHiddenFiles`, so dot-files leak
+            // into the grid: our own `.pbtmp_*` transients, and macOS's `.sb-*` atomic-write temps.
+            // Hide every dot-file — and sweep away STALE `.sb-*` orphans (a brown-out interrupted the
+            // download's atomic write, so the temp never got renamed to the real photo). Only delete
+            // ones older than 2 minutes so an in-flight write is never yanked out from under itself.
+            var visible: [URL] = []
+            for u in all {
+                let name = u.lastPathComponent
+                if name.hasPrefix(".") {
+                    if (name.hasPrefix(".sb-") || name.hasPrefix(".pbtmp_")),
+                       let mod = try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+                       Date().timeIntervalSince(mod) > 120 {
+                        try? fm.removeItem(at: u)
+                    }
+                    continue
+                }
+                visible.append(u)
+            }
+            return visible
         }.value
         guard !urls.isEmpty else { return [] }
 
