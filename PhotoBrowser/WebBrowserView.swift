@@ -81,6 +81,8 @@ struct WebBrowserView: View {
             controller.onFileDownload = { file in pendingFile = file }
             if controller.currentURLString.isEmpty {
                 controller.load(WebController.lastSavedURL ?? "https://www.google.com")
+            } else {
+                address = controller.currentURLString   // reflect the live URL when re-opening a session
             }
         }
         // Keep the controller + WKWebView alive across dismissals (that's what preserves the
@@ -118,25 +120,29 @@ struct WebBrowserView: View {
         .sheet(isPresented: $showBookmarks) { BookmarksSheet(controller: controller) { controller.load($0) } }
     }
 
+    // Star + refresh sit 10% above the bar's `.callout` (~16pt) body font.
+    private static let barControlFont = Font.system(size: 17.6)
+
     private var addressBar: some View {
         HStack(spacing: 8) {
             Image(systemName: controller.currentURLString.hasPrefix("https") ? "lock.fill" : "globe")
                 .font(.caption).foregroundStyle(.secondary)
-            TextField("Search or enter website", text: $address)
-                .textInputAutocapitalization(.never).autocorrectionDisabled()
-                .keyboardType(.webSearch).submitLabel(.go)
-                .onSubmit { controller.load(address); editingAddress = false }
-                .onTapGesture { editingAddress = true }
+            // UIKit-backed so tapping the bar selects the whole URL (and raises the keyboard),
+            // letting a new address replace the old one in a single keystroke.
+            AddressField(text: $address,
+                         onBeginEditing: { editingAddress = true },
+                         onSubmit: { controller.load(address); editingAddress = false })
             Button { controller.toggleBookmark() } label: {
                 Image(systemName: controller.isCurrentBookmarked ? "star.fill" : "star")
                     .foregroundStyle(controller.isCurrentBookmarked ? Color.yellow : Color.secondary)
             }
+            .font(Self.barControlFont)
             .disabled(!controller.hasSession)
             .accessibilityLabel(controller.isCurrentBookmarked ? "Remove bookmark" : "Add bookmark")
             if controller.isLoading {
-                Button { controller.stop() } label: { Image(systemName: "xmark") }
+                Button { controller.stop() } label: { Image(systemName: "xmark") }.font(Self.barControlFont)
             } else {
-                Button { controller.reload() } label: { Image(systemName: "arrow.clockwise") }
+                Button { controller.reload() } label: { Image(systemName: "arrow.clockwise") }.font(Self.barControlFont)
             }
         }
         .font(.callout)
@@ -194,6 +200,58 @@ struct WebBrowserView: View {
                 if let c = entry.caption, let dest = entry.dest { library.setCaption(c, for: dest) }
                 library.contentDidChange(under: folder)
             }
+        }
+    }
+}
+
+/// The address field. UIKit-backed (not SwiftUI `TextField`) for one reason: tapping it should
+/// select the *entire* current URL so the next keystroke replaces it — SwiftUI has no reliable
+/// select-all-on-focus on iOS 17. `textFieldDidBeginEditing` does the select-all and also raises
+/// the keyboard automatically (becoming first responder is what a tap already does).
+private struct AddressField: UIViewRepresentable {
+    @Binding var text: String
+    var onBeginEditing: () -> Void
+    var onSubmit: () -> Void
+
+    func makeUIView(context: Context) -> UITextField {
+        let tf = UITextField()
+        tf.delegate = context.coordinator
+        tf.placeholder = "Search or enter website"
+        tf.autocapitalizationType = .none
+        tf.autocorrectionType = .no
+        tf.keyboardType = .webSearch
+        tf.returnKeyType = .go
+        tf.clearButtonMode = .whileEditing
+        tf.font = .preferredFont(forTextStyle: .callout)
+        tf.adjustsFontForContentSizeCategory = true
+        tf.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        tf.addTarget(context.coordinator, action: #selector(Coordinator.editingChanged(_:)), for: .editingChanged)
+        return tf
+    }
+
+    func updateUIView(_ tf: UITextField, context: Context) {
+        context.coordinator.parent = self          // keep the closures fresh across body rebuilds
+        // Don't clobber what the user is typing; only mirror external URL changes.
+        if !tf.isFirstResponder, tf.text != text { tf.text = text }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        var parent: AddressField
+        init(_ parent: AddressField) { self.parent = parent }
+
+        @objc func editingChanged(_ tf: UITextField) { parent.text = tf.text ?? "" }
+
+        func textFieldDidBeginEditing(_ tf: UITextField) {
+            parent.onBeginEditing()
+            DispatchQueue.main.async { tf.selectAll(nil) }   // highlight the whole URL
+        }
+
+        func textFieldShouldReturn(_ tf: UITextField) -> Bool {
+            tf.resignFirstResponder()
+            parent.onSubmit()
+            return true
         }
     }
 }
@@ -508,6 +566,14 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         let cfg = WKWebViewConfiguration()
         cfg.allowsInlineMediaPlayback = true                  // videos play inline (and can go full-screen)
         cfg.websiteDataStore = .default()                     // persistent cookies (logins / hotlink gates)
+        // Pop-up hardening: scripts can't spawn windows on their own (only a real tap can), and
+        // Safari's fraudulent-site warning is on. Together with `createWebViewWith` below, this
+        // drops the ad/redirect pop-ups sketchy sites fire on tap.
+        cfg.preferences.javaScriptCanOpenWindowsAutomatically = false
+        cfg.preferences.isFraudulentWebsiteWarningEnabled = true
+        // A real disk/memory cache so revisits and back/forward reuse resources instead of
+        // refetching — a noticeable speed-up on media-heavy pages (mirrors TaylorGallery).
+        cfg.urlCache = URLCache(memoryCapacity: 64 << 20, diskCapacity: 512 << 20)
         let ucc = WKUserContentController()
         ucc.add(WeakScriptHandler(self), name: "pb")          // weak: avoid the config→handler→config retain cycle
         ucc.addUserScript(WKUserScript(source: Self.detectorJS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
@@ -516,6 +582,8 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         web.navigationDelegate = self
         web.uiDelegate = self
         web.allowsBackForwardNavigationGestures = true
+        web.allowsLinkPreview = false                         // skip peek/pop snapshots — faster, and
+                                                              // keeps long-press ours (download gesture)
         web.customUserAgent = WebVideoDownloader.userAgent
         for kp in ["estimatedProgress", "title", "URL", "canGoBack", "canGoForward", "loading"] {
             web.addObserver(self, forKeyPath: kp, options: .new, context: nil)
@@ -702,10 +770,13 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        // Open “_blank”/popup links in this same web view instead of dropping them.
-        if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
-            webView.load(URLRequest(url: url))
-        }
+        // A pop-up (target=_blank / window.open). Follow it in this same web view **only** when it's
+        // a link the user actually tapped and points at a normal http(s) page. Script-spawned windows
+        // and odd schemes are the usual ad/redirect/malware pop-ups — drop them silently.
+        guard navigationAction.navigationType == .linkActivated,
+              let url = navigationAction.request.url,
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return nil }
+        webView.load(URLRequest(url: url))
         return nil
     }
 

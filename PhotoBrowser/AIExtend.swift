@@ -54,11 +54,13 @@ enum AIExtend {
     enum OutputAspect: String, CaseIterable, Identifiable, Sendable {
         case original = "Original", square = "1:1", portrait = "4:5", story = "9:16"
         var id: String { rawValue }
-        /// Value sent as `prompt[aspect_ratio]`. "Original" sends **auto** so Astria keeps the
-        /// source's own proportions/size instead of snapping to a fixed ratio (e.g. 2:3).
+        /// Value sent as `prompt[aspect_ratio]`. "Original" sends a **blank** value so Astria keeps
+        /// the source's own proportions/size instead of snapping to a fixed ratio (e.g. 2:3). Some
+        /// models reject the sentinel `"auto"` ("auto is not a valid aspect ratio for this model"),
+        /// so the empty string — what Astria's own UI sends for automatic — is used instead.
         var ratio: String? {
             switch self {
-            case .original: return "auto"
+            case .original: return ""
             case .square:   return "1:1"
             case .portrait: return "4:5"
             case .story:    return "9:16"
@@ -131,8 +133,9 @@ enum AIExtend {
             "prompt[text]": prompt,
             "prompt[num_images]": String(min(max(count, 1), 8))
         ]
-        // An explicit aspect (the user picked a fixed shape) wins; otherwise derive it from
-        // the source image so "Original" keeps the photo's proportions.
+        // An explicit aspect (the user picked a fixed shape) wins — including the empty string
+        // "Original" sends, which tells Astria to keep the source's proportions (the model rejects
+        // the "auto" sentinel). Only when no override is given at all do we derive one from the size.
         if let aspectOverride {
             fields["prompt[aspect_ratio]"] = aspectOverride
         } else if let width, let height {
