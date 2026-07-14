@@ -4,6 +4,9 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-13
 
+- **Address bar fits the row again.** A long URL was stretching the (UIKit-backed) field past the
+  bar — clipping the URL's start and shoving the ☆/↻ buttons off-screen. The field now claims only
+  the width it's offered and truncates, so the buttons stay put and the URL reads from the start.
 - **Browser can't get stuck zoomed in.** Pages that ship `user-scalable=no` or a locked
   `maximum-scale` (which left the view zoomed in with no way to pinch back out) are now relaxed so
   pinch-zoom always returns to fit.

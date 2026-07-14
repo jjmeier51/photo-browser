@@ -270,7 +270,10 @@ private struct AddressField: UIViewRepresentable {
         tf.clearButtonMode = .whileEditing
         tf.font = .preferredFont(forTextStyle: .callout)
         tf.adjustsFontForContentSizeCategory = true
+        // A long URL must NOT stretch the field past the row — let it shrink to the space it's given
+        // (and truncate) so the ☆/↻ buttons stay put and the URL's start stays visible.
         tf.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        tf.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         tf.addTarget(context.coordinator, action: #selector(Coordinator.editingChanged(_:)), for: .editingChanged)
         return tf
     }
@@ -279,6 +282,13 @@ private struct AddressField: UIViewRepresentable {
         context.coordinator.parent = self          // keep the closures fresh across body rebuilds
         // Don't clobber what the user is typing; only mirror external URL changes.
         if !tf.isFirstResponder, tf.text != text { tf.text = text }
+    }
+
+    /// Claim only the width we're offered — otherwise SwiftUI uses the field's intrinsic width (the
+    /// full length of a long URL) as its ideal and the row overflows, clipping the URL's start and
+    /// pushing the ☆/↻ buttons off-screen. Height follows the font.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextField, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: uiView.intrinsicContentSize.height)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
