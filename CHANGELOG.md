@@ -10,8 +10,8 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   - **Bigger bookmark + refresh buttons** (10%) for easier tapping.
   - **Pop-up blocking:** script-spawned pop-ups (the ad/redirect/malware kind sites fire on tap) are
     dropped — only a link you actually tap opens. Safari's fraudulent-site warning is on.
-  - **Slightly faster:** a real 64 MB/512 MB resource cache means revisits and back/forward reuse
-    what's already downloaded, and long-press peek/pop is disabled.
+  - **Slightly faster:** long-press peek/pop snapshots are disabled (also reserves long-press for the
+    download gesture).
 - **AI Edit "Original" aspect ratio fixed.** Some models rejected the automatic ratio with *"auto is
   not a valid aspect ratio for this model"*; "Original" now sends a blank ratio (what keeps the
   source's proportions) instead of the `auto` sentinel.

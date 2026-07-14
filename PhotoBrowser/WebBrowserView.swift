@@ -571,9 +571,6 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         // drops the ad/redirect pop-ups sketchy sites fire on tap.
         cfg.preferences.javaScriptCanOpenWindowsAutomatically = false
         cfg.preferences.isFraudulentWebsiteWarningEnabled = true
-        // A real disk/memory cache so revisits and back/forward reuse resources instead of
-        // refetching — a noticeable speed-up on media-heavy pages (mirrors TaylorGallery).
-        cfg.urlCache = URLCache(memoryCapacity: 64 << 20, diskCapacity: 512 << 20)
         let ucc = WKUserContentController()
         ucc.add(WeakScriptHandler(self), name: "pb")          // weak: avoid the config→handler→config retain cycle
         ucc.addUserScript(WKUserScript(source: Self.detectorJS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
