@@ -26,6 +26,7 @@ struct MegaProgress: Sendable {
 struct MegaImportResult: Sendable {
     var imported: Int
     var failed: Int
+    var skipped: Int = 0        // files already present on disk (a re-import fills only the gaps)
     var folderName: String?
     var note: String?
 }
@@ -49,6 +50,17 @@ private struct MegaNode: Sendable {
 enum MegaDownloader {
 
     private static let apiBase = "https://g.api.mega.co.nz/cs"
+
+    /// A dedicated session with a higher per-host connection cap than `URLSession.shared` (which
+    /// tops out around 6). MEGA serves all of a file's range chunks from a single storage host, so
+    /// more connections directly means faster large downloads. Used for the API and every fetch.
+    nonisolated private static let session: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.httpMaximumConnectionsPerHost = 10
+        cfg.timeoutIntervalForRequest = 60
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData   // encrypted blobs, nothing to cache
+        return URLSession(configuration: cfg)
+    }()
 
     // MARK: - Entry point
 
@@ -77,55 +89,74 @@ enum MegaDownloader {
         }
 
         let fm = FileManager.default
-        let destRoot = uniqueURL(for: sanitize(rootName ?? "MEGA Import"), in: parent)
+        // Reuse an existing folder of the same name instead of making "Name 1". This is what lets a
+        // re-import fill in only the files that aren't there yet (e.g. ones that failed last time).
+        let destRoot = parent.appendingPathComponent(sanitize(rootName ?? "MEGA Import"), isDirectory: true)
         try? fm.createDirectory(at: destRoot, withIntermediateDirectories: true)
 
-        let total = files.count
-        // Download several files at once (each large file is itself split into
-        // parallel range chunks by downloadFile). Kept modest so files × chunks
-        // doesn't open too many connections. The `g` requests self-heal from
-        // rate-limit (-3) replies via apiRequest's retry.
-        let maxConcurrent = 4
-        var imported = 0, failed = 0, completed = 0
+        // Assign every file a stable destination up front, single-threaded: duplicate names in the
+        // same MEGA folder de-dupe deterministically (by order, NOT by what's on disk), so a re-run
+        // maps each file to the exact same path and can tell what's already downloaded.
+        var used = Set<String>()
+        var planned: [(node: MegaNode, dest: URL)] = []
+        planned.reserveCapacity(files.count)
+        for item in files {
+            let dir = destRoot.appendingPathComponent(item.relativeDir, isDirectory: true)
+            planned.append((item.node, dedupedURL(dir, sanitize(item.node.name), &used)))
+        }
+
+        let total = planned.count
+        // Download several files at once (each large file is itself split into parallel range chunks
+        // by downloadFile). Kept bounded so files × chunks doesn't open too many connections; the
+        // `g` requests self-heal from rate-limit (-3) replies via apiRequest's retry.
+        let maxConcurrent = 6
+        var imported = 0, failed = 0, skipped = 0, completed = 0
         var firstFailure: String?
-        await withTaskGroup(of: (ok: Bool, error: String?).self) { group in
+        await withTaskGroup(of: (ok: Bool, error: String?, skipped: Bool).self) { group in
             var index = 0
             func addNext() {
-                guard index < files.count else { return }
-                let item = files[index]; index += 1
+                guard index < planned.count else { return }
+                let p = planned[index]; index += 1
                 group.addTask {
                     do {
-                        let targetDir = destRoot.appendingPathComponent(item.relativeDir, isDirectory: true)
-                        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
-                        let dest = uniqueURL(for: sanitize(item.node.name), in: targetDir)
-                        try await downloadFile(item.node, folderID: folderID, to: dest)
-                        return (true, nil)
+                        try FileManager.default.createDirectory(at: p.dest.deletingLastPathComponent(),
+                                                                withIntermediateDirectories: true)
+                        // Already fully downloaded (byte-for-byte the expected size)? Leave it be.
+                        if isComplete(p.dest, expected: p.node.size) { return (true, nil, true) }
+                        try await downloadFile(p.node, folderID: folderID, to: p.dest)
+                        return (true, nil, false)
                     } catch {
-                        return (false, friendlyError(error))
+                        return (false, friendlyError(error), false)
                     }
                 }
             }
-            for _ in 0..<min(maxConcurrent, files.count) { addNext() }
+            for _ in 0..<min(maxConcurrent, planned.count) { addNext() }
             while let result = await group.next() {
                 completed += 1
-                if result.ok { imported += 1 }
-                else { failed += 1; if firstFailure == nil { firstFailure = result.error } }
+                if result.ok {
+                    if result.skipped { skipped += 1 } else { imported += 1 }
+                } else {
+                    failed += 1; if firstFailure == nil { firstFailure = result.error }
+                }
                 progress(MegaProgress(fraction: Double(completed) / Double(total),
-                                      done: imported, total: total, currentName: ""))
+                                      done: imported + skipped, total: total, currentName: ""))
                 addNext()
             }
         }
-        progress(MegaProgress(fraction: 1, done: imported, total: total, currentName: ""))
+        progress(MegaProgress(fraction: 1, done: imported + skipped, total: total, currentName: ""))
 
         let note: String?
-        if imported == 0 {
+        if imported == 0 && failed == 0 {
+            note = skipped > 0 ? "All \(skipped) file(s) were already downloaded — nothing new to fetch." : nil
+        } else if imported == 0 {
             note = "Couldn’t download any files. " + (firstFailure ?? "Unknown error.")
-        } else if failed > 0 {
-            note = "\(failed) file(s) failed: \(firstFailure ?? "unknown error")."
         } else {
-            note = nil
+            var parts: [String] = []
+            if skipped > 0 { parts.append("\(skipped) already present") }
+            if failed > 0 { parts.append("\(failed) failed: \(firstFailure ?? "unknown error")") }
+            note = parts.isEmpty ? nil : "(" + parts.joined(separator: ", ") + ")"
         }
-        return MegaImportResult(imported: imported, failed: failed,
+        return MegaImportResult(imported: imported, failed: failed, skipped: skipped,
                                 folderName: destRoot.lastPathComponent, note: note)
     }
 
@@ -170,7 +201,7 @@ enum MegaDownloader {
         req.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
         for attempt in 0..<5 {
-            let (data, _) = try await URLSession.shared.data(for: req)
+            let (data, _) = try await session.data(for: req)
             let obj = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
             if let arr = obj as? [Any] { return arr }
             if let num = obj as? Int {
@@ -261,7 +292,7 @@ enum MegaDownloader {
 
     private static let chunkThreshold: Int64 = 8 << 20   // chunk files larger than 8 MB
     private static let chunkSize: Int64 = 4 << 20        // 4 MB per chunk (16-aligned)
-    private static let chunkConcurrency = 6              // parallel range requests per large file
+    private static let chunkConcurrency = 8              // parallel range requests per large file
 
     nonisolated private static func downloadFile(_ node: MegaNode, folderID: String, to dest: URL) async throws {
         // `ssl:1` asks MEGA for a TLS download URL; even so it often returns a plain
@@ -294,7 +325,7 @@ enum MegaDownloader {
             if size > chunkThreshold {
                 try await downloadChunked(url: url, size: size, key: node.aesKey, baseIV: baseIV, to: tmp)
             } else {
-                let (encrypted, _) = try await URLSession.shared.download(from: url)
+                let (encrypted, _) = try await session.download(from: url)
                 defer { try? FileManager.default.removeItem(at: encrypted) }
                 try MegaCrypto.decryptCTR(input: encrypted, output: tmp, key: node.aesKey, iv: baseIV)
             }
@@ -348,7 +379,7 @@ enum MegaDownloader {
     nonisolated private static func fetchRange(url: URL, start: Int64, length: Int) async throws -> Data {
         var req = URLRequest(url: url)
         req.setValue("bytes=\(start)-\(start + Int64(length) - 1)", forHTTPHeaderField: "Range")
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await session.data(for: req)
         // If the server ignored Range (200 with the whole file instead of 206) the
         // bytes won't line up — fail rather than write a corrupt file.
         if let http = response as? HTTPURLResponse, http.statusCode == 200, data.count != length {
@@ -377,20 +408,32 @@ enum MegaDownloader {
         return cleaned.isEmpty ? "Untitled" : cleaned
     }
 
-    /// Non-colliding destination URL (mirrors `FileActions.uniqueDestination`, kept
-    /// local so it can run off the main actor).
-    nonisolated private static func uniqueURL(for name: String, in folder: URL) -> URL {
-        let fm = FileManager.default
-        var dest = folder.appendingPathComponent(name.isEmpty ? "File" : name)
-        let base = dest.deletingPathExtension().lastPathComponent
-        let ext = dest.pathExtension
+    /// Deterministic, collision-free path: appends " 2", " 3"… only for genuine duplicate *names*
+    /// within this import (tracked in `used`, NOT based on what's already on disk). Because it
+    /// doesn't look at existing files, a re-import maps each MEGA file to the same destination every
+    /// time — which is what makes the "skip what's already downloaded" resume reliable.
+    nonisolated private static func dedupedURL(_ dir: URL, _ name: String, _ used: inout Set<String>) -> URL {
+        let ns = (name.isEmpty ? "File" : name) as NSString
+        let base = ns.deletingPathExtension
+        let ext = ns.pathExtension
+        var candidate = ns as String
         var n = 1
-        while fm.fileExists(atPath: dest.path) {
-            let newName = ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)"
-            dest = folder.appendingPathComponent(newName)
+        while used.contains(dir.appendingPathComponent(candidate).path.lowercased()) {
             n += 1
+            candidate = ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)"
         }
-        return dest
+        used.insert(dir.appendingPathComponent(candidate).path.lowercased())
+        return dir.appendingPathComponent(candidate)
+    }
+
+    /// True when `url` already holds the whole file. MEGA's `s` is the decrypted (plaintext) length
+    /// and CTR is length-preserving, so a fully-downloaded file is exactly that many bytes — a
+    /// partial/failed one from a prior run won't match and gets re-fetched.
+    nonisolated private static func isComplete(_ url: URL, expected: Int64) -> Bool {
+        guard expected > 0,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = (attrs[.size] as? NSNumber)?.int64Value else { return false }
+        return size == expected
     }
 
     nonisolated private static func friendlyError(_ error: Error) -> String {

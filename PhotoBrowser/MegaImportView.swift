@@ -46,10 +46,12 @@ struct MegaImportView: View {
                 }
 
                 if let result {
+                    // Success = something downloaded, OR nothing failed and it was already all there.
+                    let ok = result.failed == 0 && (result.imported > 0 || result.skipped > 0)
                     Section {
                         Label(summary(result),
-                              systemImage: result.imported > 0 ? "checkmark.circle" : "exclamationmark.triangle")
-                            .foregroundStyle(result.imported > 0 ? .green : .orange)
+                              systemImage: ok ? "checkmark.circle" : "exclamationmark.triangle")
+                            .foregroundStyle(ok ? .green : .orange)
                         if let note = result.note {
                             Text(note).font(.caption).foregroundStyle(.secondary)
                         }
@@ -87,8 +89,15 @@ struct MegaImportView: View {
     }
 
     private func summary(_ r: MegaImportResult) -> String {
-        guard r.imported > 0 else { return "Nothing downloaded." }
-        let base = "Downloaded \(r.imported) item(s)" + (r.folderName.map { " to “\($0)”" } ?? "")
+        if r.imported == 0 {
+            if r.failed == 0 && r.skipped > 0 {
+                return "Already up to date — \(r.skipped) file(s) present"
+                    + (r.folderName.map { " in “\($0)”" } ?? "") + "."
+            }
+            return "Nothing downloaded."
+        }
+        var base = "Downloaded \(r.imported) item(s)" + (r.folderName.map { " to “\($0)”" } ?? "")
+        if r.skipped > 0 { base += ", \(r.skipped) already there" }
         return r.failed > 0 ? base + "; \(r.failed) failed." : base + "."
     }
 

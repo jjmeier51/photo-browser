@@ -2,6 +2,17 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-14
+
+- **Add from MEGA: faster, and resumable.**
+  - **Faster downloads** — a dedicated URLSession lifts the per-host connection cap (the shared one
+    tops out at ~6), more files download at once (4 → 6), and each large file pulls more range
+    chunks in parallel (6 → 8).
+  - **Re-import to fill the gaps** — pointing it at a MEGA folder you've already imported now reuses
+    that folder instead of making a "Name 1" copy, and skips files already fully downloaded (matched
+    by exact size), fetching only what's missing or what failed before. The result banner reports how
+    many were already there vs newly downloaded.
+
 ## 2026-07-13
 
 - **Address bar fits the row again.** A long URL was stretching the (UIKit-backed) field past the
