@@ -35,6 +35,10 @@ struct WebBrowserView: View {
     @State private var videoForPicker: WebController.FoundVideo?
     @State private var fileForPicker: WebController.PendingFile?
     @State private var showDownloadFolderPicker = false
+    // Transient "saved / failed" banner for file downloads (so a photo download doesn't yank open
+    // the Downloads sheet — it just confirms and fades).
+    @State private var toastText: String?
+    @State private var toastIsError = false
 
     var body: some View {
         NavigationStack {
@@ -49,6 +53,7 @@ struct WebBrowserView: View {
                     .ignoresSafeArea(edges: .bottom)
                 bottomBar
             }
+            .overlay(alignment: .top) { downloadToast }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -201,12 +206,46 @@ struct WebBrowserView: View {
     }
 
     private func startFileDownload(_ f: WebController.PendingFile, into folder: URL) {
-        showDownloads = true
+        // No auto-open of the Downloads sheet: a quick banner confirms the result and fades. Progress
+        // is still reachable via the toolbar's Downloads button (it badges active downloads).
         controller.startFileDownload(f, into: folder) { entry in
-            if entry.state == .done {
+            switch entry.state {
+            case .done:
                 if let c = entry.caption, let dest = entry.dest { library.setCaption(c, for: dest) }
                 library.contentDidChange(under: folder)
+                showToast("Saved to “\(folder.lastPathComponent)”", error: false)
+            case .failed:
+                showToast(entry.message ?? "Download failed", error: true)
+            case .downloading:
+                break
             }
+        }
+    }
+
+    /// A transient top banner ("Saved…" / an error) that dismisses itself after a couple of seconds.
+    @ViewBuilder private var downloadToast: some View {
+        if let toastText {
+            HStack(spacing: 8) {
+                Image(systemName: toastIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .foregroundStyle(toastIsError ? .orange : .green)
+                Text(toastText).font(.subheadline).lineLimit(2)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(.white.opacity(0.12)))
+            .shadow(color: .black.opacity(0.35), radius: 10, y: 3)
+            .padding(.top, 8).padding(.horizontal, 24)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    private func showToast(_ text: String, error: Bool) {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            toastText = text; toastIsError = error
+        }
+        // Auto-dismiss, but don't clobber a newer toast that replaced this one meanwhile.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            if toastText == text { withAnimation { toastText = nil } }
         }
     }
 }
@@ -968,6 +1007,21 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     (function(){
       if (window.__pbInstalled) return; window.__pbInstalled = true;
       var seen = {};
+      // Guarantee pinch-zoom can always return to fit. Some pages ship `user-scalable=no` or a locked
+      // `maximum-scale`, which leaves the in-app view stuck zoomed in with no way to pinch back out.
+      function pbRelaxViewport(){
+        try{
+          var vp=document.querySelector('meta[name="viewport"]');
+          if(!vp) return;                 // no viewport → WKWebView already allows zoom
+          var c=(vp.getAttribute('content')||'')
+            .replace(/,?\\s*user-scalable\\s*=\\s*(no|0)/ig,'')
+            .replace(/,?\\s*maximum-scale\\s*=\\s*[0-9.]+/ig,'')
+            .replace(/^\\s*,|,\\s*$/g,'');
+          vp.setAttribute('content', c + ', user-scalable=yes, maximum-scale=6');
+        }catch(e){}
+      }
+      pbRelaxViewport();
+      document.addEventListener('DOMContentLoaded', pbRelaxViewport);
       function post(m){ try{ window.webkit.messageHandlers.pb.postMessage(m); }catch(e){} }
       function add(u){
         if(!u || typeof u !== 'string') return;

@@ -4,6 +4,13 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-13
 
+- **Browser can't get stuck zoomed in.** Pages that ship `user-scalable=no` or a locked
+  `maximum-scale` (which left the view zoomed in with no way to pinch back out) are now relaxed so
+  pinch-zoom always returns to fit.
+- **Photo/file downloads show a quick banner instead of opening Downloads.** A "Saved to …" (or error)
+  toast fades on its own after a couple of seconds; the Downloads sheet no longer pops up on every
+  file/image download. Progress is still one tap away via the toolbar's Downloads button (it badges
+  active downloads). Video downloads still open Downloads, since they're large and worth watching.
 - **Long-press download picks the photo, not a stray ad video.** A video the page happens to be
   playing elsewhere (usually an ad) no longer hijacks a long-press on an image — the item directly
   under your finger wins (video → downloadable link → image), and the page's playing video is only a
