@@ -132,6 +132,9 @@ struct WebBrowserView: View {
             AddressField(text: $address,
                          onBeginEditing: { editingAddress = true },
                          onSubmit: { controller.load(address); editingAddress = false })
+                .frame(height: 22)   // a UIViewRepresentable has no intrinsic height; pin it so the
+                                     // bar doesn't stretch to fill the screen
+                .frame(maxWidth: .infinity)
             Button { controller.toggleBookmark() } label: {
                 Image(systemName: controller.isCurrentBookmarked ? "star.fill" : "star")
                     .foregroundStyle(controller.isCurrentBookmarked ? Color.yellow : Color.secondary)
