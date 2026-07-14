@@ -63,5 +63,6 @@ fastlane/test_output
 
 # Standalone helper scripts (not part of the iOS app)
 hilaryduff_download.py
+hilaryduff_setmeta.py
 __pycache__/
 *.pyc
