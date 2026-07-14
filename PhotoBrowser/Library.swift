@@ -377,6 +377,9 @@ final class Library {
     }
     /// Folder path → cover-image filename (stored under Application Support/folderCovers).
     var folderCovers: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.folderCovers") as? [String: String]) ?? [:]
+    /// Item file path → custom-thumbnail filename (stored under Application Support/itemThumbs).
+    /// A per-item override of the auto-generated grid thumbnail — the item equivalent of a folder cover.
+    var itemThumbnails: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.itemThumbnails") as? [String: String]) ?? [:]
     /// Drive file path → originating Photos-library asset identifier (for imports).
     var photoOrigins: [String: String] = Library.migrateBulk("photoOrigins", legacyKey: "photoBrowser.photoOrigins") {
         (UserDefaults.standard.dictionary(forKey: $0) as? [String: String]) ?? [:]
@@ -394,6 +397,12 @@ final class Library {
     @ObservationIgnored private lazy var coversDirectory: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("folderCovers", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+    @ObservationIgnored private lazy var itemThumbsDirectory: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("itemThumbs", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
@@ -418,6 +427,40 @@ final class Library {
             folderCovers[folder.path] = name
             UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
         } catch {}
+    }
+
+    // MARK: - Custom item thumbnails (per-photo/video grid tile override)
+
+    /// File URL of a custom thumbnail set on this item, or nil if it uses its auto-generated one.
+    func itemThumbnailURL(for url: URL) -> URL? {
+        guard let name = itemThumbnails[url.path] else { return nil }
+        return itemThumbsDirectory.appendingPathComponent(name)
+    }
+
+    func hasItemThumbnail(for url: URL) -> Bool { itemThumbnails[url.path] != nil }
+
+    /// Sets a cropped image as this item's grid thumbnail (replacing any existing one). Works like
+    /// `setCover` but keyed to the item itself rather than a folder.
+    func setItemThumbnail(_ image: UIImage, for url: URL) {
+        if let old = itemThumbnails[url.path] {
+            try? FileManager.default.removeItem(at: itemThumbsDirectory.appendingPathComponent(old))
+        }
+        guard let data = image.jpegData(compressionQuality: 0.9) else { return }
+        let name = UUID().uuidString + ".jpg"
+        do {
+            try data.write(to: itemThumbsDirectory.appendingPathComponent(name))
+            itemThumbnails[url.path] = name
+            UserDefaults.standard.set(itemThumbnails, forKey: "photoBrowser.itemThumbnails")
+        } catch {}
+    }
+
+    /// Removes the custom thumbnail, reverting to the auto-generated one.
+    func removeItemThumbnail(for url: URL) {
+        if let old = itemThumbnails[url.path] {
+            try? FileManager.default.removeItem(at: itemThumbsDirectory.appendingPathComponent(old))
+        }
+        itemThumbnails[url.path] = nil
+        UserDefaults.standard.set(itemThumbnails, forKey: "photoBrowser.itemThumbnails")
     }
 
     // MARK: - Photos-library origin tracking (for imports)
@@ -1637,6 +1680,7 @@ final class Library {
         customLabels = customLabels.mapValues { Set($0.map(remap)) }
         captions = remapKeys(captions, remap)
         folderCovers = remapKeys(folderCovers, remap)
+        itemThumbnails = remapKeys(itemThumbnails, remap)
         photoOrigins = remapKeys(photoOrigins, remap)
         igPostedBy = remapKeys(igPostedBy, remap)
         igLastHandle = remapKeys(igLastHandle, remap)
@@ -1697,6 +1741,7 @@ final class Library {
         let instagramHighlights = self.instagramHighlights, albumHighlights = self.albumHighlights
         let hiddenFolders = self.hiddenFolders
         let captions = self.captions, folderCovers = self.folderCovers, photoOrigins = self.photoOrigins
+        let itemThumbnails = self.itemThumbnails
         let igPostedBy = self.igPostedBy, igLastHandle = self.igLastHandle, storyLinks = self.storyLinks
         let folderBirthdays = self.folderBirthdays, bubbleOrders = self.bubbleOrders
         let lastTikTokHandleByFolder = self.lastTikTokHandleByFolder
@@ -1723,6 +1768,7 @@ final class Library {
             ud.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
             ud.set(Array(hiddenFolders), forKey: "photoBrowser.hiddenFolders")
             ud.set(folderCovers, forKey: "photoBrowser.folderCovers")
+            ud.set(itemThumbnails, forKey: "photoBrowser.itemThumbnails")
             ud.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
             ud.set(storyLinks, forKey: "photoBrowser.storyLinks")
             ud.set(folderBirthdays, forKey: "photoBrowser.birthdays")

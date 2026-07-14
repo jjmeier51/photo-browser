@@ -19,6 +19,7 @@ struct ViewerView: View {
     @State private var coverEntry: Entry?
     @State private var croppedCover: UIImage?
     @State private var showCoverFolderPicker = false
+    @State private var thumbnailEntry: Entry?           // "Set as Thumbnail" cropper target
     @State private var showEditor = false
     @State private var showStudio = false
     @State private var showResize = false
@@ -114,6 +115,14 @@ struct ViewerView: View {
             FolderPicker(root: coverPickerRoot, confirmTitle: "Use Here") { folder in
                 if let croppedCover { library.setCover(croppedCover, for: folder) }
                 croppedCover = nil
+            }
+        }
+        // "Set as Thumbnail" — same cropper as the album cover, but the crop is saved onto the item
+        // itself (no folder picker).
+        .fullScreenCover(item: $thumbnailEntry) { entry in
+            AlbumCoverCropper(entry: entry, title: "Crop Thumbnail",
+                              providedImage: entry.kind == .video ? coverSource.current() : nil) { cropped in
+                library.setItemThumbnail(cropped, for: entry.url)
             }
         }
         // Show the real capture date (EXIF / video creation) — for exported video
@@ -270,6 +279,14 @@ struct ViewerView: View {
                         }
                         Button { useAsAlbumCover() } label: {
                             Label("Use as Album Cover", systemImage: "rectangle.center.inset.filled.badge.plus")
+                        }
+                        Button { thumbnailEntry = current } label: {
+                            Label("Set as Thumbnail", systemImage: "photo.badge.checkmark")
+                        }
+                        if let current, library.hasItemThumbnail(for: current.url) {
+                            Button { library.removeItemThumbnail(for: current.url) } label: {
+                                Label("Reset Thumbnail", systemImage: "arrow.uturn.backward")
+                            }
                         }
                         Divider()
                         Button { duplicateCurrent() } label: {

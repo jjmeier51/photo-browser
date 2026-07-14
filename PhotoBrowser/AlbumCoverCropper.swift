@@ -5,6 +5,7 @@ import UIKit
 /// image inside a fixed square window; "Use" returns the cropped square image.
 struct AlbumCoverCropper: View {
     let entry: Entry
+    var title: String = "Crop Cover"        // "Crop Thumbnail" when setting an item's own thumbnail
     var providedImage: UIImage? = nil       // e.g. the current video frame
     let onCrop: (UIImage) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -21,7 +22,7 @@ struct AlbumCoverCropper: View {
                     ProgressView().tint(.white)
                 }
             }
-            .navigationTitle("Crop Cover")
+            .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

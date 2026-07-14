@@ -480,6 +480,7 @@ struct FolderView: View {
                   isLive: liveImageURLs.contains(entry.url),
                   isAIGenerated: library.isAIGenerated(entry.url),
                   coverURL: entry.isFolder ? library.coverURL(for: entry.url) : nil,
+                  thumbnailOverrideURL: entry.isFolder ? nil : library.itemThumbnailURL(for: entry.url),
                   likeCount: entry.kind == .video ? library.tiktokLikeCount(for: entry.url) : nil)
             // A revealed hidden folder reads as hidden (dimmed) so it isn't mistaken
             // for a normal one; invisible entirely unless Show Hidden Folders is on.
@@ -1900,9 +1901,14 @@ struct FolderView: View {
                 var n = 1
                 while fm.fileExists(atPath: d.path) { d = folder.appendingPathComponent("\(destName) \(n)", isDirectory: true); n += 1 }
                 do {
-                    try Archiver.unzip(archive, to: d) { f in Task { @MainActor in editProgress = f } }
+                    try await Archiver.unzip(archive, to: d) { f in Task { @MainActor in editProgress = f } }
                     return (d, nil)
-                } catch { return (nil, error.localizedDescription) }
+                } catch {
+                    // Failed partway → remove the half-extracted folder so no corrupt partial files
+                    // are left cluttering the drive.
+                    try? fm.removeItem(at: d)
+                    return (nil, error.localizedDescription)
+                }
             }.value
             editProgress = 1; editProcessing = false; bg.end()
             if let dest = outcome.url {

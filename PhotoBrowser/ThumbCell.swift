@@ -13,6 +13,7 @@ struct EntryCell: View {
     var isLive: Bool = false
     var isAIGenerated: Bool = false
     var coverURL: URL? = nil
+    var thumbnailOverrideURL: URL? = nil        // custom "Set as Thumbnail" image for this item
     var likeCount: Int? = nil
 
     @State private var image: UIImage?
@@ -77,14 +78,18 @@ struct EntryCell: View {
             .overlay { if selecting { selectionOverlay } }
             .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))   // ever-so-slightly rounded
             .contentShape(Rectangle())
-            .task(id: entry.id) {
+            .task(id: "\(entry.id.absoluteString)|\(thumbnailOverrideURL?.lastPathComponent ?? "")") {
                 guard entry.kind == .image || entry.kind == .video || entry.kind == .pdf else { return }
-                // Thumbnail first — it's what the user is waiting on; the duration
-                // badge (a fuller first-time AVAsset read) fills in right after.
-                image = await Thumbnailer.shared.thumbnail(
-                    for: entry,
-                    size: CGSize(width: 110, height: 110),
-                    scale: UIScreen.main.scale)
+                // A custom "Set as Thumbnail" image wins; otherwise generate the usual thumbnail —
+                // it's what the user is waiting on; the duration badge fills in right after.
+                if let ov = thumbnailOverrideURL, let custom = UIImage(contentsOfFile: ov.path) {
+                    image = custom
+                } else {
+                    image = await Thumbnailer.shared.thumbnail(
+                        for: entry,
+                        size: CGSize(width: 110, height: 110),
+                        scale: UIScreen.main.scale)
+                }
                 if entry.kind == .video { duration = await Self.loadDuration(entry) }
             }
             .task(id: coverURL) {

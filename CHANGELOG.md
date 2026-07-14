@@ -4,6 +4,15 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-13
 
+- **Set a custom thumbnail for any photo or video.** In the full-screen viewer's "…" menu →
+  "Set as Thumbnail" opens the same square cropper as "Use as Album Cover" (for a video it uses the
+  frame you're paused on), and the crop becomes that item's grid tile. "Reset Thumbnail" reverts to
+  the auto-generated one. Persisted per item and re-keyed on move, like album covers.
+  (`Library.itemThumbnails`, `EntryCell.thumbnailOverrideURL`.)
+- **A failed extraction no longer leaves corrupt "data" files.** Extraction now writes each entry via
+  the durable temp→fsync→rename path, so the real filename only appears once the file is fully
+  written — an interrupted/refused write leaves a hidden `.pbtmp_` (swept away) instead of a
+  half-written "data" tile. And if an extraction fails partway, the half-extracted folder is removed.
 - **No more `.sb-*` junk files from interrupted downloads.** A brown-out / disconnect during a
   download's `Data.write(options:.atomic)` left the hidden `.sb-*` temp orphaned on the exFAT drive
   (the real photo never landed), and the Files/exFAT provider was showing those dot-files as tiles.

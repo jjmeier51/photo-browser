@@ -109,7 +109,7 @@ enum Archiver {
     }
 
     /// Extract `archive` into `destDir` (created if needed), reporting 0…1 progress per entry.
-    nonisolated static func unzip(_ archive: URL, to destDir: URL, progress: (@Sendable (Double) -> Void)? = nil) throws {
+    nonisolated static func unzip(_ archive: URL, to destDir: URL, progress: (@Sendable (Double) -> Void)? = nil) async throws {
         // The archive lives on the security-scoped external drive — claim access for the read (the
         // root's access usually covers it, but claiming the file directly is safe on exFAT/file-provider).
         let scoped = archive.startAccessingSecurityScopedResource()
@@ -122,7 +122,7 @@ enum Archiver {
         let total = max(entries.count, 1)
         for (i, e) in entries.enumerated() {
             // Skip macOS resource-fork sidecars that clutter every Finder-made zip.
-            if !e.name.hasPrefix("__MACOSX/") { try extract(e, from: data, into: destDir) }
+            if !e.name.hasPrefix("__MACOSX/") { try await extract(e, from: data, into: destDir) }
             progress?(Double(i + 1) / Double(total))
         }
     }
@@ -201,7 +201,7 @@ enum Archiver {
         }
     }
 
-    private nonisolated static func extract(_ e: CDEntry, from data: Data, into destDir: URL) throws {
+    private nonisolated static func extract(_ e: CDEntry, from data: Data, into destDir: URL) async throws {
         guard let rel = safeRelativePath(e.name) else { return }        // drop absolute / "../" traversal
         let isDir = e.name.hasSuffix("/")
         let outURL = destDir.appendingPathComponent(rel, isDirectory: isDir)
@@ -225,33 +225,20 @@ enum Archiver {
         default: throw ArchiveError.unsupportedEntry(e.name)
         }
         let parent = outURL.deletingLastPathComponent()
+        var lastErr: Error?
         do {
             try retrying { try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true) }
             DriveWriter.fullSync(parent)                                // commit the new dir before writing into it
-            try retrying { try writeFile(raw, to: outURL) }            // verbatim bytes → EXIF intact
-        } catch let err as ArchiveError {
-            throw err
-        } catch {
-            throw ArchiveError.driveWrite(writeFailureReason(error))    // the drive refused it, not a bad archive
+        } catch { throw ArchiveError.driveWrite(writeFailureReason(error)) }
+        // Write each entry through the temp→fsync→rename path: the final name only appears once the
+        // file is complete, so an interrupted/refused write leaves a hidden `.pbtmp_` (swept away) —
+        // NOT a half-written "data" file at the real name. Retry a few times for a flaky exFAT volume.
+        for attempt in 0..<4 {
+            do { try await DriveWriter.shared.writeData(raw, to: outURL); lastErr = nil; break }
+            catch { lastErr = error; if attempt < 3 { try? await Task.sleep(nanoseconds: 200_000_000) } }
         }
+        if let lastErr { throw ArchiveError.driveWrite(writeFailureReason(lastErr)) }
         applyDate(e, to: outURL)
-        DriveWriter.fullSyncFileAndParent(outURL)                       // durable per file — no leaked clusters on unplug
-    }
-
-    /// Write extracted bytes to the drive. Uses a **non-atomic** write: `Data.write(options:.atomic)`
-    /// creates a hidden temp in the same directory and renames it, and that temp/rename step is
-    /// exactly what an exFAT/file-provider volume rejects (surfacing as "couldn't be saved in the
-    /// folder"). A direct write, with an explicit file-handle fallback, is what these volumes accept.
-    private nonisolated static func writeFile(_ data: Data, to url: URL) throws {
-        do {
-            try data.write(to: url)
-        } catch {
-            try? FileManager.default.removeItem(at: url)
-            guard FileManager.default.createFile(atPath: url.path, contents: nil),
-                  let h = try? FileHandle(forWritingTo: url) else { throw error }
-            defer { try? h.close() }
-            try h.write(contentsOf: data)
-        }
     }
 
     /// True when the file starts with a ZIP local/EOCD/spanned signature ("PK…"), regardless of its
