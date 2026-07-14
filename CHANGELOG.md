@@ -4,6 +4,12 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-13
 
+- **Long-press download picks the photo, not a stray ad video.** A video the page happens to be
+  playing elsewhere (usually an ad) no longer hijacks a long-press on an image — the item directly
+  under your finger wins (video → downloadable link → image), and the page's playing video is only a
+  last resort when nothing tangible is under the finger.
+- **"Download to Another Folder…" remembers your last choice.** The folder picker now defaults to the
+  folder your previous web download went to (like Move's picker), instead of always the current folder.
 - **Browser polish.**
   - **Tap the address bar to replace the URL:** it now selects the whole URL and raises the keyboard,
     so one keystroke overwrites it (previously you had to clear it by hand).

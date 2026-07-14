@@ -163,6 +163,15 @@ final class Library {
         UserDefaults.standard.set(url.path, forKey: "photoBrowser.lastTransferDest")
     }
 
+    /// The last folder a web-browser download was sent to via "Download to Another Folder…", so that
+    /// picker defaults there next time. Kept separate from Move/Copy's destination on purpose.
+    var lastWebDownloadDestination: URL? = UserDefaults.standard.string(forKey: "photoBrowser.lastWebDownloadDest")
+        .map { URL(fileURLWithPath: $0) }
+    func setLastWebDownloadDestination(_ url: URL) {
+        lastWebDownloadDestination = url
+        UserDefaults.standard.set(url.path, forKey: "photoBrowser.lastWebDownloadDest")
+    }
+
     // MARK: - Facebook profile folders
 
     /// Folder path → the Facebook profile downloaded into it (drives "Get New",

@@ -110,7 +110,11 @@ struct WebBrowserView: View {
             Text((f.filename.map { "\($0)\n" } ?? "") + f.url)
         }
         .sheet(isPresented: $showDownloadFolderPicker) {
-            FolderPicker(root: library.rootURL ?? targetFolder, confirmTitle: "Download Here", startAt: targetFolder) { folder in
+            // Default to the folder the last download went to (remembered like Move's picker),
+            // falling back to the folder the browser was opened from.
+            FolderPicker(root: library.rootURL ?? targetFolder, confirmTitle: "Download Here",
+                         startAt: library.lastWebDownloadDestination ?? targetFolder) { folder in
+                library.setLastWebDownloadDestination(folder)
                 if let v = videoForPicker { startDownload(v, into: folder) }
                 if let f = fileForPicker { startFileDownload(f, into: folder) }
                 videoForPicker = nil; fileForPicker = nil
@@ -859,24 +863,33 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
                 }
                 imageSrc = obj["image"] as? String
             }
-            // A video under the finger (or the page's known video) takes priority.
-            let effectiveSrc = src ?? self.playingSrc
-            if let best = Self.pickBest(src: effectiveSrc, media: media) {
+            // Priority is "what's actually under the finger" — a page-wide playing video (often an
+            // ad) must NOT hijack a long-press on a photo. So a <video> directly under the finger
+            // wins; then a downloadable link; then the image under the finger; and only if none of
+            // those exist do we fall back to whatever video the page happens to be playing.
+            // 1) A <video> element directly under the finger.
+            if let s = src, let best = Self.pickBest(src: s, media: media) {
                 self.haptic.notificationOccurred(.success)
                 self.onVideoLongPress?(FoundVideo(url: best, pageURL: self.currentURLString))
                 return
             }
-            // A link that points at a downloadable file (e.g. a gallery's full-size <a href="…jpg">)
-            // — prefer it over the displayed <img>, which is often just a thumbnail.
+            // 2) A link that points at a downloadable file (e.g. a gallery's full-size <a href="…jpg">)
+            //    — prefer it over the displayed <img>, which is often just a thumbnail.
             if let href = linkHref, href.hasPrefix("http"), linkForced || Self.looksDownloadable(href) {
                 self.haptic.notificationOccurred(.success)
                 self.onFileDownload?(PendingFile(url: href, pageURL: self.currentURLString, filename: linkName))
                 return
             }
-            // Otherwise, the image under the finger.
+            // 3) The image directly under the finger.
             if let img = imageSrc, img.hasPrefix("http") {
                 self.haptic.notificationOccurred(.success)
                 self.onFileDownload?(PendingFile(url: img, pageURL: self.currentURLString, filename: nil))
+                return
+            }
+            // 4) Nothing tangible under the finger — fall back to the page's playing video, if any.
+            if let best = Self.pickBest(src: self.playingSrc, media: media) {
+                self.haptic.notificationOccurred(.success)
+                self.onVideoLongPress?(FoundVideo(url: best, pageURL: self.currentURLString))
             }
           }
         }
