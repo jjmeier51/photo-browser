@@ -7,9 +7,10 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 - **Address bar fits the row again.** A long URL was stretching the (UIKit-backed) field past the
   bar — clipping the URL's start and shoving the ☆/↻ buttons off-screen. The field now claims only
   the width it's offered and truncates, so the buttons stay put and the URL reads from the start.
-- **Browser can't get stuck zoomed in.** Pages that ship `user-scalable=no` or a locked
-  `maximum-scale` (which left the view zoomed in with no way to pinch back out) are now relaxed so
-  pinch-zoom always returns to fit.
+- **Browser no longer cut off / stuck zoomed in.** The page is forced to a proper mobile viewport
+  (`width=device-width, initial-scale=1`) so its left/right edges aren't clipped, and the view snaps
+  back to fit-width on each load instead of carrying over a stuck pinch-zoom. Pinch-zoom still works
+  (and can always return to fit) even on pages that tried to disable it.
 - **Photo/file downloads show a quick banner instead of opening Downloads.** A "Saved to …" (or error)
   toast fades on its own after a couple of seconds; the Downloads sheet no longer pops up on every
   file/image download. Progress is still one tap away via the toolbar's Downloads button (it badges

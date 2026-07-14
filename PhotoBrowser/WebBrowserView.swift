@@ -776,6 +776,13 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         captured.removeAll(); playingSrc = nil; hasVideo = false
     }
 
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // Land at fit-width, never a zoom carried over from a prior page or a stuck pinch. The
+        // injected viewport (width=device-width) makes minimumZoomScale == fit, so snap to it.
+        let sv = webView.scrollView
+        if abs(sv.zoomScale - sv.minimumZoomScale) > 0.01 { sv.setZoomScale(sv.minimumZoomScale, animated: false) }
+    }
+
 
     /// Catch file downloads: when a response can't be rendered inline (a `.zip`, an installer, …) or
     /// is explicitly `Content-Disposition: attachment`, cancel the navigation and offer to save it.
@@ -1017,21 +1024,20 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     (function(){
       if (window.__pbInstalled) return; window.__pbInstalled = true;
       var seen = {};
-      // Guarantee pinch-zoom can always return to fit. Some pages ship `user-scalable=no` or a locked
-      // `maximum-scale`, which leaves the in-app view stuck zoomed in with no way to pinch back out.
-      function pbRelaxViewport(){
+      // Force a sane mobile viewport so the page lays out at screen width (no horizontal overflow /
+      // content cut off at the edges) and starts un-zoomed, while still allowing pinch-zoom. Some
+      // pages ship no viewport, a wide fixed width, or `user-scalable=no` + a locked `maximum-scale`,
+      // any of which leaves the in-app view cut off or stuck zoomed in with no way to pinch back out.
+      function pbFixViewport(){
         try{
           var vp=document.querySelector('meta[name="viewport"]');
-          if(!vp) return;                 // no viewport → WKWebView already allows zoom
-          var c=(vp.getAttribute('content')||'')
-            .replace(/,?\\s*user-scalable\\s*=\\s*(no|0)/ig,'')
-            .replace(/,?\\s*maximum-scale\\s*=\\s*[0-9.]+/ig,'')
-            .replace(/^\\s*,|,\\s*$/g,'');
-          vp.setAttribute('content', c + ', user-scalable=yes, maximum-scale=6');
+          if(!vp){ vp=document.createElement('meta'); vp.setAttribute('name','viewport');
+                   (document.head||document.documentElement).appendChild(vp); }
+          vp.setAttribute('content','width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=6, user-scalable=yes, viewport-fit=cover');
         }catch(e){}
       }
-      pbRelaxViewport();
-      document.addEventListener('DOMContentLoaded', pbRelaxViewport);
+      pbFixViewport();
+      document.addEventListener('DOMContentLoaded', pbFixViewport);
       function post(m){ try{ window.webkit.messageHandlers.pb.postMessage(m); }catch(e){} }
       function add(u){
         if(!u || typeof u !== 'string') return;
