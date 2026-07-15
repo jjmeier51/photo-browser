@@ -4,6 +4,16 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-14
 
+- **Optimized for APFS drives (auto-detected).** The app now checks the drive's filesystem and tunes
+  how it writes:
+  - **APFS/HFS+** (journaled, copy-on-write): writes use the lightweight `F_BARRIERFSYNC` ordering
+    barrier instead of the heavy `F_FULLFSYNC` full-device flush, and skip the extra parent-directory
+    flush (APFS journals the rename atomically). Downloads, edits, moves, and thumbnail writes are
+    noticeably faster, with the same crash-safety APFS already guarantees.
+  - **Copy to Folder / Duplicate** on the same APFS drive now use a copy-on-write **clone** — instant
+    and taking no extra space — falling back to a normal copy across drives or on exFAT.
+  - **exFAT/FAT** drives keep the full `F_FULLFSYNC` + directory-flush behavior unchanged, so they
+    stay as protected as before. Nothing to configure — it adapts to whatever drive is plugged in.
 - **Add from MEGA: faster, and resumable.**
   - **Faster downloads** — a dedicated URLSession lifts the per-host connection cap (the shared one
     tops out at ~6), more files download at once (4 → 6), and each large file pulls more range

@@ -2382,6 +2382,7 @@ final class Library {
         activeRoot = url
         rootURL = url
         rootName = url.lastPathComponent
+        DriveWriter.configureForVolume(at: url)   // tune write durability to the drive's filesystem
         path = []
         if let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
             UserDefaults.standard.set(data, forKey: bookmarkKey)
@@ -2419,6 +2420,7 @@ final class Library {
         activeRoot = url
         rootURL = url
         rootName = url.lastPathComponent
+        DriveWriter.configureForVolume(at: url)   // tune write durability to the drive's filesystem
         rekeyRootIfRemounted(to: url.path)   // carry labels/captions across a drive reconnect (new mount UUID)
         migrateInstagramPersonFolders()   // reshape before indexing so the index is current
         restorePersonFolderCovers()       // re-seed person-folder thumbnails lost to the first migration
@@ -2462,6 +2464,7 @@ final class Library {
         activeRoot = fresh
         rootURL = fresh
         rootName = fresh.lastPathComponent
+        DriveWriter.configureForVolume(at: fresh)   // tune write durability to the drive's filesystem
         path = []
         rekeyRootIfRemounted(to: fresh.path)
         processPendingTikTok()

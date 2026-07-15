@@ -24,6 +24,35 @@ import Foundation
 actor DriveWriter {
     static let shared = DriveWriter()
 
+    /// How hard we flush each write, chosen from the drive's filesystem (see `configureForVolume`).
+    /// - `.full`    — exFAT/FAT: no journal, so force every write to stable media with `F_FULLFSYNC`
+    ///                *and* flush the parent directory. This is what prevents the "clusters used but
+    ///                not referenced" corruption those volumes suffer on an unclean unplug.
+    /// - `.barrier` — APFS/HFS+: journaled / copy-on-write with atomic renames, so a lightweight
+    ///                ordering barrier (`F_BARRIERFSYNC`) already gives durability and the full
+    ///                device flush is just wasted time; directory entries are journaled with the
+    ///                rename, so the separate parent-dir flush is skipped too. Net: much faster
+    ///                downloads, edits, moves and thumbnails, with the same crash-safety APFS
+    ///                already guarantees.
+    enum SyncMode { case full, barrier }
+
+    /// Read on every write from background threads, written only when the root drive changes (rare,
+    /// on the main actor). A stale read across that single transition is harmless — it just uses the
+    /// previous, equally-valid strategy for a beat — so the unchecked static access is safe.
+    nonisolated(unsafe) static var syncMode: SyncMode = .full
+
+    /// Pick the flush strategy from the filesystem hosting `url`. Call whenever the root drive is
+    /// set or reconnects. Defaults to the safe `.full` when the type can't be determined.
+    nonisolated static func configureForVolume(at url: URL) {
+        var s = statfs()
+        guard statfs(url.path, &s) == 0 else { syncMode = .full; return }
+        let fsType = withUnsafeBytes(of: &s.f_fstypename) { raw -> String in
+            String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+        }
+        // "apfs"/"hfs" are journaled or copy-on-write; "exfat"/"msdos" (FAT) are not.
+        syncMode = (fsType == "apfs" || fsType == "hfs") ? .barrier : .full
+    }
+
     /// Number of commits currently placing a file on the drive. `> 0` means a directory
     /// write may be in flight, so it is *not* safe to remove the drive yet.
     private(set) var inFlight = 0
@@ -52,7 +81,9 @@ actor DriveWriter {
             try fm.moveItem(at: temp, to: dest)
         }
         flush(dest)                                   // file contents durable…
-        flush(dest.deletingLastPathComponent())       // …and the directory entry that names it
+        // …and, on exFAT/FAT, the directory entry that names it. APFS/HFS+ journal the rename with
+        // its metadata, so the separate directory flush is redundant there.
+        if Self.syncMode == .full { flush(dest.deletingLastPathComponent()) }
     }
 
     /// Durable, serialized write of in-memory `data` to `dest` on the drive.
@@ -76,7 +107,7 @@ actor DriveWriter {
             if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
             try fm.moveItem(at: tmp, to: dest)            // same-volume rename = atomic
             flush(dest)
-            flush(dest.deletingLastPathComponent())
+            if Self.syncMode == .full { flush(dest.deletingLastPathComponent()) }
         } catch {
             try? fm.removeItem(at: tmp)
             throw error
@@ -129,26 +160,42 @@ actor DriveWriter {
     /// alone still prevents overlapping directory writes.
     private func flush(_ url: URL) { Self.fullSync(url) }
 
-    /// Force a file (or directory) all the way out to the physical media.
+    /// Force a file (or directory) durable, using the strategy `syncMode` selected for this drive.
     ///
-    /// This uses `F_FULLFSYNC`, **not** plain `fsync`: on Apple platforms `fsync` only pushes data
-    /// to the drive's own write cache and returns — the drive may still hold it in volatile RAM. For
-    /// an external exFAT SSD with no journal, that cache is exactly where "clusters marked used but
-    /// not referenced" corruption comes from when the drive is unplugged. `F_FULLFSYNC` asks the
-    /// drive to commit its cache to stable storage, closing that window. Falls back to `fsync` on the
-    /// rare volume that rejects it. `nonisolated static` so any write path (in-place edits, unzip,
-    /// service downloads) can flush without hopping onto the actor.
+    /// On exFAT/FAT (`.full`) this uses `F_FULLFSYNC`, **not** plain `fsync`: on Apple platforms
+    /// `fsync` only pushes data to the drive's own write cache and returns — the drive may still hold
+    /// it in volatile RAM, which for a no-journal volume is exactly where "clusters marked used but
+    /// not referenced" corruption comes from on an unplug. `F_FULLFSYNC` commits that cache to stable
+    /// storage. On APFS/HFS+ (`.barrier`) the filesystem is journaled/copy-on-write with atomic
+    /// renames, so the cheaper `F_BARRIERFSYNC` ordering barrier gives the same crash-safety without
+    /// F_FULLFSYNC's expensive physical flush. Both fall back to `fsync` on a volume that rejects the
+    /// fcntl. `nonisolated static` so any write path (in-place edits, unzip, downloads) can flush
+    /// without hopping onto the actor.
     nonisolated static func fullSync(_ url: URL) {
         let fd = open(url.path, O_RDONLY)
         guard fd >= 0 else { return }
-        if fcntl(fd, F_FULLFSYNC) == -1 { fsync(fd) }
+        let cmd: Int32 = (syncMode == .full) ? F_FULLFSYNC : F_BARRIERFSYNC
+        if fcntl(fd, cmd) == -1 { fsync(fd) }
         close(fd)
     }
 
-    /// Flush a just-written file **and** the directory entry that names it — the pair that must
-    /// agree for exFAT to stay consistent. Use from non-`commit` write paths (edits, unzip, etc.).
+    /// Copy `src` → `dest`, preferring an APFS **clone** — an instant, zero-extra-space
+    /// copy-on-write copy that `FileManager.copyItem` can't do. `clonefile` only works within one
+    /// volume and when `dest` doesn't exist; every other case (cross-volume, non-APFS/exFAT, dest
+    /// exists) returns nonzero and we fall back to a normal byte copy. It duplicates the file's
+    /// bytes + metadata/xattrs exactly like `copyItem`, so provenance rides along; the app's
+    /// path-keyed labels live in UserDefaults and are unaffected either way. Caller flushes.
+    nonisolated static func copyItem(at src: URL, to dest: URL) throws {
+        if clonefile(src.path, dest.path, 0) == 0 { return }
+        try FileManager.default.copyItem(at: src, to: dest)
+    }
+
+    /// Flush a just-written file, plus (on exFAT/FAT) the directory entry that names it — the pair
+    /// that must agree for a no-journal volume to stay consistent. On APFS/HFS+ the rename is
+    /// journaled with its metadata, so only the file is flushed. Use from non-`commit` write paths
+    /// (edits, unzip, service downloads, copies).
     nonisolated static func fullSyncFileAndParent(_ url: URL) {
         fullSync(url)
-        fullSync(url.deletingLastPathComponent())
+        if syncMode == .full { fullSync(url.deletingLastPathComponent()) }
     }
 }

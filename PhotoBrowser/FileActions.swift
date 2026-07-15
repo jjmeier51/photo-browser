@@ -138,7 +138,7 @@ enum FileActions {
             let ext = e.url.pathExtension
             let name = ext.isEmpty ? "\(base) copy" : "\(base) copy.\(ext)"
             let dest = uniqueDestination(for: name, in: folder)
-            if (try? FileManager.default.copyItem(at: e.url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); count += 1 }
+            if (try? DriveWriter.copyItem(at: e.url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); count += 1 }
         }
         return count
     }
@@ -204,7 +204,7 @@ enum FileActions {
                     outcome.skipped.append(name); continue
                 }
                 let dest = uniqueDest(name, in: folder)
-                if (try? fm.copyItem(at: url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); outcome.copied.append((from: url, to: dest)) }
+                if (try? DriveWriter.copyItem(at: url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); outcome.copied.append((from: url, to: dest)) }
                 else { outcome.skipped.append(name) }
             }
             return outcome
@@ -282,7 +282,7 @@ enum FileActions {
         var copied: [(from: URL, to: URL)] = []
         for url in urls {
             let dest = uniqueDestination(for: url.lastPathComponent, in: folder)
-            if (try? FileManager.default.copyItem(at: url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); copied.append((url, dest)) }
+            if (try? DriveWriter.copyItem(at: url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); copied.append((url, dest)) }
         }
         return copied
     }
