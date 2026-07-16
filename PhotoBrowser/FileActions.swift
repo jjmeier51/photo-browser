@@ -143,10 +143,15 @@ enum FileActions {
         for url in videos {
             let asset = AVURLAsset(url: url)
             guard let track = try? await asset.loadTracks(withMediaType: .audio).first else { continue }
-            // Use the track's own range so a short audio track can't overrun the timeline.
-            let range = (try? await track.load(.timeRange))
-                ?? CMTimeRange(start: .zero, duration: (try? await asset.load(.duration)) ?? .zero)
-            guard range.duration.isValid, range.duration > .zero else { continue }
+            // Use the track's own range so a short audio track can't overrun the timeline; fall
+            // back to the asset duration. (Kept out of `??` — its default arg is a non-async
+            // autoclosure, which can't contain `await`.)
+            var range = try? await track.load(.timeRange)
+            if range == nil {
+                let dur = (try? await asset.load(.duration)) ?? .zero
+                range = CMTimeRange(start: .zero, duration: dur)
+            }
+            guard let range, range.duration.isValid, range.duration > .zero else { continue }
             do {
                 try outTrack.insertTimeRange(range, of: track, at: cursor)
                 cursor = CMTimeAdd(cursor, range.duration)
