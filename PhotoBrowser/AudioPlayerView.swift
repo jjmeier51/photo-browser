@@ -76,26 +76,25 @@ struct AudioPlayerView: View {
     }
 
     private var controls: some View {
-        HStack(spacing: 44) {
-            Button { engine.seek(by: -15) } label: {
-                Image(systemName: "gobackward.15").font(.title2)
+        VStack(spacing: 18) {
+            HStack(spacing: 44) {
+                Button { engine.seek(by: -15) } label: {
+                    Image(systemName: "gobackward.15").font(.title2)
+                }
+                Button { engine.toggle() } label: {
+                    Image(systemName: engine.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 62))
+                }
+                Button { engine.seek(by: 15) } label: {
+                    Image(systemName: "goforward.15").font(.title2)
+                }
             }
-            Button { engine.toggle() } label: {
-                Image(systemName: engine.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.system(size: 62))
-            }
-            Button { engine.seek(by: 15) } label: {
-                Image(systemName: "goforward.15").font(.title2)
-            }
-        }
-        .foregroundStyle(.white)
-        .overlay(alignment: .trailing) {
+            .foregroundStyle(.white)
             Button { engine.setLoop(!engine.loops) } label: {
-                Image(systemName: "repeat")
-                    .font(.title3)
+                Label("Loop", systemImage: "repeat")
+                    .font(.subheadline.weight(.medium))
                     .foregroundStyle(engine.loops ? Color.accentColor : .secondary)
             }
-            .offset(x: 0, y: 54)
         }
     }
 

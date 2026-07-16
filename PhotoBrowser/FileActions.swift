@@ -124,6 +124,64 @@ enum FileActions {
         catch { try? FileManager.default.removeItem(at: tmp); return false }
     }
 
+    /// Extracts the audio from one or more videos and writes it — concatenated in `videos`
+    /// order — into a single file in `folder`. iOS/AVFoundation has no MP3 *encoder* (Apple
+    /// ships only a decoder), so the output is **M4A (AAC)**: the native, universally-playable
+    /// equivalent. Returns the written URL, or an error message. Videos with no audio track are
+    /// skipped; if none had audio it fails. `nonisolated` + async so track loading and the export
+    /// stay off the main actor (the security scope is process-wide, so detached reads work).
+    nonisolated static func extractAudio(from videos: [URL], to folder: URL,
+                                         name: String) async -> (url: URL?, error: String?) {
+        guard !videos.isEmpty else { return (nil, "No videos selected.") }
+        let composition = AVMutableComposition()
+        guard let outTrack = composition.addMutableTrack(withMediaType: .audio,
+                                                         preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            return (nil, "Couldn’t create the audio track.")
+        }
+        var cursor = CMTime.zero
+        var added = 0
+        for url in videos {
+            let asset = AVURLAsset(url: url)
+            guard let track = try? await asset.loadTracks(withMediaType: .audio).first else { continue }
+            // Use the track's own range so a short audio track can't overrun the timeline.
+            let range = (try? await track.load(.timeRange))
+                ?? CMTimeRange(start: .zero, duration: (try? await asset.load(.duration)) ?? .zero)
+            guard range.duration.isValid, range.duration > .zero else { continue }
+            do {
+                try outTrack.insertTimeRange(range, of: track, at: cursor)
+                cursor = CMTimeAdd(cursor, range.duration)
+                added += 1
+            } catch { continue }
+        }
+        guard added > 0 else {
+            return (nil, "None of the selected videos have an audio track to extract.")
+        }
+
+        // Sanitize the requested name and pick a non-colliding "<name>.m4a".
+        var base = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        base = base.components(separatedBy: CharacterSet(charactersIn: "/\\:")).joined(separator: "-")
+        if base.isEmpty { base = "Audio" }
+        let fm = FileManager.default
+        var dest = folder.appendingPathComponent("\(base).m4a")
+        var n = 2
+        while fm.fileExists(atPath: dest.path) { dest = folder.appendingPathComponent("\(base) \(n).m4a"); n += 1 }
+
+        guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
+            return (nil, "Couldn’t start the audio export.")
+        }
+        export.outputURL = dest
+        export.outputFileType = .m4a
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            export.exportAsynchronously { cont.resume() }
+        }
+        guard export.status == .completed else {
+            try? fm.removeItem(at: dest)
+            return (nil, export.error?.localizedDescription ?? "Audio export failed.")
+        }
+        DriveWriter.fullSyncFileAndParent(dest)
+        return (dest, nil)
+    }
+
     static func delete(_ entries: [Entry]) {
         for e in entries { try? FileManager.default.removeItem(at: e.url) }
     }

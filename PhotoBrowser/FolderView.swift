@@ -130,6 +130,9 @@ struct FolderView: View {
     @State private var resizeEntry: Entry?
     @State private var aiEditEntry: Entry?
     @State private var audioEntry: Entry?          // a tapped audio file → full-screen player
+    @State private var audioExtractSources: [URL] = []   // videos queued for "Extract Audio"
+    @State private var audioExtractName = ""
+    @State private var showAudioExtractPrompt = false
     @State private var editProcessing = false
     @State private var editProgress: Double = 0
     @State private var editLabel = "Working…"
@@ -700,6 +703,9 @@ struct FolderView: View {
                 } label: {
                     Label("Export all frames", systemImage: "square.stack.3d.down.right")
                 }
+                Button { startAudioExtract([entry]) } label: {
+                    Label("Extract Audio…", systemImage: "waveform")
+                }
             }
             // File utilities for every file, including non-viewable ones (e.g. a downloaded .zip).
             // Offer Extract for a .zip, or any extension-less "data" file (a zip saved without a
@@ -840,6 +846,15 @@ struct FolderView: View {
                 TextField("Name", text: $newFolderName)
                 Button("Create") { createFolder() }
                 Button("Cancel", role: .cancel) { newFolderName = "" }
+            }
+            .alert("Extract Audio", isPresented: $showAudioExtractPrompt) {
+                TextField("MP3 name", text: $audioExtractName)
+                Button("Extract") { runAudioExtract() }
+                Button("Cancel", role: .cancel) { audioExtractSources = [] }
+            } message: {
+                Text(audioExtractSources.count > 1
+                     ? "Audio from \(audioExtractSources.count) videos will be stitched into one file (saved as .m4a — iOS can't write true MP3)."
+                     : "The audio will be saved as an .m4a file (iOS can't write true MP3).")
             }
             .alert("Restore Capture Dates", isPresented: $confirmFixDates) {
                 Button("Restore") { runRestoreDates() }
@@ -1896,6 +1911,43 @@ struct FolderView: View {
     /// Zip the given items into a new `.zip` in the current folder — a single item becomes
     /// "<name>.zip", several become "Archive.zip". Contents are copied byte-for-byte, so any
     /// embedded EXIF/metadata is preserved exactly. The originals are left untouched.
+    /// Queues one or more videos for audio extraction and prompts for the output name. The
+    /// default name is the single video's base name, or "Audio" for a multi-select stitch.
+    private func startAudioExtract(_ videos: [Entry]) {
+        let sources = videos.filter { $0.kind == .video }.map(\.url)
+        guard !sources.isEmpty else { resultMessage = "Select one or more videos to extract audio from."; return }
+        audioExtractSources = sources
+        audioExtractName = sources.count == 1
+            ? sources[0].deletingPathExtension().lastPathComponent
+            : "Audio"
+        // Defer so the presenting menu / context menu dismissal doesn't swallow the alert (constraint #4).
+        DispatchQueue.main.async { showAudioExtractPrompt = true }
+    }
+
+    /// Extracts (and, for multiple, stitches) the queued videos' audio into one `.m4a` in this
+    /// folder, then shows a transient result. Mirrors `compress`'s background-task pattern.
+    private func runAudioExtract() {
+        let sources = audioExtractSources
+        let name = audioExtractName
+        audioExtractSources = []
+        guard !sources.isEmpty else { return }
+        selecting = false; selection.removeAll()
+        let folder = url
+        editLabel = "Extracting audio…"; editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Extract Audio")
+        Task {
+            let outcome = await FileActions.extractAudio(from: sources, to: folder, name: name)
+            editProgress = 1; editProcessing = false; bg.end()
+            if let dest = outcome.url {
+                resultMessage = "Saved “\(dest.lastPathComponent)”."
+                library.contentDidChange(under: folder)
+                await reload()
+            } else {
+                resultMessage = outcome.error ?? "Couldn’t extract the audio."
+            }
+        }
+    }
+
     private func compress(_ entries: [Entry]) {
         let items = entries.map(\.url)
         guard !items.isEmpty else { resultMessage = "Select one or more items to compress."; return }
@@ -2020,6 +2072,11 @@ struct FolderView: View {
                     Divider()
                     Button { bulkEnhance(to: 1080, label: "1080p") } label: { Label("AI Enhance to 1080p", systemImage: "wand.and.stars") }
                 } label: { Label("Upscale Video", systemImage: "arrow.up.right.video") }
+                if selectedEntries().contains(where: { $0.kind == .video }) {
+                    Button { startAudioExtract(selectedEntries()) } label: {
+                        Label("Extract Audio…", systemImage: "waveform")
+                    }
+                }
                 Button { duplicateEntries(selectedEntries()) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
                 Button { compress(selectedEntries()) } label: { Label("Compress to Zip", systemImage: "archivebox") }
                 Button { showCopyPicker = true } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
