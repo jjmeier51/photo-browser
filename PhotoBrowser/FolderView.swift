@@ -1391,11 +1391,13 @@ struct FolderView: View {
     private var showBubbles: Bool {
         query.trimmingCharacters(in: .whitespaces).isEmpty && !labelMode && !tsLabelMode && ageFilter == nil && !igBubbles.isEmpty
     }
-    /// Whether this folder's highlights should wrap into a grid (Home, plus folders whose
-    /// bubbles are all album highlights — e.g. HD/, Hilary Duff/) rather than sit in the
-    /// horizontal, drag-arrangeable scroller used for social-profile folders.
+    /// Whether this folder's highlights should wrap into a grid rather than sit in the
+    /// horizontal scroller. Only the Home page and the two folders the user asked for — HD/
+    /// and Hilary Duff/ — wrap; every other folder keeps the drag-arrangeable row it had.
     private var wrapsBubbles: Bool {
-        isRoot || igBubbles.allSatisfy { library.isAlbumHighlight($0.url) }
+        if isRoot { return true }
+        let name = url.lastPathComponent.lowercased()
+        return name == "hd" || name == "hilary duff"
     }
 
     private var instagramBubbleRow: some View {
@@ -1434,14 +1436,24 @@ struct FolderView: View {
     /// Album-highlight *folders* (e.g. HD/, Hilary Duff/): the same wrapping A–Z layout as
     /// Home, but with larger bubbles and an adaptive column count so the highlights read big
     /// on a phone (≈4 across) and fill the width on iPad. Not drag-reorderable (order is A–Z).
+    ///
+    /// Wrapped in a height-bounded `ScrollView` on purpose: these folders can hold hundreds of
+    /// album highlights, and a bare `LazyVGrid` in this fixed (non-scrolling) region above the
+    /// photo grid isn't actually lazy — it realizes *every* bubble at once, each kicking off a
+    /// cover scan (`ensureRandomCover`). That storm of eager cells + I/O is what crashed the app
+    /// after browsing into such a folder. Inside a scroll view the grid is truly lazy (only the
+    /// visible rows realize), so a big folder stays cheap while still wrapping and scrolling.
     private var largeHighlightGrid: some View {
         let columns = [GridItem(.adaptive(minimum: 86), spacing: 4, alignment: .top)]
-        return LazyVGrid(columns: columns, spacing: 14) {
-            ForEach(homeBubbles) { entry in
-                bubbleCell(entry, diameter: 78, draggable: false)
+        return ScrollView(.vertical, showsIndicators: true) {
+            LazyVGrid(columns: columns, spacing: 14) {
+                ForEach(homeBubbles) { entry in
+                    bubbleCell(entry, diameter: 78, draggable: false)
+                }
             }
+            .padding(.horizontal, 10).padding(.vertical, 8)
         }
-        .padding(.horizontal, 10).padding(.vertical, 8)
+        .frame(maxHeight: 320)   // a few rows visible; scroll for the rest, keeping the photo grid on screen
     }
 
     /// One highlight bubble. Long-press initiates a drag to rearrange (the Instagram
