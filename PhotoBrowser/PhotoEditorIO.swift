@@ -54,14 +54,26 @@ enum PhotoEditorIO {
                              parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1.0])
     }
 
+    /// True for RAW/DNG sources. `CIImage(contentsOf:)` develops these through `CIRAWFilter`,
+    /// whose `orientation` defaults to the file's metadata and is **already baked into the
+    /// output** — so, unlike standard JPEG/HEIC (which come back in raw sensor orientation),
+    /// a RAW image must NOT be oriented a second time or it double-rotates. This was the bug
+    /// behind "crop lands on the wrong part" for DNGs: every geometric tool then ran on a
+    /// mis-oriented buffer.
+    static func isRAWSource(_ url: URL) -> Bool {
+        UTType(filenameExtension: url.pathExtension.lowercased())?.conforms(to: .rawImage) == true
+    }
+
     /// Loads the source upright (EXIF orientation applied to the pixels) along with its full
-    /// properties dictionary and the original orientation tag.
+    /// properties dictionary and the original orientation tag. RAW/DNG comes back already
+    /// upright from Core Image, so it's not oriented again (see `isRAWSource`).
     static func load(url: URL) -> (image: CIImage, properties: [CFString: Any], orientation: Int32)? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
               let ci = CIImage(contentsOf: url) else { return nil }
         let props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
         let orientation = Int32((props[kCGImagePropertyOrientation] as? UInt32) ?? 1)
-        return (ci.oriented(forExifOrientation: orientation), props, orientation)
+        let upright = isRAWSource(url) ? ci : ci.oriented(forExifOrientation: orientation)
+        return (upright, props, orientation)
     }
 
     /// A downscaled copy for the live preview proxy (PRD FR-SESS-01 — interactive framerates).
@@ -190,7 +202,10 @@ enum PhotoEditorIO {
               let ci = CIImage(contentsOf: url, options: [.expandToHDR: true]) else { return nil }
         let props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
         let orientation = Int32((props[kCGImagePropertyOrientation] as? UInt32) ?? 1)
-        return (ci.oriented(forExifOrientation: orientation), props)
+        // RAW/DNG is already oriented by Core Image's RAW pipeline — orienting again double-
+        // rotates it (same fix as `load`), which is what broke crop/geometry on the HDR path.
+        let upright = isRAWSource(url) ? ci : ci.oriented(forExifOrientation: orientation)
+        return (upright, props)
     }
 
     /// Renders the edit on the HDR-expanded source and writes a 10-bit HDR HEIC, carrying the original
