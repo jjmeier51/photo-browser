@@ -65,5 +65,6 @@ fastlane/test_output
 hilaryduff_download.py
 hilaryduff_setmeta.py
 taylorswift_download.py
+taylorswift_setmeta.py
 __pycache__/
 *.pyc
