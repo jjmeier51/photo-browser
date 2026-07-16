@@ -1179,10 +1179,15 @@ struct FolderView: View {
             VStack(spacing: 0) {
                 header
                 if showBubbles {
-                    // On the Home page the highlights wrap into rows (max 5 across, A–Z) so
-                    // they're all visible at once; everywhere else they stay a horizontal
-                    // scroller with the user's drag-arranged order.
-                    if isRoot { albumHighlightGrid } else { instagramBubbleRow }
+                    // Highlights that are album folders (Home, and album-highlight folders
+                    // like HD/ and Hilary Duff/) wrap into rows, A–Z, so they're all visible
+                    // at once. Social-profile folders (Instagram/Facebook/TikTok/OnlyFans)
+                    // keep the horizontal scroller with the user's drag-arranged order.
+                    if wrapsBubbles {
+                        if isRoot { albumHighlightGrid } else { largeHighlightGrid }
+                    } else {
+                        instagramBubbleRow
+                    }
                 }
                 if !entries.isEmpty { filterBar }
                 grid
@@ -1353,6 +1358,12 @@ struct FolderView: View {
     private var showBubbles: Bool {
         query.trimmingCharacters(in: .whitespaces).isEmpty && !labelMode && !tsLabelMode && ageFilter == nil && !igBubbles.isEmpty
     }
+    /// Whether this folder's highlights should wrap into a grid (Home, plus folders whose
+    /// bubbles are all album highlights — e.g. HD/, Hilary Duff/) rather than sit in the
+    /// horizontal, drag-arrangeable scroller used for social-profile folders.
+    private var wrapsBubbles: Bool {
+        isRoot || igBubbles.allSatisfy { library.isAlbumHighlight($0.url) }
+    }
 
     private var instagramBubbleRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -1382,6 +1393,19 @@ struct FolderView: View {
         return LazyVGrid(columns: columns, spacing: 12) {
             ForEach(homeBubbles) { entry in
                 bubbleCell(entry, diameter: 62, draggable: false)   // 10% larger than the initial 56
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+    }
+
+    /// Album-highlight *folders* (e.g. HD/, Hilary Duff/): the same wrapping A–Z layout as
+    /// Home, but with larger bubbles and an adaptive column count so the highlights read big
+    /// on a phone (≈4 across) and fill the width on iPad. Not drag-reorderable (order is A–Z).
+    private var largeHighlightGrid: some View {
+        let columns = [GridItem(.adaptive(minimum: 86), spacing: 4, alignment: .top)]
+        return LazyVGrid(columns: columns, spacing: 14) {
+            ForEach(homeBubbles) { entry in
+                bubbleCell(entry, diameter: 78, draggable: false)
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 8)

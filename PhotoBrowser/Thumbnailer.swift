@@ -177,8 +177,11 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         }
     }
 
+    // Keyed on `thumbCacheID` (parent-folder + filename), NOT the full drive-relative path:
+    // moving a folder to a different parent must not invalidate its tiles, so a moved folder's
+    // thumbnails stick instead of regenerating. mtime+size still invalidate in-place edits.
     private func cacheKey(for entry: Entry) -> String {
-        let raw = "\(entry.url.stableCacheID)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)"
+        let raw = "\(entry.url.thumbCacheID)|\(Int(entry.modified.timeIntervalSince1970))|\(entry.size)"
         return sha(raw)
     }
 
@@ -187,7 +190,7 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
     private func cacheKey(forFileAt url: URL) -> String? {
         guard let rv = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else { return nil }
         let mtime = Int((rv.contentModificationDate ?? .distantPast).timeIntervalSince1970)
-        return sha("\(url.stableCacheID)|\(mtime)|\(rv.fileSize ?? 0)")
+        return sha("\(url.thumbCacheID)|\(mtime)|\(rv.fileSize ?? 0)")
     }
 
     private func sha(_ s: String) -> String {

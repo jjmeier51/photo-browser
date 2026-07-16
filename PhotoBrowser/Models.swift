@@ -61,6 +61,20 @@ extension URL {
         guard let slash = after.firstIndex(of: "/") else { return String(after) }
         return String(after[after.index(after: slash)...])      // "rest…" (drive-relative)
     }
+
+    /// Identity for the *thumbnail* cache — the file's own name plus its immediate parent
+    /// folder's name, and nothing above that. Because it omits everything above the containing
+    /// folder, moving a whole folder to a different parent leaves every key unchanged, so the
+    /// folder's tiles "stick" to it and are never regenerated just for having moved. The
+    /// parent-folder name keeps clashes improbable (a bare `001.jpg` repeats across albums;
+    /// `Miami 2019/001.jpg` effectively doesn't), while the mtime+size the full cache key adds
+    /// disambiguate any rare remaining collision. `nonisolated` for the same reason as
+    /// `stableCacheID` — it's read from detached tasks under default-MainActor isolation.
+    nonisolated var thumbCacheID: String {
+        let file = lastPathComponent
+        let parent = deletingLastPathComponent().lastPathComponent
+        return parent.isEmpty ? file : "\(parent)/\(file)"
+    }
 }
 
 /// Content-type filter for the folder view.
