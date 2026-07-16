@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import Combine
 
 /// Full-screen player for audio files (mp3 / m4a / wav / aac / …). The browser's folders can
 /// hold audio alongside photos and videos, so tapping an audio tile opens this. Playback is
