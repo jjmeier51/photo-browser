@@ -133,6 +133,22 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
             memory.setObject(img, forKey: nsKey, cost: cost(of: img))
             return img
         }
+        // Adopt a thumbnail generated under the pre–move-stable key (full path) instead of
+        // regenerating it: on the upgrade that switched to parent+filename keys, rename the
+        // existing file to the new key. This only fires for files that haven't moved (their
+        // legacy key still resolves); already-moved files were orphaned before this build and
+        // regenerate as they always would. After adoption the new-key file exists, so this
+        // branch never runs for that file again.
+        if let legacy = legacyCacheKey(forFileAt: url) {
+            let legacyURL = diskDir.appendingPathComponent(legacy).appendingPathExtension("jpg")
+            if let data = try? Data(contentsOf: legacyURL), let raw = UIImage(data: data) {
+                do { try FileManager.default.moveItem(at: legacyURL, to: diskURL) }
+                catch { try? data.write(to: diskURL, options: .atomic) }   // rename raced/failed — copy the bytes
+                let img = raw.preparingForDisplay() ?? raw
+                memory.setObject(img, forKey: nsKey, cost: cost(of: img))
+                return img
+            }
+        }
         guard let img = await generate(url: url, kind: kind, size: size, scale: scale) else { return nil }
         memory.setObject(img, forKey: nsKey, cost: cost(of: img))
         if let data = img.jpegData(compressionQuality: 0.8) {
@@ -191,6 +207,16 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         guard let rv = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else { return nil }
         let mtime = Int((rv.contentModificationDate ?? .distantPast).timeIntervalSince1970)
         return sha("\(url.thumbCacheID)|\(mtime)|\(rv.fileSize ?? 0)")
+    }
+
+    /// The pre–move-stable disk-cache key: the full drive-relative path (`stableCacheID`) with
+    /// the same mtime+size. Used once, lazily, to adopt a thumbnail generated before the switch
+    /// to parent+filename keys — so the upgrade reuses existing thumbnails instead of a one-time
+    /// full regeneration. Nil if the file can't be stat'd.
+    private func legacyCacheKey(forFileAt url: URL) -> String? {
+        guard let rv = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else { return nil }
+        let mtime = Int((rv.contentModificationDate ?? .distantPast).timeIntervalSince1970)
+        return sha("\(url.stableCacheID)|\(mtime)|\(rv.fileSize ?? 0)")
     }
 
     private func sha(_ s: String) -> String {
