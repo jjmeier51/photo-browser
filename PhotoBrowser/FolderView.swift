@@ -129,6 +129,7 @@ struct FolderView: View {
     @State private var studioEntry: Entry?
     @State private var resizeEntry: Entry?
     @State private var aiEditEntry: Entry?
+    @State private var audioEntry: Entry?          // a tapped audio file → full-screen player
     @State private var editProcessing = false
     @State private var editProgress: Double = 0
     @State private var editLabel = "Working…"
@@ -672,6 +673,20 @@ struct FolderView: View {
                     Label("Copy to Folder…", systemImage: "doc.on.doc")
                 }
             }
+            if entry.kind == .audio {
+                Button { audioEntry = entry } label: {
+                    Label("Play", systemImage: "play.circle")
+                }
+                Button { infoEntry = entry } label: {
+                    Label("Get Info", systemImage: "info.circle")
+                }
+                Button { startSingleMove(entry) } label: {
+                    Label("Move", systemImage: "folder")
+                }
+                Button { startSingleCopy(entry) } label: {
+                    Label("Copy to Folder…", systemImage: "doc.on.doc")
+                }
+            }
             if entry.kind == .video {
                 Menu {
                     Button { aiUpscaleVideo(entry, to: 1080, label: "1080p") } label: { Text("1080p") }
@@ -870,6 +885,9 @@ struct FolderView: View {
                     .ignoresSafeArea()
             }
             .fullScreenCover(item: $editEntry) { e in MediaEditorView(entry: e) }
+            .fullScreenCover(item: $audioEntry) { e in
+                AudioPlayerView(entry: e, onDismiss: { audioEntry = nil })
+            }
             .fullScreenCover(item: $studioEntry) { e in PhotoEditorView(entry: e) }
             .fullScreenCover(item: $resizeEntry) { e in ResizeEditorView(entry: e) }
             .sheet(item: $aiEditEntry) { e in AIEditView(entry: e) }
@@ -2233,6 +2251,8 @@ struct FolderView: View {
             let media = mediaItems
             viewerPresentation = ViewerPresentation(items: media,
                                                     startIndex: media.firstIndex(of: entry) ?? 0)
+        } else if entry.kind == .audio {
+            audioEntry = entry
         } else if entry.url.pathExtension.lowercased() == "zip" {
             pendingArchive = entry                      // a zip → offer to extract (or preview)
         } else if entry.kind == .other {

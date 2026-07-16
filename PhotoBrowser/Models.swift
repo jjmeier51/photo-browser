@@ -3,15 +3,16 @@ import UniformTypeIdentifiers
 
 /// What a directory entry is. `other` covers anything not specifically handled.
 enum FileKind: String, Sendable, Codable {
-    case folder, image, video, pdf, other
+    case folder, image, video, audio, pdf, other
 
     var sortRank: Int {
         switch self {
         case .folder: return 0
         case .image:  return 1
         case .video:  return 2
-        case .pdf:    return 3
-        case .other:  return 4
+        case .audio:  return 3
+        case .pdf:    return 4
+        case .other:  return 5
         }
     }
 
@@ -20,6 +21,7 @@ enum FileKind: String, Sendable, Codable {
         case .folder: return "folder.fill"
         case .image:  return "photo"
         case .video:  return "film"
+        case .audio:  return "music.note"
         case .pdf:    return "doc.richtext"
         case .other:  return "doc"
         }
@@ -171,6 +173,7 @@ func classify(url: URL, isDirectory: Bool) -> FileKind {
     guard let type = UTType(filenameExtension: url.pathExtension.lowercased()) else { return .other }
     if type.conforms(to: .image) { return .image }
     if type.conforms(to: .movie) || type.conforms(to: .video) { return .video }
+    if type.conforms(to: .audio) { return .audio }
     if type.conforms(to: .pdf) { return .pdf }
     return .other
 }

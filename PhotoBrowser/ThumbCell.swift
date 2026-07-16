@@ -138,6 +138,12 @@ struct EntryCell: View {
                 Image(systemName: otherIcon).font(.system(size: 30)).foregroundStyle(.secondary)
                 Text(extLabel).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }
+        } else if entry.kind == .audio {
+            VStack(spacing: 6) {
+                Image(systemName: "music.note").font(.system(size: 30)).foregroundStyle(.secondary)
+                Text(entry.name).font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(2).multilineTextAlignment(.center).padding(.horizontal, 4)
+            }
         } else {
             Image(systemName: entry.kind.systemImage).font(.title3).foregroundStyle(.secondary)
         }
