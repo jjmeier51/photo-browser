@@ -2,6 +2,20 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-16
+
+- **Fixed the "slows to a crawl after a few minutes of browsing" bug.** Two causes, both worse the
+  bigger the library:
+  - **Thumbnail prefetch piled up.** Every folder reload (and there are many triggers — content
+    changes, returning to the app, pull-to-refresh) kicked off a fresh background sweep that decoded
+    the whole folder's thumbnails and was never cancelled — so sweeps stacked up and kept churning
+    after you'd moved on, saturating CPU and memory until a force-quit cleared them. Prefetch is now
+    single-flight (a new sweep cancels the previous), stops promptly when superseded, and is capped
+    so the giant aggregated Library/Favorites views don't try to prefetch everything at once.
+  - **The capture-date cache rewrote its whole file on every folder open.** As that cache grew toward
+    your library's size, each folder open re-encoded a bigger and bigger file — so browsing got
+    heavier the longer a session ran. Those writes are now coalesced into one every few seconds.
+
 ## 2026-07-14
 
 - **Optimized for APFS drives (auto-detected).** The app now checks the drive's filesystem and tunes

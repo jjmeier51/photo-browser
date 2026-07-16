@@ -60,6 +60,7 @@ enum MetadataLoader {
         private let lock = NSLock()
         private var map: [String: Double]
         private var dirty = false
+        private var flushScheduled = false
         private let fileURL: URL
 
         init() {
@@ -88,6 +89,23 @@ enum MetadataLoader {
             if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: fileURL, options: .atomic) }
         }
 
+        /// Coalesces the frequent per-folder / per-batch flushes into ONE disk write a few seconds
+        /// later. `flush()` re-encodes the entire map, so as it grows toward a big library's size,
+        /// writing it after every folder open gets progressively slower — the browsing-gets-heavier
+        /// drag. Debouncing keeps at most one write per window regardless of how many folders you open.
+        func scheduleFlush() {
+            lock.lock()
+            let start = !flushScheduled
+            if start { flushScheduled = true }
+            lock.unlock()
+            guard start else { return }
+            Task.detached(priority: .utility) { [self] in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                lock.lock(); flushScheduled = false; lock.unlock()
+                flush()
+            }
+        }
+
         /// Copies every entry under `from`'s drive-relative subtree to the matching
         /// key under `to` (backup-drive duplication; originals kept).
         func duplicatePrefix(_ from: String, _ to: String) {
@@ -106,8 +124,13 @@ enum MetadataLoader {
 
     private static let dateStore = DateStore()
 
-    /// Persists any newly-read capture dates. Call after a batch of reads.
+    /// Persists any newly-read capture dates immediately. For explicit persistence points (index
+    /// end, app background) — not the per-folder hot path (use `scheduleDateStoreFlush()` there).
     static func flushDateStore() { dateStore.flush() }
+
+    /// Debounced persist — coalesces the per-folder / per-batch bursts into one write. Use on hot
+    /// browsing paths so opening folders doesn't re-encode the whole (large) map each time.
+    static func scheduleDateStoreFlush() { dateStore.scheduleFlush() }
 
     // MARK: - Persistent media-spec cache
 

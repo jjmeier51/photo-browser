@@ -23,6 +23,7 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
     private let diskDir: URL
     private let lock = NSLock()
     private var inFlight: [String: Task<UIImage?, Never>] = [:]
+    private var prefetchTask: Task<Void, Never>?     // single-flight: only the latest folder prefetches
 
     init() {
         // Thumbnails live in Application Support, NOT Caches. iOS is free to purge
@@ -60,24 +61,43 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
     /// generating on demand. Fire-and-forget, bounded to the core count, off the main thread;
     /// in-flight de-duplication means a tile that scrolls into view reuses this work rather than
     /// starting its own. The cache key ignores the requested size, so prefetching at the grid
-    /// size also satisfies larger requests. Scales to the whole folder (no fixed cap).
+    /// size also satisfies larger requests. Single-flight (the previous sweep is cancelled) and
+    /// capped, so re-fires and huge aggregated views can't pile up unbounded decode work.
     func prefetch(_ entries: [Entry], size: CGSize, scale: CGFloat) {
-        let batch = entries.filter { $0.kind == .image || $0.kind == .video || $0.kind == .pdf }
+        // Cap the sweep. Normal folders are well under this; the aggregated Library / Favorites modes
+        // can be tens of thousands of items, and prefetching all of them up front is pointless (only
+        // the next few screens matter — the rest generate on demand as you scroll to them).
+        let batch = Array(entries.lazy.filter { $0.kind == .image || $0.kind == .video || $0.kind == .pdf }.prefix(3000))
         guard !batch.isEmpty else { return }
-        Task.detached(priority: .utility) { [weak self] in
+        // Single-flight. `reload()` re-fires prefetch on every changeToken bump / scene-active /
+        // pull-to-refresh, each with the WHOLE folder listing. Without cancellation, every fire
+        // spawned a fresh detached decode sweep that kept churning after you'd navigated away —
+        // overlapping whole-folder prefetches piling up is what made the app crawl after a few
+        // minutes of browsing a huge library (and why a force-quit, which kills the tasks, fixed it).
+        // Cancelling the previous sweep before starting a new one bounds this to one at a time, and
+        // the `Task.isCancelled` checks stop a superseded sweep promptly.
+        let newTask = Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
             await withTaskGroup(of: Void.self) { group in
                 var idx = 0
                 let maxConcurrent = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 8))
                 func next() {
-                    guard idx < batch.count else { return }
+                    guard idx < batch.count, !Task.isCancelled else { return }
                     let e = batch[idx]; idx += 1
-                    group.addTask { _ = await self.thumbnail(for: e, size: size, scale: scale) }
+                    group.addTask {
+                        guard !Task.isCancelled else { return }
+                        _ = await self.thumbnail(for: e, size: size, scale: scale)
+                    }
                 }
                 for _ in 0..<min(maxConcurrent, batch.count) { next() }
                 while await group.next() != nil { next() }
             }
         }
+        lock.lock()
+        let previous = prefetchTask
+        prefetchTask = newTask
+        lock.unlock()
+        previous?.cancel()
     }
 
     func thumbnail(for entry: Entry, size: CGSize, scale: CGFloat) async -> UIImage? {

@@ -585,7 +585,7 @@ final class Library {
                     addNext()
                 }
             }
-            MetadataLoader.flushDateStore()    // persist any newly-read dates
+            MetadataLoader.scheduleDateStoreFlush()    // persist any newly-read dates (debounced)
             let order = Self.sortEntries(media.filter { ageByURL[$0.url] != nil }, by: sort)
             return order.map { (entry: $0, age: ageByURL[$0.url] ?? 0) }
         }.value
@@ -2235,11 +2235,11 @@ final class Library {
                 for _ in 0..<min(maxConcurrent, media.count) { addNext() }
                 while await group.next() != nil {
                     done += 1
-                    if done % 500 == 0 { MetadataLoader.flushDateStore() }   // survive an early exit
+                    if done % 500 == 0 { MetadataLoader.scheduleDateStoreFlush() }   // debounced; survive an early exit
                     addNext()
                 }
             }
-            MetadataLoader.flushDateStore()
+            MetadataLoader.flushDateStore()   // final: persist everything from the full index walk
         }
     }
 
@@ -2509,7 +2509,7 @@ final class Library {
                 addNext()
             }
         }
-        MetadataLoader.flushDateStore()    // persist any newly-read dates
+        MetadataLoader.scheduleDateStoreFlush()    // persist any newly-read dates (debounced)
         return result
     }
 
