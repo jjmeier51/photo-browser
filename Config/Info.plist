@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Base Info.plist for the app. GENERATE_INFOPLIST_FILE stays YES, so the build merges
+	     the INFOPLIST_KEY_* settings (usage strings, scene manifest, orientations, …) on top
+	     of this. Only keys with no INFOPLIST_KEY_* equivalent live here — the custom URL scheme
+	     the Share Extension uses to open the app. Kept in Config/ (not PhotoBrowser/) so the
+	     app target's synchronized file group doesn't try to copy it into the bundle. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>jayymei.PhotoBrowser</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>photobrowser</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

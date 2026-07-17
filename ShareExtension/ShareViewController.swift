@@ -4,12 +4,45 @@ import UniformTypeIdentifiers
 /// The Share-sheet extension's entry point. It runs when you tap **PhotoBrowser** in the iOS
 /// share sheet (e.g. from Instagram's "Share story" → the story's link). It does the minimum an
 /// app extension safely can: pull the shared link (or copy the shared image/video into the App
-/// Group container), record it via `StorySharing`, then open the main app to finish — pick a
-/// folder, choose upscale options, and download. The main app does the drive + network work.
+/// Group container), record it, then open the main app to finish — pick a folder, choose upscale
+/// options, and download. The main app does the drive + network work.
 ///
-/// No storyboard: `Info.plist` names this class as `NSExtensionPrincipalClass`. The view is a
-/// brief spinner; the extension completes as soon as it has handed off.
+/// Self-contained on purpose: the App-Group hand-off (the constants + the `PendingShare` shape
+/// below) is **duplicated** from `PhotoBrowser/StorySharing.swift` rather than shared, so this
+/// file is the extension target's *only* Swift source and the target needs no cross-target file
+/// membership. The two copies MUST stay in sync — the app reads exactly what this writes:
+///   • App Group id `group.jayymei.PhotoBrowser`
+///   • UserDefaults key `photoBrowser.pendingSharedItems`
+///   • `PendingShare` fields: id, kind ("url"/"file"), value, isVideoHint, timestamp
+///   • URL scheme `photobrowser://share`
 final class ShareViewController: UIViewController {
+
+    // MARK: - App Group hand-off (keep in sync with StorySharing.swift)
+
+    private static let appGroupID = "group.jayymei.PhotoBrowser"
+    private static let defaultsKey = "photoBrowser.pendingSharedItems"
+
+    private struct PendingShare: Codable {
+        enum Kind: String, Codable { case url, file }
+        var id = UUID()
+        var kind: Kind
+        var value: String
+        var isVideoHint: Bool = false
+        var timestamp: Double
+    }
+
+    private static var containerURL: URL? {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
+    }
+
+    private func record(_ item: PendingShare) {
+        guard let d = UserDefaults(suiteName: Self.appGroupID) else { return }
+        var items = (d.data(forKey: Self.defaultsKey)).flatMap { try? JSONDecoder().decode([PendingShare].self, from: $0) } ?? []
+        items.append(item)
+        if let data = try? JSONEncoder().encode(items) { d.set(data, forKey: Self.defaultsKey) }
+    }
+
+    // MARK: - Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -28,25 +61,25 @@ final class ShareViewController: UIViewController {
     private func handleShare() async {
         let providers = (extensionContext?.inputItems as? [NSExtensionItem] ?? [])
             .flatMap { $0.attachments ?? [] }
+        let now = Date().timeIntervalSince1970
 
         for p in providers {
             // A shared story is a web link.
-            if p.hasItemConformingToTypeIdentifier(UTType.url.identifier),
-               let url = await loadURL(p) {
-                record(.init(kind: .url, value: url.absoluteString, timestamp: Date().timeIntervalSince1970))
+            if p.hasItemConformingToTypeIdentifier(UTType.url.identifier), let url = await loadURL(p) {
+                record(.init(kind: .url, value: url.absoluteString, timestamp: now))
                 return openAppAndFinish()
             }
             // Some apps share the link as plain text.
             if p.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
                let text = await loadText(p), let link = firstURL(in: text) {
-                record(.init(kind: .url, value: link, timestamp: Date().timeIntervalSince1970))
+                record(.init(kind: .url, value: link, timestamp: now))
                 return openAppAndFinish()
             }
             // A shared photo/video file (e.g. from Photos): copy it into the App Group container.
             let isMovie = p.hasItemConformingToTypeIdentifier(UTType.movie.identifier)
             if isMovie || p.hasItemConformingToTypeIdentifier(UTType.image.identifier),
                let name = await copyFile(p, movie: isMovie) {
-                record(.init(kind: .file, value: name, isVideoHint: isMovie, timestamp: Date().timeIntervalSince1970))
+                record(.init(kind: .file, value: name, isVideoHint: isMovie, timestamp: now))
                 return openAppAndFinish()
             }
         }
@@ -75,17 +108,17 @@ final class ShareViewController: UIViewController {
     /// the filename (the app moves it into the chosen folder and deletes it from the container).
     private func copyFile(_ p: NSItemProvider, movie: Bool) async -> String? {
         let typeID = movie ? UTType.movie.identifier : UTType.image.identifier
-        let src: URL? = await withCheckedContinuation { cont in
+        let dest: URL? = await withCheckedContinuation { cont in
             p.loadFileRepresentation(forTypeIdentifier: typeID) { url, _ in
                 // The file is only valid inside this callback — copy it synchronously here.
-                guard let url, let container = StorySharing.containerURL else { cont.resume(returning: nil); return }
-                let name = "share_\(UUID().uuidString).\(url.pathExtension.isEmpty ? (movie ? "mov" : "jpg") : url.pathExtension)"
-                let dest = container.appendingPathComponent(name)
-                do { try FileManager.default.copyItem(at: url, to: dest); cont.resume(returning: dest) }
+                guard let url, let container = Self.containerURL else { cont.resume(returning: nil); return }
+                let ext = url.pathExtension.isEmpty ? (movie ? "mov" : "jpg") : url.pathExtension
+                let out = container.appendingPathComponent("share_\(UUID().uuidString).\(ext)")
+                do { try FileManager.default.copyItem(at: url, to: out); cont.resume(returning: out) }
                 catch { cont.resume(returning: nil) }
             }
         }
-        return src?.lastPathComponent
+        return dest?.lastPathComponent
     }
 
     private func firstURL(in text: String) -> String? {
@@ -94,14 +127,10 @@ final class ShareViewController: UIViewController {
         return d.firstMatch(in: text, range: range)?.url?.absoluteString
     }
 
-    private func record(_ item: StorySharing.PendingShare) { StorySharing.enqueue(item) }
-
     // MARK: - Hand off to the app
 
     private func openAppAndFinish() {
-        if let url = URL(string: "\(StorySharing.urlScheme)://\(StorySharing.openHost)") {
-            openURL(url)
-        }
+        if let url = URL(string: "photobrowser://share") { openURL(url) }
         finish()
     }
 

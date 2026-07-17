@@ -6,7 +6,40 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		5E00000000000000000000A5 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E00000000000000000000A2 /* ShareViewController.swift */; };
+		5E00000000000000000000AF /* ShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 5E00000000000000000000A6 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		5E00000000000000000000B1 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = FEC7AC672FD3328B00875DB1 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5E00000000000000000000A7;
+			remoteInfo = ShareExtension;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		5E00000000000000000000AE /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				5E00000000000000000000AF /* ShareExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		5E00000000000000000000A2 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
+		5E00000000000000000000A3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		5E00000000000000000000A4 /* ShareExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ShareExtension.entitlements; sourceTree = "<group>"; };
+		5E00000000000000000000A6 /* ShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		FEC7AC6F2FD3328B00875DB1 /* PhotoBrowser.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhotoBrowser.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -19,6 +52,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		5E00000000000000000000A9 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		FEC7AC6C2FD3328B00875DB1 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -29,10 +69,21 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		5E00000000000000000000A1 /* ShareExtension */ = {
+			isa = PBXGroup;
+			children = (
+				5E00000000000000000000A2 /* ShareViewController.swift */,
+				5E00000000000000000000A3 /* Info.plist */,
+				5E00000000000000000000A4 /* ShareExtension.entitlements */,
+			);
+			path = ShareExtension;
+			sourceTree = "<group>";
+		};
 		FEC7AC662FD3328B00875DB1 = {
 			isa = PBXGroup;
 			children = (
 				FEC7AC712FD3328B00875DB1 /* PhotoBrowser */,
+				5E00000000000000000000A1 /* ShareExtension */,
 				FEC7AC702FD3328B00875DB1 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +92,7 @@
 			isa = PBXGroup;
 			children = (
 				FEC7AC6F2FD3328B00875DB1 /* PhotoBrowser.app */,
+				5E00000000000000000000A6 /* ShareExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -48,6 +100,25 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		5E00000000000000000000A7 /* ShareExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5E00000000000000000000AB /* Build configuration list for PBXNativeTarget "ShareExtension" */;
+			buildPhases = (
+				5E00000000000000000000A8 /* Sources */,
+				5E00000000000000000000A9 /* Frameworks */,
+				5E00000000000000000000AA /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ShareExtension;
+			packageProductDependencies = (
+			);
+			productName = ShareExtension;
+			productReference = 5E00000000000000000000A6 /* ShareExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		FEC7AC6E2FD3328B00875DB1 /* PhotoBrowser */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = FEC7AC7A2FD3328D00875DB1 /* Build configuration list for PBXNativeTarget "PhotoBrowser" */;
@@ -55,10 +126,12 @@
 				FEC7AC6B2FD3328B00875DB1 /* Sources */,
 				FEC7AC6C2FD3328B00875DB1 /* Frameworks */,
 				FEC7AC6D2FD3328B00875DB1 /* Resources */,
+				5E00000000000000000000AE /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				5E00000000000000000000B0 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				FEC7AC712FD3328B00875DB1 /* PhotoBrowser */,
@@ -80,6 +153,9 @@
 				LastSwiftUpdateCheck = 2650;
 				LastUpgradeCheck = 2650;
 				TargetAttributes = {
+					5E00000000000000000000A7 = {
+						CreatedOnToolsVersion = 26.5;
+					};
 					FEC7AC6E2FD3328B00875DB1 = {
 						CreatedOnToolsVersion = 26.5;
 						LastSwiftMigration = 2650;
@@ -101,11 +177,19 @@
 			projectRoot = "";
 			targets = (
 				FEC7AC6E2FD3328B00875DB1 /* PhotoBrowser */,
+				5E00000000000000000000A7 /* ShareExtension */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		5E00000000000000000000AA /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		FEC7AC6D2FD3328B00875DB1 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -116,6 +200,14 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		5E00000000000000000000A8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5E00000000000000000000A5 /* ShareViewController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		FEC7AC6B2FD3328B00875DB1 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -125,7 +217,65 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		5E00000000000000000000B0 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5E00000000000000000000A7 /* ShareExtension */;
+			targetProxy = 5E00000000000000000000B1 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		5E00000000000000000000AC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ShareExtension/ShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8BS5QTBPNR;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = jayymei.PhotoBrowser.ShareExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		5E00000000000000000000AD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ShareExtension/ShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8BS5QTBPNR;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = jayymei.PhotoBrowser.ShareExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 		FEC7AC782FD3328D00875DB1 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -254,11 +404,13 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = Config/PhotoBrowser.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 8BS5QTBPNR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Photos;
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save photos and videos from your drive into your Photos Library";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Import photos and videos from your library, and remove originals you delete here.";
@@ -295,11 +447,13 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = Config/PhotoBrowser.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 8BS5QTBPNR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Photos;
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save photos and videos from your drive into your Photos Library";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Import photos and videos from your library, and remove originals you delete here.";
@@ -331,6 +485,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		5E00000000000000000000AB /* Build configuration list for PBXNativeTarget "ShareExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5E00000000000000000000AC /* Debug */,
+				5E00000000000000000000AD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		FEC7AC6A2FD3328B00875DB1 /* Build configuration list for PBXProject "PhotoBrowser" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
