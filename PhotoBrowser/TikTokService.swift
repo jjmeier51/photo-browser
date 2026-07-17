@@ -59,7 +59,7 @@ enum TikTokService {
     ) async -> (authorId: String, nickname: String, totalFound: Int, resolved: Int, allStats: [String: Int], newest: Double, note: String?) {
         progress(Progress(phase: since == nil ? "Finding @\(username)’s videos…" : "Checking @\(username) for new videos…",
                           fraction: 0, done: 0, total: 0))
-        let listing = await listAllVideos(username: username, since: since, progress: progress)
+        let listing = await listAllVideos(username: username, already: alreadyDownloaded, progress: progress)
         if !listing.avatar.isEmpty, let data = await downloadData(absolute(listing.avatar)) { onAvatar(data) }
 
         // Like counts for *every* listed video (id → likes) — lets the caller refresh the
@@ -102,23 +102,29 @@ enum TikTokService {
 
     // MARK: - Listing (tikwm user/posts, paginated)
 
-    nonisolated private static func listAllVideos(username: String, since: Date?, progress: @escaping @Sendable (Progress) -> Void)
+    nonisolated private static func listAllVideos(username: String, already: Set<String>, progress: @escaping @Sendable (Progress) -> Void)
         async -> (videos: [Video], avatar: String, authorId: String, nickname: String, newest: Double) {
         var all: [Video] = []
         var seen = Set<String>()
         var avatar = "", authorId = "", nickname = ""
         var newest: Double = 0
         var cursor = "0"
-        let cutoff = since?.timeIntervalSince1970 ?? 0
-        for page in 0..<60 {     // safety cap: 60 pages × 35 ≈ 2100 videos
+        // Incremental stop is by *dedup*, not a timestamp cutoff. The old cutoff broke early on
+        // accounts whose top post is a pinned/old one (and on any tikwm ordering quirk), so they
+        // looked like they had "no new videos". Instead, page until we hit a long run of
+        // already-downloaded posts — past the ~3 pins and well into the old timeline. A new post
+        // resets the run, so nothing new is ever missed regardless of order.
+        let incremental = !already.isEmpty
+        var consecutiveSeen = 0
+        for _ in 0..<60 {     // safety cap: 60 pages × 35 ≈ 2100 videos
             guard let data = await apiGet("/api/user/posts",
                                           query: ["unique_id": username, "count": "35", "cursor": cursor, "hd": "1"]),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   intValue(json["code"]) == 0,
                   let d = json["data"] as? [String: Any] else { break }
             let vids = (d["videos"] as? [[String: Any]]) ?? []
-            var reachedOld = false
-            for (idx, v) in vids.enumerated() {
+            var stop = false
+            for v in vids {
                 guard let id = idString(v["video_id"]) ?? idString(v["aweme_id"]) ?? idString(v["id"]) else { continue }
                 if let author = v["author"] as? [String: Any] {
                     if avatar.isEmpty { avatar = (author["avatar"] as? String) ?? "" }
@@ -127,14 +133,6 @@ enum TikTokService {
                 }
                 let ctSecs = Double(intValue(v["create_time"]) ?? 0)
                 newest = max(newest, ctSecs)
-                // Posts come newest-first *except* pinned posts, which TikTok shows first (up to 3)
-                // on the first page regardless of age. A pinned/old-but-top post must NOT stop the
-                // incremental scan, or an account whose top post is an old pin looks like it has
-                // "no new videos" when it doesn't. Skip the cutoff-break for pinned items (is_top)
-                // and, as a flag-independent safety net, for the first few first-page items.
-                let pinned = (intValue(v["is_top"]) ?? 0) != 0 || (v["is_pinned"] as? Bool == true)
-                let mightBePinned = pinned || (page == 0 && idx < 3)
-                if cutoff > 0, ctSecs <= cutoff, !mightBePinned { reachedOld = true; break }
                 guard seen.insert(id).inserted else { continue }
                 let hd = (v["hdplay"] as? String) ?? ""
                 let sd = (v["play"] as? String) ?? (v["wmplay"] as? String) ?? ""
@@ -144,10 +142,18 @@ enum TikTokService {
                 let likes = intValue(v["digg_count"]) ?? 0          // tikwm: likes (hearts)
                 all.append(Video(id: id, hd: hd, sd: sd, images: images, createTime: Date(timeIntervalSince1970: ctSecs),
                                  desc: (v["title"] as? String) ?? "", likes: likes))
+                if incremental {
+                    if already.contains(id) {
+                        consecutiveSeen += 1
+                        if consecutiveSeen >= 15 { stop = true; break }
+                    } else {
+                        consecutiveSeen = 0
+                    }
+                }
             }
-            progress(Progress(phase: cutoff > 0 ? "Found \(all.count) new…" : "Found \(all.count) videos…",
+            progress(Progress(phase: incremental ? "Checking — \(all.count) scanned…" : "Found \(all.count) videos…",
                               fraction: 0, done: 0, total: 0))
-            if reachedOld { break }
+            if stop { break }
             let hasMore = (d["hasMore"] as? Bool) ?? (intValue(d["hasMore"]) == 1)
             let next = idString(d["cursor"]) ?? ""
             if !hasMore || next.isEmpty || next == cursor { break }
