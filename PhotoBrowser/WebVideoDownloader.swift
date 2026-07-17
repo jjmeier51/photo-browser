@@ -22,7 +22,7 @@ enum WebVideoDownloader {
     struct Progress: Sendable { var fraction: Double; var phase: String }
     /// `authRequired` means the server returned 401 and we sent no credentials — the caller should
     /// prompt for a username/password and retry. The associated value is the host to sign in to.
-    enum Outcome: Sendable { case saved(URL); case failed(String); case authRequired(String) }
+    enum Outcome: Sendable { case saved(URL, note: String? = nil); case failed(String); case authRequired(String) }
 
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
@@ -47,13 +47,16 @@ enum WebVideoDownloader {
         // session API hands back a pre-merged URL (progressive MP4 or muxed HLS) that includes
         // audio — the same source yt-dlp uses. Resolve that first; fall back to the captured URL.
         var effectiveURL = urlString
+        var diag = ""                                   // breadcrumb shown on the saved row for triage
         if let id = loomVideoID(pageURL) ?? loomVideoID(urlString) {
             progress(Progress(fraction: 0, phase: "Resolving Loom video…"))
-            if let resolved = await resolveLoomURL(id: id, referer: pageURL, cookieHeader: cookieHeader) { effectiveURL = resolved }
+            let (resolved, note) = await resolveLoomURL(id: id, referer: pageURL, cookieHeader: cookieHeader)
+            if let resolved { effectiveURL = resolved }
+            diag = "Loom: \(note)"
         }
         guard let url = URL(string: effectiveURL) else { return .failed("That video URL couldn’t be read.") }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let outcome: Outcome
+        var outcome: Outcome
         if isHLS(url) {
             outcome = await downloadHLS(url, pageURL: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
                                         into: folder, suggestedName: suggestedName, progress: progress)
@@ -63,9 +66,13 @@ enum WebVideoDownloader {
         }
         // Stamp the page-provided date/caption off the main actor (a video re-mux / image rewrite
         // here would freeze the UI if it ran on the main thread).
-        if case .saved(let dest) = outcome, captureDate != nil || caption != nil {
-            progress(Progress(fraction: 1, phase: "Setting date…"))
-            await stampMetadata(date: captureDate, caption: caption, to: dest)
+        if case .saved(let dest, let hlsNote) = outcome {
+            if captureDate != nil || caption != nil {
+                progress(Progress(fraction: 1, phase: "Setting date…"))
+                await stampMetadata(date: captureDate, caption: caption, to: dest)
+            }
+            let combined = [diag, hlsNote].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+            outcome = .saved(dest, note: combined.isEmpty ? nil : combined)
         }
         return outcome
     }
@@ -88,7 +95,8 @@ enum WebVideoDownloader {
     /// requests. Tries the transcoded URL, then the raw URL; returns nil if neither responds, in
     /// which case the caller keeps the captured URL. Same anonymous API yt-dlp uses; the browser's
     /// cookies are forwarded in case the video is team-restricted.
-    nonisolated private static func resolveLoomURL(id: String, referer: String, cookieHeader: String) async -> String? {
+    nonisolated private static func resolveLoomURL(id: String, referer: String, cookieHeader: String) async -> (url: String?, note: String) {
+        var notes: [String] = []
         for endpoint in ["transcoded-url", "raw-url"] {
             guard let api = URL(string: "https://www.loom.com/api/campaigns/sessions/\(id)/\(endpoint)") else { continue }
             var req = URLRequest(url: api)
@@ -101,16 +109,22 @@ enum WebVideoDownloader {
             let body: [String: Any] = ["anonID": UUID().uuidString, "deviceID": NSNull(),
                                        "force_original": false, "password": NSNull()]
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-            guard let (data, resp) = try? await session.data(for: req),
-                  (resp as? HTTPURLResponse)?.statusCode == 200,
+            let tag = endpoint == "transcoded-url" ? "transcoded" : "raw"
+            guard let (data, resp) = try? await session.data(for: req) else { notes.append("\(tag) net-err"); continue }
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            guard code == 200,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  var out = json["url"] as? String, !out.isEmpty else { continue }
+                  var out = json["url"] as? String, !out.isEmpty else {
+                notes.append("\(tag) \(code)"); continue
+            }
             // Loom's split (demuxed) HLS has a pre-merged twin: dropping "-split" yields a muxed
             // playlist whose segments already carry audio — no separate audio track to fetch/mux.
-            if out.contains("-split.m3u8") { out = out.replacingOccurrences(of: "-split.m3u8", with: ".m3u8") }
-            return out
+            let wasSplit = out.contains("-split.m3u8")
+            if wasSplit { out = out.replacingOccurrences(of: "-split.m3u8", with: ".m3u8") }
+            let kind = out.lowercased().contains(".m3u8") ? (wasSplit ? "merged-hls" : "hls") : "mp4"
+            return (out, "\(tag) → \(kind)")
         }
-        return nil
+        return (nil, notes.joined(separator: ",") + " (fell back)")
     }
 
     // MARK: - Direct file
@@ -222,14 +236,19 @@ enum WebVideoDownloader {
         // video playlist alone is silent. Find the audio playlist — from the master we already read,
         // or by probing for one next to a "…video…" media playlist — download it, and mux it in.
         var audioTmp: URL?
+        var audioNote = "no separate audio track"
         if let audioURL = await findAudioPlaylistURL(videoPlaylistURL: playlistURL, masterText: masterText,
                                                      masterURL: masterURL, pageURL: pageURL,
-                                                     cookieHeader: cookieHeader, authHeader: authHeader),
-           let atext = await fetchText(audioURL, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader),
-           let a = await downloadMediaPlaylist(audioURL, text: atext, pageURL: pageURL,
-                                               cookieHeader: cookieHeader, authHeader: authHeader,
-                                               label: "audio", progress: progress).data {
-            audioTmp = a.url
+                                                     cookieHeader: cookieHeader, authHeader: authHeader) {
+            audioNote = "audio playlist found"
+            if let atext = await fetchText(audioURL, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader),
+               let a = await downloadMediaPlaylist(audioURL, text: atext, pageURL: pageURL,
+                                                   cookieHeader: cookieHeader, authHeader: authHeader,
+                                                   label: "audio", progress: progress).data {
+                audioTmp = a.url; audioNote = "audio downloaded"
+            } else {
+                audioNote = "audio download failed"
+            }
         }
 
         progress(Progress(fraction: 1, phase: "Assembling…"))
@@ -242,7 +261,9 @@ enum WebVideoDownloader {
             let muxed = FileManager.default.temporaryDirectory.appendingPathComponent("webvid_\(UUID().uuidString).mp4")
             if await muxVideoAudio(video: videoInfo.url, audio: audioTmp, to: muxed) {
                 try? FileManager.default.removeItem(at: videoInfo.url)
-                finalTmp = muxed; finalExt = "mp4"
+                finalTmp = muxed; finalExt = "mp4"; audioNote = "audio muxed ✓"
+            } else {
+                audioNote = "audio mux failed"
             }
             try? FileManager.default.removeItem(at: audioTmp)
         }
@@ -262,7 +283,7 @@ enum WebVideoDownloader {
             return .failed("Couldn’t save to the folder.")
         }
         stampNow(dest)
-        return .saved(dest)
+        return .saved(dest, note: audioNote)
     }
 
     /// Downloads every segment of ONE media playlist and assembles them into a single temp file

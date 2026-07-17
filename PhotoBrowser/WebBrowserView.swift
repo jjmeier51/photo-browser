@@ -379,7 +379,8 @@ private struct DownloadsSheet: View {
                                 } else if d.state == .failed {
                                     Text(d.message ?? "Download failed.").font(.caption2).foregroundStyle(.orange)
                                 } else {
-                                    Text("Saved").font(.caption2).foregroundStyle(.green)
+                                    Text((d.message?.isEmpty == false) ? "Saved · \(d.message!)" : "Saved")
+                                        .font(.caption2).foregroundStyle(.green)
                                 }
                                 Text(d.urlString).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                             }
@@ -708,7 +709,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     private func finish(_ id: UUID, _ outcome: WebVideoDownloader.Outcome) {
         update(id) { e in
             switch outcome {
-            case .saved(let u): e.state = .done; e.progress = 1; e.dest = u; e.phase = "Saved"
+            case .saved(let u, let note): e.state = .done; e.progress = 1; e.dest = u; e.phase = "Saved"; e.message = note ?? ""
             case .failed(let m): e.state = .failed; e.message = m; e.phase = "Failed"
             case .authRequired: e.state = .failed; e.message = "This download needs a members login."; e.phase = "Failed"
             }
