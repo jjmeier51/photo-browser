@@ -168,12 +168,9 @@ enum WebVideoDownloader {
         }
 
         // Download the (video, or muxed audio+video) media playlist.
-        let videoInfo: (url: URL, isFMP4: Bool)
-        switch await downloadMediaPlaylist(playlistURL, text: text, pageURL: pageURL, cookieHeader: cookieHeader,
-                                           authHeader: authHeader, label: "video", progress: progress) {
-        case .success(let v): videoInfo = v
-        case .failure(let msg): return .failed(msg)
-        }
+        let vres = await downloadMediaPlaylist(playlistURL, text: text, pageURL: pageURL, cookieHeader: cookieHeader,
+                                               authHeader: authHeader, label: "video", progress: progress)
+        guard let videoInfo = vres.data else { return .failed(vres.reason ?? "Couldn’t download the video.") }
 
         // Demuxed streams (Loom, and most CMAF HLS) carry audio as a SEPARATE rendition, so the
         // video playlist alone is silent. Find the audio playlist — from the master we already read,
@@ -183,9 +180,9 @@ enum WebVideoDownloader {
                                                      masterURL: masterURL, pageURL: pageURL,
                                                      cookieHeader: cookieHeader, authHeader: authHeader),
            let atext = await fetchText(audioURL, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader),
-           case .success(let a) = await downloadMediaPlaylist(audioURL, text: atext, pageURL: pageURL,
-                                                              cookieHeader: cookieHeader, authHeader: authHeader,
-                                                              label: "audio", progress: progress) {
+           let a = await downloadMediaPlaylist(audioURL, text: atext, pageURL: pageURL,
+                                               cookieHeader: cookieHeader, authHeader: authHeader,
+                                               label: "audio", progress: progress).data {
             audioTmp = a.url
         }
 
@@ -228,12 +225,12 @@ enum WebVideoDownloader {
     /// demuxed stream, the separate audio rendition. Returns the file (+ whether it's fMP4) or a reason.
     nonisolated private static func downloadMediaPlaylist(_ playlistURL: URL, text: String, pageURL: String,
                                                           cookieHeader: String, authHeader: String?, label: String,
-                                                          progress: @escaping @Sendable (Progress) -> Void) async -> Result<(url: URL, isFMP4: Bool), String> {
+                                                          progress: @escaping @Sendable (Progress) -> Void) async -> (data: (url: URL, isFMP4: Bool)?, reason: String?) {
         let segs = parseSegments(text, base: playlistURL)
-        guard !segs.isEmpty else { return .failure("The stream had no downloadable \(label) segments.") }
+        guard !segs.isEmpty else { return (nil, "The stream had no downloadable \(label) segments.") }
         let key = await resolveKey(text, base: playlistURL, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader)
         if key == nil, text.contains("#EXT-X-KEY"), !text.uppercased().contains("METHOD=NONE") {
-            return .failure("This video is encrypted in a way that can’t be saved (DRM-protected).")
+            return (nil, "This video is encrypted in a way that can’t be saved (DRM-protected).")
         }
         let initSeg = parseInitSegment(text, base: playlistURL)     // fMP4/CMAF init
         let isFMP4 = initSeg != nil || segs.first?.url.pathExtension.lowercased() == "m4s"
@@ -286,18 +283,18 @@ enum WebVideoDownloader {
         if !datas.allSatisfy({ $0 != nil }) {
             let failed = datas.filter { $0 == nil }.count
             let detail = lastReason.map { " — \($0)" } ?? ""
-            return .failure("Couldn’t download \(failed) of \(total) \(label) segments\(detail). The stream may have expired or blocked the request.")
+            return (nil, "Couldn’t download \(failed) of \(total) \(label) segments\(detail). The stream may have expired or blocked the request.")
         }
 
         let ext = isFMP4 ? "mp4" : "ts"
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("webvid_\(UUID().uuidString).\(ext)")
-        guard let handle = createFile(tmp) else { return .failure("Couldn’t assemble the \(label) file.") }
+        guard let handle = createFile(tmp) else { return (nil, "Couldn’t assemble the \(label) file.") }
         if let initSeg, let initData = await fetchData(initSeg, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) {
             try? handle.write(contentsOf: initData)
         }
         for d in datas { if let d { try? handle.write(contentsOf: d) } }
         try? handle.close()
-        return .success((tmp, isFMP4))
+        return ((tmp, isFMP4), nil)
     }
 
     /// Locates the audio media playlist for a demuxed stream. Preferred source is a master playlist
