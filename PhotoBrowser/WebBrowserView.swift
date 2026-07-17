@@ -986,7 +986,21 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
             return ["\\.mp4", "\\.m4v", "\\.mov", "\\.webm"].contains { l.range(of: $0, options: .regularExpression) != nil }
         }
         let usableSrc = (src?.hasPrefix("http") == true) ? src : nil
-        if let m3u8 = media.last(where: { $0.lowercased().contains(".m3u8") }) { return m3u8 }
+        // Prefer a *master* (multivariant) playlist over a lone media playlist. A demuxed stream
+        // (Loom, most CMAF HLS) requests the master first, then per-track media playlists
+        // ("mediaplaylist-video-bitrate…", "…-audio-…"); taking the last .m3u8 grabs a single
+        // video track and the download comes out silent. The master carries every video + audio
+        // rendition, so the downloader can fetch both and mux them. A master lacks the per-track
+        // filename markers below; fall back to the last media playlist if no master was captured.
+        let m3u8s = media.filter { $0.lowercased().contains(".m3u8") }
+        if !m3u8s.isEmpty {
+            func isMediaRendition(_ s: String) -> Bool {
+                let l = s.lowercased()
+                return l.contains("mediaplaylist") || l.contains("-video") || l.contains("-audio") || l.contains("bitrate")
+            }
+            if let master = m3u8s.last(where: { !isMediaRendition($0) }) { return master }
+            return m3u8s.last
+        }
         if let s = usableSrc, fileLike(s) { return s }
         if let f = media.last(where: { fileLike($0) }) { return f }
         if let s = usableSrc, s.lowercased().contains(".m3u8") { return s }
