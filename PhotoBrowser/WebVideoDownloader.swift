@@ -487,8 +487,22 @@ enum WebVideoDownloader {
     // MARK: - Helpers
 
     nonisolated private static func resolve(_ uri: String, base: URL) -> URL? {
-        if uri.hasPrefix("http") { return URL(string: uri) }
-        return URL(string: uri, relativeTo: base)?.absoluteURL
+        let resolved = uri.hasPrefix("http") ? URL(string: uri) : URL(string: uri, relativeTo: base)?.absoluteURL
+        guard let u = resolved else { return nil }
+        // AWS/CloudFront-signed streams (Loom, and many CDN-hosted HLS) sign the *playlist* URL
+        // — `?Signature=…&Policy=…&Key-Pair-Id=…` — and the policy authorizes the whole path, so
+        // the player must append that same query to every segment/key/init request. The m3u8 lists
+        // those as relative URIs with no query of their own; without carrying the playlist's query
+        // over, each segment hits the CDN unsigned and 403s (all 885 segments failed for exactly
+        // this reason). Inherit the base's query when the target has none and is on the same host.
+        if u.query == nil, u.host == base.host,
+           let baseQuery = URLComponents(url: base, resolvingAgainstBaseURL: false)?.percentEncodedQuery,
+           !baseQuery.isEmpty {
+            var comps = URLComponents(url: u, resolvingAgainstBaseURL: false)
+            comps?.percentEncodedQuery = baseQuery
+            return comps?.url ?? u
+        }
+        return u
     }
 
     /// The real file extension inferred from a file's leading magic bytes — trusted over a server's
