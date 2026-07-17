@@ -60,7 +60,7 @@ enum PhotoEditorIO {
     /// a RAW image must NOT be oriented a second time or it double-rotates. This was the bug
     /// behind "crop lands on the wrong part" for DNGs: every geometric tool then ran on a
     /// mis-oriented buffer.
-    static func isRAWSource(_ url: URL) -> Bool {
+    nonisolated static func isRAWSource(_ url: URL) -> Bool {
         UTType(filenameExtension: url.pathExtension.lowercased())?.conforms(to: .rawImage) == true
     }
 
@@ -176,7 +176,7 @@ enum PhotoEditorIO {
 
     /// True when the file carries HDR worth preserving: an Apple/ISO HDR gain map, a PQ/HLG (BT.2100)
     /// profile, or a RAW file (whose scene data exceeds 8-bit). Such sources take the 10-bit save path.
-    static func isHDRSource(_ url: URL) -> Bool {
+    nonisolated static func isHDRSource(_ url: URL) -> Bool {
         if let type = UTType(filenameExtension: url.pathExtension.lowercased()), type.conforms(to: .rawImage) {
             return true
         }

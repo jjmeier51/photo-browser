@@ -330,12 +330,32 @@ enum MediaEditing {
 
     // MARK: - Photo (edit in place, preserving metadata)
 
+    /// The EXIF orientation whose display correction equals a clockwise rotation by
+    /// `quarters` × 90° — used to bake the same rotation the CGImage/UIImage helpers do
+    /// onto a Core Image buffer (6 = 90° CW, 3 = 180°, 8 = 90° CCW).
+    nonisolated static func exifOrientation(forQuarters quarters: Int) -> Int32 {
+        switch ((quarters % 4) + 4) % 4 {
+        case 1:  return 6      // 90° clockwise
+        case 2:  return 3      // 180°
+        case 3:  return 8      // 90° counter-clockwise
+        default: return 1
+        }
+    }
+
     /// Rotates/crops the photo at `url` and writes the result back over the original
     /// file (same name and container), preserving EXIF/GPS so capture date, location
     /// and Age survive the edit. Returns true on success.
     /// `nonisolated`: called from `Task.detached` save paths — the decode/re-encode
     /// of a full-resolution photo must never run on the main actor.
     nonisolated static func applyPhotoInPlace(url: URL, quarters: Int, crop: CGRect) -> Bool {
+        // HDR sources (gain-map/PQ/HLG HEIC, RAW) take a 10-bit Core Image path so the
+        // headroom survives — the 8-bit `loadFullCGImage` path below would flatten them
+        // to SDR. Falls through to SDR if the HDR encode isn't possible.
+        if PhotoEditorIO.isHDRSource(url),
+           applyPhotoHDRInPlace(url: url, quarters: quarters, crop: crop) {
+            return true
+        }
+
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
               let full = loadFullCGImage(src) else { return false }
         let rotated = rotate(full, quarters: quarters)
@@ -371,7 +391,88 @@ enum MediaEditing {
                 try? FileManager.default.removeItem(at: tmp); return false
             }
         }
-        return replaceInPlace(original: url, temp: tmp)
+        let dates = fileDates(of: url)                 // capture before the swap replaces the source
+        guard replaceInPlace(original: url, temp: tmp) else { return false }
+        restoreFileDates(dates, to: url)               // keep the file's creation/modification stamps
+        return true
+    }
+
+    /// HDR-preserving in-place rotate/crop: loads the source **expanded to HDR** (gain map
+    /// applied, extended range), bakes the rotation and crop into the pixels, and writes a
+    /// 10-bit HDR HEIC carrying the original metadata + capture date. Returns false so
+    /// `applyPhotoInPlace` can fall back to the SDR path. `nonisolated` — all pixel work is
+    /// off the main actor.
+    nonisolated private static func applyPhotoHDRInPlace(url: URL, quarters: Int, crop: CGRect) -> Bool {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let ci = CIImage(contentsOf: url, options: [.expandToHDR: true]) else { return false }
+        var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        let orientation = Int32((props[kCGImagePropertyOrientation] as? UInt32) ?? 1)
+        // RAW/DNG is already oriented by Core Image's RAW pipeline; everything else needs the
+        // EXIF orientation baked in first (same rule as PhotoEditorIO.load/loadHDR).
+        let upright = PhotoEditorIO.isRAWSource(url) ? ci : ci.oriented(forExifOrientation: orientation)
+
+        // Bake the rotation, then apply the (normalized, top-left-origin) crop. CIImage is
+        // Y-up with an arbitrary origin, so normalize origin to (0,0) and flip the crop's Y.
+        let rotated = atOrigin(upright.oriented(forExifOrientation: exifOrientation(forQuarters: quarters)))
+        let w = rotated.extent.width, h = rotated.extent.height
+        guard w > 0, h > 0 else { return false }
+        var cropped = rotated
+        if crop != CGRect(x: 0, y: 0, width: 1, height: 1) {
+            let rect = CGRect(x: crop.minX * w,
+                              y: (1 - crop.minY - crop.height) * h,     // top-left → Y-up
+                              width: crop.width * w, height: crop.height * h).integral
+            let clamped = rect.intersection(rotated.extent)
+            guard !clamped.isNull, !clamped.isEmpty else { return false }
+            cropped = atOrigin(rotated.cropped(to: clamped))
+        }
+        guard !cropped.extent.isInfinite, !cropped.extent.isNull else { return false }
+
+        props[kCGImagePropertyOrientation] = 1                          // rotation baked into pixels
+        props[kCGImagePropertyPixelWidth] = Int(cropped.extent.width.rounded())
+        props[kCGImagePropertyPixelHeight] = Int(cropped.extent.height.rounded())
+        if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+            tiff[kCGImagePropertyTIFFOrientation] = 1
+            props[kCGImagePropertyTIFFDictionary] = tiff
+        }
+        // CIImage properties are string-keyed; embed them so EXIF/GPS/dates survive the encode.
+        let stringProps = Dictionary(props.map { ($0.key as String, $0.value) }, uniquingKeysWith: { a, _ in a })
+        let withMeta = cropped.settingProperties(stringProps)
+
+        let ctx = CIContext(options: nil)
+        let outSpace = CGColorSpace(name: CGColorSpace.displayP3_PQ) ?? ci.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+        guard let data = try? ctx.heif10Representation(of: withMeta, colorSpace: outSpace, options: [:]) else { return false }
+
+        let tmp = url.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).edit")
+        do { try data.write(to: tmp) } catch { return false }
+        // Verify it decodes before swapping it in, so a bad encode can't corrupt the photo.
+        guard CGImageSourceCreateWithURL(tmp as CFURL, nil) != nil else {
+            try? FileManager.default.removeItem(at: tmp); return false
+        }
+        let dates = fileDates(of: url)
+        guard replaceInPlace(original: url, temp: tmp) else { return false }
+        restoreFileDates(dates, to: url)
+        return true
+    }
+
+    /// Translates `image` so its extent's origin sits at (0, 0) — Core Image crops/rotations
+    /// leave the extent at an arbitrary origin, which trips up cropping math and encoders.
+    nonisolated private static func atOrigin(_ image: CIImage) -> CIImage {
+        image.transformed(by: CGAffineTransform(translationX: -image.extent.origin.x, y: -image.extent.origin.y))
+    }
+
+    /// The file's creation/modification dates, re-applied after an in-place swap so the
+    /// browser's timeline stays stable (the re-encoded file would otherwise get "now").
+    nonisolated private static func fileDates(of url: URL) -> [FileAttributeKey: Any] {
+        guard let a = try? FileManager.default.attributesOfItem(atPath: url.path) else { return [:] }
+        var set: [FileAttributeKey: Any] = [:]
+        if let c = a[.creationDate] { set[.creationDate] = c }
+        if let m = a[.modificationDate] { set[.modificationDate] = m }
+        return set
+    }
+
+    nonisolated private static func restoreFileDates(_ dates: [FileAttributeKey: Any], to url: URL) {
+        guard !dates.isEmpty else { return }
+        try? FileManager.default.setAttributes(dates, ofItemAtPath: url.path)
     }
 
     /// Doubles a photo's pixel dimensions with a high-quality (Lanczos) upscale, re-encoding in
@@ -790,7 +891,10 @@ enum MediaEditing {
         poll.cancel()
         guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return false }
         progress(1)
-        return replaceInPlace(original: url, temp: tmp)
+        let dates = fileDates(of: url)                 // capture before the swap replaces the source
+        guard replaceInPlace(original: url, temp: tmp) else { return false }
+        restoreFileDates(dates, to: url)               // keep the file's creation/modification stamps
+        return true
     }
 
     enum UpscaleResult: Sendable { case upscaled, skipped, failed }

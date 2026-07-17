@@ -2,6 +2,18 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-07-17
+
+- **Bulk rotate now covers videos too, and preserves HDR.** The "Rotate… (preview)" action (multi-
+  select → More) now accepts videos as well as photos: it shows one selected item rotated the chosen
+  way (a video previews on its poster frame) before applying the same turn to all of them. Every
+  original is replaced in place — so path-keyed Favorites/captions/covers stay attached — with
+  EXIF/GPS, capture date, and the file's creation/modification stamps carried across.
+  - **HDR is kept for both.** Photos that carry HDR (a gain map, a PQ/HLG profile, or RAW) now rotate
+    through a 10-bit Core Image path and are written back as HDR HEIC, instead of the old 8-bit path
+    that silently flattened them to SDR. Videos already rotated HDR-aware (BT.2020 + PQ/HLG, 10-bit
+    HEVC); that path now also restores the file's date stamps.
+
 ## 2026-07-16
 
 - **Fixed the "slows to a crawl after a few minutes of browsing" bug.** Two causes, both worse the
