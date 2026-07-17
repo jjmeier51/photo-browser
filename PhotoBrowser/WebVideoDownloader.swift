@@ -43,7 +43,15 @@ enum WebVideoDownloader {
                                      into folder: URL, suggestedName: String?, authHeader: String? = nil,
                                      captureDate: Date? = nil, caption: String? = nil,
                                      progress: @escaping @Sendable (Progress) -> Void) async -> Outcome {
-        guard let url = URL(string: urlString) else { return .failed("That video URL couldn’t be read.") }
+        // Loom serves the page player a per-track ("…-video…") HLS playlist with no audio. Its
+        // session API hands back a pre-merged URL (progressive MP4 or muxed HLS) that includes
+        // audio — the same source yt-dlp uses. Resolve that first; fall back to the captured URL.
+        var effectiveURL = urlString
+        if let id = loomVideoID(pageURL) ?? loomVideoID(urlString) {
+            progress(Progress(fraction: 0, phase: "Resolving Loom video…"))
+            if let resolved = await resolveLoomURL(id: id, referer: pageURL, cookieHeader: cookieHeader) { effectiveURL = resolved }
+        }
+        guard let url = URL(string: effectiveURL) else { return .failed("That video URL couldn’t be read.") }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let outcome: Outcome
         if isHLS(url) {
@@ -65,6 +73,44 @@ enum WebVideoDownloader {
     nonisolated static func isHLS(_ url: URL) -> Bool {
         let s = url.absoluteString.lowercased()
         return url.pathExtension.lowercased() == "m3u8" || s.contains(".m3u8")
+    }
+
+    // MARK: - Loom
+
+    /// The 32-hex session id from a Loom URL (loom.com/id|share|embed/<id>, luna.loom.com/id/<id>).
+    nonisolated private static func loomVideoID(_ s: String) -> String? {
+        guard s.lowercased().contains("loom.com") else { return nil }
+        return firstMatch(s, "loom\\.com/(?:id|share|embed)/([0-9a-fA-F]{32})")?.lowercased()
+    }
+
+    /// Asks Loom's session URL API for a pre-merged, signed media URL (progressive MP4 or muxed
+    /// HLS) that includes audio, instead of the per-track "…-video…" playlist the page player
+    /// requests. Tries the transcoded URL, then the raw URL; returns nil if neither responds, in
+    /// which case the caller keeps the captured URL. Same anonymous API yt-dlp uses; the browser's
+    /// cookies are forwarded in case the video is team-restricted.
+    nonisolated private static func resolveLoomURL(id: String, referer: String, cookieHeader: String) async -> String? {
+        for endpoint in ["transcoded-url", "raw-url"] {
+            guard let api = URL(string: "https://www.loom.com/api/campaigns/sessions/\(id)/\(endpoint)") else { continue }
+            var req = URLRequest(url: api)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            if !referer.isEmpty { req.setValue(referer, forHTTPHeaderField: "Referer") }
+            if !cookieHeader.isEmpty { req.setValue(cookieHeader, forHTTPHeaderField: "Cookie") }
+            let body: [String: Any] = ["anonID": UUID().uuidString, "deviceID": NSNull(),
+                                       "force_original": false, "password": NSNull()]
+            req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            guard let (data, resp) = try? await session.data(for: req),
+                  (resp as? HTTPURLResponse)?.statusCode == 200,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  var out = json["url"] as? String, !out.isEmpty else { continue }
+            // Loom's split (demuxed) HLS has a pre-merged twin: dropping "-split" yields a muxed
+            // playlist whose segments already carry audio — no separate audio track to fetch/mux.
+            if out.contains("-split.m3u8") { out = out.replacingOccurrences(of: "-split.m3u8", with: ".m3u8") }
+            return out
+        }
+        return nil
     }
 
     // MARK: - Direct file
