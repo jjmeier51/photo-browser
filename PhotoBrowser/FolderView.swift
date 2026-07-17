@@ -130,6 +130,8 @@ struct FolderView: View {
     @State private var resizeEntry: Entry?
     @State private var aiEditEntry: Entry?
     @State private var audioEntry: Entry?          // a tapped audio file → full-screen player
+    @State private var reloading = false           // single-flight guard for reload()
+    @State private var reloadPending = false
     @State private var audioExtractSources: [URL] = []   // videos queued for "Extract Audio"
     @State private var audioExtractName = ""
     @State private var showAudioExtractPrompt = false
@@ -2362,6 +2364,16 @@ struct FolderView: View {
     }
 
     private func reload() async {
+        // Single-flight: `changeToken` can churn (e.g. every file a download commits), and this
+        // handler spawns an unstructured Task per bump — without a guard the same folder ran
+        // overlapping disk re-listings that piled up. Coalesce to one at a time; if more arrive
+        // mid-reload, run exactly once more afterward so the final state isn't missed.
+        if reloading { reloadPending = true; return }
+        reloading = true
+        defer {
+            reloading = false
+            if reloadPending { reloadPending = false; Task { await reload() } }
+        }
         // Paint a cached listing instantly so re-opening a folder is snappy; we still
         // re-read from disk below and update if anything changed. On a cold launch any
         // folder falls back to its persisted snapshot so it appears immediately.

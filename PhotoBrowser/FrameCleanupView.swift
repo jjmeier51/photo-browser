@@ -99,6 +99,11 @@ struct FrameCleanupView: View {
             player?.stop(); player = nil
             if let c = current, c.kind == .video { player = CleanupPlayer(url: c.url) }
         }
+        // Dismissing the view doesn't re-run the .task above, so tear the player down here too —
+        // otherwise the last player (with its periodic time observer) leaks per open/close cycle.
+        // (The copy-folder picker is a .sheet, which doesn't fire onDisappear, so this won't
+        // pause playback mid-review.)
+        .onDisappear { player?.stop(); player = nil }
     }
 
     @ViewBuilder private var content: some View {
@@ -393,6 +398,14 @@ final class CleanupPlayer {
     func stop() {
         if let observer { player.removeTimeObserver(observer); self.observer = nil }
         player.pause()
+    }
+
+    /// Guarantees the periodic time observer is removed before the player is deallocated, even if
+    /// `stop()` was never called (the cleanup view is dismissed while a video is showing — the
+    /// `.task(id:)` that recreates the player can't run cleanup on cancellation). A periodic
+    /// observer still registered at `AVPlayer` dealloc is a documented crash.
+    deinit {
+        if let observer { player.removeTimeObserver(observer) }
     }
 }
 
