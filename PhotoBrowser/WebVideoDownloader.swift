@@ -1,6 +1,7 @@
 import Foundation
 import ImageIO
 import AVFoundation
+import CoreMedia
 
 /// Downloads a video discovered in the in-app web browser (`WebBrowserView`) to a folder.
 ///
@@ -401,40 +402,86 @@ enum WebVideoDownloader {
     /// then keeps the video-only result).
     /// Combines a video-only and audio-only file into one `.mp4`. Returns nil on success, else a
     /// short failure reason (surfaced in the download note for triage).
+    ///
+    /// Uses `AVAssetReader` → `AVAssetWriter` passthrough rather than an `AVMutableComposition`
+    /// export. The inputs are raw-concatenated fragmented MP4 (CMAF init + media segments): they
+    /// have no top-level moov duration or seek index, so composition insert reads a zero timeRange
+    /// (and precise-timing parsing fails to find the track at all). The reader instead streams the
+    /// already-compressed samples sequentially — no duration or index needed — and the writer
+    /// remuxes them into a clean, non-fragmented MP4, copying samples verbatim (no re-encode).
     nonisolated private static func muxVideoAudio(video: URL, audio: URL, to out: URL) async -> String? {
-        // The assembled files are fragmented MP4 (init + media segments): their mvhd duration is 0
-        // and the real timing lives in the fragments. Ask AVFoundation to parse fragments for precise
-        // timing, and drive insertion off each track's own timeRange rather than asset.duration.
-        let opts = [AVURLAssetPreferPreciseDurationAndTimingKey: true]
-        let vAsset = AVURLAsset(url: video, options: opts)
-        let aAsset = AVURLAsset(url: audio, options: opts)
-        let comp = AVMutableComposition()
+        let vAsset = AVURLAsset(url: video)
+        let aAsset = AVURLAsset(url: audio)
         guard let vTrack = try? await vAsset.loadTracks(withMediaType: .video).first else { return "no video track" }
-        guard let vRange = try? await vTrack.load(.timeRange), vRange.duration > .zero else { return "video range 0" }
-        guard let vComp = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { return "no comp track" }
-        do { try vComp.insertTimeRange(vRange, of: vTrack, at: .zero) } catch { return "v insert: \((error as NSError).code)" }
-        if let t = try? await vTrack.load(.preferredTransform) { vComp.preferredTransform = t }
+        let aTrack = try? await aAsset.loadTracks(withMediaType: .audio).first
+        let vFormat = (try? await vTrack.load(.formatDescriptions))?.first
+        let transform = try? await vTrack.load(.preferredTransform)
+        let aFormat: CMFormatDescription? = aTrack == nil ? nil : (try? await aTrack!.load(.formatDescriptions))?.first
 
-        if let aTrack = try? await aAsset.loadTracks(withMediaType: .audio).first,
-           let aRange = try? await aTrack.load(.timeRange),
-           let aComp = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-            try? aComp.insertTimeRange(aRange, of: aTrack, at: .zero)
-        } else { return "no audio track read" }
+        try? FileManager.default.removeItem(at: out)
+        do {
+            let writer = try AVAssetWriter(outputURL: out, fileType: .mp4)
+            writer.shouldOptimizeForNetworkUse = true
 
-        // Passthrough (no re-encode) first; if the container/codecs won't passthrough, fall back to a
-        // re-encode so the result still has sound.
-        var lastErr = "no export session"
-        for preset in [AVAssetExportPresetPassthrough, AVAssetExportPresetHighestQuality] {
-            guard let export = AVAssetExportSession(asset: comp, presetName: preset) else { continue }
-            try? FileManager.default.removeItem(at: out)
-            export.outputURL = out
-            export.outputFileType = .mp4
-            export.shouldOptimizeForNetworkUse = true
-            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in export.exportAsynchronously { c.resume() } }
-            if export.status == .completed { return nil }
-            lastErr = "\(preset == AVAssetExportPresetPassthrough ? "pass" : "enc") \(export.error.map { "\(($0 as NSError).code)" } ?? "st\(export.status.rawValue)")"
+            let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: vFormat)
+            vInput.expectsMediaDataInRealTime = false
+            if let transform { vInput.transform = transform }
+            guard writer.canAdd(vInput) else { return "cant add video" }
+            writer.add(vInput)
+
+            let vReader = try AVAssetReader(asset: vAsset)
+            let vOut = AVAssetReaderTrackOutput(track: vTrack, outputSettings: nil)
+            guard vReader.canAdd(vOut) else { return "cant read video" }
+            vReader.add(vOut)
+
+            var aInput: AVAssetWriterInput?
+            var aReader: AVAssetReader?
+            var aOut: AVAssetReaderTrackOutput?
+            if let aTrack {
+                let ai = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: aFormat)
+                ai.expectsMediaDataInRealTime = false
+                let ar = try AVAssetReader(asset: aAsset)
+                let ao = AVAssetReaderTrackOutput(track: aTrack, outputSettings: nil)
+                // Only wire the audio input in when BOTH ends are ready — an added writer input that
+                // never gets data (or markAsFinished) would hang finishWriting forever.
+                if ar.canAdd(ao), writer.canAdd(ai) {
+                    ar.add(ao); writer.add(ai)
+                    aInput = ai; aReader = ar; aOut = ao
+                }
+            }
+
+            guard writer.startWriting() else { return "writer \(writer.error.map { "\(($0 as NSError).code)" } ?? "start")" }
+            writer.startSession(atSourceTime: .zero)
+            vReader.startReading()
+            aReader?.startReading()
+
+            await pump(vInput, vOut)                      // all video samples, then …
+            if let aInput, let aOut { await pump(aInput, aOut) }   // … all audio samples
+
+            if vReader.status == .failed { return "v read " + (vReader.error.map { "\(($0 as NSError).code)" } ?? "?") }
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in writer.finishWriting { c.resume() } }
+            if writer.status == .completed { return nil }
+            return "writer \(writer.error.map { "\(($0 as NSError).code)" } ?? "st\(writer.status.rawValue)")"
+        } catch {
+            return "mux \((error as NSError).code)"
         }
-        return lastErr
+    }
+
+    /// Drains one reader-track output into one writer input, copying compressed sample buffers as-is.
+    nonisolated private static func pump(_ input: AVAssetWriterInput, _ output: AVAssetReaderTrackOutput) async {
+        let queue = DispatchQueue(label: "webvid.mux.pump")
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            input.requestMediaDataWhenReady(on: queue) {
+                while input.isReadyForMoreMediaData {
+                    guard let sb = output.copyNextSampleBuffer() else {
+                        input.markAsFinished()      // stops further callbacks → single resume
+                        cont.resume()
+                        return
+                    }
+                    input.append(sb)
+                }
+            }
+        }
     }
 
     // MARK: - Playlist parsing
