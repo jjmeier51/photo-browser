@@ -163,7 +163,7 @@ enum InstagramService {
     /// "Get All New Instagram Stories" sweep, which already knows each user's id/handle
     /// and doesn't want the full posts/tagged/highlights crawl that `run` performs.
     nonisolated static func runStories(handle: String, userID: String, into storiesFolder: URL,
-                                       already: Set<String>, creds: Credentials,
+                                       already: Set<String>, creds: Credentials, onlyPK: String? = nil,
                                        progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         // Prefer the reels-media tray (reliably returns the logged-in viewer's story),
         // falling back to the older per-user reel_media — same order as `run`.
@@ -171,6 +171,16 @@ enum InstagramService {
                                       handle: handle, creds: creds, reelKey: userID)
         if stories.isEmpty {
             stories = await fetchReel(path: "feed/user/\(userID)/reel_media/", handle: handle, creds: creds)
+        }
+        // When a specific story was shared (its media pk is in the link), keep just that item.
+        // A story `id` is "<pk>_<userid>", so match the pk against pk / id / the id's prefix.
+        // If the pk isn't in the current tray (e.g. already expired), fall back to the whole tray.
+        if let onlyPK {
+            let one = stories.filter { item in
+                let pk = idString(item["pk"]) ?? "", id = idString(item["id"]) ?? ""
+                return pk == onlyPK || id == onlyPK || id.hasPrefix(onlyPK + "_")
+            }
+            if !one.isEmpty { stories = one }
         }
         let jobs = reelJobs(items: stories, folder: storiesFolder, already: already, poster: handle)
         guard !jobs.isEmpty else { return DownloadResult() }

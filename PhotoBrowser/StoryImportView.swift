@@ -129,16 +129,17 @@ struct StoryImportView: View {
 
     // MARK: - Import
 
-    /// Downloads the shared user's current stories into `folder` via the logged-in session.
+    /// Downloads the shared story into `folder` via the logged-in session. When the link carries
+    /// the story's media id, only that story is pulled; otherwise the account's current tray.
     private func importURL(_ urlString: String, into folder: URL) async -> [String] {
         phase = "Reading link…"
-        guard let handle = await Self.instagramHandle(from: urlString) else { return [] }
+        guard let story = await Self.resolveStory(from: urlString) else { return [] }
         guard let creds = await InstagramAuth.credentials() else { return [] }   // not logged in
-        phase = "Loading @\(handle)…"
-        guard let profile = await InstagramService.fetchProfile(handle: handle, creds: creds) else { return [] }
+        phase = "Loading @\(story.handle)…"
+        guard let profile = await InstagramService.fetchProfile(handle: story.handle, creds: creds) else { return [] }
         let outcome = await InstagramService.runStories(
             handle: profile.handle, userID: profile.userID, into: folder,
-            already: [], creds: creds,
+            already: [], creds: creds, onlyPK: story.pk,
             progress: { p in Task { @MainActor in phase = p.phase } })
         // Attach captions the download surfaced, so they show in the app like other stories.
         for (path, caption) in outcome.captions where !caption.isEmpty {
@@ -185,32 +186,36 @@ struct StoryImportView: View {
 
     // MARK: - URL parsing
 
-    /// Extracts the Instagram handle from a shared link. Handles `/stories/<handle>/…` and a
-    /// bare `/<handle>` profile URL; follows a share shortlink (`/s/…`, `share.` hosts) once to
-    /// resolve it. Networking stays off the main actor.
-    nonisolated static func instagramHandle(from urlString: String) async -> String? {
-        if let h = handleFromPath(urlString) { return h }
+    /// Resolves a shared link to the story's `(handle, pk)`. `pk` is the specific story's media
+    /// id (present in `/stories/<handle>/<pk>/`), used to download just that story. Handles a
+    /// bare `/<handle>` profile URL (no pk); follows a share shortlink (`/s/…`) once to resolve
+    /// it. Networking stays off the main actor.
+    nonisolated static func resolveStory(from urlString: String) async -> (handle: String, pk: String?)? {
+        if let s = storyFromPath(urlString) { return s }
         // Resolve a redirect (share shortlink) to its final URL, then re-parse.
         guard let url = URL(string: urlString) else { return nil }
         var req = URLRequest(url: url)
         req.setValue(InstagramService.userAgent, forHTTPHeaderField: "User-Agent")
         if let (_, resp) = try? await InstagramService.session.data(for: req),
            let final = (resp as? HTTPURLResponse)?.url?.absoluteString, final != urlString {
-            return handleFromPath(final)
+            return storyFromPath(final)
         }
         return nil
     }
 
-    private nonisolated static func handleFromPath(_ urlString: String) -> String? {
+    private nonisolated static func storyFromPath(_ urlString: String) -> (handle: String, pk: String?)? {
         guard let url = URL(string: urlString), let host = url.host, host.contains("instagram.com") else { return nil }
         let parts = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
         if let i = parts.firstIndex(of: "stories"), i + 1 < parts.count {
             let h = parts[i + 1]
-            return h == "highlights" ? nil : h    // a highlights link isn't a per-user handle
+            guard h != "highlights" else { return nil }         // a highlights link isn't a per-user handle
+            // The next component, if it's all digits, is the specific story's media pk.
+            let pk = (i + 2 < parts.count && parts[i + 2].allSatisfy(\.isNumber)) ? parts[i + 2] : nil
+            return (h, pk)
         }
         // A profile URL: instagram.com/<handle>. Skip known non-handle first segments.
         let reserved: Set<String> = ["p", "reel", "reels", "tv", "explore", "s", "stories", "accounts", "direct"]
-        if let first = parts.first, !reserved.contains(first) { return first }
+        if let first = parts.first, !reserved.contains(first) { return (first, nil) }
         return nil
     }
 }
