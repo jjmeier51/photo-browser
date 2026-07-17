@@ -259,11 +259,11 @@ enum WebVideoDownloader {
         // rather than losing the whole download.
         if let audioTmp {
             let muxed = FileManager.default.temporaryDirectory.appendingPathComponent("webvid_\(UUID().uuidString).mp4")
-            if await muxVideoAudio(video: videoInfo.url, audio: audioTmp, to: muxed) {
+            if let err = await muxVideoAudio(video: videoInfo.url, audio: audioTmp, to: muxed) {
+                audioNote = "audio mux failed (\(err))"
+            } else {
                 try? FileManager.default.removeItem(at: videoInfo.url)
                 finalTmp = muxed; finalExt = "mp4"; audioNote = "audio muxed ✓"
-            } else {
-                audioNote = "audio mux failed"
             }
             try? FileManager.default.removeItem(at: audioTmp)
         }
@@ -399,28 +399,31 @@ enum WebVideoDownloader {
     /// Combines a video-only file and an audio-only file into one `.mp4` without re-encoding
     /// (passthrough), preserving the video's orientation. Returns false if the mux fails (caller
     /// then keeps the video-only result).
-    nonisolated private static func muxVideoAudio(video: URL, audio: URL, to out: URL) async -> Bool {
+    /// Combines a video-only and audio-only file into one `.mp4`. Returns nil on success, else a
+    /// short failure reason (surfaced in the download note for triage).
+    nonisolated private static func muxVideoAudio(video: URL, audio: URL, to out: URL) async -> String? {
         // The assembled files are fragmented MP4 (init + media segments): their mvhd duration is 0
         // and the real timing lives in the fragments. Ask AVFoundation to parse fragments for precise
-        // timing, and drive insertion off each track's own timeRange rather than asset.duration
-        // (which reads as zero for fragmented MP4 and made the whole mux bail → "audio mux failed").
+        // timing, and drive insertion off each track's own timeRange rather than asset.duration.
         let opts = [AVURLAssetPreferPreciseDurationAndTimingKey: true]
         let vAsset = AVURLAsset(url: video, options: opts)
         let aAsset = AVURLAsset(url: audio, options: opts)
         let comp = AVMutableComposition()
-        guard let vTrack = try? await vAsset.loadTracks(withMediaType: .video).first,
-              let vRange = try? await vTrack.load(.timeRange), vRange.duration > .zero,
-              let vComp = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { return false }
-        do { try vComp.insertTimeRange(vRange, of: vTrack, at: .zero) } catch { return false }
+        guard let vTrack = try? await vAsset.loadTracks(withMediaType: .video).first else { return "no video track" }
+        guard let vRange = try? await vTrack.load(.timeRange), vRange.duration > .zero else { return "video range 0" }
+        guard let vComp = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { return "no comp track" }
+        do { try vComp.insertTimeRange(vRange, of: vTrack, at: .zero) } catch { return "v insert: \((error as NSError).code)" }
         if let t = try? await vTrack.load(.preferredTransform) { vComp.preferredTransform = t }
 
         if let aTrack = try? await aAsset.loadTracks(withMediaType: .audio).first,
            let aRange = try? await aTrack.load(.timeRange),
            let aComp = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
             try? aComp.insertTimeRange(aRange, of: aTrack, at: .zero)
-        }
+        } else { return "no audio track read" }
+
         // Passthrough (no re-encode) first; if the container/codecs won't passthrough, fall back to a
         // re-encode so the result still has sound.
+        var lastErr = "no export session"
         for preset in [AVAssetExportPresetPassthrough, AVAssetExportPresetHighestQuality] {
             guard let export = AVAssetExportSession(asset: comp, presetName: preset) else { continue }
             try? FileManager.default.removeItem(at: out)
@@ -428,9 +431,10 @@ enum WebVideoDownloader {
             export.outputFileType = .mp4
             export.shouldOptimizeForNetworkUse = true
             await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in export.exportAsynchronously { c.resume() } }
-            if export.status == .completed { return true }
+            if export.status == .completed { return nil }
+            lastErr = "\(preset == AVAssetExportPresetPassthrough ? "pass" : "enc") \(export.error.map { "\(($0 as NSError).code)" } ?? "st\(export.status.rawValue)")"
         }
-        return false
+        return lastErr
     }
 
     // MARK: - Playlist parsing
