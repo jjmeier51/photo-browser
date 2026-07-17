@@ -12,7 +12,12 @@ struct PhotoBrowserApp: App {
             ContentView()
                 .environment(library)
                 .preferredColorScheme(.dark)
-                .task { library.restoreLastFolder() }
+                .task { library.restoreLastFolder(); library.refreshPendingShares() }
+                // The Share Extension opens us via photobrowser://share after stashing what was
+                // shared in the App Group; pick it up so ContentView can present the import sheet.
+                .onOpenURL { url in
+                    if url.scheme == StorySharing.urlScheme { library.refreshPendingShares() }
+                }
                 // On every return to foreground: retry the drive if it was missing
                 // (or moved to a new mount path), then file any background downloads
                 // that completed while we were away.
@@ -20,6 +25,7 @@ struct PhotoBrowserApp: App {
                     if phase == .active {
                         library.reconnectIfNeeded()
                         library.processPendingTikTok()
+                        library.refreshPendingShares()
                     } else if phase == .background {
                         // Arm the drive's "safe to remove" state on the way out. This drains
                         // any commit already in flight and flushes the drive root, so if the

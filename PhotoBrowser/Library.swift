@@ -46,6 +46,11 @@ final class Library {
     /// Bumps when files are added/edited from outside the folder view (e.g. the
     /// editor saving a cropped copy) so the current folder reloads.
     var changeToken = 0
+    /// Items handed off from the Share Extension (a shared Instagram story link, or a
+    /// photo/video). Non-empty presents the import sheet (pick folder + upscale options).
+    var pendingShares: [StorySharing.PendingShare] = []
+    /// Re-reads what the Share Extension left in the App Group. Called on launch/open-URL/foreground.
+    func refreshPendingShares() { pendingShares = StorySharing.load() }
     /// Signals a content change. Pass the folder the change happened under to evict
     /// only that subtree's cached listings/years — a global clear forces every folder
     /// (and the year/age passes) to recompute, which made one saved edit or one

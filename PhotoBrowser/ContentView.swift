@@ -78,6 +78,12 @@ struct ContentView: View {
             library.setCaptions(translated)
             library.akPendingCaptions = [:]
         })
+        // Something shared to us via the Share Extension → ask where to save + upscale options.
+        .sheet(isPresented: Binding(
+            get: { !library.pendingShares.isEmpty },
+            set: { if !$0 { library.pendingShares = []; StorySharing.clear() } })) {
+            StoryImportView()
+        }
     }
 
     private func pillTitle(_ a: Library.Activity) -> String {
