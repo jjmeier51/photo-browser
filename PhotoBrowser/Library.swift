@@ -177,6 +177,15 @@ final class Library {
         UserDefaults.standard.set(url.path, forKey: "photoBrowser.lastWebDownloadDest")
     }
 
+    /// The last folder a shared Instagram story/post was saved to (from the Share Extension), so
+    /// the import sheet defaults there next time.
+    var lastStoryDestination: URL? = UserDefaults.standard.string(forKey: "photoBrowser.lastStoryDest")
+        .map { URL(fileURLWithPath: $0) }
+    func setLastStoryDestination(_ url: URL) {
+        lastStoryDestination = url
+        UserDefaults.standard.set(url.path, forKey: "photoBrowser.lastStoryDest")
+    }
+
     // MARK: - Facebook profile folders
 
     /// Folder path → the Facebook profile downloaded into it (drives "Get New",

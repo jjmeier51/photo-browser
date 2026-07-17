@@ -187,6 +187,52 @@ enum InstagramService {
         return await download(jobs: jobs, replace: false, progress: progress)
     }
 
+    /// Downloads a single **post / reel** by its shortcode (from an
+    /// `instagram.com/{p,reel,tv}/<code>/` link) into `folder`. A post can be a single photo, a
+    /// carousel of photos/videos, or a video — all handled by the shared job pipeline, which
+    /// writes the capture date (the post's `taken_at`) and EXIF/metadata like the profile crawl.
+    nonisolated static func runPost(shortcode: String, into folder: URL, already: Set<String>,
+                                    creds: Credentials,
+                                    progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
+        var result = DownloadResult()
+        guard !already.contains(shortcode) else { return result }
+        guard let pk = shortcodeToPK(shortcode) else {
+            result.note = "Couldn’t read that post link."
+            return result
+        }
+        progress(Progress(phase: "Loading post…", fraction: 0, done: 0, total: 0))
+        // The user-facing quality path (DASH/HDR) needs the media-info endpoint, which we already
+        // hit here; it returns the full item (carousel, video renditions, caption, taken_at).
+        guard let item = await fetchMediaInfo(pk: pk, handle: "", creds: creds) else {
+            result.note = "Couldn’t load the post. Check that you’re logged in and it’s public or one you follow."
+            return result
+        }
+        let poster = ((item["user"] as? [String: Any])?["username"] as? String) ?? ""
+        let jobs = jobsFor(item: item, id: shortcode, folder: folder, defaultPoster: poster)
+        guard !jobs.isEmpty else { return result }
+        return await download(jobs: jobs, replace: false, progress: progress)
+    }
+
+    /// Instagram shortcode → numeric media pk. The shortcode is the pk written in base-64 over the
+    /// alphabet `A–Z a–z 0–9 - _`; decode it back to the decimal pk (big-int, since an 11-char
+    /// code exceeds 64 bits).
+    nonisolated static func shortcodeToPK(_ code: String) -> String? {
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+        guard !code.isEmpty else { return nil }
+        var digits = [0]                              // base-10 digits, least-significant first
+        for ch in code {
+            guard let v = alphabet.firstIndex(of: ch) else { return nil }
+            var carry = v                             // digits = digits * 64 + v
+            for i in digits.indices {
+                let cur = digits[i] * 64 + carry
+                digits[i] = cur % 10
+                carry = cur / 10
+            }
+            while carry > 0 { digits.append(carry % 10); carry /= 10 }
+        }
+        return String(digits.reversed().map { Character(String($0)) })
+    }
+
     /// Copies freshly-downloaded story files into the shared "Today's Instagram Stories"
     /// folder, prefixing each name with the handle so two users' stories can't collide.
     /// The destination name is deterministic (`handle_storyfile`), so re-running in the

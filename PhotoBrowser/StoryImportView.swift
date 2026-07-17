@@ -1,10 +1,11 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Presented when the Share Extension hands something off (an Instagram story link, or a
-/// photo/video). Asks **where** to save and **which upscale** to apply, then downloads the
-/// story with the app's existing `InstagramService` (using your logged-in session) and applies
-/// the chosen AI upscale — the manual, on-demand alternative to the automated browser sweeps.
+/// Presented when the Share Extension hands something off (an Instagram story or post link, or a
+/// photo/video). Asks **where** to save and **which upscale** to apply, then downloads it with the
+/// app's existing `InstagramService` (using your logged-in session) and applies the chosen AI
+/// upscale — the manual, on-demand alternative to the automated browser sweeps. The download writes
+/// each item's capture date (the post/story's `taken_at`) + EXIF, like the profile crawl.
 struct StoryImportView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
@@ -16,8 +17,11 @@ struct StoryImportView: View {
     @State private var running = false
     @State private var phase = ""
     @State private var result: String?
+    @State private var loggedIn = true          // assume yes until the check; avoids a login-button flash
+    @State private var showLogin = false
 
     private var shares: [StorySharing.PendingShare] { library.pendingShares }
+    private var needsLogin: Bool { !loggedIn && shares.contains { $0.kind == .url } }
 
     var body: some View {
         NavigationStack {
@@ -29,6 +33,16 @@ struct StoryImportView: View {
                         } icon: {
                             Image(systemName: s.kind == .url ? "link" : (s.isVideoHint ? "film" : "photo"))
                         }
+                    }
+                }
+
+                if needsLogin {
+                    Section {
+                        Button { showLogin = true } label: {
+                            Label("Log in to Instagram", systemImage: "person.badge.key")
+                        }
+                    } footer: {
+                        Text("Downloading a shared story or post uses your logged-in Instagram session.")
                     }
                 }
 
@@ -68,7 +82,7 @@ struct StoryImportView: View {
                     }
                 }
             }
-            .navigationTitle("Save Shared Story")
+            .navigationTitle("Save Shared")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -85,10 +99,21 @@ struct StoryImportView: View {
                         .environment(library)
                 }
             }
+            .sheet(isPresented: $showLogin) {
+                InstagramLoginView { Task { loggedIn = await InstagramAuth.isLoggedIn() } }
+            }
         }
         .interactiveDismissDisabled(running)
-        .onAppear { if destination == nil { destination = library.rootURL } }
-        .onChange(of: library.rootURL) { if destination == nil { destination = library.rootURL } }
+        .task { loggedIn = await InstagramAuth.isLoggedIn() }
+        .onAppear { if destination == nil { destination = defaultDestination() } }
+        .onChange(of: library.rootURL) { if destination == nil { destination = defaultDestination() } }
+    }
+
+    /// Default save folder: the last place a shared story/post was saved (if it still exists),
+    /// else the drive root.
+    private func defaultDestination() -> URL? {
+        if let d = library.lastStoryDestination, FileManager.default.fileExists(atPath: d.path) { return d }
+        return library.rootURL
     }
 
     private func displayValue(_ s: StorySharing.PendingShare) -> String {
@@ -106,22 +131,27 @@ struct StoryImportView: View {
         let items = shares
         running = true; result = nil
         Task {
-            var saved = 0, failed = 0
+            var saved = 0
             for item in items {
                 let paths: [String]
                 switch item.kind {
                 case .url:  paths = await importURL(item.value, into: dest)
                 case .file: paths = await Self.importFile(item.value, into: dest)
                 }
-                if paths.isEmpty { failed += 1; continue }
+                guard !paths.isEmpty else { continue }
                 saved += paths.count
                 await applyUpscales(to: paths)
             }
             phase = ""
             running = false
-            result = saved > 0
-                ? "Saved \(saved) item\(saved == 1 ? "" : "s") to “\(dest.lastPathComponent)”."
-                : "Couldn’t save the shared story. Make sure you’re logged into Instagram in the app."
+            if saved > 0 {
+                library.setLastStoryDestination(dest)
+                result = "Saved \(saved) item\(saved == 1 ? "" : "s") to “\(dest.lastPathComponent)”."
+            } else {
+                result = needsLogin
+                    ? "Log in to Instagram above, then tap Save again."
+                    : "Couldn’t save it. If it’s an Instagram link, make sure you’re logged in and the account is public or one you follow."
+            }
             StorySharing.clear()
             library.contentDidChange(under: dest)
         }
@@ -129,19 +159,29 @@ struct StoryImportView: View {
 
     // MARK: - Import
 
-    /// Downloads the shared story into `folder` via the logged-in session. When the link carries
-    /// the story's media id, only that story is pulled; otherwise the account's current tray.
+    /// Downloads the shared Instagram link into `folder` via the logged-in session — a specific
+    /// story (by media pk), an account's current stories, or a single post/reel (photo, carousel,
+    /// or video). Captions the download surfaces are attached so they show like other downloads.
     private func importURL(_ urlString: String, into folder: URL) async -> [String] {
         phase = "Reading link…"
-        guard let story = await Self.resolveStory(from: urlString) else { return [] }
         guard let creds = await InstagramAuth.credentials() else { return [] }   // not logged in
-        phase = "Loading @\(story.handle)…"
-        guard let profile = await InstagramService.fetchProfile(handle: story.handle, creds: creds) else { return [] }
-        let outcome = await InstagramService.runStories(
-            handle: profile.handle, userID: profile.userID, into: folder,
-            already: [], creds: creds, onlyPK: story.pk,
-            progress: { p in Task { @MainActor in phase = p.phase } })
-        // Attach captions the download surfaced, so they show in the app like other stories.
+        let outcome: InstagramService.DownloadResult
+        switch await Self.resolveShared(from: urlString) {
+        case .story(let handle, let pk):
+            phase = "Loading @\(handle)…"
+            guard let profile = await InstagramService.fetchProfile(handle: handle, creds: creds) else { return [] }
+            outcome = await InstagramService.runStories(
+                handle: profile.handle, userID: profile.userID, into: folder,
+                already: [], creds: creds, onlyPK: pk,
+                progress: { p in Task { @MainActor in phase = p.phase } })
+        case .post(let code):
+            phase = "Loading post…"
+            outcome = await InstagramService.runPost(
+                shortcode: code, into: folder, already: [], creds: creds,
+                progress: { p in Task { @MainActor in phase = p.phase } })
+        case nil:
+            return []
+        }
         for (path, caption) in outcome.captions where !caption.isEmpty {
             library.setCaption(caption, for: URL(fileURLWithPath: path))
         }
@@ -186,36 +226,42 @@ struct StoryImportView: View {
 
     // MARK: - URL parsing
 
-    /// Resolves a shared link to the story's `(handle, pk)`. `pk` is the specific story's media
-    /// id (present in `/stories/<handle>/<pk>/`), used to download just that story. Handles a
-    /// bare `/<handle>` profile URL (no pk); follows a share shortlink (`/s/…`) once to resolve
-    /// it. Networking stays off the main actor.
-    nonisolated static func resolveStory(from urlString: String) async -> (handle: String, pk: String?)? {
-        if let s = storyFromPath(urlString) { return s }
-        // Resolve a redirect (share shortlink) to its final URL, then re-parse.
+    private enum Shared: Sendable {
+        case story(handle: String, pk: String?)   // /stories/<handle>/<pk?>/ or a bare profile
+        case post(shortcode: String)              // /p|reel|tv/<code>/
+    }
+
+    /// Classifies a shared Instagram link. Follows a share shortlink (`/s/…`) once to resolve it.
+    /// Networking stays off the main actor.
+    nonisolated private static func resolveShared(from urlString: String) async -> Shared? {
+        if let s = sharedFromPath(urlString) { return s }
         guard let url = URL(string: urlString) else { return nil }
         var req = URLRequest(url: url)
         req.setValue(InstagramService.userAgent, forHTTPHeaderField: "User-Agent")
         if let (_, resp) = try? await InstagramService.session.data(for: req),
            let final = (resp as? HTTPURLResponse)?.url?.absoluteString, final != urlString {
-            return storyFromPath(final)
+            return sharedFromPath(final)
         }
         return nil
     }
 
-    private nonisolated static func storyFromPath(_ urlString: String) -> (handle: String, pk: String?)? {
+    private nonisolated static func sharedFromPath(_ urlString: String) -> Shared? {
         guard let url = URL(string: urlString), let host = url.host, host.contains("instagram.com") else { return nil }
         let parts = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
+        // A post / reel / IGTV link.
+        if let i = parts.firstIndex(where: { $0 == "p" || $0 == "reel" || $0 == "tv" }), i + 1 < parts.count {
+            return .post(shortcode: parts[i + 1])
+        }
+        // A story link: /stories/<handle>/<pk?>/
         if let i = parts.firstIndex(of: "stories"), i + 1 < parts.count {
             let h = parts[i + 1]
-            guard h != "highlights" else { return nil }         // a highlights link isn't a per-user handle
-            // The next component, if it's all digits, is the specific story's media pk.
+            guard h != "highlights" else { return nil }
             let pk = (i + 2 < parts.count && parts[i + 2].allSatisfy(\.isNumber)) ? parts[i + 2] : nil
-            return (h, pk)
+            return .story(handle: h, pk: pk)
         }
-        // A profile URL: instagram.com/<handle>. Skip known non-handle first segments.
+        // A profile URL: instagram.com/<handle> → the account's current stories.
         let reserved: Set<String> = ["p", "reel", "reels", "tv", "explore", "s", "stories", "accounts", "direct"]
-        if let first = parts.first, !reserved.contains(first) { return (first, nil) }
+        if let first = parts.first, !reserved.contains(first) { return .story(handle: first, pk: nil) }
         return nil
     }
 }

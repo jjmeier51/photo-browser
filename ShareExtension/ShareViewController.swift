@@ -130,15 +130,21 @@ final class ShareViewController: UIViewController {
     // MARK: - Hand off to the app
 
     private func openAppAndFinish() {
-        if let url = URL(string: "photobrowser://share") { openURL(url) }
-        finish()
+        guard let url = URL(string: "photobrowser://share") else { return finish() }
+        // Share extensions have no public API to open their containing app, so use both known
+        // routes: the responder-chain `openURL:` hack and `NSExtensionContext.open`. Crucially,
+        // DELAY `completeRequest` — calling it immediately tears the extension down before the
+        // open can take effect, which is why the app didn't launch automatically before.
+        _ = openViaResponder(url)
+        extensionContext?.open(url, completionHandler: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.finish() }
     }
 
     /// Opens a URL from within an app extension. `UIApplication.shared` is unavailable to
-    /// extensions, so walk the responder chain to whoever implements `openURL:` (the classic,
-    /// still-working approach for share extensions).
+    /// extensions, so walk the responder chain to whoever implements `openURL:` (the classic
+    /// approach for share extensions).
     @discardableResult
-    private func openURL(_ url: URL) -> Bool {
+    private func openViaResponder(_ url: URL) -> Bool {
         var responder: UIResponder? = self
         let selector = sel_registerName("openURL:")
         while let r = responder {
