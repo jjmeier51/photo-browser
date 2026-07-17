@@ -174,32 +174,52 @@ enum WebVideoDownloader {
         let initSeg = parseInitSegment(text, base: playlistURL)     // fMP4/CMAF init
         let isFMP4 = initSeg != nil || segs.first?.url.pathExtension.lowercased() == "m4s"
 
-        // Download every segment (bounded concurrency), preserving order.
+        // Download every segment (bounded concurrency), preserving order. On a flaky network — or
+        // a stream whose segment URLs carry short-lived signed tokens (Loom, most CDN-hosted HLS) —
+        // some segments can fail even after per-request retries. Rather than discard the whole video,
+        // refetch the media playlist (which hands back fresh, re-signed segment URLs) and retry only
+        // the still-missing segments, a couple of times, before giving up.
         var datas = [Data?](repeating: nil, count: segs.count)
+        var currentSegs = segs
         let total = segs.count
-        var done = 0
-        let lock = NSLock()
-        await withTaskGroup(of: (Int, Data?).self) { group in
-            var idx = 0
-            let maxConcurrent = 6
-            func addNext() {
-                guard idx < segs.count else { return }
-                let i = idx; let seg = segs[i]; idx += 1
-                group.addTask {
-                    guard var d = await fetchData(seg.url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) else { return (i, nil) }
-                    if let key { d = aesCBCDecrypt(d, key: key.key, iv: seg.iv ?? key.iv(forSequence: i)) ?? d }
-                    return (i, d)
+        var refreshes = 0
+        while true {
+            let missing = datas.indices.filter { datas[$0] == nil }
+            if missing.isEmpty { break }
+            var done = total - missing.count
+            let lock = NSLock()
+            await withTaskGroup(of: (Int, Data?).self) { group in
+                var k = 0
+                let maxConcurrent = 6
+                func addNext() {
+                    guard k < missing.count else { return }
+                    let i = missing[k]; let seg = currentSegs[i]; k += 1
+                    group.addTask {
+                        guard var d = await fetchData(seg.url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) else { return (i, nil) }
+                        if let key { d = aesCBCDecrypt(d, key: key.key, iv: seg.iv ?? key.iv(forSequence: i)) ?? d }
+                        return (i, d)
+                    }
+                }
+                for _ in 0..<min(maxConcurrent, missing.count) { addNext() }
+                while let (i, d) = await group.next() {
+                    if let d { datas[i] = d }
+                    lock.lock(); done += 1; let dn = done; lock.unlock()
+                    if dn % 3 == 0 || dn == total {
+                        progress(Progress(fraction: Double(dn) / Double(total), phase: "Downloading \(dn)/\(total) segments…"))
+                    }
+                    addNext()
                 }
             }
-            for _ in 0..<min(maxConcurrent, segs.count) { addNext() }
-            while let (i, d) = await group.next() {
-                datas[i] = d
-                lock.lock(); done += 1; let dn = done; lock.unlock()
-                if dn % 3 == 0 || dn == total {
-                    progress(Progress(fraction: Double(dn) / Double(total), phase: "Downloading \(dn)/\(total) segments…"))
-                }
-                addNext()
-            }
+            if datas.allSatisfy({ $0 != nil }) { break }
+            refreshes += 1
+            if refreshes > 2 { break }
+            // Refetch the playlist for fresh segment URLs, then retry the missing ones. Bail if the
+            // structure changed (can't index-map) or the playlist itself is now unreachable.
+            progress(Progress(fraction: Double(total - missing.count) / Double(total), phase: "Refreshing stream…"))
+            guard let refreshed = await fetchText(playlistURL, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) else { break }
+            let newSegs = parseSegments(refreshed, base: playlistURL)
+            guard newSegs.count == total else { break }
+            currentSegs = newSegs
         }
         guard datas.allSatisfy({ $0 != nil }) else {
             return .failed("Some video segments couldn’t be downloaded (the stream may have expired).")
@@ -345,11 +365,14 @@ enum WebVideoDownloader {
     }
 
     nonisolated private static func fetchData(_ url: URL, referer: String, cookieHeader: String, authHeader: String? = nil) async -> Data? {
-        for attempt in 0..<3 {
-            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 500_000_000) }
+        for attempt in 0..<4 {
+            // Exponential backoff (0.4s, 0.8s, 1.6s) so a brief cellular drop doesn't burn the retries.
+            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(1 << (attempt - 1)) * 400_000_000) }
             guard let (data, resp) = try? await session.data(for: request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader)) else { continue }
             if let code = (resp as? HTTPURLResponse)?.statusCode {
                 if code == 429 || code >= 500 { continue }
+                // 4xx (expired/forbidden token) won't recover on the same URL — the caller refetches
+                // the playlist for a fresh one and retries, so give up on this URL now.
                 if code >= 400 { return nil }
             }
             return data
