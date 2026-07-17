@@ -51,10 +51,14 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         try? dir.setResourceValues(values)
         diskDir = dir
         // Bound by actual memory, not count — NSCache only evicts cost-tracked entries
-        // proactively. Generous so a whole folder's tiles stay resident and re-opening /
-        // scrolling back is instant.
-        memory.countLimit = 4000
-        memory.totalCostLimit = 512 * 1024 * 1024
+        // proactively. Enough that a screen's worth of tiles (and a few scrolled-past) stay
+        // resident, but NOT so high it becomes a memory-pressure liability: the old 512 MB
+        // ceiling let decoded thumbnails pile up as you browsed and, together with the viewer's
+        // full-res decodes, was a prime cause of the occasional out-of-memory kill. NSCache
+        // eviction under pressure is best-effort, so keep the ceiling conservative. Disk cache
+        // still makes re-opening a folder instant, so a lower memory ceiling costs little.
+        memory.countLimit = 1500
+        memory.totalCostLimit = 160 * 1024 * 1024
     }
 
     /// Warms the cache for a folder's items ahead of scroll, so tiles pop in instead of

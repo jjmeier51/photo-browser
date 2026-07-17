@@ -200,8 +200,13 @@ private struct GalleryThumb: View {
         .task(id: url) { image = await Self.load(url) }
     }
 
+    // Bound by BYTES, not just count: `countLimit = 5000` alone let up to 5000 full-size gallery
+    // images accumulate with no memory ceiling, spiking memory hard on a long browse.
     private static let cache: NSCache<NSURL, UIImage> = {
-        let c = NSCache<NSURL, UIImage>(); c.countLimit = 5000; return c
+        let c = NSCache<NSURL, UIImage>()
+        c.countLimit = 800
+        c.totalCostLimit = 96 * 1024 * 1024
+        return c
     }()
 
     private static func load(_ url: URL) async -> UIImage? {
@@ -210,7 +215,8 @@ private struct GalleryThumb: View {
         req.setValue(TaylorGallery.host, forHTTPHeaderField: "Referer")
         req.setValue(TaylorGallery.userAgent, forHTTPHeaderField: "User-Agent")
         guard let (data, _) = try? await TaylorGallery.session.data(for: req), let img = UIImage(data: data) else { return nil }
-        cache.setObject(img, forKey: url as NSURL)
+        let cost = Int(img.size.width * img.scale * img.size.height * img.scale) * 4
+        cache.setObject(img, forKey: url as NSURL, cost: cost)
         return img
     }
 }
