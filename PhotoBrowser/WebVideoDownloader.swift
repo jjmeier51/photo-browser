@@ -183,26 +183,28 @@ enum WebVideoDownloader {
         var currentSegs = segs
         let total = segs.count
         var refreshes = 0
+        var lastReason: String?             // why the most recent segment failed — surfaced on give-up
         while true {
             let missing = datas.indices.filter { datas[$0] == nil }
             if missing.isEmpty { break }
             var done = total - missing.count
             let lock = NSLock()
-            await withTaskGroup(of: (Int, Data?).self) { group in
+            await withTaskGroup(of: (Int, Data?, String?).self) { group in
                 var k = 0
                 let maxConcurrent = 6
                 func addNext() {
                     guard k < missing.count else { return }
                     let i = missing[k]; let seg = currentSegs[i]; k += 1
                     group.addTask {
-                        guard var d = await fetchData(seg.url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) else { return (i, nil) }
+                        let r = await fetchSegmentData(seg.url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader)
+                        guard var d = r.data else { return (i, nil, r.reason) }
                         if let key { d = aesCBCDecrypt(d, key: key.key, iv: seg.iv ?? key.iv(forSequence: i)) ?? d }
-                        return (i, d)
+                        return (i, d, nil)
                     }
                 }
                 for _ in 0..<min(maxConcurrent, missing.count) { addNext() }
-                while let (i, d) = await group.next() {
-                    if let d { datas[i] = d }
+                while let (i, d, reason) = await group.next() {
+                    if let d { datas[i] = d } else if let reason { lastReason = reason }
                     lock.lock(); done += 1; let dn = done; lock.unlock()
                     if dn % 3 == 0 || dn == total {
                         progress(Progress(fraction: Double(dn) / Double(total), phase: "Downloading \(dn)/\(total) segments…"))
@@ -221,8 +223,10 @@ enum WebVideoDownloader {
             guard newSegs.count == total else { break }
             currentSegs = newSegs
         }
-        guard datas.allSatisfy({ $0 != nil }) else {
-            return .failed("Some video segments couldn’t be downloaded (the stream may have expired).")
+        if !datas.allSatisfy({ $0 != nil }) {
+            let failed = datas.filter { $0 == nil }.count
+            let detail = lastReason.map { " — \($0)" } ?? ""
+            return .failed("Couldn’t download \(failed) of \(total) video segments\(detail). The stream may have expired or blocked the request.")
         }
 
         // Concatenate: [init] + segments, in order.
@@ -362,6 +366,29 @@ enum WebVideoDownloader {
     nonisolated private static func fetchText(_ url: URL, referer: String, cookieHeader: String, authHeader: String? = nil) async -> String? {
         guard let d = await fetchData(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader) else { return nil }
         return String(data: d, encoding: .utf8)
+    }
+
+    /// Like `fetchData` but reports *why* it failed (HTTP status or a network error), so the HLS
+    /// downloader can tell the user the real reason a segment couldn't be fetched instead of a
+    /// generic "expired". `reason` is nil on success.
+    nonisolated private static func fetchSegmentData(_ url: URL, referer: String, cookieHeader: String,
+                                                     authHeader: String? = nil) async -> (data: Data?, reason: String?) {
+        var reason = "no response"
+        for attempt in 0..<4 {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(1 << (attempt - 1)) * 400_000_000) }
+            do {
+                let (data, resp) = try await session.data(for: request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader))
+                if let code = (resp as? HTTPURLResponse)?.statusCode {
+                    if code == 429 || code >= 500 { reason = "HTTP \(code)"; continue }
+                    if code >= 400 { return (nil, "HTTP \(code)") }   // won't recover on the same URL
+                }
+                return (data, nil)
+            } catch {
+                reason = "network error (\((error as NSError).code))"
+                continue
+            }
+        }
+        return (nil, reason)
     }
 
     nonisolated private static func fetchData(_ url: URL, referer: String, cookieHeader: String, authHeader: String? = nil) async -> Data? {
