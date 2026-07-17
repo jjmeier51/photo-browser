@@ -155,8 +155,11 @@ enum WebVideoDownloader {
             return .failed("Couldn’t read the video stream (m3u8).")
         }
         var playlistURL = manifestURL
+        var masterText: String?          // kept so demuxed audio can be found from the master
+        var masterURL: URL?
         // Master playlist → pick the highest-bandwidth variant, then fetch it.
         if text.contains("#EXT-X-STREAM-INF") {
+            masterText = text; masterURL = manifestURL
             guard let variant = bestVariant(text, base: manifestURL),
                   let vtext = await fetchText(variant, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) else {
                 return .failed("Couldn’t read the stream’s quality list.")
@@ -164,26 +167,85 @@ enum WebVideoDownloader {
             playlistURL = variant; text = vtext
         }
 
+        // Download the (video, or muxed audio+video) media playlist.
+        let videoInfo: (url: URL, isFMP4: Bool)
+        switch await downloadMediaPlaylist(playlistURL, text: text, pageURL: pageURL, cookieHeader: cookieHeader,
+                                           authHeader: authHeader, label: "video", progress: progress) {
+        case .success(let v): videoInfo = v
+        case .failure(let msg): return .failed(msg)
+        }
+
+        // Demuxed streams (Loom, and most CMAF HLS) carry audio as a SEPARATE rendition, so the
+        // video playlist alone is silent. Find the audio playlist — from the master we already read,
+        // or by probing for one next to a "…video…" media playlist — download it, and mux it in.
+        var audioTmp: URL?
+        if let audioURL = await findAudioPlaylistURL(videoPlaylistURL: playlistURL, masterText: masterText,
+                                                     masterURL: masterURL, pageURL: pageURL,
+                                                     cookieHeader: cookieHeader, authHeader: authHeader),
+           let atext = await fetchText(audioURL, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader),
+           case .success(let a) = await downloadMediaPlaylist(audioURL, text: atext, pageURL: pageURL,
+                                                              cookieHeader: cookieHeader, authHeader: authHeader,
+                                                              label: "audio", progress: progress) {
+            audioTmp = a.url
+        }
+
+        progress(Progress(fraction: 1, phase: "Assembling…"))
+        var finalTmp = videoInfo.url
+        var finalExt = videoInfo.isFMP4 ? "mp4" : "ts"
+
+        // Mux the separate audio track into the video (no re-encode). On failure, keep video-only
+        // rather than losing the whole download.
+        if let audioTmp {
+            let muxed = FileManager.default.temporaryDirectory.appendingPathComponent("webvid_\(UUID().uuidString).mp4")
+            if await muxVideoAudio(video: videoInfo.url, audio: audioTmp, to: muxed) {
+                try? FileManager.default.removeItem(at: videoInfo.url)
+                finalTmp = muxed; finalExt = "mp4"
+            }
+            try? FileManager.default.removeItem(at: audioTmp)
+        }
+
+        // If TS and FFmpegKit is available, remux to a clean faststart MP4; otherwise keep .ts.
+        if finalExt == "ts", VideoTranscoder.isAvailable {
+            let mp4 = finalTmp.deletingPathExtension().appendingPathExtension("mp4")
+            if await VideoTranscoder.muxTranscode(video: finalTmp, audio: nil, to: mp4, transcode: false, date: Date(), lat: nil, lng: nil) {
+                try? FileManager.default.removeItem(at: finalTmp); finalTmp = mp4; finalExt = "mp4"
+            }
+        }
+        let dest = uniqueDestination(name: baseName(suggestedName, url: manifestURL, ext: finalExt), in: folder)
+        do {
+            try await DriveWriter.shared.commit(finalTmp, to: dest)
+        } catch {
+            try? FileManager.default.removeItem(at: finalTmp)
+            return .failed("Couldn’t save to the folder.")
+        }
+        stampNow(dest)
+        return .saved(dest)
+    }
+
+    /// Downloads every segment of ONE media playlist and assembles them into a single temp file
+    /// (fMP4 → `.mp4`, MPEG-TS → `.ts`). Handles AES-128 decryption, the fMP4 init segment, and the
+    /// refetch-on-failure retry (signed segment URLs expire / drop). Reused for the video and, on a
+    /// demuxed stream, the separate audio rendition. Returns the file (+ whether it's fMP4) or a reason.
+    nonisolated private static func downloadMediaPlaylist(_ playlistURL: URL, text: String, pageURL: String,
+                                                          cookieHeader: String, authHeader: String?, label: String,
+                                                          progress: @escaping @Sendable (Progress) -> Void) async -> Result<(url: URL, isFMP4: Bool), String> {
         let segs = parseSegments(text, base: playlistURL)
-        guard !segs.isEmpty else { return .failed("The stream had no downloadable segments.") }
+        guard !segs.isEmpty else { return .failure("The stream had no downloadable \(label) segments.") }
         let key = await resolveKey(text, base: playlistURL, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader)
         if key == nil, text.contains("#EXT-X-KEY"), !text.uppercased().contains("METHOD=NONE") {
-            // A key line exists but we couldn't fetch/parse it (or it's SAMPLE-AES / DRM).
-            return .failed("This video is encrypted in a way that can’t be saved (DRM-protected).")
+            return .failure("This video is encrypted in a way that can’t be saved (DRM-protected).")
         }
         let initSeg = parseInitSegment(text, base: playlistURL)     // fMP4/CMAF init
         let isFMP4 = initSeg != nil || segs.first?.url.pathExtension.lowercased() == "m4s"
 
-        // Download every segment (bounded concurrency), preserving order. On a flaky network — or
-        // a stream whose segment URLs carry short-lived signed tokens (Loom, most CDN-hosted HLS) —
-        // some segments can fail even after per-request retries. Rather than discard the whole video,
-        // refetch the media playlist (which hands back fresh, re-signed segment URLs) and retry only
-        // the still-missing segments, a couple of times, before giving up.
+        // Bounded-concurrent, order-preserving download. On a flaky network — or a stream whose
+        // segment URLs carry short-lived signed tokens — some segments fail even after per-request
+        // retries; refetch the playlist (fresh, re-signed URLs) and retry only the still-missing ones.
         var datas = [Data?](repeating: nil, count: segs.count)
         var currentSegs = segs
         let total = segs.count
         var refreshes = 0
-        var lastReason: String?             // why the most recent segment failed — surfaced on give-up
+        var lastReason: String?
         while true {
             let missing = datas.indices.filter { datas[$0] == nil }
             if missing.isEmpty { break }
@@ -207,7 +269,7 @@ enum WebVideoDownloader {
                     if let d { datas[i] = d } else if let reason { lastReason = reason }
                     lock.lock(); done += 1; let dn = done; lock.unlock()
                     if dn % 3 == 0 || dn == total {
-                        progress(Progress(fraction: Double(dn) / Double(total), phase: "Downloading \(dn)/\(total) segments…"))
+                        progress(Progress(fraction: Double(dn) / Double(total), phase: "Downloading \(label) \(dn)/\(total)…"))
                     }
                     addNext()
                 }
@@ -215,8 +277,6 @@ enum WebVideoDownloader {
             if datas.allSatisfy({ $0 != nil }) { break }
             refreshes += 1
             if refreshes > 2 { break }
-            // Refetch the playlist for fresh segment URLs, then retry the missing ones. Bail if the
-            // structure changed (can't index-map) or the playlist itself is now unreachable.
             progress(Progress(fraction: Double(total - missing.count) / Double(total), phase: "Refreshing stream…"))
             guard let refreshed = await fetchText(playlistURL, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) else { break }
             let newSegs = parseSegments(refreshed, base: playlistURL)
@@ -226,38 +286,78 @@ enum WebVideoDownloader {
         if !datas.allSatisfy({ $0 != nil }) {
             let failed = datas.filter { $0 == nil }.count
             let detail = lastReason.map { " — \($0)" } ?? ""
-            return .failed("Couldn’t download \(failed) of \(total) video segments\(detail). The stream may have expired or blocked the request.")
+            return .failure("Couldn’t download \(failed) of \(total) \(label) segments\(detail). The stream may have expired or blocked the request.")
         }
 
-        // Concatenate: [init] + segments, in order.
-        progress(Progress(fraction: 1, phase: "Assembling…"))
         let ext = isFMP4 ? "mp4" : "ts"
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("webvid_\(UUID().uuidString).\(ext)")
-        guard let handle = createFile(tmp) else { return .failed("Couldn’t assemble the video file.") }
+        guard let handle = createFile(tmp) else { return .failure("Couldn’t assemble the \(label) file.") }
         if let initSeg, let initData = await fetchData(initSeg, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) {
             try? handle.write(contentsOf: initData)
         }
         for d in datas { if let d { try? handle.write(contentsOf: d) } }
         try? handle.close()
+        return .success((tmp, isFMP4))
+    }
 
-        // If TS and FFmpegKit is available, remux to a clean faststart MP4; otherwise keep .ts.
-        var finalTmp = tmp
-        var finalExt = ext
-        if ext == "ts", VideoTranscoder.isAvailable {
-            let mp4 = tmp.deletingPathExtension().appendingPathExtension("mp4")
-            if await VideoTranscoder.muxTranscode(video: tmp, audio: nil, to: mp4, transcode: false, date: Date(), lat: nil, lng: nil) {
-                try? FileManager.default.removeItem(at: tmp); finalTmp = mp4; finalExt = "mp4"
-            }
+    /// Locates the audio media playlist for a demuxed stream. Preferred source is a master playlist
+    /// we already read (its `#EXT-X-MEDIA:TYPE=AUDIO` line); otherwise, when we were handed a
+    /// "…video…" media playlist directly (Loom), probe the usual master names alongside it. Returns
+    /// nil for a normal muxed stream (audio already lives inside the video segments).
+    nonisolated private static func findAudioPlaylistURL(videoPlaylistURL: URL, masterText: String?, masterURL: URL?,
+                                                         pageURL: String, cookieHeader: String, authHeader: String?) async -> URL? {
+        if let masterText, let masterURL, let u = audioMediaURI(masterText, base: masterURL) { return u }
+        guard videoPlaylistURL.lastPathComponent.lowercased().contains("video") else { return nil }
+        // Loom's master sits beside the media playlists (…/resource/hls/); names vary, so try the
+        // common ones. Each is validated by `audioMediaURI` (only a real master with an AUDIO
+        // rendition returns a URL), so a wrong guess that turns out to be a media playlist is ignored.
+        for name in ["multivariantplaylist.m3u8", "playlist.m3u8", "master.m3u8", "index.m3u8"] {
+            guard let cand = resolve(name, base: videoPlaylistURL),
+                  let mtext = await fetchText(cand, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) else { continue }
+            if let u = audioMediaURI(mtext, base: cand) { return u }
         }
-        let dest = uniqueDestination(name: baseName(suggestedName, url: manifestURL, ext: finalExt), in: folder)
-        do {
-            try await DriveWriter.shared.commit(finalTmp, to: dest)
-        } catch {
-            try? FileManager.default.removeItem(at: finalTmp)
-            return .failed("Couldn’t save to the folder.")
+        return nil
+    }
+
+    /// The audio rendition's playlist URL from a master's `#EXT-X-MEDIA:TYPE=AUDIO` entries (the
+    /// DEFAULT=YES one if present, else the first).
+    nonisolated private static func audioMediaURI(_ master: String, base: URL) -> URL? {
+        var first: URL?
+        for line in master.components(separatedBy: .newlines)
+            where line.hasPrefix("#EXT-X-MEDIA") && line.uppercased().contains("TYPE=AUDIO") {
+            guard let uri = firstMatch(line, "URI=\"([^\"]+)\""), let u = resolve(uri, base: base) else { continue }
+            if line.uppercased().contains("DEFAULT=YES") { return u }
+            if first == nil { first = u }
         }
-        stampNow(dest)
-        return .saved(dest)
+        return first
+    }
+
+    /// Combines a video-only file and an audio-only file into one `.mp4` without re-encoding
+    /// (passthrough), preserving the video's orientation. Returns false if the mux fails (caller
+    /// then keeps the video-only result).
+    nonisolated private static func muxVideoAudio(video: URL, audio: URL, to out: URL) async -> Bool {
+        let comp = AVMutableComposition()
+        let vAsset = AVURLAsset(url: video)
+        guard let vTrack = try? await vAsset.loadTracks(withMediaType: .video).first,
+              let vComp = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { return false }
+        let vDur = (try? await vAsset.load(.duration)) ?? .zero
+        guard vDur > .zero else { return false }
+        do { try vComp.insertTimeRange(CMTimeRange(start: .zero, duration: vDur), of: vTrack, at: .zero) }
+        catch { return false }
+        if let t = try? await vTrack.load(.preferredTransform) { vComp.preferredTransform = t }
+
+        let aAsset = AVURLAsset(url: audio)
+        if let aTrack = try? await aAsset.loadTracks(withMediaType: .audio).first,
+           let aComp = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            let aRange = (try? await aTrack.load(.timeRange)) ?? CMTimeRange(start: .zero, duration: vDur)
+            try? aComp.insertTimeRange(aRange, of: aTrack, at: .zero)
+        }
+        guard let export = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetPassthrough) else { return false }
+        export.outputURL = out
+        export.outputFileType = .mp4
+        export.shouldOptimizeForNetworkUse = true
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in export.exportAsynchronously { c.resume() } }
+        return export.status == .completed
     }
 
     // MARK: - Playlist parsing
