@@ -131,6 +131,8 @@ struct FolderView: View {
     @State private var audioEntry: Entry?          // a tapped audio file → full-screen player
     @State private var reloading = false           // single-flight guard for reload()
     @State private var reloadPending = false
+    @State private var showRotatePreview = false   // bulk photo-rotate preview sheet
+    @State private var rotateTargets: [Entry] = []
     @State private var audioExtractSources: [URL] = []   // videos queued for "Extract Audio"
     @State private var audioExtractName = ""
     @State private var showAudioExtractPrompt = false
@@ -902,6 +904,11 @@ struct FolderView: View {
             .fullScreenCover(item: $editEntry) { e in MediaEditorView(entry: e) }
             .fullScreenCover(item: $audioEntry) { e in
                 AudioPlayerView(entry: e, onDismiss: { audioEntry = nil })
+            }
+            .sheet(isPresented: $showRotatePreview) {
+                RotatePreviewView(entries: rotateTargets) { quarters in
+                    bulkRotateImages(rotateTargets, quarters: quarters)
+                }
             }
             .fullScreenCover(item: $studioEntry) { e in PhotoEditorView(entry: e) }
             .fullScreenCover(item: $resizeEntry) { e in ResizeEditorView(entry: e) }
@@ -2067,6 +2074,7 @@ struct FolderView: View {
                     Button { bulkRotate(-1) } label: { Label("Rotate Left", systemImage: "rotate.left") }
                     Button { bulkRotate(1) } label: { Label("Rotate Right", systemImage: "rotate.right") }
                 } label: { Label("Rotate", systemImage: "rotate.right") }
+                Button { startRotatePhotos() } label: { Label("Rotate Photos… (preview)", systemImage: "crop.rotate") }
                 Menu {
                     Button { bulkUpscale(to: 1080, label: "1080p") } label: { Label("1080p", systemImage: "arrow.up.right.video") }
                     Button { bulkUpscale(to: 2160, label: "4K") } label: { Label("4K", systemImage: "arrow.up.right.video") }
@@ -2106,6 +2114,40 @@ struct FolderView: View {
     /// Rotates every selected photo/video in place (mainly a 180° turn to fix
     /// upside-down videos). Re-encodes each file and re-keys nothing — paths are
     /// unchanged. Runs under a background-task window so a brief backgrounding is OK.
+    /// Collects the selected photos and opens the preview sheet (deferred so presenting from the
+    /// More menu isn't swallowed). Photos only — the plain "Rotate" submenu still handles videos.
+    private func startRotatePhotos() {
+        let imgs = selectedEntries().filter { $0.kind == .image }
+        guard !imgs.isEmpty else { resultMessage = "Select one or more photos."; return }
+        rotateTargets = imgs
+        DispatchQueue.main.async { showRotatePreview = true }
+    }
+
+    /// Rotates each selected photo the same way, in place — the original file is replaced,
+    /// preserving EXIF/GPS/capture date (`applyPhotoInPlace`). Runs off-main under a background
+    /// window; mirrors `bulkRotate` but scoped to an explicit photo set (from the preview sheet).
+    private func bulkRotateImages(_ targets: [Entry], quarters: Int) {
+        guard !targets.isEmpty else { return }
+        selecting = false; selection.removeAll()
+        editLabel = "Rotating…"; editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Rotate Photos")
+        Task {
+            let full = CGRect(x: 0, y: 0, width: 1, height: 1)
+            var failed = 0
+            for (i, e) in targets.enumerated() {
+                let ok = await Task.detached { MediaEditing.applyPhotoInPlace(url: e.url, quarters: quarters, crop: full) }.value
+                if !ok { failed += 1 }
+                editProgress = Double(i + 1) / Double(targets.count)
+            }
+            editProcessing = false; bg.end()
+            resultMessage = failed == 0
+                ? "Rotated \(targets.count) photo\(targets.count == 1 ? "" : "s")."
+                : "Rotated \(targets.count - failed) of \(targets.count); \(failed) couldn’t be saved."
+            library.contentDidChange(under: url)
+            await reload()
+        }
+    }
+
     private func bulkRotate(_ quarters: Int) {
         let targets = selectedEntries().filter { $0.isViewable }
         guard !targets.isEmpty else { resultMessage = "Select one or more photos or videos."; return }
