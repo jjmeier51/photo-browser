@@ -114,7 +114,6 @@ struct FolderView: View {
     @State private var loadingAges = false
     /// Set when the Age menu is first opened, so ages compute lazily on demand.
     @State private var agesRequested = false
-    @State private var showLibrary = false
     @State private var showPhotosPicker = false
     @State private var showPhotosLibrary = false
     @State private var photosLibraryMoves = false
@@ -896,7 +895,6 @@ struct FolderView: View {
             .sheet(isPresented: $showMetadataEditor) {
                 if !metadataTargets.isEmpty { MetadataEditorView(urls: metadataTargets) }
             }
-            .sheet(isPresented: $showLibrary) { LibraryView() }
             .sheet(isPresented: $showPhotosPicker) {
                 PhotosImportPicker { results in handlePhotosImport(results) }
                     .ignoresSafeArea()
@@ -976,17 +974,6 @@ struct FolderView: View {
         )
         return AnyView(g4
             .overlay(alignment: .bottom) { if selecting { selectionBar } }
-            .overlay(alignment: .bottomLeading) {
-                if isRoot && !selecting {
-                    Button { showLibrary = true } label: {
-                        Label("Library", systemImage: "photo.stack")
-                            .font(.subheadline.weight(.semibold))
-                            .padding(.horizontal, 14).padding(.vertical, 8)
-                            .background(.ultraThinMaterial, in: Capsule())
-                    }
-                    .padding(.leading, 16).padding(.bottom, 16)
-                }
-            }
             .overlay { if editProcessing { editingOverlay } }
             .overlay { if makingLive { makingLiveOverlay } }
             .overlay { if importing { importingOverlay } }

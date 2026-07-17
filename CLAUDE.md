@@ -38,7 +38,7 @@ actions the app makes no network calls.
 - **Browsing** — pick a folder → recursively scans it; square thumbnails for
   photos/videos; New Folder / rename / move; name search; sort by
   name/date/size/age; filters for type, year (EXIF date), resolution/HDR, age;
-  an aggregated `LibraryView` plus Favorites / "To AI" modes. (`FolderView`)
+  Favorites / "To AI" modes. (`FolderView`)
 - **Viewer** — photo pinch + double-tap zoom; custom `AVPlayer` video page with
   zoom, ms-precision scrubber, looping, HDR/res badge. Gestures: swipe L/R =
   prev/next, down = exit, up = info. Video double-tap zones: left/right third =
@@ -158,8 +158,6 @@ Change-notification counters that views observe:
   Favorites / "To AI" / Library "modes" are filtered presentations driven off
   `Library` data. When adding folder-level features this is usually where they
   land.
-- `LibraryView.swift` — flat all-photos/videos view across the whole index,
-  filterable by year, newest-first.
 - `ThumbCell.swift` / `Thumbnailer.swift` — tiles and the thumbnail engine.
   `Thumbnailer` is a singleton with memory (`NSCache`) + disk
   (Application Support/`thumbs`, excluded from backup) caching, in-flight
