@@ -110,7 +110,7 @@ enum TikTokService {
         var newest: Double = 0
         var cursor = "0"
         let cutoff = since?.timeIntervalSince1970 ?? 0
-        for _ in 0..<60 {     // safety cap: 60 pages × 35 ≈ 2100 videos
+        for page in 0..<60 {     // safety cap: 60 pages × 35 ≈ 2100 videos
             guard let data = await apiGet("/api/user/posts",
                                           query: ["unique_id": username, "count": "35", "cursor": cursor, "hd": "1"]),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -118,7 +118,7 @@ enum TikTokService {
                   let d = json["data"] as? [String: Any] else { break }
             let vids = (d["videos"] as? [[String: Any]]) ?? []
             var reachedOld = false
-            for v in vids {
+            for (idx, v) in vids.enumerated() {
                 guard let id = idString(v["video_id"]) ?? idString(v["aweme_id"]) ?? idString(v["id"]) else { continue }
                 if let author = v["author"] as? [String: Any] {
                     if avatar.isEmpty { avatar = (author["avatar"] as? String) ?? "" }
@@ -127,9 +127,14 @@ enum TikTokService {
                 }
                 let ctSecs = Double(intValue(v["create_time"]) ?? 0)
                 newest = max(newest, ctSecs)
-                // Posts come newest-first: once we hit one at/older than the cutoff, stop — the
-                // rest of the profile is older still (incremental "only new videos" check).
-                if cutoff > 0, ctSecs <= cutoff { reachedOld = true; break }
+                // Posts come newest-first *except* pinned posts, which TikTok shows first (up to 3)
+                // on the first page regardless of age. A pinned/old-but-top post must NOT stop the
+                // incremental scan, or an account whose top post is an old pin looks like it has
+                // "no new videos" when it doesn't. Skip the cutoff-break for pinned items (is_top)
+                // and, as a flag-independent safety net, for the first few first-page items.
+                let pinned = (intValue(v["is_top"]) ?? 0) != 0 || (v["is_pinned"] as? Bool == true)
+                let mightBePinned = pinned || (page == 0 && idx < 3)
+                if cutoff > 0, ctSecs <= cutoff, !mightBePinned { reachedOld = true; break }
                 guard seen.insert(id).inserted else { continue }
                 let hd = (v["hdplay"] as? String) ?? ""
                 let sd = (v["play"] as? String) ?? (v["wmplay"] as? String) ?? ""
