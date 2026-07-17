@@ -400,28 +400,37 @@ enum WebVideoDownloader {
     /// (passthrough), preserving the video's orientation. Returns false if the mux fails (caller
     /// then keeps the video-only result).
     nonisolated private static func muxVideoAudio(video: URL, audio: URL, to out: URL) async -> Bool {
+        // The assembled files are fragmented MP4 (init + media segments): their mvhd duration is 0
+        // and the real timing lives in the fragments. Ask AVFoundation to parse fragments for precise
+        // timing, and drive insertion off each track's own timeRange rather than asset.duration
+        // (which reads as zero for fragmented MP4 and made the whole mux bail → "audio mux failed").
+        let opts = [AVURLAssetPreferPreciseDurationAndTimingKey: true]
+        let vAsset = AVURLAsset(url: video, options: opts)
+        let aAsset = AVURLAsset(url: audio, options: opts)
         let comp = AVMutableComposition()
-        let vAsset = AVURLAsset(url: video)
         guard let vTrack = try? await vAsset.loadTracks(withMediaType: .video).first,
+              let vRange = try? await vTrack.load(.timeRange), vRange.duration > .zero,
               let vComp = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { return false }
-        let vDur = (try? await vAsset.load(.duration)) ?? .zero
-        guard vDur > .zero else { return false }
-        do { try vComp.insertTimeRange(CMTimeRange(start: .zero, duration: vDur), of: vTrack, at: .zero) }
-        catch { return false }
+        do { try vComp.insertTimeRange(vRange, of: vTrack, at: .zero) } catch { return false }
         if let t = try? await vTrack.load(.preferredTransform) { vComp.preferredTransform = t }
 
-        let aAsset = AVURLAsset(url: audio)
         if let aTrack = try? await aAsset.loadTracks(withMediaType: .audio).first,
+           let aRange = try? await aTrack.load(.timeRange),
            let aComp = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-            let aRange = (try? await aTrack.load(.timeRange)) ?? CMTimeRange(start: .zero, duration: vDur)
             try? aComp.insertTimeRange(aRange, of: aTrack, at: .zero)
         }
-        guard let export = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetPassthrough) else { return false }
-        export.outputURL = out
-        export.outputFileType = .mp4
-        export.shouldOptimizeForNetworkUse = true
-        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in export.exportAsynchronously { c.resume() } }
-        return export.status == .completed
+        // Passthrough (no re-encode) first; if the container/codecs won't passthrough, fall back to a
+        // re-encode so the result still has sound.
+        for preset in [AVAssetExportPresetPassthrough, AVAssetExportPresetHighestQuality] {
+            guard let export = AVAssetExportSession(asset: comp, presetName: preset) else { continue }
+            try? FileManager.default.removeItem(at: out)
+            export.outputURL = out
+            export.outputFileType = .mp4
+            export.shouldOptimizeForNetworkUse = true
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in export.exportAsynchronously { c.resume() } }
+            if export.status == .completed { return true }
+        }
+        return false
     }
 
     // MARK: - Playlist parsing
