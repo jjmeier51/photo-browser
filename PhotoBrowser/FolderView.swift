@@ -1222,6 +1222,13 @@ struct FolderView: View {
                 grid
             }
             .background(AppGradient())
+            // Browser downloads keep running after the browser is dismissed — surface them here
+            // (the chip observes WebController itself, so this heavy body never re-renders on
+            // download progress) with a one-tap way back into the browser.
+            .overlay(alignment: .bottomTrailing) {
+                WebDownloadsChip { showWebBrowser = true }
+                    .padding(.trailing, 16).padding(.bottom, 28)
+            }
         )
         let chrome = AnyView(core
             .navigationTitle(isRoot ? "Home" : url.lastPathComponent)
@@ -1322,6 +1329,22 @@ struct FolderView: View {
                          : advancedActive ? "No matches for this filter"
                          : "This folder is empty")
                         .foregroundStyle(.secondary)
+                    // A genuinely empty folder (no filter hiding things) gets the two ways to
+                    // fill it, instead of a dead end.
+                    if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !showEditedOnly
+                        && !advancedActive && yearFilter == nil && typeFilter == .all && ageFilter == nil {
+                        HStack(spacing: 12) {
+                            Button { showPhotosPicker = true } label: {
+                                Label("Add from Photos", systemImage: "photo.badge.plus")
+                            }
+                            .buttonStyle(.bordered)
+                            Button { showWebBrowser = true } label: {
+                                Label("Web Browser", systemImage: "safari")
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        .padding(.top, 6)
+                    }
                 } else {
                     ProgressView()
                 }
@@ -1687,13 +1710,35 @@ struct FolderView: View {
                         ForEach(availableYears, id: \.self) { year in
                             Button { yearFilter = year } label: { check(String(year), yearFilter == year) }
                         }
-                    } label: { chip("Year: \(yearFilter.map(String.init) ?? "All")") }
+                    } label: {
+                        chip("Year: \(yearFilter.map(String.init) ?? "All")")
+                            .foregroundStyle(yearFilter != nil ? Color.accentColor : Color.primary)
+                    }
 
                     Menu {
                         ForEach(TypeFilter.allCases) { type in
                             Button { typeFilter = type } label: { check(type.rawValue, typeFilter == type) }
                         }
-                    } label: { chip("Type: \(typeFilter.rawValue)") }
+                    } label: {
+                        chip("Type: \(typeFilter.rawValue)")
+                            .foregroundStyle(typeFilter != .all ? Color.accentColor : Color.primary)
+                    }
+
+                    // One tap back to an unfiltered view once any menu-driven filter is active.
+                    if yearFilter != nil || typeFilter != .all || ageFilter != nil || advancedActive {
+                        Button {
+                            yearFilter = nil; typeFilter = .all; ageFilter = nil
+                            videoRes = .all; imageRes = .all; hdrOnly = false
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "xmark.circle.fill")
+                                Text("Clear").font(.subheadline.weight(.medium))
+                            }
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(.thinMaterial, in: Capsule())
+                            .foregroundStyle(Color.accentColor)
+                        }
+                    }
                 }
 
                 Spacer()
@@ -1731,10 +1776,11 @@ struct FolderView: View {
             if selecting {
                 Button(selection.count == selectableEntries.count ? "None" : "All") { toggleAll() }
             } else {
-                if WebController.shared.hasSession {
-                    Button { showWebBrowser = true } label: { Image(systemName: "safari.fill") }
-                        .accessibilityLabel("Back to Browser")
-                }
+                // Always visible so the browser is one tap away, not buried in the "…" menu.
+                // The icon is intentionally static: FolderView doesn't observe WebController,
+                // so a hasSession-dependent icon would go stale.
+                Button { showWebBrowser = true } label: { Image(systemName: "safari") }
+                    .accessibilityLabel("Browser")
                 if !isRoot {
                     Button { library.goHome() } label: { Image(systemName: "house") }
                 }
@@ -1760,126 +1806,134 @@ struct FolderView: View {
                     Image(systemName: "arrow.up.arrow.down")
                 }
                 Menu {
-                    Button {
-                        if case .rerun = cleanupAction { library.resetCleanup(url) }   // fresh pass over what's left
-                        showCleanup = true
-                    } label: {
-                        Label(cleanupAction.title, systemImage: "wand.and.sparkles")
-                    }
-                    .disabled(!hasViewableMedia)
-                    Button {
-                        if case .rerun = cleanupAction { library.resetCleanup(url) }   // fresh random pass
-                        showRandomCleanup = true
-                    } label: {
-                        Label("Randomized Clean Up", systemImage: "shuffle")
-                    }
-                    .disabled(!hasViewableMedia)
-                    Divider()
-                    Button { playSlideshow() } label: { Label("Play Slideshow", systemImage: "play.rectangle") }
-                        .disabled(!hasViewableMedia)
-                    Button { showNewFolder = true } label: { Label("New Folder", systemImage: "folder.badge.plus") }
-                    Toggle(isOn: $showHiddenFolders) { Label("Show Hidden Folders", systemImage: "eye.slash") }
-                    // Less-used maintenance tools in a submenu — same reason as below: keep the parent
-                    // menu cheap to build so it opens instantly.
-                    Menu {
-                        Button { showDuplicates = true } label: { Label("Find Duplicates", systemImage: "doc.on.doc") }
-                        Button { confirmFixDates = true } label: { Label("Restore Capture Dates", systemImage: "clock.arrow.circlepath") }
-                        Button { runTextIndex() } label: { Label("Index Text in Photos", systemImage: "text.viewfinder") }
-                        Button { runLocationIndex() } label: { Label("Index Locations", systemImage: "location.viewfinder") }
-                        Button { confirmPhoneCheck = true } label: { Label("Check if on iPhone", systemImage: "iphone") }
+                    // Grouped into titled sections so the ~20 items scan as four short lists
+                    // instead of one long one. Sections don't change what builds when the menu
+                    // opens — the heavy lists still live in the lazy submenus below.
+                    Section("This Folder") {
+                        Button { playSlideshow() } label: { Label("Play Slideshow", systemImage: "play.rectangle") }
                             .disabled(!hasViewableMedia)
-                    } label: {
-                        Label("Maintenance…", systemImage: "wrench.and.screwdriver")
+                        Button { showNewFolder = true } label: { Label("New Folder", systemImage: "folder.badge.plus") }
+                        Toggle(isOn: $showHiddenFolders) { Label("Show Hidden Folders", systemImage: "eye.slash") }
+                        Button {
+                            if case .rerun = cleanupAction { library.resetCleanup(url) }   // fresh pass over what's left
+                            showCleanup = true
+                        } label: {
+                            Label(cleanupAction.title, systemImage: "wand.and.sparkles")
+                        }
+                        .disabled(!hasViewableMedia)
+                        Button {
+                            if case .rerun = cleanupAction { library.resetCleanup(url) }   // fresh random pass
+                            showRandomCleanup = true
+                        } label: {
+                            Label("Randomized Clean Up", systemImage: "shuffle")
+                        }
+                        .disabled(!hasViewableMedia)
                     }
-                    Button { showPeople = true } label: { Label("People", systemImage: "person.2.crop.square.stack") }
-                    Button { showSettings = true } label: { Label("Settings", systemImage: "gearshape") }
-                    Button { photosLibraryMoves = false; showPhotosLibrary = true } label: { Label("Photos Library", systemImage: "photo.stack") }
-                    Divider()
-                    Button { pickFolder(.transfer) } label: {
-                        Label("Move Here from Another Drive…", systemImage: "externaldrive.badge.minus")
-                    }
-                    Button { photosLibraryMoves = true; showPhotosLibrary = true } label: {
-                        Label("Add from iOS Album…", systemImage: "photo.badge.arrow.down")
-                    }
-                    // Grouped into a submenu so the parent "…" menu doesn't build all ~16 of these
-                    // eagerly on every open (that was the 1–2s stall). SwiftUI builds submenu content
-                    // lazily, only when this item is opened.
-                    Menu {
-                        Button { showMegaImport = true } label: {
-                            Label("Add from MEGA…", systemImage: "arrow.down.circle")
+                    Section("Add Media") {
+                        Button { photosLibraryMoves = true; showPhotosLibrary = true } label: {
+                            Label("Add from iOS Album…", systemImage: "photo.badge.arrow.down")
                         }
-                        Button { showLinkDownload = true } label: {
-                            Label("Download from a Link…", systemImage: "link.badge.plus")
-                        }
-                        Button { showGoogleDrive = true } label: {
-                            Label("Download from Google Drive…", systemImage: "arrow.down.doc")
-                        }
-                        Button { igForceFull = false; showInstagram = true } label: {
-                            Label(library.isInstagramFolder(url) ? "Get New Instagram Posts" : "Download Instagram Profile…",
-                                  systemImage: library.isInstagramFolder(url) ? "arrow.triangle.2.circlepath" : "camera")
-                        }
-                        if library.isInstagramFolder(url) {
-                            Button { igForceFull = true; showInstagram = true } label: {
-                                Label("Re-download Entire Profile", systemImage: "arrow.clockwise.circle")
+                        Button { photosLibraryMoves = false; showPhotosLibrary = true } label: { Label("Photos Library", systemImage: "photo.stack") }
+                        // Grouped into a submenu so the parent "…" menu doesn't build all ~16 of these
+                        // eagerly on every open (that was the 1–2s stall). SwiftUI builds submenu content
+                        // lazily, only when this item is opened.
+                        Menu {
+                            Button { showMegaImport = true } label: {
+                                Label("Add from MEGA…", systemImage: "arrow.down.circle")
                             }
-                        }
-                        if isRoot && !library.instagramFolders.isEmpty {
-                            Button { showAllStories = true } label: {
-                                Label("Get All New Instagram Stories", systemImage: "sparkles.rectangle.stack")
+                            Button { showLinkDownload = true } label: {
+                                Label("Download from a Link…", systemImage: "link.badge.plus")
                             }
+                            Button { showGoogleDrive = true } label: {
+                                Label("Download from Google Drive…", systemImage: "arrow.down.doc")
+                            }
+                            Button { igForceFull = false; showInstagram = true } label: {
+                                Label(library.isInstagramFolder(url) ? "Get New Instagram Posts" : "Download Instagram Profile…",
+                                      systemImage: library.isInstagramFolder(url) ? "arrow.triangle.2.circlepath" : "camera")
+                            }
+                            if library.isInstagramFolder(url) {
+                                Button { igForceFull = true; showInstagram = true } label: {
+                                    Label("Re-download Entire Profile", systemImage: "arrow.clockwise.circle")
+                                }
+                            }
+                            if isRoot && !library.instagramFolders.isEmpty {
+                                Button { showAllStories = true } label: {
+                                    Label("Get All New Instagram Stories", systemImage: "sparkles.rectangle.stack")
+                                }
+                            }
+                            if isRoot {
+                                Button { showBulkInstagram = true } label: {
+                                    Label("Bulk Download Instagram Profiles…", systemImage: "person.3.sequence")
+                                }
+                            }
+                            Button { showFacebook = true } label: {
+                                Label(library.isFacebookFolder(url) ? "Get New Facebook Photos" : "Download Facebook Profile…",
+                                      systemImage: library.isFacebookFolder(url) ? "arrow.triangle.2.circlepath" : "person.2.fill")
+                            }
+                            Button { showOnlyFans = true } label: {
+                                Label(library.isOnlyFansFolder(url) ? "Get New OnlyFans Posts" : "Download OnlyFans Profile…",
+                                      systemImage: library.isOnlyFansFolder(url) ? "arrow.triangle.2.circlepath" : "lock.circle")
+                            }
+                            Button { showTikTok = true } label: {
+                                Label(library.lastTikTokHandle(for: url) != nil ? "Get New TikTok Videos" : "Download TikTok Profile…",
+                                      systemImage: "music.note")
+                            }
+                            Button { showVSCO = true } label: {
+                                Label(library.isVSCOFolder(url) || library.lastVSCOUsername(for: url) != nil
+                                      ? "Get New VSCO Photos" : "Download VSCO Profile…",
+                                      systemImage: "camera.aperture")
+                            }
+                            Button { showYouTube = true } label: {
+                                Label("Download YouTube Video Here…", systemImage: "play.rectangle.fill")
+                            }
+                            Button { showWebBrowser = true } label: {
+                                Label("Browse the Web & Download Video…", systemImage: "safari")
+                            }
+                            Button { showTaylorBrowser = true } label: {
+                                Label("Browse taylorpictures.net…", systemImage: "globe")
+                            }
+                            Button { showAccessKardashian = true } label: {
+                                Label("Download from accessKardashian…", systemImage: "person.2.crop.square.stack.fill")
+                            }
+                            Button { showTaylorCrossRef = true } label: {
+                                Label("Cross-Reference with taylorpictures.net…", systemImage: "calendar.badge.exclamationmark")
+                            }
+                        } label: {
+                            Label("Download from the Web…", systemImage: "arrow.down.circle")
+                        }
+                    }
+                    Section("Drives & Backup") {
+                        Button { pickFolder(.transfer) } label: {
+                            Label("Move Here from Another Drive…", systemImage: "externaldrive.badge.minus")
+                        }
+                        Button { pickFolder(.relink) } label: {
+                            Label("Re-link Favorites from a Drive…", systemImage: "link")
+                        }
+                        Button { pickFolder(.backupMetadata) } label: {
+                            Label("Copy Metadata to Backup Drive…", systemImage: "externaldrive.badge.checkmark")
                         }
                         if isRoot {
-                            Button { showBulkInstagram = true } label: {
-                                Label("Bulk Download Instagram Profiles…", systemImage: "person.3.sequence")
+                            Button { pickFolder(.open) } label: { Label("Open Folder…", systemImage: "externaldrive") }
+                            Button { showEject = true } label: {
+                                Label("Prepare Drive for Removal…", systemImage: "eject")
                             }
                         }
-                        Button { showFacebook = true } label: {
-                            Label(library.isFacebookFolder(url) ? "Get New Facebook Photos" : "Download Facebook Profile…",
-                                  systemImage: library.isFacebookFolder(url) ? "arrow.triangle.2.circlepath" : "person.2.fill")
-                        }
-                        Button { showOnlyFans = true } label: {
-                            Label(library.isOnlyFansFolder(url) ? "Get New OnlyFans Posts" : "Download OnlyFans Profile…",
-                                  systemImage: library.isOnlyFansFolder(url) ? "arrow.triangle.2.circlepath" : "lock.circle")
-                        }
-                        Button { showTikTok = true } label: {
-                            Label(library.lastTikTokHandle(for: url) != nil ? "Get New TikTok Videos" : "Download TikTok Profile…",
-                                  systemImage: "music.note")
-                        }
-                        Button { showVSCO = true } label: {
-                            Label(library.isVSCOFolder(url) || library.lastVSCOUsername(for: url) != nil
-                                  ? "Get New VSCO Photos" : "Download VSCO Profile…",
-                                  systemImage: "camera.aperture")
-                        }
-                        Button { showYouTube = true } label: {
-                            Label("Download YouTube Video Here…", systemImage: "play.rectangle.fill")
-                        }
-                        Button { showWebBrowser = true } label: {
-                            Label("Browse the Web & Download Video…", systemImage: "safari")
-                        }
-                        Button { showTaylorBrowser = true } label: {
-                            Label("Browse taylorpictures.net…", systemImage: "globe")
-                        }
-                        Button { showAccessKardashian = true } label: {
-                            Label("Download from accessKardashian…", systemImage: "person.2.crop.square.stack.fill")
-                        }
-                        Button { showTaylorCrossRef = true } label: {
-                            Label("Cross-Reference with taylorpictures.net…", systemImage: "calendar.badge.exclamationmark")
-                        }
-                    } label: {
-                        Label("Download from the Web…", systemImage: "arrow.down.circle")
                     }
-                    Button { pickFolder(.relink) } label: {
-                        Label("Re-link Favorites from a Drive…", systemImage: "link")
-                    }
-                    Button { pickFolder(.backupMetadata) } label: {
-                        Label("Copy Metadata to Backup Drive…", systemImage: "externaldrive.badge.checkmark")
-                    }
-                    if isRoot {
-                        Button { pickFolder(.open) } label: { Label("Open Folder…", systemImage: "externaldrive") }
-                        Divider()
-                        Button { showEject = true } label: {
-                            Label("Prepare Drive for Removal…", systemImage: "eject")
+                    Section("Library") {
+                        Button { showPeople = true } label: { Label("People", systemImage: "person.2.crop.square.stack") }
+                        // Less-used maintenance tools stay in a submenu — same reason as above:
+                        // keep the parent menu cheap to build so it opens instantly.
+                        Menu {
+                            Button { showDuplicates = true } label: { Label("Find Duplicates", systemImage: "doc.on.doc") }
+                            Button { confirmFixDates = true } label: { Label("Restore Capture Dates", systemImage: "clock.arrow.circlepath") }
+                            Button { runTextIndex() } label: { Label("Index Text in Photos", systemImage: "text.viewfinder") }
+                            Button { runLocationIndex() } label: { Label("Index Locations", systemImage: "location.viewfinder") }
+                            Button { confirmPhoneCheck = true } label: { Label("Check if on iPhone", systemImage: "iphone") }
+                                .disabled(!hasViewableMedia)
+                        } label: {
+                            Label("Maintenance…", systemImage: "wrench.and.screwdriver")
                         }
+                        Button { showSettings = true } label: { Label("Settings", systemImage: "gearshape") }
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
