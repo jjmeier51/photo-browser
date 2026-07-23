@@ -23,7 +23,11 @@ enum WebVideoDownloader {
     struct Progress: Sendable { var fraction: Double; var phase: String }
     /// `authRequired` means the server returned 401 and we sent no credentials — the caller should
     /// prompt for a username/password and retry. The associated value is the host to sign in to.
-    enum Outcome: Sendable { case saved(URL, note: String? = nil); case failed(String); case authRequired(String) }
+    /// `cancelled` means the surrounding Task was cancelled (the user tapped ✕ on the row).
+    enum Outcome: Sendable { case saved(URL, note: String? = nil); case failed(String); case authRequired(String); case cancelled }
+
+    /// Sentinel failure reason used internally to carry a cancellation out of the segment machinery.
+    nonisolated private static let cancelledReason = "__cancelled"
 
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
@@ -32,7 +36,7 @@ enum WebVideoDownloader {
         cfg.httpShouldSetCookies = false
         cfg.httpCookieStorage = nil
         cfg.timeoutIntervalForRequest = 60
-        cfg.httpMaximumConnectionsPerHost = 8
+        cfg.httpMaximumConnectionsPerHost = 12
         return URLSession(configuration: cfg)
     }()
 
@@ -136,6 +140,7 @@ enum WebVideoDownloader {
         progress(Progress(fraction: 0, phase: "Downloading video…"))
         guard let (tmp, resp) = await downloadToTemp(url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
                                                      progress: { f in progress(Progress(fraction: f, phase: "Downloading video…")) }) else {
+            if Task.isCancelled { return .cancelled }
             return .failed("The download failed (the video may be protected or the link expired).")
         }
         if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 400 {
@@ -175,6 +180,7 @@ enum WebVideoDownloader {
         progress(Progress(fraction: 0, phase: "Downloading file…"))
         guard let (tmp, resp) = await downloadToTemp(url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
                                                      progress: { f in progress(Progress(fraction: f, phase: "Downloading file…")) }) else {
+            if Task.isCancelled { return .cancelled }
             return .failed("The download failed (the link may be protected or expired).")
         }
         if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 400 {
@@ -228,28 +234,32 @@ enum WebVideoDownloader {
             playlistURL = variant; text = vtext
         }
 
+        // Demuxed streams (Loom, and most CMAF HLS) carry audio as a SEPARATE rendition, so the
+        // video playlist alone is silent. Kick the audio download off CONCURRENTLY with the video
+        // (same host, small segments) instead of after it — its progress is silent so the video's
+        // segment count owns the progress line. `async let` keeps it structured: cancelling the
+        // download cancels both tracks.
+        async let audioResult: (tmp: URL?, note: String) = downloadAudioTrack(
+            videoPlaylistURL: playlistURL, masterText: masterText, masterURL: masterURL,
+            pageURL: pageURL, cookieHeader: cookieHeader, authHeader: authHeader)
+
         // Download the (video, or muxed audio+video) media playlist.
         let vres = await downloadMediaPlaylist(playlistURL, text: text, pageURL: pageURL, cookieHeader: cookieHeader,
                                                authHeader: authHeader, label: "video", progress: progress)
-        guard let videoInfo = vres.data else { return .failed(vres.reason ?? "Couldn’t download the video.") }
-
-        // Demuxed streams (Loom, and most CMAF HLS) carry audio as a SEPARATE rendition, so the
-        // video playlist alone is silent. Find the audio playlist — from the master we already read,
-        // or by probing for one next to a "…video…" media playlist — download it, and mux it in.
-        var audioTmp: URL?
-        var audioNote = "no separate audio track"
-        if let audioURL = await findAudioPlaylistURL(videoPlaylistURL: playlistURL, masterText: masterText,
-                                                     masterURL: masterURL, pageURL: pageURL,
-                                                     cookieHeader: cookieHeader, authHeader: authHeader) {
-            audioNote = "audio playlist found"
-            if let atext = await fetchText(audioURL, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader),
-               let a = await downloadMediaPlaylist(audioURL, text: atext, pageURL: pageURL,
-                                                   cookieHeader: cookieHeader, authHeader: authHeader,
-                                                   label: "audio", progress: progress).data {
-                audioTmp = a.url; audioNote = "audio downloaded"
-            } else {
-                audioNote = "audio download failed"
-            }
+        guard let videoInfo = vres.data else {
+            let audio = await audioResult
+            if let t = audio.tmp { try? FileManager.default.removeItem(at: t) }
+            if vres.reason == Self.cancelledReason || Task.isCancelled { return .cancelled }
+            return .failed(vres.reason ?? "Couldn’t download the video.")
+        }
+        progress(Progress(fraction: 1, phase: "Finishing audio…"))
+        let audio = await audioResult
+        let audioTmp = audio.tmp
+        var audioNote = audio.note
+        if Task.isCancelled {
+            try? FileManager.default.removeItem(at: videoInfo.url)
+            if let audioTmp { try? FileManager.default.removeItem(at: audioTmp) }
+            return .cancelled
         }
 
         progress(Progress(fraction: 1, phase: "Assembling…"))
@@ -287,10 +297,36 @@ enum WebVideoDownloader {
         return .saved(dest, note: audioNote)
     }
 
+    /// Finds and downloads the separate audio rendition of a demuxed stream (from the master we
+    /// already read, or by probing next to a "…video…" media playlist). Silent progress — the video
+    /// track owns the progress line. Returns the temp file (nil for a normal muxed stream) + a note.
+    nonisolated private static func downloadAudioTrack(videoPlaylistURL: URL, masterText: String?, masterURL: URL?,
+                                                       pageURL: String, cookieHeader: String,
+                                                       authHeader: String?) async -> (tmp: URL?, note: String) {
+        guard let audioURL = await findAudioPlaylistURL(videoPlaylistURL: videoPlaylistURL, masterText: masterText,
+                                                        masterURL: masterURL, pageURL: pageURL,
+                                                        cookieHeader: cookieHeader, authHeader: authHeader) else {
+            return (nil, "no separate audio track")
+        }
+        guard let atext = await fetchText(audioURL, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader),
+              let a = await downloadMediaPlaylist(audioURL, text: atext, pageURL: pageURL,
+                                                  cookieHeader: cookieHeader, authHeader: authHeader,
+                                                  label: "audio", progress: { _ in }).data else {
+            return (nil, "audio download failed")
+        }
+        return (a.url, "audio downloaded")
+    }
+
+    nonisolated private static let segmentConcurrency = 10   // parallel segment fetches
+    nonisolated private static let segmentWindow = 14        // how far a fetch may run ahead of the write cursor
+
     /// Downloads every segment of ONE media playlist and assembles them into a single temp file
-    /// (fMP4 → `.mp4`, MPEG-TS → `.ts`). Handles AES-128 decryption, the fMP4 init segment, and the
+    /// (fMP4 → `.mp4`, MPEG-TS → `.ts`), **streaming segments to disk in order as they arrive**
+    /// (see `SegmentSink` — the old approach held every decrypted segment in memory until the end,
+    /// which jetsam-killed long videos). Handles AES-128 decryption, the fMP4 init segment, and the
     /// refetch-on-failure retry (signed segment URLs expire / drop). Reused for the video and, on a
-    /// demuxed stream, the separate audio rendition. Returns the file (+ whether it's fMP4) or a reason.
+    /// demuxed stream, the separate audio rendition. Returns the file (+ whether it's fMP4) or a
+    /// reason (`cancelledReason` when the surrounding Task was cancelled).
     nonisolated private static func downloadMediaPlaylist(_ playlistURL: URL, text: String, pageURL: String,
                                                           cookieHeader: String, authHeader: String?, label: String,
                                                           progress: @escaping @Sendable (Progress) -> Void) async -> (data: (url: URL, isFMP4: Bool)?, reason: String?) {
@@ -302,44 +338,72 @@ enum WebVideoDownloader {
         }
         let initSeg = parseInitSegment(text, base: playlistURL)     // fMP4/CMAF init
         let isFMP4 = initSeg != nil || segs.first?.url.pathExtension.lowercased() == "m4s"
+        let ext = isFMP4 ? "mp4" : "ts"
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("webvid_\(UUID().uuidString).\(ext)")
+        guard let sink = SegmentSink(fileURL: tmp, window: segmentWindow) else {
+            return (nil, "Couldn’t assemble the \(label) file.")
+        }
+        // The init segment must lead the file, so it's fetched before any media segment is written.
+        if let initSeg {
+            guard let initData = await fetchData(initSeg, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) else {
+                await sink.abort()
+                return (nil, Task.isCancelled ? cancelledReason : "Couldn’t read the stream’s init data.")
+            }
+            await sink.writeHead(initData)
+        }
 
-        // Bounded-concurrent, order-preserving download. On a flaky network — or a stream whose
+        // Bounded-concurrent fetch, order-preserving writes. On a flaky network — or a stream whose
         // segment URLs carry short-lived signed tokens — some segments fail even after per-request
         // retries; refetch the playlist (fresh, re-signed URLs) and retry only the still-missing ones.
-        var datas = [Data?](repeating: nil, count: segs.count)
-        var currentSegs = segs
         let total = segs.count
+        var currentSegs = segs
+        var toFetch = Array(0..<total)
         var refreshes = 0
         var lastReason: String?
         while true {
-            let missing = datas.indices.filter { datas[$0] == nil }
-            if missing.isEmpty { break }
-            var done = total - missing.count
-            let lock = NSLock()
-            await withTaskGroup(of: (Int, Data?, String?).self) { group in
-                var k = 0
-                let maxConcurrent = 6
-                func addNext() {
-                    guard k < missing.count else { return }
-                    let i = missing[k]; let seg = currentSegs[i]; k += 1
-                    group.addTask {
-                        let r = await fetchSegmentData(seg.url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader)
-                        guard var d = r.data else { return (i, nil, r.reason) }
-                        if let key { d = aesCBCDecrypt(d, key: key.key, iv: seg.iv ?? key.iv(forSequence: i)) ?? d }
-                        return (i, d, nil)
+            var done = total - toFetch.count
+            await withTaskCancellationHandler {
+                await withTaskGroup(of: (Int, Data?, String?).self) { group in
+                    var k = 0
+                    func addNext() {
+                        guard k < toFetch.count, !Task.isCancelled else { return }
+                        let i = toFetch[k]; let seg = currentSegs[i]; k += 1
+                        group.addTask {
+                            // Admission may pause this segment (sink paused / too far ahead of the
+                            // write cursor). A refused segment is simply retried next pass.
+                            guard await sink.admit(i) else { return (i, nil, nil) }
+                            let r = await fetchSegmentData(seg.url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader)
+                            guard var d = r.data else { return (i, nil, r.reason) }
+                            if let key { d = aesCBCDecrypt(d, key: key.key, iv: seg.iv ?? key.iv(forSequence: i)) ?? d }
+                            return (i, d, nil)
+                        }
+                    }
+                    for _ in 0..<min(segmentConcurrency, toFetch.count) { addNext() }
+                    while let (i, d, reason) = await group.next() {
+                        if let d {
+                            await sink.deliver(i, d)
+                            done += 1
+                            if done % 3 == 0 || done == total {
+                                progress(Progress(fraction: Double(done) / Double(total), phase: "Downloading \(label) \(done)/\(total)…"))
+                            }
+                        } else if let reason {
+                            lastReason = reason
+                            // A real failure: release admission waiters so this pass drains fast,
+                            // then refresh the playlist and retry only the missing indices.
+                            await sink.pause()
+                        }
+                        addNext()
                     }
                 }
-                for _ in 0..<min(maxConcurrent, missing.count) { addNext() }
-                while let (i, d, reason) = await group.next() {
-                    if let d { datas[i] = d } else if let reason { lastReason = reason }
-                    lock.lock(); done += 1; let dn = done; lock.unlock()
-                    if dn % 3 == 0 || dn == total {
-                        progress(Progress(fraction: Double(dn) / Double(total), phase: "Downloading \(label) \(dn)/\(total)…"))
-                    }
-                    addNext()
-                }
+            } onCancel: {
+                Task { await sink.pause() }     // wake blocked admissions so the group can drain
             }
-            if datas.allSatisfy({ $0 != nil }) { break }
+            if Task.isCancelled || lastReason == cancelledReason {
+                await sink.abort()
+                return (nil, cancelledReason)
+            }
+            let missing = await sink.missing(total: total)
+            if missing.isEmpty { break }
             refreshes += 1
             if refreshes > 2 { break }
             progress(Progress(fraction: Double(total - missing.count) / Double(total), phase: "Refreshing stream…"))
@@ -347,21 +411,16 @@ enum WebVideoDownloader {
             let newSegs = parseSegments(refreshed, base: playlistURL)
             guard newSegs.count == total else { break }
             currentSegs = newSegs
+            toFetch = missing
+            await sink.resume()
         }
-        if !datas.allSatisfy({ $0 != nil }) {
-            let failed = datas.filter { $0 == nil }.count
+        let missing = await sink.missing(total: total)
+        if !missing.isEmpty {
+            await sink.abort()
             let detail = lastReason.map { " — \($0)" } ?? ""
-            return (nil, "Couldn’t download \(failed) of \(total) \(label) segments\(detail). The stream may have expired or blocked the request.")
+            return (nil, "Couldn’t download \(missing.count) of \(total) \(label) segments\(detail). The stream may have expired or blocked the request.")
         }
-
-        let ext = isFMP4 ? "mp4" : "ts"
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("webvid_\(UUID().uuidString).\(ext)")
-        guard let handle = createFile(tmp) else { return (nil, "Couldn’t assemble the \(label) file.") }
-        if let initSeg, let initData = await fetchData(initSeg, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader) {
-            try? handle.write(contentsOf: initData)
-        }
-        for d in datas { if let d { try? handle.write(contentsOf: d) } }
-        try? handle.close()
+        await sink.close()
         return ((tmp, isFMP4), nil)
     }
 
@@ -600,6 +659,7 @@ enum WebVideoDownloader {
         var reason = "no response"
         for attempt in 0..<4 {
             if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(1 << (attempt - 1)) * 400_000_000) }
+            if Task.isCancelled { return (nil, cancelledReason) }   // don't let the retry loop absorb a cancel
             do {
                 let (data, resp) = try await session.data(for: request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader))
                 if let code = (resp as? HTTPURLResponse)?.statusCode {
@@ -608,6 +668,7 @@ enum WebVideoDownloader {
                 }
                 return (data, nil)
             } catch {
+                if Task.isCancelled || error is CancellationError { return (nil, cancelledReason) }
                 reason = "network error (\((error as NSError).code))"
                 continue
             }
@@ -619,7 +680,11 @@ enum WebVideoDownloader {
         for attempt in 0..<4 {
             // Exponential backoff (0.4s, 0.8s, 1.6s) so a brief cellular drop doesn't burn the retries.
             if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(1 << (attempt - 1)) * 400_000_000) }
-            guard let (data, resp) = try? await session.data(for: request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader)) else { continue }
+            if Task.isCancelled { return nil }   // don't let the retry loop absorb a cancel
+            guard let (data, resp) = try? await session.data(for: request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader)) else {
+                if Task.isCancelled { return nil }
+                continue
+            }
             if let code = (resp as? HTTPURLResponse)?.statusCode {
                 if code == 429 || code >= 500 { continue }
                 // 4xx (expired/forbidden token) won't recover on the same URL — the caller refetches
@@ -634,7 +699,7 @@ enum WebVideoDownloader {
     // MARK: - Fast download (parallel HTTP range requests)
 
     private static let rangeChunk: Int64 = 4 << 20        // 4 MB per range request
-    private static let rangeConcurrency = 6               // parallel connections
+    private static let rangeConcurrency = 8               // parallel connections
     private static let rangeMinSize: Int64 = 6 << 20      // only parallelize files bigger than this
 
     /// Downloads `url` to a temp file. When the server supports HTTP range requests and the file is
@@ -643,6 +708,15 @@ enum WebVideoDownloader {
     /// over a single connection. Returns the temp file + the response (for status / MIME).
     nonisolated private static func downloadToTemp(_ url: URL, referer: String, cookieHeader: String, authHeader: String?,
                                                    progress: @escaping @Sendable (Double) -> Void) async -> (URL, URLResponse)? {
+        // A previously interrupted attempt (cancel or dropped connection) may have banked resume
+        // data — continue the partial transfer instead of re-probing and starting over. URLSession
+        // validates it (ETag/ranges) and fails cleanly if the server won't resume, in which case we
+        // fall through to a fresh download.
+        if let rd = await ResumeDataStore.shared.take(url.absoluteString) {
+            let dl = ProgressDownloadDelegate(urlKey: url.absoluteString) { progress($0) }
+            if let out = await dl.run(resumeData: rd) { return out }
+            if Task.isCancelled { return nil }
+        }
         // HEAD probe: learn the size + whether ranges are supported, WITHOUT pulling any body (a
         // ranged-GET probe would download the whole file if the server ignored the Range header).
         var head = request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader)
@@ -655,11 +729,12 @@ enum WebVideoDownloader {
                                               authHeader: authHeader, response: http, progress: progress) {
                 return out
             }
+            if Task.isCancelled { return nil }
         }
         // Single-connection fallback (small file, no range support, HEAD unsupported, or a mid-download
         // failure). This path also carries the 4xx/auth response through so the caller can prompt + retry.
         let req = request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader)
-        let dl = ProgressDownloadDelegate { progress($0) }
+        let dl = ProgressDownloadDelegate(urlKey: url.absoluteString) { progress($0) }
         return await dl.run(req)
     }
 
@@ -677,7 +752,7 @@ enum WebVideoDownloader {
             var offset: Int64 = 0
             var active = 0
             func addNext() {
-                guard offset < total else { return }
+                guard offset < total, !Task.isCancelled else { return }
                 let start = offset, end = min(start + rangeChunk, total) - 1
                 offset = end + 1
                 active += 1
@@ -685,7 +760,11 @@ enum WebVideoDownloader {
                     var req = request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader)
                     req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
                     for _ in 0..<3 {
-                        guard let (data, resp) = try? await session.data(for: req) else { continue }
+                        if Task.isCancelled { return false }
+                        guard let (data, resp) = try? await session.data(for: req) else {
+                            if Task.isCancelled { return false }
+                            continue
+                        }
                         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                         if code == 206, !data.isEmpty {
                             try? await writer.write(data, at: start)
@@ -832,11 +911,6 @@ enum WebVideoDownloader {
         return dest
     }
 
-    nonisolated private static func createFile(_ url: URL) -> FileHandle? {
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        return try? FileHandle(forWritingTo: url)
-    }
-
     nonisolated private static func stampNow(_ url: URL) {
         let now = Date()
         try? FileManager.default.setAttributes([.creationDate: now, .modificationDate: now], ofItemAtPath: url.path)
@@ -970,14 +1044,21 @@ enum WebVideoDownloader {
 
 /// A one-shot download that reports real byte-progress (`didWriteData`) and hands back the temp
 /// file + response. Used for direct-file downloads so the browser's Downloads tab shows a true %.
+/// Cancelling the surrounding Swift Task cancels the URLSession transfer (they were previously
+/// unlinked — the network kept going after a "cancel"), banking resume data so a retry can pick up
+/// where it left off; a mid-transfer failure banks resume data the same way.
 private final class ProgressDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     private let onProgress: @Sendable (Double) -> Void
+    private let urlKey: String
     private var continuation: CheckedContinuation<(URL, URLResponse)?, Never>?
     private var session: URLSession!
+    private var task: URLSessionDownloadTask?
     private var lastReport = 0.0
+    private let lock = NSLock()          // continuation/task are touched from both the caller and delegate threads
 
-    init(onProgress: @escaping @Sendable (Double) -> Void) {
+    init(urlKey: String, onProgress: @escaping @Sendable (Double) -> Void) {
         self.onProgress = onProgress
+        self.urlKey = urlKey
         super.init()
         let cfg = URLSessionConfiguration.ephemeral
         cfg.httpShouldSetCookies = false            // our manual Cookie header is authoritative
@@ -986,10 +1067,29 @@ private final class ProgressDownloadDelegate: NSObject, URLSessionDownloadDelega
         session = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
     }
 
-    func run(_ req: URLRequest) async -> (URL, URLResponse)? {
-        await withCheckedContinuation { c in
-            continuation = c
-            session.downloadTask(with: req).resume()
+    /// Start from a request, or continue a partial transfer from banked resume data.
+    func run(_ req: URLRequest? = nil, resumeData: Data? = nil) async -> (URL, URLResponse)? {
+        guard !Task.isCancelled else { return nil }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (c: CheckedContinuation<(URL, URLResponse)?, Never>) in
+                lock.lock()
+                continuation = c
+                let t: URLSessionDownloadTask
+                if let resumeData { t = session.downloadTask(withResumeData: resumeData) }
+                else if let req { t = session.downloadTask(with: req) }
+                else { lock.unlock(); c.resume(returning: nil); return }
+                task = t
+                lock.unlock()
+                // Close the race where cancellation lands between the guard above and the
+                // handler installation — the handler may have fired while `task` was still nil.
+                if Task.isCancelled { t.cancel { _ in } } else { t.resume() }
+            }
+        } onCancel: {
+            lock.lock(); let t = task; lock.unlock()
+            let key = urlKey
+            t?.cancel { data in
+                if let data { Task { await ResumeDataStore.shared.put(data, for: key) } }
+            }
         }
     }
 
@@ -1007,11 +1107,112 @@ private final class ProgressDownloadDelegate: NSObject, URLSessionDownloadDelega
         catch { try? FileManager.default.copyItem(at: location, to: dst) }
         let resp = downloadTask.response ?? URLResponse()
         let result: (URL, URLResponse)? = FileManager.default.fileExists(atPath: dst.path) ? (dst, resp) : nil
-        continuation?.resume(returning: result); continuation = nil
+        lock.lock(); let c = continuation; continuation = nil; lock.unlock()
+        c?.resume(returning: result)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if error != nil { continuation?.resume(returning: nil); continuation = nil }
+        guard let error else { return }
+        // A dropped connection (or the cancel above) leaves resume data — bank it for a retry.
+        if let rd = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data {
+            let key = urlKey
+            Task { await ResumeDataStore.shared.put(rd, for: key) }
+        }
+        lock.lock(); let c = continuation; continuation = nil; lock.unlock()
+        c?.resume(returning: nil)
+    }
+}
+
+/// In-memory resume data for interrupted single-stream downloads, keyed by URL — a cancelled or
+/// dropped direct download picks up where it left off when retried (within this app session).
+/// Ranged and HLS downloads restart instead: range chunks already retry internally, and expired
+/// HLS segment URLs need a fresh playlist anyway.
+private actor ResumeDataStore {
+    static let shared = ResumeDataStore()
+    private var store: [String: Data] = [:]
+    func put(_ data: Data, for url: String) {
+        store[url] = data
+        if store.count > 20, let first = store.keys.first { store.removeValue(forKey: first) }  // crude cap
+    }
+    func take(_ url: String) -> Data? { store.removeValue(forKey: url) }
+}
+
+/// Streams HLS segments to the output file **in index order** while they download out of order, so
+/// a long video never sits in memory (the old approach held every decrypted segment in an array
+/// until the end — hundreds of MB for a long stream, an easy jetsam kill).
+///
+/// A download calls `admit(i)` before fetching segment `i`: it suspends while `i` is more than
+/// `window` segments ahead of the write cursor, bounding buffered data to ~window × segment size.
+/// `deliver(i,_:)` appends any now-contiguous run to disk and wakes eligible waiters. A segment
+/// that fails its per-request retries makes the caller `pause()` — every waiter is released (they
+/// return without fetching) so the task group can drain and the caller can refresh the playlist
+/// and retry just the missing indices; buffered later segments are kept and flush once the gap
+/// fills. `abort()` releases everyone, closes the handle, and deletes the temp file.
+private actor SegmentSink {
+    private let handle: FileHandle
+    private let fileURL: URL
+    private let window: Int
+    private var nextIndex = 0                       // next segment index to append
+    private var buffer: [Int: Data] = [:]           // finished segments waiting their turn
+    private var waiters: [(index: Int, cont: CheckedContinuation<Bool, Never>)] = []
+    private var released = false                    // pause()/abort(): admissions return false
+
+    init?(fileURL: URL, window: Int) {
+        FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+        guard let h = try? FileHandle(forWritingTo: fileURL) else { return nil }
+        self.handle = h; self.fileURL = fileURL; self.window = window
+    }
+
+    /// Prepend data (the fMP4 init segment) before any media segment is written.
+    func writeHead(_ data: Data) { try? handle.write(contentsOf: data) }
+
+    /// Returns false when the sink is paused/aborted — give up on this segment for the current
+    /// pass; it stays in the missing set and is retried next pass.
+    func admit(_ i: Int) async -> Bool {
+        while !released && i >= nextIndex + window {
+            let go = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+                waiters.append((i, c))
+            }
+            if !go { return false }
+        }
+        return !released
+    }
+
+    func deliver(_ i: Int, _ data: Data) {
+        guard i >= nextIndex, buffer[i] == nil else { return }
+        buffer[i] = data
+        while let d = buffer.removeValue(forKey: nextIndex) {
+            try? handle.write(contentsOf: d)
+            nextIndex += 1
+        }
+        wakeEligible()
+    }
+
+    /// Release every admission waiter (they see false) so the current pass can drain.
+    func pause() { released = true; wakeEligible() }
+    /// Re-arm admissions for a retry pass.
+    func resume() { released = false }
+
+    /// Indices neither on disk nor buffered — what a refresh pass must re-fetch.
+    func missing(total: Int) -> [Int] { (nextIndex..<total).filter { buffer[$0] == nil } }
+
+    func close() { try? handle.close() }
+
+    func abort() {
+        released = true; wakeEligible()
+        buffer.removeAll()
+        try? handle.close()
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+
+    private func wakeEligible() {
+        var keep: [(index: Int, cont: CheckedContinuation<Bool, Never>)] = []
+        for w in waiters {
+            if released { w.cont.resume(returning: false) }
+            else if w.index < nextIndex + window { w.cont.resume(returning: true) }
+            else { keep.append(w) }
+        }
+        waiters = keep
     }
 }
 

@@ -84,10 +84,23 @@ struct WebBrowserView: View {
         .onAppear {
             controller.onVideoLongPress = { found in pending = found }
             controller.onFileDownload = { file in pendingFile = file }
+            // Fires for every completed download, including retries started from the Downloads
+            // sheet — applies the page caption and invalidates the folder listing so new files
+            // show up without waiting for the browser to close.
+            controller.onAnyDownloadComplete = { entry in
+                guard entry.state == .done else { return }
+                if let c = entry.caption, let dest = entry.dest { library.setCaption(c, for: dest) }
+                if let f = entry.folder { library.contentDidChange(under: f) }
+            }
             if controller.currentURLString.isEmpty {
                 controller.load(WebController.lastSavedURL ?? "https://www.google.com")
             } else {
                 address = controller.currentURLString   // reflect the live URL when re-opening a session
+            }
+            // Re-attachment cue: coming back to the browser with downloads still running.
+            if controller.activeDownloads > 0 {
+                let n = controller.activeDownloads
+                showToast("\(n) download\(n == 1 ? "" : "s") still running — tap ⬇ for progress", error: false)
             }
         }
         // Keep the controller + WKWebView alive across dismissals (that's what preserves the
@@ -196,28 +209,27 @@ struct WebBrowserView: View {
     }
 
     private func startDownload(_ v: WebController.FoundVideo, into folder: URL) {
-        showDownloads = true            // surface the Downloads tab so its real progress is visible
+        // No auto-open of the Downloads sheet (it used to cover the page) — the toast + the
+        // badged ⬇ button confirm it started, matching file downloads. Captions and the folder
+        // refresh happen in `onAnyDownloadComplete`.
+        showToast("Downloading — tap ⬇ for progress", error: false)
         controller.startDownload(v, into: folder, suggestedName: controller.pageTitle) { entry in
-            if entry.state == .done {
-                if let c = entry.caption, let dest = entry.dest { library.setCaption(c, for: dest) }
-                library.contentDidChange(under: folder)
+            switch entry.state {
+            case .done: showToast("Saved to “\(folder.lastPathComponent)”", error: false)
+            case .failed: showToast(entry.message ?? "Download failed", error: true)
+            default: break
             }
         }
     }
 
     private func startFileDownload(_ f: WebController.PendingFile, into folder: URL) {
-        // No auto-open of the Downloads sheet: a quick banner confirms the result and fades. Progress
-        // is still reachable via the toolbar's Downloads button (it badges active downloads).
+        // A quick banner confirms the result and fades. Progress is still reachable via the
+        // toolbar's Downloads button (it badges active downloads).
         controller.startFileDownload(f, into: folder) { entry in
             switch entry.state {
-            case .done:
-                if let c = entry.caption, let dest = entry.dest { library.setCaption(c, for: dest) }
-                library.contentDidChange(under: folder)
-                showToast("Saved to “\(folder.lastPathComponent)”", error: false)
-            case .failed:
-                showToast(entry.message ?? "Download failed", error: true)
-            case .downloading:
-                break
+            case .done: showToast("Saved to “\(folder.lastPathComponent)”", error: false)
+            case .failed: showToast(entry.message ?? "Download failed", error: true)
+            default: break
             }
         }
     }
@@ -352,53 +364,121 @@ private struct BookmarksSheet: View {
     }
 }
 
-/// The Downloads tab: live rows with a real progress bar + % for each video the browser is saving.
+/// The Downloads tab: live rows with a real progress bar + % for each item the browser is saving
+/// (with per-row cancel and retry), plus the persisted history from earlier sessions.
 private struct DownloadsSheet: View {
     @ObservedObject var controller: WebController
     @Environment(\.dismiss) private var dismiss
+    @State private var history: [WebDownloadRecord] = []
 
     var body: some View {
         NavigationStack {
             Group {
-                if controller.downloads.isEmpty {
+                if controller.downloads.isEmpty && earlier.isEmpty {
                     ContentUnavailableView("No downloads yet", systemImage: "arrow.down.circle",
                                            description: Text("Long-press a video or file link — or tap a site's download button. Progress shows here."))
                 } else {
                     List {
-                        ForEach(controller.downloads) { d in
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack {
-                                    Image(systemName: icon(d.state)).foregroundStyle(color(d.state))
-                                    Text(d.name).lineLimit(1).font(.callout.weight(.medium))
-                                    Spacer()
-                                    if d.state == .downloading { Text("\(Int(d.progress * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
-                                }
-                                if d.state == .downloading {
-                                    ProgressView(value: d.progress).tint(.accentColor)
-                                    Text(d.phase).font(.caption2).foregroundStyle(.secondary)
-                                } else if d.state == .failed {
-                                    Text(d.message ?? "Download failed.").font(.caption2).foregroundStyle(.orange)
-                                } else {
-                                    Text((d.message?.isEmpty == false) ? "Saved · \(d.message!)" : "Saved")
-                                        .font(.caption2).foregroundStyle(.green)
-                                }
-                                Text(d.urlString).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        if !controller.downloads.isEmpty {
+                            Section("This Session") {
+                                ForEach(controller.downloads) { d in liveRow(d) }
                             }
-                            .padding(.vertical, 2)
+                        }
+                        if !earlier.isEmpty {
+                            Section("Earlier") {
+                                ForEach(earlier) { r in historyRow(r) }
+                            }
                         }
                     }
                 }
             }
             .navigationTitle("Downloads")
             .navigationBarTitleDisplayMode(.inline)
+            // Reload whenever the live list changes shape — finishing rows append to history,
+            // retries remove their superseded record.
+            .task(id: controller.downloads.count) { history = await WebDownloadHistory.shared.all() }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
                 ToolbarItem(placement: .topBarTrailing) {
-                    if controller.downloads.contains(where: { $0.state != .downloading }) {
-                        Button("Clear") { controller.clearFinishedDownloads() }
+                    if controller.downloads.contains(where: { $0.state != .downloading }) || !earlier.isEmpty {
+                        Menu("Clear") {
+                            Button("Clear Finished") { controller.clearFinishedDownloads() }
+                            Button("Clear History", role: .destructive) {
+                                history = []
+                                Task { await WebDownloadHistory.shared.clear() }
+                            }
+                        }
                     }
                 }
             }
+        }
+    }
+
+    /// History minus anything currently shown live (a just-finished row is in both).
+    private var earlier: [WebDownloadRecord] {
+        history.filter { r in !controller.downloads.contains { $0.id == r.id } }
+    }
+
+    private func liveRow(_ d: WebController.DownloadEntry) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: icon(d.state)).foregroundStyle(color(d.state))
+                Text(d.name).lineLimit(1).font(.callout.weight(.medium))
+                Spacer()
+                if d.state == .downloading {
+                    Text("\(Int(d.progress * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    Button { controller.cancelDownload(d.id) } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Cancel download")
+                } else if d.state == .failed || d.state == .cancelled {
+                    Button("Retry") { controller.retryDownload(d.id) }
+                        .font(.caption.weight(.semibold)).buttonStyle(.bordered).controlSize(.mini)
+                }
+            }
+            if d.state == .downloading {
+                ProgressView(value: d.progress).tint(.accentColor)
+                Text(d.phase).font(.caption2).foregroundStyle(.secondary)
+            } else if d.state == .failed {
+                Text(d.message ?? "Download failed.").font(.caption2).foregroundStyle(.orange)
+            } else if d.state == .cancelled {
+                Text("Cancelled").font(.caption2).foregroundStyle(.secondary)
+            } else {
+                Text((d.message?.isEmpty == false) ? "Saved · \(d.message!)" : "Saved")
+                    .font(.caption2).foregroundStyle(.green)
+            }
+            Text(d.urlString).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func historyRow(_ r: WebDownloadRecord) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: recordIcon(r.status)).foregroundStyle(recordColor(r.status))
+                Text(r.name).lineLimit(1).font(.callout.weight(.medium))
+                Spacer()
+                if r.status != .done {
+                    Button("Retry") { controller.retry(record: r) }
+                        .font(.caption.weight(.semibold)).buttonStyle(.bordered).controlSize(.mini)
+                }
+            }
+            HStack(spacing: 6) {
+                Text(r.status == .done ? "Saved" : r.status == .cancelled ? "Cancelled" : (r.note ?? "Failed"))
+                    .font(.caption2).foregroundStyle(recordColor(r.status)).lineLimit(1)
+                Spacer()
+                Text(r.date, format: .dateTime.month().day().hour().minute())
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            Text(r.urlString).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+        }
+        .padding(.vertical, 2)
+        .swipeActions {
+            Button(role: .destructive) {
+                history.removeAll { $0.id == r.id }
+                Task { await WebDownloadHistory.shared.remove(id: r.id) }
+            } label: { Label("Delete", systemImage: "trash") }
         }
     }
 
@@ -407,6 +487,7 @@ private struct DownloadsSheet: View {
         case .downloading: return "arrow.down.circle"
         case .done: return "checkmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
+        case .cancelled: return "xmark.circle"
         }
     }
     private func color(_ s: WebController.DownloadEntry.State) -> Color {
@@ -414,6 +495,21 @@ private struct DownloadsSheet: View {
         case .downloading: return .accentColor
         case .done: return .green
         case .failed: return .orange
+        case .cancelled: return .secondary
+        }
+    }
+    private func recordIcon(_ s: WebDownloadRecord.Status) -> String {
+        switch s {
+        case .done: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .cancelled: return "xmark.circle"
+        }
+    }
+    private func recordColor(_ s: WebDownloadRecord.Status) -> Color {
+        switch s {
+        case .done: return .green
+        case .failed: return .orange
+        case .cancelled: return .secondary
         }
     }
 }
@@ -437,18 +533,27 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     /// response the web view can't render inline (a `Content-Disposition: attachment`).
     struct PendingFile: Identifiable { let id = UUID(); let url: String; let pageURL: String; let filename: String? }
 
-    /// One row in the Downloads tab.
+    /// One row in the Downloads tab. Carries everything needed to re-run itself (kind, page,
+    /// destination folder, scraped date/caption) so failed/cancelled rows — and history records
+    /// from earlier sessions — can be retried through the same path.
     struct DownloadEntry: Identifiable {
-        enum State { case downloading, done, failed }
+        enum State { case downloading, done, failed, cancelled }
+        enum Kind { case video, file }
         let id = UUID()
         var name: String
         var urlString: String
+        var pageURL: String = ""
+        var kind: Kind = .video
+        var folder: URL?
+        var suggestedName: String?
         var progress: Double = 0
         var phase: String = "Starting…"
         var state: State = .downloading
         var dest: URL?
         var message: String?
         var caption: String?          // page-provided caption to apply to the saved file
+        var captureDate: Date?        // page-provided date to stamp into the saved file
+        var date = Date()
     }
 
     @Published var currentURLString = ""
@@ -462,9 +567,16 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     var activeDownloads: Int { downloads.filter { $0.state == .downloading }.count }
 
+    /// The running Task per download row, so a row's ✕ can actually cancel the transfer.
+    private var downloadTasks: [UUID: Task<Void, Never>] = [:]
+
     var onVideoLongPress: ((FoundVideo) -> Void)?
     /// Fired when a downloadable file is discovered (long-pressed link or an attachment response).
     var onFileDownload: ((PendingFile) -> Void)?
+    /// Fired on EVERY download completion (including retries started from the Downloads sheet,
+    /// which have no per-call closure) — the browser view uses it to apply the caption and refresh
+    /// the folder listing.
+    var onAnyDownloadComplete: ((DownloadEntry) -> Void)?
 
     /// App-lifetime instance so the WKWebView and its navigation history persist across the browser
     /// being dismissed and re-opened (folder → back to browser keeps your back button working).
@@ -675,73 +787,115 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     // MARK: Downloads
 
     /// Starts a download, tracking it in `downloads` with real progress; `onComplete` fires on the
-    /// main actor when it finishes (so the view can refresh the folder).
+    /// main actor when it finishes (so the view can toast the result).
     func startDownload(_ v: FoundVideo, into folder: URL, suggestedName: String?,
                        onComplete: @escaping (DownloadEntry) -> Void) {
         let name = (suggestedName.flatMap { $0.isEmpty ? nil : $0 }) ?? URL(string: v.url)?.lastPathComponent ?? "video"
-        let entry = DownloadEntry(name: name, urlString: v.url)
-        downloads.insert(entry, at: 0)
-        let id = entry.id
-        let urlString = v.url, pageURL = v.pageURL, sName = suggestedName
-        Task {
-            let cookie = await cookieHeader(forURLString: urlString)
-            let info = await self.pageMediaInfo()         // read while the page is still loaded
-            self.update(id) { $0.caption = info.caption }
-            func run() async -> WebVideoDownloader.Outcome {
-                await WebVideoDownloader.download(
-                    urlString: urlString, pageURL: pageURL, cookieHeader: cookie, into: folder,
-                    suggestedName: sName, authHeader: self.authHeader(forURLString: urlString),
-                    captureDate: info.date, caption: info.caption) { p in
-                        Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
-                    }
-            }
-            var outcome = await run()
-            if case .authRequired(let host) = outcome, await self.promptSignIn(host: host) {
-                self.update(id) { $0.phase = "Signing in…" }
-                outcome = await run()
-            }
-            self.finish(id, outcome)
-            if let done = self.downloads.first(where: { $0.id == id }) { onComplete(done) }
-        }
-    }
-
-    /// Map a download outcome onto its Downloads-tab row.
-    private func finish(_ id: UUID, _ outcome: WebVideoDownloader.Outcome) {
-        update(id) { e in
-            switch outcome {
-            case .saved(let u, let note): e.state = .done; e.progress = 1; e.dest = u; e.phase = "Saved"; e.message = note ?? ""
-            case .failed(let m): e.state = .failed; e.message = m; e.phase = "Failed"
-            case .authRequired: e.state = .failed; e.message = "This download needs a members login."; e.phase = "Failed"
-            }
-        }
+        var entry = DownloadEntry(name: name, urlString: v.url)
+        entry.pageURL = v.pageURL; entry.kind = .video; entry.folder = folder; entry.suggestedName = suggestedName
+        run(entry, readPageInfo: true, onComplete: onComplete)
     }
 
     /// Starts a plain file download (zip, pdf, image, …), tracked in `downloads` like a video.
     func startFileDownload(_ f: PendingFile, into folder: URL, onComplete: @escaping (DownloadEntry) -> Void) {
         let name = (f.filename.flatMap { $0.isEmpty ? nil : $0 }) ?? URL(string: f.url)?.lastPathComponent ?? "file"
-        let entry = DownloadEntry(name: name, urlString: f.url)
+        var entry = DownloadEntry(name: name, urlString: f.url)
+        entry.pageURL = f.pageURL; entry.kind = .file; entry.folder = folder; entry.suggestedName = f.filename
+        run(entry, readPageInfo: true, onComplete: onComplete)
+    }
+
+    /// Cancel a running download. The engine's cancellation checks surface as a `.cancelled`
+    /// outcome, which flips the row (and banks resume data for direct files, so Retry continues
+    /// where it stopped).
+    func cancelDownload(_ id: UUID) {
+        downloadTasks[id]?.cancel()
+        update(id) { if $0.state == .downloading { $0.phase = "Cancelling…" } }
+    }
+
+    /// Re-run a failed/cancelled row through the normal path, reusing its stored page date/caption
+    /// (the original page may no longer be loaded).
+    func retryDownload(_ id: UUID) {
+        guard let e = downloads.first(where: { $0.id == id }), e.state == .failed || e.state == .cancelled,
+              e.folder != nil else { return }
+        downloads.removeAll { $0.id == id }
+        Task { await WebDownloadHistory.shared.remove(id: e.id) }   // superseded by the new attempt
+        var entry = DownloadEntry(name: e.name, urlString: e.urlString)
+        entry.pageURL = e.pageURL; entry.kind = e.kind; entry.folder = e.folder
+        entry.suggestedName = e.suggestedName; entry.caption = e.caption; entry.captureDate = e.captureDate
+        run(entry, readPageInfo: false)
+    }
+
+    /// Retry a history record from an earlier session.
+    func retry(record: WebDownloadRecord) {
+        Task { await WebDownloadHistory.shared.remove(id: record.id) }   // superseded by the new attempt
+        var entry = DownloadEntry(name: record.name, urlString: record.urlString)
+        entry.pageURL = record.pageURL
+        entry.kind = record.kind == .video ? .video : .file
+        entry.folder = URL(fileURLWithPath: record.folderPath)
+        entry.suggestedName = record.suggestedName; entry.caption = record.caption; entry.captureDate = record.captureDate
+        run(entry, readPageInfo: false)
+    }
+
+    /// Runs one download to completion, tracking it in `downloads`. `readPageInfo` scrapes the
+    /// live page for a date/caption (first attempts only — retries reuse the entry's stored values).
+    private func run(_ entry: DownloadEntry, readPageInfo: Bool, onComplete: ((DownloadEntry) -> Void)? = nil) {
+        guard let folder = entry.folder else { return }
         downloads.insert(entry, at: 0)
         let id = entry.id
-        let urlString = f.url, pageURL = f.pageURL, fname = f.filename
-        Task {
-            let cookie = await cookieHeader(forURLString: urlString)
-            let info = await self.pageMediaInfo()         // read while the page is still loaded
-            self.update(id) { $0.caption = info.caption }
-            func run() async -> WebVideoDownloader.Outcome {
-                await WebVideoDownloader.downloadFile(
-                    urlString: urlString, pageURL: pageURL, cookieHeader: cookie,
-                    authHeader: self.authHeader(forURLString: urlString), into: folder, suggestedName: fname,
-                    captureDate: info.date, caption: info.caption) { p in
-                        Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
-                    }
+        let urlString = entry.urlString, pageURL = entry.pageURL, sName = entry.suggestedName, kind = entry.kind
+        let task = Task {
+            var date = entry.captureDate, caption = entry.caption
+            if readPageInfo {
+                let info = await self.pageMediaInfo()         // read while the page is still loaded
+                date = info.date; caption = info.caption
+                self.update(id) { $0.caption = info.caption; $0.captureDate = info.date }
             }
-            var outcome = await run()
-            if case .authRequired(let host) = outcome, await self.promptSignIn(host: host) {
+            let cookie = await cookieHeader(forURLString: urlString)
+            func runOnce() async -> WebVideoDownloader.Outcome {
+                let auth = self.authHeader(forURLString: urlString)
+                let prog: @Sendable (WebVideoDownloader.Progress) -> Void = { p in
+                    Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
+                }
+                if kind == .video {
+                    return await WebVideoDownloader.download(
+                        urlString: urlString, pageURL: pageURL, cookieHeader: cookie, into: folder,
+                        suggestedName: sName, authHeader: auth,
+                        captureDate: date, caption: caption, progress: prog)
+                } else {
+                    return await WebVideoDownloader.downloadFile(
+                        urlString: urlString, pageURL: pageURL, cookieHeader: cookie,
+                        authHeader: auth, into: folder, suggestedName: sName,
+                        captureDate: date, caption: caption, progress: prog)
+                }
+            }
+            var outcome = await runOnce()
+            if case .authRequired(let host) = outcome, !Task.isCancelled, await self.promptSignIn(host: host) {
                 self.update(id) { $0.phase = "Signing in…" }
-                outcome = await run()
+                outcome = await runOnce()
             }
             self.finish(id, outcome)
-            if let done = self.downloads.first(where: { $0.id == id }) { onComplete(done) }
+            if let done = self.downloads.first(where: { $0.id == id }) {
+                onComplete?(done)
+                self.onAnyDownloadComplete?(done)
+            }
+        }
+        downloadTasks[id] = task
+    }
+
+    /// Map a download outcome onto its Downloads-tab row, and persist it to history.
+    private func finish(_ id: UUID, _ outcome: WebVideoDownloader.Outcome) {
+        downloadTasks[id] = nil
+        update(id) { e in
+            switch outcome {
+            case .saved(let u, let note): e.state = .done; e.progress = 1; e.dest = u; e.phase = "Saved"; e.message = note ?? ""
+            case .failed(let m): e.state = .failed; e.message = m; e.phase = "Failed"
+            case .authRequired: e.state = .failed; e.message = "This download needs a members login."; e.phase = "Failed"
+            case .cancelled: e.state = .cancelled; e.message = nil; e.phase = "Cancelled"
+            }
+        }
+        if let e = downloads.first(where: { $0.id == id }) {
+            let record = WebDownloadRecord(entry: e)
+            Task.detached(priority: .utility) { await WebDownloadHistory.shared.append(record) }
         }
     }
 
@@ -1114,5 +1268,42 @@ private final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     init(_ target: WKScriptMessageHandler) { self.target = target }
     func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
         target?.userContentController(ucc, didReceive: message)
+    }
+}
+
+extension WebDownloadRecord {
+    /// Snapshot a finished Downloads-tab row for the persistent history.
+    init(entry: WebController.DownloadEntry) {
+        self.init(id: entry.id, name: entry.name, urlString: entry.urlString, pageURL: entry.pageURL,
+                  destPath: entry.dest?.path, folderPath: entry.folder?.path ?? "",
+                  suggestedName: entry.suggestedName, caption: entry.caption, captureDate: entry.captureDate,
+                  kind: entry.kind == .video ? .video : .file,
+                  status: entry.state == .done ? .done : (entry.state == .cancelled ? .cancelled : .failed),
+                  note: entry.message, date: entry.date)
+    }
+}
+
+/// Small floating pill shown over the folder grid while browser downloads run — keeps progress
+/// visible after the browser is dismissed, and is a one-tap way back in. Deliberately its own view
+/// holding the `@ObservedObject`: only the chip re-renders on WebController's frequent publishes,
+/// never FolderView's heavy body.
+struct WebDownloadsChip: View {
+    @ObservedObject private var controller = WebController.shared
+    var open: () -> Void
+
+    var body: some View {
+        if controller.activeDownloads > 0 {
+            Button(action: open) {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small).tint(.white)
+                    Text("\(controller.activeDownloads) downloading…")
+                        .font(.caption.weight(.semibold))
+                }
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.12)))
+            }
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
     }
 }
