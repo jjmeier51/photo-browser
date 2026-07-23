@@ -39,6 +39,8 @@ struct WebBrowserView: View {
     // the Downloads sheet — it just confirms and fades).
     @State private var toastText: String?
     @State private var toastIsError = false
+    /// Once the user has downloaded anything, the bottom-bar how-to line retires for good.
+    @AppStorage("photoBrowser.webHintSeen") private var webHintSeen = false
 
     var body: some View {
         NavigationStack {
@@ -49,8 +51,25 @@ struct WebBrowserView: View {
                         .progressViewStyle(.linear).tint(.accentColor)
                         .frame(height: 2)
                 }
-                WebViewContainer(controller: controller)
-                    .ignoresSafeArea(edges: .bottom)
+                ZStack {
+                    WebViewContainer(controller: controller)
+                        .ignoresSafeArea(edges: .bottom)
+                    // Chrome-style error page instead of silently showing the previous page.
+                    if let err = controller.loadError {
+                        VStack(spacing: 10) {
+                            Image(systemName: "wifi.exclamationmark")
+                                .font(.largeTitle).foregroundStyle(.secondary)
+                            Text("Couldn’t load the page").font(.headline)
+                            Text(err).font(.caption).foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center).padding(.horizontal, 32)
+                            Button("Try Again") { controller.reload() }
+                                .buttonStyle(.borderedProminent)
+                                .padding(.top, 4)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(.regularMaterial)
+                    }
+                }
                 bottomBar
             }
             .overlay(alignment: .top) { downloadToast }
@@ -145,14 +164,24 @@ struct WebBrowserView: View {
     // Star + refresh sit 10% above the bar's `.callout` (~16pt) body font.
     private static let barControlFont = Font.system(size: 17.6)
 
+    /// The bare domain for the unfocused address bar ("example.com"), or nil while editing / before
+    /// any page has loaded (nil → the field shows its own text/placeholder, left-aligned).
+    private var compactAddress: String? {
+        guard !editingAddress, let host = URL(string: controller.currentURLString)?.host, !host.isEmpty else { return nil }
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+
     private var addressBar: some View {
         HStack(spacing: 8) {
             Image(systemName: controller.currentURLString.hasPrefix("https") ? "lock.fill" : "globe")
                 .font(.caption).foregroundStyle(.secondary)
             // UIKit-backed so tapping the bar selects the whole URL (and raises the keyboard),
-            // letting a new address replace the old one in a single keystroke.
+            // letting a new address replace the old one in a single keystroke. Unfocused it shows
+            // just the domain, centered — Safari's compact address bar.
             AddressField(text: $address,
+                         display: compactAddress,
                          onBeginEditing: { editingAddress = true },
+                         onEndEditing: { editingAddress = false },
                          onSubmit: { controller.load(address); editingAddress = false })
                 .frame(height: 22)   // a UIViewRepresentable has no intrinsic height; pin it so the
                                      // bar doesn't stretch to fill the screen
@@ -178,13 +207,38 @@ struct WebBrowserView: View {
 
     private var bottomBar: some View {
         VStack(spacing: 4) {
-            Text(controller.hasVideo ? "Video detected — long-press it, or tap ⬇︎ to download"
-                                     : "Long-press a video, image, or file link to download it")
-                .font(.caption2).foregroundStyle(controller.hasVideo ? .green : .secondary)
+            // The gray how-to line retires after the first download ever; the green "video
+            // detected" line stays (it's live state, not instruction).
+            if controller.hasVideo {
+                Text("Video detected — long-press it, or tap ⬇︎ to download")
+                    .font(.caption2).foregroundStyle(.green)
+            } else if !webHintSeen {
+                Text("Long-press a video, image, or file link to download it")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             HStack {
-                Button { controller.goBack() } label: { Image(systemName: "chevron.left") }.disabled(!controller.canGoBack)
+                // Tap = back/forward; touch-and-hold = the recent-pages list, like Safari.
+                Menu {
+                    ForEach(controller.backStack(), id: \.self) { item in
+                        Button { controller.go(to: item) } label: { Text(historyLabel(item)) }
+                    }
+                } label: {
+                    Image(systemName: "chevron.left")
+                } primaryAction: {
+                    controller.goBack()
+                }
+                .disabled(!controller.canGoBack)
                 Spacer()
-                Button { controller.goForward() } label: { Image(systemName: "chevron.right") }.disabled(!controller.canGoForward)
+                Menu {
+                    ForEach(controller.forwardStack(), id: \.self) { item in
+                        Button { controller.go(to: item) } label: { Text(historyLabel(item)) }
+                    }
+                } label: {
+                    Image(systemName: "chevron.right")
+                } primaryAction: {
+                    controller.goForward()
+                }
+                .disabled(!controller.canGoForward)
                 Spacer()
                 if controller.hasVideo, let v = controller.bestVideo() {
                     Button { pending = v } label: { Image(systemName: "arrow.down.circle.fill").foregroundStyle(.green) }
@@ -193,13 +247,34 @@ struct WebBrowserView: View {
                 }
                 Spacer()
                 Menu {
-                    Button { controller.load("https://www.google.com") } label: { Label("Home", systemImage: "house") }
-                    Button { controller.toggleBookmark() } label: {
-                        Label(controller.isCurrentBookmarked ? "Remove Bookmark" : "Add Bookmark",
-                              systemImage: controller.isCurrentBookmarked ? "star.slash" : "star")
-                    }.disabled(!controller.hasSession)
-                    Button { showBookmarks = true } label: { Label("Bookmarks", systemImage: "book") }
-                    Button { UIPasteboard.general.string = controller.currentURLString } label: { Label("Copy Page Link", systemImage: "doc.on.doc") }
+                    Section {
+                        if controller.hasSession, let u = URL(string: controller.currentURLString) {
+                            ShareLink(item: u) { Label("Share…", systemImage: "square.and.arrow.up") }
+                        }
+                        Button { UIPasteboard.general.string = controller.currentURLString } label: {
+                            Label("Copy Page Link", systemImage: "doc.on.doc")
+                        }.disabled(!controller.hasSession)
+                        Button { controller.findInPage() } label: {
+                            Label("Find on Page…", systemImage: "magnifyingglass")
+                        }.disabled(!controller.hasSession)
+                        Button { controller.toggleDesktopSite() } label: {
+                            Label(controller.isDesktopSite ? "Request Mobile Website" : "Request Desktop Website",
+                                  systemImage: controller.isDesktopSite ? "iphone" : "desktopcomputer")
+                        }.disabled(!controller.hasSession)
+                        Button { controller.openInSafari() } label: {
+                            Label("Open in Safari", systemImage: "safari")
+                        }.disabled(!controller.hasSession)
+                    }
+                    Section {
+                        Button { controller.toggleBookmark() } label: {
+                            Label(controller.isCurrentBookmarked ? "Remove Bookmark" : "Add Bookmark",
+                                  systemImage: controller.isCurrentBookmarked ? "star.slash" : "star")
+                        }.disabled(!controller.hasSession)
+                        Button { showBookmarks = true } label: { Label("Bookmarks & History", systemImage: "book") }
+                    }
+                    Section {
+                        Button { controller.load("https://www.google.com") } label: { Label("Home", systemImage: "house") }
+                    }
                 } label: { Image(systemName: "ellipsis.circle") }
             }
             .font(.title3)
@@ -208,10 +283,17 @@ struct WebBrowserView: View {
         .background(.ultraThinMaterial)
     }
 
+    /// Menu label for a back/forward-list entry: its title, else its host.
+    private func historyLabel(_ item: WKBackForwardListItem) -> String {
+        if let t = item.title, !t.isEmpty { return t }
+        return item.url.host ?? item.url.absoluteString
+    }
+
     private func startDownload(_ v: WebController.FoundVideo, into folder: URL) {
         // No auto-open of the Downloads sheet (it used to cover the page) — the toast + the
         // badged ⬇ button confirm it started, matching file downloads. Captions and the folder
         // refresh happen in `onAnyDownloadComplete`.
+        webHintSeen = true
         showToast("Downloading — tap ⬇ for progress", error: false)
         controller.startDownload(v, into: folder, suggestedName: controller.pageTitle) { entry in
             switch entry.state {
@@ -225,6 +307,7 @@ struct WebBrowserView: View {
     private func startFileDownload(_ f: WebController.PendingFile, into folder: URL) {
         // A quick banner confirms the result and fades. Progress is still reachable via the
         // toolbar's Downloads button (it badges active downloads).
+        webHintSeen = true
         controller.startFileDownload(f, into: folder) { entry in
             switch entry.state {
             case .done: showToast("Saved to “\(folder.lastPathComponent)”", error: false)
@@ -268,7 +351,11 @@ struct WebBrowserView: View {
 /// the keyboard automatically (becoming first responder is what a tap already does).
 private struct AddressField: UIViewRepresentable {
     @Binding var text: String
+    /// Safari-style compact display: when set (and the field isn't focused), show this — the bare
+    /// domain, centered — instead of the full URL. Focusing swaps the full URL back in, selected.
+    var display: String?
     var onBeginEditing: () -> Void
+    var onEndEditing: () -> Void
     var onSubmit: () -> Void
 
     func makeUIView(context: Context) -> UITextField {
@@ -293,7 +380,11 @@ private struct AddressField: UIViewRepresentable {
     func updateUIView(_ tf: UITextField, context: Context) {
         context.coordinator.parent = self          // keep the closures fresh across body rebuilds
         // Don't clobber what the user is typing; only mirror external URL changes.
-        if !tf.isFirstResponder, tf.text != text { tf.text = text }
+        if !tf.isFirstResponder {
+            let shown = display ?? text
+            if tf.text != shown { tf.text = shown }
+            tf.textAlignment = display != nil ? .center : .natural
+        }
     }
 
     /// Claim only the width we're offered — otherwise SwiftUI uses the field's intrinsic width (the
@@ -313,7 +404,13 @@ private struct AddressField: UIViewRepresentable {
 
         func textFieldDidBeginEditing(_ tf: UITextField) {
             parent.onBeginEditing()
+            tf.text = parent.text                            // swap the compact domain for the full URL
+            tf.textAlignment = .natural
             DispatchQueue.main.async { tf.selectAll(nil) }   // highlight the whole URL
+        }
+
+        func textFieldDidEndEditing(_ tf: UITextField) {
+            parent.onEndEditing()                            // drop back to the compact display
         }
 
         func textFieldShouldReturn(_ tf: UITextField) -> Bool {
@@ -324,41 +421,85 @@ private struct AddressField: UIViewRepresentable {
     }
 }
 
-/// Saved sites. Tap a row to open it (and dismiss); swipe to delete.
+/// Saved sites + visited pages, Safari-style: a segmented switch between Bookmarks and History.
+/// Tap a row to open it (and dismiss); swipe to delete.
 private struct BookmarksSheet: View {
     @ObservedObject var controller: WebController
     let onOpen: (String) -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var showingHistory = false
 
     var body: some View {
         NavigationStack {
-            Group {
-                if controller.bookmarks.isEmpty {
-                    ContentUnavailableView("No Bookmarks", systemImage: "star",
-                                           description: Text("Tap the ☆ in the address bar to save the current site."))
-                } else {
-                    List {
-                        ForEach(controller.bookmarks) { b in
-                            Button { onOpen(b.url); dismiss() } label: {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(b.title.isEmpty ? b.url : b.title)
-                                        .font(.callout.weight(.medium)).foregroundStyle(.primary).lineLimit(1)
-                                    Text(b.url).font(.caption2).foregroundStyle(.secondary)
-                                        .lineLimit(1).truncationMode(.middle)
-                                }
-                            }
-                        }
-                        .onDelete { controller.removeBookmarks(at: $0) }
-                    }
+            VStack(spacing: 0) {
+                Picker("", selection: $showingHistory) {
+                    Text("Bookmarks").tag(false)
+                    Text("History").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16).padding(.bottom, 6)
+                Group {
+                    if showingHistory { historyList } else { bookmarkList }
                 }
             }
-            .navigationTitle("Bookmarks")
+            .navigationTitle(showingHistory ? "History" : "Bookmarks")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
-                if !controller.bookmarks.isEmpty {
-                    ToolbarItem(placement: .topBarTrailing) { EditButton() }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if showingHistory {
+                        if !controller.history.isEmpty {
+                            Button("Clear", role: .destructive) { controller.clearHistory() }
+                        }
+                    } else if !controller.bookmarks.isEmpty {
+                        EditButton()
+                    }
                 }
+            }
+        }
+    }
+
+    @ViewBuilder private var bookmarkList: some View {
+        if controller.bookmarks.isEmpty {
+            ContentUnavailableView("No Bookmarks", systemImage: "star",
+                                   description: Text("Tap the ☆ in the address bar to save the current site."))
+        } else {
+            List {
+                ForEach(controller.bookmarks) { b in
+                    row(title: b.title.isEmpty ? b.url : b.title, url: b.url)
+                }
+                .onDelete { controller.removeBookmarks(at: $0) }
+            }
+        }
+    }
+
+    @ViewBuilder private var historyList: some View {
+        if controller.history.isEmpty {
+            ContentUnavailableView("No History", systemImage: "clock.arrow.circlepath",
+                                   description: Text("Pages you visit show up here."))
+        } else {
+            List {
+                ForEach(controller.history) { h in
+                    row(title: h.title.isEmpty ? h.url : h.title, url: h.url, date: h.date)
+                }
+                .onDelete { controller.removeHistory(at: $0) }
+            }
+        }
+    }
+
+    private func row(title: String, url: String, date: Date? = nil) -> some View {
+        Button { onOpen(url); dismiss() } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text(title).font(.callout.weight(.medium)).foregroundStyle(.primary).lineLimit(1)
+                    if let date {
+                        Spacer()
+                        Text(date, format: .relative(presentation: .named))
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                Text(url).font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
             }
         }
     }
@@ -564,6 +705,10 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     @Published var isLoading = false
     @Published var hasVideo = false
     @Published var downloads: [DownloadEntry] = []
+    /// Human message for a failed page load — drives the "Couldn't load the page" overlay.
+    @Published var loadError: String?
+    /// True while the page is rendered with a desktop UA ("Request Desktop Website").
+    @Published var isDesktopSite = false
 
     var activeDownloads: Int { downloads.filter { $0.state == .downloading }.count }
 
@@ -588,6 +733,13 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     /// Reused + pre-warmed so the long-press haptic doesn't cold-start the Taptic Engine (a hitch).
     private let haptic = UINotificationFeedbackGenerator()
+
+    /// Safari-style pull-to-refresh on the page.
+    private let refreshControl = UIRefreshControl()
+
+    /// Desktop-Safari UA for "Request Desktop Website". Only affects page rendering — downloads
+    /// always send `WebVideoDownloader.userAgent` themselves.
+    private static let desktopUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 
     /// The last page visited, so re-opening the browser resumes where you left off.
     static var lastSavedURL: String? {
@@ -629,6 +781,42 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     func removeBookmarks(at offsets: IndexSet) {
         bookmarks.remove(atOffsets: offsets)
         saveBookmarks()
+    }
+
+    // MARK: - History (visited pages, persisted like bookmarks)
+
+    struct HistoryEntry: Identifiable, Codable, Equatable { var id = UUID(); var title: String; var url: String; var date: Date }
+
+    @Published var history: [HistoryEntry] = WebController.loadHistory()
+
+    private static let historyKey = "photoBrowser.webHistory"
+    private static func loadHistory() -> [HistoryEntry] {
+        guard let data = UserDefaults.standard.data(forKey: historyKey),
+              let list = try? JSONDecoder().decode([HistoryEntry].self, from: data) else { return [] }
+        return list
+    }
+    private func saveHistory() {
+        if let data = try? JSONEncoder().encode(history) { UserDefaults.standard.set(data, forKey: Self.historyKey) }
+    }
+
+    /// Record the finished page (called from `didFinish`; the title KVO back-fills late titles).
+    private func recordHistory() {
+        let u = currentURLString
+        guard u.hasPrefix("http") else { return }
+        if let first = history.first, first.url == u { return }   // reloads don't duplicate
+        history.insert(HistoryEntry(title: pageTitle.isEmpty ? u : pageTitle, url: u, date: Date()), at: 0)
+        if history.count > 150 { history.removeLast(history.count - 150) }
+        saveHistory()
+    }
+
+    func removeHistory(at offsets: IndexSet) {
+        history.remove(atOffsets: offsets)
+        saveHistory()
+    }
+
+    func clearHistory() {
+        history = []
+        saveHistory()
     }
 
     /// Media URLs the page has requested (direct files + `.m3u8`), newest last.
@@ -751,6 +939,9 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         web.allowsLinkPreview = false                         // skip peek/pop snapshots — faster, and
                                                               // keeps long-press ours (download gesture)
         web.customUserAgent = WebVideoDownloader.userAgent
+        web.isFindInteractionEnabled = true                   // system Find-on-Page UI (⌕ in the menu)
+        refreshControl.addTarget(self, action: #selector(refreshPulled), for: .valueChanged)
+        web.scrollView.refreshControl = refreshControl        // Safari-style pull-to-refresh
         for kp in ["estimatedProgress", "title", "URL", "canGoBack", "canGoForward", "loading"] {
             web.addObserver(self, forKeyPath: kp, options: .new, context: nil)
         }
@@ -771,6 +962,28 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     func goForward() { webView.goForward() }
     func reload() { webView.reload() }
     func stop() { webView.stopLoading() }
+
+    @objc private func refreshPulled() { webView.reload() }
+
+    /// Recent pages behind the ◀ / ▶ buttons (Safari's tap-and-hold list). Nearest first.
+    func backStack() -> [WKBackForwardListItem] { Array(webView.backForwardList.backList.suffix(8).reversed()) }
+    func forwardStack() -> [WKBackForwardListItem] { Array(webView.backForwardList.forwardList.prefix(8)) }
+    func go(to item: WKBackForwardListItem) { webView.go(to: item) }
+
+    /// Present the system find-on-page navigator.
+    func findInPage() { webView.findInteraction?.presentFindNavigator(showingReplace: false) }
+
+    func openInSafari() {
+        if let u = URL(string: currentURLString) { UIApplication.shared.open(u) }
+    }
+
+    /// Reload the page with a desktop (or back to mobile) UA. Downloads are unaffected — the
+    /// engine sends its own UA.
+    func toggleDesktopSite() {
+        isDesktopSite.toggle()
+        webView.customUserAgent = isDesktopSite ? Self.desktopUserAgent : WebVideoDownloader.userAgent
+        webView.reload()
+    }
 
     /// Pause any playing audio/video without tearing anything down — called when the browser view
     /// disappears so media doesn't keep playing while the web view is kept alive for the session.
@@ -913,7 +1126,13 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         MainActor.assumeIsolated {
             switch keyPath {
             case "estimatedProgress": progress = webView.estimatedProgress
-            case "title": pageTitle = webView.title ?? ""
+            case "title":
+                pageTitle = webView.title ?? ""
+                // Titles often arrive after didFinish recorded the page — back-fill the entry.
+                if !pageTitle.isEmpty, let f = history.first, f.url == currentURLString, f.title != pageTitle {
+                    history[0].title = pageTitle
+                    saveHistory()
+                }
             case "URL":
                 currentURLString = webView.url?.absoluteString ?? currentURLString
                 if let u = webView.url?.absoluteString, u.hasPrefix("http") { Self.lastSavedURL = u }
@@ -929,6 +1148,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         captured.removeAll(); playingSrc = nil; hasVideo = false
+        loadError = nil
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -936,6 +1156,26 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         // injected viewport (width=device-width) makes minimumZoomScale == fit, so snap to it.
         let sv = webView.scrollView
         if abs(sv.zoomScale - sv.minimumZoomScale) > 0.01 { sv.setZoomScale(sv.minimumZoomScale, animated: false) }
+        refreshControl.endRefreshing()
+        loadError = nil
+        recordHistory()
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        handleLoadError(error)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        handleLoadError(error)
+    }
+
+    /// Surface a real load failure ("Couldn't load the page" + retry) — but never for a mere
+    /// cancellation (a new navigation superseding this one, or a download interception).
+    private func handleLoadError(_ error: Error) {
+        refreshControl.endRefreshing()
+        let e = error as NSError
+        if e.code == NSURLErrorCancelled || e.code == 102 /* WebKitErrorFrameLoadInterrupted */ { return }
+        loadError = e.localizedDescription
     }
 
 
