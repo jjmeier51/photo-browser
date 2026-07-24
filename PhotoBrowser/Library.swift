@@ -942,16 +942,17 @@ final class Library {
 
     /// Walks the whole drive and generates a disk thumbnail for every photo/video that doesn't
     /// have one yet (already-cached files are skipped — see `Thumbnailer.precache`). Runs as an
-    /// app-wide activity pill so the user can keep browsing; progress is a fraction only, no
-    /// file counts. Stoppable from the Maintenance menu.
+    /// app-wide activity pill so the user can keep browsing; the pill shows a fraction and the
+    /// folder currently being worked through — deliberately no file counts. Stoppable from the
+    /// Maintenance menu.
     func startThumbnailCaching() {
         guard thumbnailCacheTask == nil, let root = rootURL else { return }
         let id = beginActivity("Caching In Progress", indeterminate: true)
         setActivity(id, status: "Scanning drive…")
         let bg = BackgroundTaskHolder(); bg.begin(name: "Cache All Thumbnails")
         thumbnailCacheTask = Task {
-            let cancelled = await Self.cacheAllThumbnails(under: root) { fraction in
-                Task { @MainActor in self.setActivity(id, status: "", fraction: fraction) }
+            let cancelled = await Self.cacheAllThumbnails(under: root) { fraction, folder in
+                Task { @MainActor in self.setActivity(id, status: folder, fraction: fraction) }
             }
             endActivity(id, result: cancelled ? nil : "All thumbnails are cached.")
             thumbnailCacheTask = nil
@@ -972,7 +973,7 @@ final class Library {
     /// synchronous drive walk froze the whole UI without it. A detached task doesn't inherit the
     /// caller's cancellation, so the Stop button's cancel is forwarded explicitly.
     private nonisolated static func cacheAllThumbnails(under root: URL,
-                                                       progress: @escaping @Sendable (Double) -> Void) async -> Bool {
+                                                       progress: @escaping @Sendable (Double, String) -> Void) async -> Bool {
         let worker = Task.detached(priority: .utility) { () -> Bool in
             let fm = FileManager.default
             var files: [(url: URL, kind: FileKind)] = []
@@ -986,22 +987,28 @@ final class Library {
             }
             guard !files.isEmpty else { return Task.isCancelled }
             var done = 0
-            await withTaskGroup(of: Void.self) { group in
+            var lastFolder = ""
+            await withTaskGroup(of: String.self) { group in
                 var idx = 0
                 let maxConcurrent = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 8))
                 func next() {
                     guard idx < files.count, !Task.isCancelled else { return }
                     let file = files[idx]; idx += 1
                     group.addTask {
-                        guard !Task.isCancelled else { return }
+                        guard !Task.isCancelled else { return "" }
                         await Thumbnailer.shared.precache(fileAt: file.url, kind: file.kind)
+                        return file.url.deletingLastPathComponent().lastPathComponent
                     }
                 }
                 for _ in 0..<min(maxConcurrent, files.count) { next() }
-                while await group.next() != nil {
+                while let folder = await group.next() {
                     done += 1
-                    if done % 20 == 0 || done == files.count {
-                        progress(Double(done) / Double(files.count))
+                    // Surface the folder currently being worked through (the walk is depth-first,
+                    // so consecutive files share a folder) — promptly on a folder change, and on
+                    // a steady cadence inside big folders. Still no file counts, by design.
+                    if (!folder.isEmpty && folder != lastFolder) || done % 20 == 0 || done == files.count {
+                        if !folder.isEmpty { lastFolder = folder }
+                        progress(Double(done) / Double(files.count), lastFolder)
                     }
                     next()
                 }

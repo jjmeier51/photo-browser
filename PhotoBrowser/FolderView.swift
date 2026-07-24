@@ -415,8 +415,10 @@ struct FolderView: View {
     /// locale-aware compare, and running that just to build the toolbar menu's label was the
     /// ~1s stall when opening the “…” menu in a large folder.
     private var cleanupAction: CleanupAction {
-        let reviewed = library.reviewedInCleanup(url)
-        if reviewed.isEmpty { return .start }
+        // Evaluated whenever the toolbar's "…" menu builds, so the common no-history case must
+        // stay a bare dictionary lookup — no Set of (possibly thousands of) reviewed paths.
+        guard let reviewedList = library.cleanupReviewed[url.path], !reviewedList.isEmpty else { return .start }
+        let reviewed = Set(reviewedList)
         return entries.contains { $0.isViewable && !reviewed.contains($0.url.path) } ? .resume : .rerun
     }
 
@@ -1902,21 +1904,29 @@ struct FolderView: View {
                             Label("Download from the Web…", systemImage: "arrow.down.circle")
                         }
                     }
-                    Section("Drives & Backup") {
-                        Button { pickFolder(.transfer) } label: {
-                            Label("Move Here from Another Drive…", systemImage: "externaldrive.badge.minus")
-                        }
-                        Button { pickFolder(.relink) } label: {
-                            Label("Re-link Favorites from a Drive…", systemImage: "link")
-                        }
-                        Button { pickFolder(.backupMetadata) } label: {
-                            Label("Copy Metadata to Backup Drive…", systemImage: "externaldrive.badge.checkmark")
-                        }
-                        if isRoot {
-                            Button { pickFolder(.open) } label: { Label("Open Folder…", systemImage: "externaldrive") }
-                            Button { showEject = true } label: {
-                                Label("Prepare Drive for Removal…", systemImage: "eject")
+                    Section {
+                        // A lazy submenu like "Download from the Web…" above: these are rarely
+                        // used, and SwiftUI builds a toolbar menu's TOP-LEVEL content eagerly
+                        // (every toolbar render + every open) — submenu content only when the
+                        // item is opened. Trimming the parent menu is what shrinks the hitch.
+                        Menu {
+                            Button { pickFolder(.transfer) } label: {
+                                Label("Move Here from Another Drive…", systemImage: "externaldrive.badge.minus")
                             }
+                            Button { pickFolder(.relink) } label: {
+                                Label("Re-link Favorites from a Drive…", systemImage: "link")
+                            }
+                            Button { pickFolder(.backupMetadata) } label: {
+                                Label("Copy Metadata to Backup Drive…", systemImage: "externaldrive.badge.checkmark")
+                            }
+                            if isRoot {
+                                Button { pickFolder(.open) } label: { Label("Open Folder…", systemImage: "externaldrive") }
+                                Button { showEject = true } label: {
+                                    Label("Prepare Drive for Removal…", systemImage: "eject")
+                                }
+                            }
+                        } label: {
+                            Label("Drives & Backup…", systemImage: "externaldrive")
                         }
                     }
                     Section("Library") {
