@@ -1065,7 +1065,9 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
             }
             let cookie = await cookieHeader(forURLString: urlString)
             func runOnce() async -> WebVideoDownloader.Outcome {
-                let auth = self.authHeader(forURLString: urlString)
+                // Nested funcs don't inherit the controller's MainActor isolation — hop back for
+                // the credential lookup (it must be re-read each attempt, after a sign-in).
+                let auth = await self.authHeader(forURLString: urlString)
                 let prog: @Sendable (WebVideoDownloader.Progress) -> Void = { p in
                     Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
                 }
