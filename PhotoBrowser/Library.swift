@@ -965,42 +965,54 @@ final class Library {
 
     /// The worker: enumerate every media file under `root`, then ensure each has a disk
     /// thumbnail, bounded-concurrent (the codebase's task-group pattern). Returns true if the
-    /// pass was cancelled. `nonisolated` so the walk and the decoding never touch the main actor.
+    /// pass was cancelled.
+    ///
+    /// The body MUST run in `Task.detached` (hard-won constraint #1): a `nonisolated` async
+    /// function still runs on the *caller's* actor here, and the caller is the main actor — the
+    /// synchronous drive walk froze the whole UI without it. A detached task doesn't inherit the
+    /// caller's cancellation, so the Stop button's cancel is forwarded explicitly.
     private nonisolated static func cacheAllThumbnails(under root: URL,
                                                        progress: @escaping @Sendable (Double) -> Void) async -> Bool {
-        let fm = FileManager.default
-        var files: [(url: URL, kind: FileKind)] = []
-        if let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey],
-                                      options: [.skipsHiddenFiles]) {
-            for case let url as URL in walker {
-                if Task.isCancelled { return true }
-                let kind = classify(url: url, isDirectory: false)
-                if kind == .image || kind == .video { files.append((url, kind)) }
-            }
-        }
-        guard !files.isEmpty else { return Task.isCancelled }
-        var done = 0
-        await withTaskGroup(of: Void.self) { group in
-            var idx = 0
-            let maxConcurrent = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 8))
-            func next() {
-                guard idx < files.count, !Task.isCancelled else { return }
-                let file = files[idx]; idx += 1
-                group.addTask {
-                    guard !Task.isCancelled else { return }
-                    await Thumbnailer.shared.precache(fileAt: file.url, kind: file.kind)
+        let worker = Task.detached(priority: .utility) { () -> Bool in
+            let fm = FileManager.default
+            var files: [(url: URL, kind: FileKind)] = []
+            if let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey],
+                                          options: [.skipsHiddenFiles]) {
+                for case let url as URL in walker {
+                    if Task.isCancelled { return true }
+                    let kind = classify(url: url, isDirectory: false)
+                    if kind == .image || kind == .video { files.append((url, kind)) }
                 }
             }
-            for _ in 0..<min(maxConcurrent, files.count) { next() }
-            while await group.next() != nil {
-                done += 1
-                if done % 20 == 0 || done == files.count {
-                    progress(Double(done) / Double(files.count))
+            guard !files.isEmpty else { return Task.isCancelled }
+            var done = 0
+            await withTaskGroup(of: Void.self) { group in
+                var idx = 0
+                let maxConcurrent = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 8))
+                func next() {
+                    guard idx < files.count, !Task.isCancelled else { return }
+                    let file = files[idx]; idx += 1
+                    group.addTask {
+                        guard !Task.isCancelled else { return }
+                        await Thumbnailer.shared.precache(fileAt: file.url, kind: file.kind)
+                    }
                 }
-                next()
+                for _ in 0..<min(maxConcurrent, files.count) { next() }
+                while await group.next() != nil {
+                    done += 1
+                    if done % 20 == 0 || done == files.count {
+                        progress(Double(done) / Double(files.count))
+                    }
+                    next()
+                }
             }
+            return Task.isCancelled
         }
-        return Task.isCancelled
+        return await withTaskCancellationHandler {
+            await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
     }
 
     // MARK: - Google Drive download (app-wide, navigable while it runs)
