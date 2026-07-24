@@ -20,6 +20,7 @@ struct InstagramImportView: View {
     @State private var showLogin = false
     @State private var skipTagged = false
     @State private var upscale1080 = false
+    @State private var upscalePhotos = false      // 2× AI Upscale downloaded photos
 
     private var isUpdate: Bool { existing != nil }
 
@@ -59,6 +60,7 @@ struct InstagramImportView: View {
                 Section {
                     Toggle("Skip tagged photos & videos", isOn: $skipTagged)
                     Toggle("Upscale videos to 1080p", isOn: $upscale1080)
+                    Toggle("2× AI Upscale photos", isOn: $upscalePhotos)
                 } header: {
                     Text("Options")
                 } footer: {
@@ -99,6 +101,7 @@ struct InstagramImportView: View {
         let h = isUpdate ? (existing?.handle ?? "") : sanitizedHandle
         guard !h.isEmpty else { return }
         let target = targetFolder, isUpd = isUpdate, force = forceFull, skipT = skipTagged, up = upscale1080, ex = existing
+        let up2x = upscalePhotos
         let finish = onFinished
         if !isUpd { library.setLastIGHandle(h, for: target) }      // remember it for next time
         let id = library.beginActivity(forceFull ? "Re-downloading @\(h)" : (isUpd ? "@\(h) — new posts" : "Downloading @\(h)"),
@@ -133,6 +136,9 @@ struct InstagramImportView: View {
             }
             if up {
                 await InstagramApply.upscaleVideosTo1080(r.files) { d, t in library.setActivity(id, status: "Upscaling videos — \(d) of \(t)…") }
+            }
+            if up2x {
+                await InstagramApply.aiUpscalePhotos2x(r.files) { d, t in library.setActivity(id, status: "Upscaling photos — \(d) of \(t)…") }
             }
 
             let n = r.photos + r.videos

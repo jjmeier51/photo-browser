@@ -104,10 +104,11 @@ enum InstagramService {
         print("[Instagram] start @\(handle) — FFmpegKit transcoder available: \(VideoTranscoder.isAvailable)")
         var jobs: [Job] = []
         // Posts → main folder.
-        jobs += await collectFeed(base: "feed/user/\(profile.userID)/", folder: folder, already: alreadyDownloaded,
-                                  poster: profile.handle, creds: creds) { n in
+        let feed = await collectFeed(base: "feed/user/\(profile.userID)/", folder: folder, already: alreadyDownloaded,
+                                     poster: profile.handle, creds: creds) { n in
             progress(Progress(phase: "Finding posts — \(n) item(s)…", fraction: 0, done: 0, total: 0))
         }
+        jobs += feed.jobs
         // Tagged media → main folder, but only the specific photos/videos this user is
         // actually tagged in (not whole carousels). The original poster's handle is kept.
         // Skippable (it's the slowest, least-wanted category).
@@ -115,7 +116,7 @@ enum InstagramService {
             progress(Progress(phase: "Finding tagged media…", fraction: 0, done: 0, total: 0))
             jobs += await collectFeed(base: "usertags/\(profile.userID)/feed/", folder: folder, already: alreadyDownloaded,
                                       poster: profile.handle, creds: creds,
-                                      taggedUser: (id: profile.userID, username: profile.handle)) { _ in }
+                                      taggedUser: (id: profile.userID, username: profile.handle)) { _ in }.jobs
         }
         // Current stories (the last 24 hours) → "Stories" subfolder. Prefer the
         // reels-media tray (the endpoint that reliably returns the logged-in viewer's
@@ -147,7 +148,13 @@ enum InstagramService {
             result.highlightFolders = highlightDirs
             result.profilePic = await fetchProfilePic(userID: profile.userID, handle: profile.handle,
                                                        creds: creds, fallback: profile.profilePicURL)
-            result.note = alreadyDownloaded.isEmpty ? "No downloadable media found." : "No new posts, stories or highlights."
+            if let f = feed.failure {
+                // A failed FEED fetch must not read as "nothing new" — that's how a post from
+                // yesterday silently never arrives while the run still "succeeds".
+                result.note = "Couldn’t check for new posts — \(f). Try again in a few minutes."
+            } else {
+                result.note = alreadyDownloaded.isEmpty ? "No downloadable media found." : "No new posts, stories or highlights."
+            }
             return result
         }
         result = await download(jobs: jobs, replace: replaceExisting, progress: progress)
@@ -155,6 +162,11 @@ enum InstagramService {
         result.highlightFolders = highlightDirs
         result.profilePic = await fetchProfilePic(userID: profile.userID, handle: profile.handle,
                                                    creds: creds, fallback: profile.profilePicURL)
+        // Stories/highlights downloaded but the posts feed itself failed — say so, or the user
+        // assumes their feed was checked.
+        if let f = feed.failure, feed.jobs.isEmpty {
+            result.note = (result.note.map { $0 + " " } ?? "") + "Note: posts couldn’t be checked — \(f)."
+        }
         return result
     }
 
@@ -343,11 +355,16 @@ enum InstagramService {
         }
     }
 
-    /// Paginated, newest-first feed (posts or tagged); stops at the first known item.
+    /// Result of one feed crawl: the jobs plus whether the FETCH itself failed (rate limit,
+    /// expired login, checkpoint page). Callers must distinguish that from a genuinely-empty
+    /// feed — the old unchecked fetch turned a throttled page-1 into "No new posts".
+    private struct FeedResult { var jobs: [Job] = []; var failure: String? }
+
+    /// Paginated, newest-first feed (posts or tagged); stops after a long run of known items.
     nonisolated private static func collectFeed(base: String, folder: URL, already: Set<String>, poster: String,
                                                 creds: Credentials, taggedUser: (id: String, username: String)? = nil,
-                                                found: @escaping @Sendable (Int) -> Void) async -> [Job] {
-        var jobs: [Job] = []
+                                                found: @escaping @Sendable (Int) -> Void) async -> FeedResult {
+        var out = FeedResult()
         var maxID: String?
         var pages = 0
         var consecutiveSeen = 0          // run of already-downloaded posts
@@ -355,19 +372,41 @@ enum InstagramService {
             pages += 1
             var s = "https://i.instagram.com/api/v1/\(base)?count=33"
             if let maxID { s += "&max_id=\(maxID)" }
-            guard let url = URL(string: s),
-                  let (data, _) = try? await session.data(for: apiRequest(url, handle: poster, creds: creds)),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { break }
+            guard let url = URL(string: s) else { break }
+            // Status-checked fetch with retry. This endpoint rate-limits readily, and the old
+            // unchecked version fed a 429/login-wall body straight to the JSON parser and
+            // bailed — making a throttled run indistinguishable from "no new posts".
+            var json: [String: Any]?
+            attempts: for attempt in 0..<3 {
+                if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000) }
+                guard let (data, resp) = try? await session.data(for: apiRequest(url, handle: poster, creds: creds)) else {
+                    out.failure = "the network request failed"
+                    continue
+                }
+                let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                if status == 429 || status >= 500 { out.failure = "Instagram is rate-limiting requests (HTTP \(status))"; continue }
+                if status == 401 || status == 403 {
+                    out.failure = "Instagram refused the request (HTTP \(status)) — the login may have expired"
+                    break attempts
+                }
+                if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    json = j; out.failure = nil
+                } else {
+                    out.failure = "Instagram sent an unreadable response (possibly a login checkpoint)"
+                }
+                break attempts
+            }
+            guard let json else { break }
             let items = json["items"] as? [[String: Any]] ?? []
             for item in items {
                 guard let code = item["code"] as? String else { continue }
                 if already.contains(code) {
                     // Don't stop at the *first* already-downloaded post: Instagram pins up to ~3
                     // (already-downloaded) posts above newer ones, so a new post can sit below them.
-                    // Skip seen posts and only stop after a long run — past the pins and well into the
-                    // already-downloaded timeline.
+                    // Skip seen posts and only stop after a long run — past the pins and well into
+                    // the already-downloaded timeline. (15 matches the TikTok dedup-run threshold.)
                     consecutiveSeen += 1
-                    if consecutiveSeen >= 12 { break loop }
+                    if consecutiveSeen >= 15 { break loop }
                     continue
                 }
                 consecutiveSeen = 0
@@ -379,14 +418,14 @@ enum InstagramService {
                    let info = await fetchMediaInfo(pk: pk, handle: poster, creds: creds) {
                     enriched = info
                 }
-                jobs += jobsFor(item: enriched, id: code, folder: folder, defaultPoster: poster, taggedUser: taggedUser)
+                out.jobs += jobsFor(item: enriched, id: code, folder: folder, defaultPoster: poster, taggedUser: taggedUser)
             }
-            found(jobs.count)
+            found(out.jobs.count)
             let more = json["more_available"] as? Bool ?? false
             maxID = json["next_max_id"] as? String
             if !more || maxID == nil || items.isEmpty { break }
         }
-        return jobs
+        return out
     }
 
     nonisolated private static func fetchReel(path: String, handle: String, creds: Credentials, reelKey: String? = nil) async -> [[String: Any]] {

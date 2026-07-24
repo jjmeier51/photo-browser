@@ -60,6 +60,36 @@ enum InstagramApply {
         }
     }
 
+    /// 2× AI Upscale (Lanczos ×2 + denoise + sharpen) of every downloaded **photo**, in place,
+    /// EXIF/capture-date preserved — the same pass the Facebook downloader runs. Bounded to 2
+    /// concurrent renders; file dates are restored after each in-place swap (the swap resets
+    /// them, and the size change re-keys the thumbnail cache naturally). Best-effort.
+    static func aiUpscalePhotos2x(_ files: [String], progress: @escaping (Int, Int) -> Void) async {
+        let photos = files.filter { ["jpg", "jpeg", "png", "heic"].contains(URL(fileURLWithPath: $0).pathExtension.lowercased()) }
+        let total = photos.count
+        guard total > 0 else { return }
+        await withTaskGroup(of: Void.self) { group in
+            var idx = 0
+            let maxConcurrent = 2
+            func addNext() {
+                guard idx < photos.count else { return }
+                let path = photos[idx]; idx += 1
+                group.addTask {
+                    let url = URL(fileURLWithPath: path)
+                    let dates = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+                    guard MediaEditing.enhancePhotoInPlace(url: url, scale: 2) else { return }
+                    var attrs: [FileAttributeKey: Any] = [:]
+                    if let c = dates?.creationDate { attrs[.creationDate] = c }
+                    if let m = dates?.contentModificationDate { attrs[.modificationDate] = m }
+                    if !attrs.isEmpty { try? FileManager.default.setAttributes(attrs, ofItemAtPath: url.path) }
+                }
+            }
+            for _ in 0..<min(maxConcurrent, photos.count) { addNext() }
+            var done = 0
+            while await group.next() != nil { done += 1; progress(done, total); addNext() }
+        }
+    }
+
     /// Doubles the pixel dimensions of every downloaded **photo** in place (Lanczos), preserving
     /// EXIF/capture-date. Reports (done, total). Best-effort.
     static func upscalePhotos2x(_ files: [String], progress: @escaping (Int, Int) -> Void) async {
