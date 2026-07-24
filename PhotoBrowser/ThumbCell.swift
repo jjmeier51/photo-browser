@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import AVFoundation
 
 /// One square tile: a folder, or a file with a lazily-loaded thumbnail.
@@ -93,8 +94,20 @@ struct EntryCell: View {
                 if entry.kind == .video { duration = await Self.loadDuration(entry) }
             }
             .task(id: coverURL) {
-                cover = coverURL.flatMap { UIImage(contentsOfFile: $0.path) }
+                cover = await Self.loadCover(coverURL)
             }
+    }
+
+    /// Cover load, HDR-aware: covers saved from HDR content are 10-bit HEICs, and a plain
+    /// `UIImage(contentsOfFile:)` would tone-map them to SDR. `UIImageReader` keeps the
+    /// headroom; the tile's Image opts into `.allowedDynamicRange(.high)` to show it.
+    nonisolated static func loadCover(_ url: URL?) async -> UIImage? {
+        guard let url else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            var config = UIImageReader.Configuration()
+            config.prefersHighDynamicRange = true
+            return UIImageReader(configuration: config).image(contentsOf: url)
+        }.value
     }
 
     @ViewBuilder private var content: some View {
@@ -103,6 +116,7 @@ struct EntryCell: View {
                 GeometryReader { geo in
                     Image(uiImage: cover)
                         .resizable().scaledToFill()
+                        .allowedDynamicRange(.high)
                         .frame(width: geo.size.width, height: geo.size.height)
                         .clipped()
                 }

@@ -70,9 +70,10 @@ private struct ZoomableVideo: UIViewControllerRepresentable {
         // time observer, which together can wedge the UI. Resume on dismiss.
         vc.setOverlayPaused(infoShown)
         // This page owns the album-cover source while it's visible: grab the
-        // current video frame on demand.
+        // current video frame on demand (and its player time, for the HDR re-render).
         coverSource?.staticImage = nil
         coverSource?.liveProvider = { [weak vc] in vc?.currentFrameImage() }
+        coverSource?.liveTime = { [weak vc] in vc?.currentPlaybackSeconds() ?? 0 }
     }
 
     static func dismantleUIViewController(_ vc: ZoomableVideoController, coordinator: ()) {
@@ -90,6 +91,10 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
     var onNext: () -> Void = {}
     var onControlsVisibilityChanged: (Bool) -> Void = { _ in }
     var onCaptured: () -> Void = {}
+
+    /// Player time of the frame `currentFrameImage()` grabs — the cover flow records this so
+    /// an HDR re-render can pull the same frame straight from the file.
+    func currentPlaybackSeconds() -> Double { player.currentTime().seconds }
 
     private let player: AVPlayer
     private let playerLayer: AVPlayerLayer

@@ -2782,6 +2782,7 @@ private struct BubbleCover: View {
         ZStack {
             if let image {
                 Image(uiImage: image).resizable().scaledToFill()
+                    .allowedDynamicRange(.high)     // HDR covers (10-bit HEIC) keep their headroom
             } else {
                 Circle().fill(Color(white: 0.2))
                     .overlay { Image(systemName: "photo.stack").font(.title3).foregroundStyle(.secondary) }
@@ -2789,10 +2790,9 @@ private struct BubbleCover: View {
         }
         .task(id: coverURL) {
             guard let coverURL else { image = nil; return }
-            image = await Task.detached(priority: .userInitiated) {
-                let raw = UIImage(contentsOfFile: coverURL.path)
-                return raw?.preparingForDisplay() ?? raw     // decode now, off-main
-            }.value
+            // HDR-aware read (see ThumbCell.loadCover) — a plain UIImage(contentsOfFile:)
+            // would tone-map an HDR cover to SDR.
+            image = await ThumbCell.loadCover(coverURL)
         }
     }
 }

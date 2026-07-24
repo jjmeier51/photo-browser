@@ -7,7 +7,10 @@ struct AlbumCoverCropper: View {
     let entry: Entry
     var title: String = "Crop Cover"        // "Crop Thumbnail" when setting an item's own thumbnail
     var providedImage: UIImage? = nil       // e.g. the current video frame
-    let onCrop: (UIImage) -> Void
+    /// The cropped preview image plus the crop square in normalized (0–1, top-left-origin)
+    /// coordinates of the upright image — the region lets HDR sources be re-rendered from the
+    /// original media instead of this SDR preview.
+    let onCrop: (UIImage, CGRect?) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var box = CropControllerBox()
     @State private var image: UIImage?
@@ -30,7 +33,9 @@ struct AlbumCoverCropper: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Use") {
-                        if let cropped = box.controller?.croppedImage() { onCrop(cropped) }
+                        if let cropped = box.controller?.croppedImage() {
+                            onCrop(cropped, box.controller?.cropRegion())
+                        }
                         dismiss()
                     }
                     .disabled(image == nil)
@@ -141,6 +146,19 @@ final class CropController: UIViewController, UIScrollViewDelegate {
         rect = rect.intersection(CGRect(origin: .zero, size: image.size))
         guard !rect.isEmpty, let cg = image.cgImage?.cropping(to: rect) else { return nil }
         return UIImage(cgImage: cg, scale: 1, orientation: image.imageOrientation)
+    }
+
+    /// The crop square in normalized (0–1) coordinates of the (upright) image — resolution-
+    /// independent, so an HDR re-render from the full-resolution original lands on the same square.
+    func cropRegion() -> CGRect? {
+        guard configured, scrollView.zoomScale > 0, image.size.width > 0, image.size.height > 0 else { return nil }
+        let zoom = scrollView.zoomScale
+        let cr = cropRect
+        let originX = (scrollView.contentOffset.x + cr.minX) / zoom
+        let originY = (scrollView.contentOffset.y + cr.minY) / zoom
+        let side = cropSize / zoom
+        return CGRect(x: originX / image.size.width, y: originY / image.size.height,
+                      width: side / image.size.width, height: side / image.size.height)
     }
 
     /// Dims everything outside the crop square and draws its border.

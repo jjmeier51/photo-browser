@@ -452,6 +452,20 @@ final class Library {
         } catch {}
     }
 
+    /// Saves a pre-encoded 10-bit HDR HEIC as `folder`'s cover (see `HDRCover`) — same store
+    /// and keying as the JPEG path, just a different container so the headroom survives.
+    func setCover(hdrHEIC data: Data, for folder: URL) {
+        if let old = folderCovers[folder.path] {
+            try? FileManager.default.removeItem(at: coversDirectory.appendingPathComponent(old))
+        }
+        let name = UUID().uuidString + ".heic"
+        do {
+            try data.write(to: coversDirectory.appendingPathComponent(name))
+            folderCovers[folder.path] = name
+            UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
+        } catch {}
+    }
+
     // MARK: - Custom item thumbnails (per-photo/video grid tile override)
 
     /// File URL of a custom thumbnail set on this item, or nil if it uses its auto-generated one.

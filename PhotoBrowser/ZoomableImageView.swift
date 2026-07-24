@@ -53,6 +53,7 @@ struct ZoomableImageView: View {
             badge = await MetadataLoader.photoBadge(url: url)
             // This page owns the album-cover source while it's visible.
             coverSource?.liveProvider = nil
+            coverSource?.liveTime = nil
             // Preloaded by the viewer (or shown before)? Show it instantly — this is
             // what makes swiping feel like Photos instead of a cold decode per page.
             if let ready = ViewerPageCache.shared.image(for: url) {

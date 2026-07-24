@@ -18,6 +18,10 @@ struct ViewerView: View {
     @State private var coverSource = CoverFrameSource()
     @State private var coverEntry: Entry?
     @State private var croppedCover: UIImage?
+    // Provenance of the pending cover crop, for the HDR re-render (see HDRCover).
+    @State private var croppedCoverRegion: CGRect?
+    @State private var croppedCoverEntry: Entry?
+    @State private var croppedCoverTime: Double?
     @State private var showCoverFolderPicker = false
     @State private var thumbnailEntry: Entry?           // "Set as Thumbnail" cropper target
     @State private var showEditor = false
@@ -107,21 +111,36 @@ struct ViewerView: View {
             if croppedCover != nil { showCoverFolderPicker = true }
         }) { entry in
             AlbumCoverCropper(entry: entry,
-                              providedImage: entry.kind == .video ? coverSource.current() : nil) { cropped in
+                              providedImage: entry.kind == .video ? coverSource.current() : nil) { cropped, region in
                 croppedCover = cropped
+                croppedCoverRegion = region
+                croppedCoverEntry = entry
+                croppedCoverTime = coverSource.lastCaptureTime
             }
         }
         .sheet(isPresented: $showCoverFolderPicker) {
             FolderPicker(root: coverPickerRoot, confirmTitle: "Use Here") { folder in
-                if let croppedCover { library.setCover(croppedCover, for: folder) }
-                croppedCover = nil
+                if let sdr = croppedCover {
+                    // HDR sources get re-rendered from the original media as a 10-bit HEIC
+                    // (photo via gain-map expansion; video via the frame at the captured time);
+                    // SDR sources keep the existing JPEG path.
+                    let entry = croppedCoverEntry, region = croppedCoverRegion, time = croppedCoverTime
+                    Task {
+                        if let entry, let data = await HDRCover.render(entry: entry, region: region, videoTime: time) {
+                            library.setCover(hdrHEIC: data, for: folder)
+                        } else {
+                            library.setCover(sdr, for: folder)
+                        }
+                    }
+                }
+                croppedCover = nil; croppedCoverRegion = nil; croppedCoverEntry = nil; croppedCoverTime = nil
             }
         }
         // "Set as Thumbnail" — same cropper as the album cover, but the crop is saved onto the item
         // itself (no folder picker).
         .fullScreenCover(item: $thumbnailEntry) { entry in
             AlbumCoverCropper(entry: entry, title: "Crop Thumbnail",
-                              providedImage: entry.kind == .video ? coverSource.current() : nil) { cropped in
+                              providedImage: entry.kind == .video ? coverSource.current() : nil) { cropped, _ in
                 library.setItemThumbnail(cropped, for: entry.url)
             }
         }
