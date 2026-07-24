@@ -65,9 +65,13 @@ struct WebBrowserView: View {
                             Text("Couldn’t load the page").font(.headline)
                             Text(err).font(.caption).foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center).padding(.horizontal, 32)
-                            Button("Try Again") { controller.reload() }
-                                .buttonStyle(.borderedProminent)
-                                .padding(.top, 4)
+                            HStack(spacing: 10) {
+                                Button("Dismiss") { controller.loadError = nil }
+                                    .buttonStyle(.bordered)
+                                Button("Try Again") { controller.reload() }
+                                    .buttonStyle(.borderedProminent)
+                            }
+                            .padding(.top, 4)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(.regularMaterial)
@@ -364,6 +368,7 @@ struct WebBrowserView: View {
             .shadow(color: .black.opacity(0.35), radius: 10, y: 3)
             .padding(.top, 8).padding(.horizontal, 24)
             .transition(.move(edge: .top).combined(with: .opacity))
+            .allowsHitTesting(false)   // informational only — must never eat taps meant for the page
         }
     }
 
@@ -832,6 +837,16 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         if let data = try? JSONEncoder().encode(history) { UserDefaults.standard.set(data, forKey: Self.historyKey) }
     }
 
+    /// Coalesced save for high-frequency updates (SPA-style sites change `document.title`
+    /// constantly, and re-encoding the whole history per change janked page loads).
+    private var historySaveWork: DispatchWorkItem?
+    private func scheduleHistorySave() {
+        historySaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.saveHistory() }
+        historySaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+    }
+
     /// Record the finished page (called from `didFinish`; the title KVO back-fills late titles).
     private func recordHistory() {
         let u = currentURLString
@@ -1089,7 +1104,9 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         downloads.insert(entry, at: 0)
         let id = entry.id
         let urlString = entry.urlString, pageURL = entry.pageURL, sName = entry.suggestedName, kind = entry.kind
-        let task = Task {
+        // Utility priority: the engine's segment/decrypt work must not compete with WebKit's
+        // rendering and interactive traffic — downloads at UI priority made browsing sluggish.
+        let task = Task(priority: .utility) {
             var date = entry.captureDate, caption = entry.caption
             if readPageInfo {
                 let info = await self.pageMediaInfo()         // read while the page is still loaded
@@ -1164,9 +1181,10 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
             case "title":
                 pageTitle = webView.title ?? ""
                 // Titles often arrive after didFinish recorded the page — back-fill the entry.
+                // Save is debounced: some sites churn the title continuously.
                 if !pageTitle.isEmpty, let f = history.first, f.url == currentURLString, f.title != pageTitle {
                     history[0].title = pageTitle
-                    saveHistory()
+                    scheduleHistorySave()
                 }
             case "URL":
                 currentURLString = webView.url?.absoluteString ?? currentURLString
@@ -1196,21 +1214,23 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         recordHistory()
     }
 
+    // Only PROVISIONAL failures show the error page — the page never arrived, so the overlay
+    // replaces a blank screen. A mid-load `didFail` is deliberately NOT surfaced: the page is
+    // already rendered, and the full-screen overlay was silently eating every tap on it (the
+    // "links need a second click" bug).
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        handleLoadError(error)
+        refreshControl.endRefreshing()
+        let e = error as NSError
+        // Benign codes: a superseding navigation/download interception (-999), a frame-load
+        // interruption (102), and taps on app-scheme/App Store links the web view can't
+        // render (-1002) — none of these should cover the current page with an error.
+        if e.code == NSURLErrorCancelled || e.code == 102 /* WebKitErrorFrameLoadInterrupted */
+            || e.code == NSURLErrorUnsupportedURL { return }
+        loadError = e.localizedDescription
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        handleLoadError(error)
-    }
-
-    /// Surface a real load failure ("Couldn't load the page" + retry) — but never for a mere
-    /// cancellation (a new navigation superseding this one, or a download interception).
-    private func handleLoadError(_ error: Error) {
         refreshControl.endRefreshing()
-        let e = error as NSError
-        if e.code == NSURLErrorCancelled || e.code == 102 /* WebKitErrorFrameLoadInterrupted */ { return }
-        loadError = e.localizedDescription
     }
 
 

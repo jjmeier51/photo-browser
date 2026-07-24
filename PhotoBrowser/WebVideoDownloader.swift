@@ -37,6 +37,9 @@ enum WebVideoDownloader {
         cfg.httpCookieStorage = nil
         cfg.timeoutIntervalForRequest = 60
         cfg.httpMaximumConnectionsPerHost = 12
+        // Background service class: downloads use spare bandwidth aggressively but YIELD to
+        // interactive traffic — a full-tilt HLS download was starving the browser's page loads.
+        cfg.networkServiceType = .background
         return URLSession(configuration: cfg)
     }()
 
@@ -317,8 +320,8 @@ enum WebVideoDownloader {
         return (a.url, "audio downloaded")
     }
 
-    nonisolated private static let segmentConcurrency = 10   // parallel segment fetches
-    nonisolated private static let segmentWindow = 14        // how far a fetch may run ahead of the write cursor
+    nonisolated private static let segmentConcurrency = 12   // parallel segment fetches
+    nonisolated private static let segmentWindow = 16        // how far a fetch may run ahead of the write cursor
 
     /// Downloads every segment of ONE media playlist and assembles them into a single temp file
     /// (fMP4 → `.mp4`, MPEG-TS → `.ts`), **streaming segments to disk in order as they arrive**
@@ -637,6 +640,7 @@ enum WebVideoDownloader {
 
     nonisolated private static func request(_ url: URL, referer: String, cookieHeader: String, authHeader: String? = nil) -> URLRequest {
         var req = URLRequest(url: url)
+        req.assumesHTTP3Capable = true      // skip the Alt-Svc round trip on H3-capable CDNs
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("*/*", forHTTPHeaderField: "Accept")
         if !referer.isEmpty { req.setValue(referer, forHTTPHeaderField: "Referer") }
@@ -699,7 +703,7 @@ enum WebVideoDownloader {
     // MARK: - Fast download (parallel HTTP range requests)
 
     private static let rangeChunk: Int64 = 4 << 20        // 4 MB per range request
-    private static let rangeConcurrency = 8               // parallel connections
+    private static let rangeConcurrency = 10              // parallel connections
     private static let rangeMinSize: Int64 = 6 << 20      // only parallelize files bigger than this
 
     /// Downloads `url` to a temp file. When the server supports HTTP range requests and the file is
@@ -1064,6 +1068,7 @@ private final class ProgressDownloadDelegate: NSObject, URLSessionDownloadDelega
         cfg.httpShouldSetCookies = false            // our manual Cookie header is authoritative
         cfg.httpCookieStorage = nil
         cfg.timeoutIntervalForRequest = 60
+        cfg.networkServiceType = .background        // yield to the browser's interactive traffic
         session = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
     }
 
