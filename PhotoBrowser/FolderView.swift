@@ -1924,6 +1924,15 @@ struct FolderView: View {
                         // Less-used maintenance tools stay in a submenu — same reason as above:
                         // keep the parent menu cheap to build so it opens instantly.
                         Menu {
+                            if library.thumbnailCacheRunning {
+                                Button(role: .destructive) { library.stopThumbnailCaching() } label: {
+                                    Label("Stop Caching Process", systemImage: "stop.circle")
+                                }
+                            } else {
+                                Button { library.startThumbnailCaching() } label: {
+                                    Label("Cache All Thumbnails", systemImage: "square.grid.3x3.square")
+                                }
+                            }
                             Button { showDuplicates = true } label: { Label("Find Duplicates", systemImage: "doc.on.doc") }
                             Button { confirmFixDates = true } label: { Label("Restore Capture Dates", systemImage: "clock.arrow.circlepath") }
                             Button { runTextIndex() } label: { Label("Index Text in Photos", systemImage: "text.viewfinder") }

@@ -227,6 +227,28 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Ensures a disk-cache thumbnail exists for a file, skipping files that already have one —
+    /// the "Cache All Thumbnails" drive pass calls this for every photo/video. A legacy-key hit
+    /// is adopted with a cheap rename instead of regenerating. Deliberately bypasses the memory
+    /// cache: a whole-drive sweep must not evict the tiles the user is actually looking at.
+    /// Generates at the largest size a grid tile can ask for (the key ignores size, so one
+    /// stored thumbnail satisfies every future request).
+    func precache(fileAt url: URL, kind: FileKind) async {
+        guard let key = cacheKey(forFileAt: url) else { return }
+        let fm = FileManager.default
+        let diskURL = diskDir.appendingPathComponent(key).appendingPathExtension("jpg")
+        if fm.fileExists(atPath: diskURL.path) { return }
+        if let legacy = legacyCacheKey(forFileAt: url) {
+            let legacyURL = diskDir.appendingPathComponent(legacy).appendingPathExtension("jpg")
+            if fm.fileExists(atPath: legacyURL.path), (try? fm.moveItem(at: legacyURL, to: diskURL)) != nil { return }
+        }
+        let side: CGFloat = 110                               // grid tile size, matching `prewarm`
+        guard let img = await generate(url: url, kind: kind, size: CGSize(width: side, height: side), scale: 3) else { return }
+        if let data = img.jpegData(compressionQuality: 0.8) {
+            try? data.write(to: diskURL, options: .atomic)
+        }
+    }
+
     /// Pre-generates the disk-cache thumbnail for a file whose full-size bytes we already have
     /// in memory (e.g. a video frame the exporter just wrote), so the folder never has to decode
     /// the full file off the drive later. Keyed exactly like a normal tile request, so the grid

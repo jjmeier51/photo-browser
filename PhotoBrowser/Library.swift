@@ -933,6 +933,76 @@ final class Library {
         }
     }
 
+    // MARK: - Cache All Thumbnails (full-drive background pass)
+
+    /// The running "Cache All Thumbnails" pass — non-nil while it runs. Drives the Maintenance
+    /// menu's Cache/Stop toggle.
+    private(set) var thumbnailCacheTask: Task<Void, Never>?
+    var thumbnailCacheRunning: Bool { thumbnailCacheTask != nil }
+
+    /// Walks the whole drive and generates a disk thumbnail for every photo/video that doesn't
+    /// have one yet (already-cached files are skipped — see `Thumbnailer.precache`). Runs as an
+    /// app-wide activity pill so the user can keep browsing; progress is a fraction only, no
+    /// file counts. Stoppable from the Maintenance menu.
+    func startThumbnailCaching() {
+        guard thumbnailCacheTask == nil, let root = rootURL else { return }
+        let id = beginActivity("Caching In Progress", indeterminate: true)
+        setActivity(id, status: "Scanning drive…")
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Cache All Thumbnails")
+        thumbnailCacheTask = Task {
+            let cancelled = await Self.cacheAllThumbnails(under: root) { fraction in
+                Task { @MainActor in self.setActivity(id, status: "", fraction: fraction) }
+            }
+            endActivity(id, result: cancelled ? nil : "All thumbnails are cached.")
+            thumbnailCacheTask = nil
+            bg.end()
+        }
+    }
+
+    func stopThumbnailCaching() {
+        thumbnailCacheTask?.cancel()
+    }
+
+    /// The worker: enumerate every media file under `root`, then ensure each has a disk
+    /// thumbnail, bounded-concurrent (the codebase's task-group pattern). Returns true if the
+    /// pass was cancelled. `nonisolated` so the walk and the decoding never touch the main actor.
+    private nonisolated static func cacheAllThumbnails(under root: URL,
+                                                       progress: @escaping @Sendable (Double) -> Void) async -> Bool {
+        let fm = FileManager.default
+        var files: [(url: URL, kind: FileKind)] = []
+        if let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey],
+                                      options: [.skipsHiddenFiles]) {
+            for case let url as URL in walker {
+                if Task.isCancelled { return true }
+                let kind = classify(url: url, isDirectory: false)
+                if kind == .image || kind == .video { files.append((url, kind)) }
+            }
+        }
+        guard !files.isEmpty else { return Task.isCancelled }
+        var done = 0
+        await withTaskGroup(of: Void.self) { group in
+            var idx = 0
+            let maxConcurrent = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 8))
+            func next() {
+                guard idx < files.count, !Task.isCancelled else { return }
+                let file = files[idx]; idx += 1
+                group.addTask {
+                    guard !Task.isCancelled else { return }
+                    await Thumbnailer.shared.precache(fileAt: file.url, kind: file.kind)
+                }
+            }
+            for _ in 0..<min(maxConcurrent, files.count) { next() }
+            while await group.next() != nil {
+                done += 1
+                if done % 20 == 0 || done == files.count {
+                    progress(Double(done) / Double(files.count))
+                }
+                next()
+            }
+        }
+        return Task.isCancelled
+    }
+
     // MARK: - Google Drive download (app-wide, navigable while it runs)
 
     func startGoogleDriveDownload(link: String, into folder: URL) {
