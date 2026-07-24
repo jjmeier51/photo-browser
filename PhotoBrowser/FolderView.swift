@@ -1028,8 +1028,12 @@ struct FolderView: View {
     /// stay untouched; this drive remains the primary.
     private func performBackupCopy(newRoot: URL) {
         let n = library.duplicateMetadata(from: url, to: newRoot)
+        // Cached thumbnails follow in the background (folders, photos and videos alike), so the
+        // backup browses with instant tiles. Faithful copies share keys already; this covers
+        // the rest with cheap local file copies.
+        library.startThumbnailBackup(from: url, to: newRoot)
         resultMessage = n > 0
-            ? "Copied \(n) metadata entr\(n == 1 ? "y" : "ies") — favorites, labels, captions, covers, birthdays, People and profile records — onto “\(newRoot.lastPathComponent)”."
+            ? "Copied \(n) metadata entr\(n == 1 ? "y" : "ies") — favorites, labels, captions, covers, birthdays, People and profile records — onto “\(newRoot.lastPathComponent)”. Cached thumbnails are copying in the background."
             : "Nothing to copy — no metadata found under “\(url.lastPathComponent)”, or the same folder was picked."
     }
 
@@ -1230,7 +1234,11 @@ struct FolderView: View {
                     }
                 }
                 if !entries.isEmpty { filterBar }
-                grid
+                // Edge swipes on the grid hop to the alphabetical neighbor folder (right edge,
+                // swipe left → next; left edge, swipe right → previous). Simultaneous so
+                // scrolling, taps and long-presses are untouched; attached to the grid only so
+                // the horizontal filter-chip scroller can't trigger it.
+                grid.simultaneousGesture(folderSwipeGesture)
             }
             .background(AppGradient())
             // Browser downloads keep running after the browser is dismissed — surface them here
@@ -2623,6 +2631,52 @@ struct FolderView: View {
             }
         }
         performMove(to: dest)
+    }
+
+    // MARK: - Sibling-folder edge swipes
+
+    /// Right edge + swipe left → next sibling folder (A→Z); left edge + swipe right → previous.
+    /// Start-location and direction filters keep vertical scrolling and mid-screen pans inert.
+    private var folderSwipeGesture: some Gesture {
+        DragGesture(minimumDistance: 30, coordinateSpace: .global)
+            .onEnded { v in
+                guard !selecting, !isRoot else { return }
+                let width = UIScreen.main.bounds.width
+                let edge = width * 0.18
+                let dx = v.translation.width, dy = v.translation.height
+                guard abs(dx) > 70, abs(dy) < abs(dx) * 0.6 else { return }
+                if v.startLocation.x > width - edge, dx < 0 { goToSiblingFolder(offset: 1) }
+                else if v.startLocation.x < edge, dx > 0 { goToSiblingFolder(offset: -1) }
+            }
+    }
+
+    /// Replace the top of the navigation path with the alphabetical neighbor of this folder
+    /// (same parent). The `.id(url)` on the pushed FolderView gives the replacement a fresh
+    /// identity, so the listing reloads — the same mechanism "Open Stories" uses.
+    private func goToSiblingFolder(offset: Int) {
+        let parent = url.deletingLastPathComponent()
+        guard let root = library.rootURL,
+              parent.path == root.path || parent.path.hasPrefix(root.path + "/") else { return }
+        let currentPath = url.path
+        let showHidden = showHiddenFolders
+        Task {
+            let siblings = await Task.detached(priority: .userInitiated) { () -> [URL] in
+                let fm = FileManager.default
+                let items = (try? fm.contentsOfDirectory(at: parent, includingPropertiesForKeys: [.isDirectoryKey],
+                                                         options: [.skipsHiddenFiles])) ?? []
+                return items.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
+                    .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            }.value
+            let visible = siblings.filter { showHidden || !library.isHiddenFolder($0) || $0.path == currentPath }
+            guard let i = visible.firstIndex(where: { $0.path == currentPath }) else { return }
+            let j = i + offset
+            guard visible.indices.contains(j) else { return }   // first/last folder — nowhere to go
+            if library.path.isEmpty {
+                library.path = [visible[j]]
+            } else {
+                library.path[library.path.count - 1] = visible[j]
+            }
+        }
     }
 
     private func performMove(to dest: URL) {

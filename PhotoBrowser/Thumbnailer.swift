@@ -227,6 +227,39 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Backup companion to `Library.duplicateMetadata`: for every media file under `srcRoot`
+    /// whose thumbnail is cached, ensure the counterpart file under `destRoot` (same relative
+    /// path — the Copy-Metadata mapping) has a cached thumbnail too, by copying the small
+    /// cached JPEG under the counterpart's own key. Keys are parent+filename|mtime|size, so
+    /// faithful copies match for free; this covers root-level files (different parent folder
+    /// name) and copies whose mtimes drifted. Pure local Application-Support file copies — no
+    /// decoding, nothing written to either drive. Returns the number of thumbnails copied.
+    func duplicateThumbnails(from srcRoot: URL, to destRoot: URL) async -> Int {
+        await Task.detached(priority: .utility) { () -> Int in
+            let fm = FileManager.default
+            var copied = 0
+            guard let walker = fm.enumerator(at: srcRoot, includingPropertiesForKeys: [.isRegularFileKey],
+                                             options: [.skipsHiddenFiles]) else { return 0 }
+            for case let src as URL in walker {
+                if Task.isCancelled { break }
+                let kind = classify(url: src, isDirectory: false)
+                guard kind == .image || kind == .video else { continue }
+                guard let srcKey = self.cacheKey(forFileAt: src) else { continue }
+                let srcThumb = self.diskDir.appendingPathComponent(srcKey).appendingPathExtension("jpg")
+                guard fm.fileExists(atPath: srcThumb.path) else { continue }
+                let rel = String(src.path.dropFirst(srcRoot.path.count))
+                let dest = URL(fileURLWithPath: destRoot.path + rel)
+                // The counterpart must actually exist on the backup, and its own key (its real
+                // mtime/size) decides the cache entry name.
+                guard let destKey = self.cacheKey(forFileAt: dest), destKey != srcKey else { continue }
+                let destThumb = self.diskDir.appendingPathComponent(destKey).appendingPathExtension("jpg")
+                guard !fm.fileExists(atPath: destThumb.path) else { continue }
+                if (try? fm.copyItem(at: srcThumb, to: destThumb)) != nil { copied += 1 }
+            }
+            return copied
+        }.value
+    }
+
     /// Ensures a disk-cache thumbnail exists for a file, skipping files that already have one —
     /// the "Cache All Thumbnails" drive pass calls this for every photo/video. A legacy-key hit
     /// is adopted with a cheap rename instead of regenerating. Deliberately bypasses the memory

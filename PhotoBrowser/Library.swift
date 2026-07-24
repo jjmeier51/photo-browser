@@ -948,6 +948,19 @@ final class Library {
         }
     }
 
+    /// Backup companion to `duplicateMetadata`: duplicates the cached thumbnails onto the
+    /// backup subtree's cache keys in the background, so browsing the backup shows instant
+    /// tiles instead of re-thumbnailing the whole drive. Cheap local file copies only.
+    func startThumbnailBackup(from oldRoot: URL, to newRoot: URL) {
+        let id = beginActivity("Backing Up Thumbnails", indeterminate: true)
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Thumbnail Backup")
+        Task {
+            let n = await Thumbnailer.shared.duplicateThumbnails(from: oldRoot, to: newRoot)
+            endActivity(id, result: n > 0 ? "Copied \(n) cached thumbnail\(n == 1 ? "" : "s") for the backup." : nil)
+            bg.end()
+        }
+    }
+
     // MARK: - Cache All Thumbnails (full-drive background pass)
 
     /// The running "Cache All Thumbnails" pass — non-nil while it runs. Drives the Maintenance
