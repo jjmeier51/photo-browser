@@ -4,6 +4,13 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **VSCO downloads work again.** VSCO retired the page-based `api/2.0/medias` gallery endpoint and
+  now rotates the anonymous API token, so the app — which called the old endpoint with a hardcoded
+  token — got an empty list and reported "Couldn't find any posts." It now reads a **fresh token**
+  (and the site id) from the profile page's embedded `__PRELOADED_STATE__`, lists media through the
+  current cursor-paginated **`api/3.0/medias/profile`** endpoint (unwrapping its type-tagged
+  image/video items), and sends the `X-Client-Platform`/`X-Client-Build` headers the API now
+  requires. Field parsing accepts both the old snake_case and new camelCase spellings.
 - **Instagram fetches new posts and stories again.** Instagram moved its private web API off the
   `i.instagram.com` app host; the app was still calling `i.instagram.com/api/v1/…` while sending a
   `www.instagram.com` Referer — a cross-origin mismatch Instagram now refuses, so *both* the posts

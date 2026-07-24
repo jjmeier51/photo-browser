@@ -27,9 +27,9 @@ struct VSCOFolderInfo: Codable, Sendable {
 /// unofficial, so parsing is defensive and failures are surfaced as notes, never crashes.
 enum VSCOService {
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-    /// The public anonymous web token VSCO's own site uses for browsing (the same constant the
-    /// open-source VSCO downloaders rely on). If VSCO rotates it, a run just comes back empty and
-    /// says so — it's never treated as fatal.
+    /// Fallback anonymous web token, used only if a fresh one can't be read from the profile page
+    /// (`fetchPreloadState`). VSCO rotates these, so the live token is preferred; this stale
+    /// constant is a last resort and a failed run just comes back empty and says so — never fatal.
     nonisolated static let webToken = "7356455548d0a1d886db010883388d08be84d0c9"
 
     struct Progress: Sendable { var phase: String; var fraction: Double; var done: Int; var total: Int }
@@ -64,7 +64,14 @@ enum VSCOService {
         let log = DownloadLog(folder: folder, kind: "vsco")
         await log.begin("VSCO download — @\(user)")
 
-        guard let site = await resolveSite(user) else {
+        // Fetch the profile page's preloaded state once: it yields a *fresh* anonymous API token
+        // (VSCO rotates these, so the hardcoded fallback goes stale and makes the media list come
+        // back empty) and, usually, the site id — avoiding a second lookup.
+        let preload = await fetchPreloadState(user: user)
+        let token = preload.token ?? webToken
+        await log.log("token: \(preload.token != nil ? "fresh from page" : "fallback constant")")
+
+        guard let site = preload.site ?? (await resolveSite(user, token: token)) else {
             result.note = "Couldn’t open @\(user) on VSCO — check the username (and that the profile is public)."
             await log.finish("FAILED: site not found for @\(user)")
             return result
@@ -76,7 +83,7 @@ enum VSCOService {
 
         // Page through the whole gallery.
         progress(Progress(phase: "Listing @\(user)’s posts…", fraction: 0, done: 0, total: 0))
-        let items = await listAllMedia(siteID: site.id, log: log)
+        let items = await listAllMedia(siteID: site.id, token: token, log: log)
         await log.log("listed \(items.count) media item(s) across the gallery")
         let pending = items.filter { !alreadyDownloaded.contains($0.id) }
         guard !pending.isEmpty else {
@@ -127,9 +134,44 @@ enum VSCOService {
 
     private struct Site: Sendable { let id: String; let name: String; let picURL: String }
 
+    /// Fetches the profile page and extracts VSCO's embedded `__PRELOADED_STATE__` JSON, which
+    /// carries a fresh anonymous API token (`users.currentUser.tkn`) and the profile's site node.
+    /// VSCO rotates the token, so reading a live one here is what keeps the media list from coming
+    /// back empty. Returns nils (caller falls back) if the page or JSON can't be read.
+    nonisolated private static func fetchPreloadState(user: String) async -> (token: String?, site: Site?) {
+        guard let url = URL(string: "https://vsco.co/\(user)/gallery") else { return (nil, nil) }
+        var req = URLRequest(url: url)
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue("https://vsco.co/", forHTTPHeaderField: "Referer")
+        req.timeoutInterval = 30
+        guard let (data, _) = try? await session.data(for: req),
+              let html = String(data: data, encoding: .utf8),
+              // Embedded as `__PRELOADED_STATE__ = {…}<`. A literal `<` inside the JSON is escaped
+              // (to a unicode escape) to keep the inline script valid, so the first raw `<` after
+              // the marker is the script-tag boundary — a safe end delimiter.
+              let jsonStr = between(html, "__PRELOADED_STATE__ = ", "<"),
+              let obj = try? JSONSerialization.jsonObject(with: Data(jsonStr.utf8)) as? [String: Any]
+        else { return (nil, nil) }
+
+        let token = ((obj["users"] as? [String: Any])?["currentUser"] as? [String: Any])?["tkn"] as? String
+            ?? firstString(obj, key: "tkn")
+
+        var site: Site?
+        if let sites = obj["sites"] as? [String: Any], let byUser = sites["siteByUsername"] as? [String: Any] {
+            let node = (byUser[user] as? [String: Any]) ?? (byUser.values.first as? [String: Any])
+            let s = (node?["site"] as? [String: Any]) ?? node
+            if let s, let id = idString(s["id"]) {
+                let name = (s["name"] as? String) ?? (s["domain"] as? String) ?? user
+                let pic = absolute((s["profile_image"] as? String) ?? (s["responsive_url"] as? String) ?? "")
+                site = Site(id: id, name: name, picURL: pic)
+            }
+        }
+        return (token.flatMap { $0.isEmpty ? nil : $0 }, site)
+    }
+
     /// Resolves a username to its VSCO `site_id` (+ display name and avatar).
-    nonisolated private static func resolveSite(_ username: String) async -> Site? {
-        guard let data = await apiGet("https://vsco.co/api/2.0/sites?subdomain=\(username)"),
+    nonisolated private static func resolveSite(_ username: String, token: String) async -> Site? {
+        guard let data = await apiGet("https://vsco.co/api/2.0/sites?subdomain=\(username)", token: token),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let sites = json["sites"] as? [[String: Any]], let s = sites.first,
               let id = idString(s["id"]) else { return nil }
@@ -138,45 +180,64 @@ enum VSCOService {
         return Site(id: id, name: name, picURL: pic)
     }
 
-    /// Every media item in the profile, paged (newest-first) until VSCO returns none.
-    nonisolated private static func listAllMedia(siteID: String, log: DownloadLog?) async -> [Item] {
+    /// Every media item in the profile, via VSCO's cursor-paginated `api/3.0/medias/profile`
+    /// (the old page-based `api/2.0/medias` was retired — it's what made the list come back
+    /// empty). Each entry is type-discriminated (`{"type":"image","image":{…}}`); unwrap it,
+    /// then follow `next_cursor` until it's absent.
+    nonisolated private static func listAllMedia(siteID: String, token: String, log: DownloadLog?) async -> [Item] {
         var out: [Item] = []
         var seen = Set<String>()
-        var page = 1
-        while page <= 200 {          // hard cap: 200 × 100 = 20k media
-            guard let data = await apiGet("https://vsco.co/api/2.0/medias?site_id=\(siteID)&page=\(page)&size=100"),
+        var cursor: String?
+        var page = 0
+        while page < 400 {           // hard cap: 400 × 100 = 40k media
+            page += 1
+            var s = "https://vsco.co/api/3.0/medias/profile?site_id=\(siteID)&limit=100"
+            if let cursor, !cursor.isEmpty {
+                let enc = cursor.addingPercentEncoding(withAllowedCharacters: cursorAllowed) ?? cursor
+                s += "&cursor=\(enc)"
+            }
+            guard let data = await apiGet(s, token: token),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 await log?.log("page \(page): fetch/parse failed — stopping"); break
             }
             let media = (json["media"] as? [[String: Any]]) ?? []
-            guard !media.isEmpty else { break }
             var added = 0
-            for m in media {
+            for wrapper in media {
+                // Unwrap the type-discriminated item; tolerate a flat object (older shape).
+                let type = wrapper["type"] as? String
+                let m = (type.flatMap { wrapper[$0] as? [String: Any] }) ?? wrapper
                 guard let it = parseItem(m), seen.insert(it.id).inserted else { continue }
                 out.append(it); added += 1
             }
             await log?.log("page \(page): \(media.count) item(s), \(added) new (total \(out.count))")
-            if added == 0 { break }   // fully-overlapping page → done
-            page += 1
+            cursor = json["next_cursor"] as? String
+            if media.isEmpty || cursor == nil || cursor!.isEmpty { break }
         }
         return out
     }
 
-    /// Parses one VSCO media object into a downloadable item, tolerating field-name drift.
+    /// Parses one VSCO media object into a downloadable item. The 2.0 and 3.0 APIs disagree on
+    /// field casing (snake_case vs camelCase), so accept both spellings of every field.
     nonisolated private static func parseItem(_ m: [String: Any]) -> Item? {
-        guard let id = idString(m["_id"]) ?? idString(m["upload_id"]) ?? idString(m["id"]) else { return nil }
-        let isVideo = (m["is_video"] as? Bool) ?? (m["video_url"] != nil)
+        func str(_ keys: String...) -> String? {
+            for k in keys { if let v = m[k] as? String, !v.isEmpty { return v } }
+            return nil
+        }
+        guard let id = idString(m["_id"]) ?? idString(m["upload_id"]) ?? idString(m["uploadId"]) ?? idString(m["id"])
+        else { return nil }
+        let isVideo = (m["is_video"] as? Bool) ?? (m["isVideo"] as? Bool)
+            ?? (str("video_url", "videoUrl", "playback_url", "playbackUrl") != nil)
         let urlStr: String
         if isVideo {
-            urlStr = absolute((m["video_url"] as? String) ?? (m["responsive_url"] as? String) ?? "")
+            urlStr = absolute(str("video_url", "videoUrl", "playback_url", "playbackUrl",
+                                  "responsive_url", "responsiveUrl") ?? "")
         } else {
-            urlStr = absolute((m["responsive_url"] as? String) ?? (m["img_url"] as? String) ?? "")
+            urlStr = absolute(str("responsive_url", "responsiveUrl", "img_url", "imgUrl") ?? "")
         }
         guard !urlStr.isEmpty else { return nil }
-        // Posting date: capture_date is the shot time when VSCO has it, else upload_date.
-        // Both are epoch milliseconds.
-        let ms = doubleValue(m["capture_date"]).flatMap { $0 > 0 ? $0 : nil }
-            ?? doubleValue(m["upload_date"]).flatMap { $0 > 0 ? $0 : nil }
+        // Posting date: capture time when VSCO has it, else upload time. Both are epoch milliseconds.
+        let ms = doubleValue(m["capture_date"] ?? m["captureDate"]).flatMap { $0 > 0 ? $0 : nil }
+            ?? doubleValue(m["upload_date"] ?? m["uploadDate"]).flatMap { $0 > 0 ? $0 : nil }
         let date = ms.map { Date(timeIntervalSince1970: $0 / 1000) }
         let caption = ((m["description"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return Item(id: id, url: urlStr, isVideo: isVideo, date: date, caption: caption)
@@ -248,13 +309,16 @@ enum VSCOService {
 
     // MARK: - HTTP
 
-    nonisolated private static func apiGet(_ urlString: String) async -> Data? {
+    nonisolated private static func apiGet(_ urlString: String, token: String) async -> Data? {
         guard let url = URL(string: urlString) else { return nil }
         var req = URLRequest(url: url)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("Bearer \(webToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("https://vsco.co/", forHTTPHeaderField: "Referer")
+        // The api/3.0 endpoints require these client headers (the web app sends them).
+        req.setValue("web", forHTTPHeaderField: "X-Client-Platform")
+        req.setValue("1", forHTTPHeaderField: "X-Client-Build")
         req.timeoutInterval = 30
         for attempt in 0..<3 {
             if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 800_000_000) }
@@ -314,6 +378,30 @@ enum VSCOService {
         var n = 1
         while fm.fileExists(atPath: dest.path) { dest = folder.appendingPathComponent("\(base) \(n).\(ext)"); n += 1 }
         return dest
+    }
+
+    /// Unreserved URL characters (RFC 3986) — used to percent-encode an opaque cursor token so
+    /// any `+`, `/`, or `=` in it can't corrupt the query string.
+    nonisolated private static let cursorAllowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+
+    /// The substring of `s` between the first occurrence of `start` and the next `end` after it.
+    nonisolated private static func between(_ s: String, _ start: String, _ end: String) -> String? {
+        guard let r1 = s.range(of: start) else { return nil }
+        let rest = s[r1.upperBound...]
+        guard let r2 = rest.range(of: end) else { return nil }
+        return String(rest[..<r2.lowerBound])
+    }
+
+    /// Depth-first search for the first non-empty string value stored at `key` anywhere in a
+    /// decoded JSON tree — a resilient fallback for reading the token when the exact path drifts.
+    nonisolated private static func firstString(_ obj: Any, key: String) -> String? {
+        if let d = obj as? [String: Any] {
+            if let v = d[key] as? String, !v.isEmpty { return v }
+            for (_, val) in d { if let found = firstString(val, key: key) { return found } }
+        } else if let a = obj as? [Any] {
+            for val in a { if let found = firstString(val, key: key) { return found } }
+        }
+        return nil
     }
 
     nonisolated private static func idString(_ any: Any?) -> String? {
