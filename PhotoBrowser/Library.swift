@@ -950,12 +950,14 @@ final class Library {
         let id = beginActivity("Caching In Progress", indeterminate: true)
         setActivity(id, status: "Scanning drive…")
         let bg = BackgroundTaskHolder(); bg.begin(name: "Cache All Thumbnails")
+        UIApplication.shared.isIdleTimerDisabled = true       // long run — keep the screen alive
         thumbnailCacheTask = Task {
             let cancelled = await Self.cacheAllThumbnails(under: root) { fraction, folder in
                 Task { @MainActor in self.setActivity(id, status: folder, fraction: fraction) }
             }
             endActivity(id, result: cancelled ? nil : "All thumbnails are cached.")
             thumbnailCacheTask = nil
+            UIApplication.shared.isIdleTimerDisabled = false
             bg.end()
         }
     }
