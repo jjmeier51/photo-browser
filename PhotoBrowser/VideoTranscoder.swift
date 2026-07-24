@@ -65,7 +65,7 @@ enum VideoTranscoder {
 
     /// Decrypts already-downloaded Widevine CENC media with `keyHex` (a 32-char content
     /// key) and muxes video (+ optional separate audio) into a plain MP4 — used by the
-    /// OnlyFans DRM path once cdmpool has returned the key. Inputs are **local files**
+    /// OF DRM path once cdmpool has returned the key. Inputs are **local files**
     /// (not a manifest URL) so `-decryption_key` actually applies (it's a mov-demuxer
     /// option that doesn't propagate through the DASH demuxer). Streams are copied (no
     /// re-encode) so quality/HDR is preserved. Returns false without FFmpegKit.

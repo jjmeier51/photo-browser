@@ -85,7 +85,7 @@ struct FolderView: View {
     @State private var showAllStories = false
     @State private var showBulkInstagram = false
     @State private var showFacebook = false
-    @State private var showOnlyFans = false
+    @State private var showOF = false
     @State private var showLinkDownload = false
     @State private var showTikTok = false
     @State private var showVSCO = false
@@ -971,8 +971,8 @@ struct FolderView: View {
             .fullScreenCover(isPresented: $showFacebook, onDismiss: { Task { await reload() } }) {
                 FacebookImportView(targetFolder: url, existing: library.facebookInfo(for: url)) { Task { await reload() } }
             }
-            .fullScreenCover(isPresented: $showOnlyFans, onDismiss: { Task { await reload() } }) {
-                OnlyFansImportView(targetFolder: url, existing: library.onlyfansInfo(for: url)) { Task { await reload() } }
+            .fullScreenCover(isPresented: $showOF, onDismiss: { Task { await reload() } }) {
+                OFImportView(targetFolder: url, existing: library.ofInfo(for: url)) { Task { await reload() } }
             }
             .sheet(isPresented: $showLinkDownload, onDismiss: { Task { await reload() } }) {
                 LinkImportView(targetFolder: url) { Task { await reload() } }
@@ -1221,7 +1221,7 @@ struct FolderView: View {
                 if showBubbles {
                     // Highlights that are album folders (Home, and album-highlight folders
                     // like HD/ and Hilary Duff/) wrap into rows, A–Z, so they're all visible
-                    // at once. Social-profile folders (Instagram/Facebook/TikTok/OnlyFans)
+                    // at once. Social-profile folders (Instagram/Facebook/TikTok/OF)
                     // keep the horizontal scroller with the user's drag-arranged order.
                     if wrapsBubbles {
                         if isRoot { albumHighlightGrid } else { largeHighlightGrid }
@@ -1331,30 +1331,35 @@ struct FolderView: View {
                     Image(systemName: "magnifyingglass").font(.largeTitle).foregroundStyle(.secondary)
                     Text("No results").foregroundStyle(.secondary)
                 } else if loaded {
-                    Image(systemName: "photo.on.rectangle.angled")
-                        .font(.largeTitle).foregroundStyle(.secondary)
-                    Text(tsNoLabel ? "Everything here is labeled"
-                         : tsLabelMode ? "No items match these labels"
-                         : showFavoritesOnly ? "No favorites here yet"
-                         : showAIOnly ? "Nothing marked To AI yet"
-                         : advancedActive ? "No matches for this filter"
-                         : "This folder is empty")
-                        .foregroundStyle(.secondary)
-                    // A genuinely empty folder (no filter hiding things) gets the two ways to
-                    // fill it, instead of a dead end.
-                    if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !showEditedOnly
-                        && !advancedActive && yearFilter == nil && typeFilter == .all && ageFilter == nil {
-                        HStack(spacing: 12) {
-                            Button { showPhotosPicker = true } label: {
-                                Label("Add from Photos", systemImage: "photo.badge.plus")
+                    // A folder presented as album-highlight bubbles isn't "empty" — the albums
+                    // ARE its content — so no empty-state text or actions (they collided with
+                    // the bubble grid).
+                    if !showBubbles {
+                        Image(systemName: "photo.on.rectangle.angled")
+                            .font(.largeTitle).foregroundStyle(.secondary)
+                        Text(tsNoLabel ? "Everything here is labeled"
+                             : tsLabelMode ? "No items match these labels"
+                             : showFavoritesOnly ? "No favorites here yet"
+                             : showAIOnly ? "Nothing marked To AI yet"
+                             : advancedActive ? "No matches for this filter"
+                             : "This folder is empty")
+                            .foregroundStyle(.secondary)
+                        // A genuinely empty folder (no filter hiding things) gets the two ways to
+                        // fill it, instead of a dead end.
+                        if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !showEditedOnly
+                            && !advancedActive && yearFilter == nil && typeFilter == .all && ageFilter == nil {
+                            HStack(spacing: 12) {
+                                Button { showPhotosPicker = true } label: {
+                                    Label("Add from Photos", systemImage: "photo.badge.plus")
+                                }
+                                .buttonStyle(.bordered)
+                                Button { showWebBrowser = true } label: {
+                                    Label("Web Browser", systemImage: "safari")
+                                }
+                                .buttonStyle(.bordered)
                             }
-                            .buttonStyle(.bordered)
-                            Button { showWebBrowser = true } label: {
-                                Label("Web Browser", systemImage: "safari")
-                            }
-                            .buttonStyle(.bordered)
+                            .padding(.top, 6)
                         }
-                        .padding(.top, 6)
                     }
                 } else {
                     ProgressView()
@@ -1392,16 +1397,16 @@ struct FolderView: View {
     private func isBubbleFolder(_ url: URL) -> Bool {
         library.isInstagramFolder(url) || library.isInstagramHighlight(url)
             || library.isAlbumHighlight(url) || library.isFacebookFolder(url)
-            || library.isTikTokFolder(url) || library.isOnlyFansFolder(url)
+            || library.isTikTokFolder(url) || library.isOFFolder(url)
     }
     /// Pin rank: a profile's "Stories" highlight first, then the Instagram profile, the
-    /// Facebook profile, the TikTok profile, the OnlyFans creator, and everything else after.
+    /// Facebook profile, the TikTok profile, the OF creator, and everything else after.
     private func bubbleRank(_ url: URL) -> Int {
         if library.isInstagramHighlight(url) && url.lastPathComponent == "Stories" { return -1 }
         if library.isInstagramFolder(url) { return 0 }
         if library.isFacebookFolder(url) { return 1 }
         if library.isTikTokFolder(url) { return 2 }
-        if library.isOnlyFansFolder(url) { return 3 }
+        if library.isOFFolder(url) { return 3 }
         return 4
     }
     private var igBubbles: [Entry] {
@@ -1515,7 +1520,7 @@ struct FolderView: View {
     private func isPinnedBubble(_ url: URL) -> Bool {
         (library.isInstagramHighlight(url) && url.lastPathComponent == "Stories")
             || library.isInstagramFolder(url) || library.isFacebookFolder(url)
-            || library.isTikTokFolder(url) || library.isOnlyFansFolder(url)
+            || library.isTikTokFolder(url) || library.isOFFolder(url)
     }
 
     private func bubble(_ entry: Entry, diameter: CGFloat = 72) -> some View {
@@ -1545,7 +1550,7 @@ struct FolderView: View {
         if let ig = library.instagramInfo(for: entry.url) { return "@\(ig.handle)" }
         if let fb = library.facebookInfo(for: entry.url) { return fb.profileName }
         if let tt = library.tiktokInfo(for: entry.url) { return "@\(tt.handle)" }
-        if let of = library.onlyfansInfo(for: entry.url) { return "@\(of.username)" }
+        if let of = library.ofInfo(for: entry.url) { return "@\(of.username)" }
         return entry.name
     }
 
@@ -1563,7 +1568,7 @@ struct FolderView: View {
                                                          Color(red: 0.99, green: 0.17, blue: 0.33)],  // #FE2C55
                                                 startPoint: .topLeading, endPoint: .bottomTrailing))
         }
-        if library.isOnlyFansFolder(url) {
+        if library.isOFFolder(url) {
             return AnyShapeStyle(LinearGradient(colors: [Color(red: 0.00, green: 0.69, blue: 0.94),   // #00AFF0
                                                          Color(red: 0.00, green: 0.83, blue: 1.00)],
                                                 startPoint: .topLeading, endPoint: .bottomTrailing))
@@ -1611,7 +1616,7 @@ struct FolderView: View {
             let when = f.string(from: Date(timeIntervalSince1970: fb.lastUpdated))
             return "Last Updated on \(when) · \(fb.photos) Photos and \(fb.videos) Videos"
         }
-        if let of = library.onlyfansInfo(for: url) {
+        if let of = library.ofInfo(for: url) {
             let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
             let when = f.string(from: Date(timeIntervalSince1970: of.lastUpdated))
             return "Last Updated on \(when) · \(of.photos) Photos and \(of.videos) Videos"
@@ -1881,9 +1886,9 @@ struct FolderView: View {
                                 Label(library.isFacebookFolder(url) ? "Get New Facebook Photos" : "Download Facebook Profile…",
                                       systemImage: library.isFacebookFolder(url) ? "arrow.triangle.2.circlepath" : "person.2.fill")
                             }
-                            Button { showOnlyFans = true } label: {
-                                Label(library.isOnlyFansFolder(url) ? "Get New OnlyFans Posts" : "Download OnlyFans Profile…",
-                                      systemImage: library.isOnlyFansFolder(url) ? "arrow.triangle.2.circlepath" : "lock.circle")
+                            Button { showOF = true } label: {
+                                Label(library.isOFFolder(url) ? "Get New OF Posts" : "Download OF Profile…",
+                                      systemImage: library.isOFFolder(url) ? "arrow.triangle.2.circlepath" : "lock.circle")
                             }
                             Button { showTikTok = true } label: {
                                 Label(library.lastTikTokHandle(for: url) != nil ? "Get New TikTok Videos" : "Download TikTok Profile…",

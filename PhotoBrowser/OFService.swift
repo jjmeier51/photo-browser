@@ -2,7 +2,7 @@ import Foundation
 import ImageIO
 import WebKit
 
-/// Per-folder record for a downloaded OnlyFans creator (drives "Get New OnlyFans
+/// Per-folder record for a downloaded OF creator (drives "Get New OF
 /// Posts", the blue-ringed highlight bubble, the folder subtitle, and dedup). On
 /// `Library`. Mirrors `IGFolderInfo` / `FBFolderInfo`.
 struct OFFolderInfo: Codable, Sendable {
@@ -15,14 +15,15 @@ struct OFFolderInfo: Codable, Sendable {
     var videos: Int
 }
 
-/// Reads the logged-in OnlyFans session from the in-app browser. Unlike Instagram /
-/// Facebook, OnlyFans needs three things to talk to its private API: the session
-/// cookies (`auth_id` + `sess`), and the `x-bc` device token — which OnlyFans keeps
+/// Reads the logged-in OF session from the in-app browser. Unlike Instagram /
+/// Facebook, OF needs three things to talk to its private API: the session
+/// cookies (`auth_id` + `sess`), and the `x-bc` device token — which OF keeps
 /// in **`localStorage`** (`bcTokenSha`), not a cookie. The login web view captures
 /// the `x-bc` while it's on the page and stashes it here; `credentials()` then joins
 /// it with the cookies. MainActor — `WKHTTPCookieStore` is main-bound.
 @MainActor
-enum OnlyFansAuth {
+enum OFAuth {
+    // Legacy defaults key kept verbatim — renaming it would sign the user out.
     private static let xbcKey = "photoBrowser.onlyfansXBC"
 
     static func cookies() async -> [HTTPCookie] {
@@ -33,7 +34,7 @@ enum OnlyFansAuth {
         }
     }
 
-    /// The device token OnlyFans stores in `localStorage`, captured during login.
+    /// The device token OF stores in `localStorage`, captured during login.
     static var storedXBC: String { UserDefaults.standard.string(forKey: xbcKey) ?? "" }
     static func setStoredXBC(_ value: String) {
         guard !value.isEmpty else { return }
@@ -48,31 +49,31 @@ enum OnlyFansAuth {
             && cs.contains { $0.name == "sess" && !$0.value.isEmpty }
     }
 
-    static func credentials() async -> OnlyFansService.Credentials? {
+    static func credentials() async -> OFService.Credentials? {
         let cs = await cookies()
         guard let authID = cs.first(where: { $0.name == "auth_id" })?.value, !authID.isEmpty,
               cs.contains(where: { $0.name == "sess" && !$0.value.isEmpty }) else { return nil }
         let xbc = storedXBC
         guard !xbc.isEmpty else { return nil }
         let header = cs.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-        return OnlyFansService.Credentials(cookie: header, userID: authID, xbc: xbc)
+        return OFService.Credentials(cookie: header, userID: authID, xbc: xbc)
     }
 }
 
-/// Downloads an OnlyFans creator's posts and messages (all the photos/videos the
+/// Downloads an OF creator's posts and messages (all the photos/videos the
 /// signed-in user can view) using the user's own logged-in session — the same
-/// approach as the reference `onlyfans-dl` scrapers. OnlyFans' private API
+/// approach as the reference `of-dl` scrapers. OF' private API
 /// (`/api2/v2`) requires every request to be **signed**: a SHA-1 over
 /// `static_param\ntime\npath\nuserId`, folded into a checksum, formatted per a small
 /// set of "dynamic rules" the community publishes (they rotate, so we fetch them at
-/// run time). Media in the JSON responses is pre-signed by OnlyFans, and we always
+/// run time). Media in the JSON responses is pre-signed by OF, and we always
 /// pick the **original / source** rendition (highest quality). Discovery (posts +
 /// messages) and downloading overlap, both throttled through one shared pacer, so a
 /// large creator pulls fast. Capture date + caption are written into each file.
 /// Best-effort, opt-in, download-only like the Instagram/Facebook/MEGA features:
 /// the protocol is unofficial, parsing is defensive, and failures surface as notes.
 /// All `nonisolated`: networking + crypto + parsing + big writes stay off the main actor.
-enum OnlyFansService {
+enum OFService {
     struct Credentials: Sendable { let cookie: String; let userID: String; let xbc: String }
     struct Creator: Sendable {
         let id: String
@@ -105,7 +106,7 @@ enum OnlyFansService {
     }
 
     /// DRM (Widevine) info for an encrypted item — its DASH manifest, the CloudFront
-    /// cookies to fetch it, and the OnlyFans license URL to sign. Present only when
+    /// cookies to fetch it, and the OF license URL to sign. Present only when
     /// cdmpool is configured and FFmpegKit is available.
     private struct DRMInfo: Sendable {
         let mpdURL: String
@@ -125,14 +126,14 @@ enum OnlyFansService {
     nonisolated static let apiBase = "https://onlyfans.com/api2/v2"
     nonisolated static let referer = "https://onlyfans.com/"
     // A stable desktop UA, used both by the login web view and the API, so x-bc /
-    // signing stay consistent with what OnlyFans expects.
+    // signing stay consistent with what OF expects.
     nonisolated static let userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     nonisolated static let defaultAppToken = "33d57ade8c02dbc5a333db99ff9ae26a"
     nonisolated static let pageLimit = 50
 
     /// Community-maintained signing rules (DATAHOARDERS is the currently-active
     /// feed; the jsdelivr CDN is a second host in case raw.githubusercontent is
-    /// blocked). They rotate as OnlyFans changes its scheme, so we try each in order
+    /// blocked). They rotate as OF changes its scheme, so we try each in order
     /// and use the first that parses.
     nonisolated static let dynamicRuleURLs = [
         "https://raw.githubusercontent.com/DATAHOARDERS/dynamic-rules/main/onlyfans.json",
@@ -153,7 +154,7 @@ enum OnlyFansService {
     // MARK: - Coordination (mirrors FacebookService)
 
     /// Spaces API page fetches globally so parallel discovery (posts + messages)
-    /// stays gentle on OnlyFans' rate limiter while overlapping request latency.
+    /// stays gentle on OF' rate limiter while overlapping request latency.
     private actor Pacer {
         private var next = ContinuousClock.now
         func waitTurn() async {
@@ -208,7 +209,7 @@ enum OnlyFansService {
         var drmSummary: String? {
             let total = drmSeen + skipDRM        // attempted + couldn't-attempt (no token/FFmpeg)
             guard total > 0 else { return nil }
-            if !OnlyFansDRM.isEnabled {
+            if !OFDRM.isEnabled {
                 return "\(total) DRM-protected video\(total == 1 ? "" : "s") skipped — add a cdmpool token in Settings to download them"
             }
             var parts: [String] = []
@@ -243,8 +244,8 @@ enum OnlyFansService {
         func noteDRMError(_ s: String) { if drmError == nil { drmError = s } }
         var diagnostics: String {
             var s = "posts \(postsScanned), msgs \(messagesScanned); media \(mediaSeen) → new \(foundCount), skipped \(skipLocked) locked / \(skipAudio) audio / no-url: \(skipDRM) drm, \(skipHLS) hls, \(skipOther) other"
-            if skipDRM > 0, OnlyFansDRM.isEnabled, !VideoTranscoder.isAvailable { s += " (DRM needs FFmpegKit)" }
-            if skipDRM > 0, !OnlyFansDRM.isEnabled { s += " (set a cdmpool token in Settings for DRM)" }
+            if skipDRM > 0, OFDRM.isEnabled, !VideoTranscoder.isAvailable { s += " (DRM needs FFmpegKit)" }
+            if skipDRM > 0, !OFDRM.isEnabled { s += " (set a cdmpool token in Settings for DRM)" }
             if let drmError { s += "; drm error: \(drmError)" }
             return s
         }
@@ -267,27 +268,27 @@ enum OnlyFansService {
                                 progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        // Verbose per-run log written into the creator's folder (onlyfans-log.txt) so
+        // Verbose per-run log written into the creator's folder (of-log.txt) so
         // failures can be inspected and shared. Best-effort, never affects the download.
-        let log = DownloadLog(folder: folder, kind: "onlyfans")
+        let log = DownloadLog(folder: folder, kind: "of")
         await log.begin("@\(username) — messages=\(includeMessages), known=\(alreadyDownloaded.count)")
-        progress(Progress(phase: "Loading OnlyFans signing rules…", fraction: 0, done: 0, total: 0))
+        progress(Progress(phase: "Loading OF signing rules…", fraction: 0, done: 0, total: 0))
         guard let rules = await fetchDynamicRules() else {
-            result.note = "Couldn’t load OnlyFans’ signing rules (the network may be blocked). Try again later."
+            result.note = "Couldn’t load OF’ signing rules (the network may be blocked). Try again later."
             await log.finish("FAILED: couldn’t load signing rules")
             return result
         }
         // Probe /users/me first: it validates the login + signing and gives a precise
-        // reason (the real HTTP status + OnlyFans error) instead of a vague "couldn’t
+        // reason (the real HTTP status + OF error) instead of a vague "couldn’t
         // open the creator", so a failed run points at what actually broke.
         switch await apiGet("/users/me", creds: creds, rules: rules) {
         case .ok: await log.log("auth OK (/users/me)")
         case .authError(let detail):
-            result.note = "OnlyFans didn’t accept the login (\(detail)). Tap “Log in to OnlyFans”, sign in again, and retry."
+            result.note = "OF didn’t accept the login (\(detail)). Tap “Log in to OF”, sign in again, and retry."
             await log.finish("FAILED: auth rejected — \(detail)")
             return result
         case .failed(let detail):
-            result.note = "Couldn’t verify the OnlyFans login (\(detail)). Try again in a moment."
+            result.note = "Couldn’t verify the OF login (\(detail)). Try again in a moment."
             await log.finish("FAILED: couldn’t verify login — \(detail)")
             return result
         }
@@ -364,7 +365,7 @@ enum OnlyFansService {
         let drmNote = await hub.drmSummary
         if await hub.foundCount == 0 {
             let base = await hub.hitLoginWall
-                ? "OnlyFans asked for a fresh login. Tap “Log in to OnlyFans”, sign in again, and retry."
+                ? "OF asked for a fresh login. Tap “Log in to OF”, sign in again, and retry."
                 : (alreadyDownloaded.isEmpty
                     ? "No downloadable posts or messages found (are you subscribed to this creator?)."
                     : "No new posts or messages.")
@@ -372,7 +373,7 @@ enum OnlyFansService {
         } else {
             // Always surface the coverage diagnostic so any missing media can be traced.
             var prefix = ""
-            if result.photos + result.videos == 0 { prefix = "Couldn’t download any media (OnlyFans may be blocking access). " }
+            if result.photos + result.videos == 0 { prefix = "Couldn’t download any media (OF may be blocking access). " }
             else if result.failed > 0 { prefix = "\(result.failed) item(s) couldn’t be downloaded. " }
             // Lead with the DRM breakdown so daily-limit skips read as expected, not failures.
             let drm = drmNote.map { $0 + ". " } ?? ""
@@ -411,7 +412,7 @@ enum OnlyFansService {
     // MARK: - Collecting media
 
     /// Walks the creator's timeline newest-first, paging with `beforePublishTime`
-    /// until OnlyFans reports no more (or a page repeats). Every viewable media in
+    /// until OF reports no more (or a page repeats). Every viewable media in
     /// each post is emitted; the hub dedups against already-downloaded ids.
     nonisolated private static func collectPosts(_ creatorID: String, creds: Credentials,
                                                  rules: DynamicRules, hub: Hub) async {
@@ -475,7 +476,7 @@ enum OnlyFansService {
             guard let mid = idString(m["id"]) else { continue }
             // DRM (encrypted DASH): downloadable only via cdmpool + FFmpegKit.
             if let files = m["files"] as? [String: Any], let drm = files["drm"] as? [String: Any] {
-                if OnlyFansDRM.isEnabled, VideoTranscoder.isAvailable,
+                if OFDRM.isEnabled, VideoTranscoder.isAvailable,
                    let di = drmInfo(drm, mediaId: mid, source: source, postID: postID) {
                     items.append(Item(id: mid, isVideo: true, url: di.mpdURL, caption: caption, date: date, drm: di))
                 } else {
@@ -505,7 +506,7 @@ enum OnlyFansService {
     /// space / HDR the creator uploaded survives intact. Transcoded `videoSources`
     /// renditions (which are re-encoded and typically SDR) are a last resort only.
     nonisolated private static func mediaURL(_ m: [String: Any], isVideo: Bool) -> String? {
-        // `source.source` is the original upload — the highest quality OnlyFans keeps.
+        // `source.source` is the original upload — the highest quality OF keeps.
         if let source = m["source"] as? [String: Any] {
             if let s = source["source"] as? String, !s.isEmpty { return s }
             if let s = source["url"] as? String, !s.isEmpty { return s }
@@ -583,7 +584,7 @@ enum OnlyFansService {
     }
 
     /// Builds `DRMInfo` from a media's `files.drm`: the DASH manifest, the CloudFront
-    /// cookies that authorize fetching it, and the OnlyFans license URL to sign.
+    /// cookies that authorize fetching it, and the OF license URL to sign.
     nonisolated private static func drmInfo(_ drm: [String: Any], mediaId: String, source: String, postID: String) -> DRMInfo? {
         guard let manifest = drm["manifest"] as? [String: Any],
               let mpd = manifest["dash"] as? String, !mpd.isEmpty else { return nil }
@@ -639,7 +640,7 @@ enum OnlyFansService {
     }
 
     /// DRM pipeline: fetch the manifest → pull the Widevine PSSH → have cdmpool run
-    /// the OnlyFans license handshake (with our signed headers) for the content key →
+    /// the OF license handshake (with our signed headers) for the content key →
     /// FFmpegKit downloads + decrypts the DASH to a plain MP4. Each failure stage is
     /// reported to the hub so the result note says exactly where it stopped.
     nonisolated private static func downloadDRM(_ item: Item, drm: DRMInfo, into folder: URL, creds: Credentials,
@@ -651,11 +652,11 @@ enum OnlyFansService {
         }
         await hub.noteDRMSeen()
         guard let mpd = await fetchText(drm.mpdURL, cookie: drm.cfCookie) else { return await fail("manifest fetch failed") }
-        guard let pssh = OnlyFansDRM.widevinePSSH(fromMPD: mpd) else { return await fail("no PSSH in manifest") }
+        guard let pssh = OFDRM.widevinePSSH(fromMPD: mpd) else { return await fail("no PSSH in manifest") }
         // A key we already extracted (e.g. a prior run that failed at decrypt) is reused
         // — never spend a cdmpool quota unit twice on the same video.
         let key: String
-        if let cached = await OnlyFansDRM.cachedKey(for: item.id) {
+        if let cached = await OFDRM.cachedKey(for: item.id) {
             key = cached
         } else {
             if await hub.drmQuotaHit { return await fail("cdmpool daily quota reached (5/day) — skipping remaining DRM", quota: true) }
@@ -663,18 +664,18 @@ enum OnlyFansService {
             var headers = signedHeaders(for: licURL, creds: creds, rules: rules)
             let cookies = cookieDict(creds.cookie)
             headers.removeValue(forKey: "cookie")          // cdmpool takes cookies separately
-            let kr = await OnlyFansDRM.extractKey(pssh: pssh, licenseURL: drm.licenseURL, headers: headers,
+            let kr = await OFDRM.extractKey(pssh: pssh, licenseURL: drm.licenseURL, headers: headers,
                                                   cookies: cookies, mpdURL: drm.mpdURL)
             if kr.quota { await hub.noteDRMQuota() }        // stop hammering a spent quota
             guard let k = kr.key else { return await fail(kr.error ?? "key extraction failed", quota: kr.quota) }
-            await OnlyFansDRM.cacheKey(k, for: item.id)
+            await OFDRM.cacheKey(k, for: item.id)
             key = k
         }
         // Download the encrypted media ourselves (with the CloudFront cookies) into the
         // app's temp dir, then hand FFmpeg local files — `-decryption_key` works on the
         // mov demuxer but not through the DASH demuxer, and our own download guarantees
         // the segment cookies are sent.
-        let mf = OnlyFansDRM.mediaFiles(mpd, mpdURL: drm.mpdURL)
+        let mf = OFDRM.mediaFiles(mpd, mpdURL: drm.mpdURL)
         guard !mf.video.isEmpty else { return await fail("manifest not a single-file DASH (\(mf.note))") }
         let tmpDir = FileManager.default.temporaryDirectory
         let vEnc = tmpDir.appendingPathComponent("of_v_\(item.id)_\(UUID().uuidString).mp4")
@@ -694,7 +695,7 @@ enum OnlyFansService {
         // Move the finished MP4 onto the drive in one step (a failed/killed decrypt
         // never leaves a half-written file corrupting the external drive's directory).
         let dest = uniqueDestination("OF_\(item.id).mp4", in: folder)
-        // Serialized, flushed commit so concurrent OnlyFans downloads + FFmpegKit writes
+        // Serialized, flushed commit so concurrent OF downloads + FFmpegKit writes
         // can't corrupt the exFAT directory (this path was the reported corruption source).
         do { try await DriveWriter.shared.commit(out, to: dest) }
         catch {
@@ -812,7 +813,7 @@ enum OnlyFansService {
             guard let url = URL(string: urlString) else { continue }
             var req = URLRequest(url: url)
             req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-            // Always revalidate: OnlyFans rotates its signing scheme often, and a
+            // Always revalidate: OF rotates its signing scheme often, and a
             // CDN-cached (stale) rules file would sign with an outdated static_param
             // → "Please refresh the page".
             req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
@@ -865,7 +866,7 @@ enum OnlyFansService {
         ]
         // `remove_headers` can list headers to omit, but we keep everything the
         // signature depends on. Critically `user-id` is part of the signed message,
-        // and OnlyFans re-signs the request server-side using the `user-id` header —
+        // and OF re-signs the request server-side using the `user-id` header —
         // dropping it produces a "Please refresh the page" sign mismatch. So the
         // essentials (and user-id) are never removed; only a genuinely-extra header
         // the rules flag would be.
@@ -905,10 +906,10 @@ enum OnlyFansService {
 
     // MARK: - Networking
 
-    /// A signed GET against the OnlyFans API, retrying transient failures with a
+    /// A signed GET against the OF API, retrying transient failures with a
     /// short backoff. 401/403 (and the `{"error":{"code":0}}` bad-sign envelope)
     /// report as `.authError`; both failure cases carry a short diagnostic (HTTP
-    /// status + OnlyFans' own error message) so the UI can show what actually broke.
+    /// status + OF' own error message) so the UI can show what actually broke.
     nonisolated private static func apiGet(_ pathAndQuery: String, creds: Credentials, rules: DynamicRules) async -> APIResult {
         guard let url = URL(string: apiBase + pathAndQuery) else { return .failed("bad URL") }
         for attempt in 0..<3 {
@@ -921,7 +922,7 @@ enum OnlyFansService {
             let status = (resp as? HTTPURLResponse)?.statusCode ?? 200
             if status == 429 || status >= 500 { continue }               // rate-limited / transient
             let obj = try? JSONSerialization.jsonObject(with: data)
-            // OnlyFans' own error message (a bad signature / expired login comes back
+            // OF' own error message (a bad signature / expired login comes back
             // as HTTP 400 with `{"error":{"code":0,"message":…}}`).
             var ofCode = Int.min
             var ofMsg = ""

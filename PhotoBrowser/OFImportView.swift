@@ -2,16 +2,16 @@ import SwiftUI
 import UIKit
 import WebKit
 
-/// "Download OnlyFans Profile" / "Get New OnlyFans Posts": logs in via a real
+/// "Download OF Profile" / "Get New OF Posts": logs in via a real
 /// in-app web view (only the session cookies + device token are kept, never the
 /// password), then pulls a creator's posts, messages, photos and videos — at the
-/// highest quality OnlyFans keeps (source/original) — into a handle-named subfolder,
+/// highest quality OF keeps (source/original) — into a handle-named subfolder,
 /// or, when the current folder already tracks a creator, just the new content.
 /// Capture date and caption are written onto each item. Like the Instagram
 /// downloader, the run happens as an app-wide background activity, so the user can
 /// keep browsing the app (or leave it briefly) while it works. Best-effort, opt-in,
 /// download-only; you can only download creators you subscribe to.
-struct OnlyFansImportView: View {
+struct OFImportView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
     let targetFolder: URL
@@ -36,11 +36,11 @@ struct OnlyFansImportView: View {
                     }
                 } else {
                     Section {
-                        TextField("OnlyFans username (e.g. creator)", text: $username)
+                        TextField("OF username (e.g. creator)", text: $username)
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
                             .keyboardType(.URL)
                     } header: {
-                        Text("OnlyFans creator")
+                        Text("OF creator")
                     } footer: {
                         Text("Enter the username of a creator you subscribe to. Downloads into a new “username” folder inside “\(targetFolder.lastPathComponent)”. Nothing is uploaded.")
                     }
@@ -49,7 +49,7 @@ struct OnlyFansImportView: View {
                 if !loggedIn {
                     Section {
                         Button { showLogin = true } label: {
-                            Label("Log in to OnlyFans", systemImage: "person.badge.key")
+                            Label("Log in to OF", systemImage: "person.badge.key")
                         }
                     } footer: {
                         Text("You log in inside the app; only the session cookies and device token are kept, on this device.")
@@ -64,7 +64,7 @@ struct OnlyFansImportView: View {
                     Text("The download runs in the background — you can keep using the app (or leave it briefly) and watch progress at the bottom of the screen. Everything is pulled in the highest quality available.")
                 }
             }
-            .navigationTitle(isUpdate ? "Get New OnlyFans Posts" : "Add from OnlyFans")
+            .navigationTitle(isUpdate ? "Get New OF Posts" : "Add from OF")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -72,16 +72,16 @@ struct OnlyFansImportView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(isUpdate ? "Get New" : "Download") { start() }
-                        .disabled(!loggedIn || (!isUpdate && OnlyFansService.sanitizeUsername(username).isEmpty))
+                        .disabled(!loggedIn || (!isUpdate && OFService.sanitizeUsername(username).isEmpty))
                 }
             }
             .sheet(isPresented: $showLogin) {
-                OnlyFansLoginView { Task { loggedIn = await OnlyFansAuth.isLoggedIn() } }
+                OFLoginView { Task { loggedIn = await OFAuth.isLoggedIn() } }
             }
-            .task { loggedIn = await OnlyFansAuth.isLoggedIn() }
+            .task { loggedIn = await OFAuth.isLoggedIn() }
             .onAppear {
                 if let existing { username = existing.username }
-                else if username.isEmpty { username = library.lastOnlyFansUsername(for: targetFolder) ?? "" }
+                else if username.isEmpty { username = library.lastOFUsername(for: targetFolder) ?? "" }
             }
         }
     }
@@ -92,18 +92,18 @@ struct OnlyFansImportView: View {
     /// while the run continues. The whole flow runs off the closed sheet, driven off
     /// `Library`.
     private func start() {
-        let h = isUpdate ? (existing?.username ?? "") : OnlyFansService.sanitizeUsername(username)
+        let h = isUpdate ? (existing?.username ?? "") : OFService.sanitizeUsername(username)
         guard !h.isEmpty else { return }
         let target = targetFolder, isUpd = isUpdate, msgs = includeMessages, ex = existing
         let finish = onFinished
-        if !isUpd { library.setLastOnlyFansUsername(h, for: target) }
-        let id = library.beginActivity(isUpd ? "OnlyFans @\(h) — new posts" : "Downloading OnlyFans @\(h)", indeterminate: true)
+        if !isUpd { library.setLastOFUsername(h, for: target) }
+        let id = library.beginActivity(isUpd ? "OF @\(h) — new posts" : "Downloading OF @\(h)", indeterminate: true)
         library.setActivity(id, status: "Starting…")
         dismiss()        // let the user navigate; the download runs in the background
-        let bg = BackgroundTaskHolder(); bg.begin(name: "OnlyFans Download")
+        let bg = BackgroundTaskHolder(); bg.begin(name: "OF Download")
         Task {
-            guard let creds = await OnlyFansAuth.credentials() else {
-                library.endActivity(id, result: "Couldn’t start — not logged in to OnlyFans."); bg.end(); return
+            guard let creds = await OFAuth.credentials() else {
+                library.endActivity(id, result: "Couldn’t start — not logged in to OF."); bg.end(); return
             }
             let dest: URL
             if isUpd { dest = target }
@@ -111,10 +111,10 @@ struct OnlyFansImportView: View {
                 dest = target.appendingPathComponent(h, isDirectory: true)
                 try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
             }
-            let prior = isUpd ? ex : library.onlyfansInfo(for: dest)
+            let prior = isUpd ? ex : library.ofInfo(for: dest)
             let already = Set(prior?.downloaded ?? [])
 
-            let r = await OnlyFansService.run(username: h, into: dest, alreadyDownloaded: already,
+            let r = await OFService.run(username: h, into: dest, alreadyDownloaded: already,
                                               creds: creds, includeMessages: msgs) { p in
                 Task { @MainActor in
                     library.setActivity(id, status: p.phase.isEmpty ? "Working…" : p.phase,
@@ -133,7 +133,7 @@ struct OnlyFansImportView: View {
                                         downloaded: Array(already.union(r.newIDs)),
                                         photos: (prior?.photos ?? 0) + r.photos,
                                         videos: (prior?.videos ?? 0) + r.videos)
-                library.setOnlyFansInfo(info, for: dest)
+                library.setOFInfo(info, for: dest)
             } else if !isUpd, let contents = try? FileManager.default.contentsOfDirectory(atPath: dest.path), contents.isEmpty {
                 try? FileManager.default.removeItem(at: dest)   // creator never loaded — drop the empty folder
             }
@@ -145,7 +145,7 @@ struct OnlyFansImportView: View {
     }
 
     /// Completion message shown as the activity-result popup.
-    private func summary(_ r: OnlyFansService.DownloadResult, handle: String) -> String {
+    private func summary(_ r: OFService.DownloadResult, handle: String) -> String {
         let n = r.photos + r.videos
         guard n > 0 else { return r.note ?? "No new content for @\(handle)." }
         var s = "@\(handle): downloaded \(r.photos) photo\(r.photos == 1 ? "" : "s") and \(r.videos) video\(r.videos == 1 ? "" : "s")"
@@ -164,11 +164,11 @@ struct OnlyFansImportView: View {
     }
 }
 
-/// A real OnlyFans login in a `WKWebView` (persistent cookie + storage). When the
+/// A real OF login in a `WKWebView` (persistent cookie + storage). When the
 /// session cookies appear, the coordinator also captures the `x-bc` device token
-/// from `localStorage` (OnlyFans keeps it there, not in a cookie) so the API can be
+/// from `localStorage` (OF keeps it there, not in a cookie) so the API can be
 /// signed later; "Done" enables once both are in hand.
-struct OnlyFansLoginView: View {
+struct OFLoginView: View {
     @Environment(\.dismiss) private var dismiss
     let onDone: () -> Void
     @State private var loggedIn = false
@@ -177,7 +177,7 @@ struct OnlyFansLoginView: View {
         NavigationStack {
             OFWebView(loggedIn: $loggedIn)
                 .ignoresSafeArea(edges: .bottom)
-                .navigationTitle("Log in to OnlyFans")
+                .navigationTitle("Log in to OF")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -204,7 +204,7 @@ private struct OFWebView: UIViewRepresentable {
         cfg.websiteDataStore = .default()                 // persistent: the login survives relaunch
         let web = WKWebView(frame: .zero, configuration: cfg)
         web.navigationDelegate = context.coordinator
-        web.customUserAgent = OnlyFansService.userAgent   // match the UA the API uses
+        web.customUserAgent = OFService.userAgent   // match the UA the API uses
         if let url = URL(string: "https://onlyfans.com/") { web.load(URLRequest(url: url)) }
         return web
     }
@@ -218,7 +218,7 @@ private struct OFWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             // Grab the x-bc device token from localStorage while we're on the page
-            // (OnlyFans keeps it under `bcTokenSha`; fall back to any hex-looking
+            // (OF keeps it under `bcTokenSha`; fall back to any hex-looking
             // token in case the key changes), then re-check the login state.
             let js = """
             (function(){try{var t=localStorage.getItem('bcTokenSha')||localStorage.getItem('bcTokenCache');if(t)return t;\
@@ -227,9 +227,9 @@ private struct OFWebView: UIViewRepresentable {
             """
             webView.evaluateJavaScript(js) { value, _ in
                 if let token = value as? String, !token.isEmpty {
-                    Task { @MainActor in OnlyFansAuth.setStoredXBC(token) }
+                    Task { @MainActor in OFAuth.setStoredXBC(token) }
                 }
-                Task { @MainActor in self.loggedIn = await OnlyFansAuth.isLoggedIn() }
+                Task { @MainActor in self.loggedIn = await OFAuth.isLoggedIn() }
             }
         }
     }

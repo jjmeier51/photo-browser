@@ -6,7 +6,7 @@ import CryptoKit
 /// link** on one of the common file/media hosts into the current folder. One paste
 /// box, many hosts — the link's domain picks a resolver that turns the album/file
 /// page into a list of direct media URLs, which are then streamed to disk (12-wide,
-/// byte-for-byte so EXIF and HDR survive), exactly like the OnlyFans downloader.
+/// byte-for-byte so EXIF and HDR survive), exactly like the OF downloader.
 ///
 /// Supported, with a tailored resolver: **pixeldrain**, **gofile**, **bunkr**
 /// (+ its `.cr`/`.pk`/… mirrors and the bunkr-family `turbo.cr` / `goonbox.cr`),
@@ -14,7 +14,7 @@ import CryptoKit
 /// `filester.gg`, or a host that moved — falls back to a generic page scrape
 /// (`og:image`/`og:video` + direct media links). All of these are unofficial and
 /// actively fight scraping, so this is best-effort and download-only, like the
-/// Instagram/Facebook/MEGA/OnlyFans features. Everything is `nonisolated`:
+/// Instagram/Facebook/MEGA/OF features. Everything is `nonisolated`:
 /// networking + parsing + big writes stay off the main actor.
 enum LinkDownloadService {
     struct Progress: Sendable { var phase: String; var fraction: Double; var done: Int; var total: Int }
@@ -113,7 +113,7 @@ enum LinkDownloadService {
         } else {
         await withTaskGroup(of: Int.self) { group in
             var active = 0
-            let maxConcurrent = 12          // streams straight to disk — as wide as OnlyFans
+            let maxConcurrent = 12          // streams straight to disk — as wide as OF
             var done = 0
             func tally(_ status: Int) {
                 done += 1

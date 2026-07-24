@@ -4,7 +4,7 @@ import UIKit
 /// "Download VSCO Profile" / "Get New VSCO Photos": enter a public VSCO username and pull the
 /// whole gallery (photos + videos, full resolution) into a "username" folder here. EXIF is
 /// preserved; photos with no capture date get VSCO's posting date. The run happens as an
-/// app-wide background activity — like the Instagram/OnlyFans downloaders — so you can keep
+/// app-wide background activity — like the Instagram/OF downloaders — so you can keep
 /// browsing the app (or leave it briefly) while it works. No login needed; download-only.
 struct VSCOImportView: View {
     @Environment(Library.self) private var library

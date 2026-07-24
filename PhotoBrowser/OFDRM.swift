@@ -1,19 +1,19 @@
 import Foundation
 
-/// OnlyFans DRM (Widevine) support via a user-supplied **CDMPOOL** account
-/// (cdmpool.xyz). OnlyFans serves some videos as encrypted DASH with no plain file;
+/// OF DRM (Widevine) support via a user-supplied **CDMPOOL** account
+/// (cdmpool.xyz). OF serves some videos as encrypted DASH with no plain file;
 /// those need Widevine content keys, which require a CDM. Rather than ship one, we
-/// use the user's CDMPOOL token: we fetch the manifest ourselves (OnlyFans' CDN
+/// use the user's CDMPOOL token: we fetch the manifest ourselves (OF' CDN
 /// 403s cdmpool's servers, so their MPD-analyze can't), pull the Widevine PSSH, and
-/// hand cdmpool the PSSH + the OnlyFans license URL + our signed headers. CDMPOOL
+/// hand cdmpool the PSSH + the OF license URL + our signed headers. CDMPOOL
 /// runs the license handshake and returns the content key; `VideoTranscoder`
 /// (FFmpegKit) then downloads + decrypts the stream to a plain MP4.
 ///
 /// Entirely opt-in and gated behind the token (empty token = feature off). Note the
-/// one-shot cdmpool flow relays the OnlyFans license headers through their service,
+/// one-shot cdmpool flow relays the OF license headers through their service,
 /// so — unlike the rest of the app — this path does send session headers to a third
 /// party; that's inherent to using a hosted CDM and is the user's explicit choice.
-enum OnlyFansDRM {
+enum OFDRM {
     private static let tokenKey = "photoBrowser.cdmpoolToken"
     nonisolated static var token: String { UserDefaults.standard.string(forKey: tokenKey) ?? "" }
     nonisolated static func setToken(_ t: String) {
@@ -55,7 +55,7 @@ enum OnlyFansDRM {
     }
 
     /// Extracts the content key via cdmpool's one-shot `/api/extract`. cdmpool calls
-    /// the OnlyFans license server itself (with the headers/cookies we pass) and
+    /// the OF license server itself (with the headers/cookies we pass) and
     /// returns `keys:[{kid,key}]`. Returns the first key's hex, or an error hint.
     nonisolated static func extractKey(pssh: String, licenseURL: String, headers: [String: String],
                                        cookies: [String: String], mpdURL: String) async -> KeyResult {
@@ -64,7 +64,7 @@ enum OnlyFansDRM {
         let payload: [String: Any] = [
             "token": token, "drm": "widevine", "pssh": pssh, "license_url": licenseURL,
             "headers": headers, "cookies": cookies, "mpd_url": mpdURL,
-            "channel_name": "PhotoBrowser OnlyFans",
+            "channel_name": "PhotoBrowser OF",
         ]
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return KeyResult(key: nil, error: "encode failed") }
         var req = URLRequest(url: url)
@@ -89,7 +89,7 @@ enum OnlyFansDRM {
 
     /// The encrypted media file URLs from the manifest — the video representation's
     /// file (best bandwidth) and, if audio is a separate AdaptationSet, its file.
-    /// OnlyFans packages each representation as one CloudFront-signed file (SegmentBase),
+    /// OF packages each representation as one CloudFront-signed file (SegmentBase),
     /// so a whole-file download is a valid encrypted fragmented MP4 for FFmpeg to
     /// decrypt. `note` records the manifest's segmenting style for diagnostics.
     nonisolated static func mediaFiles(_ mpd: String, mpdURL: String) -> (video: String, audio: String?, note: String) {
