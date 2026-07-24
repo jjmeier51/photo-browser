@@ -107,12 +107,17 @@ struct EntryCell: View {
                         .clipped()
                 }
                 .overlay(alignment: .bottom) {
+                    // Frosted capsule: a blurred-glass pill (iOS home-screen folder style) keeps
+                    // the name readable on ANY cover — the old white-text-with-shadow washed out
+                    // on light, busy images.
                     Text(entry.name)
-                        .font(.caption2).lineLimit(1)
+                        .font(.caption2.weight(.semibold)).lineLimit(1)
                         .foregroundStyle(.white)
-                        .shadow(color: .black.opacity(0.8), radius: 2)
-                        .padding(.horizontal, 4).padding(.vertical, 2)
-                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(Capsule().strokeBorder(.white.opacity(0.15), lineWidth: 0.5))
+                        .padding(.horizontal, 4)
+                        .padding(.bottom, 5)
                 }
             } else {
                 VStack(spacing: 6) {
