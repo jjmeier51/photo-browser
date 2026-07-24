@@ -969,8 +969,9 @@ final class Library {
     ///
     /// Discovery is INTERLEAVED with the thumbnail work — files feed the task group straight off
     /// the enumerator — so caching starts within seconds. (The first version scanned the whole
-    /// drive up front to learn the total, which on a big exFAT drive meant minutes of
-    /// "Scanning drive…" with nothing visibly happening.) While the walk is still going the
+    /// drive up front to learn the total; enumerating a huge external drive — any filesystem,
+    /// the per-file round-trips dominate — meant minutes of "Scanning drive…" with nothing
+    /// visibly happening.) While the walk is still going the
     /// reported fraction is -1 (indeterminate spinner + folder name); when it finishes, the real
     /// fraction takes over. `classify` is memoized per extension — it's a UTType lookup, and one
     /// per file made the old scan CPU-bound on top of the drive I/O.
