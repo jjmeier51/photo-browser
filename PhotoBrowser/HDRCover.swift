@@ -97,3 +97,18 @@ enum HDRCover {
         ci.transformed(by: CGAffineTransform(translationX: -ci.extent.origin.x, y: -ci.extent.origin.y))
     }
 }
+
+/// HDR-aware cover loading, shared by the grid tile (ThumbCell) and the highlight bubbles
+/// (BubbleCover): covers saved from HDR content are 10-bit HEICs, and a plain
+/// `UIImage(contentsOfFile:)` would tone-map them to SDR. `UIImageReader` keeps the headroom;
+/// display sites pair this with `.allowedDynamicRange(.high)`.
+enum CoverImageLoader {
+    nonisolated static func load(_ url: URL?) async -> UIImage? {
+        guard let url else { return nil }
+        return await Task.detached(priority: .userInitiated) { () async -> UIImage? in
+            var config = UIImageReader.Configuration()
+            config.prefersHighDynamicRange = true
+            return await UIImageReader(configuration: config).image(contentsOf: url)
+        }.value
+    }
+}

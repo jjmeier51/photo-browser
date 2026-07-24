@@ -2795,9 +2795,8 @@ private struct BubbleCover: View {
         }
         .task(id: coverURL) {
             guard let coverURL else { image = nil; return }
-            // HDR-aware read (see ThumbCell.loadCover) — a plain UIImage(contentsOfFile:)
-            // would tone-map an HDR cover to SDR.
-            image = await ThumbCell.loadCover(coverURL)
+            // HDR-aware read — a plain UIImage(contentsOfFile:) would tone-map an HDR cover to SDR.
+            image = await CoverImageLoader.load(coverURL)
         }
     }
 }
