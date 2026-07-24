@@ -58,6 +58,8 @@ struct FolderView: View {
     @State private var captionDraft = ""
     @State private var showNewFolder = false
     @State private var newFolderName = ""
+    @State private var showMoveToNewFolder = false   // multi-select "Move N Items to New Folder…"
+    @State private var moveNewFolderName = ""
     @State private var renameTarget: Entry?
     @State private var renameDraft = ""
     @State private var showMovePicker = false
@@ -851,6 +853,13 @@ struct FolderView: View {
                 TextField("Name", text: $newFolderName)
                 Button("Create") { createFolder() }
                 Button("Cancel", role: .cancel) { newFolderName = "" }
+            }
+            .alert("Move to New Folder", isPresented: $showMoveToNewFolder) {
+                TextField("Folder name", text: $moveNewFolderName)
+                Button("Move") { moveToNewFolder() }
+                Button("Cancel", role: .cancel) { moveNewFolderName = "" }
+            } message: {
+                Text("Creates a folder here and moves the selected items into it.")
             }
             .alert("Extract Audio", isPresented: $showAudioExtractPrompt) {
                 TextField("MP3 name", text: $audioExtractName)
@@ -2162,6 +2171,14 @@ struct FolderView: View {
                 Button { duplicateEntries(selectedEntries()) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
                 Button { compress(selectedEntries()) } label: { Label("Compress to Zip", systemImage: "archivebox") }
                 Button { showCopyPicker = true } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
+                Button {
+                    moveNewFolderName = ""
+                    // Defer so the Menu's dismissal doesn't swallow the alert (constraint #4).
+                    DispatchQueue.main.async { showMoveToNewFolder = true }
+                } label: {
+                    Label("Move \(selection.count) Item\(selection.count == 1 ? "" : "s") to New Folder…",
+                          systemImage: "folder.badge.plus")
+                }
                 if let tsRoot = taylorSwiftRoot {
                     Button { performMove(to: tsRoot) } label: { Label("Move to “Taylor Swift”", systemImage: "music.mic") }
                 }
@@ -2584,6 +2601,23 @@ struct FolderView: View {
         }
         renameTarget = nil
         Task { await reload() }
+    }
+
+    /// "Move N Items to New Folder…": create (or reuse) a subfolder of this folder, then send the
+    /// selection through the normal move path — labels/captions follow, conflicts surface as usual.
+    private func moveToNewFolder() {
+        let name = moveNewFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        moveNewFolderName = ""
+        guard !name.isEmpty else { return }
+        let dest = url.appendingPathComponent(name, isDirectory: true)
+        var isDir: ObjCBool = false
+        if !(FileManager.default.fileExists(atPath: dest.path, isDirectory: &isDir) && isDir.boolValue) {
+            guard FileActions.createFolder(named: name, in: url) else {
+                resultMessage = "Couldn’t create “\(name)”. A file with that name may already exist, or the drive isn’t writable right now."
+                return
+            }
+        }
+        performMove(to: dest)
     }
 
     private func performMove(to dest: URL) {

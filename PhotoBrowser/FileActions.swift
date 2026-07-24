@@ -1151,11 +1151,59 @@ enum FileActions {
         return (result.0, onDisk, firstFrame, nil)
     }
 
-    /// Sequential AVAssetReader that writes every decoded frame in order (10-bit
-    /// for HDR, 8-bit BGRA otherwise), restarting after the last good frame whenever
-    /// the reader fails — so one undecodable frame can't end the whole export, and
-    /// only one frame is ever in memory at a time. Resumes from `startIndex`; frames
+    /// Per-export context for the parallel frame writers: immutable encode config plus
+    /// lock-guarded result counters. `@unchecked Sendable` — the config crosses task boundaries
+    /// read-only, and the mutable counters are NSLock-protected.
+    private final class FrameExportContext: @unchecked Sendable {
+        let transform: CGAffineTransform
+        let props: [String: Any]
+        private let lock = NSLock()
+        private(set) var written = 0
+        private(set) var encodeFailures = 0
+        private(set) var writeError: String?     // first disk-write error, verbatim — names the real cause
+        init(transform: CGAffineTransform, props: [String: Any]) { self.transform = transform; self.props = props }
+        func recordWritten() { lock.lock(); written += 1; lock.unlock() }
+        func recordEncodeFailure() { lock.lock(); encodeFailures += 1; lock.unlock() }
+        func recordWriteError(_ e: String) { lock.lock(); if writeError == nil { writeError = e }; lock.unlock() }
+    }
+
+    /// One captured frame handed to a writer task. `@unchecked Sendable`: the pixel buffer is
+    /// retained, fully decoded, and read-only from here on.
+    private struct FrameJob: @unchecked Sendable {
+        let buffer: CVPixelBuffer
+        let dest: URL
+    }
+
+    /// Encode + write + thumbnail-prewarm one captured frame (runs on a writer task).
+    private static func runFrameJob(_ job: FrameJob, ctx: FrameExportContext) {
+        guard let data = encodeFrame(job.buffer, transform: ctx.transform, properties: ctx.props, scale: 1.5) else {
+            ctx.recordEncodeFailure()
+            return
+        }
+        // Count only frames actually on disk — counting before the write made a run whose
+        // writes all failed (missing folder, yanked drive) report success with nothing saved.
+        do {
+            try data.write(to: job.dest)
+            ctx.recordWritten()
+            // Warm the folder's thumbnail from the frame we already have in memory, so opening
+            // a 6k-frame folder later reads small cached JPEGs from local storage instead of
+            // decoding every full HEIC off the drive (the ~15-min stall).
+            Thumbnailer.shared.prewarm(imageData: data, for: job.dest)
+        } catch {
+            ctx.recordWriteError(error.localizedDescription)
+        }
+    }
+
+    /// Sequential AVAssetReader that captures every decoded frame in order (10-bit for HDR,
+    /// 8-bit BGRA otherwise), restarting after the last good frame whenever the reader fails —
+    /// so one undecodable frame can't end the whole export. Resumes from `startIndex`; frames
     /// are named by index.
+    ///
+    /// The DECODE is sequential, but the expensive per-frame tail — 1.5× Lanczos upscale, HEIC
+    /// encode, the drive write, and the thumbnail prewarm — runs on a small pool of writer
+    /// tasks, so frame N's encode/write overlaps frame N+1's decode instead of serializing
+    /// (the loop used to do everything one frame at a time). Two writers bound transient
+    /// memory to about two decoded frames plus their upscaled render targets.
     private static func exportFramesSequential(asset: AVURLAsset, track: AVAssetTrack, transform: CGAffineTransform,
                                                dir: URL, safeName: String, props: [String: Any],
                                                duration: Double, interval: Double, total: Int, startIndex: Int,
@@ -1166,9 +1214,7 @@ enum FileActions {
                 kCVPixelBufferPixelFormatTypeKey as String:
                     isHDR ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_32BGRA
             ]
-            var written = 0
-            var encodeFailures = 0
-            var writeError: String?          // first disk-write error, verbatim — names the real cause (full/read-only/corrupt)
+            let ctx = FrameExportContext(transform: transform, props: props)
             var everStartedReading = false
             var frameIndex = startIndex                  // next frame index to capture
             var nextTime = Double(startIndex) * interval  // its target time
@@ -1176,83 +1222,95 @@ enum FileActions {
             var failures = 0
             var lastPct = -1
             var lastSaved = startIndex
-            while startTime < duration, failures < 6, frameIndex < total {
-                guard let reader = try? AVAssetReader(asset: asset) else { break }
-                if startTime > 0 {
-                    reader.timeRange = CMTimeRange(start: CMTime(seconds: startTime, preferredTimescale: 600),
-                                                   duration: .positiveInfinity)
-                }
-                let output = AVAssetReaderTrackOutput(track: track, outputSettings: settings)
-                output.alwaysCopiesSampleData = false
-                guard reader.canAdd(output) else { break }
-                reader.add(output)
-                guard reader.startReading() else { break }
-                everStartedReading = true
+            let maxWriters = 2
+            await withTaskGroup(of: Void.self) { group in
+                var inFlight = 0
+                readers: while startTime < duration, failures < 6, frameIndex < total {
+                    guard let reader = try? AVAssetReader(asset: asset) else { break }
+                    if startTime > 0 {
+                        reader.timeRange = CMTimeRange(start: CMTime(seconds: startTime, preferredTimescale: 600),
+                                                       duration: .positiveInfinity)
+                    }
+                    let output = AVAssetReaderTrackOutput(track: track, outputSettings: settings)
+                    output.alwaysCopiesSampleData = false
+                    guard reader.canAdd(output) else { break }
+                    reader.add(output)
+                    guard reader.startReading() else { break }
+                    everStartedReading = true
 
-                var lastPTS = startTime
-                var advanced = false
-                while reader.status == .reading, frameIndex < total, let sample = output.copyNextSampleBuffer() {
-                    autoreleasepool {
-                        let pts = CMSampleBufferGetPresentationTimeStamp(sample).seconds
-                        if pts.isFinite { lastPTS = pts; advanced = true }
-                        if pts.isFinite, pts + 1e-4 >= nextTime {
-                            let dest = dir.appendingPathComponent("\(safeName) \(frameIndex).heic")
-                            if !FileManager.default.fileExists(atPath: dest.path) {
-                                if let pb = CMSampleBufferGetImageBuffer(sample),
-                                   let data = encodeFrame(pb, transform: transform, properties: props, scale: 1.5) {  // 1.5× each frame
-                                    // Count only frames actually on disk — counting before the
-                                    // write made a run whose writes all failed (missing folder,
-                                    // yanked drive) report "Exported N frames" with nothing saved.
-                                    do {
-                                        try data.write(to: dest); written += 1
-                                        // Warm the folder's thumbnail from the frame we already
-                                        // have in memory, so opening a 6k-frame folder later reads
-                                        // small cached JPEGs from local storage instead of decoding
-                                        // every full HEIC off the drive (the ~15-min stall).
-                                        Thumbnailer.shared.prewarm(imageData: data, for: dest)
+                    var lastPTS = startTime
+                    var advanced = false
+                    frames: while reader.status == .reading, frameIndex < total {
+                        // The sample work is sync inside an autoreleasepool (prompt buffer
+                        // release); the await to reap a writer slot must happen outside it.
+                        var job: FrameJob?
+                        var samplesEnded = false
+                        autoreleasepool {
+                            guard let sample = output.copyNextSampleBuffer() else { samplesEnded = true; return }
+                            let pts = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+                            if pts.isFinite { lastPTS = pts; advanced = true }
+                            if pts.isFinite, pts + 1e-4 >= nextTime {
+                                let dest = dir.appendingPathComponent("\(safeName) \(frameIndex).heic")
+                                if !FileManager.default.fileExists(atPath: dest.path) {
+                                    if let pb = CMSampleBufferGetImageBuffer(sample) {
+                                        job = FrameJob(buffer: pb, dest: dest)   // retains the decoded buffer
+                                    } else {
+                                        ctx.recordEncodeFailure()
                                     }
-                                    catch { if writeError == nil { writeError = error.localizedDescription } }
-                                } else {
-                                    encodeFailures += 1
+                                }
+                                frameIndex += 1
+                                nextTime = Double(frameIndex) * interval
+                                if nextTime <= pts {                          // sparse frames: skip ahead on the grid
+                                    frameIndex = Int((pts / interval).rounded(.down)) + 1
+                                    nextTime = Double(frameIndex) * interval
+                                }
+                                let overall = min(1.0, Double(frameIndex) / Double(total))
+                                let pct = Int(overall * 100)
+                                if pct != lastPct { lastPct = pct; onProgress(overall) }
+                                if frameIndex - lastSaved >= 25 {
+                                    lastSaved = frameIndex
+                                    // Checkpoint a couple behind the schedule: up to `maxWriters`
+                                    // frames may still be in flight, and a resume must re-visit
+                                    // (and fileExists-skip) them rather than assume they landed.
+                                    setExportProgress(ExportProgress(folder: dir.path, total: total,
+                                                                     nextIndex: max(startIndex, frameIndex - maxWriters)),
+                                                      forVideoKey: videoKey)
                                 }
                             }
-                            frameIndex += 1
-                            nextTime = Double(frameIndex) * interval
-                            if nextTime <= pts {                          // sparse frames: skip ahead on the grid
-                                frameIndex = Int((pts / interval).rounded(.down)) + 1
-                                nextTime = Double(frameIndex) * interval
-                            }
-                            let overall = min(1.0, Double(frameIndex) / Double(total))
-                            let pct = Int(overall * 100)
-                            if pct != lastPct { lastPct = pct; onProgress(overall) }
-                            if frameIndex - lastSaved >= 25 {
-                                lastSaved = frameIndex
-                                setExportProgress(ExportProgress(folder: dir.path, total: total, nextIndex: frameIndex), forVideoKey: videoKey)
-                            }
+                            // A captured sample's pixel buffer now belongs to a writer; only
+                            // invalidate the ones we're done with.
+                            if job == nil { CMSampleBufferInvalidate(sample) }
                         }
-                        CMSampleBufferInvalidate(sample)
+                        if samplesEnded { break frames }
+                        if let job {
+                            if inFlight >= maxWriters { _ = await group.next(); inFlight -= 1 }
+                            group.addTask { Self.runFrameJob(job, ctx: ctx) }
+                            inFlight += 1
+                        }
+                    }
+                    if reader.status == .completed { break }
+                    if reader.status == .failed {
+                        failures += 1
+                        startTime = advanced ? lastPTS + interval : startTime + max(interval, 0.5)
+                        if nextTime < startTime {
+                            frameIndex = max(frameIndex, Int((startTime / interval).rounded()))
+                            nextTime = Double(frameIndex) * interval
+                        }
+                    } else {
+                        break       // cancelled / unknown
                     }
                 }
-                if reader.status == .completed { break }
-                if reader.status == .failed {
-                    failures += 1
-                    startTime = advanced ? lastPTS + interval : startTime + max(interval, 0.5)
-                    if nextTime < startTime {
-                        frameIndex = max(frameIndex, Int((startTime / interval).rounded()))
-                        nextTime = Double(frameIndex) * interval
-                    }
-                } else {
-                    break       // cancelled / unknown
-                }
+                while await group.next() != nil { }   // drain the remaining writers
             }
             onProgress(1.0)
             // Explain a zero-frame run — each cause needs a different user action.
+            let written = ctx.written
             var note: String?
             if written == 0 {
-                if let writeError {
+                if let writeError = ctx.writeError {
                     note = "the frames couldn’t be written to the drive (\(writeError))."
-                } else if encodeFailures > 0 {
-                    note = "the video decoded but its frames couldn’t be encoded (\(encodeFailures) failed)."
+                } else if ctx.encodeFailures > 0 {
+                    note = "the video decoded but its frames couldn’t be encoded (\(ctx.encodeFailures) failed)."
                 } else if !everStartedReading {
                     note = "the video couldn’t be opened for decoding — it may use an unsupported codec or be damaged."
                 } else {

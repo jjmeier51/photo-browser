@@ -35,6 +35,9 @@ struct WebBrowserView: View {
     @State private var videoForPicker: WebController.FoundVideo?
     @State private var fileForPicker: WebController.PendingFile?
     @State private var showDownloadFolderPicker = false
+    // "Download to a New Folder…" flow: same stash, but a name prompt instead of a picker.
+    @State private var showNewFolderPrompt = false
+    @State private var newDownloadFolderName = ""
     // Transient "saved / failed" banner for file downloads (so a photo download doesn't yank open
     // the Downloads sheet — it just confirms and fades).
     @State private var toastText: String?
@@ -130,6 +133,8 @@ struct WebBrowserView: View {
             Button("Download to “\(targetFolder.lastPathComponent)”") { startDownload(v, into: targetFolder) }
             Button("Download to Another Folder…") { videoForPicker = v; fileForPicker = nil
                 DispatchQueue.main.async { showDownloadFolderPicker = true } }   // defer so the dialog dismissal doesn't swallow the sheet
+            Button("Download to a New Folder…") { videoForPicker = v; fileForPicker = nil; newDownloadFolderName = ""
+                DispatchQueue.main.async { showNewFolderPrompt = true } }
             Button("Copy Video Link") { UIPasteboard.general.string = v.url }
             Button("Cancel", role: .cancel) {}
         } message: { v in
@@ -141,6 +146,8 @@ struct WebBrowserView: View {
             Button("Download to “\(targetFolder.lastPathComponent)”") { startFileDownload(f, into: targetFolder) }
             Button("Download to Another Folder…") { fileForPicker = f; videoForPicker = nil
                 DispatchQueue.main.async { showDownloadFolderPicker = true } }   // defer so the dialog dismissal doesn't swallow the sheet
+            Button("Download to a New Folder…") { fileForPicker = f; videoForPicker = nil; newDownloadFolderName = ""
+                DispatchQueue.main.async { showNewFolderPrompt = true } }
             Button("Copy Link") { UIPasteboard.general.string = f.url }
             Button("Cancel", role: .cancel) {}
         } message: { f in
@@ -156,6 +163,13 @@ struct WebBrowserView: View {
                 if let f = fileForPicker { startFileDownload(f, into: folder) }
                 videoForPicker = nil; fileForPicker = nil
             }
+        }
+        .alert("Download to a New Folder", isPresented: $showNewFolderPrompt) {
+            TextField("Folder name", text: $newDownloadFolderName)
+            Button("Download") { downloadToNewFolder() }
+            Button("Cancel", role: .cancel) { videoForPicker = nil; fileForPicker = nil }
+        } message: {
+            Text("The folder is created inside “\(targetFolder.lastPathComponent)”.")
         }
         .sheet(isPresented: $showDownloads) { DownloadsSheet(controller: controller) }
         .sheet(isPresented: $showBookmarks) { BookmarksSheet(controller: controller) { controller.load($0) } }
@@ -287,6 +301,25 @@ struct WebBrowserView: View {
     private func historyLabel(_ item: WKBackForwardListItem) -> String {
         if let t = item.title, !t.isEmpty { return t }
         return item.url.host ?? item.url.absoluteString
+    }
+
+    /// "Download to a New Folder…": create (or reuse) a subfolder of the current folder and send
+    /// the stashed download there. Remembered as the last destination, like the picker flow.
+    private func downloadToNewFolder() {
+        let name = newDownloadFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        newDownloadFolderName = ""
+        defer { videoForPicker = nil; fileForPicker = nil }
+        guard !name.isEmpty else { return }
+        let dest = targetFolder.appendingPathComponent(name, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: dest.path, isDirectory: &isDir), isDir.boolValue else {
+            showToast("Couldn’t create “\(name)”", error: true)
+            return
+        }
+        library.setLastWebDownloadDestination(dest)
+        if let v = videoForPicker { startDownload(v, into: dest) }
+        if let f = fileForPicker { startFileDownload(f, into: dest) }
     }
 
     private func startDownload(_ v: WebController.FoundVideo, into folder: URL) {
