@@ -4,6 +4,14 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **Instagram fetches new posts and stories again.** Instagram moved its private web API off the
+  `i.instagram.com` app host; the app was still calling `i.instagram.com/api/v1/…` while sending a
+  `www.instagram.com` Referer — a cross-origin mismatch Instagram now refuses, so *both* the posts
+  feed and the stories/highlights trays quietly returned nothing (reported as "No new posts"). All
+  calls now go to `www.instagram.com/api/v1/…` — the same origin as the logged-in session cookies —
+  and carry the headers the live web client sends (`Sec-Fetch-*`, `X-IG-WWW-Claim`, and the current
+  `X-ASBD-ID`). Posts, tagged media, stories, highlights and single-post links all share this path,
+  so all of them recover.
 - **Loom downloads now keep their audio.** Two bugs, both fixed:
   - **The audio mux failed with "no video track."** Loom serves separate video and audio HLS
     renditions; we download both and mux them. The muxer opened the assembled fragmented-MP4 with a

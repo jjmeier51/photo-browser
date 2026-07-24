@@ -282,7 +282,7 @@ enum InstagramService {
     /// step, finally to whatever `web_profile_info` gave us.
     nonisolated static func bestProfilePicURL(userID: String, handle: String, creds: Credentials, fallback: String) async -> String {
         guard !userID.isEmpty,
-              let url = URL(string: "https://i.instagram.com/api/v1/users/\(userID)/info/"),
+              let url = URL(string: "https://www.instagram.com/api/v1/users/\(userID)/info/"),
               let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let user = json["user"] as? [String: Any] else { return fallback }
@@ -322,7 +322,7 @@ enum InstagramService {
     // MARK: - API
 
     nonisolated static func fetchProfile(handle: String, creds: Credentials) async -> Profile? {
-        guard let url = URL(string: "https://i.instagram.com/api/v1/users/web_profile_info/?username=\(handle)"),
+        guard let url = URL(string: "https://www.instagram.com/api/v1/users/web_profile_info/?username=\(handle)"),
               let (data, resp) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
               (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? false,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -338,7 +338,7 @@ enum InstagramService {
     /// Full media-info for one post (includes `video_dash_manifest` with the high-res
     /// renditions that the feed list omits).
     nonisolated private static func fetchMediaInfo(pk: String, handle: String, creds: Credentials) async -> [String: Any]? {
-        guard let url = URL(string: "https://i.instagram.com/api/v1/media/\(pk)/info/"),
+        guard let url = URL(string: "https://www.instagram.com/api/v1/media/\(pk)/info/"),
               let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return (json["items"] as? [[String: Any]])?.first
@@ -370,7 +370,7 @@ enum InstagramService {
         var consecutiveSeen = 0          // run of already-downloaded posts
         loop: while pages < 400 {
             pages += 1
-            var s = "https://i.instagram.com/api/v1/\(base)?count=33"
+            var s = "https://www.instagram.com/api/v1/\(base)?count=33"
             if let maxID { s += "&max_id=\(maxID)" }
             guard let url = URL(string: s) else { break }
             // Status-checked fetch with retry. This endpoint rate-limits readily, and the old
@@ -429,7 +429,7 @@ enum InstagramService {
     }
 
     nonisolated private static func fetchReel(path: String, handle: String, creds: Credentials, reelKey: String? = nil) async -> [[String: Any]] {
-        guard let url = URL(string: "https://i.instagram.com/api/v1/\(path)"),
+        guard let url = URL(string: "https://www.instagram.com/api/v1/\(path)"),
               let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
         if let items = json["items"] as? [[String: Any]] { return items }
@@ -443,7 +443,7 @@ enum InstagramService {
     }
 
     nonisolated private static func fetchHighlights(userID: String, handle: String, creds: Credentials) async -> [(id: String, title: String)] {
-        guard let url = URL(string: "https://i.instagram.com/api/v1/highlights/\(userID)/highlights_tray/"),
+        guard let url = URL(string: "https://www.instagram.com/api/v1/highlights/\(userID)/highlights_tray/"),
               let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tray = json["tray"] as? [[String: Any]] else { return [] }
@@ -766,15 +766,27 @@ enum InstagramService {
 
     // MARK: - Helpers
 
+    /// Builds a request that mirrors Instagram's own web client, on the SAME origin as the
+    /// session cookies (`www.instagram.com`). This matters: the API host was moved off
+    /// `i.instagram.com` — hitting the app host with a `www.instagram.com` Referer is a cross-origin
+    /// mismatch that Instagram now rejects (so posts *and* stories quietly returned nothing). The
+    /// `Sec-Fetch-*` + `X-IG-WWW-Claim` + current `X-ASBD-ID` headers are what the live web app sends.
     nonisolated private static func apiRequest(_ url: URL, handle: String, creds: Credentials) -> URLRequest {
         var req = URLRequest(url: url)
+        req.setValue("*/*", forHTTPHeaderField: "Accept")
         req.setValue(appID, forHTTPHeaderField: "X-IG-App-ID")
-        req.setValue("198387", forHTTPHeaderField: "X-ASBD-ID")
+        req.setValue("129477", forHTTPHeaderField: "X-ASBD-ID")
+        req.setValue("0", forHTTPHeaderField: "X-IG-WWW-Claim")
         req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
         req.setValue(creds.csrf, forHTTPHeaderField: "X-CSRFToken")
         req.setValue(creds.cookie, forHTTPHeaderField: "Cookie")
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("https://www.instagram.com/\(handle)/", forHTTPHeaderField: "Referer")
+        // Same-origin Referer/Sec-Fetch trio — the request host is now www.instagram.com too.
+        req.setValue(handle.isEmpty ? "https://www.instagram.com/" : "https://www.instagram.com/\(handle)/",
+                     forHTTPHeaderField: "Referer")
+        req.setValue("empty", forHTTPHeaderField: "Sec-Fetch-Dest")
+        req.setValue("cors", forHTTPHeaderField: "Sec-Fetch-Mode")
+        req.setValue("same-origin", forHTTPHeaderField: "Sec-Fetch-Site")
         req.timeoutInterval = 30
         return req
     }
