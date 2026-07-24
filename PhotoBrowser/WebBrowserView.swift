@@ -236,12 +236,17 @@ struct WebBrowserView: View {
             }
             HStack {
                 // Tap = back/forward; touch-and-hold = the recent-pages list, like Safari.
+                // A size up from the rest of the bar, with padded hit areas — these are the two
+                // most-pressed buttons in the browser.
                 Menu {
                     ForEach(controller.backStack(), id: \.self) { item in
                         Button { controller.go(to: item) } label: { Text(historyLabel(item)) }
                     }
                 } label: {
                     Image(systemName: "chevron.left")
+                        .font(.title2.weight(.medium))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .contentShape(Rectangle())
                 } primaryAction: {
                     controller.goBack()
                 }
@@ -253,6 +258,9 @@ struct WebBrowserView: View {
                     }
                 } label: {
                     Image(systemName: "chevron.right")
+                        .font(.title2.weight(.medium))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .contentShape(Rectangle())
                 } primaryAction: {
                     controller.goForward()
                 }
