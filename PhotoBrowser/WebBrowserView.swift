@@ -1122,6 +1122,9 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
                 self.update(id) { $0.caption = info.caption; $0.captureDate = info.date }
             }
             let cookie = await cookieHeader(forURLString: urlString)
+            // Loom's session API lives on www.loom.com; forward the *page-host* cookies (which include
+            // the `.loom.com`-domain auth cookie) so private/workspace videos (e.g. luna.loom.com) resolve.
+            let loomCookie = pageURL.contains("loom.com") ? await cookieHeader(forURLString: pageURL) : ""
             func runOnce() async -> WebVideoDownloader.Outcome {
                 // Nested funcs don't inherit the controller's MainActor isolation — hop back for
                 // the credential lookup (it must be re-read each attempt, after a sign-in).
@@ -1133,7 +1136,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
                     return await WebVideoDownloader.download(
                         urlString: urlString, pageURL: pageURL, cookieHeader: cookie, into: folder,
                         suggestedName: sName, authHeader: auth,
-                        captureDate: date, caption: caption, progress: prog)
+                        captureDate: date, caption: caption, loomCookieHeader: loomCookie, progress: prog)
                 } else {
                     return await WebVideoDownloader.downloadFile(
                         urlString: urlString, pageURL: pageURL, cookieHeader: cookie,

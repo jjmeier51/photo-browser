@@ -4,6 +4,16 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **Loom downloads now keep their audio.** Two bugs, both fixed:
+  - **The audio mux failed with "no video track."** Loom serves separate video and audio HLS
+    renditions; we download both and mux them. The muxer opened the assembled fragmented-MP4 with a
+    plain `AVURLAsset`, which for some Loom fMP4s reports zero tracks even though the file plays fine
+    — so the mux bailed and the saved file was left video-only/silent. The muxer now opens both inputs
+    with `AVURLAssetPreferPreciseDurationAndTimingKey`, so it parses the fragments and finds the tracks.
+  - **The session-URL API 403'd, so the clean pre-merged (audio-included) URL was never used.** We were
+    sending the media/CDN host's cookies and a cross-origin referer to `www.loom.com`. The request now
+    matches Loom's own web app — a same-origin `Origin`/`Referer` and only the `.loom.com` cookies —
+    so it resolves for public videos and, when signed in, for workspace videos (e.g. `luna.loom.com`).
 - **Bulk rotate now covers videos too, and preserves HDR.** The "Rotate… (preview)" action (multi-
   select → More) now accepts videos as well as photos: it shows one selected item rotated the chosen
   way (a video previews on its poster frame) before applying the same turn to all of them. Every

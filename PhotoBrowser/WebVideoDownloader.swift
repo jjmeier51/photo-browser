@@ -50,6 +50,7 @@ enum WebVideoDownloader {
     nonisolated static func download(urlString: String, pageURL: String, cookieHeader: String,
                                      into folder: URL, suggestedName: String?, authHeader: String? = nil,
                                      captureDate: Date? = nil, caption: String? = nil,
+                                     loomCookieHeader: String = "",
                                      progress: @escaping @Sendable (Progress) -> Void) async -> Outcome {
         // Loom serves the page player a per-track ("…-video…") HLS playlist with no audio. Its
         // session API hands back a pre-merged URL (progressive MP4 or muxed HLS) that includes
@@ -58,7 +59,9 @@ enum WebVideoDownloader {
         var diag = ""                                   // breadcrumb shown on the saved row for triage
         if let id = loomVideoID(pageURL) ?? loomVideoID(urlString) {
             progress(Progress(fraction: 0, phase: "Resolving Loom video…"))
-            let (resolved, note) = await resolveLoomURL(id: id, referer: pageURL, cookieHeader: cookieHeader)
+            // Use loom.com cookies (from the page host), NOT the media/CDN-host cookies — the API
+            // lives on www.loom.com, so CDN cookies there are useless (and can trip its WAF).
+            let (resolved, note) = await resolveLoomURL(id: id, loomCookieHeader: loomCookieHeader)
             if let resolved { effectiveURL = resolved }
             diag = "Loom: \(note)"
         }
@@ -101,9 +104,10 @@ enum WebVideoDownloader {
     /// Asks Loom's session URL API for a pre-merged, signed media URL (progressive MP4 or muxed
     /// HLS) that includes audio, instead of the per-track "…-video…" playlist the page player
     /// requests. Tries the transcoded URL, then the raw URL; returns nil if neither responds, in
-    /// which case the caller keeps the captured URL. Same anonymous API yt-dlp uses; the browser's
-    /// cookies are forwarded in case the video is team-restricted.
-    nonisolated private static func resolveLoomURL(id: String, referer: String, cookieHeader: String) async -> (url: String?, note: String) {
+    /// which case the caller keeps the captured URL. Same API yt-dlp uses, sent with a same-origin
+    /// www.loom.com Origin/Referer; `loomCookieHeader` (the page's `.loom.com` cookies) is forwarded
+    /// so team-restricted videos resolve for a signed-in session.
+    nonisolated private static func resolveLoomURL(id: String, loomCookieHeader: String) async -> (url: String?, note: String) {
         var notes: [String] = []
         for endpoint in ["transcoded-url", "raw-url"] {
             guard let api = URL(string: "https://www.loom.com/api/campaigns/sessions/\(id)/\(endpoint)") else { continue }
@@ -112,8 +116,12 @@ enum WebVideoDownloader {
             req.setValue("application/json", forHTTPHeaderField: "Accept")
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-            if !referer.isEmpty { req.setValue(referer, forHTTPHeaderField: "Referer") }
-            if !cookieHeader.isEmpty { req.setValue(cookieHeader, forHTTPHeaderField: "Cookie") }
+            // Same-origin Origin/Referer on www.loom.com (matching the real web app) — a cross-origin
+            // luna.loom.com/CDN referer was one reason the API 403'd. Only loom.com-domain cookies are
+            // forwarded, so an authenticated (workspace) session reaches the API for private videos.
+            req.setValue("https://www.loom.com", forHTTPHeaderField: "Origin")
+            req.setValue("https://www.loom.com/", forHTTPHeaderField: "Referer")
+            if !loomCookieHeader.isEmpty { req.setValue(loomCookieHeader, forHTTPHeaderField: "Cookie") }
             let body: [String: Any] = ["anonID": UUID().uuidString, "deviceID": NSNull(),
                                        "force_original": false, "password": NSNull()]
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -472,8 +480,15 @@ enum WebVideoDownloader {
     /// already-compressed samples sequentially — no duration or index needed — and the writer
     /// remuxes them into a clean, non-fragmented MP4, copying samples verbatim (no re-encode).
     nonisolated private static func muxVideoAudio(video: URL, audio: URL, to out: URL) async -> String? {
-        let vAsset = AVURLAsset(url: video)
-        let aAsset = AVURLAsset(url: audio)
+        // Precise timing is REQUIRED here: the inputs are raw-concatenated fragmented MP4 (CMAF
+        // init + m4s segments) with no top-level movie duration/index. A default AVURLAsset scans
+        // only the moov box and, for some Loom fMP4s, reports zero tracks ("no video track") even
+        // though the file plays fine in AVPlayer — so the audio mux silently failed and the saved
+        // file was left video-only/silent. This option makes the asset parse the moof fragments and
+        // find the real tracks. (Same reasoning the reader-based mux comment above describes.)
+        let opts: [String: Any] = [AVURLAssetPreferPreciseDurationAndTimingKey: true]
+        let vAsset = AVURLAsset(url: video, options: opts)
+        let aAsset = AVURLAsset(url: audio, options: opts)
         guard let vTrack = try? await vAsset.loadTracks(withMediaType: .video).first else { return "no video track" }
         let aTrack = try? await aAsset.loadTracks(withMediaType: .audio).first
         let vFormat = (try? await vTrack.load(.formatDescriptions))?.first
