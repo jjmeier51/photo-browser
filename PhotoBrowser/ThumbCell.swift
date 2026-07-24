@@ -103,10 +103,10 @@ struct EntryCell: View {
     /// headroom; the tile's Image opts into `.allowedDynamicRange(.high)` to show it.
     nonisolated static func loadCover(_ url: URL?) async -> UIImage? {
         guard let url else { return nil }
-        return await Task.detached(priority: .userInitiated) {
+        return await Task.detached(priority: .userInitiated) { () async -> UIImage? in
             var config = UIImageReader.Configuration()
             config.prefersHighDynamicRange = true
-            return UIImageReader(configuration: config).image(contentsOf: url)
+            return await UIImageReader(configuration: config).image(contentsOf: url)
         }.value
     }
 
