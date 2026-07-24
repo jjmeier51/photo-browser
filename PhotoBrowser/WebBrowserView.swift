@@ -1234,6 +1234,21 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     }
 
 
+    /// Navigations flagged `shouldPerformDownload` — an `<a download>` click, including the
+    /// JS-synthesized ones file hosts' Download buttons use (pixeldrain et al) — are ignored by
+    /// WKWebView unless the delegate acts on them. Offer them as a file download; everything
+    /// else proceeds as before.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if navigationAction.shouldPerformDownload,
+           let url = navigationAction.request.url?.absoluteString, url.hasPrefix("http") {
+            decisionHandler(.cancel)
+            onFileDownload?(PendingFile(url: url, pageURL: currentURLString, filename: nil))
+            return
+        }
+        decisionHandler(.allow)
+    }
+
     /// Catch file downloads: when a response can't be rendered inline (a `.zip`, an installer, …) or
     /// is explicitly `Content-Disposition: attachment`, cancel the navigation and offer to save it.
     /// This is the "tap a Download button → a save prompt appears" path.
@@ -1280,13 +1295,17 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        // A pop-up (target=_blank / window.open). Follow it in this same web view **only** when it's
-        // a link the user actually tapped and points at a normal http(s) page. Script-spawned windows
-        // and odd schemes are the usual ad/redirect/malware pop-ups — drop them silently.
-        guard navigationAction.navigationType == .linkActivated,
-              let url = navigationAction.request.url,
+        // A pop-up (target=_blank / window.open). Follow it in this same web view when it's a
+        // link the user actually tapped, OR a script-opened window that stays on the SAME HOST —
+        // that's how file hosts' Download buttons open their own download endpoint (pixeldrain
+        // et al); the attachment interception below then turns it into a save prompt. Cross-host
+        // script pop-ups (the ad/redirect kind) and odd schemes stay dropped silently.
+        guard let url = navigationAction.request.url,
               let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return nil }
-        webView.load(URLRequest(url: url))
+        let sameHost = url.host != nil && url.host == webView.url?.host
+        if navigationAction.navigationType == .linkActivated || sameHost {
+            webView.load(URLRequest(url: url))
+        }
         return nil
     }
 
