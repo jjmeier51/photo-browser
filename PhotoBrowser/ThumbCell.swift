@@ -112,7 +112,7 @@ struct EntryCell: View {
                     // on light, busy images. SF Pro at 9.5pt (~15% under caption2); the faint
                     // white wash lightens the dark glass a touch.
                     Text(entry.name)
-                        .font(.system(size: 9.5, weight: .semibold)).lineLimit(1)
+                        .font(.system(size: 9.5, weight: .medium)).lineLimit(1)
                         .foregroundStyle(.white)
                         .padding(.horizontal, 8).padding(.vertical, 3)
                         .background {
@@ -120,6 +120,7 @@ struct EntryCell: View {
                                 Capsule().fill(.ultraThinMaterial)
                                 Capsule().fill(.white.opacity(0.10))
                             }
+                            .opacity(0.7)   // let more of the cover show through the glass
                         }
                         .overlay(Capsule().strokeBorder(.white.opacity(0.15), lineWidth: 0.5))
                         .padding(.horizontal, 4)
