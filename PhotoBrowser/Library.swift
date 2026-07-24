@@ -964,9 +964,16 @@ final class Library {
         thumbnailCacheTask?.cancel()
     }
 
-    /// The worker: enumerate every media file under `root`, then ensure each has a disk
-    /// thumbnail, bounded-concurrent (the codebase's task-group pattern). Returns true if the
-    /// pass was cancelled.
+    /// The worker: walk the drive and thumbnail as it goes, bounded-concurrent. Returns true if
+    /// the pass was cancelled.
+    ///
+    /// Discovery is INTERLEAVED with the thumbnail work — files feed the task group straight off
+    /// the enumerator — so caching starts within seconds. (The first version scanned the whole
+    /// drive up front to learn the total, which on a big exFAT drive meant minutes of
+    /// "Scanning drive…" with nothing visibly happening.) While the walk is still going the
+    /// reported fraction is -1 (indeterminate spinner + folder name); when it finishes, the real
+    /// fraction takes over. `classify` is memoized per extension — it's a UTType lookup, and one
+    /// per file made the old scan CPU-bound on top of the drive I/O.
     ///
     /// The body MUST run in `Task.detached` (hard-won constraint #1): a `nonisolated` async
     /// function still runs on the *caller's* actor here, and the caller is the main actor — the
@@ -976,41 +983,50 @@ final class Library {
                                                        progress: @escaping @Sendable (Double, String) -> Void) async -> Bool {
         let worker = Task.detached(priority: .utility) { () -> Bool in
             let fm = FileManager.default
-            var files: [(url: URL, kind: FileKind)] = []
-            if let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey],
-                                          options: [.skipsHiddenFiles]) {
-                for case let url as URL in walker {
-                    if Task.isCancelled { return true }
-                    let kind = classify(url: url, isDirectory: false)
-                    if kind == .image || kind == .video { files.append((url, kind)) }
+            guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey],
+                                             options: [.skipsHiddenFiles]) else { return Task.isCancelled }
+            var kindByExt: [String: FileKind] = [:]
+            func nextMedia() -> (url: URL, kind: FileKind)? {
+                while !Task.isCancelled, let url = walker.nextObject() as? URL {
+                    let ext = url.pathExtension.lowercased()
+                    let kind: FileKind
+                    if let known = kindByExt[ext] {
+                        kind = known
+                    } else {
+                        kind = classify(url: url, isDirectory: false)
+                        kindByExt[ext] = kind
+                    }
+                    if kind == .image || kind == .video { return (url, kind) }
                 }
+                return nil
             }
-            guard !files.isEmpty else { return Task.isCancelled }
             var done = 0
+            var discovered = 0
+            var scanDone = false
             var lastFolder = ""
             await withTaskGroup(of: String.self) { group in
-                var idx = 0
                 let maxConcurrent = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 8))
-                func next() {
-                    guard idx < files.count, !Task.isCancelled else { return }
-                    let file = files[idx]; idx += 1
+                func addNext() {
+                    guard !Task.isCancelled else { return }
+                    guard let file = nextMedia() else { scanDone = true; return }
+                    discovered += 1
                     group.addTask {
                         guard !Task.isCancelled else { return "" }
                         await Thumbnailer.shared.precache(fileAt: file.url, kind: file.kind)
                         return file.url.deletingLastPathComponent().lastPathComponent
                     }
                 }
-                for _ in 0..<min(maxConcurrent, files.count) { next() }
+                for _ in 0..<maxConcurrent { addNext() }
                 while let folder = await group.next() {
                     done += 1
                     // Surface the folder currently being worked through (the walk is depth-first,
                     // so consecutive files share a folder) — promptly on a folder change, and on
                     // a steady cadence inside big folders. Still no file counts, by design.
-                    if (!folder.isEmpty && folder != lastFolder) || done % 20 == 0 || done == files.count {
+                    if (!folder.isEmpty && folder != lastFolder) || done % 20 == 0 || (scanDone && done == discovered) {
                         if !folder.isEmpty { lastFolder = folder }
-                        progress(Double(done) / Double(files.count), lastFolder)
+                        progress(scanDone ? Double(done) / Double(max(discovered, 1)) : -1, lastFolder)
                     }
-                    next()
+                    addNext()
                 }
             }
             return Task.isCancelled
