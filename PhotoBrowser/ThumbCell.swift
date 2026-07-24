@@ -109,12 +109,18 @@ struct EntryCell: View {
                 .overlay(alignment: .bottom) {
                     // Frosted capsule: a blurred-glass pill (iOS home-screen folder style) keeps
                     // the name readable on ANY cover — the old white-text-with-shadow washed out
-                    // on light, busy images.
+                    // on light, busy images. SF Pro at 9.5pt (~15% under caption2); the faint
+                    // white wash lightens the dark glass a touch.
                     Text(entry.name)
-                        .font(.caption2.weight(.semibold)).lineLimit(1)
+                        .font(.system(size: 9.5, weight: .semibold)).lineLimit(1)
                         .foregroundStyle(.white)
                         .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(.ultraThinMaterial, in: Capsule())
+                        .background {
+                            ZStack {
+                                Capsule().fill(.ultraThinMaterial)
+                                Capsule().fill(.white.opacity(0.10))
+                            }
+                        }
                         .overlay(Capsule().strokeBorder(.white.opacity(0.15), lineWidth: 0.5))
                         .padding(.horizontal, 4)
                         .padding(.bottom, 5)
