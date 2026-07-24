@@ -26,9 +26,16 @@ enum HDRCover {
 
     nonisolated private static func photoCover(url: URL, region: CGRect) -> Data? {
         guard let ci = CIImage(contentsOf: url, options: [.expandToHDR: true]) else { return nil }
-        // Only worth a 10-bit cover when the image actually carries HDR headroom.
-        guard ci.contentHeadroom > 1.01 else { return nil }
         let src = CGImageSourceCreateWithURL(url as CFURL, nil)
+        // Only worth a 10-bit cover when the image actually carries HDR. `contentHeadroom` is
+        // iOS 18+ (deployment target is 17): on 17, fall back to checking for a gain map.
+        let isHDR: Bool
+        if #available(iOS 18.0, *) {
+            isHDR = ci.contentHeadroom > 1.01
+        } else {
+            isHDR = src.map { CGImageSourceCopyAuxiliaryDataInfoAtIndex($0, 0, kCGImageAuxiliaryDataTypeHDRGainMap) != nil } ?? false
+        }
+        guard isHDR else { return nil }
         let props = src.flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [CFString: Any] } ?? [:]
         let orientation = Int32((props[kCGImagePropertyOrientation] as? UInt32) ?? 1)
         let upright = ci.oriented(forExifOrientation: orientation)
