@@ -157,7 +157,7 @@ enum InstagramService {
             }
             return result
         }
-        result = await download(jobs: jobs, replace: replaceExisting, progress: progress)
+        result = await download(jobs: jobs, replace: replaceExisting, creds: creds, progress: progress)
         result.profile = profile
         result.highlightFolders = highlightDirs
         result.profilePic = await fetchProfilePic(userID: profile.userID, handle: profile.handle,
@@ -196,7 +196,7 @@ enum InstagramService {
         }
         let jobs = reelJobs(items: stories, folder: storiesFolder, already: already, poster: handle)
         guard !jobs.isEmpty else { return DownloadResult() }
-        return await download(jobs: jobs, replace: false, progress: progress)
+        return await download(jobs: jobs, replace: false, creds: creds, progress: progress)
     }
 
     /// Downloads a single **post / reel** by its shortcode (from an
@@ -222,7 +222,7 @@ enum InstagramService {
         let poster = ((item["user"] as? [String: Any])?["username"] as? String) ?? ""
         let jobs = jobsFor(item: item, id: shortcode, folder: folder, defaultPoster: poster)
         guard !jobs.isEmpty else { return result }
-        return await download(jobs: jobs, replace: false, progress: progress)
+        return await download(jobs: jobs, replace: false, creds: creds, progress: progress)
     }
 
     /// Instagram shortcode → numeric media pk. The shortcode is the pk written in base-64 over the
@@ -316,7 +316,7 @@ enum InstagramService {
     /// Downloads a user's highest-resolution profile picture (see `bestProfilePicURL`).
     nonisolated static func fetchProfilePic(userID: String, handle: String, creds: Credentials, fallback: String) async -> Data? {
         let best = await bestProfilePicURL(userID: userID, handle: handle, creds: creds, fallback: fallback)
-        return await downloadData(best)
+        return await downloadData(best, creds: creds)
     }
 
     // MARK: - API
@@ -500,7 +500,8 @@ enum InstagramService {
 
     // MARK: - Downloading
 
-    nonisolated private static func download(jobs: [Job], replace: Bool, progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
+    nonisolated private static func download(jobs: [Job], replace: Bool, creds: Credentials,
+                                             progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
         let total = jobs.count
         var done = 0
@@ -511,7 +512,7 @@ enum InstagramService {
             func addNext() {
                 guard idx < jobs.count else { return }
                 let job = jobs[idx]; idx += 1
-                group.addTask { await downloadJob(job, replace: replace) }
+                group.addTask { await downloadJob(job, replace: replace, creds: creds) }
             }
             for _ in 0..<min(maxConcurrent, jobs.count) { addNext() }
             while let r = await group.next() {
@@ -531,10 +532,17 @@ enum InstagramService {
         // that failed (or a carousel that partly failed) is retried on the next
         // "Get New Posts" instead of being treated as already-done.
         result.newIDs = Array(succeeded.subtracting(failedIDs))
+        // Items were found but *nothing* downloaded — don't let the caller report a bland "no new
+        // posts". This is the private-account case (media is auth-gated) and expired-login case; say so.
+        if total > 0 && succeeded.isEmpty {
+            let what = total == 1 ? "it" : "them"
+            result.note = "Found \(total) new item\(total == 1 ? "" : "s") but couldn’t download \(what). "
+                + "Instagram blocked the media requests — for a private profile, make sure you follow it and are still logged in (re-log in if this keeps happening)."
+        }
         return result
     }
 
-    nonisolated private static func downloadJob(_ job: Job, replace: Bool) async -> (ok: Bool, isVideo: Bool, path: String, caption: String, poster: String, id: String) {
+    nonisolated private static func downloadJob(_ job: Job, replace: Bool, creds: Credentials) async -> (ok: Bool, isVideo: Bool, path: String, caption: String, poster: String, id: String) {
         try? FileManager.default.createDirectory(at: job.folder, withIntermediateDirectories: true)
         let ext = job.isVideo ? "mp4" : "jpg"
         // Re-download replaces the existing file in place; otherwise avoid collisions.
@@ -545,7 +553,7 @@ enum InstagramService {
         if job.isVideo { print("[Instagram] video \(job.name).mp4 → \(job.quality)") }
 
         if job.isVideo, let audio = job.audioURL,
-           let v = await downloadToTemp(job.url), let a = await downloadToTemp(audio) {
+           let v = await downloadToTemp(job.url, creds: creds), let a = await downloadToTemp(audio, creds: creds) {
             let ok = job.transcode
                 ? await VideoTranscoder.muxTranscode(video: v, audio: a, to: dest, transcode: true, date: job.date, lat: job.lat, lng: job.lng)
                 : await mux(video: v, audio: a, to: dest, date: job.date, lat: job.lat, lng: job.lng)
@@ -557,37 +565,52 @@ enum InstagramService {
 
         if job.isVideo {
             let progressive = job.fallbackURL ?? job.url
-            guard await downloadFile(progressive, to: dest) else { return (false, true, "", "", "", job.id) }
+            guard await downloadFile(progressive, to: dest, creds: creds) else { return (false, true, "", "", "", job.id) }
             await writeVideoMeta(date: job.date, lat: job.lat, lng: job.lng, to: dest)
         } else {
-            guard await downloadFile(job.url, to: dest) else { return (false, false, "", "", "", job.id) }
+            guard await downloadFile(job.url, to: dest, creds: creds) else { return (false, false, "", "", "", job.id) }
             writeImageMeta(date: job.date, lat: job.lat, lng: job.lng, caption: job.caption, poster: job.poster, to: dest)
         }
         setFileDate(dest, job.date)
         return (true, job.isVideo, dest.path, job.caption, job.poster, job.id)
     }
 
-    nonisolated private static func downloadFile(_ urlString: String, to dest: URL) async -> Bool {
-        guard let tmp = await downloadToTemp(urlString) else { return false }
+    nonisolated private static func downloadFile(_ urlString: String, to dest: URL, creds: Credentials?) async -> Bool {
+        guard let tmp = await downloadToTemp(urlString, creds: creds) else { return false }
         // Serialized, flushed commit — keeps concurrent downloads from corrupting the exFAT directory.
         do { try await DriveWriter.shared.commit(tmp, to: dest); return true }
         catch { try? FileManager.default.removeItem(at: tmp); return false }
     }
 
-    nonisolated private static func downloadToTemp(_ urlString: String) async -> URL? {
+    nonisolated private static func downloadToTemp(_ urlString: String, creds: Credentials?) async -> URL? {
         guard let url = URL(string: urlString) else { return nil }
-        var req = URLRequest(url: url); req.setValue(userAgent, forHTTPHeaderField: "User-Agent"); req.timeoutInterval = 240
-        guard let (tmp, resp) = try? await session.download(for: req),
+        guard let (tmp, resp) = try? await session.download(for: mediaRequest(url, creds: creds)),
               (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true else { return nil }
         let out = FileManager.default.temporaryDirectory.appendingPathComponent("ig_" + UUID().uuidString)
         guard (try? FileManager.default.moveItem(at: tmp, to: out)) != nil else { return nil }
         return out
     }
 
-    nonisolated static func downloadData(_ urlString: String) async -> Data? {
+    nonisolated static func downloadData(_ urlString: String, creds: Credentials? = nil) async -> Data? {
         guard let url = URL(string: urlString) else { return nil }
-        var req = URLRequest(url: url); req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        return (try? await session.data(for: req))?.0
+        return (try? await session.data(for: mediaRequest(url, creds: creds)))?.0
+    }
+
+    /// A request for a media file on Instagram's CDN. Carries the logged-in session (Cookie +
+    /// app id) and an instagram.com Referer — **required for private/followed profiles**, whose
+    /// post/story media the CDN refuses to serve to an unauthenticated request (which silently
+    /// 403'd every download, so a private profile's new stories looked like "nothing to download").
+    /// Public media is unaffected. `creds` is optional so callers without a session still work.
+    nonisolated private static func mediaRequest(_ url: URL, creds: Credentials?) -> URLRequest {
+        var req = URLRequest(url: url)
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
+        if let creds, !creds.cookie.isEmpty {
+            req.setValue(creds.cookie, forHTTPHeaderField: "Cookie")
+            req.setValue(appID, forHTTPHeaderField: "X-IG-App-ID")
+        }
+        req.timeoutInterval = 240
+        return req
     }
 
     nonisolated private static func setFileDate(_ url: URL, _ date: Date) {

@@ -4,6 +4,14 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **Instagram private-profile posts and stories download again.** After the API host fix, the app
+  correctly *found* a followed private profile's new posts/stories (e.g. "downloading 14 of 14") but
+  every file failed and it reported "nothing to download." The media requests carried only a
+  User-Agent — no session — so Instagram's CDN refused a private profile's auth-gated media (public
+  media was unaffected). Media downloads (and profile-picture fetches) now carry the logged-in
+  session cookie, an `instagram.com` Referer, and the app id, matching the API calls. And when items
+  are found but none download, the result now says so ("Found N new items but couldn't download
+  them… re-log in if this keeps happening") instead of a misleading "no new posts."
 - **VSCO downloads work again.** VSCO retired the page-based `api/2.0/medias` gallery endpoint and
   now rotates the anonymous API token, so the app — which called the old endpoint with a hardcoded
   token — got an empty list and reported "Couldn't find any posts." It now reads a **fresh token**
