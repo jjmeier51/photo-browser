@@ -164,7 +164,7 @@ struct ViewerView: View {
             guard slideshow, !items.isEmpty else { return }
             let dwell = await slideshowDwell(for: current)
             try? await Task.sleep(nanoseconds: UInt64(dwell * 1_000_000_000))
-            if !Task.isCancelled { index = (index + 1) % items.count }
+            if !Task.isCancelled { Haptics.soft(); index = (index + 1) % items.count }   // muted tick on advance
         }
     }
 

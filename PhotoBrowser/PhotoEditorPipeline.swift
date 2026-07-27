@@ -361,10 +361,11 @@ enum EditPipeline {
         if r.exposure != 0 {
             img = img.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: r.exposure * 1.5])
         }
-        if r.contrast != 0 || r.saturation != 0 {
+        if r.contrast != 0 || r.saturation != 0 || r.brightness != 0 {
             img = img.applyingFilter("CIColorControls", parameters: [
                 kCIInputContrastKey: 1 + r.contrast * 0.5,
                 kCIInputSaturationKey: 1 + r.saturation,
+                kCIInputBrightnessKey: r.brightness * 0.35,   // linear lift/drop, gentler than a full ±1
             ])
         }
         if r.highlights != 0 || r.shadows != 0 {

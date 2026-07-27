@@ -385,11 +385,18 @@ private struct ZoomScrollView: UIViewRepresentable {
             (scrollView as? CenteringScrollView)?.imageView
         }
 
+        private var didHitZoomLimit = false
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             let zoomed = scrollView.zoomScale > scrollView.minimumZoomScale + 0.01
             scrollView.isScrollEnabled = zoomed
             onZoomChanged?(zoomed)
             (scrollView as? CenteringScrollView)?.centerContent()
+            // A crisp tick when a pinch bumps against the max zoom — fires once until you back off.
+            if scrollView.zoomScale >= scrollView.maximumZoomScale - 0.01 {
+                if !didHitZoomLimit { didHitZoomLimit = true; Haptics.rigid(intensity: 0.7) }
+            } else {
+                didHitZoomLimit = false
+            }
         }
 
         private var atRest: Bool {

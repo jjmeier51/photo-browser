@@ -442,7 +442,7 @@ struct FolderView: View {
                 .padding(4)
             }
             .scrollDisabled(scrollLocked)        // freeze the page while a select-drag is active
-            .refreshable { await reload() }      // pull down to force a fresh disk re-listing
+            .refreshable { Haptics.light(); await reload() }   // pull down to force a fresh disk re-listing
             .coordinateSpace(name: "grid")
             .background(
                 GeometryReader { g in
@@ -540,6 +540,7 @@ struct FolderView: View {
         for i in lo...hi where i >= 0 && i < dragOrder.count {
             if dragSelectAdding { newSel.insert(dragOrder[i]) } else { newSel.remove(dragOrder[i]) }
         }
+        if newSel.count != selection.count { Haptics.selection() }   // tick as the painted range grows/shrinks
         selection = newSel
     }
 

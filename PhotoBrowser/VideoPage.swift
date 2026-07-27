@@ -376,6 +376,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
         let canStep = count < 0 ? item.canStepBackward : item.canStepForward
         guard canStep else { return }
         item.step(byCount: count)
+        Haptics.rigid()                       // a crisp tick per single-frame step
         flashCapture(count < 0 ? "◀ Frame" : "Frame ▶")
         if !controlsHidden { scheduleHide() }
     }

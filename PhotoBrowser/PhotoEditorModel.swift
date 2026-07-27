@@ -27,7 +27,8 @@ struct EditRecipe: Codable, Equatable {
     var cropRect: CGRect?
 
     // MARK: Light & color  (neutral 0, range −1…1)
-    var exposure = 0.0                  // Exposure / Brightness
+    var exposure = 0.0                  // Exposure (EV multiply)
+    var brightness = 0.0                // linear brightness lift/drop (added to each channel)
     var contrast = 0.0
     var highlights = 0.0
     var shadows = 0.0
@@ -250,6 +251,7 @@ struct Adjustment: Identifiable {
 
     static let all: [Adjustment] = [
         .init(id: "exposure",   name: "Exposure",   systemImage: "sun.max",            keyPath: \.exposure,   range: -1...1),
+        .init(id: "brightness", name: "Brightness", systemImage: "sun.min",            keyPath: \.brightness, range: -1...1),
         .init(id: "contrast",   name: "Contrast",   systemImage: "circle.lefthalf.filled", keyPath: \.contrast, range: -1...1),
         .init(id: "highlights", name: "Highlights", systemImage: "sun.max.fill",        keyPath: \.highlights, range: -1...1),
         .init(id: "shadows",    name: "Shadows",    systemImage: "moon.fill",           keyPath: \.shadows,    range: -1...1),

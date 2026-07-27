@@ -139,12 +139,14 @@ struct InfoPanel: View {
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button {
+                        Haptics.light()
                         library.toggleAI(entry.url)
                     } label: {
                         Image(systemName: library.isAI(entry.url) ? "sparkles" : "sparkles")
                             .foregroundStyle(library.isAI(entry.url) ? .yellow : .primary)
                     }
                     Button {
+                        Haptics.light()
                         library.toggleFavorite(entry.url)
                     } label: {
                         Image(systemName: library.isFavorite(entry.url) ? "heart.fill" : "heart")
