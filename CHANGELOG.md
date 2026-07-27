@@ -4,6 +4,15 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **Fixed a temp-file leak that ballooned the app's on-device storage (and caused more download
+  failures).** Every download streams to a temp file in the app container, then moves it to the
+  drive. When a download *failed* — a rate-limit 403/429, or a failed move — that temp file was left
+  behind instead of deleted. Across a big OF run with ~1000 failures those orphans piled up (the app
+  jumping from ~13 GB to 37 GB), and once on-device storage filled, further downloads couldn't even
+  write their temp and failed too — a self-reinforcing spiral. OF (both regular and DRM downloads)
+  and Instagram now delete the temp on every failure path, and an OF run first **sweeps orphaned
+  download temps** (URLSession temp files older than an hour) from earlier failed runs to reclaim the
+  space. Running the OF downloader once will claw back the leaked gigabytes.
 - **Download logs (`<kind>-log.txt`) actually get written now.** They were saved with a raw
   cross-volume `moveItem` into the external/file-provider drive, which silently fails there (the
   downloaded files land because they go through `DriveWriter`; the log didn't). The log now writes

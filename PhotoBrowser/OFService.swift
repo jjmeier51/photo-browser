@@ -279,6 +279,7 @@ enum OFService {
                                 progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        sweepStaleTemps()        // reclaim any orphaned download temps left by earlier failed runs
         // Verbose per-run log written into the creator's folder (of-log.txt) so
         // failures can be inspected and shared. Best-effort, never affects the download.
         let log = DownloadLog(folder: folder, kind: "of")
@@ -748,11 +749,14 @@ enum OFService {
             req.setValue(referer, forHTTPHeaderField: "Referer")
             req.timeoutInterval = 600
             guard let (tmp, resp) = try? await session.download(for: req) else { continue }
-            if let code = (resp as? HTTPURLResponse)?.statusCode {
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
+            if code >= 400 {
+                try? FileManager.default.removeItem(at: tmp)               // don't leak the temp on failure
                 if code == 429 || code >= 500 { continue }
-                if code >= 400 { return false }
+                return false
             }
-            do { try await DriveWriter.shared.commit(tmp, to: dest); return true } catch { return false }
+            do { try await DriveWriter.shared.commit(tmp, to: dest); return true }
+            catch { try? FileManager.default.removeItem(at: tmp); return false }
         }
         return false
     }
@@ -971,13 +975,23 @@ enum OFService {
             req.timeoutInterval = 600
             guard let (tmp, resp) = try? await session.download(for: req) else { lastReason = "network error"; continue }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
-            if code == 429 || code == 403 || code >= 500 { lastReason = "HTTP \(code)"; continue }   // throttle / transient → back off
-            if code >= 400 { return "HTTP \(code)" }
+            if code >= 400 {
+                // Delete the response-body temp. Leaving it on every 4xx/retry piled hundreds of
+                // orphaned files into the app's on-device storage, which then filled up and caused
+                // *more* download failures — the runaway "app is using 37 GB" growth.
+                try? FileManager.default.removeItem(at: tmp)
+                if code == 429 || code == 403 || code >= 500 { lastReason = "HTTP \(code)"; continue }   // throttle/transient → back off
+                return "HTTP \(code)"
+            }
             do {
-                try await DriveWriter.shared.commit(tmp, to: dest)
+                try await DriveWriter.shared.commit(tmp, to: dest)          // moves tmp onto the drive
                 let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                return size >= 128 ? nil : "empty file (\(size)B)"
-            } catch { return "save error" }
+                if size >= 128 { return nil }
+                try? FileManager.default.removeItem(at: dest); return "empty file (\(size)B)"
+            } catch {
+                try? FileManager.default.removeItem(at: tmp)               // commit failed → don't leak the media temp
+                return "save error"
+            }
         }
         return lastReason
     }
@@ -1052,6 +1066,24 @@ enum OFService {
             .replacingOccurrences(of: "&lt;", with: "<").replacingOccurrences(of: "&gt;", with: ">")
         let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.count > 800 ? String(trimmed.prefix(800)) : trimmed
+    }
+
+    /// Deletes stale files left in the app's on-device temp directory — orphaned URLSession
+    /// download temps (`CFNetworkDownload*.tmp`) from downloads that failed before their temp
+    /// could be moved to the drive, which is what ballooned the app's storage. Only touches
+    /// top-level temp files older than an hour, so nothing an in-flight download is using (temps
+    /// live seconds, and every download times out at 10 min) can be removed. Best-effort.
+    nonisolated private static func sweepStaleTemps() {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: fm.temporaryDirectory,
+                                                      includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+                                                      options: [.skipsHiddenFiles]) else { return }
+        let cutoff = Date().addingTimeInterval(-3600)   // 1 hour
+        for url in items {
+            let vals = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey])
+            if vals?.isDirectory == true { continue }
+            if let mod = vals?.contentModificationDate, mod < cutoff { try? fm.removeItem(at: url) }
+        }
     }
 
     nonisolated private static func uniqueDestination(_ name: String, in folder: URL) -> URL {

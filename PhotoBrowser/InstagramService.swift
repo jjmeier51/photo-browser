@@ -583,11 +583,16 @@ enum InstagramService {
     }
 
     nonisolated private static func downloadToTemp(_ urlString: String, creds: Credentials?) async -> URL? {
-        guard let url = URL(string: urlString) else { return nil }
-        guard let (tmp, resp) = try? await session.download(for: mediaRequest(url, creds: creds)),
-              (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true else { return nil }
+        guard let url = URL(string: urlString),
+              let (tmp, resp) = try? await session.download(for: mediaRequest(url, creds: creds)) else { return nil }
+        // A non-2xx (e.g. a private profile's media 403) still wrote a temp — delete it instead of
+        // leaking it into on-device storage.
+        let ok = (resp as? HTTPURLResponse).map { (200...299).contains($0.statusCode) } ?? true
+        guard ok else { try? FileManager.default.removeItem(at: tmp); return nil }
         let out = FileManager.default.temporaryDirectory.appendingPathComponent("ig_" + UUID().uuidString)
-        guard (try? FileManager.default.moveItem(at: tmp, to: out)) != nil else { return nil }
+        guard (try? FileManager.default.moveItem(at: tmp, to: out)) != nil else {
+            try? FileManager.default.removeItem(at: tmp); return nil
+        }
         return out
     }
 
