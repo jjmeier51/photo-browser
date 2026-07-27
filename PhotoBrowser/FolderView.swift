@@ -22,6 +22,12 @@ final class HomeSettleTracker {
     var sawAny = false
 }
 
+/// Carries the selected videos into the combine-order sheet (an array isn't `Identifiable`).
+struct CombineRequest: Identifiable {
+    let id = UUID()
+    let videos: [Entry]
+}
+
 /// Browses one directory: subfolders + files, with sort, search, a full-screen
 /// viewer for photos/videos, and a Select mode for save/delete.
 struct FolderView: View {
@@ -86,6 +92,7 @@ struct FolderView: View {
     @State private var searching = false
     @State private var exportTarget: Entry?
     @State private var trimTarget: Entry?
+    @State private var combineRequest: CombineRequest?
     @State private var showAIOnly = false
     @State private var aiEntries: [Entry] = []
     @State private var labelKind: LabelKind = .all
@@ -579,7 +586,9 @@ struct FolderView: View {
             // slow drive (they'll report and take the `settled` path instead).
             let empty = !homeSettle.sawAny && entries.isEmpty && elapsed > 0.8
             if settled || empty || elapsed > 6 {
-                withAnimation(.easeOut(duration: 0.5)) { showHomeHaze = false }
+                // A long, gentle cross-dissolve so the folders emerge from the glass rather than the
+                // haze cutting away.
+                withAnimation(.easeInOut(duration: 1.0)) { showHomeHaze = false }
                 return
             }
         }
@@ -1002,6 +1011,9 @@ struct FolderView: View {
             }
             .fullScreenCover(item: $studioEntry) { e in PhotoEditorView(entry: e) }
             .fullScreenCover(item: $trimTarget) { e in VideoTrimView(url: e.url) { Task { await reload() } } }
+            .sheet(item: $combineRequest) { req in
+                VideoCombineView(videos: req.videos) { ordered in runCombine(ordered) }
+            }
             .fullScreenCover(item: $resizeEntry) { e in ResizeEditorView(entry: e) }
             .sheet(item: $aiEditEntry) { e in AIEditView(entry: e) }
             .fullScreenCover(isPresented: $showPeople) { PeopleView(folder: url) }
@@ -2292,7 +2304,7 @@ struct FolderView: View {
                     }
                 }
                 if selectedEntries().filter({ $0.kind == .video }).count >= 2 {
-                    Button { combineVideos() } label: { Label("Combine Videos", systemImage: "film.stack") }
+                    Button { startCombine() } label: { Label("Combine Videos", systemImage: "film.stack") }
                 }
                 Button { duplicateEntries(selectedEntries()) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
                 Button { compress(selectedEntries()) } label: { Label("Compress to Zip", systemImage: "archivebox") }
@@ -2414,25 +2426,31 @@ struct FolderView: View {
         }
     }
 
-    /// Concatenates the selected videos (name order) into one new "Combined" file in this folder,
-    /// via `VideoComposer.stitch`. Originals are left untouched. Best for clips sharing an
-    /// orientation. Runs off-main under a background window with export progress.
-    private func combineVideos() {
+    /// Opens the order-picker sheet for the selected videos; the sheet hands back the ordered URLs.
+    private func startCombine() {
         let vids = selectedEntries().filter { $0.kind == .video }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         guard vids.count >= 2 else { resultMessage = "Select two or more videos to combine."; return }
+        let req = CombineRequest(videos: vids)
+        DispatchQueue.main.async { combineRequest = req }   // defer so the Menu dismissal doesn't swallow the sheet
+    }
+
+    /// Concatenates the given videos (in the picked order) into one new "Combined" file in this
+    /// folder, via `VideoComposer.stitch`. Originals are left untouched. Off-main under a background
+    /// window with export progress.
+    private func runCombine(_ orderedURLs: [URL]) {
+        guard orderedURLs.count >= 2 else { return }
         selecting = false; selection.removeAll()
-        editLabel = "Combining \(vids.count) videos…"; editProcessing = true; editProgress = 0
+        editLabel = "Combining \(orderedURLs.count) videos…"; editProcessing = true; editProgress = 0
         let bg = BackgroundTaskHolder(); bg.begin(name: "Combine Videos")
-        let urls = vids.map(\.url)
         let dest = combinedDestination()
         Task {
-            let ok = await VideoComposer.stitch(urls, to: dest) { p in
+            let ok = await VideoComposer.stitch(orderedURLs, to: dest) { p in
                 Task { @MainActor in editProgress = p }
             }
             editProcessing = false; bg.end()
             resultMessage = ok
-                ? "Combined \(urls.count) videos into “\(dest.lastPathComponent)”."
+                ? "Combined \(orderedURLs.count) videos into “\(dest.lastPathComponent)”."
                 : "Couldn’t combine the videos."
             library.contentDidChange(under: url)
             await reload()
