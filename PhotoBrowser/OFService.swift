@@ -342,25 +342,34 @@ enum OFService {
         // persisted list is used only as a fallback when the folder can't be scanned (drive
         // detached), so a failed scan can never trigger a full re-download.
         var already = Set<String>()
-        var corruptVideos: [(id: String, path: URL)] = []
+        var videoFiles: [(id: String, path: URL)] = []
         if let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) {
             for n in names where n.hasPrefix("OF_") {
                 let id = String(n.dropFirst(3).prefix { $0.isNumber })   // OF_<id>.<ext> / "OF_<id> 2.ext"
                 guard !id.isEmpty else { continue }
                 already.insert(id)
-                // Flag a truncated/corrupt video (saved before the Content-Length check existed, so
-                // it "won't play") for repair. It stays "known" so the main pipeline skips it; we
-                // re-fetch just these afterwards, replacing the file only if the fresh copy is
-                // intact — a failed repair leaves the old file so it's retried next run. Cheap check.
-                if isVideoFile(n), !isVideoIntact(folder.appendingPathComponent(n)) {
-                    corruptVideos.append((id, folder.appendingPathComponent(n)))
-                }
+                if isVideoFile(n) { videoFiles.append((id, folder.appendingPathComponent(n))) }
             }
-            await log.log("dedup: \(already.count) file(s) on disk are authoritative (persisted list of \(alreadyDownloaded.count) ignored so missing files re-download)"
-                          + (corruptVideos.isEmpty ? "" : "; \(corruptVideos.count) corrupt video(s) to repair"))
+            await log.log("dedup: \(already.count) file(s) on disk are authoritative (persisted list of \(alreadyDownloaded.count) ignored so missing files re-download)")
         } else {
             already = alreadyDownloaded          // couldn't scan the folder — trust the persisted list
             await log.log("dedup: folder scan failed — using \(already.count) persisted ids")
+        }
+
+        // Integrity-check the on-disk videos to find truncated/corrupt ones to repair — but do it in
+        // the BACKGROUND, 8 at a time. The result is only needed for the repair pass (after
+        // discovery), so overlap it with the whole run. Doing it inline and one-at-a-time stalled the
+        // run for minutes before any download started, because each read on a userspace (FSKit)
+        // external drive has high latency — that's the "it just hangs, no log, no downloads" report.
+        let corruptCheck = Task.detached(priority: .utility) { [videoFiles] () -> [(id: String, path: URL)] in
+            await withTaskGroup(of: (id: String, path: URL)?.self) { group -> [(id: String, path: URL)] in
+                var i = 0
+                func addNext() { if i < videoFiles.count { let v = videoFiles[i]; i += 1; group.addTask { isVideoIntact(v.path) ? nil : v } } }
+                for _ in 0..<min(8, videoFiles.count) { addNext() }
+                var out: [(id: String, path: URL)] = []
+                while let r = await group.next() { if let r { out.append(r) }; addNext() }
+                return out
+            }
         }
 
         // Discovery and download overlap: collectors walk posts (and messages)
@@ -411,6 +420,18 @@ enum OFService {
         // Repair corrupt on-disk videos: re-fetch just the flagged ones (URLs are still fresh from
         // discovery) and replace the file only when the new copy verifies intact. A failed repair
         // leaves the old file untouched, so it's retried on the next run rather than lost.
+        // Await the background integrity check — but cap the wait so a wedged read on the userspace
+        // drive can never stall the run's completion (proceed without repair; it retries next run).
+        let corruptVideos: [(id: String, path: URL)] = await withTaskGroup(of: [(id: String, path: URL)].self) { g in
+            g.addTask { await corruptCheck.value }
+            g.addTask { try? await Task.sleep(nanoseconds: 120_000_000_000); return [] }   // 2-min safety cap
+            let first = await g.next() ?? []
+            g.cancelAll()
+            return first
+        }
+        if !corruptVideos.isEmpty {
+            await log.log("repairing \(corruptVideos.count) corrupt video(s)…")
+        }
         var repairedVideos = 0
         if !corruptVideos.isEmpty {
             let vinfo = await hub.videoInfo

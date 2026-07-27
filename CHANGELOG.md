@@ -4,6 +4,13 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **OF: fixed the run stalling before it started (no downloads, no completion, empty log).** The
+  new corrupt-video integrity check was running on every on-disk video *inline and one-at-a-time*
+  during the dedup phase — and on a userspace (FSKit) external drive each file read has high latency,
+  so checking hundreds of videos stalled the whole run for minutes before a single download began.
+  The check now runs **concurrently (8 at a time) in the background**, overlapped with discovery and
+  downloading, so the run starts immediately; its result is only awaited at the repair step, with a
+  safety timeout so a wedged read can never hang completion.
 - **Search waits for Return/Search instead of firing on every keystroke.** The folder search now
   runs only when you submit it (Return or the keyboard's Search key); typing no longer churns the
   grid or kicks off a recursive index search per character. Clearing the field exits search
