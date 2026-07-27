@@ -728,6 +728,32 @@ final class Library {
         removeTrashRecords(expired.map(\.id))
     }
 
+    // MARK: - On This Day (Memories)
+
+    /// Viewable media captured on today's month/day in previous years, grouped by year (newest year
+    /// first, items name-sorted within a year). Capture dates come from the cached `captureDates`
+    /// path, so a repeat visit is cheap. Nonisolated: the recursive walk stays off the main actor.
+    nonisolated func onThisDay(under folder: URL) async -> [(year: Int, items: [Entry])] {
+        let cal = Calendar.current
+        let now = Date()
+        let month = cal.component(.month, from: now)
+        let day = cal.component(.day, from: now)
+        let thisYear = cal.component(.year, from: now)
+        let media = await Self.enumerateAll(folder).filter { $0.isViewable && ($0.kind == .image || $0.kind == .video) }
+        guard !media.isEmpty else { return [] }
+        let dates = await captureDates(for: media)
+        var byYear: [Int: [Entry]] = [:]
+        for e in media {
+            guard let d = dates[e.url] else { continue }
+            let c = cal.dateComponents([.year, .month, .day], from: d)
+            guard c.month == month, c.day == day, let y = c.year, y < thisYear else { continue }
+            byYear[y, default: []].append(e)
+        }
+        return byYear.keys.sorted(by: >).map { y in
+            (y, byYear[y]!.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending })
+        }
+    }
+
     // MARK: - Taylor Swift custom labels
 
     /// The fixed set of labels offered inside the "Taylor Swift" folder.

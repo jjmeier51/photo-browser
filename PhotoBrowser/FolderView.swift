@@ -103,6 +103,7 @@ struct FolderView: View {
     @State private var phoneProgress = 0.0
     @State private var showPeople = false
     @State private var showPlaces = false
+    @State private var showMemories = false
     @State private var showTrash = false
     @State private var showSettings = false
     @State private var fixProgress: Double = 0
@@ -931,6 +932,7 @@ struct FolderView: View {
             .sheet(item: $aiEditEntry) { e in AIEditView(entry: e) }
             .fullScreenCover(isPresented: $showPeople) { PeopleView(folder: url) }
             .fullScreenCover(isPresented: $showPlaces) { PlacesMapView(root: url) }
+            .fullScreenCover(isPresented: $showMemories) { MemoriesView(root: url) }
             .sheet(isPresented: $showTrash, onDismiss: { Task { await reload() } }) { RecentlyDeletedView() }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(isPresented: $showEject) { EjectDriveView(root: library.rootURL) }
@@ -1965,6 +1967,7 @@ struct FolderView: View {
                     Section("Library") {
                         Button { showPeople = true } label: { Label("People", systemImage: "person.2.crop.square.stack") }
                         Button { showPlaces = true } label: { Label("Places", systemImage: "map") }
+                        Button { showMemories = true } label: { Label("On This Day", systemImage: "calendar") }
                         Button { showTrash = true } label: {
                             Label(library.trash.isEmpty ? "Recently Deleted" : "Recently Deleted (\(library.trash.count))",
                                   systemImage: "trash")
