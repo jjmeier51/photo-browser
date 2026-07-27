@@ -10,6 +10,8 @@ import AVFoundation
 struct ViewerView: View {
     @State private var items: [Entry]      // mutable so Delete/Move can drop the current item and advance
     let slideshow: Bool
+    let zoomSourceID: URL?                  // shared-element zoom transition source (iOS 18+)
+    let zoomNamespace: Namespace.ID?
     @State private var index: Int
     @State private var isZoomed = false
     @State private var chromeHidden = false      // single-tap hides all overlays
@@ -36,9 +38,12 @@ struct ViewerView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
 
-    init(items: [Entry], startIndex: Int, slideshow: Bool = false) {
+    init(items: [Entry], startIndex: Int, slideshow: Bool = false,
+         zoomSourceID: URL? = nil, zoomNamespace: Namespace.ID? = nil) {
         _items = State(initialValue: items)
         self.slideshow = slideshow
+        self.zoomSourceID = zoomSourceID
+        self.zoomNamespace = zoomNamespace
         _index = State(initialValue: startIndex)
         _chromeHidden = State(initialValue: slideshow)
     }
@@ -71,6 +76,7 @@ struct ViewerView: View {
             if let actionNote { toast(actionNote) }
         }
         .statusBarHidden(true)
+        .zoomDestination(zoomSourceID, zoomNamespace)   // expand from the tapped grid cell (iOS 18+)
         .onChange(of: index) { isZoomed = false; if !slideshow { chromeHidden = false } }
         .sheet(isPresented: $showInfo) {
             if let current { InfoPanel(entry: current) }

@@ -31,6 +31,7 @@ struct FolderView: View {
     @State private var selection = Set<URL>()
 
     @State private var viewerPresentation: ViewerPresentation?
+    @Namespace private var zoomNS      // shared-element zoom transition (grid cell → viewer), iOS 18+
 
     @State private var previewItem: PreviewItem?
     @State private var pendingArchive: Entry?      // a tapped .zip → offer Extract / Quick Look
@@ -521,6 +522,9 @@ struct FolderView: View {
                     await library.ensureRandomCover(for: entry.url)
                 }
             }
+            // Source of the zoom transition into the viewer (matched by the item's URL). Harmless on
+            // folder cells (they navigate, not present the viewer) and a no-op before iOS 18.
+            .zoomSource(entry.url, zoomNS)
     }
 
     /// Paints a contiguous selection range as the finger moves — like Photos: every
@@ -833,7 +837,11 @@ struct FolderView: View {
                     DispatchQueue.main.async { library.path = [target] }
                 }
             }) { p in
-                ViewerView(items: p.items, startIndex: p.startIndex, slideshow: p.slideshow)
+                // Zoom out of the tapped cell into the viewer (iOS 18+); skipped for the shuffled
+                // slideshow, which has no originating cell.
+                let sourceID = (!p.slideshow && p.items.indices.contains(p.startIndex)) ? p.items[p.startIndex].url : nil
+                ViewerView(items: p.items, startIndex: p.startIndex, slideshow: p.slideshow,
+                           zoomSourceID: sourceID, zoomNamespace: p.slideshow ? nil : zoomNS)
             }
             .sheet(isPresented: $showExporter) {
                 FilesExporter(urls: exportURLs) { showExporter = false }
