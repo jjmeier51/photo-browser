@@ -462,7 +462,7 @@ enum OFService {
     /// videos aren't silently dropped; `mediaURL` (which returns nil for anything
     /// without a real file) is the real gate.
     nonisolated private static func emitMedia(from container: [String: Any], source: String, hub: Hub) async {
-        let caption = stripHTML(container["text"] as? String ?? "")
+        let caption = captionText(container)
         let date = postDate(container)
         let postID = idString(container["id"]) ?? ""
         guard let media = container["media"] as? [[String: Any]] else { return }
@@ -1004,6 +1004,20 @@ enum OFService {
     nonisolated private static let isoPlain = ISO8601DateFormatter()
     nonisolated private static func parseISO(_ s: String) -> Date? {
         isoFractional.date(from: s) ?? isoPlain.date(from: s)
+    }
+
+    /// The caption for a post/message: OF puts it in the post text, exposed as `rawText`
+    /// (plain) and/or `text` (HTML). Prefer whichever is non-empty, cleaned to plain text —
+    /// so a post that populates only one of them (or wraps the caption in HTML) still yields
+    /// a caption. Empty when the post genuinely has no text (a media-only post).
+    nonisolated private static func captionText(_ c: [String: Any]) -> String {
+        for key in ["rawText", "text", "caption", "description"] {
+            if let raw = c[key] as? String {
+                let cleaned = stripHTML(raw)
+                if !cleaned.isEmpty { return cleaned }
+            }
+        }
+        return ""
     }
 
     /// Strips HTML tags/entities from post text down to plain caption text (capped).

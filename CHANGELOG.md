@@ -4,6 +4,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **OF downloads keep the post caption more reliably.** Each downloaded photo/video already takes
+  its post/message text as the item's caption (shown in the info panel, searchable; photos also embed
+  it as IPTC). The grab now reads the caption from `rawText` as well as `text` (and a couple of
+  fallbacks), so a post that populates only the plain-text field — or wraps its caption in HTML —
+  still gets a caption instead of coming through blank.
 - **Slo-Mo playback in the video viewer.** Long-press the center of a video to open "Play in Slo Mo"
   and choose **4× slower** or **8× slower**; playback continues at that speed, with pause/resume,
   looping, scrubbing and frame-stepping all working as usual and a "SLO MO 4×/8×" badge shown while
