@@ -4,6 +4,13 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **OF: auto-repair already-downloaded videos that won't play.** The truncated-download fix only
+  protects *new* downloads; videos saved broken by an earlier run stay broken because dedup skips
+  them. A run now does a cheap integrity check on every on-disk `OF_*` video (walks the MP4 atoms to
+  confirm nothing is truncated and a `moov` is present — no decoding), and re-fetches the corrupt
+  ones using their fresh source URL, replacing the file only when the new copy verifies intact (a
+  failed repair leaves the old file so it retries next run). So running "Get New OF Posts" now heals
+  the unplayable videos across the library.
 - **OF: reject truncated downloads, and backfill captions onto older files.** Two fixes:
   - Some downloaded videos wouldn't play because a CDN under load closed the `200` stream early and
     the short body was saved as a partial file. Downloads now check the received size against the

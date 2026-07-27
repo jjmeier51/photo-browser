@@ -246,6 +246,11 @@ enum OFService {
             // can backfill captions onto files pulled before the caption feature existed (dedup
             // skips those, so they'd otherwise never get one).
             for item in items where !item.caption.isEmpty { captionsByID[item.id] = item.caption }
+            // Remember each (non-DRM) video's fresh source URL + date, so an already-downloaded but
+            // corrupt one can be re-fetched even though dedup won't route it through the pipeline.
+            for item in items where item.isVideo && item.drm == nil {
+                videoByID[item.id] = VideoRef(url: item.url, date: item.date)
+            }
             var yielded = false
             for item in items where ids.insert(item.id).inserted && !already.contains(item.id) {
                 foundCount += 1
@@ -257,6 +262,10 @@ enum OFService {
         /// Caption for every scanned media id (new *and* already-downloaded), for backfill.
         private var captionsByID: [String: String] = [:]
         var allCaptions: [String: String] { captionsByID }
+        /// Fresh source URL + date for every scanned video id, for re-fetching a corrupt on-disk one.
+        struct VideoRef: Sendable { let url: String; let date: Date? }
+        private var videoByID: [String: VideoRef] = [:]
+        var videoInfo: [String: VideoRef] { videoByID }
         func scanned(posts: Int) { postsScanned += posts }
         func scanned(messages: Int) { messagesScanned += messages }
         func noteDRMError(_ s: String) { if drmError == nil { drmError = s } }
@@ -327,13 +336,23 @@ enum OFService {
         // persisted list can never cause the whole set to re-download as duplicates — the
         // files already present are recognised regardless.
         var already = alreadyDownloaded
+        var corruptVideos: [(id: String, path: URL)] = []
         if let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) {
             var onDisk = 0
             for n in names where n.hasPrefix("OF_") {
-                let id = n.dropFirst(3).prefix { $0.isNumber }   // OF_<id>.<ext> / "OF_<id> 2.ext"
-                if !id.isEmpty, already.insert(String(id)).inserted { onDisk += 1 }
+                let id = String(n.dropFirst(3).prefix { $0.isNumber })   // OF_<id>.<ext> / "OF_<id> 2.ext"
+                guard !id.isEmpty else { continue }
+                if already.insert(id).inserted { onDisk += 1 }
+                // Flag a truncated/corrupt video (saved before the Content-Length check existed, so
+                // it "won't play") for repair. It stays "known" so the main pipeline skips it; we
+                // re-fetch just these afterwards, replacing the file only if the fresh copy is
+                // intact — a failed repair leaves the old file so it's retried next run. Cheap check.
+                if isVideoFile(n), !isVideoIntact(folder.appendingPathComponent(n)) {
+                    corruptVideos.append((id, folder.appendingPathComponent(n)))
+                }
             }
-            await log.log("dedup: \(alreadyDownloaded.count) persisted + \(onDisk) more from files on disk = \(already.count) known")
+            await log.log("dedup: \(alreadyDownloaded.count) persisted + \(onDisk) on disk = \(already.count) known"
+                          + (corruptVideos.isEmpty ? "" : "; \(corruptVideos.count) corrupt video(s) to repair"))
         }
 
         // Discovery and download overlap: collectors walk posts (and messages)
@@ -381,6 +400,24 @@ enum OFService {
         }
         await discovery.value
 
+        // Repair corrupt on-disk videos: re-fetch just the flagged ones (URLs are still fresh from
+        // discovery) and replace the file only when the new copy verifies intact. A failed repair
+        // leaves the old file untouched, so it's retried on the next run rather than lost.
+        var repairedVideos = 0
+        if !corruptVideos.isEmpty {
+            let vinfo = await hub.videoInfo
+            for (id, path) in corruptVideos {
+                guard let info = vinfo[id] else { continue }        // post gone from the timeline → can't refetch
+                if let reason = await downloadFile(info.url, to: path, creds: creds) {
+                    await log.log("• repair video \(id): failed (\(reason))")
+                } else {
+                    if let d = info.date { setFileDate(path, d) }
+                    repairedVideos += 1
+                    await log.log("✓ repair video \(id): re-downloaded \(path.lastPathComponent)")
+                }
+            }
+        }
+
         // Backfill captions onto files already on disk (older downloads predate the caption
         // feature, and dedup skips them so a fresh download never revisits them). Map each scanned
         // media id to its `OF_<id>.*` file and set the caption where one isn't already recorded.
@@ -413,6 +450,9 @@ enum OFService {
             // Lead with the DRM breakdown so daily-limit skips read as expected, not failures.
             let drm = drmNote.map { $0 + ". " } ?? ""
             result.note = "\(prefix)\(drm)[\(diag)]"
+        }
+        if repairedVideos > 0 {
+            result.note = "Repaired \(repairedVideos) unplayable video\(repairedVideos == 1 ? "" : "s"). " + (result.note ?? "")
         }
         await log.finish("photos \(result.photos), videos \(result.videos), failed \(result.failed)"
                          + (drmNote.map { " — \($0)" } ?? "") + " — \(diag)")
@@ -808,6 +848,42 @@ enum OFService {
             return ext == "jpeg" ? "jpg" : ext
         }
         return isVideo ? "mp4" : "jpg"
+    }
+
+    nonisolated private static func isVideoFile(_ name: String) -> Bool {
+        let l = name.lowercased()
+        return l.hasSuffix(".mp4") || l.hasSuffix(".mov") || l.hasSuffix(".m4v")
+    }
+
+    /// Cheap integrity check for an mp4/mov: walk its top-level atoms and confirm none claims more
+    /// bytes than the file actually has, and that a `moov` (movie header) atom is present. A
+    /// truncated download — the CDN closing a 200 stream early, saved before the Content-Length
+    /// check existed — fails one of these (its final atom overruns EOF, or the `moov` is missing).
+    /// No decode, just a few seeks, so it's cheap enough to run over every on-disk video per run.
+    nonisolated private static func isVideoIntact(_ url: URL) -> Bool {
+        guard let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, fileSize > 16,
+              let fh = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? fh.close() }
+        let total = UInt64(fileSize)
+        var offset: UInt64 = 0
+        var sawMoov = false
+        while offset + 8 <= total {
+            guard (try? fh.seek(toOffset: offset)) != nil,
+                  let h = try? fh.read(upToCount: 8), h.count == 8 else { return false }
+            let b = [UInt8](h)
+            var size = UInt64(b[0]) << 24 | UInt64(b[1]) << 16 | UInt64(b[2]) << 8 | UInt64(b[3])
+            let type = String(bytes: b[4..<8], encoding: .ascii) ?? ""
+            if size == 1 {                                   // 64-bit size follows the 8-byte header
+                guard let e = try? fh.read(upToCount: 8), e.count == 8 else { return false }
+                size = [UInt8](e).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+            } else if size == 0 {
+                size = total - offset                        // atom runs to end of file
+            }
+            if size < 8 || offset + size > total { return false }   // malformed / truncated
+            if type == "moov" { sawMoov = true }
+            offset += size
+        }
+        return sawMoov
     }
 
     // MARK: - Metadata writing (mirrors FacebookService)
