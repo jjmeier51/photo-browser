@@ -41,17 +41,28 @@ enum OFAuth {
         UserDefaults.standard.set(value, forKey: xbcKey)
     }
 
-    /// Logged in enough to hit the API: session cookies present *and* an x-bc captured.
+    /// The logged-in user's numeric id from the `auth_id` cookie — or nil when not signed in.
+    /// **OF sets `auth_id=0` for anonymous visitors** (alongside an anonymous `sess` cookie and a
+    /// `bcTokenSha` device token that exists from the first page load), so a non-empty `auth_id`
+    /// alone is NOT proof of login — it has to be a real, non-zero user id. Missing this check made
+    /// the app think it was logged in before the user actually signed in, then sign every API
+    /// request as guest `user-id: 0`, which OF rejects.
+    private static func realUserID(_ cookies: [HTTPCookie]) -> String? {
+        guard let v = cookies.first(where: { $0.name == "auth_id" })?.value,
+              !v.isEmpty, (Int(v) ?? 0) > 0 else { return nil }
+        return v
+    }
+
+    /// Logged in enough to hit the API: a real (non-zero) `auth_id`, a session cookie, and an x-bc.
     static func isLoggedIn() async -> Bool {
         guard !storedXBC.isEmpty else { return false }
         let cs = await cookies()
-        return cs.contains { $0.name == "auth_id" && !$0.value.isEmpty }
-            && cs.contains { $0.name == "sess" && !$0.value.isEmpty }
+        return realUserID(cs) != nil && cs.contains { $0.name == "sess" && !$0.value.isEmpty }
     }
 
     static func credentials() async -> OFService.Credentials? {
         let cs = await cookies()
-        guard let authID = cs.first(where: { $0.name == "auth_id" })?.value, !authID.isEmpty,
+        guard let authID = realUserID(cs),
               cs.contains(where: { $0.name == "sess" && !$0.value.isEmpty }) else { return nil }
         let xbc = storedXBC
         guard !xbc.isEmpty else { return nil }

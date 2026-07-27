@@ -4,6 +4,13 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **OF login is no longer detected before you actually sign in.** OF sets `auth_id=0` (a guest
+  session) plus a device token from the very first page load, so the app treated you as "logged in"
+  immediately, grabbed the anonymous session, and then signed every API call as guest `user-id: 0`
+  — which OF rejects. Login now requires a **real, non-zero `auth_id`**. And because OF signs you in
+  via an in-page transition that fires no navigation event, the login sheet now **polls** — it keeps
+  re-checking the real login state (and re-capturing the x-bc token) so "Done" enables right after
+  you finish signing in.
 - **OF downloads keep the post caption more reliably.** Each downloaded photo/video already takes
   its post/message text as the item's caption (shown in the info panel, searchable; photos also embed
   it as IPTC). The grab now reads the caption from `rawText` as well as `text` (and a couple of

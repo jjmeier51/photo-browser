@@ -205,21 +205,41 @@ private struct OFWebView: UIViewRepresentable {
         let web = WKWebView(frame: .zero, configuration: cfg)
         web.navigationDelegate = context.coordinator
         web.customUserAgent = OFService.userAgent   // match the UA the API uses
+        context.coordinator.webView = web
+        context.coordinator.startPolling()
         if let url = URL(string: "https://onlyfans.com/") { web.load(URLRequest(url: url)) }
         return web
     }
 
     func updateUIView(_ web: WKWebView, context: Context) {}
     func makeCoordinator() -> Coordinator { Coordinator(loggedIn: $loggedIn) }
+    static func dismantleUIView(_ web: WKWebView, coordinator: Coordinator) { coordinator.stopPolling() }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         @Binding var loggedIn: Bool
+        weak var webView: WKWebView?
+        private var timer: Timer?
         init(loggedIn: Binding<Bool>) { _loggedIn = loggedIn }
 
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            // Grab the x-bc device token from localStorage while we're on the page
-            // (OF keeps it under `bcTokenSha`; fall back to any hex-looking
-            // token in case the key changes), then re-check the login state.
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { captureAndCheck() }
+
+        /// OF signs you in via an in-page (SPA) transition that fires **no** `didFinish`, and it
+        /// only writes the real `auth_id`/`sess` cookies (and may rotate the x-bc device token)
+        /// once that finishes. So poll: keep re-grabbing the token and re-checking the *real*
+        /// login state until the user is actually signed in, instead of trusting the one snapshot
+        /// taken when the login page first loaded (which is still the anonymous guest session).
+        func startPolling() {
+            timer?.invalidate()
+            timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+                self?.captureAndCheck()
+            }
+        }
+        func stopPolling() { timer?.invalidate(); timer = nil }
+
+        private func captureAndCheck() {
+            guard let webView else { return }
+            // Grab the x-bc device token from localStorage (OF keeps it under `bcTokenSha`; fall
+            // back to any hex-looking token in case the key changes).
             let js = """
             (function(){try{var t=localStorage.getItem('bcTokenSha')||localStorage.getItem('bcTokenCache');if(t)return t;\
             for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);if(/bc/i.test(k)){\
