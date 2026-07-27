@@ -22,6 +22,14 @@ struct MemorySection: Identifiable, Sendable {
     let items: [Entry]
 }
 
+/// A saved photo-editor "look" preset: a name plus a recipe. Only the recipe's look fields are used
+/// when the preset is applied (see `EditRecipe.applyingLook`).
+struct EditPreset: Codable, Sendable, Identifiable {
+    var id: String
+    var name: String
+    var look: EditRecipe
+}
+
 /// App-wide state: the chosen root folder (with persistent access), the
 /// navigation path, and the current sort. Uses the Observation framework so
 /// view updates are reliable under Xcode's default-MainActor isolation.
@@ -760,6 +768,29 @@ final class Library {
         return byYear.keys.sorted(by: >).map { y in
             MemorySection(year: y, items: byYear[y]!.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending })
         }
+    }
+
+    // MARK: - Photo-editor look clipboard + presets
+
+    /// The last "Copy Edits" look, applied by "Paste Edits" (editor) and "Paste Edits to Selection".
+    var copiedLook: EditRecipe? = Library.loadBulk("copiedLook", as: EditRecipe.self)
+    /// User-saved editor look presets (name-sorted).
+    var editPresets: [EditPreset] = Library.loadBulk("editPresets", as: [EditPreset].self) ?? []
+
+    func copyLook(_ recipe: EditRecipe) { copiedLook = recipe; Self.saveBulk(recipe, "copiedLook") }
+
+    func addEditPreset(name: String, from recipe: EditRecipe) {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        editPresets.removeAll { $0.name.caseInsensitiveCompare(clean) == .orderedSame }   // replace same-named
+        editPresets.append(EditPreset(id: UUID().uuidString, name: clean, look: recipe))
+        editPresets.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        Self.saveBulk(editPresets, "editPresets")
+    }
+
+    func deleteEditPreset(_ id: String) {
+        editPresets.removeAll { $0.id == id }
+        Self.saveBulk(editPresets, "editPresets")
     }
 
     // MARK: - Taylor Swift custom labels

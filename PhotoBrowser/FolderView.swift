@@ -2189,6 +2189,21 @@ struct FolderView: View {
                     Button { bulkRotate(1) } label: { Label("Rotate Right", systemImage: "rotate.right") }
                 } label: { Label("Rotate", systemImage: "rotate.right") }
                 Button { startRotatePhotos() } label: { Label("Rotate… (preview)", systemImage: "crop.rotate") }
+                if library.copiedLook != nil || !library.editPresets.isEmpty {
+                    Menu {
+                        Button {
+                            if let look = library.copiedLook { bulkApplyLook(look, name: "Copied Edits") }
+                        } label: { Label("Paste Edits to Selection", systemImage: "doc.on.clipboard") }
+                            .disabled(library.copiedLook == nil)
+                        if !library.editPresets.isEmpty {
+                            Menu("Apply Preset") {
+                                ForEach(library.editPresets) { preset in
+                                    Button(preset.name) { bulkApplyLook(preset.look, name: preset.name) }
+                                }
+                            }
+                        }
+                    } label: { Label("Edits", systemImage: "wand.and.stars.inverse") }
+                }
                 Menu {
                     Button { bulkUpscale(to: 1080, label: "1080p") } label: { Label("1080p", systemImage: "arrow.up.right.video") }
                     Button { bulkUpscale(to: 2160, label: "4K") } label: { Label("4K", systemImage: "arrow.up.right.video") }
@@ -2276,6 +2291,45 @@ struct FolderView: View {
             resultMessage = failed == 0
                 ? "Rotated \(n) item\(n == 1 ? "" : "s")."
                 : "Rotated \(n - failed) of \(n); \(failed) couldn’t be saved."
+            library.contentDidChange(under: url)
+            await reload()
+        }
+    }
+
+    /// Applies a saved/copied editor look to the selected photos in place (images only — a look is a
+    /// tone/color/filter edit). Each photo re-renders through the same pipeline the editor uses
+    /// (`PhotoEditorIO.save`), preserving metadata/HDR, and the original is overwritten. A container
+    /// change (e.g. gain-map JPEG → HDR HEIC) lands as a sibling; the original is removed and its
+    /// labels re-keyed. Runs off-main under a background window.
+    private func bulkApplyLook(_ look: EditRecipe, name: String) {
+        let targets = selectedEntries().filter { $0.kind == .image }
+        guard !targets.isEmpty else { resultMessage = "Select one or more photos."; return }
+        selecting = false; selection.removeAll()
+        editLabel = "Applying \(name)…"; editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Apply Edits")
+        Task {
+            let n = targets.count
+            var failed = 0
+            for (i, e) in targets.enumerated() {
+                let recipe = EditRecipe().applyingLook(of: look)
+                let src = e.url
+                let format = PhotoEditorIO.format(forSource: src)
+                let dest = PhotoEditorIO.overwriteDestination(for: src, format: format)
+                let ok = await Task.detached {
+                    PhotoEditorIO.save(recipe: recipe, sourceURL: src, to: dest, format: format)
+                }.value
+                if ok {
+                    if dest != src {
+                        try? FileManager.default.removeItem(at: src)   // container changed → sibling replaces it
+                        library.itemMoved(from: src, to: dest)
+                    }
+                } else { failed += 1 }
+                editProgress = Double(i + 1) / Double(n)
+            }
+            editProcessing = false; bg.end()
+            resultMessage = failed == 0
+                ? "Applied \(name) to \(n) photo\(n == 1 ? "" : "s")."
+                : "Applied to \(n - failed) of \(n); \(failed) couldn’t be saved."
             library.contentDidChange(under: url)
             await reload()
         }

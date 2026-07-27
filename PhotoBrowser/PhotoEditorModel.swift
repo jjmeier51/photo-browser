@@ -77,6 +77,28 @@ struct EditRecipe: Codable, Equatable {
         rotationQuarters != 0 || flipH || flipV || straighten != 0 ||
         perspectiveH != 0 || perspectiveV != 0 || cropRect != nil
     }
+
+    /// Returns a copy of `self` with the portable **look** fields taken from `look` — tone, color,
+    /// detail, effects, the preset filter, and skin tone. Geometry (crop/rotate/straighten) and
+    /// position-specific edits (reshape, brushes, stickers, cutout, body/makeup) are deliberately
+    /// NOT transferred: they don't map meaningfully onto a different photo. Used by copy/paste-edits,
+    /// saved presets, and batch apply.
+    func applyingLook(of look: EditRecipe) -> EditRecipe {
+        var r = self
+        r.exposure = look.exposure; r.brightness = look.brightness; r.contrast = look.contrast
+        r.highlights = look.highlights; r.shadows = look.shadows
+        r.saturation = look.saturation; r.vibrance = look.vibrance
+        r.temperature = look.temperature; r.tint = look.tint
+        r.sharpen = look.sharpen; r.structure = look.structure
+        r.vignette = look.vignette; r.grain = look.grain; r.fade = look.fade
+        r.filterID = look.filterID; r.filterIntensity = look.filterIntensity
+        r.filterBackgroundOnly = look.filterBackgroundOnly
+        r.skinTone = look.skinTone
+        return r
+    }
+
+    /// True when this recipe carries a non-trivial portable look (worth copying / saving as a preset).
+    var hasLook: Bool { EditRecipe().applyingLook(of: self) != EditRecipe() }
 }
 
 /// A serializable displacement mesh for manual reshape/liquify (`FR-RESH-01`). A regular `cols`×`rows`

@@ -56,6 +56,8 @@ struct PhotoEditorView: View {
     @State private var originalPreview: UIImage?    // unedited proxy, for the hold-to-compare overlay
     @State private var showOriginal = false
     @State private var showSaveOptions = false
+    @State private var showSavePreset = false
+    @State private var presetNameDraft = ""
     @State private var originalThumb: UIImage?
     @State private var filterThumbs: [String: UIImage] = [:]
     @State private var loadFailed = false
@@ -137,6 +139,13 @@ struct PhotoEditorView: View {
         } message: {
             Text("Overwrite replaces the original (labels and captions stay attached). Save as New keeps it and adds an edited copy.")
         }
+        .alert("Save Preset", isPresented: $showSavePreset) {
+            TextField("Preset name", text: $presetNameDraft)
+            Button("Save") { library.addEditPreset(name: presetNameDraft, from: recipe) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Saves the current look (tone, color, filter) so you can apply it to other photos.")
+        }
         .photosPicker(isPresented: $showStickerPicker, selection: $stickerPickerItem, matching: .images)
         .fileImporter(isPresented: $showStickerFiles, allowedContentTypes: [.image],
                       allowsMultipleSelection: true) { result in addStickerFromFiles(result) }
@@ -195,6 +204,7 @@ struct PhotoEditorView: View {
                 .disabled(redoStack.isEmpty)
             Button { reset() } label: { Image(systemName: "arrow.counterclockwise") }
                 .disabled(!hasEdits)
+            presetsMenu
             Spacer()
             Button { showSaveOptions = true } label: { Text("Save").fontWeight(.semibold) }
                 .disabled(!hasEdits)
@@ -203,6 +213,51 @@ struct PhotoEditorView: View {
         .tint(.white)
         .padding(.horizontal)
         .padding(.vertical, 12)
+    }
+
+    /// Copy/paste the current look and manage saved presets. The "look" is the tone/color/filter/
+    /// effects portion of the recipe (`EditRecipe.applyingLook`) — geometry and position-specific
+    /// edits (crop, reshape, brushes, stickers, body/makeup) are intentionally not carried across.
+    private var presetsMenu: some View {
+        Menu {
+            Button {
+                guard let look = library.copiedLook else { return }
+                snapshot()
+                recipe = recipe.applyingLook(of: look)
+                scheduleRender()
+            } label: { Label("Paste Edits", systemImage: "doc.on.clipboard") }
+                .disabled(library.copiedLook == nil)
+
+            Button { library.copyLook(recipe) } label: { Label("Copy Edits", systemImage: "doc.on.doc") }
+                .disabled(!recipe.hasLook)
+
+            Divider()
+
+            Button { presetNameDraft = ""; showSavePreset = true } label: {
+                Label("Save as Preset…", systemImage: "plus.rectangle.on.folder")
+            }
+            .disabled(!recipe.hasLook)
+
+            if !library.editPresets.isEmpty {
+                Menu("Apply Preset") {
+                    ForEach(library.editPresets) { preset in
+                        Button(preset.name) {
+                            snapshot()
+                            recipe = recipe.applyingLook(of: preset.look)
+                            scheduleRender()
+                        }
+                    }
+                }
+                Menu("Delete Preset") {
+                    ForEach(library.editPresets) { preset in
+                        Button(role: .destructive) { library.deleteEditPreset(preset.id) } label: { Text(preset.name) }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "wand.and.stars.inverse")
+        }
+        .tint(.white)
     }
 
     /// Press and hold to peek at the unedited original (disabled when there are no edits to compare).
