@@ -14,6 +14,14 @@ struct TrashEntry: Codable, Sendable, Identifiable {
     var name: String
 }
 
+/// One year's worth of "On This Day" media (`Library.onThisDay`). A named struct rather than a tuple
+/// so it's `Identifiable` for `ForEach` (Swift can't key-path a tuple element).
+struct MemorySection: Identifiable, Sendable {
+    var id: Int { year }
+    let year: Int
+    let items: [Entry]
+}
+
 /// App-wide state: the chosen root folder (with persistent access), the
 /// navigation path, and the current sort. Uses the Observation framework so
 /// view updates are reliable under Xcode's default-MainActor isolation.
@@ -733,7 +741,7 @@ final class Library {
     /// Viewable media captured on today's month/day in previous years, grouped by year (newest year
     /// first, items name-sorted within a year). Capture dates come from the cached `captureDates`
     /// path, so a repeat visit is cheap. Nonisolated: the recursive walk stays off the main actor.
-    nonisolated func onThisDay(under folder: URL) async -> [(year: Int, items: [Entry])] {
+    nonisolated func onThisDay(under folder: URL) async -> [MemorySection] {
         let cal = Calendar.current
         let now = Date()
         let month = cal.component(.month, from: now)
@@ -750,7 +758,7 @@ final class Library {
             byYear[y, default: []].append(e)
         }
         return byYear.keys.sorted(by: >).map { y in
-            (y, byYear[y]!.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending })
+            MemorySection(year: y, items: byYear[y]!.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending })
         }
     }
 

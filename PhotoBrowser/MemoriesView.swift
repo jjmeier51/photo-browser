@@ -10,7 +10,7 @@ struct MemoriesView: View {
     @Environment(\.dismiss) private var dismiss
     let root: URL
 
-    @State private var sections: [(year: Int, items: [Entry])] = []
+    @State private var sections: [MemorySection] = []
     @State private var loading = true
     @State private var viewer: ViewerPresentation?
 
@@ -27,7 +27,7 @@ struct MemoriesView: View {
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 24) {
-                            ForEach(sections, id: \.year) { section in
+                            ForEach(sections) { section in
                                 sectionView(section)
                             }
                         }
@@ -48,7 +48,7 @@ struct MemoriesView: View {
         }
     }
 
-    private func sectionView(_ section: (year: Int, items: [Entry])) -> some View {
+    private func sectionView(_ section: MemorySection) -> some View {
         let ago = thisYear - section.year
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
