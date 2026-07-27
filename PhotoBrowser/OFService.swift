@@ -242,6 +242,10 @@ enum OFService {
         func ingest(_ items: [Item], tally t: Tally) {
             mediaSeen += t.seen; skipLocked += t.locked; skipAudio += t.audio
             skipDRM += t.drm; skipHLS += t.hls; skipOther += t.other
+            // Remember every item's caption by id — including already-downloaded ones — so the run
+            // can backfill captions onto files pulled before the caption feature existed (dedup
+            // skips those, so they'd otherwise never get one).
+            for item in items where !item.caption.isEmpty { captionsByID[item.id] = item.caption }
             var yielded = false
             for item in items where ids.insert(item.id).inserted && !already.contains(item.id) {
                 foundCount += 1
@@ -250,6 +254,9 @@ enum OFService {
             }
             if yielded, foundCount <= 5 || foundCount % 10 == 0 { report() }
         }
+        /// Caption for every scanned media id (new *and* already-downloaded), for backfill.
+        private var captionsByID: [String: String] = [:]
+        var allCaptions: [String: String] { captionsByID }
         func scanned(posts: Int) { postsScanned += posts }
         func scanned(messages: Int) { messagesScanned += messages }
         func noteDRMError(_ s: String) { if drmError == nil { drmError = s } }
@@ -373,6 +380,21 @@ enum OFService {
             while let r = await group.next() { apply(r); await hub.savedOne() }
         }
         await discovery.value
+
+        // Backfill captions onto files already on disk (older downloads predate the caption
+        // feature, and dedup skips them so a fresh download never revisits them). Map each scanned
+        // media id to its `OF_<id>.*` file and set the caption where one isn't already recorded.
+        let allCaps = await hub.allCaptions
+        if !allCaps.isEmpty, let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) {
+            var idToFile: [String: String] = [:]
+            for n in names where n.hasPrefix("OF_") {
+                let id = String(n.dropFirst(3).prefix { $0.isNumber })
+                if !id.isEmpty, idToFile[id] == nil { idToFile[id] = folder.appendingPathComponent(n).path }
+            }
+            for (id, cap) in allCaps where result.captions[idToFile[id] ?? ""] == nil {
+                if let path = idToFile[id] { result.captions[path] = cap }
+            }
+        }
 
         let diag = await hub.diagnostics
         let drmNote = await hub.drmSummary
@@ -981,6 +1003,16 @@ enum OFService {
                 try? FileManager.default.removeItem(at: tmp)
                 if code == 429 || code == 403 || code >= 500 { lastReason = "HTTP \(code)"; continue }   // throttle/transient → back off
                 return "HTTP \(code)"
+            }
+            // Reject a truncated download before committing it. A CDN under load can close a 200
+            // stream early; the short body would otherwise be saved as a partial, unplayable file
+            // (the "downloaded but won't play" videos). A fresh request usually completes.
+            let expected = resp.expectedContentLength
+            let got = Int64((try? tmp.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            if expected > 0, got < expected {
+                try? FileManager.default.removeItem(at: tmp)
+                lastReason = "truncated \(got)/\(expected)"
+                continue
             }
             do {
                 try await DriveWriter.shared.commit(tmp, to: dest)          // moves tmp onto the drive

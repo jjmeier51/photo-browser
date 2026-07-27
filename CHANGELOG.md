@@ -4,6 +4,14 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **OF: reject truncated downloads, and backfill captions onto older files.** Two fixes:
+  - Some downloaded videos wouldn't play because a CDN under load closed the `200` stream early and
+    the short body was saved as a partial file. Downloads now check the received size against the
+    `Content-Length` and, if it's short, discard and retry instead of committing a broken file.
+  - Captions were only applied to freshly-downloaded items, so anything pulled before the caption
+    feature stayed blank (dedup skips it on re-runs). A run now also **backfills** the post caption
+    onto matching `OF_<id>` files already on disk — so running "Get New OF Posts" fills in captions
+    across the existing library, even when there are no new posts.
 - **OF downloads run faster again.** The earlier mass failures were the on-device temp leak filling
   storage, not CDN throttling — so the throttle-avoidance measures were slowing things for no reason.
   Download concurrency goes back up (6 → 10; the 403/429 backoff-retry still absorbs any real
