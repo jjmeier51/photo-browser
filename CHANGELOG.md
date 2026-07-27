@@ -4,6 +4,14 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **Download logs (`<kind>-log.txt`) actually get written now.** They were saved with a raw
+  cross-volume `moveItem` into the external/file-provider drive, which silently fails there (the
+  downloaded files land because they go through `DriveWriter`; the log didn't). The log now writes
+  through the same durable `DriveWriter` path, and it **flushes incrementally** (every ~25 lines and
+  on finish) instead of only once at the end — so a big run that gets killed mid-way (e.g. under
+  low-storage memory pressure) still leaves a partial log to inspect. This is what was hiding the
+  reason OF downloads fail; the per-item failure reason (HTTP status / network / save error) is
+  recorded, so `of-log.txt` now shows exactly why each item didn't download.
 - **OF large pulls stop mostly failing to rate-limiting.** With login fixed, a big creator would
   discover everything but then download only a fraction ("161 photos, 31 videos; 1015 failed") — OF'
   CloudFront CDN lets a burst of parallel downloads through, then blocks the rest with **403/429**.

@@ -1,21 +1,27 @@
 import Foundation
 
 /// Collects timestamped diagnostic lines for one download run and writes them to a
-/// `<kind>-log.txt` file **in the download folder** exactly once, at the end — so a run's
-/// decisions and failures can be inspected afterwards and shared.
+/// `<kind>-log.txt` file **in the download folder**, so a run's decisions and failures can be
+/// inspected afterwards and shared.
 ///
-/// Why buffer-then-write-once: the drive is usually a file-provider/exFAT volume, and
-/// *repeated* coordinated writes to a held-open file (FileHandle/createFile) leave `.sb-…`
-/// staging items that exFAT can corrupt into unopenable "folders". So we accumulate lines
-/// in memory (an actor, so concurrent download tasks don't race), then on `finish` write the
-/// whole thing to the app's temp dir and do a single `removeItem`+`moveItem` onto the drive
-/// — one plain file, no held handle, no atomic-replace staging. Best-effort throughout; a
-/// logging failure never touches the download. Trade-off: a crash mid-run loses the log.
+/// Two hard-won details:
+/// * **Write through `DriveWriter.writeData`, not a raw cross-volume `moveItem`.** The drive is
+///   usually a file-provider / exFAT volume; a plain `FileManager.moveItem` from the app's temp dir
+///   into it silently fails there (no coordination), which is why the log never appeared even though
+///   the downloaded files — which go through `DriveWriter` — landed fine. `writeData` does the same
+///   safe same-volume `.pbtmp_*` write + fsync + rename the file downloads use.
+/// * **Flush incrementally, not once at the end.** A big run under memory/disk pressure can be
+///   jetsam-killed before it finishes, and a buffer-then-write-once log would be lost with it. So we
+///   rewrite the whole (small) log every so often and on `finish`. Rewriting via `writeData` holds
+///   no file handle open on the drive, so it doesn't reintroduce the exFAT directory-churn the
+///   original once-only design was avoiding. Best-effort throughout; a logging failure never touches
+///   the download.
 actor DownloadLog {
     private let folder: URL
     private let kind: String
     private var header = ""
     private var lines: [String] = []
+    private var flushedAt = -1        // `lines.count` at the last successful flush (-1 = never)
 
     private static let time: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f
@@ -29,29 +35,36 @@ actor DownloadLog {
         self.kind = kind
     }
 
-    /// Records the dated session header + opening line. Call once, first.
-    func begin(_ header: String) {
+    /// Records the dated session header + opening line, and writes the file immediately so it
+    /// exists (with just the header) from the start of the run. Call once, first.
+    func begin(_ header: String) async {
         self.header = "===== \(Self.full.string(from: Date())) — \(header) ====="
+        await flushToDisk()
     }
 
-    /// Buffers one timestamped line (in memory; nothing is written until `finish`).
-    func log(_ s: String) {
+    /// Buffers one timestamped line and flushes to disk every so often, so a run that's killed
+    /// mid-way still leaves a partial log.
+    func log(_ s: String) async {
         lines.append("\(Self.time.string(from: Date()))  \(s)")
+        if lines.count - flushedAt >= 25 { await flushToDisk() }
     }
 
-    /// Appends an optional final summary and writes the whole log to the folder in one shot.
-    func finish(_ summary: String? = nil) {
-        if let summary { log("SUMMARY: \(summary)") }
+    /// Appends an optional final summary and writes the whole log to the folder.
+    func finish(_ summary: String? = nil) async {
+        if let summary { lines.append("\(Self.time.string(from: Date()))  SUMMARY: \(summary)") }
+        await flushToDisk()
+    }
+
+    /// Rewrites the accumulated log to `<folder>/<kind>-log.txt` via `DriveWriter` (durable,
+    /// serialized, file-provider-safe). Records the line count so `log` only reflushes on new lines.
+    private func flushToDisk() async {
         let text = ([header] + lines).filter { !$0.isEmpty }.joined(separator: "\n") + "\n"
-        let fm = FileManager.default
-        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
-        // Write to app-local temp (fast, no drive coordination), then a single move onto the
-        // drive — overwriting any prior log via remove+move (not atomic-replace, which stages
-        // a `.sb-` item on the drive).
-        let tmp = fm.temporaryDirectory.appendingPathComponent("\(kind)-\(UUID().uuidString).txt")
-        guard (try? text.write(to: tmp, atomically: true, encoding: .utf8)) != nil else { return }
+        guard let data = text.data(using: .utf8) else { return }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let dest = folder.appendingPathComponent("\(kind)-log.txt")
-        try? fm.removeItem(at: dest)
-        do { try fm.moveItem(at: tmp, to: dest) } catch { try? fm.removeItem(at: tmp) }
+        do {
+            try await DriveWriter.shared.writeData(data, to: dest)
+            flushedAt = lines.count
+        } catch {}
     }
 }
