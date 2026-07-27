@@ -25,6 +25,7 @@ struct FolderView: View {
 
     @State private var entries: [Entry] = []
     @State private var query = ""
+    @State private var submittedQuery = ""   // the query actually searched — only set on Return/Search
 
     @State private var selecting = false
     @State private var selection = Set<URL>()
@@ -195,7 +196,7 @@ struct FolderView: View {
     /// Whether anything on screen actually needs per-file ages right now.
     private var agesNeeded: Bool {
         library.sort.isAge || ageFilter != nil || agesRequested
-            || Int(query.trimmingCharacters(in: .whitespaces)) != nil
+            || Int(submittedQuery.trimmingCharacters(in: .whitespaces)) != nil
     }
 
     /// Real capture year (EXIF/creation) when known, else the file's modified year.
@@ -269,7 +270,9 @@ struct FolderView: View {
     }
 
     private var filteredRaw: [Entry] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        // Driven by the SUBMITTED query (Return/Search), not each keystroke — typing doesn't filter
+        // or churn the grid until the user commits the search.
+        let q = submittedQuery.trimmingCharacters(in: .whitespaces).lowercased()
 
         // Taylor Swift label mode: items carrying every selected label (AND),
         // gathered recursively under this folder.
@@ -768,10 +771,9 @@ struct FolderView: View {
     }
 
     private func runSearch() async {
-        let q = query.trimmingCharacters(in: .whitespaces)
+        let q = submittedQuery.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { searchResults = []; searching = false; return }
         searching = true
-        try? await Task.sleep(nanoseconds: 300_000_000)   // debounce
         if Task.isCancelled { return }
         if !library.index.isEmpty {
             searchResults = library.searchIndex(under: url, query: q, captions: library.captions, sort: library.sort)
@@ -1253,6 +1255,10 @@ struct FolderView: View {
             .navigationTitle(isRoot ? "Home" : url.lastPathComponent)
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $query, prompt: "Search folder + subfolders")
+            // Search only when the user hits Return/Search — not on every keystroke. Clearing the
+            // field (X or deleting the text) exits search immediately.
+            .onSubmit(of: .search) { submittedQuery = query }
+            .onChange(of: query) { if query.trimmingCharacters(in: .whitespaces).isEmpty { submittedQuery = "" } }
             .toolbar { toolbar }
         )
         let loaders = AnyView(chrome
@@ -1261,11 +1267,11 @@ struct FolderView: View {
             // Re-list on return to foreground, so folders created/changed while the app was backgrounded
             // (e.g. a stories run finishing, or a change made in the Files app) show up.
             .onChange(of: scenePhase) { if scenePhase == .active { Task { await reload() } } }
-            .task(id: "search-\(query)-\(library.sort.rawValue)-\(library.index.count)") { await runSearch() }
+            .task(id: "search-\(submittedQuery)-\(library.sort.rawValue)-\(library.index.count)") { await runSearch() }
             // Embedded captions are only needed to match a search; load them lazily so a
             // plain folder open doesn't read every file on the drive.
-            .task(id: "filecaps-\(query.trimmingCharacters(in: .whitespaces).isEmpty)-\(entries.count)") {
-                if query.trimmingCharacters(in: .whitespaces).isEmpty { fileCaptions = [:] }
+            .task(id: "filecaps-\(submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty)-\(entries.count)") {
+                if submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty { fileCaptions = [:] }
                 else if fileCaptions.isEmpty { fileCaptions = await library.fileCaptions(for: entries) }
             }
             .task(id: "labels-\(showFavoritesOnly)-\(showAIOnly)-\(library.labelsVersion)-\(library.sort.rawValue)") {
@@ -1327,7 +1333,7 @@ struct FolderView: View {
     @ViewBuilder private var emptyOverlay: some View {
         if filtered.isEmpty {
             VStack(spacing: 8) {
-                if loadingAges && (ageFilter != nil || Int(query.trimmingCharacters(in: .whitespaces)) != nil) {
+                if loadingAges && (ageFilter != nil || Int(submittedQuery.trimmingCharacters(in: .whitespaces)) != nil) {
                     // Only block on ages for an actual age filter / numeric (age) query — a text search must
                     // not get stuck behind the age computation.
                     ProgressView()
@@ -1335,7 +1341,7 @@ struct FolderView: View {
                 } else if searching {
                     ProgressView()
                     Text("Searching…").foregroundStyle(.secondary)
-                } else if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                } else if !submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty {
                     Image(systemName: "magnifyingglass").font(.largeTitle).foregroundStyle(.secondary)
                     Text("No results").foregroundStyle(.secondary)
                 } else if loaded {
@@ -1432,7 +1438,7 @@ struct FolderView: View {
             }
     }
     private var showBubbles: Bool {
-        query.trimmingCharacters(in: .whitespaces).isEmpty && !labelMode && !tsLabelMode && ageFilter == nil && !igBubbles.isEmpty
+        submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty && !labelMode && !tsLabelMode && ageFilter == nil && !igBubbles.isEmpty
     }
     /// Whether this folder's highlights should wrap into a grid rather than sit in the
     /// horizontal scroller. Only the Home page and the two folders the user asked for — HD/

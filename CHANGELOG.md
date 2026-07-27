@@ -4,6 +4,17 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **Search waits for Return/Search instead of firing on every keystroke.** The folder search now
+  runs only when you submit it (Return or the keyboard's Search key); typing no longer churns the
+  grid or kicks off a recursive index search per character. Clearing the field exits search
+  immediately, as before.
+- **OF: fetch everything the creator actually has.** The library was ending up with far fewer files
+  than the creator's page because dedup trusted the persisted "downloaded" id list — so an item it
+  had recorded but whose file went missing (lost in the storage crunch, or a corrupt file that got
+  cleaned up) was skipped forever. Dedup is now authoritative on **what's actually on disk**: any
+  item without a file present is re-fetched. (The persisted list is only a fallback for when the
+  folder can't be scanned, so a bad scan can't trigger a full re-download.) Running "Get New OF
+  Posts" now backfills the gaps toward the full library.
 - **OF: auto-repair already-downloaded videos that won't play.** The truncated-download fix only
   protects *new* downloads; videos saved broken by an earlier run stay broken because dedup skips
   them. A run now does a cheap integrity check on every on-disk `OF_*` video (walks the MP4 atoms to

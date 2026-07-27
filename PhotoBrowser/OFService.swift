@@ -335,14 +335,19 @@ enum OFService {
         // in the folder. The on-disk scan is a belt-and-suspenders guard so a stale or lost
         // persisted list can never cause the whole set to re-download as duplicates — the
         // files already present are recognised regardless.
-        var already = alreadyDownloaded
+        // Dedup is authoritative on **what's actually on disk**, not the persisted id list. An item
+        // the persisted list calls "downloaded" but whose file is missing (lost in the earlier
+        // storage crunch, or a corrupt file that got cleaned up) must be re-fetched, not skipped —
+        // that's why the library ended up with far fewer files than the creator's page. The
+        // persisted list is used only as a fallback when the folder can't be scanned (drive
+        // detached), so a failed scan can never trigger a full re-download.
+        var already = Set<String>()
         var corruptVideos: [(id: String, path: URL)] = []
         if let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) {
-            var onDisk = 0
             for n in names where n.hasPrefix("OF_") {
                 let id = String(n.dropFirst(3).prefix { $0.isNumber })   // OF_<id>.<ext> / "OF_<id> 2.ext"
                 guard !id.isEmpty else { continue }
-                if already.insert(id).inserted { onDisk += 1 }
+                already.insert(id)
                 // Flag a truncated/corrupt video (saved before the Content-Length check existed, so
                 // it "won't play") for repair. It stays "known" so the main pipeline skips it; we
                 // re-fetch just these afterwards, replacing the file only if the fresh copy is
@@ -351,8 +356,11 @@ enum OFService {
                     corruptVideos.append((id, folder.appendingPathComponent(n)))
                 }
             }
-            await log.log("dedup: \(alreadyDownloaded.count) persisted + \(onDisk) on disk = \(already.count) known"
+            await log.log("dedup: \(already.count) file(s) on disk are authoritative (persisted list of \(alreadyDownloaded.count) ignored so missing files re-download)"
                           + (corruptVideos.isEmpty ? "" : "; \(corruptVideos.count) corrupt video(s) to repair"))
+        } else {
+            already = alreadyDownloaded          // couldn't scan the folder — trust the persisted list
+            await log.log("dedup: folder scan failed — using \(already.count) persisted ids")
         }
 
         // Discovery and download overlap: collectors walk posts (and messages)
