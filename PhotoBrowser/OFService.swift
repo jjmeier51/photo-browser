@@ -347,10 +347,12 @@ enum OFService {
         let creatorName = creator.name.isEmpty ? creator.username : creator.name
         await withTaskGroup(of: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String).self) { group in
             var active = 0
-            // Downloads stream straight to disk (no in-memory buffering). 12-wide is
-            // the sweet spot — fast, but not so many concurrent writes to a slow
-            // external drive that a jetsam kill risks corrupting its directory.
-            let maxConcurrent = 12
+            // Downloads stream straight to disk (no in-memory buffering). Kept modest on purpose:
+            // OF' CloudFront CDN rate-limits a bursty parallel pull (it lets a batch through, then
+            // blocks the rest with 403/429) — 12-wide was failing most of a large run. 6-wide plus
+            // the backoff-retry in `downloadFile` stays under the limit, and is gentler on a slow
+            // external drive's directory too.
+            let maxConcurrent = 6
             func apply(_ r: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String)) {
                 if r.ok {
                     if r.isVideo { result.videos += 1 } else { result.photos += 1 }
@@ -385,7 +387,7 @@ enum OFService {
             // Always surface the coverage diagnostic so any missing media can be traced.
             var prefix = ""
             if result.photos + result.videos == 0 { prefix = "Couldn’t download any media (OF may be blocking access). " }
-            else if result.failed > 0 { prefix = "\(result.failed) item(s) couldn’t be downloaded. " }
+            else if result.failed > 0 { prefix = "\(result.failed) item(s) couldn’t be downloaded (OF may be rate-limiting) — run “Get New OF Posts” again to retry just those. " }
             // Lead with the DRM breakdown so daily-limit skips read as expected, not failures.
             let drm = drmNote.map { $0 + ". " } ?? ""
             result.note = "\(prefix)\(drm)[\(diag)]"
@@ -636,8 +638,8 @@ enum OFService {
         if let drm = item.drm { return await downloadDRM(item, drm: drm, into: folder, creds: creds, rules: rules, hub: hub, log: log) }
         let ext = fileExt(of: item.url, isVideo: item.isVideo)
         let dest = uniqueDestination("OF_\(item.id).\(ext)", in: folder)
-        guard await downloadFile(item.url, to: dest, creds: creds) else {
-            await log?.log("• \(item.isVideo ? "video" : "photo") \(item.id): download failed. url \(String(item.url.prefix(110)))")
+        if let reason = await downloadFile(item.url, to: dest, creds: creds) {
+            await log?.log("• \(item.isVideo ? "video" : "photo") \(item.id): download failed (\(reason)). url \(String(item.url.prefix(110)))")
             return (false, item.isVideo, item.id, nil, "")
         }
         await log?.log("✓ \(item.isVideo ? "video" : "photo") \(item.id): saved OF_\(item.id).\(ext)")
@@ -951,28 +953,33 @@ enum OFService {
         return .failed("network error / timeout")
     }
 
-    /// Streams a media file straight to disk (no in-memory buffering — source videos
-    /// can be hundreds of MB), with the same transient-failure retry as the API.
-    nonisolated private static func downloadFile(_ urlString: String, to dest: URL, creds: Credentials) async -> Bool {
-        guard let url = URL(string: urlString) else { return false }
-        for attempt in 0..<3 {
-            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000) }
+    /// Streams a media file straight to disk (no in-memory buffering — source videos can be
+    /// hundreds of MB). Returns nil on success, else a short failure reason for the log.
+    /// OF' CloudFront CDN rate-limits a big pull with **403 as well as 429** (a batch downloads,
+    /// then the rest are blocked), so those are retried with an exponential backoff rather than
+    /// failing on the spot — which is what turned a large run into "1015 failed". A non-throttle
+    /// 4xx is a genuine miss and returns right away.
+    nonisolated private static func downloadFile(_ urlString: String, to dest: URL, creds: Credentials) async -> String? {
+        guard let url = URL(string: urlString) else { return "bad url" }
+        var lastReason = "no response"
+        for attempt in 0..<4 {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(1 << (attempt - 1)) * 1_500_000_000) }  // 1.5s, 3s, 6s
             var req = URLRequest(url: url)
             req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             req.setValue(creds.cookie, forHTTPHeaderField: "Cookie")
             req.setValue(referer, forHTTPHeaderField: "Referer")
             req.timeoutInterval = 600
-            guard let (tmp, resp) = try? await session.download(for: req) else { continue }
-            if let code = (resp as? HTTPURLResponse)?.statusCode {
-                if code == 429 || code >= 500 { continue }
-                if code >= 400 { return false }
-            }
+            guard let (tmp, resp) = try? await session.download(for: req) else { lastReason = "network error"; continue }
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
+            if code == 429 || code == 403 || code >= 500 { lastReason = "HTTP \(code)"; continue }   // throttle / transient → back off
+            if code >= 400 { return "HTTP \(code)" }
             do {
                 try await DriveWriter.shared.commit(tmp, to: dest)
-                return (try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0 >= 128
-            } catch { return false }
+                let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                return size >= 128 ? nil : "empty file (\(size)B)"
+            } catch { return "save error" }
         }
-        return false
+        return lastReason
     }
 
     /// Raw bytes (used for the small avatar image), with retry.

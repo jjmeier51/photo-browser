@@ -4,6 +4,14 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **OF large pulls stop mostly failing to rate-limiting.** With login fixed, a big creator would
+  discover everything but then download only a fraction ("161 photos, 31 videos; 1015 failed") — OF'
+  CloudFront CDN lets a burst of parallel downloads through, then blocks the rest with **403/429**.
+  Downloads used to fail immediately on 403 and ran 12-wide. Now they run 6-wide and retry 403/429
+  (and 5xx) with an exponential backoff, so throttled items recover instead of being lost. The
+  per-run log records the exact failure reason (HTTP status) for each miss, and — since failed items
+  are never marked downloaded — the result tells you to just run "Get New OF Posts" again to retry
+  only the ones that didn't make it.
 - **OF login is no longer detected before you actually sign in.** OF sets `auth_id=0` (a guest
   session) plus a device token from the very first page load, so the app treated you as "logged in"
   immediately, grabbed the anonymous session, and then signed every API call as guest `user-id: 0`
