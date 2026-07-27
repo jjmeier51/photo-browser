@@ -71,7 +71,10 @@ enum VSCOService {
         let token = preload.token ?? webToken
         await log.log("token: \(preload.token != nil ? "fresh from page" : "fallback constant")")
 
-        guard let site = preload.site ?? (await resolveSite(user, token: token)) else {
+        // (`await` can't live inside the `??` autoclosure, so resolve the fallback separately.)
+        var site = preload.site
+        if site == nil { site = await resolveSite(user, token: token) }
+        guard let site else {
             result.note = "Couldn’t open @\(user) on VSCO — check the username (and that the profile is public)."
             await log.finish("FAILED: site not found for @\(user)")
             return result
