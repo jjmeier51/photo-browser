@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreLocation
+import MapKit
 import UIKit
 
 /// The swipe-up details sheet — like the iOS Photos info card.
@@ -62,6 +63,25 @@ struct InfoPanel: View {
                         row("Location", String(format: "%.5f, %.5f", c.latitude, c.longitude))
                     }
                     if let savedFrom { row("Saved from", savedFrom) }
+                    if let coord = mapCoordinate {
+                        Button { openInMaps(coord) } label: {
+                            Map(initialPosition: .region(MKCoordinateRegion(
+                                center: coord,
+                                span: MKCoordinateSpan(latitudeDelta: 0.008, longitudeDelta: 0.008)))) {
+                                    Marker(placeName ?? "Location", coordinate: coord)
+                                }
+                                .frame(height: 150)
+                                .allowsHitTesting(false)      // the whole tile is the button; taps open Maps
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                                .overlay(alignment: .topTrailing) {
+                                    Image(systemName: "arrow.up.forward.app.fill")
+                                        .foregroundStyle(.white, .black.opacity(0.4))
+                                        .padding(8)
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                    }
                     // Facebook / OF posters are display names, not @handles.
                     if let poster = library.postedBy(for: entry.url) {
                         row("Posted by", (isFacebookItem || isOFItem) ? poster : "@\(poster)")
@@ -182,6 +202,24 @@ struct InfoPanel: View {
                 placeName = await MetadataLoader.placeName(for: coord)
             }
         }
+    }
+
+    /// The item's GPS coordinate, but only when it's genuinely valid — invalid or (0,0)
+    /// coordinates are dropped (a null-island fix), mirroring the reverse-geocode guard, so the
+    /// map never renders a bogus pin (and `CLLocationCoordinate2DIsValid` guards the same crash
+    /// class the geocoder guards against).
+    private var mapCoordinate: CLLocationCoordinate2D? {
+        guard let c = info?.coordinate, CLLocationCoordinate2DIsValid(c),
+              c.latitude.isFinite, c.longitude.isFinite,
+              !(abs(c.latitude) < 0.0001 && abs(c.longitude) < 0.0001) else { return nil }
+        return c
+    }
+
+    /// Opens the item's location in Maps, labeled with the reverse-geocoded place when known.
+    private func openInMaps(_ c: CLLocationCoordinate2D) {
+        let item = MKMapItem(placemark: MKPlacemark(coordinate: c))
+        item.name = placeName ?? entry.name
+        item.openInMaps()
     }
 
     private func row(_ key: String, _ value: String) -> some View {

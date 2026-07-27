@@ -102,6 +102,7 @@ struct FolderView: View {
     @State private var checkingPhone = false
     @State private var phoneProgress = 0.0
     @State private var showPeople = false
+    @State private var showPlaces = false
     @State private var showSettings = false
     @State private var fixProgress: Double = 0
     @State private var videoRes: VideoRes = .all
@@ -928,6 +929,7 @@ struct FolderView: View {
             .fullScreenCover(item: $resizeEntry) { e in ResizeEditorView(entry: e) }
             .sheet(item: $aiEditEntry) { e in AIEditView(entry: e) }
             .fullScreenCover(isPresented: $showPeople) { PeopleView(folder: url) }
+            .fullScreenCover(isPresented: $showPlaces) { PlacesMapView(root: url) }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(isPresented: $showEject) { EjectDriveView(root: library.rootURL) }
         )
@@ -1960,6 +1962,7 @@ struct FolderView: View {
                     }
                     Section("Library") {
                         Button { showPeople = true } label: { Label("People", systemImage: "person.2.crop.square.stack") }
+                        Button { showPlaces = true } label: { Label("Places", systemImage: "map") }
                         // Less-used maintenance tools stay in a submenu — same reason as above:
                         // keep the parent menu cheap to build so it opens instantly.
                         Menu {
