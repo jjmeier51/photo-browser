@@ -16,10 +16,14 @@ struct EntryCell: View {
     var coverURL: URL? = nil
     var thumbnailOverrideURL: URL? = nil        // custom "Set as Thumbnail" image for this item
     var likeCount: Int? = nil
+    /// Fired once when the cell's visual content is finalized (cover/thumbnail loaded, or an icon
+    /// that needs no load) — drives the home-screen launch haze, which lifts once tiles have settled.
+    var onReady: () -> Void = {}
 
     @State private var image: UIImage?
     @State private var duration: String?
     @State private var cover: UIImage?
+    @State private var reported = false
 
     /// Folders without a cover blend into the (orange) app background instead of
     /// showing a stark dark tile; everything else keeps a dark placeholder while its
@@ -80,7 +84,10 @@ struct EntryCell: View {
             .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))   // ever-so-slightly rounded
             .contentShape(Rectangle())
             .task(id: "\(entry.id.absoluteString)|\(thumbnailOverrideURL?.lastPathComponent ?? "")") {
-                guard entry.kind == .image || entry.kind == .video || entry.kind == .pdf else { return }
+                guard entry.kind == .image || entry.kind == .video || entry.kind == .pdf else {
+                    if !entry.isFolder { report() }   // audio/other: an icon, instantly ready (folders report via the cover task)
+                    return
+                }
                 // A custom "Set as Thumbnail" image wins; otherwise generate the usual thumbnail —
                 // it's what the user is waiting on; the duration badge fills in right after.
                 if let ov = thumbnailOverrideURL, let custom = UIImage(contentsOfFile: ov.path) {
@@ -92,10 +99,19 @@ struct EntryCell: View {
                         scale: UIScreen.main.scale)
                 }
                 if entry.kind == .video { duration = await Self.loadDuration(entry) }
+                report()
             }
             .task(id: coverURL) {
                 cover = await CoverImageLoader.load(coverURL)
+                if entry.isFolder { report() }   // folder cell is finalized once its cover (or lack of one) resolves
             }
+    }
+
+    /// Fires `onReady` exactly once for this cell.
+    private func report() {
+        guard !reported else { return }
+        reported = true
+        onReady()
     }
 
     @ViewBuilder private var content: some View {

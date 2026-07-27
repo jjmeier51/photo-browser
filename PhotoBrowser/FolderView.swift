@@ -15,6 +15,13 @@ struct ViewerPresentation: Identifiable {
 /// multiple `.fileImporter` modifiers on one view conflict in SwiftUI).
 enum ImportPurpose { case open, transfer, relink, backupMetadata }
 
+/// Records when Home tiles last finished loading, for the launch haze. A plain reference type held
+/// in `@State` (its identity never changes) so per-tile updates don't re-render the grid.
+final class HomeSettleTracker {
+    var lastReady = Date()
+    var sawAny = false
+}
+
 /// Browses one directory: subfolders + files, with sort, search, a full-screen
 /// viewer for photos/videos, and a Select mode for save/delete.
 struct FolderView: View {
@@ -32,6 +39,13 @@ struct FolderView: View {
 
     @State private var viewerPresentation: ViewerPresentation?
     @Namespace private var zoomNS      // shared-element zoom transition (grid cell → viewer), iOS 18+
+    // Launch haze: a glassy blur over the Home grid on first open that lifts once the tiles have
+    // loaded, so the staggered thumbnail pop-in isn't visible. Tiles record their load time on a
+    // plain reference `homeSettle` (NOT @State — a per-tile @State bump would re-render the heavy
+    // grid dozens of times mid-launch); a single poller lifts the haze a beat after they stop
+    // settling (or a hard cap).
+    @State private var showHomeHaze = true
+    @State private var homeSettle = HomeSettleTracker()
 
     @State private var previewItem: PreviewItem?
     @State private var pendingArchive: Entry?      // a tapped .zip → offer Extract / Quick Look
@@ -500,7 +514,8 @@ struct FolderView: View {
                   isAIGenerated: library.isAIGenerated(entry.url),
                   coverURL: entry.isFolder ? library.coverURL(for: entry.url) : nil,
                   thumbnailOverrideURL: entry.isFolder ? nil : library.itemThumbnailURL(for: entry.url),
-                  likeCount: entry.kind == .video ? library.tiktokLikeCount(for: entry.url) : nil)
+                  likeCount: entry.kind == .video ? library.tiktokLikeCount(for: entry.url) : nil,
+                  onReady: { homeCellReady() })
             // A revealed hidden folder reads as hidden (dimmed) so it isn't mistaken
             // for a normal one; invisible entirely unless Show Hidden Folders is on.
             .opacity(entry.isFolder && library.isHiddenFolder(entry.url) ? 0.45 : 1)
@@ -525,6 +540,49 @@ struct FolderView: View {
             // Source of the zoom transition into the viewer (matched by the item's URL). Harmless on
             // folder cells (they navigate, not present the viewer) and a no-op before iOS 18.
             .zoomSource(entry.url, zoomNS)
+    }
+
+    /// A glassy blur laid over the Home grid on first launch until its tiles have loaded, so the
+    /// staggered thumbnail pop-in is hidden behind frosted glass and then revealed all at once.
+    @ViewBuilder private var homeHazeOverlay: some View {
+        if isRoot && showHomeHaze {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)      // the grid underneath still scrolls/taps
+                .transition(.opacity)
+        }
+    }
+
+    /// A Home tile finished loading its cover/thumbnail — record the time on the plain tracker (no
+    /// view re-render) so the poller can lift the haze once tiles stop settling.
+    private func homeCellReady() {
+        guard isRoot, showHomeHaze else { return }
+        homeSettle.lastReady = Date()
+        homeSettle.sawAny = true
+    }
+
+    /// Polls the settle tracker and lifts the launch haze a beat after the last tile loads — or fast
+    /// when there's nothing to load, or at a hard cap so a slow drive can never leave it stuck on.
+    private func runHomeHaze() async {
+        guard isRoot, showHomeHaze else { return }
+        homeSettle.lastReady = Date()
+        let start = Date()
+        while showHomeHaze {
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            if Task.isCancelled { return }
+            let sinceReady = Date().timeIntervalSince(homeSettle.lastReady)
+            let elapsed = Date().timeIntervalSince(start)
+            let settled = homeSettle.sawAny && sinceReady > 0.4         // tiles loaded, then quiet
+            // Genuinely nothing to load (listing came back empty) — reveal quickly. Requiring
+            // `entries.isEmpty` avoids a premature lift while folders are still being listed on a
+            // slow drive (they'll report and take the `settled` path instead).
+            let empty = !homeSettle.sawAny && entries.isEmpty && elapsed > 0.8
+            if settled || empty || elapsed > 6 {
+                withAnimation(.easeOut(duration: 0.5)) { showHomeHaze = false }
+                return
+            }
+        }
     }
 
     /// Paints a contiguous selection range as the finger moves — like Photos: every
@@ -1266,6 +1324,8 @@ struct FolderView: View {
                 grid.simultaneousGesture(folderSwipeGesture)
             }
             .background(AppGradient())
+            .overlay { homeHazeOverlay }
+            .task { await runHomeHaze() }
             // Browser downloads keep running after the browser is dismissed — surface them here
             // (the chip observes WebController itself, so this heavy body never re-renders on
             // download progress) with a one-tap way back into the browser.
