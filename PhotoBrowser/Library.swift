@@ -2,6 +2,18 @@ import SwiftUI
 import Observation
 import CryptoKit
 
+/// One item in the Recently Deleted trash: where it now sits inside the drive's `.Trash`, where it
+/// came from, when it was deleted (for the 30-day auto-purge), and enough to display + restore it.
+/// Folders are trashed whole. `id` is the trashed path (unique within `.Trash`).
+struct TrashEntry: Codable, Sendable, Identifiable {
+    var id: String { trashedPath }
+    var trashedPath: String
+    var originalPath: String
+    var deletedAt: Double
+    var isFolder: Bool
+    var name: String
+}
+
 /// App-wide state: the chosen root folder (with persistent access), the
 /// navigation path, and the current sort. Uses the Observation framework so
 /// view updates are reliable under Xcode's default-MainActor isolation.
@@ -30,6 +42,9 @@ final class Library {
     var aiLabels: Set<String> = Library.migrateBulk("ai", legacyKey: "photoBrowser.ai") {
         Set(UserDefaults.standard.stringArray(forKey: $0) ?? [])
     }
+    /// Items in the Recently Deleted trash (see the Trash section). Persisted in the bulk store,
+    /// keyed by the item's current `.Trash` path.
+    var trash: [TrashEntry] = Library.loadBulk("trash", as: [TrashEntry].self) ?? []
     /// Custom labels offered inside the "Taylor Swift" / Kardashian folders, keyed
     /// labelName → set of file paths (an item may carry several). Persisted as one
     /// file **per label** (see `persistCustomLabels`): at 100k+ labeled photos the
@@ -673,6 +688,44 @@ final class Library {
         if aiLabels.contains(url.path) { aiLabels.remove(url.path) } else { aiLabels.insert(url.path) }
         Self.saveBulk(aiLabels, "ai")
         labelsVersion += 1
+    }
+
+    // MARK: - Trash (Recently Deleted)
+
+    /// The drive's hidden trash folder, or nil until a root is chosen. Lives on the same volume as
+    /// the media so trashing is a fast same-volume rename (no cross-drive copy), and the dot prefix
+    /// keeps it out of the normal folder listing.
+    var trashFolder: URL? { rootURL?.appendingPathComponent(".Trash", isDirectory: true) }
+
+    /// Records freshly-trashed items and persists. Labels/captions are intentionally left keyed to
+    /// the original path so a restore reconnects them automatically (see `FileActions.moveToTrash`).
+    func recordTrashed(_ entries: [TrashEntry]) {
+        guard !entries.isEmpty else { return }
+        trash.append(contentsOf: entries)
+        Self.saveBulk(trash, "trash")
+        labelsVersion += 1
+    }
+
+    /// Drops trash records by id (after a restore or permanent delete).
+    func removeTrashRecords(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let set = Set(ids)
+        trash.removeAll { set.contains($0.id) }
+        Self.saveBulk(trash, "trash")
+        labelsVersion += 1
+    }
+
+    /// Removes trash records — and their files, in the background — older than 30 days. Best-effort;
+    /// call when a root opens so the trash self-empties without any user action.
+    func purgeExpiredTrash() {
+        let cutoff = Date().timeIntervalSince1970 - 30 * 86_400
+        let expired = trash.filter { $0.deletedAt < cutoff }
+        guard !expired.isEmpty else { return }
+        let paths = expired.map(\.trashedPath)
+        Task.detached(priority: .utility) {
+            for p in paths { try? FileManager.default.removeItem(atPath: p) }
+        }
+        removeTrashRecords(expired.map(\.id))
     }
 
     // MARK: - Taylor Swift custom labels
@@ -2443,8 +2496,14 @@ final class Library {
             let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
             guard let walker = FileManager.default.enumerator(
                 at: root, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles]) else { return [] }
+            let rootDepth = root.pathComponents.count
             var result: [Entry] = []
             for case let url as URL in walker {
+                // Never surface app-internal dot-directories (e.g. `.Trash`) or dot-files: the
+                // file-provider drive can ignore `.skipsHiddenFiles`, which would otherwise leak
+                // trashed items into search / Places / the indexes. Checked below the root only, so a
+                // root that itself lives under a dot-path isn't wholesale excluded.
+                if url.pathComponents.dropFirst(rootDepth).contains(where: { $0.hasPrefix(".") }) { continue }
                 let rv = try? url.resourceValues(forKeys: keys)
                 result.append(Entry(url: url, name: url.lastPathComponent,
                                     kind: classify(url: url, isDirectory: rv?.isDirectory ?? false),
@@ -2542,6 +2601,7 @@ final class Library {
         restorePersonFolderCovers()       // re-seed person-folder thumbnails lost to the first migration
         BackgroundDownloader.shared.activate()   // reconnect to the background session
         processPendingTikTok()            // file anything that finished while we were closed
+        purgeExpiredTrash()               // drop trashed items past their 30-day window
         scheduleIndexBuild()
     }
 
@@ -2576,6 +2636,7 @@ final class Library {
         restorePersonFolderCovers()       // re-seed person-folder thumbnails lost to the first migration
         BackgroundDownloader.shared.activate()   // reconnect to the background session
         processPendingTikTok()            // file anything that finished while we were closed
+        purgeExpiredTrash()               // drop trashed items past their 30-day window
         scheduleIndexBuild()
     }
 

@@ -103,6 +103,7 @@ struct FolderView: View {
     @State private var phoneProgress = 0.0
     @State private var showPeople = false
     @State private var showPlaces = false
+    @State private var showTrash = false
     @State private var showSettings = false
     @State private var fixProgress: Double = 0
     @State private var videoRes: VideoRes = .all
@@ -837,7 +838,7 @@ struct FolderView: View {
             }
         )
         let g2 = AnyView(g1
-            .confirmationDialog("Delete \(selection.count) item(s)? This permanently removes them from the drive.",
+            .confirmationDialog("Move \(selection.count) item(s) to Recently Deleted? You can restore them for 30 days.",
                                 isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("Delete", role: .destructive) { performDelete() }
                 Button("Cancel", role: .cancel) {}
@@ -930,6 +931,7 @@ struct FolderView: View {
             .sheet(item: $aiEditEntry) { e in AIEditView(entry: e) }
             .fullScreenCover(isPresented: $showPeople) { PeopleView(folder: url) }
             .fullScreenCover(isPresented: $showPlaces) { PlacesMapView(root: url) }
+            .sheet(isPresented: $showTrash, onDismiss: { Task { await reload() } }) { RecentlyDeletedView() }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(isPresented: $showEject) { EjectDriveView(root: library.rootURL) }
         )
@@ -1963,6 +1965,10 @@ struct FolderView: View {
                     Section("Library") {
                         Button { showPeople = true } label: { Label("People", systemImage: "person.2.crop.square.stack") }
                         Button { showPlaces = true } label: { Label("Places", systemImage: "map") }
+                        Button { showTrash = true } label: {
+                            Label(library.trash.isEmpty ? "Recently Deleted" : "Recently Deleted (\(library.trash.count))",
+                                  systemImage: "trash")
+                        }
                         // Less-used maintenance tools stay in a submenu — same reason as above:
                         // keep the parent menu cheap to build so it opens instantly.
                         Menu {
@@ -2811,14 +2817,19 @@ struct FolderView: View {
 
     private func performDelete() {
         let targets = selectedEntries()
-        let assetIDs = targets.compactMap { library.origin(for: $0.url) }   // Photos-imported items
-        FileActions.delete(targets)
-        library.clearOrigins(targets.map(\.url))
+        Haptics.warning()
         selection.removeAll(); selecting = false
-        if !assetIDs.isEmpty {
-            // Also remove the originals from the iOS Photos library (→ Recently
-            // Deleted). iOS shows its own confirmation prompt.
-            Task { await FileActions.deletePhotosAssets(assetIDs) }
+        // Move to the drive's Recently Deleted trash (recoverable for 30 days) rather than a hard
+        // delete. Labels/captions stay keyed to the original path so a restore reconnects them.
+        // The iOS Photos originals are left alone here — they're only a separate copy, and trashing
+        // is meant to be reversible; a hard delete would be the place to also clear those.
+        if let trashFolder = library.trashFolder {
+            let records = FileActions.moveToTrash(targets, trashFolder: trashFolder)
+            library.recordTrashed(records)
+        } else {
+            // No root (shouldn't happen in normal use) — fall back to a permanent delete.
+            FileActions.delete(targets)
+            library.clearOrigins(targets.map(\.url))
         }
         Task { await reload() }
     }

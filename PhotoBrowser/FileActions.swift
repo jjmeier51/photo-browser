@@ -191,6 +191,47 @@ enum FileActions {
         for e in entries { try? FileManager.default.removeItem(at: e.url) }
     }
 
+    /// Moves items into the drive's hidden `.Trash` (a fast same-volume rename), returning records to
+    /// persist. Same volume as the media, so there's no cross-drive copy. Labels/captions are left
+    /// keyed to the original path so a later restore reconnects them. Falls back to copy+delete if a
+    /// plain move is refused; a file that can't be moved at all is left in place (not silently lost).
+    static func moveToTrash(_ entries: [Entry], trashFolder: URL) -> [TrashEntry] {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: trashFolder, withIntermediateDirectories: true)
+        var records: [TrashEntry] = []
+        for e in entries {
+            let dest = uniqueDestination(for: e.url.lastPathComponent, in: trashFolder)
+            func record() -> TrashEntry {
+                TrashEntry(trashedPath: dest.path, originalPath: e.url.path,
+                           deletedAt: Date().timeIntervalSince1970, isFolder: e.isFolder, name: e.name)
+            }
+            if (try? fm.moveItem(at: e.url, to: dest)) != nil {
+                records.append(record())
+            } else if (try? DriveWriter.copyItem(at: e.url, to: dest)) != nil {
+                try? fm.removeItem(at: e.url)
+                records.append(record())
+            }
+        }
+        return records
+    }
+
+    /// Restores a trashed item to its original location (uniquified on collision). Returns the new URL.
+    static func restoreFromTrash(_ item: TrashEntry) -> URL? {
+        let fm = FileManager.default
+        let src = URL(fileURLWithPath: item.trashedPath)
+        guard fm.fileExists(atPath: src.path) else { return nil }
+        let original = URL(fileURLWithPath: item.originalPath)
+        let parent = original.deletingLastPathComponent()
+        try? fm.createDirectory(at: parent, withIntermediateDirectories: true)
+        let dest = uniqueDestination(for: original.lastPathComponent, in: parent)
+        return (try? fm.moveItem(at: src, to: dest)) != nil ? dest : nil
+    }
+
+    /// Permanently removes trashed files from the drive.
+    static func purgeTrash(_ items: [TrashEntry]) {
+        for i in items { try? FileManager.default.removeItem(atPath: i.trashedPath) }
+    }
+
     /// Copies each file in place as "<name> copy.ext" (non-colliding). Returns the count.
     @discardableResult
     static func duplicate(_ entries: [Entry]) -> Int {
