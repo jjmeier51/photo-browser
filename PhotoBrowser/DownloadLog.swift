@@ -71,11 +71,24 @@ actor DownloadLog {
         guard flushedAt < lines.count else { return }        // nothing new since the last flush
         let text = ([header] + lines).filter { !$0.isEmpty }.joined(separator: "\n") + "\n"
         guard let data = text.data(using: .utf8) else { return }
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
         let dest = folder.appendingPathComponent("\(kind)-log.txt")
         do {
-            try data.write(to: dest)                 // direct, non-atomic overwrite — no rename to fail
-            DriveWriter.fullSync(dest)               // push it to media so a later unplug keeps it
+            // Write and fsync on ONE file handle, then close. An earlier version used
+            // `Data.write` followed by a separate open-for-fsync; on a userspace (FSKit) drive that
+            // left the file visible at 0 bytes — the bytes sat in the filesystem cache and fsync on
+            // a *different* descriptor didn't push them. Truncating + writing + `synchronize()` on
+            // the same handle commits the bytes before it closes. No temp + rename — that step was
+            // what silently dropped the log here in the first place.
+            if !fm.fileExists(atPath: dest.path) { fm.createFile(atPath: dest.path, contents: nil) }
+            let fh = try FileHandle(forWritingTo: dest)
+            do {
+                try fh.truncate(atOffset: 0)
+                try fh.write(contentsOf: data)
+                try fh.synchronize()
+                try fh.close()
+            } catch { try? fh.close(); throw error }
             flushedAt = lines.count
             lastFlush = Date()
         } catch {
