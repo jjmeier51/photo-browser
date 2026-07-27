@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreMedia
 import UIKit
 
 /// AVFoundation helpers for the video editor: a filmstrip of thumbnails, lossless **trim** (passthrough
@@ -67,6 +68,7 @@ enum VideoComposer {
         var frameDuration = CMTime(value: 1, timescale: 30)
         var oldest: Date?                       // earliest source date → the combined clip's date
         var baseMeta: [AVMetadataItem] = []     // metadata carried over (from the first clip)
+        var hdrColor: (primaries: String, transfer: String, matrix: String)?   // set from the first HDR clip
 
         for url in urls {
             let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
@@ -79,6 +81,9 @@ enum VideoComposer {
             }
             if segs.isEmpty { baseMeta = (try? await asset.load(.commonMetadata)) ?? [] }  // carry the first clip's metadata
             if let d = await sourceDate(asset, url), oldest == nil || d < oldest! { oldest = d }
+            if hdrColor == nil, let ci = await colorInfo(of: srcV), ci.isHDR {
+                hdrColor = (ci.primaries, ci.transfer, ci.matrix)   // any HDR source → HDR output
+            }
             let natural = (try? await srcV.load(.naturalSize)) ?? CGSize(width: 1280, height: 720)
             let transform = (try? await srcV.load(.preferredTransform)) ?? .identity
             let oriented = CGRect(origin: .zero, size: natural).applying(transform)
@@ -111,8 +116,16 @@ enum VideoComposer {
         videoComp.renderSize = finalSize
         videoComp.frameDuration = frameDuration
         videoComp.instructions = instructions
+        if let hdrColor {
+            // Render + tag the composition in the source's HDR (BT.2020 + HLG/PQ) color space, and
+            // export via HEVC so the output is a real 10-bit HDR video, not a tone-mapped SDR one.
+            videoComp.colorPrimaries = hdrColor.primaries
+            videoComp.colorTransferFunction = hdrColor.transfer
+            videoComp.colorYCbCrMatrix = hdrColor.matrix
+        }
 
-        guard let export = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetHighestQuality) else { return false }
+        let preset = hdrColor != nil ? AVAssetExportPresetHEVCHighestQuality : AVAssetExportPresetHighestQuality
+        guard let export = AVAssetExportSession(asset: comp, presetName: preset) else { return false }
         export.videoComposition = videoComp
         export.outputURL = dest
         export.outputFileType = fileType(for: dest)
@@ -126,6 +139,21 @@ enum VideoComposer {
                                                    ofItemAtPath: dest.path)
         }
         return ok
+    }
+
+    /// The video track's color primaries / transfer function / YCbCr matrix, plus whether it's HDR
+    /// (an HLG or PQ transfer function). The extension values are the same strings AVVideoComposition
+    /// expects, so they can be applied to the composition directly. Falls back to Rec.709 (SDR).
+    private nonisolated static func colorInfo(of track: AVAssetTrack) async
+        -> (primaries: String, transfer: String, matrix: String, isHDR: Bool)? {
+        guard let fmts = try? await track.load(.formatDescriptions), let fmt = fmts.first else { return nil }
+        let ext = (CMFormatDescriptionGetExtensions(fmt) as? [CFString: Any]) ?? [:]
+        let primaries = (ext[kCMFormatDescriptionExtension_ColorPrimaries] as? String) ?? AVVideoColorPrimaries_ITU_R_709_2
+        let transfer  = (ext[kCMFormatDescriptionExtension_TransferFunction] as? String) ?? AVVideoTransferFunction_ITU_R_709_2
+        let matrix    = (ext[kCMFormatDescriptionExtension_YCbCrMatrix] as? String) ?? AVVideoYCbCrMatrix_ITU_R_709_2
+        let isHDR = transfer == AVVideoTransferFunction_ITU_R_2100_HLG
+                 || transfer == AVVideoTransferFunction_SMPTE_ST_2084_PQ
+        return (primaries, transfer, matrix, isHDR)
     }
 
     /// The best available date for a source clip: its embedded creation date, else the file's
