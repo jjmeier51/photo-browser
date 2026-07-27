@@ -4,6 +4,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **OF downloads run faster again.** The earlier mass failures were the on-device temp leak filling
+  storage, not CDN throttling — so the throttle-avoidance measures were slowing things for no reason.
+  Download concurrency goes back up (6 → 10; the 403/429 backoff-retry still absorbs any real
+  rate-limiting), and the per-run log now flushes on a ~10-second timer instead of every 25 lines, so
+  its durable drive-write no longer competes with the downloads.
 - **Fixed a temp-file leak that ballooned the app's on-device storage (and caused more download
   failures).** Every download streams to a temp file in the app container, then moves it to the
   drive. When a download *failed* — a rate-limit 403/429, or a failed move — that temp file was left

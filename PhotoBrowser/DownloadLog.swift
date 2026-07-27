@@ -22,6 +22,7 @@ actor DownloadLog {
     private var header = ""
     private var lines: [String] = []
     private var flushedAt = -1        // `lines.count` at the last successful flush (-1 = never)
+    private var lastFlush = Date.distantPast
 
     private static let time: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f
@@ -42,11 +43,14 @@ actor DownloadLog {
         await flushToDisk()
     }
 
-    /// Buffers one timestamped line and flushes to disk every so often, so a run that's killed
-    /// mid-way still leaves a partial log.
+    /// Buffers one timestamped line and flushes to disk periodically — often enough that a killed
+    /// run leaves a useful partial log, but rarely enough that its durable drive-fsync doesn't
+    /// contend with (and slow) the downloads themselves. Bounded by both time and line count.
     func log(_ s: String) async {
         lines.append("\(Self.time.string(from: Date()))  \(s)")
-        if lines.count - flushedAt >= 25 { await flushToDisk() }
+        if Date().timeIntervalSince(lastFlush) >= 10 || lines.count - flushedAt >= 400 {
+            await flushToDisk()
+        }
     }
 
     /// Appends an optional final summary and writes the whole log to the folder.
@@ -58,6 +62,7 @@ actor DownloadLog {
     /// Rewrites the accumulated log to `<folder>/<kind>-log.txt` via `DriveWriter` (durable,
     /// serialized, file-provider-safe). Records the line count so `log` only reflushes on new lines.
     private func flushToDisk() async {
+        guard flushedAt < lines.count else { return }        // nothing new since the last flush
         let text = ([header] + lines).filter { !$0.isEmpty }.joined(separator: "\n") + "\n"
         guard let data = text.data(using: .utf8) else { return }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -65,6 +70,7 @@ actor DownloadLog {
         do {
             try await DriveWriter.shared.writeData(data, to: dest)
             flushedAt = lines.count
+            lastFlush = Date()
         } catch {}
     }
 }

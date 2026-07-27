@@ -348,12 +348,11 @@ enum OFService {
         let creatorName = creator.name.isEmpty ? creator.username : creator.name
         await withTaskGroup(of: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String).self) { group in
             var active = 0
-            // Downloads stream straight to disk (no in-memory buffering). Kept modest on purpose:
-            // OF' CloudFront CDN rate-limits a bursty parallel pull (it lets a batch through, then
-            // blocks the rest with 403/429) — 12-wide was failing most of a large run. 6-wide plus
-            // the backoff-retry in `downloadFile` stays under the limit, and is gentler on a slow
-            // external drive's directory too.
-            let maxConcurrent = 6
+            // Downloads stream straight to disk (no in-memory buffering). 10-wide: the earlier
+            // mass failures were the on-device temp leak filling storage, not CDN throttling, so
+            // this is back near full speed — while the 403/429 backoff-retry in `downloadFile`
+            // still absorbs any real rate-limiting without dropping items.
+            let maxConcurrent = 10
             func apply(_ r: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String)) {
                 if r.ok {
                     if r.isVideo { result.videos += 1 } else { result.photos += 1 }
