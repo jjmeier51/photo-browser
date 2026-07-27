@@ -266,8 +266,11 @@ enum OFService {
         struct VideoRef: Sendable { let url: String; let date: Date? }
         private var videoByID: [String: VideoRef] = [:]
         var videoInfo: [String: VideoRef] { videoByID }
-        func scanned(posts: Int) { postsScanned += posts }
-        func scanned(messages: Int) { messagesScanned += messages }
+        // Report on every page scanned (not only when new media is found) so the pill shows live
+        // progress during a scan that turns up nothing new — otherwise it freezes on the last
+        // "Loading @…" status and then snaps to a bare "Downloading 0 of 0", which reads as hung.
+        func scanned(posts: Int) { postsScanned += posts; report() }
+        func scanned(messages: Int) { messagesScanned += messages; report() }
         func noteDRMError(_ s: String) { if drmError == nil { drmError = s } }
         var diagnostics: String {
             var s = "posts \(postsScanned), msgs \(messagesScanned); media \(mediaSeen) → new \(foundCount), skipped \(skipLocked) locked / \(skipAudio) audio / no-url: \(skipDRM) drm, \(skipHLS) hls, \(skipOther) other"
@@ -280,8 +283,17 @@ enum OFService {
         func discoveryFinished() { finding = false; continuation.finish(); report() }
         func savedOne() { saved += 1; if saved % 4 == 0 || saved == foundCount { report() } }
         private func report() {
-            let phase = finding ? "Found \(foundCount) — downloaded \(saved)…"
-                                : "Downloading \(saved) of \(foundCount)…"
+            let phase: String
+            if finding {
+                var s = "Scanning… \(postsScanned) post\(postsScanned == 1 ? "" : "s")"
+                if messagesScanned > 0 { s += ", \(messagesScanned) message\(messagesScanned == 1 ? "" : "s")" }
+                s += foundCount > 0 ? " — \(foundCount) new, \(saved) saved" : " — up to date so far"
+                phase = s
+            } else {
+                // Nothing new to pull → don't show a bare "0 of 0" (reads as stuck); the run is
+                // wrapping up (integrity/repair/backfill), which the repair pass reports separately.
+                phase = foundCount == 0 ? "Finishing up…" : "Downloading \(saved) of \(foundCount)…"
+            }
             progress(Progress(phase: phase,
                               fraction: !finding && foundCount > 0 ? Double(saved) / Double(foundCount) : 0,
                               done: saved, total: finding ? 0 : foundCount))
@@ -429,13 +441,26 @@ enum OFService {
             g.cancelAll()
             return first
         }
-        if !corruptVideos.isEmpty {
-            await log.log("repairing \(corruptVideos.count) corrupt video(s)…")
-        }
         var repairedVideos = 0
         if !corruptVideos.isEmpty {
+            await log.log("repairing \(corruptVideos.count) corrupt video(s)…")
             let vinfo = await hub.videoInfo
+            // Re-downloading corrupt videos is the slowest tail of a run on a userspace (FSKit) drive.
+            // Report per-video progress — otherwise the pill sits at a frozen "Finishing up…" and the
+            // run looks hung — and cap the total time so a slow drive / stubborn URL can't stall the
+            // run's completion; anything left over is simply retried on the next run.
+            let repairStart = ContinuousClock.now
+            let repairBudget = Duration.seconds(180)
+            var i = 0
             for (id, path) in corruptVideos {
+                i += 1
+                if ContinuousClock.now - repairStart > repairBudget {
+                    await log.log("repair time budget reached — \(corruptVideos.count - i + 1) left for next run")
+                    break
+                }
+                progress(Progress(phase: "Repairing videos… \(i) of \(corruptVideos.count)",
+                                  fraction: Double(i) / Double(corruptVideos.count),
+                                  done: i, total: corruptVideos.count))
                 guard let info = vinfo[id] else { continue }        // post gone from the timeline → can't refetch
                 if let reason = await downloadFile(info.url, to: path, creds: creds) {
                     await log.log("• repair video \(id): failed (\(reason))")
