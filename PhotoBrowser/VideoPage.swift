@@ -123,6 +123,10 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
     private var captureFlash: UILabel?
     private let url: URL
     private var preferredTransform: CGAffineTransform = .identity
+    /// Slo-Mo mode: 0 = off; otherwise the playback rate (0.25 = 4× slower, 0.125 = 8× slower).
+    /// Resume paths honor this, so pause/resume/frame-step keep working while it's active.
+    private var sloMoRate: Float = 0
+    private let sloMoBadge = UILabel()
 
     init(url: URL) {
         self.url = url
@@ -157,6 +161,8 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
         let output = AVPlayerItemVideoOutput(outputSettings: nil)
         player.currentItem?.add(output)
         videoOutput = output
+        // Keep audio pitch natural when playing slowed down (Slo-Mo mode).
+        player.currentItem?.audioTimePitchAlgorithm = .spectral
 
         // Load the video's orientation so captured frames aren't sideways.
         Task { [weak self] in
@@ -248,6 +254,17 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
         captureButton.setImage(UIImage(systemName: "camera.fill"), for: .normal)
         captureButton.addTarget(self, action: #selector(captureFrame), for: .touchUpInside)
         controlsBar.addSubview(captureButton)
+
+        // Persistent "SLO MO" indicator (top-center) so the slowed playback is never a mystery.
+        // Stays visible while active even when the controls auto-hide.
+        sloMoBadge.textColor = .white
+        sloMoBadge.font = .systemFont(ofSize: 12, weight: .bold)
+        sloMoBadge.textAlignment = .center
+        sloMoBadge.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        sloMoBadge.layer.cornerRadius = 11
+        sloMoBadge.layer.masksToBounds = true
+        sloMoBadge.isHidden = true
+        view.addSubview(sloMoBadge)
     }
 
     private func layoutControls() {
@@ -266,6 +283,11 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
         durationLabel.frame = CGRect(x: captureButton.frame.minX - durW - 2, y: 0, width: durW, height: h)
         slider.frame = CGRect(x: currentLabel.frame.maxX + 4, y: 0,
                               width: durationLabel.frame.minX - currentLabel.frame.maxX - 8, height: h)
+
+        sloMoBadge.sizeToFit()
+        let bw = sloMoBadge.bounds.width + 20, bh: CGFloat = 22
+        sloMoBadge.frame = CGRect(x: (view.bounds.width - bw) / 2,
+                                  y: view.safeAreaInsets.top + 8, width: bw, height: bh)
     }
 
     // MARK: - Gestures
@@ -286,6 +308,11 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
             g.direction = dir
             scrollView.addGestureRecognizer(g)
         }
+
+        // Long-press the CENTER of the video to toggle Slo-Mo mode (see `handleLongPress`).
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+        longPress.minimumPressDuration = 0.45
+        scrollView.addGestureRecognizer(longPress)
     }
 
     private var atRest: Bool { scrollView.zoomScale <= 1.001 }
@@ -357,6 +384,67 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
         let w = scrollView.bounds.width / scale
         let h = scrollView.bounds.height / scale
         scrollView.zoom(to: CGRect(x: p.x - w / 2, y: p.y - h / 2, width: w, height: h), animated: true)
+    }
+
+    // MARK: - Slo-Mo mode
+
+    /// Long-press the center of the video to toggle Slo-Mo. When it's off, offer 4×/8× slower;
+    /// when it's on, a center long-press turns it off (no confirmation prompt — just a flash).
+    /// Restricted to the center region so it can't be mistaken for a skip/zoom/frame-step tap,
+    /// and ignored while zoomed in (that gesture pans).
+    @objc private func handleLongPress(_ g: UILongPressGestureRecognizer) {
+        guard g.state == .began, atRest else { return }
+        let loc = g.location(in: view)
+        let w = view.bounds.width, h = view.bounds.height
+        let inCenter = loc.x > w / 3 && loc.x < w * 2 / 3 && loc.y > h / 4 && loc.y < h * 3 / 4
+        guard inCenter else { return }
+        if sloMoRate > 0 {
+            disableSloMo()
+        } else {
+            presentSloMoOptions(at: loc)
+        }
+    }
+
+    private func presentSloMoOptions(at point: CGPoint) {
+        let sheet = UIAlertController(title: "Play in Slo Mo", message: nil, preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "Play 4× slower", style: .default) { [weak self] _ in self?.enableSloMo(rate: 0.25) })
+        sheet.addAction(UIAlertAction(title: "Play 8× slower", style: .default) { [weak self] _ in self?.enableSloMo(rate: 0.125) })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        // iPad requires a source for the popover form of an action sheet.
+        if let pop = sheet.popoverPresentationController {
+            pop.sourceView = view
+            pop.sourceRect = CGRect(origin: point, size: .zero)
+            pop.permittedArrowDirections = [.up, .down]
+        }
+        present(sheet, animated: true)
+    }
+
+    private func enableSloMo(rate: Float) {
+        sloMoRate = rate
+        let times = rate == 0.25 ? "4×" : "8×"
+        sloMoBadge.text = "  ● SLO MO \(times)  "
+        sloMoBadge.isHidden = false
+        view.setNeedsLayout()
+        resumePlayback()                        // start playing at the slowed rate
+        flashCapture("Slo Mo · \(times) slower")
+        if !controlsHidden { scheduleHide() }
+    }
+
+    private func disableSloMo() {
+        guard sloMoRate > 0 else { return }
+        let wasPlaying = player.timeControlStatus == .playing
+        sloMoRate = 0
+        sloMoBadge.isHidden = true
+        if wasPlaying { player.rate = 1 }       // keep playing, at normal speed
+        flashCapture("Slo Mo Disabled")
+        if !controlsHidden { scheduleHide() }
+    }
+
+    /// Resumes playback at the current speed — the Slo-Mo rate when the mode is on, else 1×.
+    /// Every play/resume path goes through this so Slo-Mo survives pause/resume/loop/scrub.
+    private func resumePlayback() {
+        if sloMoRate > 0 { player.rate = sloMoRate } else { player.play() }
+        playButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
     }
 
     @objc private func toggleControls() { setControls(hidden: !controlsHidden) }
@@ -478,12 +566,13 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
         appeared = false
         player.pause()
         player.seek(to: .zero)
+        sloMoRate = 0                 // exiting the player disables Slo-Mo
+        sloMoBadge.isHidden = true
     }
 
     private func playIfNeeded() {
         guard appeared, !overlayPaused, player.currentItem?.status == .readyToPlay else { return }
-        player.play()
-        playButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
+        resumePlayback()
         scheduleHide()
     }
 
@@ -501,10 +590,10 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
         }
     }
 
-    /// Loop: jump back to the start and keep playing when the video ends.
+    /// Loop: jump back to the start and keep playing when the video ends (in Slo-Mo if active).
     @objc private func playerDidReachEnd() {
         player.seek(to: .zero)
-        if appeared { player.play() }
+        if appeared { resumePlayback() }
     }
 
     @objc private func togglePlay() {
@@ -513,8 +602,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
             playButton.setImage(UIImage(systemName: "play.fill"), for: .normal)
             hideWork?.cancel()
         } else {
-            player.play()
-            playButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
+            resumePlayback()            // resumes in Slo-Mo when the mode is on
             scheduleHide()
         }
     }
@@ -535,7 +623,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
         scrubbing = false
         let final = CMTime(seconds: Double(slider.value), preferredTimescale: 600)
         player.seek(to: final, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-            if self?.wasPlayingBeforeScrub == true { self?.player.play() }
+            if self?.wasPlayingBeforeScrub == true { self?.resumePlayback() }
         }
         scheduleHide()
     }

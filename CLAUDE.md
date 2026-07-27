@@ -44,7 +44,8 @@ actions the app makes no network calls.
   prev/next, down = exit, up = info. Video double-tap zones: left/right third =
   ∓15s, center = zoom, lower-third left/right corners = step one frame
   back/forward (via `AVPlayerItem.step(byCount:)`; the lower-middle is excluded).
-  Slideshow mode. (`ViewerView`,
+  Long-press the video center = Slo-Mo mode (4×/8× slower via `player.rate`;
+  long-press again to turn off). Slideshow mode. (`ViewerView`,
   `ZoomableImageView`, `VideoPage`)
 - **Info panel** (swipe-up) — date, device, dimensions, size, GPS →
   reverse-geocoded place, "Saved from" (xattrs), Age, inline caption edit.

@@ -4,6 +4,11 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-07-17
 
+- **Slo-Mo playback in the video viewer.** Long-press the center of a video to open "Play in Slo Mo"
+  and choose **4× slower** or **8× slower**; playback continues at that speed, with pause/resume,
+  looping, scrubbing and frame-stepping all working as usual and a "SLO MO 4×/8×" badge shown while
+  it's active. Slo-Mo turns off when you leave the video, move to the next one, or long-press the
+  center again (which flashes "Slo Mo Disabled").
 - **Instagram private-profile posts and stories download again.** After the API host fix, the app
   correctly *found* a followed private profile's new posts/stories (e.g. "downloading 14 of 14") but
   every file failed and it reported "nothing to download." The media requests carried only a
