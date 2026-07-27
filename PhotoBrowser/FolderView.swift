@@ -70,6 +70,7 @@ struct FolderView: View {
     @State private var searchResults: [Entry] = []
     @State private var searching = false
     @State private var exportTarget: Entry?
+    @State private var trimTarget: Entry?
     @State private var showAIOnly = false
     @State private var aiEntries: [Entry] = []
     @State private var labelKind: LabelKind = .all
@@ -720,6 +721,12 @@ struct FolderView: View {
                 Button { startAudioExtract([entry]) } label: {
                     Label("Extract Audio…", systemImage: "waveform")
                 }
+                Button {
+                    let e = entry
+                    DispatchQueue.main.async { trimTarget = e }   // defer so the menu dismissal doesn't swallow the cover
+                } label: {
+                    Label("Trim Video…", systemImage: "scissors")
+                }
             }
             // File utilities for every file, including non-viewable ones (e.g. a downloaded .zip).
             // Offer Extract for a .zip, or any extension-less "data" file (a zip saved without a
@@ -928,6 +935,7 @@ struct FolderView: View {
                 }
             }
             .fullScreenCover(item: $studioEntry) { e in PhotoEditorView(entry: e) }
+            .fullScreenCover(item: $trimTarget) { e in VideoTrimView(url: e.url) { Task { await reload() } } }
             .fullScreenCover(item: $resizeEntry) { e in ResizeEditorView(entry: e) }
             .sheet(item: $aiEditEntry) { e in AIEditView(entry: e) }
             .fullScreenCover(isPresented: $showPeople) { PeopleView(folder: url) }
@@ -2215,6 +2223,9 @@ struct FolderView: View {
                         Label("Extract Audio…", systemImage: "waveform")
                     }
                 }
+                if selectedEntries().filter({ $0.kind == .video }).count >= 2 {
+                    Button { combineVideos() } label: { Label("Combine Videos", systemImage: "film.stack") }
+                }
                 Button { duplicateEntries(selectedEntries()) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
                 Button { compress(selectedEntries()) } label: { Label("Compress to Zip", systemImage: "archivebox") }
                 Button { showCopyPicker = true } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
@@ -2333,6 +2344,41 @@ struct FolderView: View {
             library.contentDidChange(under: url)
             await reload()
         }
+    }
+
+    /// Concatenates the selected videos (name order) into one new "Combined" file in this folder,
+    /// via `VideoComposer.stitch`. Originals are left untouched. Best for clips sharing an
+    /// orientation. Runs off-main under a background window with export progress.
+    private func combineVideos() {
+        let vids = selectedEntries().filter { $0.kind == .video }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        guard vids.count >= 2 else { resultMessage = "Select two or more videos to combine."; return }
+        selecting = false; selection.removeAll()
+        editLabel = "Combining \(vids.count) videos…"; editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder(); bg.begin(name: "Combine Videos")
+        let urls = vids.map(\.url)
+        let dest = combinedDestination()
+        Task {
+            let ok = await VideoComposer.stitch(urls, to: dest) { p in
+                Task { @MainActor in editProgress = p }
+            }
+            editProcessing = false; bg.end()
+            resultMessage = ok
+                ? "Combined \(urls.count) videos into “\(dest.lastPathComponent)”."
+                : "Couldn’t combine the videos."
+            library.contentDidChange(under: url)
+            await reload()
+        }
+    }
+
+    /// A non-colliding "Combined.mov" in the current folder.
+    private func combinedDestination() -> URL {
+        var c = url.appendingPathComponent("Combined.mov")
+        var n = 2
+        while FileManager.default.fileExists(atPath: c.path) {
+            c = url.appendingPathComponent("Combined \(n).mov"); n += 1
+        }
+        return c
     }
 
     private func bulkRotate(_ quarters: Int) {
