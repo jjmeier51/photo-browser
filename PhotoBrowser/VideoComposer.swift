@@ -65,6 +65,8 @@ enum VideoComposer {
         var cursor = CMTime.zero
         var renderSize = CGSize.zero
         var frameDuration = CMTime(value: 1, timescale: 30)
+        var oldest: Date?                       // earliest source date → the combined clip's date
+        var baseMeta: [AVMetadataItem] = []     // metadata carried over (from the first clip)
 
         for url in urls {
             let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
@@ -75,6 +77,8 @@ enum VideoComposer {
             if let aTrack, let srcA = try? await asset.loadTracks(withMediaType: .audio).first {
                 try? aTrack.insertTimeRange(range, of: srcA, at: cursor)
             }
+            if segs.isEmpty { baseMeta = (try? await asset.load(.commonMetadata)) ?? [] }  // carry the first clip's metadata
+            if let d = await sourceDate(asset, url), oldest == nil || d < oldest! { oldest = d }
             let natural = (try? await srcV.load(.naturalSize)) ?? CGSize(width: 1280, height: 720)
             let transform = (try? await srcV.load(.preferredTransform)) ?? .identity
             let oriented = CGRect(origin: .zero, size: natural).applying(transform)
@@ -113,8 +117,40 @@ enum VideoComposer {
         export.outputURL = dest
         export.outputFileType = fileType(for: dest)
         export.shouldOptimizeForNetworkUse = true
+        export.metadata = combinedMetadata(baseMeta, date: oldest)   // carry over metadata; stamp the oldest date
         try? FileManager.default.removeItem(at: dest)
-        return await run(export, progress: progress)
+        let ok = await run(export, progress: progress)
+        // Also set the file's dates so the browser's timeline/Age/sort use the oldest source date.
+        if ok, let oldest {
+            try? FileManager.default.setAttributes([.creationDate: oldest, .modificationDate: oldest],
+                                                   ofItemAtPath: dest.path)
+        }
+        return ok
+    }
+
+    /// The best available date for a source clip: its embedded creation date, else the file's
+    /// creation/modification date. Used to pick the earliest across the combined clips.
+    private nonisolated static func sourceDate(_ asset: AVURLAsset, _ url: URL) async -> Date? {
+        if let item = (try? await asset.load(.creationDate)) ?? nil,
+           let date = (try? await item.load(.dateValue)) ?? nil {
+            return date
+        }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attrs?[.creationDate] as? Date) ?? (attrs?[.modificationDate] as? Date)
+    }
+
+    /// The metadata to write onto the combined clip: the carried-over items from the first source
+    /// (location, device, etc.), with the creation date replaced by the earliest source date.
+    private nonisolated static func combinedMetadata(_ base: [AVMetadataItem], date: Date?) -> [AVMetadataItem] {
+        var items = base.filter { $0.commonKey != .commonKeyCreationDate }
+        if let date {
+            let item = AVMutableMetadataItem()
+            item.keySpace = .common
+            item.identifier = .commonIdentifierCreationDate
+            item.value = date as NSDate
+            items.append(item)
+        }
+        return items
     }
 
     /// A transform that takes a source of `natural` size, applies its `preferred` orientation

@@ -2457,12 +2457,13 @@ struct FolderView: View {
         }
     }
 
-    /// A non-colliding "Combined.mov" in the current folder.
+    /// A non-colliding "<folder name> combined.mov" in the current folder ("… combined 2.mov", etc.).
     private func combinedDestination() -> URL {
-        var c = url.appendingPathComponent("Combined.mov")
+        let name = url.lastPathComponent
+        var c = url.appendingPathComponent("\(name) combined.mov")
         var n = 2
         while FileManager.default.fileExists(atPath: c.path) {
-            c = url.appendingPathComponent("Combined \(n).mov"); n += 1
+            c = url.appendingPathComponent("\(name) combined \(n).mov"); n += 1
         }
         return c
     }
