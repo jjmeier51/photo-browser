@@ -131,30 +131,40 @@ final class ShareViewController: UIViewController {
 
     private func openAppAndFinish() {
         guard let url = URL(string: "photobrowser://share") else { return finish() }
-        // Share extensions have no public API to open their containing app, so use both known
-        // routes: the responder-chain `openURL:` hack and `NSExtensionContext.open`. Crucially,
-        // DELAY `completeRequest` — calling it immediately tears the extension down before the
-        // open can take effect, which is why the app didn't launch automatically before.
-        _ = openViaResponder(url)
-        extensionContext?.open(url, completionHandler: nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.finish() }
+        // Share extensions have no public API to open their containing app. The reliable route is to
+        // walk the responder chain to the live `UIApplication` instance (`UIApplication.shared` is
+        // off-limits in extensions) and call the MODERN `open(_:options:completionHandler:)`. The
+        // previous code performed the *deprecated* `openURL:` selector, which no longer launches the
+        // app on current iOS — so the extension just flashed white and dismissed without opening us.
+        // `NSExtensionContext.open` is a no-op for share extensions, kept only as a last-ditch.
+        // Crucially, DELAY `completeRequest`: tearing the extension down immediately kills the open
+        // before it takes effect. Retry briefly in case the view isn't in the window (responder
+        // chain not yet reaching UIApplication) the instant we ask.
+        openHostApp(url, attemptsLeft: 6)
     }
 
-    /// Opens a URL from within an app extension. `UIApplication.shared` is unavailable to
-    /// extensions, so walk the responder chain to whoever implements `openURL:` (the classic
-    /// approach for share extensions).
-    @discardableResult
-    private func openViaResponder(_ url: URL) -> Bool {
+    /// Opens `url` in the containing app by finding the `UIApplication` in the responder chain and
+    /// calling `open(_:options:completionHandler:)`. If the chain doesn't reach a `UIApplication`
+    /// yet (the view may not be in the window at the moment of the first try), retries shortly.
+    /// Finishes the extension request once the app has been asked to open (or attempts run out).
+    private func openHostApp(_ url: URL, attemptsLeft: Int) {
         var responder: UIResponder? = self
-        let selector = sel_registerName("openURL:")
         while let r = responder {
-            if r.responds(to: selector) {
-                r.perform(selector, with: url)
-                return true
+            if let app = r as? UIApplication {
+                app.open(url, options: [:], completionHandler: nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in self?.finish() }
+                return
             }
             responder = r.next
         }
-        return false
+        guard attemptsLeft > 0 else {
+            extensionContext?.open(url, completionHandler: nil)   // last-ditch; usually a no-op here
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.finish() }
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.openHostApp(url, attemptsLeft: attemptsLeft - 1)
+        }
     }
 
     private func finish() {
