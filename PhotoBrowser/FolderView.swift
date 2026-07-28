@@ -44,7 +44,6 @@ struct FolderView: View {
     @State private var selection = Set<URL>()
 
     @State private var viewerPresentation: ViewerPresentation?
-    @Namespace private var zoomNS      // shared-element zoom transition (grid cell → viewer), iOS 18+
     // Launch haze: a glassy blur over the Home grid on first open that lifts once the tiles have
     // loaded, so the staggered thumbnail pop-in isn't visible. Tiles record their load time on a
     // plain reference `homeSettle` (NOT @State — a per-tile @State bump would re-render the heavy
@@ -545,9 +544,6 @@ struct FolderView: View {
                     await library.ensureRandomCover(for: entry.url)
                 }
             }
-            // Source of the zoom transition into the viewer (matched by the item's URL). Harmless on
-            // folder cells (they navigate, not present the viewer) and a no-op before iOS 18.
-            .zoomSource(entry.url, zoomNS)
     }
 
     /// A glassy blur laid over the Home grid on first launch until its tiles have loaded, so the
@@ -908,11 +904,7 @@ struct FolderView: View {
                     DispatchQueue.main.async { library.path = [target] }
                 }
             }) { p in
-                // Zoom out of the tapped cell into the viewer (iOS 18+); skipped for the shuffled
-                // slideshow, which has no originating cell.
-                let sourceID = (!p.slideshow && p.items.indices.contains(p.startIndex)) ? p.items[p.startIndex].url : nil
-                ViewerView(items: p.items, startIndex: p.startIndex, slideshow: p.slideshow,
-                           zoomSourceID: sourceID, zoomNamespace: p.slideshow ? nil : zoomNS)
+                ViewerView(items: p.items, startIndex: p.startIndex, slideshow: p.slideshow)
             }
             .sheet(isPresented: $showExporter) {
                 FilesExporter(urls: exportURLs) { showExporter = false }
@@ -2854,13 +2846,14 @@ struct FolderView: View {
     /// replaces the back button, so this reinstates it); from the **right** edge, swipe left → the
     /// next alphabetical sibling folder.
     private var folderSwipeGesture: some Gesture {
-        DragGesture(minimumDistance: 30, coordinateSpace: .global)
+        DragGesture(minimumDistance: 18, coordinateSpace: .global)
             .onEnded { v in
                 guard !selecting, !isRoot else { return }
                 let bounds = UIScreen.main.bounds
                 let edge = bounds.width * 0.18
                 let dx = v.translation.width, dy = v.translation.height
-                guard abs(dx) > 70, abs(dy) < abs(dx) * 0.6 else { return }
+                // A short, mostly-horizontal flick is enough (was 70pt — too far).
+                guard abs(dx) > 36, abs(dy) < abs(dx) * 0.75 else { return }
                 // Back (left → right): from the left edge, OR anywhere along the bottom third of the
                 // screen — so a swipe near the bottom-center works too, not just the left edge.
                 let fromBottom = v.startLocation.y > bounds.height * 0.72
