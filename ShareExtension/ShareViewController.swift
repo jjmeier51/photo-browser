@@ -64,22 +64,30 @@ final class ShareViewController: UIViewController {
         let now = Date().timeIntervalSince1970
 
         for p in providers {
-            // A shared story is a web link.
-            if p.hasItemConformingToTypeIdentifier(UTType.url.identifier), let url = await loadURL(p) {
+            // A shared story is a web link — but ONLY a real http/https link. A shared movie/image
+            // item ALSO advertises a `file://` URL for itself, so the old "URL first, any scheme"
+            // check recorded that bogus file:// "link" (which the app can't download) instead of the
+            // actual video. That's why sharing a *video* story did nothing while photos (whose image
+            // item isn't exposed as a URL) worked. Requiring http/https lets a movie's file:// URL
+            // fall through to the file branch below.
+            if p.hasItemConformingToTypeIdentifier(UTType.url.identifier), let url = await loadURL(p),
+               let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
                 record(.init(kind: .url, value: url.absoluteString, timestamp: now))
+                return openAppAndFinish()
+            }
+            // A shared photo/video file (from Instagram's "share to", Photos, etc.): copy it into
+            // the App Group container. Checked before plain text so a movie always beats any stray
+            // text representation.
+            let isMovie = p.hasItemConformingToTypeIdentifier(UTType.movie.identifier)
+            if isMovie || p.hasItemConformingToTypeIdentifier(UTType.image.identifier),
+               let name = await copyFile(p, movie: isMovie) {
+                record(.init(kind: .file, value: name, isVideoHint: isMovie, timestamp: now))
                 return openAppAndFinish()
             }
             // Some apps share the link as plain text.
             if p.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
                let text = await loadText(p), let link = firstURL(in: text) {
                 record(.init(kind: .url, value: link, timestamp: now))
-                return openAppAndFinish()
-            }
-            // A shared photo/video file (e.g. from Photos): copy it into the App Group container.
-            let isMovie = p.hasItemConformingToTypeIdentifier(UTType.movie.identifier)
-            if isMovie || p.hasItemConformingToTypeIdentifier(UTType.image.identifier),
-               let name = await copyFile(p, movie: isMovie) {
-                record(.init(kind: .file, value: name, isVideoHint: isMovie, timestamp: now))
                 return openAppAndFinish()
             }
         }
