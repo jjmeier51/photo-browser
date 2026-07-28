@@ -57,7 +57,21 @@ private struct HTMLWebView: UIViewRepresentable {
         web.navigationDelegate = context.coordinator
         web.uiDelegate = context.coordinator
         web.allowsBackForwardNavigationGestures = false
-        web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        // Load the file's bytes ourselves rather than `loadFileURL`: the app process holds the
+        // drive's security-scoped access, but WKWebView's separate content process may not — so
+        // `loadFileURL` left some on-drive files blank. Reading the data here (off-main; the drive
+        // can be slow) and handing over the bytes means the content process needs no file access.
+        let fileURL = url
+        Task { @MainActor in
+            if let data = await Task.detached(priority: .userInitiated, operation: { try? Data(contentsOf: fileURL) }).value {
+                web.load(data, mimeType: "text/html", characterEncodingName: "UTF-8",
+                         baseURL: fileURL.deletingLastPathComponent())
+            } else {
+                web.loadHTMLString("<meta name=viewport content='width=device-width,initial-scale=1'>"
+                    + "<body style='font-family:-apple-system;padding:2em;color:#888'>Couldn’t open this file.</body>",
+                                   baseURL: nil)
+            }
+        }
         return web
     }
 

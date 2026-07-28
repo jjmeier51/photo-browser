@@ -2857,12 +2857,15 @@ struct FolderView: View {
         DragGesture(minimumDistance: 30, coordinateSpace: .global)
             .onEnded { v in
                 guard !selecting, !isRoot else { return }
-                let width = UIScreen.main.bounds.width
-                let edge = width * 0.18
+                let bounds = UIScreen.main.bounds
+                let edge = bounds.width * 0.18
                 let dx = v.translation.width, dy = v.translation.height
                 guard abs(dx) > 70, abs(dy) < abs(dx) * 0.6 else { return }
-                if v.startLocation.x < edge, dx > 0 { goBack() }
-                else if v.startLocation.x > width - edge, dx < 0 { goToSiblingFolder(offset: 1) }
+                // Back (left → right): from the left edge, OR anywhere along the bottom third of the
+                // screen — so a swipe near the bottom-center works too, not just the left edge.
+                let fromBottom = v.startLocation.y > bounds.height * 0.72
+                if dx > 0, v.startLocation.x < edge || fromBottom { goBack() }
+                else if dx < 0, v.startLocation.x > bounds.width - edge { goToSiblingFolder(offset: 1) }
             }
     }
 

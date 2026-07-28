@@ -164,9 +164,12 @@ struct EntryCell: View {
                     .clipped()
             }
         } else if entry.kind == .other {
+            // Show the file's name (e.g. an .html link sheet) rather than just its type, so it's
+            // identifiable at a glance.
             VStack(spacing: 6) {
                 Image(systemName: otherIcon).font(.system(size: 30)).foregroundStyle(.secondary)
-                Text(extLabel).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                Text(entry.name).font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(2).multilineTextAlignment(.center).padding(.horizontal, 4)
             }
         } else if entry.kind == .audio {
             VStack(spacing: 6) {
