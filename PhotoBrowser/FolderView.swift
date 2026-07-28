@@ -1329,10 +1329,10 @@ struct FolderView: View {
                     }
                 }
                 if !entries.isEmpty { filterBar }
-                // Edge swipes on the grid hop to the alphabetical neighbor folder (right edge,
-                // swipe left → next; left edge, swipe right → previous). Simultaneous so
-                // scrolling, taps and long-presses are untouched; attached to the grid only so
-                // the horizontal filter-chip scroller can't trigger it.
+                // Edge swipes on the grid: left edge, swipe right → back to the parent folder;
+                // right edge, swipe left → next alphabetical sibling. Simultaneous so scrolling,
+                // taps and long-presses are untouched; attached to the grid only so the horizontal
+                // filter-chip scroller can't trigger it.
                 grid.simultaneousGesture(folderSwipeGesture)
             }
             .background(AppGradient())
@@ -2843,6 +2843,10 @@ struct FolderView: View {
 
     /// Right edge + swipe left → next sibling folder (A→Z); left edge + swipe right → previous.
     /// Start-location and direction filters keep vertical scrolling and mid-screen pans inert.
+    /// Horizontal edge swipes on the grid: from the **left** edge, swipe right → **go back** to the
+    /// parent folder (the system back-swipe is disabled because the custom leading toolbar item
+    /// replaces the back button, so this reinstates it); from the **right** edge, swipe left → the
+    /// next alphabetical sibling folder.
     private var folderSwipeGesture: some Gesture {
         DragGesture(minimumDistance: 30, coordinateSpace: .global)
             .onEnded { v in
@@ -2851,9 +2855,15 @@ struct FolderView: View {
                 let edge = width * 0.18
                 let dx = v.translation.width, dy = v.translation.height
                 guard abs(dx) > 70, abs(dy) < abs(dx) * 0.6 else { return }
-                if v.startLocation.x > width - edge, dx < 0 { goToSiblingFolder(offset: 1) }
-                else if v.startLocation.x < edge, dx > 0 { goToSiblingFolder(offset: -1) }
+                if v.startLocation.x < edge, dx > 0 { goBack() }
+                else if v.startLocation.x > width - edge, dx < 0 { goToSiblingFolder(offset: 1) }
             }
+    }
+
+    /// Pops the navigation stack back to the parent directory (the left-to-right back-swipe).
+    private func goBack() {
+        Haptics.light()
+        _ = library.path.popLast()
     }
 
     /// Replace the top of the navigation path with the alphabetical neighbor of this folder
