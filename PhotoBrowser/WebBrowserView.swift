@@ -20,6 +20,9 @@ struct WebBrowserView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
     let targetFolder: URL
+    /// When set (e.g. a link tapped inside a viewable `.html` file), the browser opens straight to
+    /// this URL instead of restoring the last session.
+    var initialURL: String? = nil
 
     // Shared, app-lifetime controller so the WKWebView (and its back/forward history) survives
     // dismissing the browser and re-opening it — navigating to a folder and back doesn't reset the
@@ -118,7 +121,10 @@ struct WebBrowserView: View {
                 if let c = entry.caption, let dest = entry.dest { library.setCaption(c, for: dest) }
                 if let f = entry.folder { library.contentDidChange(under: f) }
             }
-            if controller.currentURLString.isEmpty {
+            if let initialURL, !initialURL.isEmpty {
+                controller.load(initialURL)             // opened for a specific link (e.g. from an .html file)
+                address = initialURL
+            } else if controller.currentURLString.isEmpty {
                 controller.load(WebController.lastSavedURL ?? "https://www.google.com")
             } else {
                 address = controller.currentURLString   // reflect the live URL when re-opening a session

@@ -793,6 +793,23 @@ final class Library {
         Self.saveBulk(editPresets, "editPresets")
     }
 
+    // MARK: - HTML checkbox state (viewable .html files remember their ticked boxes)
+
+    /// Checked checkbox indices for a viewable `.html` file, keyed by its path. Boxes are identified
+    /// by document order (the nth `input[type=checkbox]`) because these files' checkboxes carry no
+    /// stable ids. Persisted in the bulk store.
+    func htmlChecks(for url: URL) -> [Int] {
+        (Self.loadBulk("htmlChecks", as: [String: [Int]].self) ?? [:])[url.path] ?? []
+    }
+
+    func setHtmlCheck(_ index: Int, checked: Bool, for url: URL) {
+        var dict = Self.loadBulk("htmlChecks", as: [String: [Int]].self) ?? [:]
+        var set = Set(dict[url.path] ?? [])
+        if checked { set.insert(index) } else { set.remove(index) }
+        if set.isEmpty { dict[url.path] = nil } else { dict[url.path] = set.sorted() }
+        Self.saveBulk(dict, "htmlChecks")
+    }
+
     // MARK: - Taylor Swift custom labels
 
     /// The fixed set of labels offered inside the "Taylor Swift" folder.

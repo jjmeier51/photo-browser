@@ -54,6 +54,7 @@ struct FolderView: View {
     @State private var homeSettle = HomeSettleTracker()
 
     @State private var previewItem: PreviewItem?
+    @State private var htmlItem: PreviewItem?       // a tapped .html file → custom viewer (links + checkboxes)
     @State private var pendingArchive: Entry?      // a tapped .zip → offer Extract / Quick Look
     @State private var confirmDelete = false
     @State private var showExporter = false
@@ -889,6 +890,9 @@ struct FolderView: View {
             }
             .sheet(item: $previewItem) { item in
                 QuickLookPreview(url: item.url).ignoresSafeArea()
+            }
+            .fullScreenCover(item: $htmlItem) { item in
+                HTMLFileView(url: item.url, targetFolder: url).environment(library)
             }
             .sheet(item: $moveConflict) { c in
                 MoveConflictView(dest: c.dest, items: c.items, verb: c.isCopy ? "Copy" : "Move",
@@ -2667,6 +2671,8 @@ struct FolderView: View {
             if selection.contains(entry.url) { selection.remove(entry.url) } else { selection.insert(entry.url) }
         } else if entry.isFolder {
             library.path.append(entry.url)
+        } else if ["html", "htm"].contains(entry.url.pathExtension.lowercased()) {
+            htmlItem = PreviewItem(url: entry.url)      // custom viewer: links → in-app browser, remembered checkboxes
         } else if entry.isViewable {
             let media = mediaItems
             viewerPresentation = ViewerPresentation(items: media,
