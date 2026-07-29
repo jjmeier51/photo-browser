@@ -28,8 +28,10 @@ nonisolated final class BackgroundDownloader: NSObject, URLSessionDownloadDelega
         // completed tasks from a prior run, so their completions are delivered here.
         let cfg = URLSessionConfiguration.background(withIdentifier: Self.sessionID)
         cfg.sessionSendsLaunchEvents = true
-        cfg.isDiscretionary = false
+        cfg.isDiscretionary = false                       // run promptly, don't wait for "ideal" conditions
         cfg.allowsCellularAccess = true
+        cfg.httpMaximumConnectionsPerHost = 6             // more videos in flight at once (faster overall)
+        cfg.timeoutIntervalForResource = 7 * 24 * 3600    // let a big/queued transfer finish across app suspensions
         session = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
     }
 

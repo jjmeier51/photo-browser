@@ -59,7 +59,24 @@ enum TikTokService {
     ) async -> (authorId: String, nickname: String, totalFound: Int, resolved: Int, allStats: [String: Int], newest: Double, note: String?) {
         progress(Progress(phase: since == nil ? "Finding @\(username)’s videos…" : "Checking @\(username) for new videos…",
                           fraction: 0, done: 0, total: 0))
-        let listing = await listAllVideos(username: username, already: alreadyDownloaded, progress: progress)
+        // Stream downloads AS THE PROFILE IS LISTED: any new video that already has its HD URL
+        // (or is a photo post) is handed to the caller the instant it's seen, so its background
+        // download starts during pagination instead of after the whole profile is scanned — a big
+        // head start on large profiles, and more downloads handed off before any background window
+        // closes. Only SD-only videos (no HD in the listing) are held back for the per-video HD
+        // resolve below.
+        var resolved = 0
+        let listing = await listAllVideos(username: username, already: alreadyDownloaded, progress: progress) { v in
+            guard !alreadyDownloaded.contains(v.id) else { return }
+            if !v.images.isEmpty {
+                onResolved(ResolvedVideo(id: v.id, url: "", images: v.images.map { absolute($0) },
+                                         createTime: v.createTime, desc: v.desc, likes: v.likes))
+                resolved += 1
+            } else if !v.hd.isEmpty {
+                onResolved(ResolvedVideo(id: v.id, url: absolute(v.hd), images: [], createTime: v.createTime, desc: v.desc, likes: v.likes))
+                resolved += 1
+            }
+        }
         if !listing.avatar.isEmpty, let data = await downloadData(absolute(listing.avatar)) { onAvatar(data) }
 
         // Like counts for *every* listed video (id → likes) — lets the caller refresh the
@@ -69,29 +86,25 @@ enum TikTokService {
 
         let pending = listing.videos.filter { !alreadyDownloaded.contains($0.id) }
         guard !pending.isEmpty else {
-            let note = listing.videos.isEmpty
-                ? (since != nil ? "No new videos." : "Couldn’t find any videos — TikTok or the resolver may be blocking, or the handle is wrong.")
-                : "No new videos."
-            return (listing.authorId, listing.nickname, listing.videos.count, 0, allStats, listing.newest, note)
+            // Distinguish a genuinely up-to-date profile from a resolver that failed/rate-limited:
+            // the old code reported BOTH as "No new videos.", so a throttled update looked done
+            // while new posts silently never arrived. `failed` (never got one good page) says so.
+            let note = listing.failed
+                ? "Couldn’t check for new videos — the resolver may be rate-limiting or blocking. Try again in a moment."
+                : (listing.videos.isEmpty
+                   ? (since != nil ? "No new videos." : "Couldn’t find any videos — TikTok or the resolver may be blocking, or the handle is wrong.")
+                   : "No new videos.")
+            return (listing.authorId, listing.nickname, listing.videos.count, resolved, allStats, listing.newest, note)
         }
 
-        var resolved = 0
-        for (i, v) in pending.enumerated() {
+        // The stragglers streaming skipped: new videos with no HD (and no images) in the listing —
+        // resolve each via the single-video endpoint (rate-limited, so paced).
+        let needResolve = pending.filter { $0.hd.isEmpty && $0.images.isEmpty }
+        for (i, v) in needResolve.enumerated() {
             if Task.isCancelled { break }
-            progress(Progress(phase: "Preparing HD links — \(i + 1) of \(pending.count)…", fraction: 0, done: 0, total: 0))
-            // Photo/slideshow post: the image URLs are direct — no HD resolution needed.
-            if !v.images.isEmpty {
-                onResolved(ResolvedVideo(id: v.id, url: "", images: v.images.map { absolute($0) },
-                                         createTime: v.createTime, desc: v.desc, likes: v.likes))
-                resolved += 1
-                continue
-            }
-            var best = v.hd
-            if best.isEmpty {
-                // No HD in the listing — ask the single-video endpoint for it (rate-limited).
-                best = await resolveDetailHD(id: v.id, username: username) ?? v.sd
-                try? await Task.sleep(nanoseconds: 1_100_000_000)
-            }
+            progress(Progress(phase: "Preparing HD links — \(i + 1) of \(needResolve.count)…", fraction: 0, done: 0, total: 0))
+            if i > 0 { try? await Task.sleep(nanoseconds: 1_100_000_000) }   // pace before each (not after the last)
+            let best = await resolveDetailHD(id: v.id, username: username) ?? v.sd
             guard !best.isEmpty else { continue }
             onResolved(ResolvedVideo(id: v.id, url: absolute(best), images: [], createTime: v.createTime, desc: v.desc, likes: v.likes))
             resolved += 1
@@ -102,13 +115,19 @@ enum TikTokService {
 
     // MARK: - Listing (tikwm user/posts, paginated)
 
-    nonisolated private static func listAllVideos(username: String, already: Set<String>, progress: @escaping @Sendable (Progress) -> Void)
-        async -> (videos: [Video], avatar: String, authorId: String, nickname: String, newest: Double) {
+    /// `onDirect` is called synchronously for every video the moment it's listed, so the caller can
+    /// start downloading the HD-ready ones during pagination. `failed` is true when not a single
+    /// page came back valid (a resolver failure/rate-cap), so callers don't mistake it for "empty".
+    nonisolated private static func listAllVideos(
+        username: String, already: Set<String>, progress: @escaping @Sendable (Progress) -> Void,
+        onDirect: (Video) -> Void
+    ) async -> (videos: [Video], avatar: String, authorId: String, nickname: String, newest: Double, failed: Bool) {
         var all: [Video] = []
         var seen = Set<String>()
         var avatar = "", authorId = "", nickname = ""
         var newest: Double = 0
         var cursor = "0"
+        var gotAnyPage = false        // at least one page parsed cleanly → not a blanket failure
         // Incremental stop is by *dedup*, not a timestamp cutoff. The old cutoff broke early on
         // accounts whose top post is a pinned/old one (and on any tikwm ordering quirk), so they
         // looked like they had "no new videos". Instead, page until we hit a long run of
@@ -117,11 +136,11 @@ enum TikTokService {
         let incremental = !already.isEmpty
         var consecutiveSeen = 0
         for _ in 0..<60 {     // safety cap: 60 pages × 35 ≈ 2100 videos
-            guard let data = await apiGet("/api/user/posts",
-                                          query: ["unique_id": username, "count": "35", "cursor": cursor, "hd": "1"]),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  intValue(json["code"]) == 0,
-                  let d = json["data"] as? [String: Any] else { break }
+            // Retried through tikwm's rate-cap (`code != 0`) and transient failures, so a throttled
+            // request doesn't truncate the list — or, on page 1, masquerade as "no new videos".
+            guard let d = await apiData("/api/user/posts",
+                                        query: ["unique_id": username, "count": "35", "cursor": cursor, "hd": "1"]) else { break }
+            gotAnyPage = true
             let vids = (d["videos"] as? [[String: Any]]) ?? []
             var stop = false
             for v in vids {
@@ -140,8 +159,10 @@ enum TikTokService {
                 let images = ((v["images"] as? [String]) ?? []).filter { !$0.isEmpty }
                 guard !(hd.isEmpty && sd.isEmpty && images.isEmpty) else { continue }
                 let likes = intValue(v["digg_count"]) ?? 0          // tikwm: likes (hearts)
-                all.append(Video(id: id, hd: hd, sd: sd, images: images, createTime: Date(timeIntervalSince1970: ctSecs),
-                                 desc: (v["title"] as? String) ?? "", likes: likes))
+                let video = Video(id: id, hd: hd, sd: sd, images: images, createTime: Date(timeIntervalSince1970: ctSecs),
+                                  desc: (v["title"] as? String) ?? "", likes: likes)
+                all.append(video)
+                onDirect(video)                                     // stream: start its download now if HD-ready
                 if incremental {
                     if already.contains(id) {
                         consecutiveSeen += 1
@@ -160,20 +181,32 @@ enum TikTokService {
             cursor = next
             try? await Task.sleep(nanoseconds: 1_100_000_000)     // tikwm rate-limits ~1 req/sec
         }
-        return (all, avatar, authorId, nickname, newest)
+        return (all, avatar, authorId, nickname, newest, !gotAnyPage)
     }
 
     /// The HD (watermark-free) URL for a single video, via the resolver's single-video endpoint.
     nonisolated private static func resolveDetailHD(id: String, username: String) async -> String? {
         let videoURL = "https://www.tiktok.com/@\(username)/video/\(id)"
-        guard let data = await apiGet("/api/", query: ["url": videoURL, "hd": "1"]),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              intValue(json["code"]) == 0, let d = json["data"] as? [String: Any] else { return nil }
+        guard let d = await apiData("/api/", query: ["url": videoURL, "hd": "1"]) else { return nil }
         let hd = (d["hdplay"] as? String) ?? ""
         return hd.isEmpty ? (d["play"] as? String) : hd
     }
 
     // MARK: - HTTP
+
+    /// GETs a tikwm endpoint and returns its `data` object, retrying through transient failures and
+    /// the free-tier rate-cap (which answers `code != 0`). Returns nil only after exhausting retries,
+    /// so a single throttled request no longer looks like an empty profile.
+    nonisolated private static func apiData(_ path: String, query: [String: String], retries: Int = 3) async -> [String: Any]? {
+        for attempt in 0...retries {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_200_000_000) }   // 1.2s, 2.4s, 3.6s backoff
+            guard let data = await apiGet(path, query: query),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            guard intValue(json["code"]) == 0, let d = json["data"] as? [String: Any] else { continue }
+            return d
+        }
+        return nil
+    }
 
     nonisolated private static func apiGet(_ path: String, query: [String: String]) async -> Data? {
         guard var comps = URLComponents(string: apiBase + path) else { return nil }
