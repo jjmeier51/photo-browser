@@ -128,15 +128,11 @@ enum InstagramService {
                                       poster: profile.handle, creds: creds,
                                       taggedUser: (id: profile.userID, username: profile.handle)) { _ in }.jobs
         }
-        // Current stories (the last 24 hours) → "Stories" subfolder. Prefer the
-        // reels-media tray (the endpoint that reliably returns the logged-in viewer's
-        // story), falling back to the older per-user reel_media.
+        // Current stories (the last 24 hours) → "Stories" subfolder. Gathered from every
+        // reel source, so subscriber-only "Exclusive" stories (which Instagram can deliver in
+        // a separately-keyed reel) are captured alongside the normal ones.
         progress(Progress(phase: "Finding stories…", fraction: 0, done: 0, total: 0))
-        var stories = await fetchReel(path: "feed/reels_media/?reel_ids=\(profile.userID)",
-                                      handle: profile.handle, creds: creds, reelKey: profile.userID)
-        if stories.isEmpty {
-            stories = await fetchReel(path: "feed/user/\(profile.userID)/reel_media/", handle: profile.handle, creds: creds)
-        }
+        let stories = await fetchStories(userID: profile.userID, handle: profile.handle, creds: creds)
         let storiesFolder = folder.appendingPathComponent("Stories", isDirectory: true)
         let storyJobs = reelJobs(items: stories, folder: storiesFolder, already: alreadyDownloaded, poster: profile.handle)
         jobs += storyJobs
@@ -187,13 +183,8 @@ enum InstagramService {
     nonisolated static func runStories(handle: String, userID: String, into storiesFolder: URL,
                                        already: Set<String>, creds: Credentials, onlyPK: String? = nil,
                                        progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
-        // Prefer the reels-media tray (reliably returns the logged-in viewer's story),
-        // falling back to the older per-user reel_media — same order as `run`.
-        var stories = await fetchReel(path: "feed/reels_media/?reel_ids=\(userID)",
-                                      handle: handle, creds: creds, reelKey: userID)
-        if stories.isEmpty {
-            stories = await fetchReel(path: "feed/user/\(userID)/reel_media/", handle: handle, creds: creds)
-        }
+        // Gather from every reel source (normal + subscriber "Exclusive"), same as `run`.
+        var stories = await fetchStories(userID: userID, handle: handle, creds: creds)
         // When a specific story was shared (its media pk is in the link), keep just that item.
         // A story `id` is "<pk>_<userid>", so match the pk against pk / id / the id's prefix.
         // If the pk isn't in the current tray (e.g. already expired), fall back to the whole tray.
@@ -450,7 +441,9 @@ enum InstagramService {
             guard let json else { break }
             let items = json["items"] as? [[String: Any]] ?? []
             for item in items {
-                guard let code = item["code"] as? String else { continue }
+                // Normally the shortcode is the dedup key; fall back to the numeric pk so an
+                // "Exclusive" (subscriber-only) post that arrives without a `code` isn't dropped.
+                guard let code = (item["code"] as? String) ?? idString(item["pk"]) ?? idString(item["id"]) else { continue }
                 if already.contains(code) {
                     // Don't stop at the *first* already-downloaded post: Instagram pins up to ~3
                     // (already-downloaded) posts above newer ones, so a new post can sit below them.
@@ -491,6 +484,70 @@ enum InstagramService {
         }
         if let arr = json["reels_media"] as? [[String: Any]], let items = arr.first?["items"] as? [[String: Any]] { return items }
         return []
+    }
+
+    /// A user's CURRENT story items (last 24h) gathered from every source Instagram may split
+    /// them across, so subscriber-only "Exclusive" stories are captured too. Instagram delivers
+    /// a creator's exclusive stories in a **separate reel** (often keyed differently from the
+    /// plain user id), and can return more than one reel in a single response — the older
+    /// single-reel fetch dropped whichever reel it didn't pick. This merges:
+    ///   1. the reels-media tray for the user (all reels in the response, not just one),
+    ///   2. the older per-user `reel_media`, and
+    ///   3. any additional reel owned by this user found in the viewer's story tray (this is
+    ///      where a separately-keyed subscriber/exclusive reel surfaces).
+    /// De-dups by media pk, preserving first-seen order. Best-effort.
+    nonisolated private static func fetchStories(userID: String, handle: String, creds: Credentials) async -> [[String: Any]] {
+        var byKey: [String: [String: Any]] = [:]
+        var order: [String] = []
+        func add(_ items: [[String: Any]]) {
+            for it in items {
+                let key = idString(it["pk"]) ?? idString(it["id"]) ?? "\(order.count)"
+                if byKey[key] == nil { order.append(key) }
+                byKey[key] = it
+            }
+        }
+        add(await fetchReelAll(path: "feed/reels_media/?reel_ids=\(userID)", handle: handle, creds: creds))
+        add(await fetchReelAll(path: "feed/user/\(userID)/reel_media/", handle: handle, creds: creds))
+        for reelID in await subscriberReelIDs(forUser: userID, handle: handle, creds: creds) {
+            let encoded = reelID.replacingOccurrences(of: ":", with: "%3A")
+            add(await fetchReelAll(path: "feed/reels_media/?reel_ids=\(encoded)", handle: handle, creds: creds))
+        }
+        return order.compactMap { byKey[$0] }
+    }
+
+    /// Like `fetchReel`, but returns the items of **every** reel in the response merged together,
+    /// so a response that splits normal and exclusive stories into two reels loses neither.
+    nonisolated private static func fetchReelAll(path: String, handle: String, creds: Credentials) async -> [[String: Any]] {
+        guard let url = URL(string: "https://www.instagram.com/api/v1/\(path)"),
+              let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+        var out: [[String: Any]] = []
+        if let items = json["items"] as? [[String: Any]] { out += items }
+        if let reel = json["reel"] as? [String: Any], let items = reel["items"] as? [[String: Any]] { out += items }
+        if let reels = json["reels"] as? [String: Any] {
+            for v in reels.values { if let r = v as? [String: Any], let items = r["items"] as? [[String: Any]] { out += items } }
+        }
+        if let arr = json["reels_media"] as? [[String: Any]] {
+            for r in arr { if let items = r["items"] as? [[String: Any]] { out += items } }
+        }
+        return out
+    }
+
+    /// Reel ids in the viewer's story tray that belong to `userID` but aren't the plain user id —
+    /// i.e. a creator's separate subscriber/"Exclusive" story reel. The tray only lists creators
+    /// the viewer follows/subscribes to with active stories, so it's exactly where such a reel shows up.
+    nonisolated private static func subscriberReelIDs(forUser userID: String, handle: String, creds: Credentials) async -> [String] {
+        guard let url = URL(string: "https://www.instagram.com/api/v1/feed/reels_tray/"),
+              let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+        let tray = (json["tray"] as? [[String: Any]]) ?? []
+        var ids: [String] = []
+        for node in tray {
+            let owner = idString((node["user"] as? [String: Any])?["pk"]) ?? idString((node["user"] as? [String: Any])?["id"])
+            guard owner == userID, let rid = idString(node["id"]), rid != userID, !ids.contains(rid) else { continue }
+            ids.append(rid)
+        }
+        return ids
     }
 
     nonisolated private static func fetchHighlights(userID: String, handle: String, creds: Credentials) async -> [(id: String, title: String)] {
