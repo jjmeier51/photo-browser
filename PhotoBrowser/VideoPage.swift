@@ -83,7 +83,7 @@ private struct ZoomableVideo: UIViewControllerRepresentable {
 
 /// Custom AVPlayer view: the player layer lives inside a zoomable scroll view,
 /// with a minimal control bar overlaid on top (which does not zoom).
-final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
+final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIGestureRecognizerDelegate {
     var onDismiss: () -> Void = {}
     var onInfo: () -> Void = {}
     var onZoomChanged: (Bool) -> Void = { _ in }
@@ -126,8 +126,11 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
     /// Slo-Mo mode: 0 = off; otherwise the playback rate (0.25 = 4× slower, 0.125 = 8× slower).
     /// Resume paths honor this, so pause/resume/frame-step keep working while it's active.
     private var sloMoRate: Float = 0
-    /// True while a left/right side is held during Slo-Mo, playing 1.5× until the finger lifts.
-    private var tempFast = false
+    /// Rate while a left/right side is held during Slo-Mo: 1.5× *slower* (not 1.5× real-time
+    /// speed) — a gentler peek than the 4×/8× rate, still clearly slow motion.
+    private static let sideHoldRate: Float = 1.0 / 1.5
+    /// True while a left/right side is held during Slo-Mo, playing 1.5× slower until the finger lifts.
+    private var tempPeek = false
     private let sloMoBadge = UILabel()
 
     init(url: URL) {
@@ -311,10 +314,22 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
             scrollView.addGestureRecognizer(g)
         }
 
-        // Long-press the CENTER of the video to toggle Slo-Mo mode (see `handleLongPress`).
+        // Long-press to control Slo-Mo (see `handleLongPress`). Its delegate lets it recognize
+        // alongside the scroll view's pan/zoom, so Slo-Mo also works on a zoomed-in video
+        // without blocking panning.
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
         longPress.minimumPressDuration = 0.45
+        longPress.delegate = self
         scrollView.addGestureRecognizer(longPress)
+    }
+
+    /// Allow the Slo-Mo long-press to coexist with the scroll view's pan/zoom gestures, so a
+    /// zoomed video can still be panned while Slo-Mo is toggled or a side is held for a peek.
+    /// (A real pan drags past the long-press's movement threshold and fails it, so the two don't
+    /// fight: a still hold = Slo-Mo, a drag = pan.)
+    func gestureRecognizer(_ g: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        g is UILongPressGestureRecognizer || other is UILongPressGestureRecognizer
     }
 
     private var atRest: Bool { scrollView.zoomScale <= 1.001 }
@@ -391,10 +406,11 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
 
     // MARK: - Slo-Mo mode
 
-    /// Long-press the center of the video to toggle Slo-Mo. When it's off, offer 4×/8× slower;
+    /// Long-press the center of the video to toggle Slo-Mo. When it's off, offer 2×/4×/8× slower;
     /// when it's on, a center long-press turns it off (no confirmation prompt — just a flash).
-    /// Restricted to the center region so it can't be mistaken for a skip/zoom/frame-step tap,
-    /// and ignored while zoomed in (that gesture pans).
+    /// Restricted to the center region so it can't be mistaken for a skip/zoom/frame-step tap.
+    /// Works whether or not the video is zoomed in — the recognizer coexists with the pan gesture,
+    /// so a still hold controls Slo-Mo while a drag still pans a zoomed video.
     @objc private func handleLongPress(_ g: UILongPressGestureRecognizer) {
         let loc = g.location(in: view)
         let w = view.bounds.width, h = view.bounds.height
@@ -402,33 +418,32 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
         let onSide = loc.x < w / 3 || loc.x > w * 2 / 3
         switch g.state {
         case .began:
-            guard atRest else { return }            // while zoomed the long-press pans instead
             if inCenter {
                 if sloMoRate > 0 { disableSloMo() } else { presentSloMoOptions(at: loc) }
             } else if onSide, sloMoRate > 0 {
-                beginTempFast()                     // hold a side during Slo-Mo → 1.5× until released
+                beginTempPeek()                     // hold a side during Slo-Mo → 1.5× slower until released
             }
         case .ended, .cancelled, .failed:
-            endTempFast()
+            endTempPeek()
         default:
             break
         }
     }
 
-    /// While Slo-Mo is on, a press-and-hold on the left/right side plays at 1.5× for a quick
-    /// forward peek; lifting the finger drops straight back to the 4×/8× Slo-Mo rate.
-    private func beginTempFast() {
-        guard sloMoRate > 0, !tempFast else { return }
-        tempFast = true
-        player.rate = 1.5
+    /// While Slo-Mo is on, a press-and-hold on the left/right side plays at 1.5× *slower* — a
+    /// gentler peek than the 4×/8× rate; lifting the finger drops back to the Slo-Mo rate.
+    private func beginTempPeek() {
+        guard sloMoRate > 0, !tempPeek else { return }
+        tempPeek = true
+        player.rate = Self.sideHoldRate
         playButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
-        flashCapture("▶▶ 1.5×")
+        flashCapture("Slo Mo · 1.5× slower")
         if !controlsHidden { scheduleHide() }
     }
 
-    private func endTempFast() {
-        guard tempFast else { return }
-        tempFast = false
+    private func endTempPeek() {
+        guard tempPeek else { return }
+        tempPeek = false
         guard sloMoRate > 0 else { return }
         player.rate = sloMoRate                      // resume the previous Slo-Mo rate
         flashCapture("Slo Mo · \(sloMoTimes(sloMoRate)) slower")
@@ -482,7 +497,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
     /// Resumes playback at the current speed — the Slo-Mo rate when the mode is on, else 1×.
     /// Every play/resume path goes through this so Slo-Mo survives pause/resume/loop/scrub.
     private func resumePlayback() {
-        if tempFast { player.rate = 1.5 }            // a side is being held (survives a loop)
+        if tempPeek { player.rate = Self.sideHoldRate }   // a side is being held (survives a loop)
         else if sloMoRate > 0 { player.rate = sloMoRate }
         else { player.play() }
         playButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
@@ -608,7 +623,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
         player.pause()
         player.seek(to: .zero)
         sloMoRate = 0                 // exiting the player disables Slo-Mo
-        tempFast = false
+        tempPeek = false
         sloMoBadge.isHidden = true
     }
 
