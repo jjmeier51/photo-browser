@@ -272,6 +272,14 @@ struct WebBrowserView: View {
                 }
                 .disabled(!controller.canGoForward)
                 Spacer()
+                // A thumb-reachable "Done" at the bottom center (the top-left one stays too), so the
+                // browser can be closed without reaching up to the corner.
+                Button { dismiss() } label: {
+                    Text("Done").fontWeight(.semibold)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .contentShape(Rectangle())
+                }
+                Spacer()
                 if controller.hasVideo, let v = controller.bestVideo() {
                     Button { pending = v } label: { Image(systemName: "arrow.down.circle.fill").foregroundStyle(.green) }
                 } else {
