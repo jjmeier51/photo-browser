@@ -83,7 +83,10 @@ struct HTMLFileView: View {
         showToast("Downloading…")
         WebController.shared.startFileDownload(file, into: folder) { entry in
             switch entry.state {
-            case .done: library.contentDidChange(under: folder); showToast("Saved to “\(folder.lastPathComponent)”")
+            case .done:
+                library.contentDidChange(under: folder)
+                showToast(entry.message?.hasPrefix("Already") == true
+                          ? "Already in “\(folder.lastPathComponent)”" : "Saved to “\(folder.lastPathComponent)”")
             case .failed: showToast(entry.message ?? "Download failed")
             default: break
             }

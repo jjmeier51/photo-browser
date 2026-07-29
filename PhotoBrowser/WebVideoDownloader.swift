@@ -67,6 +67,12 @@ enum WebVideoDownloader {
         }
         guard let url = URL(string: effectiveURL) else { return .failed("That video URL couldn’t be read.") }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        // Already saved here? Skip the whole transfer (matched by the filename we'd give it). Return
+        // before the metadata-stamp block below so the existing file is left untouched.
+        let existingName = baseName(suggestedName, url: url, ext: "mp4")
+        if alreadyExists(existingName, in: folder) {
+            return .saved(folder.appendingPathComponent(existingName), note: "Already in this folder")
+        }
         var outcome: Outcome
         if isHLS(url) {
             outcome = await downloadHLS(url, pageURL: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
@@ -188,6 +194,12 @@ enum WebVideoDownloader {
                                          progress: @escaping @Sendable (Progress) -> Void) async -> Outcome {
         guard let url = URL(string: urlString) else { return .failed("That link couldn’t be read.") }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        // Already saved here? Skip the download (matched by the filename we'd give it). This is what
+        // stops a re-tapped image/file from being saved again as a " 1" duplicate.
+        let existingName = fileName(suggested: suggestedName, url: url, response: nil, sniffedExt: nil)
+        if alreadyExists(existingName, in: folder) {
+            return .saved(folder.appendingPathComponent(existingName), note: "Already in this folder")
+        }
         progress(Progress(fraction: 0, phase: "Downloading file…"))
         guard let (tmp, resp) = await downloadToTemp(url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
                                                      progress: { f in progress(Progress(fraction: f, phase: "Downloading file…")) }) else {
@@ -548,14 +560,22 @@ enum WebVideoDownloader {
     nonisolated private static func pump(_ input: AVAssetWriterInput, _ output: AVAssetReaderTrackOutput) async {
         let queue = DispatchQueue(label: "webvid.mux.pump")
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            // `requestMediaDataWhenReady`'s block can be invoked again even after we finish, and
+            // resuming a continuation twice is a HARD CRASH — this guard (serialized on `queue`)
+            // makes the resume happen exactly once. That double-resume was crashing HLS-with-audio
+            // downloads intermittently.
+            var finished = false
             input.requestMediaDataWhenReady(on: queue) {
+                if finished { return }
                 while input.isReadyForMoreMediaData {
                     guard let sb = output.copyNextSampleBuffer() else {
-                        input.markAsFinished()      // stops further callbacks → single resume
-                        cont.resume()
-                        return
+                        finished = true; input.markAsFinished(); cont.resume(); return
                     }
-                    input.append(sb)
+                    // A refused append means the writer entered a failed state — stop instead of
+                    // spinning on a wedged writer (and finish the input so `finishWriting` returns).
+                    if !input.append(sb) {
+                        finished = true; input.markAsFinished(); cont.resume(); return
+                    }
                 }
             }
         }
@@ -919,6 +939,12 @@ enum WebVideoDownloader {
         case let m where m.contains("plain"): return "txt"
         default: return "bin"
         }
+    }
+
+    /// True if a file with this exact name is already in `folder` — used to SKIP re-downloading
+    /// something already saved there, rather than making a " 1" duplicate.
+    nonisolated private static func alreadyExists(_ name: String, in folder: URL) -> Bool {
+        FileManager.default.fileExists(atPath: folder.appendingPathComponent(name).path)
     }
 
     nonisolated private static func uniqueDestination(name: String, in folder: URL) -> URL {

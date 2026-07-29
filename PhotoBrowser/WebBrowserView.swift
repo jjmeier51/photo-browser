@@ -363,7 +363,9 @@ struct WebBrowserView: View {
         showToast("Downloading — tap ⬇ for progress", error: false)
         controller.startDownload(v, into: folder, suggestedName: controller.pageTitle) { entry in
             switch entry.state {
-            case .done: showToast("Saved to “\(folder.lastPathComponent)”", error: false)
+            case .done:
+                let skipped = entry.message?.hasPrefix("Already") == true
+                showToast(skipped ? "Already in “\(folder.lastPathComponent)”" : "Saved to “\(folder.lastPathComponent)”", error: false)
             case .failed: showToast(entry.message ?? "Download failed", error: true)
             default: break
             }
@@ -376,7 +378,9 @@ struct WebBrowserView: View {
         webHintSeen = true
         controller.startFileDownload(f, into: folder) { entry in
             switch entry.state {
-            case .done: showToast("Saved to “\(folder.lastPathComponent)”", error: false)
+            case .done:
+                let skipped = entry.message?.hasPrefix("Already") == true
+                showToast(skipped ? "Already in “\(folder.lastPathComponent)”" : "Saved to “\(folder.lastPathComponent)”", error: false)
             case .failed: showToast(entry.message ?? "Download failed", error: true)
             default: break
             }
