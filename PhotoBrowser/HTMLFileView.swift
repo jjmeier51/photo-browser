@@ -25,6 +25,9 @@ struct HTMLFileView: View {
     @State private var showImageFolderPicker = false
     // Transient "Saved / failed / downloading" banner.
     @State private var toast: String?
+    // Text selection is OFF by default so it doesn't fight the long-press-to-download gesture
+    // (which was firing only intermittently); the lower-right menu re-enables it for the session.
+    @State private var allowTextSelection = false
 
     private struct LinkItem: Identifiable { let id = UUID(); let value: String }
     private struct ImageItem: Identifiable { let id = UUID(); let url: String }
@@ -33,11 +36,13 @@ struct HTMLFileView: View {
         NavigationStack {
             HTMLWebView(url: url,
                         savedChecks: library.htmlChecks(for: url),
+                        allowTextSelection: allowTextSelection,
                         onToggle: { index, checked in library.setHtmlCheck(index, checked: checked, for: url) },
                         onOpenLink: { linkItem = LinkItem(value: $0) },
                         onImageLongPress: { imageItem = ImageItem(url: $0) })
                 .ignoresSafeArea(edges: .bottom)
                 .overlay(alignment: .top) { toastView }
+                .overlay(alignment: .bottomTrailing) { selectionMenu }
                 .navigationTitle(url.deletingPathExtension().lastPathComponent)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
@@ -105,6 +110,23 @@ struct HTMLFileView: View {
             if toast == text { withAnimation { toast = nil } }
         }
     }
+
+    /// Lower-right menu to re-enable text selection for the session (off by default so it doesn't
+    /// interfere with long-press-to-download).
+    private var selectionMenu: some View {
+        Menu {
+            Button { allowTextSelection.toggle() } label: {
+                Label(allowTextSelection ? "Turn Off Text Selection" : "Turn On Text Selection",
+                      systemImage: allowTextSelection ? "character.cursor.ibeam" : "hand.tap")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle.fill")
+                .font(.title2)
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, .black.opacity(0.45))
+                .padding(14)
+        }
+    }
 }
 
 /// The WKWebView that renders the local file, routes link taps out to `onOpenLink`, reports an image
@@ -112,6 +134,7 @@ struct HTMLFileView: View {
 private struct HTMLWebView: UIViewRepresentable {
     let url: URL
     let savedChecks: [Int]
+    let allowTextSelection: Bool
     let onToggle: (Int, Bool) -> Void
     let onOpenLink: (String) -> Void
     let onImageLongPress: (String) -> Void
@@ -128,6 +151,9 @@ private struct HTMLWebView: UIViewRepresentable {
         // under the finger (and a device-width viewport when the file ships none, so points map to
         // CSS pixels). Same detection the in-app browser uses.
         ucc.addUserScript(WKUserScript(source: Self.imageHitTestJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        // Disable text selection/callout by default so it doesn't fight the long-press download
+        // (`window.__pbAllowSelect` re-enables it); shared with the in-app browser.
+        ucc.addUserScript(WKUserScript(source: WebController.noSelectJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         cfg.userContentController = ucc
         let web = WKWebView(frame: .zero, configuration: cfg)
         web.navigationDelegate = context.coordinator
@@ -158,7 +184,9 @@ private struct HTMLWebView: UIViewRepresentable {
         return web
     }
 
-    func updateUIView(_ web: WKWebView, context: Context) {}
+    func updateUIView(_ web: WKWebView, context: Context) {
+        context.coordinator.applySelection(allowTextSelection, to: web)
+    }
 
     /// Finds, under a point, both the enclosing link (`<a href>` — often the FULL-SIZE image a
     /// thumbnail links to) and the displayed `<img>` / CSS background image, resolving pinch-zoom
@@ -202,6 +230,8 @@ private struct HTMLWebView: UIViewRepresentable {
         private let onImageLongPress: (String) -> Void
         /// Reused so the long-press haptic doesn't cold-start the Taptic Engine.
         private let haptic = UINotificationFeedbackGenerator()
+        /// Last selection state pushed to the page, so `updateUIView` only re-runs the JS on change.
+        private var appliedSelect: Bool?
 
         init(savedChecks: [Int], onToggle: @escaping (Int, Bool) -> Void,
              onOpenLink: @escaping (String) -> Void, onImageLongPress: @escaping (String) -> Void) {
@@ -209,6 +239,13 @@ private struct HTMLWebView: UIViewRepresentable {
             self.onToggle = onToggle
             self.onOpenLink = onOpenLink
             self.onImageLongPress = onImageLongPress
+        }
+
+        /// Turn text selection/callout on or off (the injected script defaults it off at load).
+        func applySelection(_ allow: Bool, to web: WKWebView) {
+            guard appliedSelect != allow else { return }
+            appliedSelect = allow
+            web.evaluateJavaScript("window.__pbAllowSelect && window.__pbAllowSelect(\(allow))", completionHandler: nil)
         }
 
         /// After the file loads: restore the ticked boxes and post back any future changes.
@@ -228,6 +265,10 @@ private struct HTMLWebView: UIViewRepresentable {
             })();
             """
             webView.evaluateJavaScript(js, completionHandler: nil)
+            // The page loaded with selection disabled (injected default) — restore a session opt-in.
+            if appliedSelect == true {
+                webView.evaluateJavaScript("window.__pbAllowSelect && window.__pbAllowSelect(true)", completionHandler: nil)
+            }
         }
 
         /// Route any http/https navigation (a tapped link) to the in-app browser; allow the local

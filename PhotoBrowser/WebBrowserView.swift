@@ -273,11 +273,14 @@ struct WebBrowserView: View {
                 .disabled(!controller.canGoForward)
                 Spacer()
                 // A thumb-reachable "Done" at the bottom center (the top-left one stays too), so the
-                // browser can be closed without reaching up to the corner.
+                // browser can be closed without reaching up to the corner. Smaller than the nav
+                // icons, in a pill border so it reads as a button.
                 Button { dismiss() } label: {
-                    Text("Done").fontWeight(.semibold)
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .contentShape(Rectangle())
+                    Text("Done")
+                        .font(.callout.weight(.semibold))            // ~20% smaller than the bar's .title3
+                        .padding(.horizontal, 14).padding(.vertical, 5)
+                        .overlay(Capsule().strokeBorder(.secondary.opacity(0.6), lineWidth: 1))
+                        .contentShape(Capsule())
                 }
                 Spacer()
                 if controller.hasVideo, let v = controller.bestVideo() {
@@ -301,6 +304,10 @@ struct WebBrowserView: View {
                             Label(controller.isDesktopSite ? "Request Mobile Website" : "Request Desktop Website",
                                   systemImage: controller.isDesktopSite ? "iphone" : "desktopcomputer")
                         }.disabled(!controller.hasSession)
+                        Button { controller.toggleTextSelection() } label: {
+                            Label(controller.allowTextSelection ? "Turn Off Text Selection" : "Turn On Text Selection",
+                                  systemImage: controller.allowTextSelection ? "character.cursor.ibeam" : "hand.tap")
+                        }
                         Button { controller.openInSafari() } label: {
                             Label("Open in Safari", systemImage: "safari")
                         }.disabled(!controller.hasSession)
@@ -769,8 +776,24 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     @Published var loadError: String?
     /// True while the page is rendered with a desktop UA ("Request Desktop Website").
     @Published var isDesktopSite = false
+    /// Text selection is OFF by default: the drag-to-select / long-press-callout gestures fight the
+    /// long-press-to-download gesture, making downloads fire only intermittently. A menu toggle
+    /// re-enables it for the session.
+    @Published var allowTextSelection = false
 
     var activeDownloads: Int { downloads.filter { $0.state == .downloading }.count }
+
+    /// Flip text selection for this session and apply it to the live page immediately.
+    func toggleTextSelection() {
+        allowTextSelection.toggle()
+        applyTextSelection()
+    }
+
+    /// Sync the page to the current `allowTextSelection` (called on toggle and after each load,
+    /// since a fresh page starts with selection disabled via the injected script).
+    private func applyTextSelection() {
+        webView.evaluateJavaScript("window.__pbAllowSelect && window.__pbAllowSelect(\(allowTextSelection))", completionHandler: nil)
+    }
 
     /// The running Task per download row, so a row's ✕ can actually cancel the transfer.
     private var downloadTasks: [UUID: Task<Void, Never>] = [:]
@@ -1001,6 +1024,8 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         let ucc = WKUserContentController()
         ucc.add(WeakScriptHandler(self), name: "pb")          // weak: avoid the config→handler→config retain cycle
         ucc.addUserScript(WKUserScript(source: Self.detectorJS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        // Disable text selection/callout by default so it doesn't fight long-press-to-download.
+        ucc.addUserScript(WKUserScript(source: Self.noSelectJS, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         cfg.userContentController = ucc
         let web = WKWebView(frame: .zero, configuration: cfg)
         web.navigationDelegate = self
@@ -1237,6 +1262,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         refreshControl.endRefreshing()
         loadError = nil
         recordHistory()
+        applyTextSelection()        // a fresh page loads with selection disabled — honor a session opt-in
     }
 
     // Only PROVISIONAL failures show the error page — the page never arrived, so the overlay
@@ -1525,6 +1551,24 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "pb")
         webView.stopLoading()
     }
+
+    /// Toggles text selection + the long-press callout via an injected stylesheet. Installed at
+    /// document start disabled (so the long-press-to-download gesture wins); `window.__pbAllowSelect`
+    /// lets the app turn it back on for the session.
+    static let noSelectJS = """
+    (function(){
+      window.__pbAllowSelect = function(allow){
+        var id='__pbNoSelectStyle', s=document.getElementById(id);
+        if(allow){ if(s) s.parentNode && s.parentNode.removeChild(s); return; }
+        if(!s){ s=document.createElement('style'); s.id=id;
+          // Exclude form fields so typing/editing still works; disable selection + the long-press
+          // callout everywhere else (that callout is what was stealing the download long-press).
+          s.textContent='*:not(input):not(textarea):not([contenteditable]){-webkit-user-select:none !important;user-select:none !important;-webkit-touch-callout:none !important;}';
+          (document.head||document.documentElement).appendChild(s); }
+      };
+      window.__pbAllowSelect(false);
+    })();
+    """
 
     /// Injected at document start into every frame: capture media requests + report the video
     /// under a point for long-press.
