@@ -160,8 +160,10 @@ private struct HTMLWebView: UIViewRepresentable {
 
     func updateUIView(_ web: WKWebView, context: Context) {}
 
-    /// Finds the `<img>` (or CSS background image) under a point, resolving pinch-zoom via
-    /// `visualViewport`, and ensures a device-width viewport when the file ships none.
+    /// Finds, under a point, both the enclosing link (`<a href>` — often the FULL-SIZE image a
+    /// thumbnail links to) and the displayed `<img>` / CSS background image, resolving pinch-zoom
+    /// via `visualViewport`. Ensures a device-width viewport when the file ships none. Returns
+    /// `{link, image}` JSON so Swift can prefer the linked full image over the thumbnail.
     private static let imageHitTestJS = """
     (function(){
       if (window.__pbImgInstalled) return; window.__pbImgInstalled = true;
@@ -174,20 +176,21 @@ private struct HTMLWebView: UIViewRepresentable {
       }catch(e){}
       window.__pbImgAt = function(x,y){
         try{ var vv=window.visualViewport; if(vv){ x=vv.offsetLeft + x/vv.scale; y=vv.offsetTop + y/vv.scale; } }catch(e){}
-        var n = document.elementFromPoint(x,y);
+        var n = document.elementFromPoint(x,y), link = '', image = '';
         while(n){
-          if(n.tagName==='IMG'){
+          if(!image && n.tagName==='IMG'){
             var s = n.currentSrc || n.src || n.getAttribute('data-src') || '';
-            return (s && s.indexOf('data:')!==0) ? s : '';
+            if(s && s.indexOf('data:')!==0) image = s;
           }
-          if(n.nodeType===1){
+          if(!link && n.tagName==='A' && n.href) link = n.href;
+          if(!image && n.nodeType===1){
             var bg = getComputedStyle(n).backgroundImage||'';
             var m = bg.match(/url\\(["']?([^"')]+)["']?\\)/);
-            if(m && m[1] && m[1].indexOf('data:')!==0) return m[1];
+            if(m && m[1] && m[1].indexOf('data:')!==0) image = m[1];
           }
           n = n.parentElement;
         }
-        return '';
+        return JSON.stringify({ link: link, image: image });
       };
     })();
     """
@@ -254,15 +257,32 @@ private struct HTMLWebView: UIViewRepresentable {
             onToggle(index, checked)
         }
 
-        /// Long-press → ask the page for the image under the finger; if it has a real URL, offer it.
+        /// Long-press → ask the page what's under the finger. Prefer the full-size image the
+        /// thumbnail LINKS to (an `<a href="…jpg">`) over the displayed `<img>`, which is usually
+        /// just a thumbnail — the same priority the in-app browser uses. Falls back to the image
+        /// itself when the link doesn't point at a downloadable file.
         @objc func handleLongPress(_ g: UILongPressGestureRecognizer) {
             guard g.state == .began, let web = g.view as? WKWebView else { return }
             haptic.prepare()                     // warm the engine while the JS hit-test round-trips
             let p = g.location(in: web)
             web.evaluateJavaScript("window.__pbImgAt ? window.__pbImgAt(\(Int(p.x)),\(Int(p.y))) : ''") { [weak self] result, _ in
-                guard let self, let src = result as? String, src.hasPrefix("http") else { return }
-                self.haptic.notificationOccurred(.success)
-                self.onImageLongPress(src)
+                guard let self else { return }
+                var link: String?, image: String?
+                if let json = result as? String, let data = json.data(using: .utf8),
+                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    link = (obj["link"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                    image = (obj["image"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                }
+                // A link to a real file (…jpg/png/mp4/…) is the full-size target — prefer it.
+                if let href = link, href.hasPrefix("http"), WebController.looksDownloadable(href) {
+                    self.haptic.notificationOccurred(.success)
+                    self.onImageLongPress(href)
+                    return
+                }
+                if let img = image, img.hasPrefix("http") {
+                    self.haptic.notificationOccurred(.success)
+                    self.onImageLongPress(img)
+                }
             }
         }
 
