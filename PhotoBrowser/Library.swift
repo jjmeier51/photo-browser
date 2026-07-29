@@ -1291,7 +1291,8 @@ final class Library {
                 setActivity(id, status: "@\(job.handle) — \(already.isEmpty ? "downloading" : "checking for new posts") (\(i + 1) of \(jobs.count))",
                             fraction: Double(i) / Double(jobs.count))
                 let r = await InstagramService.run(handle: job.handle, into: dest, alreadyDownloaded: already,
-                                                   creds: creds, includeTagged: !skipTagged) { p in
+                                                   creds: creds, includeTagged: !skipTagged,
+                                                   knownUserID: prior?.userID) { p in
                     Task { @MainActor in
                         self.setActivity(id, fraction: (Double(i) + p.fraction) / Double(jobs.count))
                     }

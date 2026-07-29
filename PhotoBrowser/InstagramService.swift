@@ -93,10 +93,20 @@ enum InstagramService {
 
     nonisolated static func run(handle: String, into folder: URL, alreadyDownloaded: Set<String>,
                                 creds: Credentials, replaceExisting: Bool = false, includeTagged: Bool = true,
+                                knownUserID: String? = nil,
                                 progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
         progress(Progress(phase: "Loading @\(handle)…", fraction: 0, done: 0, total: 0))
-        guard let profile = await fetchProfile(handle: handle, creds: creds) else {
+        let profile: Profile
+        if let p = await fetchProfile(handle: handle, creds: creds) {
+            profile = p
+        } else if let knownUserID, !knownUserID.isEmpty {
+            // We've downloaded this profile before, so its numeric id is already on record.
+            // `web_profile_info` rate-limits hard and sometimes refuses specific handles even
+            // while logged in — don't let that abort an *update* when we can crawl by the known
+            // id instead. (The crawl, stories and profile-pic all key off the id, not the handle.)
+            profile = Profile(userID: knownUserID, handle: handle, fullName: "", profilePicURL: "", postCount: 0)
+        } else {
             result.note = "Couldn’t load @\(handle). Check the handle, that you’re logged in, and that the profile is public or one you follow."
             return result
         }
@@ -321,18 +331,59 @@ enum InstagramService {
 
     // MARK: - API
 
+    /// Resolves a handle to a `Profile`. The rich `web_profile_info` endpoint rate-limits
+    /// aggressively and intermittently refuses specific handles (even while logged in), which
+    /// used to fail the whole run for "certain public users". So: retry it through throttling,
+    /// then fall back to the topsearch endpoint (a different path that commonly still answers).
     nonisolated static func fetchProfile(handle: String, creds: Credentials) async -> Profile? {
-        guard let url = URL(string: "https://www.instagram.com/api/v1/users/web_profile_info/?username=\(handle)"),
+        if let p = await webProfileInfo(handle: handle, creds: creds) { return p }
+        return await profileViaSearch(handle: handle, creds: creds)
+    }
+
+    /// The primary source (`web_profile_info`), retried through rate-limits/5xx.
+    nonisolated private static func webProfileInfo(handle: String, creds: Credentials) async -> Profile? {
+        guard let url = URL(string: "https://www.instagram.com/api/v1/users/web_profile_info/?username=\(handle)") else { return nil }
+        for attempt in 0..<3 {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_500_000_000) }
+            guard let (data, resp) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)) else { continue }
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 429 || status >= 500 { continue }        // throttled — back off and retry
+            guard (200...299).contains(status),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let user = (json["data"] as? [String: Any])?["user"] as? [String: Any] else { return nil }
+            let media = user["edge_owner_to_timeline_media"] as? [String: Any]
+            return Profile(userID: idString(user["id"]) ?? idString(user["pk"]) ?? "",
+                           handle: user["username"] as? String ?? handle,
+                           fullName: user["full_name"] as? String ?? "",
+                           profilePicURL: (user["profile_pic_url_hd"] as? String) ?? (user["profile_pic_url"] as? String) ?? "",
+                           postCount: media?["count"] as? Int ?? 0)
+        }
+        return nil
+    }
+
+    /// Fallback: resolve the handle via the web topsearch endpoint. It doesn't report a post
+    /// count (0 here), but the crawl only needs the numeric user id, which it does return — so a
+    /// throttled/blocked `web_profile_info` no longer stops us from downloading a public profile.
+    nonisolated private static func profileViaSearch(handle: String, creds: Credentials) async -> Profile? {
+        let want = handle.lowercased()
+        guard !want.isEmpty,
+              let encoded = want.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://www.instagram.com/api/v1/web/search/topsearch/?context=blended&query=\(encoded)"),
               let (data, resp) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
               (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? false,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let user = (json["data"] as? [String: Any])?["user"] as? [String: Any] else { return nil }
-        let media = user["edge_owner_to_timeline_media"] as? [String: Any]
-        return Profile(userID: idString(user["id"]) ?? idString(user["pk"]) ?? "",
-                       handle: user["username"] as? String ?? handle,
-                       fullName: user["full_name"] as? String ?? "",
-                       profilePicURL: (user["profile_pic_url_hd"] as? String) ?? (user["profile_pic_url"] as? String) ?? "",
-                       postCount: media?["count"] as? Int ?? 0)
+              let users = json["users"] as? [[String: Any]] else { return nil }
+        for entry in users {
+            guard let u = entry["user"] as? [String: Any],
+                  (u["username"] as? String)?.lowercased() == want,
+                  let id = idString(u["pk"]) ?? idString(u["id"]) else { continue }
+            return Profile(userID: id,
+                           handle: u["username"] as? String ?? handle,
+                           fullName: u["full_name"] as? String ?? "",
+                           profilePicURL: (u["profile_pic_url"] as? String) ?? "",
+                           postCount: 0)
+        }
+        return nil
     }
 
     /// Full media-info for one post (includes `video_dash_manifest` with the high-res
