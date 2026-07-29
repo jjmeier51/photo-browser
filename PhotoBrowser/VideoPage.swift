@@ -166,8 +166,9 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         let output = AVPlayerItemVideoOutput(outputSettings: nil)
         player.currentItem?.add(output)
         videoOutput = output
-        // Keep audio pitch natural when playing slowed down (Slo-Mo mode).
-        player.currentItem?.audioTimePitchAlgorithm = .spectral
+        // Keep audio pitch natural when slowed (Slo-Mo). Re-asserted once the item is ready and
+        // before each rate change — a single early set here doesn't reliably take.
+        preservePitch()
 
         // Load the video's orientation so captured frames aren't sideways.
         Task { [weak self] in
@@ -180,6 +181,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
             statusObservation = item.observe(\.status, options: [.new, .initial]) { [weak self] item, _ in
                 guard let self, item.status == .readyToPlay else { return }
                 if item.presentationSize != .zero { self.videoSize = item.presentationSize }
+                self.preservePitch()          // now that the item is ready, the algorithm sticks
                 self.view.setNeedsLayout()
                 self.updateDuration()
                 self.playIfNeeded()
@@ -435,6 +437,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
     private func beginTempPeek() {
         guard sloMoRate > 0, !tempPeek else { return }
         tempPeek = true
+        preservePitch()
         player.rate = Self.sideHoldRate
         playButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
         flashCapture("Slo Mo · 1.5× slower")
@@ -445,6 +448,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         guard tempPeek else { return }
         tempPeek = false
         guard sloMoRate > 0 else { return }
+        preservePitch()
         player.rate = sloMoRate                      // resume the previous Slo-Mo rate
         flashCapture("Slo Mo · \(sloMoTimes(sloMoRate)) slower")
     }
@@ -497,10 +501,18 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
     /// Resumes playback at the current speed — the Slo-Mo rate when the mode is on, else 1×.
     /// Every play/resume path goes through this so Slo-Mo survives pause/resume/loop/scrub.
     private func resumePlayback() {
+        preservePitch()                                   // ensure pitch-preservation is active before any slowed rate
         if tempPeek { player.rate = Self.sideHoldRate }   // a side is being held (survives a loop)
         else if sloMoRate > 0 { player.rate = sloMoRate }
         else { player.play() }
         playButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
+    }
+
+    /// Force pitch-preserving time-stretch so slowed (or peeked) audio keeps its natural pitch
+    /// instead of dropping like a slowed record. Idempotent; re-asserted at every rate change
+    /// because a single set before the item is ready doesn't reliably take.
+    private func preservePitch() {
+        player.currentItem?.audioTimePitchAlgorithm = .spectral
     }
 
     @objc private func toggleControls() { setControls(hidden: !controlsHidden) }
