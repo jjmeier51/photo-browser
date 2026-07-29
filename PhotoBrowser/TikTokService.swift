@@ -27,6 +27,9 @@ struct TTFolderInfo: Codable, Sendable {
 enum TikTokService {
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
     nonisolated static let apiBase = "https://www.tikwm.com"
+    /// Hosts tried (rotated) for the resolver API — tikwm answers on both, and rotating past a
+    /// throttled/blocked one occasionally gets through when a single host keeps refusing.
+    nonisolated private static let apiHosts = ["https://www.tikwm.com", "https://tikwm.com"]
 
     struct Progress: Sendable { var phase: String; var fraction: Double; var done: Int; var total: Int }
     /// A post ready to download: either a direct best-quality video `url`, or — for a
@@ -195,12 +198,16 @@ enum TikTokService {
     // MARK: - HTTP
 
     /// GETs a tikwm endpoint and returns its `data` object, retrying through transient failures and
-    /// the free-tier rate-cap (which answers `code != 0`). Returns nil only after exhausting retries,
-    /// so a single throttled request no longer looks like an empty profile.
-    nonisolated private static func apiData(_ path: String, query: [String: String], retries: Int = 3) async -> [String: Any]? {
+    /// the free-tier rate-cap (which answers `code != 0`). Rotates hosts across attempts and backs
+    /// off, so a briefly rate-limited/blocked resolver is given several real chances before we give
+    /// up — a single throttled request no longer looks like an empty (or unreachable) profile.
+    nonisolated private static func apiData(_ path: String, query: [String: String], retries: Int = 4) async -> [String: Any]? {
         for attempt in 0...retries {
-            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_200_000_000) }   // 1.2s, 2.4s, 3.6s backoff
-            guard let data = await apiGet(path, query: query),
+            // Backoff grows to a ~4s cap; tikwm's free limit is roughly one request/second, and a
+            // short block clears within a few seconds.
+            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(min(attempt, 4)) * 1_000_000_000) }
+            let host = apiHosts[attempt % apiHosts.count]
+            guard let data = await apiGet(path, query: query, host: host),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             guard intValue(json["code"]) == 0, let d = json["data"] as? [String: Any] else { continue }
             return d
@@ -208,13 +215,19 @@ enum TikTokService {
         return nil
     }
 
-    nonisolated private static func apiGet(_ path: String, query: [String: String]) async -> Data? {
-        guard var comps = URLComponents(string: apiBase + path) else { return nil }
+    nonisolated private static func apiGet(_ path: String, query: [String: String], host: String) async -> Data? {
+        guard var comps = URLComponents(string: host + path) else { return nil }
         comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
         guard let url = comps.url else { return nil }
         var req = URLRequest(url: url)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+        req.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        // Present as a page-driven XHR from tikwm's own site — a bare, refererless request is what
+        // its bot/rate protection blocks most readily, which reads to us as "resolver unreachable".
+        req.setValue("\(host)/", forHTTPHeaderField: "Referer")
+        req.setValue(host, forHTTPHeaderField: "Origin")
+        req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
         req.timeoutInterval = 30
         return (try? await session.data(for: req))?.0
     }
