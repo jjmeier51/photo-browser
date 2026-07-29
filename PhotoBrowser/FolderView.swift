@@ -2854,11 +2854,11 @@ struct FolderView: View {
                 let dx = v.translation.width, dy = v.translation.height
                 // A short, mostly-horizontal flick is enough (was 70pt — too far).
                 guard abs(dx) > 36, abs(dy) < abs(dx) * 0.75 else { return }
-                // Back (left → right): from the left edge, OR anywhere along the bottom third of the
-                // screen — so a swipe near the bottom-center works too, not just the left edge.
-                let fromBottom = v.startLocation.y > bounds.height * 0.72
-                if dx > 0, v.startLocation.x < edge || fromBottom { goBack() }
-                else if dx < 0, v.startLocation.x > bounds.width - edge { goToSiblingFolder(offset: 1) }
+                // Back: ANY left-to-right swipe on the grid, anywhere on screen — the grid never
+                // scrolls horizontally, so there's nothing else a horizontal swipe could mean.
+                // Right-to-left from the right edge still hops to the next sibling folder.
+                if dx > 0 { goBack() }
+                else if v.startLocation.x > bounds.width - edge { goToSiblingFolder(offset: 1) }
             }
     }
 
