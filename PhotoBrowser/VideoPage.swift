@@ -430,12 +430,13 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
         guard tempFast else { return }
         tempFast = false
         guard sloMoRate > 0 else { return }
-        player.rate = sloMoRate                      // resume the previous 4×/8× Slo-Mo rate
-        flashCapture("Slo Mo · \(sloMoRate == 0.25 ? "4×" : "8×") slower")
+        player.rate = sloMoRate                      // resume the previous Slo-Mo rate
+        flashCapture("Slo Mo · \(sloMoTimes(sloMoRate)) slower")
     }
 
     private func presentSloMoOptions(at point: CGPoint) {
         let sheet = UIAlertController(title: "Play in Slo Mo", message: nil, preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "Play 2× slower", style: .default) { [weak self] _ in self?.enableSloMo(rate: 0.5) })
         sheet.addAction(UIAlertAction(title: "Play 4× slower", style: .default) { [weak self] _ in self?.enableSloMo(rate: 0.25) })
         sheet.addAction(UIAlertAction(title: "Play 8× slower", style: .default) { [weak self] _ in self?.enableSloMo(rate: 0.125) })
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
@@ -448,9 +449,18 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate {
         present(sheet, animated: true)
     }
 
+    /// Label for a Slo-Mo rate: 0.5 → "2×", 0.25 → "4×", 0.125 → "8×".
+    private func sloMoTimes(_ rate: Float) -> String {
+        switch rate {
+        case 0.5:  return "2×"
+        case 0.25: return "4×"
+        default:   return "8×"
+        }
+    }
+
     private func enableSloMo(rate: Float) {
         sloMoRate = rate
-        let times = rate == 0.25 ? "4×" : "8×"
+        let times = sloMoTimes(rate)
         sloMoBadge.text = "  ● SLO MO \(times)  "
         sloMoBadge.isHidden = false
         view.setNeedsLayout()
