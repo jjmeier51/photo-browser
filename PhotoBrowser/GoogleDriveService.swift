@@ -137,25 +137,45 @@ enum GoogleDrive {
         return true
     }
 
-    /// A flat download plan (fileID → local destination), building the subfolder tree under `into`.
-    /// Recurses concurrently; only real media/binary files are included (Google-native docs skipped).
-    nonisolated static func buildPlan(folderID: String, named name: String, into parent: URL) async -> [(item: Item, dest: URL)] {
+    /// True if a file named like `item` already lives in `folder` and — when Drive reported a byte
+    /// size — matches it. Used to **skip re-downloading** files that are already on the drive. A
+    /// partial/truncated earlier download (size mismatch) is *not* considered a match, so it re-fetches.
+    private nonisolated static func existsMatching(_ item: Item, in folder: URL) -> Bool {
+        let safe = item.name.replacingOccurrences(of: "/", with: "-")
+        let dest = folder.appendingPathComponent(safe)
         let fm = FileManager.default
-        let root = uniqueChild(named: name, in: parent)
+        guard fm.fileExists(atPath: dest.path) else { return false }
+        guard item.size > 0,
+              let attrs = try? fm.attributesOfItem(atPath: dest.path),
+              let localSize = (attrs[.size] as? NSNumber)?.int64Value else { return true }
+        return localSize == item.size
+    }
+
+    /// A flat download plan (fileID → local destination), building the subfolder tree under `into`,
+    /// plus a count of files skipped because they're already on the drive.
+    /// Recurses concurrently; only real media/binary files are included (Google-native docs skipped).
+    nonisolated static func buildPlan(folderID: String, named name: String, into parent: URL) async -> (plan: [(item: Item, dest: URL)], skipped: Int) {
+        let fm = FileManager.default
+        // Reuse an existing same-named subfolder (don't spawn "Folder 1") so a re-download lands
+        // alongside what's already there and the per-file existence check can see it.
+        let safe = name.replacingOccurrences(of: "/", with: "-")
+        let root = parent.appendingPathComponent(safe)
         try? fm.createDirectory(at: root, withIntermediateDirectories: true)
         var result: [(item: Item, dest: URL)] = []
+        var skipped = 0
         let children = await list(folderID: folderID)
         // Recurse into subfolders concurrently, collect files.
-        await withTaskGroup(of: [(item: Item, dest: URL)].self) { group in
+        await withTaskGroup(of: (plan: [(item: Item, dest: URL)], skipped: Int).self) { group in
             for child in children where child.isFolder {
                 group.addTask { await buildPlan(folderID: child.id, named: child.name, into: root) }
             }
-            for await sub in group { result.append(contentsOf: sub) }
+            for await sub in group { result.append(contentsOf: sub.plan); skipped += sub.skipped }
         }
         for child in children where !child.isFolder && !child.isGoogleDoc {
+            if existsMatching(child, in: root) { skipped += 1; continue }
             result.append((item: child, dest: uniqueChild(named: child.name, in: root)))
         }
-        return result
+        return (plan: result, skipped: skipped)
     }
 
     /// Downloads a whole plan with bounded concurrency, reporting progress. Returns (downloaded, failed).
@@ -201,16 +221,26 @@ enum GoogleDrive {
     nonisolated static func importItems(_ items: [Item], into dest: URL,
                                         progress: @escaping @Sendable (Progress) -> Void) async -> Result {
         var jobs: [(item: Item, dest: URL)] = []
+        var skipped = 0
         for item in items {
             if item.isFolder {
-                jobs.append(contentsOf: await buildPlan(folderID: item.id, named: item.name, into: dest))
+                let built = await buildPlan(folderID: item.id, named: item.name, into: dest)
+                jobs.append(contentsOf: built.plan); skipped += built.skipped
             } else if !item.isGoogleDoc {
+                if existsMatching(item, in: dest) { skipped += 1; continue }
                 jobs.append((item: item, dest: uniqueChild(named: item.name, in: dest)))
             }
         }
         let firstFolder = items.first(where: { $0.isFolder })?.name
         let (ok, failed) = await run(plan: jobs, progress: progress)
-        let note = (ok == 0 && failed == 0) ? "No downloadable photos or videos found." : nil
+        // Surface what dedup did: nothing new vs. some new alongside skips.
+        let note: String?
+        if ok == 0 && failed == 0 {
+            note = skipped > 0 ? "Already downloaded — skipped \(skipped) existing file\(skipped == 1 ? "" : "s"), nothing new."
+                               : "No downloadable photos or videos found."
+        } else {
+            note = skipped > 0 ? "Skipped \(skipped) already-downloaded file\(skipped == 1 ? "" : "s")." : nil
+        }
         return Result(downloaded: ok, failed: failed, folderName: firstFolder, note: note)
     }
 
@@ -352,7 +382,19 @@ enum GoogleDrive {
 
     private nonisolated static func save(_ tmp: URL, http: HTTPURLResponse, id: String, into folder: URL) -> Bool {
         let fm = FileManager.default
-        let dest = uniqueChild(named: filename(from: http) ?? "drive-\(id)", in: folder)
+        let name = filename(from: http) ?? "drive-\(id)"
+        // The cookie path has no metadata up front, so it can't skip before fetching. But once the
+        // bytes are here, avoid writing a duplicate: if a same-named, same-size file already exists
+        // on the drive, drop the temp and treat it as already downloaded.
+        let existing = folder.appendingPathComponent(name.replacingOccurrences(of: "/", with: "-"))
+        if fm.fileExists(atPath: existing.path),
+           let a = try? fm.attributesOfItem(atPath: existing.path), let sa = (a[.size] as? NSNumber)?.int64Value,
+           let b = try? fm.attributesOfItem(atPath: tmp.path), let sb = (b[.size] as? NSNumber)?.int64Value,
+           sa == sb {
+            try? fm.removeItem(at: tmp)
+            return true
+        }
+        let dest = uniqueChild(named: name, in: folder)
         guard (try? fm.moveItem(at: tmp, to: dest)) != nil else { try? fm.removeItem(at: tmp); return false }
         DriveWriter.fullSyncFileAndParent(dest)
         return true
