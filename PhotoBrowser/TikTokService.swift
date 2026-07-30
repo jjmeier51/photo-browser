@@ -9,6 +9,10 @@ struct TTFolderInfo: Codable, Sendable {
     var downloaded: [String]          // video ids already pulled (dedup)
     var videos: Int
     var newestDate: Double?           // post date of the newest video *filed onto the drive* — the incremental cutoff
+    /// Total videos the profile had at the last FULL enumeration. When fewer than this are actually
+    /// downloaded (e.g. a run was interrupted, leaving older videos missing), "Get New" does a full
+    /// scan instead of the stop-early shortcut, so the missing older videos are still found.
+    var profileVideoCount: Int? = nil
 }
 
 /// Resolves a whole TikTok profile's own videos — like ssstik/snaptik, but for the entire
@@ -55,7 +59,7 @@ enum TikTokService {
     /// profile. `onAvatar` fires once with the profile picture. Honors task cancellation, so it
     /// stops cleanly when its background-task window expires.
     nonisolated static func enumerateStreaming(
-        username: String, alreadyDownloaded: Set<String>, since: Date? = nil,
+        username: String, alreadyDownloaded: Set<String>, since: Date? = nil, fullScan: Bool = false,
         onAvatar: @escaping @Sendable (Data) -> Void,
         onResolved: @escaping @Sendable (ResolvedVideo) -> Void,
         progress: @escaping @Sendable (Progress) -> Void
@@ -69,7 +73,7 @@ enum TikTokService {
         // closes. Only SD-only videos (no HD in the listing) are held back for the per-video HD
         // resolve below.
         var resolved = 0
-        let listing = await listAllVideos(username: username, already: alreadyDownloaded, progress: progress) { v in
+        let listing = await listAllVideos(username: username, already: alreadyDownloaded, fullScan: fullScan, progress: progress) { v in
             guard !alreadyDownloaded.contains(v.id) else { return }
             if !v.images.isEmpty {
                 onResolved(ResolvedVideo(id: v.id, url: "", images: v.images.map { absolute($0) },
@@ -122,7 +126,7 @@ enum TikTokService {
     /// start downloading the HD-ready ones during pagination. `failed` is true when not a single
     /// page came back valid (a resolver failure/rate-cap), so callers don't mistake it for "empty".
     nonisolated private static func listAllVideos(
-        username: String, already: Set<String>, progress: @escaping @Sendable (Progress) -> Void,
+        username: String, already: Set<String>, fullScan: Bool = false, progress: @escaping @Sendable (Progress) -> Void,
         onDirect: (Video) -> Void
     ) async -> (videos: [Video], avatar: String, authorId: String, nickname: String, newest: Double, failed: Bool, reason: String?) {
         var all: [Video] = []
@@ -137,7 +141,10 @@ enum TikTokService {
         // looked like they had "no new videos". Instead, page until we hit a long run of
         // already-downloaded posts — past the ~3 pins and well into the old timeline. A new post
         // resets the run, so nothing new is ever missed regardless of order.
-        let incremental = !already.isEmpty
+        // `fullScan` disables the stop entirely — used when the profile isn't fully downloaded yet
+        // (an interrupted run left OLDER videos missing below the already-downloaded newest ones,
+        // which the stop-early shortcut would never reach).
+        let incremental = !already.isEmpty && !fullScan
         var consecutiveSeen = 0
         for _ in 0..<60 {     // safety cap: 60 pages × 35 ≈ 2100 videos
             // Retried through tikwm's rate-cap (`code != 0`) and transient failures, so a throttled

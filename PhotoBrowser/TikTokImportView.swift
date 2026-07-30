@@ -98,6 +98,12 @@ struct TikTokImportView: View {
         // Already downloaded this profile? Only check for videos newer than the most recent one
         // we have — the resolver stops paging once it reaches older posts.
         let since = prior?.newestDate.map { Date(timeIntervalSince1970: $0) }
+        // If the profile isn't fully downloaded yet (an interrupted run left older videos missing
+        // below the downloaded newest ones), scan the WHOLE list so those older videos are found —
+        // the stop-early shortcut would otherwise halt at the downloaded top and say "no new videos".
+        // Unknown count on an existing folder → scan fully once (it also records the count).
+        let fullScan = (prior?.profileVideoCount).map { already.count < $0 } ?? (prior != nil)
+        let didFullList = already.isEmpty || fullScan     // no early stop → totalFound is the whole profile
         batchToken += 1                                          // start the monitor loop
 
         // A background-task window so link resolution keeps going for a few minutes after the app
@@ -107,7 +113,7 @@ struct TikTokImportView: View {
         Task {
             let destPath = dest.path
             let result = await TikTokService.enumerateStreaming(
-                username: user, alreadyDownloaded: already, since: since,
+                username: user, alreadyDownloaded: already, since: since, fullScan: fullScan,
                 onAvatar: { data in
                     Task { @MainActor in
                         guard let img = UIImage(data: data) else { return }
@@ -167,6 +173,9 @@ struct TikTokImportView: View {
             // cutoff and is re-listed (then re-fetched via id-dedup) by the next run.
             if var info = library.tiktokInfo(for: dest) {
                 if info.secUid.isEmpty, !result.authorId.isEmpty { info.secUid = result.authorId }
+                // Record the profile's true video count from a full listing, so a later run can tell
+                // whether everything's downloaded (→ fast incremental) or some are still missing.
+                if didFullList, result.totalFound > 0 { info.profileVideoCount = result.totalFound }
                 library.setTikTokInfo(info, for: dest)
             }
             resolving = false
