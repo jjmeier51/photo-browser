@@ -42,9 +42,18 @@ final class TikTokWebFetcher: NSObject {
         let wv = ensureWebView()
         guard wv.window != nil else { return nil }   // no window → JS won't run → pointless
         wv.stopLoading()
+        // Clear the PRIOR page's JSON first. The web view is reused across paginated calls, and
+        // without this the poll below can read the previous page's response before the new one
+        // commits — returning stale data whose cursor matches the current one, which silently
+        // truncated a multi-page profile to a single 35-item page.
+        if let blank = URL(string: "about:blank") {
+            wv.load(URLRequest(url: blank))
+            try? await Task.sleep(nanoseconds: 150_000_000)   // let about:blank commit → empties the DOM
+        }
         wv.load(URLRequest(url: url))
-        // Poll the body text until it parses as JSON (challenge passed) or we give up. The challenge
-        // page's text isn't JSON, so it's simply skipped until the real response replaces it.
+        // Poll the body text until it parses as JSON (challenge passed) or we give up. Empty (blank
+        // page, mid-load) and the challenge page's own text simply don't parse, so they're skipped
+        // until the real response replaces them.
         for _ in 0..<40 {
             try? await Task.sleep(nanoseconds: 500_000_000)
             let text: String? = await withCheckedContinuation { cont in
