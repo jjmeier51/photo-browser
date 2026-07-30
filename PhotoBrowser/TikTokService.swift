@@ -93,7 +93,7 @@ enum TikTokService {
             // the old code reported BOTH as "No new videos.", so a throttled update looked done
             // while new posts silently never arrived. `failed` (never got one good page) says so.
             let note = listing.failed
-                ? "Couldn’t check for new videos — the resolver may be rate-limiting or blocking. Try again in a moment."
+                ? "Couldn’t check for new videos — \(listing.reason ?? "the resolver may be rate-limiting or blocking"). Try again in a moment."
                 : (listing.videos.isEmpty
                    ? (since != nil ? "No new videos." : "Couldn’t find any videos — TikTok or the resolver may be blocking, or the handle is wrong.")
                    : "No new videos.")
@@ -124,13 +124,14 @@ enum TikTokService {
     nonisolated private static func listAllVideos(
         username: String, already: Set<String>, progress: @escaping @Sendable (Progress) -> Void,
         onDirect: (Video) -> Void
-    ) async -> (videos: [Video], avatar: String, authorId: String, nickname: String, newest: Double, failed: Bool) {
+    ) async -> (videos: [Video], avatar: String, authorId: String, nickname: String, newest: Double, failed: Bool, reason: String?) {
         var all: [Video] = []
         var seen = Set<String>()
         var avatar = "", authorId = "", nickname = ""
         var newest: Double = 0
         var cursor = "0"
         var gotAnyPage = false        // at least one page parsed cleanly → not a blanket failure
+        var failReason: String?       // why the resolver refused (surfaced when nothing came back)
         // Incremental stop is by *dedup*, not a timestamp cutoff. The old cutoff broke early on
         // accounts whose top post is a pinned/old one (and on any tikwm ordering quirk), so they
         // looked like they had "no new videos". Instead, page until we hit a long run of
@@ -141,8 +142,9 @@ enum TikTokService {
         for _ in 0..<60 {     // safety cap: 60 pages × 35 ≈ 2100 videos
             // Retried through tikwm's rate-cap (`code != 0`) and transient failures, so a throttled
             // request doesn't truncate the list — or, on page 1, masquerade as "no new videos".
-            guard let d = await apiData("/api/user/posts",
-                                        query: ["unique_id": username, "count": "35", "cursor": cursor, "hd": "1"]) else { break }
+            let page = await apiData("/api/user/posts",
+                                     query: ["unique_id": username, "count": "35", "cursor": cursor, "hd": "1"])
+            guard let d = page.data else { failReason = page.reason; break }
             gotAnyPage = true
             let vids = (d["videos"] as? [[String: Any]]) ?? []
             var stop = false
@@ -184,41 +186,51 @@ enum TikTokService {
             cursor = next
             try? await Task.sleep(nanoseconds: 1_100_000_000)     // tikwm rate-limits ~1 req/sec
         }
-        return (all, avatar, authorId, nickname, newest, !gotAnyPage)
+        return (all, avatar, authorId, nickname, newest, !gotAnyPage, failReason)
     }
 
     /// The HD (watermark-free) URL for a single video, via the resolver's single-video endpoint.
     nonisolated private static func resolveDetailHD(id: String, username: String) async -> String? {
         let videoURL = "https://www.tiktok.com/@\(username)/video/\(id)"
-        guard let d = await apiData("/api/", query: ["url": videoURL, "hd": "1"]) else { return nil }
+        guard let d = await apiData("/api/", query: ["url": videoURL, "hd": "1"]).data else { return nil }
         let hd = (d["hdplay"] as? String) ?? ""
         return hd.isEmpty ? (d["play"] as? String) : hd
     }
 
     // MARK: - HTTP
 
-    /// GETs a tikwm endpoint and returns its `data` object, retrying through transient failures and
-    /// the free-tier rate-cap (which answers `code != 0`). Rotates hosts across attempts and backs
-    /// off, so a briefly rate-limited/blocked resolver is given several real chances before we give
-    /// up — a single throttled request no longer looks like an empty (or unreachable) profile.
-    nonisolated private static func apiData(_ path: String, query: [String: String], retries: Int = 4) async -> [String: Any]? {
+    /// One resolver response: parsed JSON, a non-JSON HTTP reply (a block/challenge page), or a
+    /// transport error — carried so failures can say *why* instead of a blanket "unreachable".
+    private enum ApiResult { case json([String: Any]); case http(code: Int, isHTML: Bool); case network(String) }
+
+    /// GETs a tikwm endpoint and returns its `data` object plus, on failure, a short human reason.
+    /// Retries through transient failures and the free-tier rate-cap (`code != 0`), rotates hosts,
+    /// and backs off — so a briefly rate-limited/blocked resolver gets several real chances, and a
+    /// persistent failure reports the actual cause (HTTP status / block page / network).
+    nonisolated private static func apiData(_ path: String, query: [String: String], retries: Int = 4) async -> (data: [String: Any]?, reason: String?) {
+        var reason: String?
         for attempt in 0...retries {
             // Backoff grows to a ~4s cap; tikwm's free limit is roughly one request/second, and a
             // short block clears within a few seconds.
             if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(min(attempt, 4)) * 1_000_000_000) }
             let host = apiHosts[attempt % apiHosts.count]
-            guard let data = await apiGet(path, query: query, host: host),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-            guard intValue(json["code"]) == 0, let d = json["data"] as? [String: Any] else { continue }
-            return d
+            switch await apiGet(path, query: query, host: host) {
+            case .json(let obj):
+                if intValue(obj["code"]) == 0, let d = obj["data"] as? [String: Any] { return (d, nil) }
+                reason = "resolver busy (\((obj["msg"] as? String) ?? "code \(intValue(obj["code"]) ?? -1)"))"
+            case .http(let code, let isHTML):
+                reason = isHTML ? "resolver returned a block page (HTTP \(code))" : "resolver answered HTTP \(code)"
+            case .network(let why):
+                reason = why
+            }
         }
-        return nil
+        return (nil, reason)
     }
 
-    nonisolated private static func apiGet(_ path: String, query: [String: String], host: String) async -> Data? {
-        guard var comps = URLComponents(string: host + path) else { return nil }
+    nonisolated private static func apiGet(_ path: String, query: [String: String], host: String) async -> ApiResult {
+        guard var comps = URLComponents(string: host + path) else { return .network("bad URL") }
         comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
-        guard let url = comps.url else { return nil }
+        guard let url = comps.url else { return .network("bad URL") }
         var req = URLRequest(url: url)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
@@ -229,7 +241,25 @@ enum TikTokService {
         req.setValue(host, forHTTPHeaderField: "Origin")
         req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
         req.timeoutInterval = 30
-        return (try? await session.data(for: req))?.0
+        do {
+            let (data, resp) = try await session.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { return .json(json) }
+            // Not JSON — a Cloudflare/CDN block or challenge page rather than the API.
+            let head = (String(data: data.prefix(300), encoding: .utf8) ?? "").lowercased()
+            let isHTML = head.contains("<html") || head.contains("<!doctype") || head.contains("cloudflare") || head.contains("captcha") || head.contains("attention required")
+            return .http(code: code, isHTML: isHTML)
+        } catch {
+            if let u = error as? URLError {
+                switch u.code {
+                case .timedOut: return .network("the resolver timed out")
+                case .notConnectedToInternet, .networkConnectionLost: return .network("no internet connection")
+                case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed: return .network("couldn’t reach the resolver")
+                default: return .network("network error (\(u.code.rawValue))")
+                }
+            }
+            return .network("network error (\((error as NSError).code))")
+        }
     }
 
     nonisolated static func downloadData(_ urlString: String) async -> Data? {
