@@ -66,6 +66,35 @@ final class TikTokWebFetcher: NSObject {
         return nil
     }
 
+    /// After a challenge is solved, the tikwm cookies WebKit banked (including `cf_clearance`) as a
+    /// `Cookie:` header, plus the exact User-Agent they were issued for. Handing BOTH to URLSession
+    /// lets the fast path reuse the clearance instead of going through WebKit every time. nil until a
+    /// challenge has actually been solved (no cookies yet).
+    func clearance() async -> (cookie: String, userAgent: String)? {
+        guard let wv = webView else { return nil }
+        let ua: String = await withCheckedContinuation { cont in
+            wv.evaluateJavaScript("navigator.userAgent") { r, _ in cont.resume(returning: (r as? String) ?? "") }
+        }
+        let cookies: [HTTPCookie] = await withCheckedContinuation { cont in
+            wv.configuration.websiteDataStore.httpCookieStore.getAllCookies { cont.resume(returning: $0) }
+        }
+        let header = cookies.filter { $0.domain.contains("tikwm.com") }
+            .map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+        guard !header.isEmpty, !ua.isEmpty else { return nil }
+        return (header, ua)
+    }
+
     private static let bodyTextJS =
         "(document.body && document.body.innerText) || (document.documentElement && document.documentElement.textContent) || ''"
+}
+
+/// Cloudflare clearance (cookie + the UA it was issued for) banked once WebKit solves the challenge,
+/// so the fast URLSession path can reuse it. An actor because it's read from the concurrent resolve
+/// paths.
+actor TikTokClearance {
+    static let shared = TikTokClearance()
+    private var cookie = ""
+    private var userAgent = ""
+    func store(cookie: String, userAgent: String) { self.cookie = cookie; self.userAgent = userAgent }
+    func current() -> (cookie: String, userAgent: String)? { cookie.isEmpty ? nil : (cookie, userAgent) }
 }

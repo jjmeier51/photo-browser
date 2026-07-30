@@ -232,6 +232,11 @@ enum TikTokService {
         // rest fast.
         if blocked, let url = apiURL(path, query: query, host: apiBase),
            let obj = await TikTokWebFetcher.shared.fetchJSON(url) {
+            // Bank the clearance WebKit just earned so the NEXT pages (and the rest of this run) go
+            // back through the fast URLSession path instead of WebKit.
+            if let c = await TikTokWebFetcher.shared.clearance() {
+                await TikTokClearance.shared.store(cookie: c.cookie, userAgent: c.userAgent)
+            }
             if intValue(obj["code"]) == 0, let d = obj["data"] as? [String: Any] { return (d, nil) }
             reason = "resolver busy (\((obj["msg"] as? String) ?? "code \(intValue(obj["code"]) ?? -1)"))"
         }
@@ -248,7 +253,11 @@ enum TikTokService {
     nonisolated private static func apiGet(_ path: String, query: [String: String], host: String) async -> ApiResult {
         guard let url = apiURL(path, query: query, host: host) else { return .network("bad URL") }
         var req = URLRequest(url: url)
-        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        // Reuse a Cloudflare clearance WebKit already earned, so most requests skip WebKit and stay
+        // fast. The UA MUST match the one the cf_clearance cookie was issued for, or Cloudflare
+        // rejects it — so use WebKit's UA whenever we have a clearance.
+        let clearance = await TikTokClearance.shared.current()
+        req.setValue(clearance?.userAgent ?? userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
         req.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
         // Present as a page-driven XHR from tikwm's own site — a bare, refererless request is what
@@ -256,6 +265,7 @@ enum TikTokService {
         req.setValue("\(host)/", forHTTPHeaderField: "Referer")
         req.setValue(host, forHTTPHeaderField: "Origin")
         req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+        if let cookie = clearance?.cookie, !cookie.isEmpty { req.setValue(cookie, forHTTPHeaderField: "Cookie") }
         req.timeoutInterval = 30
         do {
             let (data, resp) = try await session.data(for: req)
