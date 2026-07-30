@@ -209,7 +209,8 @@ enum TikTokService {
     /// persistent failure reports the actual cause (HTTP status / block page / network).
     nonisolated private static func apiData(_ path: String, query: [String: String], retries: Int = 4) async -> (data: [String: Any]?, reason: String?) {
         var reason: String?
-        for attempt in 0...retries {
+        var blocked = false        // Cloudflare 403/block page — URLSession can't get through
+        attempts: for attempt in 0...retries {
             // Backoff grows to a ~4s cap; tikwm's free limit is roughly one request/second, and a
             // short block clears within a few seconds.
             if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(min(attempt, 4)) * 1_000_000_000) }
@@ -220,17 +221,32 @@ enum TikTokService {
                 reason = "resolver busy (\((obj["msg"] as? String) ?? "code \(intValue(obj["code"]) ?? -1)"))"
             case .http(let code, let isHTML):
                 reason = isHTML ? "resolver returned a block page (HTTP \(code))" : "resolver answered HTTP \(code)"
+                // A bot block won't yield to more URLSession retries — go straight to the WebKit path.
+                if isHTML || code == 403 { blocked = true; break attempts }
             case .network(let why):
                 reason = why
             }
         }
+        // Cloudflare blocked the plain request — retry through a real WebKit browser, which runs the
+        // JS challenge a URLSession can't. After the first clear, its cf_clearance cookie makes the
+        // rest fast.
+        if blocked, let url = apiURL(path, query: query, host: apiBase),
+           let obj = await TikTokWebFetcher.shared.fetchJSON(url) {
+            if intValue(obj["code"]) == 0, let d = obj["data"] as? [String: Any] { return (d, nil) }
+            reason = "resolver busy (\((obj["msg"] as? String) ?? "code \(intValue(obj["code"]) ?? -1)"))"
+        }
         return (nil, reason)
     }
 
-    nonisolated private static func apiGet(_ path: String, query: [String: String], host: String) async -> ApiResult {
-        guard var comps = URLComponents(string: host + path) else { return .network("bad URL") }
+    /// The endpoint URL for `path` + `query` on `host`.
+    nonisolated private static func apiURL(_ path: String, query: [String: String], host: String) -> URL? {
+        guard var comps = URLComponents(string: host + path) else { return nil }
         comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
-        guard let url = comps.url else { return .network("bad URL") }
+        return comps.url
+    }
+
+    nonisolated private static func apiGet(_ path: String, query: [String: String], host: String) async -> ApiResult {
+        guard let url = apiURL(path, query: query, host: host) else { return .network("bad URL") }
         var req = URLRequest(url: url)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
