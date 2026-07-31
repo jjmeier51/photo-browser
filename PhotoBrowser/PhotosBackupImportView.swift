@@ -535,41 +535,65 @@ enum PhotosBackupImporter {
         return ok
     }
 
-    /// Reads `src`'s bytes and writes them to `dest`, coordinated so a file-provider–backed source
-    /// (iCloud, a third-party provider) is materialized first. Reads the RAW BYTES (memory-mapped)
-    /// rather than `copyItem`, which is more robust against provider quirks and still preserves EXIF
-    /// (it lives in the bytes). Returns nil on success, else a short human reason for the first
-    /// failure — so a folder that imports nothing says *why* instead of just "nothing".
+    /// Copies `src` to `dest`, coordinated so a file-provider–backed source (iCloud, a third-party
+    /// provider) is materialized first. Reads the RAW BYTES rather than `copyItem` (more robust
+    /// against provider quirks, still preserves EXIF — it lives in the bytes), then writes them into
+    /// the destination robustly. Returns nil on success, else a short human reason for the failure —
+    /// so a folder that imports nothing (or fails midway) says *why* instead of just "nothing".
     nonisolated private static func copyCoordinated(from src: URL, to dest: URL) -> String? {
         let fm = FileManager.default
         if (try? src.resourceValues(forKeys: [.isUbiquitousItemKey]))?.isUbiquitousItem == true {
             try? fm.startDownloadingUbiquitousItem(at: src)   // no-op for a local file
         }
+        // 1) Read the source bytes, coordinated (materializes a provider placeholder first).
+        var data: Data?
         var readError: Error?
         var coordError: NSError?
+        // Read into concrete memory (no `.mappedIfSafe`): a mapped `Data` stays backed by the source
+        // file, so a provider page that can't be served during the later *write* would fault both the
+        // atomic and plain writes alike. Concrete bytes make the copy independent of the source's
+        // continued availability. Photos-backup files (images / short videos) fit comfortably.
         NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: src, options: [], error: &coordError) { readURL in
-            do {
-                let data = try Data(contentsOf: readURL, options: .mappedIfSafe)
-                try data.write(to: dest, options: .atomic)
-            } catch { readError = error }
+            do { data = try Data(contentsOf: readURL) }
+            catch { readError = error }
         }
         // Coordinated read failed (provider couldn't serve it) — try one plain read before giving
         // up, in case the coordinator itself is what's refusing on a defunct provider.
-        if coordError != nil, readError == nil {
-            do {
-                let data = try Data(contentsOf: src, options: .mappedIfSafe)
-                try data.write(to: dest, options: .atomic)
-                return nil
-            } catch { readError = error }
+        if data == nil {
+            data = try? Data(contentsOf: src)
         }
-        if let e = (readError as NSError?) ?? coordError {
-            if e.domain == NSCocoaErrorDomain,
-               e.code == NSFileReadNoSuchFileError || e.code == NSFileReadNoPermissionError || e.code == NSFileReadUnknownError {
-                return "a file couldn’t be read (\(e.code)) — it may be an iCloud item whose data isn’t on this device"
+        guard let bytes = data else {
+            if let e = (readError as NSError?) ?? coordError {
+                if e.domain == NSCocoaErrorDomain,
+                   e.code == NSFileReadNoSuchFileError || e.code == NSFileReadNoPermissionError || e.code == NSFileReadUnknownError {
+                    return "a file couldn’t be read (\(e.code)) — it may be an iCloud item whose data isn’t on this device"
+                }
+                return "couldn’t read the file: \(e.localizedDescription) (\(e.domain) \(e.code))"
             }
-            return "\(e.localizedDescription) (\(e.domain) \(e.code))"
+            return "the file couldn’t be read"
         }
-        return fm.fileExists(atPath: dest.path) ? nil : "the file couldn’t be read"
+        // 2) Write the bytes into the destination robustly.
+        return writeBytes(bytes, to: dest)
+    }
+
+    /// Writes `bytes` to `dest`, trying progressively-less-demanding strategies. `.atomic` (write a
+    /// hidden temp file in the folder, then rename) is fastest and crash-safe but some file
+    /// providers / external volumes reject the temp-file-then-rename dance with a generic
+    /// `NSFileWriteUnknownError` (512) — the failure the user hit. So fall back to a plain direct
+    /// write, then a coordinated write, before giving up with a precise reason.
+    nonisolated private static func writeBytes(_ bytes: Data, to dest: URL) -> String? {
+        do { try bytes.write(to: dest, options: .atomic); return nil } catch {}
+        do { try bytes.write(to: dest, options: []); return nil } catch {}
+        var writeError: Error?
+        var coordError: NSError?
+        NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: dest, options: .forReplacing, error: &coordError) { writeURL in
+            do { try bytes.write(to: writeURL, options: []) } catch { writeError = error }
+        }
+        if FileManager.default.fileExists(atPath: dest.path) { return nil }
+        if let e = (writeError as NSError?) ?? coordError {
+            return "couldn’t save the file: \(e.localizedDescription) (\(e.domain) \(e.code))"
+        }
+        return "the file couldn’t be saved"
     }
 
     /// Writes `date` into an image's EXIF/TIFF date fields, copying the encoded image verbatim (no
