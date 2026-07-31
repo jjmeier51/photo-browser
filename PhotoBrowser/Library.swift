@@ -1635,6 +1635,19 @@ final class Library {
         UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
     }
 
+    /// Folders the user created as a "Reviews" folder — a container that holds *only*
+    /// highlight folders. A Reviews folder gets a special cleared-out presentation
+    /// (`FolderView`): every subfolder is shown as a large highlight bubble, and the
+    /// normal photo grid / filters are hidden. Marked by path (like `albumHighlights`),
+    /// so it is remapped on move/rename and duplicated to a backup drive.
+    var reviewsFolders: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.reviewsFolders") ?? [])
+    func isReviewsFolder(_ folder: URL) -> Bool { reviewsFolders.contains(folder.path) }
+    func setReviewsFolder(_ on: Bool, for folder: URL) {
+        if on { reviewsFolders.insert(folder.path) } else { reviewsFolders.remove(folder.path) }
+        UserDefaults.standard.set(Array(reviewsFolders), forKey: "photoBrowser.reviewsFolders")
+        labelsVersion += 1
+    }
+
     /// User-chosen order of the highlight bubbles within a folder (parent path →
     /// ordered child bubble paths). The Instagram bubble is always pinned first by
     /// the view regardless of this order; everything else follows it.
@@ -1971,6 +1984,7 @@ final class Library {
         kardashianFolders = Set(kardashianFolders.map(remap))
         instagramHighlights = Set(instagramHighlights.map(remap))
         albumHighlights = Set(albumHighlights.map(remap))
+        reviewsFolders = Set(reviewsFolders.map(remap))
         hiddenFolders = Set(hiddenFolders.map(remap))
         customLabels = customLabels.mapValues { Set($0.map(remap)) }
         captions = remapKeys(captions, remap)
@@ -2034,6 +2048,7 @@ final class Library {
         let people = self.people
         let framesFolders = self.framesFolders, kardashianFolders = self.kardashianFolders
         let instagramHighlights = self.instagramHighlights, albumHighlights = self.albumHighlights
+        let reviewsFolders = self.reviewsFolders
         let hiddenFolders = self.hiddenFolders
         let captions = self.captions, folderCovers = self.folderCovers, photoOrigins = self.photoOrigins
         let itemThumbnails = self.itemThumbnails
@@ -2061,6 +2076,7 @@ final class Library {
             ud.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
             ud.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
             ud.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
+            ud.set(Array(reviewsFolders), forKey: "photoBrowser.reviewsFolders")
             ud.set(Array(hiddenFolders), forKey: "photoBrowser.hiddenFolders")
             ud.set(folderCovers, forKey: "photoBrowser.folderCovers")
             ud.set(itemThumbnails, forKey: "photoBrowser.itemThumbnails")
@@ -2187,7 +2203,7 @@ final class Library {
 
         dupSet(&favorites); dupSet(&aiLabels); dupSet(&editedInAppPaths); dupSet(&aiGeneratedPaths)
         dupSet(&framesFolders); dupSet(&kardashianFolders); dupSet(&instagramHighlights); dupSet(&albumHighlights)
-        dupSet(&hiddenFolders)
+        dupSet(&reviewsFolders); dupSet(&hiddenFolders)
         customLabels = customLabels.mapValues { paths in
             var s = paths
             for p in paths { if let np = mapped(p), s.insert(np).inserted { added += 1 } }
@@ -2250,6 +2266,7 @@ final class Library {
         UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
         UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
         UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
+        UserDefaults.standard.set(Array(reviewsFolders), forKey: "photoBrowser.reviewsFolders")
         UserDefaults.standard.set(Array(hiddenFolders), forKey: "photoBrowser.hiddenFolders")
         UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
         UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")

@@ -80,6 +80,8 @@ struct FolderView: View {
     @State private var captionDraft = ""
     @State private var showNewFolder = false
     @State private var newFolderName = ""
+    @State private var showNewReviewsFolder = false   // "Create Reviews Folder" prompt
+    @State private var newReviewsFolderName = ""
     @State private var showMoveToNewFolder = false   // multi-select "Move N Items to New Folder…"
     @State private var moveNewFolderName = ""
     @State private var renameTarget: Entry?
@@ -194,6 +196,9 @@ struct FolderView: View {
 
     private var advancedActive: Bool { videoRes != .all || imageRes != .all || hdrOnly }
     private var labelMode: Bool { showFavoritesOnly || showAIOnly }
+    /// A "Reviews" folder: a container that holds only highlight folders. Its whole
+    /// presentation is replaced by a centered grid of large highlight bubbles.
+    private var isReviews: Bool { library.isReviewsFolder(url) }
     /// The bespoke labeling/filtering only appears inside the "Taylor Swift"
     /// folder (or any folder nested under it).
     private var inTaylorSwift: Bool { url.pathComponents.contains("Taylor Swift") }
@@ -940,6 +945,13 @@ struct FolderView: View {
                 Button("Create") { createFolder() }
                 Button("Cancel", role: .cancel) { newFolderName = "" }
             }
+            .alert("Create Reviews Folder", isPresented: $showNewReviewsFolder) {
+                TextField("Name", text: $newReviewsFolderName)
+                Button("Create") { createReviewsFolder() }
+                Button("Cancel", role: .cancel) { newReviewsFolderName = "" }
+            } message: {
+                Text("A Reviews folder holds only highlight folders — every folder you make inside it becomes a highlight.")
+            }
             .alert("Move to New Folder", isPresented: $showMoveToNewFolder) {
                 TextField("Folder name", text: $moveNewFolderName)
                 Button("Move") { moveToNewFolder() }
@@ -1318,23 +1330,29 @@ struct FolderView: View {
         let core = AnyView(
             VStack(spacing: 0) {
                 header
-                if showBubbles {
-                    // Highlights that are album folders (Home, and album-highlight folders
-                    // like HD/ and Hilary Duff/) wrap into rows, A–Z, so they're all visible
-                    // at once. Social-profile folders (Instagram/Facebook/TikTok/OF)
-                    // keep the horizontal scroller with the user's drag-arranged order.
-                    if wrapsBubbles {
-                        if isRoot { albumHighlightGrid } else { largeHighlightGrid }
-                    } else {
-                        instagramBubbleRow
+                if isReviews {
+                    // Reviews folder: clear the screen down to just its highlight folders,
+                    // shown as a centered grid of large bubbles (no photo grid, no filters).
+                    reviewsGrid.simultaneousGesture(folderSwipeGesture)
+                } else {
+                    if showBubbles {
+                        // Highlights that are album folders (Home, and album-highlight folders
+                        // like HD/ and Hilary Duff/) wrap into rows, A–Z, so they're all visible
+                        // at once. Social-profile folders (Instagram/Facebook/TikTok/OF)
+                        // keep the horizontal scroller with the user's drag-arranged order.
+                        if wrapsBubbles {
+                            if isRoot { albumHighlightGrid } else { largeHighlightGrid }
+                        } else {
+                            instagramBubbleRow
+                        }
                     }
+                    if !entries.isEmpty { filterBar }
+                    // Edge swipes on the grid: left edge, swipe right → back to the parent folder;
+                    // right edge, swipe left → next alphabetical sibling. Simultaneous so scrolling,
+                    // taps and long-presses are untouched; attached to the grid only so the horizontal
+                    // filter-chip scroller can't trigger it.
+                    grid.simultaneousGesture(folderSwipeGesture)
                 }
-                if !entries.isEmpty { filterBar }
-                // Edge swipes on the grid: left edge, swipe right → back to the parent folder;
-                // right edge, swipe left → next alphabetical sibling. Simultaneous so scrolling,
-                // taps and long-presses are untouched; attached to the grid only so the horizontal
-                // filter-chip scroller can't trigger it.
-                grid.simultaneousGesture(folderSwipeGesture)
             }
             .background(AppGradient())
             .overlay { homeHazeOverlay }
@@ -1427,7 +1445,8 @@ struct FolderView: View {
 
 
     @ViewBuilder private var emptyOverlay: some View {
-        if filtered.isEmpty {
+        // A Reviews folder draws its own centered empty state in `reviewsGrid`.
+        if filtered.isEmpty && !isReviews {
             VStack(spacing: 8) {
                 if loadingAges && (ageFilter != nil || Int(submittedQuery.trimmingCharacters(in: .whitespaces)) != nil) {
                     // Only block on ages for an actual age filter / numeric (age) query — a text search must
@@ -1599,6 +1618,73 @@ struct FolderView: View {
             .padding(.horizontal, 10).padding(.vertical, 8)
         }
         .frame(maxHeight: 320)   // a few rows visible; scroll for the rest, keeping the photo grid on screen
+    }
+
+    /// The highlight folders inside a Reviews folder, A–Z (respecting hidden-folder visibility).
+    /// Every subfolder is a highlight; loose files aren't surfaced — a Reviews folder holds only
+    /// highlight folders.
+    private var reviewHighlights: [Entry] {
+        entries.filter { $0.isFolder && (showHiddenFolders || !library.isHiddenFolder($0.url)) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    /// A Reviews folder's whole body: its highlight folders as large bubbles — four per line,
+    /// bigger than the standard highlight, wrapping and flowing down the centered grid. No photo
+    /// grid, no filters. An empty Reviews folder offers a one-tap way to add a highlight.
+    private var reviewsGrid: some View {
+        // Size the bubbles to the width so exactly four fit per line (as large as possible without
+        // overflowing a narrow phone — well beyond the denser 62/72pt highlight layouts elsewhere),
+        // capped so they don't balloon on iPad.
+        GeometryReader { geo in
+            reviewsScroll(diameter: reviewBubbleDiameter(for: geo.size.width))
+        }
+    }
+
+    /// Diameter for a Reviews highlight bubble so four fit across `width` (accounting for the row's
+    /// spacing, the grid's horizontal padding, and the label being a touch wider than the circle).
+    private func reviewBubbleDiameter(for width: CGFloat) -> CGFloat {
+        let usable = width - 28 - 36 - 16      // hPadding*2 + interItemSpacing*3 + label slack
+        return min(max(usable / 4, 60), 112)
+    }
+
+    /// The scrollable centered grid of Reviews highlight bubbles. Rows are chunked into fours and
+    /// each is a centered `HStack`, so a partial last row is centered too (a plain `LazyVGrid` would
+    /// left-align it) — the "flow down the center" the folder asks for. A `LazyVStack` of rows keeps
+    /// it lazy so a big Reviews folder stays cheap.
+    private func reviewsScroll(diameter: CGFloat) -> some View {
+        let highlights = reviewHighlights
+        let rows: [[Entry]] = stride(from: 0, to: highlights.count, by: 4).map {
+            Array(highlights[$0 ..< min($0 + 4, highlights.count)])
+        }
+        return ScrollView {
+            Group {
+                if highlights.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "star.square.on.square").font(.largeTitle).foregroundStyle(.secondary)
+                        Text("No highlight folders yet").foregroundStyle(.secondary)
+                        Button { showNewFolder = true } label: {
+                            Label("Add Highlight Folder", systemImage: "folder.badge.plus")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .frame(maxWidth: .infinity).padding(.top, 60)
+                } else {
+                    LazyVStack(spacing: 20) {
+                        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                            HStack(alignment: .top, spacing: 12) {
+                                ForEach(row) { entry in
+                                    bubbleCell(entry, diameter: diameter, draggable: false)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity)      // center each row's bubbles horizontally
+                    .padding(.horizontal, 14).padding(.vertical, 16)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .refreshable { Haptics.light(); await reload() }
     }
 
     /// One highlight bubble. Long-press initiates a drag to rearrange (the Instagram
@@ -1939,6 +2025,9 @@ struct FolderView: View {
                         Button { playSlideshow() } label: { Label("Play Slideshow", systemImage: "play.rectangle") }
                             .disabled(!hasViewableMedia)
                         Button { showNewFolder = true } label: { Label("New Folder", systemImage: "folder.badge.plus") }
+                        Button { showNewReviewsFolder = true } label: {
+                            Label("Create Reviews Folder", systemImage: "star.square.on.square")
+                        }
                         Toggle(isOn: $showHiddenFolders) { Label("Show Hidden Folders", systemImage: "eye.slash") }
                         Button {
                             if case .rerun = cleanupAction { library.resetCleanup(url) }   // fresh pass over what's left
@@ -2870,6 +2959,23 @@ struct FolderView: View {
         }
         library.contentDidChange(under: url)                       // refresh this folder's listing
         library.path.append(url.appendingPathComponent(name, isDirectory: true))   // open the new folder
+    }
+
+    /// Creates a new folder here, marks it as a "Reviews" folder (holds only highlight folders),
+    /// and opens it. Its subfolders are then presented as large highlight bubbles.
+    private func createReviewsFolder() {
+        let name = newReviewsFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        newReviewsFolderName = ""
+        guard !name.isEmpty else { return }
+        guard FileActions.createFolder(named: name, in: url) else {
+            let id = library.beginActivity("Reviews Folder")
+            library.endActivity(id, result: "Couldn't create “\(name)”. A folder with that name may already exist, or the drive isn't writable right now.")
+            return
+        }
+        let dest = url.appendingPathComponent(name, isDirectory: true)
+        library.setReviewsFolder(true, for: dest)                  // mark it as a Reviews folder
+        library.contentDidChange(under: url)                       // refresh this folder's listing
+        library.path.append(dest)                                  // open the new Reviews folder
     }
 
     private func performRename() {
