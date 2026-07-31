@@ -13,7 +13,7 @@ struct ViewerPresentation: Identifiable {
 
 /// What the single folder picker is being used for (one `.fileImporter` total —
 /// multiple `.fileImporter` modifiers on one view conflict in SwiftUI).
-enum ImportPurpose { case open, transfer, relink, backupMetadata }
+enum ImportPurpose { case open, transfer, relink, backupMetadata, photosBackup }
 
 /// Records when Home tiles last finished loading, for the launch haze. A plain reference type held
 /// in `@State` (its identity never changes) so per-tile updates don't re-render the grid.
@@ -172,6 +172,7 @@ struct FolderView: View {
     @State private var metadataTargets: [URL] = []
     @State private var showMetadataEditor = false
     @State private var transferItem: PreviewItem?
+    @State private var photosBackupItem: PreviewItem?
     @State private var cellFrames: [URL: CGRect] = [:]
     @State private var dragSelectAdding = true
     @State private var lastDragPoint: CGPoint?
@@ -881,6 +882,7 @@ struct FolderView: View {
                     case .transfer:       transferItem = PreviewItem(url: picked)
                     case .relink:         performRelink(oldRoot: picked)
                     case .backupMetadata: performBackupCopy(newRoot: picked)
+                    case .photosBackup:   photosBackupItem = PreviewItem(url: picked)
                     }
                 }
             }
@@ -1093,6 +1095,9 @@ struct FolderView: View {
             .overlay { emptyOverlay }
             .fullScreenCover(item: $transferItem) { item in
                 DriveTransferView(source: item.url, destination: url)
+            }
+            .fullScreenCover(item: $photosBackupItem) { item in
+                PhotosBackupImportView(source: item.url, destination: url)
             }
         )
     }
@@ -2032,6 +2037,9 @@ struct FolderView: View {
                             Button { pickFolder(.transfer) } label: {
                                 Label("Move Here from Another Drive…", systemImage: "externaldrive.badge.minus")
                             }
+                            Button { pickFolder(.photosBackup) } label: {
+                                Label("Import from Mac Photos Backup…", systemImage: "photo.on.rectangle.angled")
+                            }
                             Button { pickFolder(.relink) } label: {
                                 Label("Re-link Favorites from a Drive…", systemImage: "link")
                             }
@@ -2294,6 +2302,11 @@ struct FolderView: View {
                     Divider()
                     Button { bulkEnhance(to: 1080, label: "1080p") } label: { Label("AI Enhance to 1080p", systemImage: "wand.and.stars") }
                 } label: { Label("Upscale Video", systemImage: "arrow.up.right.video") }
+                if selectedEntries().contains(where: { $0.kind == .image }) {
+                    Button { bulkUpscalePhotos() } label: {
+                        Label("AI Upscale Photos (2×)", systemImage: "wand.and.rays")
+                    }
+                }
                 if selectedEntries().contains(where: { $0.kind == .video }) {
                     Button { startAudioExtract(selectedEntries()) } label: {
                         Label("Extract Audio…", systemImage: "waveform")
@@ -2497,6 +2510,25 @@ struct FolderView: View {
     /// Upscales the selected videos in place to the target resolution (short side
     /// `target` px: 1080 or 2160), preserving HDR, metadata, labels, and capture
     /// date; originals are replaced. Videos already at/above the target are skipped.
+    /// Bulk AI photo upscale: 2× resolution with a denoise + unsharp clarity pass, in place,
+    /// EXIF and capture date preserved (reuses the same engine the downloaders' "2× AI Upscale" uses).
+    private func bulkUpscalePhotos() {
+        let targets = selectedEntries().filter { $0.kind == .image }
+        guard !targets.isEmpty else { resultMessage = "Select one or more photos."; return }
+        selecting = false; selection.removeAll()
+        editLabel = "AI Upscaling photos…"; editProcessing = true; editProgress = 0
+        let bg = BackgroundTaskHolder(); bg.begin(name: "AI Upscale Photos")
+        Task {
+            await InstagramApply.aiUpscalePhotos2x(targets.map { $0.url.path }) { done, total in
+                editProgress = Double(done) / Double(max(total, 1))
+            }
+            editProcessing = false; bg.end()
+            resultMessage = "Upscaled \(targets.count) photo\(targets.count == 1 ? "" : "s") (2×)."
+            library.contentDidChange(under: url)
+            await reload()
+        }
+    }
+
     private func bulkUpscale(to target: CGFloat, label: String) {
         let targets = selectedEntries().filter { $0.kind == .video }
         guard !targets.isEmpty else { resultMessage = "Select one or more videos."; return }
