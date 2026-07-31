@@ -36,6 +36,7 @@ struct PhotosBackupImportView: View {
     @State private var statusLine = ""
     @State private var movedCount = 0
     @State private var failedCount = 0
+    @State private var importError: String?
     @State private var resultText = ""
 
     @State private var accessing = false
@@ -208,6 +209,7 @@ struct PhotosBackupImportView: View {
             }
             movedCount += r.moved
             failedCount += r.failed
+            if let reason = r.reason { importError = reason }
             library.contentDidChange(under: destination)
             if held.isEmpty {
                 finish()
@@ -233,6 +235,7 @@ struct PhotosBackupImportView: View {
             }
             movedCount += r.moved
             failedCount += r.failed
+            if let reason = r.reason { importError = reason }
             library.contentDidChange(under: destination)
             finish()
         }
@@ -240,10 +243,14 @@ struct PhotosBackupImportView: View {
 
     private func finish() {
         let verb = deleteOriginals ? "Moved" : "Copied"
-        resultText = movedCount == 0
-            ? "Nothing was imported."
-            : "\(verb) \(movedCount) item\(movedCount == 1 ? "" : "s")"
-                + (failedCount > 0 ? ", \(failedCount) couldn’t be imported." : ", with EXIF and dates kept.")
+        if movedCount == 0 {
+            resultText = failedCount > 0
+                ? "Couldn’t import \(failedCount) item\(failedCount == 1 ? "" : "s")\(importError.map { " — \($0)" } ?? ".")"
+                : "Nothing was imported."
+        } else {
+            resultText = "\(verb) \(movedCount) item\(movedCount == 1 ? "" : "s")"
+                + (failedCount > 0 ? ", \(failedCount) couldn’t be imported\(importError.map { " (\($0))" } ?? "")." : ", with EXIF and dates kept.")
+        }
         phase = .done
     }
 
@@ -401,17 +408,24 @@ enum PhotosBackupImporter {
 
     /// Copies (or moves) each item into `destination`, preserving embedded EXIF/QuickTime (byte copy)
     /// and setting the displayed capture date + filesystem dates to `item.older`. Reports (fraction,
-    /// currentName). Collisions get a unique name so nothing is overwritten.
+    /// currentName). Collisions get a unique name. `reason` names the first failure (surfaced to the
+    /// user) so a folder that imports nothing doesn't just say "nothing" without saying why.
     nonisolated static func move(_ items: [ScanItem], into destination: URL, deleteOriginals: Bool,
-                                 progress: @escaping @Sendable (Double, String) -> Void) async -> (moved: Int, failed: Int) {
+                                 progress: @escaping @Sendable (Double, String) -> Void) async -> (moved: Int, failed: Int, reason: String?) {
         let fm = FileManager.default
         try? fm.createDirectory(at: destination, withIntermediateDirectories: true)
         var moved = 0, failed = 0
+        var reason: String?
         for (i, item) in items.enumerated() {
             progress(Double(i) / Double(max(items.count, 1)), item.name)
             let target = FileActions.uniqueDestination(for: item.name, in: destination)
-            do { try fm.copyItem(at: item.url, to: target) }
-            catch { failed += 1; continue }
+            // Read through NSFileCoordinator so a source that lives in iCloud Drive / a file provider
+            // (these Photos backups usually do) is DOWNLOADED before we copy it. A plain copyItem on a
+            // not-yet-materialized placeholder fails (Files "error 100092"), which is why nothing imported.
+            if let why = copyCoordinated(from: item.url, to: target) {
+                failed += 1; if reason == nil { reason = why }
+                continue
+            }
             // Make the app show the older-of-created/modified date: write it into the file's capture
             // metadata (lossless — the rest of the EXIF/QuickTime is untouched), then mirror it onto
             // the filesystem dates (the metadata rewrite resets those). Off-main throughout.
@@ -423,7 +437,32 @@ enum PhotosBackupImporter {
             moved += 1
         }
         progress(1, "")
-        return (moved, failed)
+        return (moved, failed, reason)
+    }
+
+    /// Copies `src` → `dest` through `NSFileCoordinator`, which materializes an iCloud/file-provider
+    /// item (downloading it if it's a placeholder) before the copy — the plain `copyItem` fails on
+    /// those with a "couldn't be completed (100092)"-style error. Returns nil on success, else a
+    /// short human reason. If a not-downloaded item still can't be read, the reason says so.
+    nonisolated private static func copyCoordinated(from src: URL, to dest: URL) -> String? {
+        let fm = FileManager.default
+        // Nudge iCloud to start downloading a placeholder (harmless/no-op for a local file).
+        if (try? src.resourceValues(forKeys: [.isUbiquitousItemKey]))?.isUbiquitousItem == true {
+            try? fm.startDownloadingUbiquitousItem(at: src)
+        }
+        var copyError: Error?
+        var coordError: NSError?
+        NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: src, options: [], error: &coordError) { readURL in
+            do { try fm.copyItem(at: readURL, to: dest) } catch { copyError = error }
+        }
+        if let e = coordError ?? (copyError as NSError?) {
+            // A file provider that can't hand over the bytes (offline iCloud item, revoked access).
+            if e.domain == NSCocoaErrorDomain, e.code == NSFileReadNoSuchFileError {
+                return "a file wasn’t downloaded from iCloud"
+            }
+            return e.localizedDescription
+        }
+        return fm.fileExists(atPath: dest.path) ? nil : "the file couldn’t be read"
     }
 
     /// Writes `date` into an image's EXIF/TIFF date fields, copying the encoded image verbatim (no
