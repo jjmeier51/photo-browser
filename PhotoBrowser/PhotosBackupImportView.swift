@@ -535,24 +535,33 @@ enum PhotosBackupImporter {
         return ok
     }
 
-    /// Copies `src` to `dest`, coordinated so a file-provider–backed source (iCloud, a third-party
-    /// provider) is materialized first. Reads the RAW BYTES rather than `copyItem` (more robust
-    /// against provider quirks, still preserves EXIF — it lives in the bytes), then writes them into
-    /// the destination robustly. Returns nil on success, else a short human reason for the failure —
+    /// Copies `src` to `dest`. Returns nil on success, else a short human reason for the failure —
     /// so a folder that imports nothing (or fails midway) says *why* instead of just "nothing".
+    ///
+    /// Primary strategy is `FileManager.copyItem`, the exact mechanism the working "Move Here from
+    /// Another Drive" transfer uses (`FileActions.transferContents`). It copies through the file
+    /// provider / external volume correctly and preserves EXIF (a byte-identical copy). A raw
+    /// `Data.write` into the destination — the previous approach — failed on this user's drive with
+    /// `NSFileWriteUnknownError` (512) even though `copyItem` to the *same* folder succeeds. The
+    /// coordinated byte-copy is kept only as a fallback for a provider placeholder that `copyItem`
+    /// can't serve directly.
     nonisolated private static func copyCoordinated(from src: URL, to dest: URL) -> String? {
         let fm = FileManager.default
         if (try? src.resourceValues(forKeys: [.isUbiquitousItemKey]))?.isUbiquitousItem == true {
             try? fm.startDownloadingUbiquitousItem(at: src)   // no-op for a local file
         }
-        // 1) Read the source bytes, coordinated (materializes a provider placeholder first).
+        if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }   // clear any partial leftover
+        // 1) The proven path: a straight file copy, exactly like the drive-to-drive transfer.
+        if (try? fm.copyItem(at: src, to: dest)) != nil { return nil }
+
+        // 2) Fallback — coordinate a read (materializes a not-yet-downloaded provider placeholder)
+        //    into concrete bytes, then write them robustly. Concrete memory (no `.mappedIfSafe`): a
+        //    mapped `Data` stays backed by the source, so a provider page that can't be served during
+        //    the write would fault every write strategy alike.
+        if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }   // partial from a failed copyItem
         var data: Data?
         var readError: Error?
         var coordError: NSError?
-        // Read into concrete memory (no `.mappedIfSafe`): a mapped `Data` stays backed by the source
-        // file, so a provider page that can't be served during the later *write* would fault both the
-        // atomic and plain writes alike. Concrete bytes make the copy independent of the source's
-        // continued availability. Photos-backup files (images / short videos) fit comfortably.
         NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: src, options: [], error: &coordError) { readURL in
             do { data = try Data(contentsOf: readURL) }
             catch { readError = error }
