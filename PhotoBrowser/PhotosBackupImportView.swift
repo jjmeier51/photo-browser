@@ -440,27 +440,39 @@ enum PhotosBackupImporter {
         return (moved, failed, reason)
     }
 
-    /// Copies `src` → `dest` through `NSFileCoordinator`, which materializes an iCloud/file-provider
-    /// item (downloading it if it's a placeholder) before the copy — the plain `copyItem` fails on
-    /// those with a "couldn't be completed (100092)"-style error. Returns nil on success, else a
-    /// short human reason. If a not-downloaded item still can't be read, the reason says so.
+    /// Reads `src`'s bytes and writes them to `dest`, coordinated so a file-provider–backed source
+    /// (iCloud, a third-party provider) is materialized first. Reads the RAW BYTES (memory-mapped)
+    /// rather than `copyItem`, which is more robust against provider quirks and still preserves EXIF
+    /// (it lives in the bytes). Returns nil on success, else a short human reason for the first
+    /// failure — so a folder that imports nothing says *why* instead of just "nothing".
     nonisolated private static func copyCoordinated(from src: URL, to dest: URL) -> String? {
         let fm = FileManager.default
-        // Nudge iCloud to start downloading a placeholder (harmless/no-op for a local file).
         if (try? src.resourceValues(forKeys: [.isUbiquitousItemKey]))?.isUbiquitousItem == true {
-            try? fm.startDownloadingUbiquitousItem(at: src)
+            try? fm.startDownloadingUbiquitousItem(at: src)   // no-op for a local file
         }
-        var copyError: Error?
+        var readError: Error?
         var coordError: NSError?
         NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: src, options: [], error: &coordError) { readURL in
-            do { try fm.copyItem(at: readURL, to: dest) } catch { copyError = error }
+            do {
+                let data = try Data(contentsOf: readURL, options: .mappedIfSafe)
+                try data.write(to: dest, options: .atomic)
+            } catch { readError = error }
         }
-        if let e = coordError ?? (copyError as NSError?) {
-            // A file provider that can't hand over the bytes (offline iCloud item, revoked access).
-            if e.domain == NSCocoaErrorDomain, e.code == NSFileReadNoSuchFileError {
-                return "a file wasn’t downloaded from iCloud"
+        // Coordinated read failed (provider couldn't serve it) — try one plain read before giving
+        // up, in case the coordinator itself is what's refusing on a defunct provider.
+        if coordError != nil, readError == nil {
+            do {
+                let data = try Data(contentsOf: src, options: .mappedIfSafe)
+                try data.write(to: dest, options: .atomic)
+                return nil
+            } catch { readError = error }
+        }
+        if let e = (readError as NSError?) ?? coordError {
+            if e.domain == NSCocoaErrorDomain,
+               e.code == NSFileReadNoSuchFileError || e.code == NSFileReadNoPermissionError || e.code == NSFileReadUnknownError {
+                return "a file couldn’t be read (\(e.code)) — it may be an iCloud item whose data isn’t on this device"
             }
-            return e.localizedDescription
+            return "\(e.localizedDescription) (\(e.domain) \(e.code))"
         }
         return fm.fileExists(atPath: dest.path) ? nil : "the file couldn’t be read"
     }
