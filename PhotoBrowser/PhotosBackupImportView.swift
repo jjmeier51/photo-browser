@@ -342,6 +342,10 @@ enum PhotosBackupImporter {
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .creationDateKey, .contentModificationDateKey]
 
         func scanItem(_ url: URL) -> ScanItem? {
+            // Never import Photos-library sidecars — `.xmp` (metadata) and `.aae` (Apple edit
+            // instructions) sit next to the media but aren't media themselves.
+            let ext = url.pathExtension.lowercased()
+            guard ext != "xmp", ext != "aae" else { return nil }
             let kind = classify(url: url, isDirectory: false)
             guard kind == .image || kind == .video else { return nil }
             let vals = try? url.resourceValues(forKeys: Set(keys))

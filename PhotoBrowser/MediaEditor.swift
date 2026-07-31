@@ -563,6 +563,61 @@ enum MediaEditing {
         return replaceInPlace(original: url, temp: tmp)
     }
 
+    /// AI Upscale tailored for **Apple Photos preview derivatives** — the ~2048px-long-edge JPEGs a
+    /// Photos Library keeps for display, which are what you're left with when only the preview (not
+    /// the full-size original) survived a backup. Those are downscaled *and* JPEG-compressed (block +
+    /// chroma-subsampling noise, ringing on edges) and Apple has already output-sharpened them, so
+    /// the generic enhance — which denoises/sharpens AFTER upscaling with a full-RGB unsharp mask —
+    /// magnifies their artifacts and stacks halos. This pipeline is ordered for that source:
+    ///   1. clean the compression noise at NATIVE resolution first, before upscaling magnifies it,
+    ///   2. Lanczos-upscale (default 2×),
+    ///   3. restore edge crispness on the LUMINANCE channel only — gentle, so it neither stacks on
+    ///      Apple's sharpening nor amplifies the JPEG's chroma fringing (a full-RGB unsharp would).
+    /// In place, metadata preserved, verified before the swap. SDR only. Returns true on success.
+    /// `nonisolated`: pixel work must never touch the main actor.
+    nonisolated static func enhancePreviewInPlace(url: URL, scale: CGFloat = 2) -> Bool {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let full = loadFullCGImage(src) else { return false }
+        let s = max(1, scale)
+        let targetW = Int((CGFloat(full.width) * s).rounded())
+        let targetH = Int((CGFloat(full.height) * s).rounded())
+        guard targetW > 1, targetH > 1 else { return false }
+
+        var ci = CIImage(cgImage: full).clampedToExtent()
+        // 1) De-block the JPEG compression noise at native resolution (before it's magnified).
+        ci = ci.applyingFilter("CINoiseReduction", parameters: ["inputNoiseLevel": 0.02, "inputSharpness": 0.35])
+        // 2) High-quality upscale.
+        if s > 1 {
+            ci = ci.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: s, kCIInputAspectRatioKey: 1.0])
+        }
+        // 3) Gentle luminance-only sharpening — avoids amplifying JPEG chroma fringing.
+        ci = ci.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: 0.5])
+            .cropped(to: CGRect(x: 0, y: 0, width: targetW, height: targetH))
+        let ctx = CIContext(options: nil)
+        guard let out = ctx.createCGImage(ci, from: ci.extent) else { return false }
+
+        var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        props[kCGImagePropertyPixelWidth] = targetW
+        props[kCGImagePropertyPixelHeight] = targetH
+
+        let folder = url.deletingLastPathComponent()
+        let tmp = folder.appendingPathComponent(".\(UUID().uuidString).up")
+        let type = CGImageSourceGetType(src) ?? (UTType.jpeg.identifier as CFString)
+        func encode(_ t: CFString) -> Bool {
+            guard let dst = CGImageDestinationCreateWithURL(tmp as CFURL, t, 1, nil) else { return false }
+            CGImageDestinationAddImage(dst, out, props as CFDictionary)
+            return CGImageDestinationFinalize(dst)
+        }
+        if !encode(type) {
+            try? FileManager.default.removeItem(at: tmp)
+            guard encode(UTType.jpeg.identifier as CFString) else { try? FileManager.default.removeItem(at: tmp); return false }
+        }
+        guard CGImageSourceCreateWithURL(tmp as CFURL, nil).flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }) != nil else {
+            try? FileManager.default.removeItem(at: tmp); return false
+        }
+        return replaceInPlace(original: url, temp: tmp)
+    }
+
     /// Resizes a photo to exactly `targetWidth`×`targetHeight` pixels (high-quality Lanczos), re-encoded in
     /// place while **preserving metadata** (EXIF capture date, GPS, …). Handles both down- and up-scaling.
     /// The caller supplies a proportional target (aspect-preserving). Writes to a temp file and verifies it

@@ -2510,8 +2510,9 @@ struct FolderView: View {
     /// Upscales the selected videos in place to the target resolution (short side
     /// `target` px: 1080 or 2160), preserving HDR, metadata, labels, and capture
     /// date; originals are replaced. Videos already at/above the target are skipped.
-    /// Bulk AI photo upscale: 2× resolution with a denoise + unsharp clarity pass, in place,
-    /// EXIF and capture date preserved (reuses the same engine the downloaders' "2× AI Upscale" uses).
+    /// Bulk AI photo upscale to 2×, in place, EXIF/date preserved. Apple Photos "…preview" JPEGs get
+    /// a pipeline tuned for their compression artifacts (`enhancePreviewInPlace`); everything else
+    /// uses the standard clarity enhance.
     private func bulkUpscalePhotos() {
         let targets = selectedEntries().filter { $0.kind == .image }
         guard !targets.isEmpty else { resultMessage = "Select one or more photos."; return }
@@ -2519,11 +2520,28 @@ struct FolderView: View {
         editLabel = "AI Upscaling photos…"; editProcessing = true; editProgress = 0
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Upscale Photos")
         Task {
-            await InstagramApply.aiUpscalePhotos2x(targets.map { $0.url.path }) { done, total in
-                editProgress = Double(done) / Double(max(total, 1))
+            let n = targets.count
+            var ok = 0, previews = 0
+            for (i, e) in targets.enumerated() {
+                let isPreview = PhotosBackupImporter.previewInfo(e.name).isPreview
+                let dates = try? e.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+                let done = await Task.detached(priority: .userInitiated) {
+                    isPreview ? MediaEditing.enhancePreviewInPlace(url: e.url, scale: 2)
+                              : MediaEditing.enhancePhotoInPlace(url: e.url, scale: 2)
+                }.value
+                if done {
+                    ok += 1; if isPreview { previews += 1 }
+                    // The in-place re-encode resets the file dates — restore them (EXIF is preserved).
+                    var attrs: [FileAttributeKey: Any] = [:]
+                    if let c = dates?.creationDate { attrs[.creationDate] = c }
+                    if let m = dates?.contentModificationDate { attrs[.modificationDate] = m }
+                    if !attrs.isEmpty { try? FileManager.default.setAttributes(attrs, ofItemAtPath: e.url.path) }
+                }
+                editProgress = Double(i + 1) / Double(n)
             }
             editProcessing = false; bg.end()
-            resultMessage = "Upscaled \(targets.count) photo\(targets.count == 1 ? "" : "s") (2×)."
+            resultMessage = "Upscaled \(ok) of \(n) photo\(n == 1 ? "" : "s") (2×)"
+                + (previews > 0 ? " — \(previews) tuned for Photos previews." : ".")
             library.contentDidChange(under: url)
             await reload()
         }
@@ -2597,13 +2615,23 @@ struct FolderView: View {
     private func aiUpscale(_ entry: Entry) {
         editLabel = "AI Upscaling…"; editProcessing = true; editProgress = 0
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Upscale")
+        // Apple Photos "…preview" JPEGs use the tuned 2× pipeline; other photos the standard 1.5× enhance.
+        let isPreview = PhotosBackupImporter.previewInfo(entry.name).isPreview
+        let dates = try? entry.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
         Task {
             let ok = await Task.detached(priority: .userInitiated) {
-                MediaEditing.enhancePhotoInPlace(url: entry.url, scale: 1.5)
+                isPreview ? MediaEditing.enhancePreviewInPlace(url: entry.url, scale: 2)
+                          : MediaEditing.enhancePhotoInPlace(url: entry.url, scale: 1.5)
             }.value
+            if ok {
+                var attrs: [FileAttributeKey: Any] = [:]
+                if let c = dates?.creationDate { attrs[.creationDate] = c }
+                if let m = dates?.contentModificationDate { attrs[.modificationDate] = m }
+                if !attrs.isEmpty { try? FileManager.default.setAttributes(attrs, ofItemAtPath: entry.url.path) }
+            }
             editProgress = 1
             editProcessing = false; bg.end()
-            resultMessage = ok ? "Upscaled “\(entry.name)”." : "Couldn’t upscale “\(entry.name)”."
+            resultMessage = ok ? "Upscaled “\(entry.name)”\(isPreview ? " (preview-tuned 2×)" : "")." : "Couldn’t upscale “\(entry.name)”."
             library.contentDidChange(under: url)
             await reload()
         }
