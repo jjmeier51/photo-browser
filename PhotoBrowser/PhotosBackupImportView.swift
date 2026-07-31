@@ -25,17 +25,22 @@ struct PhotosBackupImportView: View {
     let source: URL
     let destination: URL
 
-    private enum Phase { case scanning, confirm, working, review, done }
+    private enum Phase { case scanning, confirm, choose, working, review, done }
     @State private var phase: Phase = .scanning
     @State private var toMove: [PhotosBackupImporter.ScanItem] = []
     @State private var held: [PhotosBackupImporter.HeldItem] = []
     @State private var selectedHeld = Set<UUID>()
     @State private var deleteOriginals = false
+    // Feature toggles on the confirm screen.
+    @State private var upscaleAfter = false          // 2× AI upscale imported photos after moving
+    @State private var pickItems = false             // choose specific files instead of the whole folder
+    @State private var chosen = Set<UUID>()          // ScanItem ids selected on the choose screen
 
     @State private var progress: Double = 0
     @State private var statusLine = ""
     @State private var movedCount = 0
     @State private var failedCount = 0
+    @State private var upscaledCount = 0
     @State private var importError: String?
     @State private var resultText = ""
 
@@ -48,6 +53,7 @@ struct PhotosBackupImportView: View {
                 switch phase {
                 case .scanning: scanningView
                 case .confirm:  confirmView
+                case .choose:   chooseView
                 case .working:  workingView
                 case .review:   reviewView
                 case .done:     doneView
@@ -58,6 +64,9 @@ struct PhotosBackupImportView: View {
             .toolbar {
                 if phase == .confirm || phase == .scanning {
                     ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                }
+                if phase == .choose {
+                    ToolbarItem(placement: .cancellationAction) { Button("Back") { phase = .confirm } }
                 }
                 if phase == .review {
                     ToolbarItem(placement: .topBarTrailing) { Button("Done") { finish() } }
@@ -89,13 +98,21 @@ struct PhotosBackupImportView: View {
             if toMove.isEmpty && held.isEmpty {
                 Button("Done") { dismiss() }.buttonStyle(.borderedProminent).padding(.top, 6)
             } else {
+                if !toMove.isEmpty {
+                    VStack(spacing: 4) {
+                        Toggle("Choose specific items", isOn: $pickItems)
+                        Toggle("AI Upscale imported photos (2×)", isOn: $upscaleAfter)
+                    }
+                    .font(.subheadline)
+                    .padding(.horizontal, 34).padding(.top, 4)
+                }
                 VStack(spacing: 10) {
                     if !toMove.isEmpty {
-                        Button { start(delete: false) } label: {
-                            Text("Copy Here (keep originals)").frame(maxWidth: .infinity)
+                        Button { begin(delete: false) } label: {
+                            Text(pickItems ? "Choose to Copy…" : "Copy Here (keep originals)").frame(maxWidth: .infinity)
                         }.buttonStyle(.borderedProminent)
-                        Button(role: .destructive) { start(delete: true) } label: {
-                            Text("Move Here (delete originals)").frame(maxWidth: .infinity)
+                        Button(role: .destructive) { begin(delete: true) } label: {
+                            Text(pickItems ? "Choose to Move…" : "Move Here (delete originals)").frame(maxWidth: .infinity)
                         }.buttonStyle(.bordered)
                     } else {
                         // Nothing new to auto-import — go straight to reviewing the matches.
@@ -139,7 +156,10 @@ struct PhotosBackupImportView: View {
                 Section {
                     ForEach(held) { h in
                         Button { toggle(h.id) } label: {
-                            HeldRow(held: h, selected: selectedHeld.contains(h.id))
+                            MediaRow(item: h.item, selected: selectedHeld.contains(h.id),
+                                     badge: h.matchKind == .exactDuplicate
+                                        ? (text: "Duplicate of \(h.matchName)", icon: "doc.on.doc", color: .orange)
+                                        : (text: "Preview of \(h.matchName)", icon: "photo.badge.checkmark", color: .blue))
                         }
                         .buttonStyle(.plain)
                     }
@@ -190,33 +210,55 @@ struct PhotosBackupImportView: View {
 
     private func beginScan() async {
         guard phase == .scanning else { return }
-        if !accessing { accessing = source.startAccessingSecurityScopedResource() }
+        if !accessing { accessing = source.startAccessingSecurityScopedResource(); bgTask.begin(name: "Import Photos Backup") }
         let result = await PhotosBackupImporter.scan(source: source, destination: destination)
         toMove = result.toMove
         held = result.held
         phase = .confirm
     }
 
-    private func start(delete: Bool) {
+    /// Copy/Move tapped on the confirm screen: either go choose specific items, or import all
+    /// non-duplicate items straight away.
+    private func begin(delete: Bool) {
         deleteOriginals = delete
-        phase = .working
-        progress = 0
-        bgTask.begin(name: "Import Photos Backup")
-        let items = toMove
+        if pickItems {
+            chosen = Set(toMove.map { $0.id })      // default: everything selected
+            phase = .choose
+        } else {
+            start(toMove)
+        }
+    }
+
+    /// Import the given (already-scanned, non-duplicate) items, then optionally 2× upscale the
+    /// photos among them, then move on to reviewing the held/duplicate items (or finish).
+    private func start(_ items: [PhotosBackupImporter.ScanItem]) {
         Task {
-            let r = await PhotosBackupImporter.move(items, into: destination, deleteOriginals: delete) { frac, name in
-                Task { @MainActor in progress = frac; statusLine = name.isEmpty ? "" : "Importing \(name)" }
-            }
-            movedCount += r.moved
-            failedCount += r.failed
-            if let reason = r.reason { importError = reason }
-            library.contentDidChange(under: destination)
-            if held.isEmpty {
-                finish()
-            } else {
-                phase = .review
+            await performMove(items)
+            if held.isEmpty { finish() } else { phase = .review }
+        }
+    }
+
+    /// The shared move (+ optional upscale) pass, driving the working screen.
+    private func performMove(_ items: [PhotosBackupImporter.ScanItem]) async {
+        phase = .working; progress = 0; statusLine = ""
+        let r = await PhotosBackupImporter.move(items, into: destination, deleteOriginals: deleteOriginals) { frac, name in
+            Task { @MainActor in progress = frac; statusLine = name.isEmpty ? "" : "Importing \(name)" }
+        }
+        movedCount += r.moved.count
+        failedCount += r.failed
+        if let reason = r.reason { importError = reason }
+        // 2× AI upscale the photos we just imported (after they've been confirmed non-duplicates).
+        // Previews get the preview-tuned pipeline; EXIF + dates are preserved/restored.
+        if upscaleAfter {
+            let images = r.moved.filter { classify(url: $0, isDirectory: false) == .image }
+            if !images.isEmpty {
+                progress = 0
+                upscaledCount += await PhotosBackupImporter.upscaleImported(images) { frac in
+                    Task { @MainActor in progress = frac; statusLine = "AI Upscaling photos…" }
+                }
             }
         }
+        library.contentDidChange(under: destination)
     }
 
     private func toggle(_ id: UUID) {
@@ -224,21 +266,9 @@ struct PhotosBackupImportView: View {
     }
 
     private func moveSelectedHeld() {
-        let chosen = held.filter { selectedHeld.contains($0.id) }.map { $0.item }
-        guard !chosen.isEmpty else { finish(); return }
-        phase = .working
-        progress = 0
-        bgTask.begin(name: "Import Photos Backup")
-        Task {
-            let r = await PhotosBackupImporter.move(chosen, into: destination, deleteOriginals: deleteOriginals) { frac, name in
-                Task { @MainActor in progress = frac; statusLine = name.isEmpty ? "" : "Importing \(name)" }
-            }
-            movedCount += r.moved
-            failedCount += r.failed
-            if let reason = r.reason { importError = reason }
-            library.contentDidChange(under: destination)
-            finish()
-        }
+        let picks = held.filter { selectedHeld.contains($0.id) }.map { $0.item }
+        guard !picks.isEmpty else { finish(); return }
+        Task { await performMove(picks); finish() }
     }
 
     private func finish() {
@@ -249,9 +279,45 @@ struct PhotosBackupImportView: View {
                 : "Nothing was imported."
         } else {
             resultText = "\(verb) \(movedCount) item\(movedCount == 1 ? "" : "s")"
-                + (failedCount > 0 ? ", \(failedCount) couldn’t be imported\(importError.map { " (\($0))" } ?? "")." : ", with EXIF and dates kept.")
+                + (upscaledCount > 0 ? ", \(upscaledCount) upscaled 2×" : "")
+                + (failedCount > 0 ? ", \(failedCount) couldn’t be imported\(importError.map { " (\($0))" } ?? "")." : ", EXIF and dates kept.")
         }
         phase = .done
+    }
+
+    /// Choose-specific-items screen: every non-duplicate media file with a thumbnail and a check,
+    /// so the user can import a subset instead of the whole folder.
+    @ViewBuilder private var chooseView: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("\(chosen.count) of \(toMove.count) selected").font(.subheadline).foregroundStyle(.secondary)
+                Spacer()
+                Button(chosen.count == toMove.count ? "Deselect All" : "Select All") {
+                    chosen = chosen.count == toMove.count ? [] : Set(toMove.map { $0.id })
+                }.font(.subheadline)
+            }
+            .padding(.horizontal).padding(.vertical, 8)
+
+            List {
+                ForEach(toMove) { item in
+                    Button {
+                        if chosen.contains(item.id) { chosen.remove(item.id) } else { chosen.insert(item.id) }
+                    } label: {
+                        MediaRow(item: item, selected: chosen.contains(item.id),
+                                 badge: item.isPreview ? (text: "Preview", icon: "photo.badge.checkmark", color: .blue) : nil)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            Button { start(toMove.filter { chosen.contains($0.id) }) } label: {
+                Text(chosen.isEmpty ? "Select items to import" : "\(deleteOriginals ? "Move" : "Copy") \(chosen.count) Selected")
+                    .fontWeight(.semibold).frame(maxWidth: .infinity).padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent).disabled(chosen.isEmpty)
+            .padding().background(.ultraThinMaterial)
+        }
     }
 
     private func releaseAccess() {
@@ -260,34 +326,36 @@ struct PhotosBackupImportView: View {
     }
 }
 
-/// One held (duplicate / preview) row: thumbnail, name, size · dimensions · date, a match badge,
-/// and a selection check. Thumbnail + dimensions load lazily (off-main), like the duplicates view.
-private struct HeldRow: View {
-    let held: PhotosBackupImporter.HeldItem
+/// One selectable media row: thumbnail, name, size · dimensions · date, an optional badge, and a
+/// selection check. Used for both the choose-items list and the held (duplicate/preview) review.
+/// Thumbnail + dimensions load lazily (off-main), like the duplicates view.
+private struct MediaRow: View {
+    let item: PhotosBackupImporter.ScanItem
     let selected: Bool
+    let badge: (text: String, icon: String, color: Color)?
     @State private var image: UIImage?
     @State private var dims = "—"
 
     private var entry: Entry {
-        Entry(url: held.item.url, name: held.item.name, kind: held.item.kind,
-              size: held.item.size, modified: held.item.older)
+        Entry(url: item.url, name: item.name, kind: item.kind, size: item.size, modified: item.older)
     }
 
     var body: some View {
         HStack(spacing: 12) {
             ZStack {
                 if let image { Image(uiImage: image).resizable().scaledToFill() }
-                else { Rectangle().fill(.quaternary).overlay { Image(systemName: held.item.kind.systemImage).foregroundStyle(.secondary) } }
+                else { Rectangle().fill(.quaternary).overlay { Image(systemName: item.kind.systemImage).foregroundStyle(.secondary) } }
             }
             .frame(width: 56, height: 56).clipShape(RoundedRectangle(cornerRadius: 6))
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(held.item.name).font(.subheadline.weight(.medium)).lineLimit(1)
-                Text("\(held.item.size.sizeString) · \(dims) · \(held.item.older.formatted(date: .abbreviated, time: .shortened))")
+                Text(item.name).font(.subheadline.weight(.medium)).lineLimit(1)
+                Text("\(item.size.sizeString) · \(dims) · \(item.older.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                Label(held.matchKind == .exactDuplicate ? "Duplicate of \(held.matchName)" : "Preview of \(held.matchName)",
-                      systemImage: held.matchKind == .exactDuplicate ? "doc.on.doc" : "photo.badge.checkmark")
-                    .font(.caption2).foregroundStyle(held.matchKind == .exactDuplicate ? Color.orange : Color.blue).lineLimit(1)
+                if let badge {
+                    Label(badge.text, systemImage: badge.icon)
+                        .font(.caption2).foregroundStyle(badge.color).lineLimit(1)
+                }
             }
             Spacer()
             Image(systemName: selected ? "checkmark.circle.fill" : "circle")
@@ -295,7 +363,7 @@ private struct HeldRow: View {
         }
         .padding(.vertical, 3)
         .contentShape(Rectangle())
-        .task(id: held.id) {
+        .task(id: item.id) {
             image = await Thumbnailer.shared.thumbnail(for: entry, size: CGSize(width: 56, height: 56), scale: UIScreen.main.scale)
             let spec = await MetadataLoader.mediaSpec(for: entry)
             if spec.longSide > 0 { dims = "\(spec.longSide) × \(spec.pixels / spec.longSide)" }
@@ -411,10 +479,11 @@ enum PhotosBackupImporter {
     /// currentName). Collisions get a unique name. `reason` names the first failure (surfaced to the
     /// user) so a folder that imports nothing doesn't just say "nothing" without saying why.
     nonisolated static func move(_ items: [ScanItem], into destination: URL, deleteOriginals: Bool,
-                                 progress: @escaping @Sendable (Double, String) -> Void) async -> (moved: Int, failed: Int, reason: String?) {
+                                 progress: @escaping @Sendable (Double, String) -> Void) async -> (moved: [URL], failed: Int, reason: String?) {
         let fm = FileManager.default
         try? fm.createDirectory(at: destination, withIntermediateDirectories: true)
-        var moved = 0, failed = 0
+        var moved: [URL] = []
+        var failed = 0
         var reason: String?
         for (i, item) in items.enumerated() {
             progress(Double(i) / Double(max(items.count, 1)), item.name)
@@ -434,10 +503,36 @@ enum PhotosBackupImporter {
             try? fm.setAttributes([.creationDate: item.older, .modificationDate: item.older], ofItemAtPath: target.path)
             DriveWriter.fullSyncFileAndParent(target)
             if deleteOriginals { try? fm.removeItem(at: item.url) }
-            moved += 1
+            moved.append(target)
         }
         progress(1, "")
         return (moved, failed, reason)
+    }
+
+    /// 2× AI upscale the just-imported photos in place — Apple Photos "…preview" JPEGs get the
+    /// preview-tuned pipeline, others the standard enhance. EXIF (incl. the capture date we wrote)
+    /// is preserved by the enhancers; the filesystem dates are read first and restored after (the
+    /// in-place re-encode resets them). Returns how many succeeded. `nonisolated` — pixel work.
+    nonisolated static func upscaleImported(_ urls: [URL], progress: @escaping @Sendable (Double) -> Void) async -> Int {
+        let fm = FileManager.default
+        var ok = 0
+        for (i, url) in urls.enumerated() {
+            progress(Double(i) / Double(max(urls.count, 1)))
+            let isPreview = previewInfo(url.lastPathComponent).isPreview
+            let dates = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+            let done = isPreview ? MediaEditing.enhancePreviewInPlace(url: url, scale: 2)
+                                 : MediaEditing.enhancePhotoInPlace(url: url, scale: 2)
+            if done {
+                ok += 1
+                var attrs: [FileAttributeKey: Any] = [:]
+                if let c = dates?.creationDate { attrs[.creationDate] = c }
+                if let m = dates?.contentModificationDate { attrs[.modificationDate] = m }
+                if !attrs.isEmpty { try? fm.setAttributes(attrs, ofItemAtPath: url.path) }
+                DriveWriter.fullSyncFileAndParent(url)
+            }
+        }
+        progress(1)
+        return ok
     }
 
     /// Reads `src`'s bytes and writes them to `dest`, coordinated so a file-provider–backed source
