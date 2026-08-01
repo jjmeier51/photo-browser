@@ -16,6 +16,7 @@ struct EntryCell: View {
     var coverURL: URL? = nil
     var thumbnailOverrideURL: URL? = nil        // custom "Set as Thumbnail" image for this item
     var likeCount: Int? = nil
+    var reviewsFolder: Bool = false             // a "Reviews" folder — marked with a green outline/glow
     /// Fired once when the cell's visual content is finalized (cover/thumbnail loaded, or an icon
     /// that needs no load) — drives the home-screen launch haze, which lifts once tiles have settled.
     var onReady: () -> Void = {}
@@ -82,6 +83,14 @@ struct EntryCell: View {
             }
             .overlay { if selecting { selectionOverlay } }
             .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))   // ever-so-slightly rounded
+            // A Reviews folder stands out with a green outline and a soft green glow.
+            .overlay {
+                if reviewsFolder {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(Color.green, lineWidth: 2.5)
+                }
+            }
+            .shadow(color: reviewsFolder ? .green.opacity(0.75) : .clear, radius: reviewsFolder ? 6 : 0)
             .contentShape(Rectangle())
             .task(id: "\(entry.id.absoluteString)|\(thumbnailOverrideURL?.lastPathComponent ?? "")") {
                 guard entry.kind == .image || entry.kind == .video || entry.kind == .pdf else {

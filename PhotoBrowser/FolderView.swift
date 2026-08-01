@@ -528,6 +528,7 @@ struct FolderView: View {
                   coverURL: entry.isFolder ? library.coverURL(for: entry.url) : nil,
                   thumbnailOverrideURL: entry.isFolder ? nil : library.itemThumbnailURL(for: entry.url),
                   likeCount: entry.kind == .video ? library.tiktokLikeCount(for: entry.url) : nil,
+                  reviewsFolder: entry.isFolder && library.isReviewsFolder(entry.url),
                   onReady: { homeCellReady() })
             // A revealed hidden folder reads as hidden (dimmed) so it isn't mistaken
             // for a normal one; invisible entirely unless Show Hidden Folders is on.
