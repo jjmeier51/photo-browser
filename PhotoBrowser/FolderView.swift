@@ -1671,9 +1671,9 @@ struct FolderView: View {
                     .frame(maxWidth: .infinity).padding(.top, 60)
                 } else {
                     LazyVStack(spacing: 20) {
-                        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                        ForEach(rows.indices, id: \.self) { i in
                             HStack(alignment: .top, spacing: 12) {
-                                ForEach(row) { entry in
+                                ForEach(rows[i]) { entry in
                                     bubbleCell(entry, diameter: diameter, draggable: false)
                                 }
                             }
