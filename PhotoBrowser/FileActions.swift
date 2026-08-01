@@ -487,6 +487,106 @@ enum FileActions {
         return TransferResult(destFolder: destFolder, moved: moved, failed: failed, paused: paused)
     }
 
+    /// Lists every regular file under `source`, recursively, with its size and kind — the pickable
+    /// items for a *selective* drive transfer. Off-main (a slow external drive can hold thousands of
+    /// files). The `rel` path is kept so the picker can group / show where each file lives, and so the
+    /// selective move can recreate the same subfolder layout at the destination.
+    nonisolated static func scanTransferItems(under source: URL) async -> [TransferItem] {
+        let fm = FileManager.default
+        let base = source.path
+        var out: [TransferItem] = []
+        if let walker = fm.enumerator(at: source, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+                                      options: [.skipsHiddenFiles]) {
+            for case let url as URL in walker {
+                let rv = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                guard rv?.isRegularFile == true else { continue }
+                let rel = String(url.path.dropFirst(base.count).drop(while: { $0 == "/" }))
+                out.append(TransferItem(url: url, name: url.lastPathComponent, size: Int64(rv?.fileSize ?? 0),
+                                        kind: classify(url: url, isDirectory: false), rel: rel))
+            }
+        }
+        return out.sorted { $0.rel.localizedStandardCompare($1.rel) == .orderedAscending }
+    }
+
+    /// Copies (or moves) a **chosen subset** of files into a subfolder of `parent` named after the
+    /// source — the selective counterpart to `transferContents`. Each file keeps its path relative to
+    /// `source`, so the picked items land in the same subfolder layout at the destination. Shares all
+    /// of `transferContents`' behavior: 8-way fan-out, resumable skip-if-already-there, `isPaused`
+    /// polling, per-file durable sync, and capture-date preservation. The relative paths come from
+    /// `TransferItem.rel` (computed against `source`).
+    nonisolated static func transferItems(
+        _ items: [TransferItem], from source: URL, into parent: URL,
+        reuseDestination: URL? = nil, move: Bool,
+        isPaused: @escaping @Sendable () -> Bool = { false },
+        progress: @escaping @Sendable (TransferProgress) -> Void) async -> TransferResult {
+        let maxConcurrent = 8
+        let fm = FileManager.default
+        let folderName = source.lastPathComponent.isEmpty ? "Imported Drive" : source.lastPathComponent
+        let destFolder = reuseDestination ?? uniqueDestination(for: folderName, in: parent)
+        try? fm.createDirectory(at: destFolder, withIntermediateDirectories: true)
+
+        let files = items
+        let total = files.count
+        guard total > 0 else { return TransferResult(destFolder: destFolder, moved: 0, failed: 0) }
+
+        var moved = 0, failed = 0, done = 0
+        var paused = false
+        await withTaskGroup(of: (Bool, String).self) { group in
+            var index = 0
+            func addNext() {
+                guard !isPaused() else { return }
+                guard index < total else { return }
+                let item = files[index]
+                index += 1
+                // A slash-less rel (a file picked at the source root) just uses its name.
+                let rel = item.rel.isEmpty ? item.name : item.rel
+                let target = destFolder.appendingPathComponent(rel)
+                let srcSize = item.size
+                let srcURL = item.url
+                group.addTask(priority: .userInitiated) {
+                    let fm = FileManager.default
+                    // Resume: same-size file already at the target was copied on an earlier pass.
+                    if srcSize > 0,
+                       let tv = try? target.resourceValues(forKeys: [.fileSizeKey]),
+                       Int64(tv.fileSize ?? -1) == srcSize {
+                        if move { try? fm.removeItem(at: srcURL) }
+                        return (true, srcURL.lastPathComponent)
+                    }
+                    try? fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: target) }   // partial leftover
+                    do {
+                        if move { try fm.moveItem(at: srcURL, to: target) }
+                        else { try fm.copyItem(at: srcURL, to: target) }
+                        await preserveCaptureDate(target)
+                        DriveWriter.fullSyncFileAndParent(target)
+                        return (true, srcURL.lastPathComponent)
+                    } catch { return (false, srcURL.lastPathComponent) }
+                }
+            }
+            for _ in 0..<min(maxConcurrent, total) { addNext() }
+            while let (ok, name) = await group.next() {
+                if ok { moved += 1 } else { failed += 1 }
+                done += 1
+                progress(TransferProgress(fraction: Double(done) / Double(total),
+                                          done: done, total: total, currentName: name))
+                if isPaused() { paused = true } else { addNext() }
+            }
+        }
+        // Tidy any folders the picked files emptied (only on a finished, unpaused move).
+        if move && !paused { removeEmptyDirectories(under: source) }
+        return TransferResult(destFolder: destFolder, moved: moved, failed: failed, paused: paused)
+    }
+
+    /// One pickable file for a selective drive transfer.
+    struct TransferItem: Identifiable, Sendable {
+        let id = UUID()
+        let url: URL
+        let name: String
+        let size: Int64
+        let kind: FileKind
+        let rel: String      // path relative to the transfer source
+    }
+
     /// Removes empty directories left behind after a file-by-file move.
     nonisolated private static func removeEmptyDirectories(under root: URL) {
         let fm = FileManager.default
