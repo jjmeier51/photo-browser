@@ -12,7 +12,7 @@ struct PhotoBrowserApp: App {
             ContentView()
                 .environment(library)
                 .preferredColorScheme(.dark)
-                .task { library.restoreLastFolder(); library.refreshPendingShares() }
+                .task { library.restoreLastFolder(); library.refreshPendingShares(); library.configureAINotificationRouting() }
                 // The Share Extension opens us via photobrowser://share after stashing what was
                 // shared in the App Group; pick it up so ContentView can present the import sheet.
                 .onOpenURL { url in

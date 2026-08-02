@@ -80,6 +80,11 @@ struct ViewerView: View {
         .onChange(of: library.pendingFolderNavigation) { _, target in
             if target != nil { dismiss() }
         }
+        // A tapped "AI images ready" notification wants to reopen the results — leave the viewer so
+        // ContentView can present the Edit-with-AI UI (a sheet can't appear over the full-screen viewer).
+        .onChange(of: library.aiResultPresentation?.id) { _, id in
+            if id != nil { dismiss() }
+        }
         .fullScreenCover(isPresented: $showEditor) {
             if let current { MediaEditorView(entry: current) }
         }

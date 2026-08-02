@@ -1083,6 +1083,94 @@ final class Library {
         }
     }
 
+    // MARK: - Edit with AI (app-wide, background)
+
+    /// One "Edit with AI" job. Held app-wide so generation runs in the background while the user
+    /// browses; a completed job's results are shown when the user taps the completion notification,
+    /// which reopens the Edit-with-AI UI on the original photo.
+    struct AIEditJob: Identifiable {
+        let id = UUID()
+        let entry: Entry
+        let folder: URL          // the original photo's folder — where the tap navigates back to
+        let prompt: String
+        let model: AIExtend.AIModel
+        var results: [Data] = []
+    }
+
+    /// Completed jobs by id — a tapped notification looks its results up here. In-memory for the
+    /// session (the images are large and transient; a killed-and-relaunched app simply can't restore
+    /// them, which is acceptable).
+    @ObservationIgnored private var completedAIEdits: [UUID: AIEditJob] = [:]
+    /// Set to reopen the Edit-with-AI UI showing a finished job's results (observed by ContentView).
+    var aiResultPresentation: AIEditJob?
+
+    /// Routes a tapped AI-completion notification back to `presentAIResult`. Call once at launch.
+    func configureAINotificationRouting() {
+        AINotifications.tapHandler = { [weak self] id in self?.presentAIResult(jobID: id) }
+    }
+
+    /// Starts an "Edit with AI" generation app-wide so the user can navigate away while it runs — a
+    /// progress pill shows it working, and on completion a notification fires (tap → the results).
+    /// The finished job is stored so the tap can reopen it on the original photo. Mirrors the
+    /// frame-export pattern (activity pill + best-effort background window).
+    func startAIEdit(entry: Entry, prompt: String, count: Int, model: AIExtend.AIModel,
+                     resolution: AIExtend.OutputResolution, aspect: AIExtend.OutputAspect) {
+        recordAIPrompt(prompt)      // history, newest first
+        let job = AIEditJob(entry: entry, folder: entry.url.deletingLastPathComponent(),
+                            prompt: prompt, model: model)
+        let jobID = job.id
+        let activityID = beginActivity("Editing with AI", indeterminate: true)
+        setActivity(activityID, status: "Generating \(count) image\(count == 1 ? "" : "s") with Astria…")
+        let bg = BackgroundTaskHolder(); bg.begin(name: "AI Edit")
+        let live = AIProgressActivity()
+        live.begin(title: "AI Edit", detail: "Generating with Astria…")
+        let url = entry.url
+        Task {
+            guard let prep = await Task.detached(priority: .userInitiated, operation: {
+                AIExtend.uploadJPEG(of: url, maxPixel: resolution.uploadLongSide)
+            }).value else {
+                endActivity(activityID); bg.end()
+                live.finish(success: false, message: "Couldn’t read the photo.")
+                activityResults.append("AI edit failed — couldn’t read the photo.")
+                return
+            }
+            let result = await AIExtend.generate(model: model, prompt: prompt, imageData: prep.data,
+                                                 count: count, width: prep.width, height: prep.height,
+                                                 aspectOverride: aspect.ratio, superResolution: resolution.superResolution)
+            endActivity(activityID); bg.end()
+            switch result {
+            case .success(let data):
+                var done = job; done.results = data
+                completedAIEdits[jobID] = done
+                live.finish(success: true,
+                            message: "\(data.count) AI image\(data.count == 1 ? "" : "s") ready to review. Tap to see them.",
+                            jobID: jobID.uuidString)
+            case .failure(let err):
+                let msg: String
+                switch err {
+                case .notConfigured:        msg = "Add your Astria API key in Settings."
+                case .network:              msg = "Couldn’t reach the provider."
+                case .badImage, .badResult: msg = "The image couldn’t be processed."
+                case .server(let m):        msg = m
+                }
+                live.finish(success: false, message: msg)
+                activityResults.append("AI edit failed — \(msg)")
+            }
+        }
+    }
+
+    /// Reopens the Edit-with-AI UI showing a finished job's results — navigating back to the
+    /// original photo's folder first. Called when the user taps the completion notification.
+    func presentAIResult(jobID: String) {
+        guard let uuid = UUID(uuidString: jobID), let job = completedAIEdits[uuid] else { return }
+        if let root = rootURL, job.folder.standardizedFileURL == root.standardizedFileURL {
+            path = []                       // the original lives in the root
+        } else {
+            path = [job.folder]             // push straight to its folder
+        }
+        aiResultPresentation = job
+    }
+
     /// Backup companion to `duplicateMetadata`: duplicates the cached thumbnails onto the
     /// backup subtree's cache keys in the background, so browsing the backup shows instant
     /// tiles instead of re-thumbnailing the whole drive. Cheap local file copies only.

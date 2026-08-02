@@ -34,9 +34,11 @@ final class AIProgressActivity {
         #endif
     }
 
-    /// Finish: end the Live Activity with a final state and post the notification.
-    func finish(success: Bool, message: String) {
-        AINotifications.post(title: success ? "AI images ready" : "AI couldn’t finish", body: message)
+    /// Finish: end the Live Activity with a final state and post the notification. `jobID` is
+    /// carried on the notification so tapping it can reopen the exact photo's results.
+    func finish(success: Bool, message: String, jobID: String? = nil) {
+        AINotifications.post(title: success ? "AI images ready" : "AI couldn’t finish", body: message,
+                             jobID: success ? jobID : nil)
         #if canImport(ActivityKit)
         if #available(iOS 16.2, *), let id = activityID,
            let activity = Activity<AIActivityAttributes>.activities.first(where: { $0.id == id }) {
@@ -50,6 +52,12 @@ final class AIProgressActivity {
 
 /// Thin wrapper over `UNUserNotificationCenter` for the "AI images received" alert.
 enum AINotifications {
+    /// userInfo key carrying the finished AI job's id, so a tap can reopen its results.
+    static let jobIDKey = "aiJobID"
+    /// Set once at launch by `Library`: routes a tapped completion notification (its job id)
+    /// back to the app so it can navigate to the photo and show the results.
+    @MainActor static var tapHandler: ((String) -> Void)?
+
     /// Retained delegate that lets the completion alert appear **while the app is in the
     /// foreground**. Without it iOS silently drops immediate notifications whenever the app
     /// is active — the cause of the "only fires ~50% of the time" behaviour (it showed only
@@ -71,7 +79,7 @@ enum AINotifications {
         center.delegate = presenter        // must be set before any notification is posted
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
-    static func post(title: String, body: String) {
+    static func post(title: String, body: String, jobID: String? = nil) {
         // Ensure the presenter is installed even if `post` is somehow reached without a
         // prior `requestAuthorization` (belt-and-braces so foreground alerts never drop).
         UNUserNotificationCenter.current().delegate = presenter
@@ -79,16 +87,28 @@ enum AINotifications {
         content.title = title
         content.body = body
         content.sound = .default
+        if let jobID { content.userInfo = [jobIDKey: jobID] }
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))   // nil = deliver now
     }
 }
 
-/// Presents AI completion notifications even when the app is foregrounded.
+/// Presents AI completion notifications even when the app is foregrounded, and — when one is
+/// tapped — routes its job id back to the app so it can reopen the photo's results.
 private final class ForegroundPresenter: NSObject, UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .list, .sound])
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        let jobID = response.notification.request.content.userInfo[AINotifications.jobIDKey] as? String
+        if let jobID {
+            Task { @MainActor in AINotifications.tapHandler?(jobID) }
+        }
+        completionHandler()
     }
 }

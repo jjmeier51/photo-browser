@@ -8,6 +8,11 @@ struct AIEditView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
     let entry: Entry
+    // Reopen path: when the user taps the completion notification, ContentView reopens this UI
+    // pre-loaded with the finished job's results so they show immediately over the Edit-with-AI UI.
+    var initialResults: [Data]? = nil
+    var initialPrompt: String = ""
+    var initialModel: AIExtend.AIModel = AIExtend.defaultModel
 
     @State private var prompt = ""
     @State private var count = 1
@@ -16,10 +21,9 @@ struct AIEditView: View {
     @State private var aspect = AIExtend.OutputAspect.original
     @State private var lastPrompt = ""                       // prompt/model actually sent, for result metadata
     @State private var lastModel = AIExtend.defaultModel
-    @State private var running = false
     @State private var results: [Data]?
-    @State private var error: String?
     @State private var showSettings = false
+    @State private var seeded = false
 
     private let counts = [1, 2, 3, 4, 8]
 
@@ -93,32 +97,16 @@ struct AIEditView: View {
                         ForEach(counts, id: \.self) { Text("\($0)").tag($0) }
                     }
                 } footer: {
-                    Text("Uploads the photo to Astria to generate edits. “4K” super-resolves the result; “Original” keeps the photo's shape. Results are reviewed before anything is saved (to an “AI” subfolder, keeping the original's EXIF).")
-                }
-                if let error {
-                    Section { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange).font(.callout) }
+                    Text("Uploads the photo to Astria to generate edits — it runs in the background, so you can keep browsing while it works. You'll get a notification when the images are ready; tap it to review them here. “4K” super-resolves the result; “Original” keeps the photo's shape. Kept results save to an “AI” subfolder, keeping the original's EXIF.")
                 }
             }
             .navigationTitle("Edit with AI")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(running) }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Generate") { generate() }
-                        .disabled(running || prompt.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-            }
-            .overlay {
-                if running {
-                    VStack(spacing: 12) {
-                        ProgressView()
-                        Text("Generating \(count) image\(count == 1 ? "" : "s") with Astria…")
-                            .font(.callout.weight(.medium)).multilineTextAlignment(.center)
-                        Text("This can take up to a minute. Keep the app open — it keeps going briefly in the background.")
-                            .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    }
-                    .padding(28).frame(maxWidth: 300)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .disabled(prompt.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
@@ -127,41 +115,26 @@ struct AIEditView: View {
                               model: lastModel.rawValue, prompt: lastPrompt)
             }
         }
+        // Reopen path: seed the finished results so they show over the Edit-with-AI UI. Deferred a
+        // tick so the outer sheet finishes presenting before its inner results sheet is triggered
+        // (presenting one straight from the other's onAppear can be swallowed).
+        .onAppear {
+            guard !seeded, let initialResults else { return }
+            seeded = true
+            lastPrompt = initialPrompt
+            lastModel = initialModel
+            DispatchQueue.main.async { results = initialResults }
+        }
     }
 
+    /// Kicks off generation app-wide (it keeps running while you browse) and closes this sheet, so
+    /// you're free to navigate. A progress pill shows it working; a notification arrives when it's
+    /// done — tapping it reopens this UI on the photo with the results.
     private func generate() {
         guard AIExtend.isConfigured else { showSettings = true; return }
-        library.recordAIPrompt(prompt)     // history, newest first (reuse moves it to the top)
-        running = true; error = nil
-        let url = entry.url, p = prompt, n = count, m = model
-        lastPrompt = p; lastModel = m       // snapshot for the results sheet's metadata
-        let res = resolution, asp = aspect
-        let bg = BackgroundTaskHolder(); bg.begin(name: "AI Edit")
-        let activity = AIProgressActivity()
-        activity.begin(title: "AI Edit", detail: "Generating with Astria…")
-        Task {
-            guard let prep = await Task.detached(priority: .userInitiated) { AIExtend.uploadJPEG(of: url, maxPixel: res.uploadLongSide) }.value else {
-                running = false; bg.end(); error = "Couldn’t read the photo."
-                activity.finish(success: false, message: "Couldn’t read the photo."); return
-            }
-            let result = await AIExtend.generate(model: m, prompt: p, imageData: prep.data, count: n,
-                                                 width: prep.width, height: prep.height,
-                                                 aspectOverride: asp.ratio, superResolution: res.superResolution)
-            running = false; bg.end()
-            switch result {
-            case .success(let data):
-                results = data
-                activity.finish(success: true, message: "\(data.count) AI image\(data.count == 1 ? "" : "s") ready to review.")
-            case .failure(.notConfigured):
-                showSettings = true; activity.finish(success: false, message: "Add your Astria API key in Settings.")
-            case .failure(.network):
-                error = "Couldn’t reach the provider."; activity.finish(success: false, message: "Couldn’t reach the provider.")
-            case .failure(.badImage), .failure(.badResult):
-                error = "The image couldn’t be processed."; activity.finish(success: false, message: "The image couldn’t be processed.")
-            case .failure(.server(let m)):
-                error = m; activity.finish(success: false, message: m)
-            }
-        }
+        library.startAIEdit(entry: entry, prompt: prompt, count: count, model: model,
+                            resolution: resolution, aspect: aspect)
+        dismiss()
     }
 }
 

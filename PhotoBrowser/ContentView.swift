@@ -84,6 +84,13 @@ struct ContentView: View {
             set: { if !$0 { library.pendingShares = []; StorySharing.clear() } })) {
             StoryImportView()
         }
+        // Tapping an "AI images ready" notification reopens the Edit-with-AI UI on the original
+        // photo with the finished results shown (the path was already navigated to its folder).
+        .sheet(item: $library.aiResultPresentation) { job in
+            AIEditView(entry: job.entry, initialResults: job.results,
+                       initialPrompt: job.prompt, initialModel: job.model)
+                .environment(library)
+        }
     }
 
     private func pillTitle(_ a: Library.Activity) -> String {
