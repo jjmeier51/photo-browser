@@ -128,6 +128,15 @@ enum InstagramService {
                                       poster: profile.handle, creds: creds,
                                       taggedUser: (id: profile.userID, username: profile.handle), since: since) { _ in }.jobs
         }
+        // Reels → main folder. Reel-heavy profiles post clips the timeline feed can omit entirely,
+        // so recent reels showed up as "no new posts". Crawl the dedicated clips endpoint too and
+        // merge, skipping any reel the feed already captured (so nothing downloads twice). Best-effort.
+        progress(Progress(phase: "Finding reels…", fraction: 0, done: 0, total: 0))
+        let haveIDs = alreadyDownloaded.union(Set(jobs.map { $0.id }))
+        jobs += await collectClips(userID: profile.userID, folder: folder, already: haveIDs,
+                                   poster: profile.handle, creds: creds, since: since) { n in
+            progress(Progress(phase: "Finding reels — \(n) item(s)…", fraction: 0, done: 0, total: 0))
+        }.jobs
         // Current stories (the last 24 hours) → "Stories" subfolder. Gathered from every
         // reel source, so subscriber-only "Exclusive" stories (which Instagram can deliver in
         // a separately-keyed reel) are captured alongside the normal ones.
@@ -481,6 +490,68 @@ enum InstagramService {
             found(out.jobs.count)
             let more = json["more_available"] as? Bool ?? false
             maxID = json["next_max_id"] as? String
+            if !more || maxID == nil || items.isEmpty { break }
+        }
+        return out
+    }
+
+    /// The user's **reels** via the dedicated clips endpoint. Reel-heavy profiles post clips that
+    /// the timeline `feed/user/` endpoint can omit entirely — so those reels never showed up as
+    /// "new" no matter how deep the feed crawl went. This POSTs to `clips/user/`, whose items wrap
+    /// the media under a `media` key and paginate via `paging_info`. Same newest-first, time-aware
+    /// stop as `collectFeed`. Best-effort: a failure just yields no reels (the feed crawl stands).
+    nonisolated private static func collectClips(userID: String, folder: URL, already: Set<String>, poster: String,
+                                                 creds: Credentials, since: Double,
+                                                 found: @escaping @Sendable (Int) -> Void) async -> FeedResult {
+        var out = FeedResult()
+        guard let url = URL(string: "https://www.instagram.com/api/v1/clips/user/") else { return out }
+        var maxID: String?
+        var pages = 0
+        var consecutiveSeen = 0
+        let floor = since > 0 ? Date(timeIntervalSince1970: since - 14 * 86_400) : Date.distantFuture
+        loop: while pages < 200 {
+            pages += 1
+            var body = "target_user_id=\(userID)&page_size=12&include_feed_video=true"
+            if let maxID, let enc = maxID.addingPercentEncoding(withAllowedCharacters: .alphanumerics) { body += "&max_id=\(enc)" }
+            var json: [String: Any]?
+            attempts: for attempt in 0..<3 {
+                if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000) }
+                var req = apiRequest(url, handle: poster, creds: creds)
+                req.httpMethod = "POST"
+                req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                req.httpBody = body.data(using: .utf8)
+                guard let (data, resp) = try? await session.data(for: req) else { out.failure = "the network request failed"; continue }
+                let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                if status == 429 || status >= 500 { out.failure = "Instagram is rate-limiting requests (HTTP \(status))"; continue }
+                if status == 401 || status == 403 { out.failure = "Instagram refused the request (HTTP \(status))"; break attempts }
+                if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { json = j; out.failure = nil }
+                break attempts
+            }
+            guard let json else { break }
+            // Each clips item wraps the real post under `media`; older shapes put it inline.
+            let items = json["items"] as? [[String: Any]] ?? []
+            for wrapper in items {
+                let item = (wrapper["media"] as? [String: Any]) ?? wrapper
+                guard let code = (item["code"] as? String) ?? idString(item["pk"]) ?? idString(item["id"]) else { continue }
+                if already.contains(code) {
+                    consecutiveSeen += 1
+                    let itemDate = Date(timeIntervalSince1970: Double(item["taken_at"] as? Int ?? 0))
+                    if consecutiveSeen >= 15 && itemDate < floor { break loop }
+                    continue
+                }
+                consecutiveSeen = 0
+                var enriched = item
+                if VideoTranscoder.isAvailable, lacksDash(item), let pk = idString(item["pk"]),
+                   let info = await fetchMediaInfo(pk: pk, handle: poster, creds: creds) {
+                    enriched = info
+                }
+                out.jobs += jobsFor(item: enriched, id: code, folder: folder, defaultPoster: poster)
+            }
+            found(out.jobs.count)
+            // Clips paginate via `paging_info`; tolerate the top-level shape too.
+            let paging = json["paging_info"] as? [String: Any]
+            let more = (paging?["more_available"] as? Bool) ?? (json["more_available"] as? Bool) ?? false
+            maxID = (paging?["max_id"] as? String) ?? (json["next_max_id"] as? String)
             if !more || maxID == nil || items.isEmpty { break }
         }
         return out
