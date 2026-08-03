@@ -93,7 +93,7 @@ enum InstagramService {
 
     nonisolated static func run(handle: String, into folder: URL, alreadyDownloaded: Set<String>,
                                 creds: Credentials, replaceExisting: Bool = false, includeTagged: Bool = true,
-                                knownUserID: String? = nil,
+                                knownUserID: String? = nil, since: Double = 0,
                                 progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
         progress(Progress(phase: "Loading @\(handle)…", fraction: 0, done: 0, total: 0))
@@ -115,7 +115,7 @@ enum InstagramService {
         var jobs: [Job] = []
         // Posts → main folder.
         let feed = await collectFeed(base: "feed/user/\(profile.userID)/", folder: folder, already: alreadyDownloaded,
-                                     poster: profile.handle, creds: creds) { n in
+                                     poster: profile.handle, creds: creds, since: since) { n in
             progress(Progress(phase: "Finding posts — \(n) item(s)…", fraction: 0, done: 0, total: 0))
         }
         jobs += feed.jobs
@@ -126,7 +126,7 @@ enum InstagramService {
             progress(Progress(phase: "Finding tagged media…", fraction: 0, done: 0, total: 0))
             jobs += await collectFeed(base: "usertags/\(profile.userID)/feed/", folder: folder, already: alreadyDownloaded,
                                       poster: profile.handle, creds: creds,
-                                      taggedUser: (id: profile.userID, username: profile.handle)) { _ in }.jobs
+                                      taggedUser: (id: profile.userID, username: profile.handle), since: since) { _ in }.jobs
         }
         // Current stories (the last 24 hours) → "Stories" subfolder. Gathered from every
         // reel source, so subscriber-only "Exclusive" stories (which Instagram can deliver in
@@ -402,14 +402,26 @@ enum InstagramService {
     /// feed — the old unchecked fetch turned a throttled page-1 into "No new posts".
     private struct FeedResult { var jobs: [Job] = []; var failure: String? }
 
-    /// Paginated, newest-first feed (posts or tagged); stops after a long run of known items.
+    /// Paginated, newest-first feed (posts or tagged); stops after a long run of known items —
+    /// but not before it has crawled past the window since the last update, so a recent post can't
+    /// be skipped (see `floor` below).
     nonisolated private static func collectFeed(base: String, folder: URL, already: Set<String>, poster: String,
                                                 creds: Credentials, taggedUser: (id: String, username: String)? = nil,
+                                                since: Double = 0,
                                                 found: @escaping @Sendable (Int) -> Void) async -> FeedResult {
         var out = FeedResult()
         var maxID: String?
         var pages = 0
         var consecutiveSeen = 0          // run of already-downloaded posts
+        // Keep crawling until posts are older than a window before the last successful update. The
+        // feed is chronological (bar a handful of pinned posts), so once we reach posts older than
+        // that, everything below is older still — and already downloaded — meaning nothing NEW can
+        // remain. This makes the "stop after a run of already-seen posts" heuristic safe: it no
+        // longer stops early *above* a recent post a prior run left behind (e.g. one that failed to
+        // download and is now pinned below newer successes), which was how a post from the last week
+        // could be skipped run after run. With no time reference (`since <= 0`) it falls back to the
+        // old count-only stop.
+        let floor = since > 0 ? Date(timeIntervalSince1970: since - 14 * 86_400) : Date.distantFuture
         loop: while pages < 400 {
             pages += 1
             var s = "https://www.instagram.com/api/v1/\(base)?count=33"
@@ -447,10 +459,12 @@ enum InstagramService {
                 if already.contains(code) {
                     // Don't stop at the *first* already-downloaded post: Instagram pins up to ~3
                     // (already-downloaded) posts above newer ones, so a new post can sit below them.
-                    // Skip seen posts and only stop after a long run — past the pins and well into
-                    // the already-downloaded timeline. (15 matches the TikTok dedup-run threshold.)
+                    // Skip seen posts and only stop after a long run — AND once we're past the
+                    // recent-window floor, so a not-yet-downloaded recent post below a wall of seen
+                    // posts is still reached. (15 matches the TikTok dedup-run threshold.)
                     consecutiveSeen += 1
-                    if consecutiveSeen >= 15 { break loop }
+                    let itemDate = Date(timeIntervalSince1970: Double(item["taken_at"] as? Int ?? 0))
+                    if consecutiveSeen >= 15 && itemDate < floor { break loop }
                     continue
                 }
                 consecutiveSeen = 0

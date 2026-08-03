@@ -124,7 +124,7 @@ struct InstagramImportView: View {
 
             let r = await InstagramService.run(handle: h, into: dest, alreadyDownloaded: already, creds: creds,
                                                replaceExisting: force, includeTagged: !skipT,
-                                               knownUserID: prior?.userID) { p in
+                                               knownUserID: prior?.userID, since: force ? 0 : (prior?.lastUpdated ?? 0)) { p in
                 Task { @MainActor in
                     library.setActivity(id, status: p.total > 0 ? "Downloading \(p.done) of \(p.total)…" : p.phase,
                                         fraction: p.total > 0 ? p.fraction : nil)

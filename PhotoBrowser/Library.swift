@@ -1380,7 +1380,7 @@ final class Library {
                             fraction: Double(i) / Double(jobs.count))
                 let r = await InstagramService.run(handle: job.handle, into: dest, alreadyDownloaded: already,
                                                    creds: creds, includeTagged: !skipTagged,
-                                                   knownUserID: prior?.userID) { p in
+                                                   knownUserID: prior?.userID, since: prior?.lastUpdated ?? 0) { p in
                     Task { @MainActor in
                         self.setActivity(id, fraction: (Double(i) + p.fraction) / Double(jobs.count))
                     }
