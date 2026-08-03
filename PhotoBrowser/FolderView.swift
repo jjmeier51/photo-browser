@@ -28,6 +28,12 @@ struct CombineRequest: Identifiable {
     let videos: [Entry]
 }
 
+/// Carries the selected videos into the blocking bulk frame-export screen.
+struct FrameExportRequest: Identifiable {
+    let id = UUID()
+    let videos: [Entry]
+}
+
 /// Browses one directory: subfolders + files, with sort, search, a full-screen
 /// viewer for photos/videos, and a Select mode for save/delete.
 struct FolderView: View {
@@ -95,6 +101,7 @@ struct FolderView: View {
     @State private var exportTarget: Entry?
     @State private var trimTarget: Entry?
     @State private var combineRequest: CombineRequest?
+    @State private var frameExportRequest: FrameExportRequest?
     @State private var showAIOnly = false
     @State private var aiEntries: [Entry] = []
     @State private var labelKind: LabelKind = .all
@@ -358,11 +365,27 @@ struct FolderView: View {
         return applyHidden(list)
     }
 
-    /// Removes hidden folders — and, for recursive result sets (search, labels,
-    /// ages), anything inside them — unless "Show Hidden Folders" is on.
+    /// Removes hidden folders (and, for recursive result sets, anything inside them), individually
+    /// hidden files, and empty (0 KB) files — unless "Show Hidden Items" is on. A 0 KB file is
+    /// usually a broken/failed download; it's hidden like a manually-hidden file (revealable, so it
+    /// can still be found and deleted).
     private func applyHidden(_ list: [Entry]) -> [Entry] {
-        guard !showHiddenFolders, !library.hiddenFolders.isEmpty else { return list }
-        return list.filter { !library.isUnderHiddenFolder($0.url.path) }
+        guard !showHiddenFolders else { return list }
+        let anyHiddenFolders = !library.hiddenFolders.isEmpty
+        let anyHiddenFiles = !library.hiddenFiles.isEmpty
+        return list.filter { e in
+            if !e.isFolder && e.size == 0 { return false }                                    // empty file
+            if anyHiddenFolders && library.isUnderHiddenFolder(e.url.path) { return false }    // hidden folder / inside one
+            if anyHiddenFiles && !e.isFolder && library.isHiddenFile(e.url) { return false }   // hidden file
+            return true
+        }
+    }
+
+    /// Whether a (revealed) entry should be dimmed to read as hidden: a hidden folder, a hidden
+    /// file, or a 0 KB file.
+    private func isDimmedHidden(_ entry: Entry) -> Bool {
+        if entry.isFolder { return library.isHiddenFolder(entry.url) }
+        return library.isHiddenFile(entry.url) || entry.size == 0
     }
 
     /// Keeps only files produced by the in-app editor (when the "Edited" filter is on).
@@ -530,9 +553,9 @@ struct FolderView: View {
                   likeCount: entry.kind == .video ? library.tiktokLikeCount(for: entry.url) : nil,
                   reviewsFolder: entry.isFolder && library.isReviewsFolder(entry.url),
                   onReady: { homeCellReady() })
-            // A revealed hidden folder reads as hidden (dimmed) so it isn't mistaken
-            // for a normal one; invisible entirely unless Show Hidden Folders is on.
-            .opacity(entry.isFolder && library.isHiddenFolder(entry.url) ? 0.45 : 1)
+            // A revealed hidden item (folder, file, or 0 KB file) reads as hidden (dimmed) so it
+            // isn't mistaken for a normal one; invisible entirely unless Show Hidden Items is on.
+            .opacity(isDimmedHidden(entry) ? 0.45 : 1)
             .background {
                 // Always publish cell frames (only the visible LazyVGrid cells exist)
                 // so a drag-select can begin immediately — even before Select mode.
@@ -814,6 +837,11 @@ struct FolderView: View {
             Button { compress([entry]) } label: {
                 Label("Compress to Zip", systemImage: "archivebox")
             }
+            Button { library.setFileHidden(!library.isHiddenFile(entry.url), for: entry.url) } label: {
+                library.isHiddenFile(entry.url)
+                    ? Label("Unhide File", systemImage: "eye")
+                    : Label("Hide File", systemImage: "eye.slash")
+            }
             Button(role: .destructive) { startSingleDelete(entry) } label: {
                 Label("Delete", systemImage: "trash")
             }
@@ -1024,6 +1052,9 @@ struct FolderView: View {
             .fullScreenCover(item: $trimTarget) { e in VideoTrimView(url: e.url) { Task { await reload() } } }
             .sheet(item: $combineRequest) { req in
                 VideoCombineView(videos: req.videos) { ordered in runCombine(ordered) }
+            }
+            .fullScreenCover(item: $frameExportRequest) { req in
+                BulkFrameExportView(videos: req.videos)
             }
             .fullScreenCover(item: $resizeEntry) { e in ResizeEditorView(entry: e) }
             .sheet(item: $aiEditEntry) { e in AIEditView(entry: e) }
@@ -2029,7 +2060,7 @@ struct FolderView: View {
                         Button { showNewReviewsFolder = true } label: {
                             Label("Create Reviews Folder", systemImage: "star.square.on.square")
                         }
-                        Toggle(isOn: $showHiddenFolders) { Label("Show Hidden Folders", systemImage: "eye.slash") }
+                        Toggle(isOn: $showHiddenFolders) { Label("Show Hidden Items", systemImage: "eye.slash") }
                         Button {
                             if case .rerun = cleanupAction { library.resetCleanup(url) }   // fresh pass over what's left
                             showCleanup = true
@@ -2398,6 +2429,9 @@ struct FolderView: View {
                     }
                 }
                 if selectedEntries().contains(where: { $0.kind == .video }) {
+                    Button { startBulkFrameExport() } label: {
+                        Label("Export All Frames", systemImage: "square.stack.3d.down.right")
+                    }
                     Button { startAudioExtract(selectedEntries()) } label: {
                         Label("Extract Audio…", systemImage: "waveform")
                     }
@@ -2532,6 +2566,17 @@ struct FolderView: View {
         guard vids.count >= 2 else { resultMessage = "Select two or more videos to combine."; return }
         let req = CombineRequest(videos: vids)
         DispatchQueue.main.async { combineRequest = req }   // defer so the Menu dismissal doesn't swallow the sheet
+    }
+
+    /// Bulk "Export All Frames": every selected video, each into its own "<name> Frames" folder,
+    /// exported concurrently on the blocking screen (so all the device's resources go to the task).
+    private func startBulkFrameExport() {
+        let vids = selectedEntries().filter { $0.kind == .video }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        guard !vids.isEmpty else { resultMessage = "Select one or more videos."; return }
+        selecting = false; selection.removeAll()
+        let req = FrameExportRequest(videos: vids)
+        DispatchQueue.main.async { frameExportRequest = req }   // defer so the Menu dismissal doesn't swallow the cover
     }
 
     /// Concatenates the given videos (in the picked order) into one new "Combined" file in this

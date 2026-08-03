@@ -1714,6 +1714,17 @@ final class Library {
         contentDidChange(under: url.deletingLastPathComponent())
     }
 
+    /// Individual files hidden from browsing — same idea as `hiddenFolders`, but per file (nothing on
+    /// the drive is touched). Revealed by the same "Show Hidden Items" toggle.
+    var hiddenFiles: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.hiddenFiles") ?? [])
+    func isHiddenFile(_ url: URL) -> Bool { hiddenFiles.contains(url.path) }
+    func setFileHidden(_ hidden: Bool, for url: URL) {
+        if hidden { hiddenFiles.insert(url.path) } else { hiddenFiles.remove(url.path) }
+        UserDefaults.standard.set(Array(hiddenFiles), forKey: "photoBrowser.hiddenFiles")
+        labelsVersion += 1
+        contentDidChange(under: url.deletingLastPathComponent())
+    }
+
     /// Folders the user turned into "album highlights" — shown as bubbles like the
     /// Instagram ones (but for any folder).
     var albumHighlights: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.albumHighlights") ?? [])
@@ -2074,6 +2085,7 @@ final class Library {
         albumHighlights = Set(albumHighlights.map(remap))
         reviewsFolders = Set(reviewsFolders.map(remap))
         hiddenFolders = Set(hiddenFolders.map(remap))
+        hiddenFiles = Set(hiddenFiles.map(remap))
         customLabels = customLabels.mapValues { Set($0.map(remap)) }
         captions = remapKeys(captions, remap)
         folderCovers = remapKeys(folderCovers, remap)
@@ -2137,7 +2149,7 @@ final class Library {
         let framesFolders = self.framesFolders, kardashianFolders = self.kardashianFolders
         let instagramHighlights = self.instagramHighlights, albumHighlights = self.albumHighlights
         let reviewsFolders = self.reviewsFolders
-        let hiddenFolders = self.hiddenFolders
+        let hiddenFolders = self.hiddenFolders, hiddenFiles = self.hiddenFiles
         let captions = self.captions, folderCovers = self.folderCovers, photoOrigins = self.photoOrigins
         let itemThumbnails = self.itemThumbnails
         let igPostedBy = self.igPostedBy, igLastHandle = self.igLastHandle, storyLinks = self.storyLinks
@@ -2166,6 +2178,7 @@ final class Library {
             ud.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
             ud.set(Array(reviewsFolders), forKey: "photoBrowser.reviewsFolders")
             ud.set(Array(hiddenFolders), forKey: "photoBrowser.hiddenFolders")
+            ud.set(Array(hiddenFiles), forKey: "photoBrowser.hiddenFiles")
             ud.set(folderCovers, forKey: "photoBrowser.folderCovers")
             ud.set(itemThumbnails, forKey: "photoBrowser.itemThumbnails")
             ud.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
@@ -2291,7 +2304,7 @@ final class Library {
 
         dupSet(&favorites); dupSet(&aiLabels); dupSet(&editedInAppPaths); dupSet(&aiGeneratedPaths)
         dupSet(&framesFolders); dupSet(&kardashianFolders); dupSet(&instagramHighlights); dupSet(&albumHighlights)
-        dupSet(&reviewsFolders); dupSet(&hiddenFolders)
+        dupSet(&reviewsFolders); dupSet(&hiddenFolders); dupSet(&hiddenFiles)
         customLabels = customLabels.mapValues { paths in
             var s = paths
             for p in paths { if let np = mapped(p), s.insert(np).inserted { added += 1 } }
@@ -2356,6 +2369,7 @@ final class Library {
         UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
         UserDefaults.standard.set(Array(reviewsFolders), forKey: "photoBrowser.reviewsFolders")
         UserDefaults.standard.set(Array(hiddenFolders), forKey: "photoBrowser.hiddenFolders")
+        UserDefaults.standard.set(Array(hiddenFiles), forKey: "photoBrowser.hiddenFiles")
         UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
         UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
         UserDefaults.standard.set(storyLinks, forKey: "photoBrowser.storyLinks")
