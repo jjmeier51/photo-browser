@@ -461,6 +461,41 @@ final class Library {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
+    @ObservationIgnored private lazy var textMessagesDirectory: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("textMessages", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    // MARK: - Text-message archives (imported Messages HTML)
+
+    /// Folder path → filename of an imported text-message HTML archive (kept in Application Support),
+    /// so the in-app Messages viewer reopens the last import for a folder instead of re-importing.
+    var textMessageArchives: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.textMessageArchives") as? [String: String]) ?? [:]
+    func textMessageArchiveURL(for folder: URL) -> URL? {
+        guard let name = textMessageArchives[folder.path] else { return nil }
+        let url = textMessagesDirectory.appendingPathComponent(name)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+    @discardableResult
+    func saveTextMessageArchive(_ data: Data, for folder: URL) -> URL? {
+        if let old = textMessageArchives[folder.path] {
+            try? FileManager.default.removeItem(at: textMessagesDirectory.appendingPathComponent(old))
+        }
+        let name = UUID().uuidString + ".html"
+        let url = textMessagesDirectory.appendingPathComponent(name)
+        guard (try? data.write(to: url, options: .atomic)) != nil else { return nil }
+        textMessageArchives[folder.path] = name
+        UserDefaults.standard.set(textMessageArchives, forKey: "photoBrowser.textMessageArchives")
+        return url
+    }
+    func clearTextMessageArchive(for folder: URL) {
+        if let old = textMessageArchives.removeValue(forKey: folder.path) {
+            try? FileManager.default.removeItem(at: textMessagesDirectory.appendingPathComponent(old))
+            UserDefaults.standard.set(textMessageArchives, forKey: "photoBrowser.textMessageArchives")
+        }
+    }
 
     // MARK: - Folder covers (custom album icons)
 

@@ -88,6 +88,7 @@ struct FolderView: View {
     @State private var newFolderName = ""
     @State private var showNewReviewsFolder = false   // "Create Reviews Folder" prompt
     @State private var newReviewsFolderName = ""
+    @State private var showTextMessages = false        // in-app Messages viewer for this folder
     @State private var showMoveToNewFolder = false   // multi-select "Move N Items to New Folder…"
     @State private var moveNewFolderName = ""
     @State private var renameTarget: Entry?
@@ -1055,6 +1056,9 @@ struct FolderView: View {
             }
             .fullScreenCover(item: $frameExportRequest) { req in
                 BulkFrameExportView(videos: req.videos)
+            }
+            .fullScreenCover(isPresented: $showTextMessages) {
+                TextMessagesView(folder: url).environment(library)
             }
             .fullScreenCover(item: $resizeEntry) { e in ResizeEditorView(entry: e) }
             .sheet(item: $aiEditEntry) { e in AIEditView(entry: e) }
@@ -2059,6 +2063,9 @@ struct FolderView: View {
                         Button { showNewFolder = true } label: { Label("New Folder", systemImage: "folder.badge.plus") }
                         Button { showNewReviewsFolder = true } label: {
                             Label("Create Reviews Folder", systemImage: "star.square.on.square")
+                        }
+                        Button { showTextMessages = true } label: {
+                            Label("Import Your Text Messages", systemImage: "message")
                         }
                         Toggle(isOn: $showHiddenFolders) { Label("Show Hidden Items", systemImage: "eye.slash") }
                         Button {
