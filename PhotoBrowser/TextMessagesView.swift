@@ -15,19 +15,25 @@ struct TMMessage: Identifiable, Hashable, Sendable {
 }
 
 /// All messages exchanged with one address (phone number / handle / contact), grouped together.
+/// Metadata (`lastDate`/`preview`/`isGroup`) and the chronological message order are computed ONCE
+/// in the initializer and stored — recomputing them per render is what froze a 31 MB import.
 struct TMConversation: Identifiable, Sendable {
     let id = UUID()
     let displayName: String     // contact name, or the phone number if that's all we have
     let address: String         // normalized phone/handle — the grouping key
-    var messages: [TMMessage]
+    let messages: [TMMessage]   // pre-sorted oldest → newest
+    let lastDate: Date?
+    let preview: String
+    let isGroup: Bool           // more than one sender (besides me) → show sender names
 
-    var lastDate: Date? { messages.compactMap(\.date).max() }
-    var preview: String {
-        (messages.last { !$0.text.isEmpty })?.text ?? messages.last?.text ?? ""
-    }
-    /// Whether more than one person (besides me) appears — drives showing sender names.
-    var isGroup: Bool {
-        Set(messages.filter { !$0.isFromMe }.map(\.sender).filter { !$0.isEmpty }).count > 1
+    init(displayName: String, address: String, messages rawMessages: [TMMessage]) {
+        let sorted = rawMessages.sorted { ($0.date ?? .distantPast) < ($1.date ?? .distantPast) }
+        self.displayName = displayName
+        self.address = address
+        self.messages = sorted
+        self.lastDate = sorted.last?.date ?? sorted.compactMap(\.date).max()
+        self.preview = (sorted.last { !$0.text.isEmpty })?.text ?? sorted.last?.text ?? ""
+        self.isGroup = Set(sorted.lazy.filter { !$0.isFromMe }.compactMap { $0.sender.isEmpty ? nil : $0.sender }).count > 1
     }
 }
 
@@ -43,16 +49,16 @@ struct TextMessagesView: View {
     @Environment(\.dismiss) private var dismiss
     let folder: URL
 
-    @State private var conversations: [TMConversation] = []
+    @State private var conversations: [TMConversation] = []   // already sorted by recency at parse time
     @State private var loading = false
     @State private var loadedOnce = false
     @State private var showImporter = false
     @State private var note: String?
-    @State private var query = ""
-
-    private var sorted: [TMConversation] {
-        conversations.sorted { ($0.lastDate ?? .distantPast) > ($1.lastDate ?? .distantPast) }
-    }
+    @State private var queryInput = ""                        // bound to the search field
+    @State private var query = ""                             // debounced term the results reflect
+    @State private var convoHits: [TMConversation] = []       // computed once per debounced term, off-main
+    @State private var msgHits: [MessageHit] = []
+    @State private var searchTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
@@ -116,8 +122,8 @@ struct TextMessagesView: View {
 
     private var conversationList: some View {
         List {
-            if query.trimmingCharacters(in: .whitespaces).isEmpty {
-                ForEach(sorted) { convo in
+            if query.isEmpty {
+                ForEach(conversations) { convo in
                     NavigationLink { MessageThreadView(conversation: convo) } label: { ConversationRow(convo: convo) }
                 }
             } else {
@@ -125,26 +131,33 @@ struct TextMessagesView: View {
             }
         }
         .listStyle(.plain)
-        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search Messages")
+        .searchable(text: $queryInput, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search Messages")
+        // Debounce + off-main: searching every keystroke over 100k+ messages would freeze. A beat
+        // after typing stops, compute the results once on a background task and publish them.
+        .onChange(of: queryInput) { _, v in
+            searchTask?.cancel()
+            let term = v.trimmingCharacters(in: .whitespaces)
+            let convos = conversations
+            searchTask = Task {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                if Task.isCancelled { return }
+                if term.isEmpty { query = ""; convoHits = []; msgHits = []; return }
+                let r = await Task.detached(priority: .userInitiated) { Self.computeSearch(convos, term) }.value
+                if Task.isCancelled { return }
+                query = term; convoHits = r.convos; msgHits = r.msgs   // set together — no empty flash
+            }
+        }
     }
 
-    /// iOS-Messages-style search: matching conversations (by name/number), then matching messages.
+    /// iOS-Messages-style search results (precomputed): matching conversations, then messages.
     @ViewBuilder private var searchResults: some View {
-        let q = query.trimmingCharacters(in: .whitespaces)
-        let convoHits = sorted.filter {
-            $0.displayName.localizedCaseInsensitiveContains(q) || $0.address.localizedCaseInsensitiveContains(q)
-        }
-        let msgHits: [MessageHit] = Array(sorted.flatMap { convo in
-            convo.messages.filter { $0.text.localizedCaseInsensitiveContains(q) }
-                .map { MessageHit(convo: convo, message: $0) }
-        }.prefix(300))
         if convoHits.isEmpty && msgHits.isEmpty {
             Text("No results").foregroundStyle(.secondary)
         }
         if !convoHits.isEmpty {
             Section("Conversations") {
                 ForEach(convoHits) { convo in
-                    NavigationLink { MessageThreadView(conversation: convo, initialSearch: q) } label: { ConversationRow(convo: convo) }
+                    NavigationLink { MessageThreadView(conversation: convo, initialSearch: query) } label: { ConversationRow(convo: convo) }
                 }
             }
         }
@@ -152,16 +165,32 @@ struct TextMessagesView: View {
             Section("Messages") {
                 ForEach(msgHits) { hit in
                     NavigationLink {
-                        MessageThreadView(conversation: hit.convo, initialSearch: q, scrollTo: hit.message.id)
+                        MessageThreadView(conversation: hit.convo, initialSearch: query, scrollTo: hit.message.id)
                     } label: {
-                        MessageHitRow(hit: hit, query: q)
+                        MessageHitRow(hit: hit, query: query)
                     }
                 }
             }
         }
     }
 
-    fileprivate struct MessageHit: Identifiable {
+    /// Runs the search off the main actor: conversations by name/number, then messages (capped so a
+    /// common term can't scan the whole archive).
+    nonisolated private static func computeSearch(_ conversations: [TMConversation], _ q: String) -> (convos: [TMConversation], msgs: [MessageHit]) {
+        let convos = conversations.filter {
+            $0.displayName.localizedCaseInsensitiveContains(q) || $0.address.localizedCaseInsensitiveContains(q)
+        }
+        var msgs: [MessageHit] = []
+        outer: for convo in conversations {
+            for m in convo.messages where m.text.localizedCaseInsensitiveContains(q) {
+                msgs.append(MessageHit(convo: convo, message: m))
+                if msgs.count >= 300 { break outer }
+            }
+        }
+        return (convos, msgs)
+    }
+
+    fileprivate struct MessageHit: Identifiable, Sendable {
         var id: UUID { message.id }
         let convo: TMConversation
         let message: TMMessage
@@ -200,7 +229,7 @@ struct TextMessagesView: View {
 
     private func clear() {
         library.clearTextMessageArchive(for: folder)
-        conversations = []; note = nil; query = ""
+        conversations = []; note = nil; query = ""; queryInput = ""
     }
 }
 
@@ -286,9 +315,10 @@ struct MessageThreadView: View {
     var scrollTo: UUID? = nil
 
     @State private var query = ""
-    @State private var didInit = false
+    @State private var rows: [ThreadRow] = []      // built once off-main; messages are already sorted
+    @State private var built = false
 
-    private var effectiveTerm: String { query.trimmingCharacters(in: .whitespaces) }
+    private var term: String { query.trimmingCharacters(in: .whitespaces) }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -299,27 +329,25 @@ struct MessageThreadView: View {
                             Text(sep).font(.caption2.weight(.medium)).foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity).padding(.vertical, 8).id(row.id)
                         } else if let m = row.message {
-                            MessageBubble(message: m, showSender: row.showSender, highlight: effectiveTerm).id(m.id)
+                            MessageBubble(message: m, showSender: row.showSender, highlight: term).id(m.id)
                         }
                     }
-                    Color.clear.frame(height: 1).id(Self.bottomID)
                 }
                 .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 10)
             }
             .background(Color(.systemBackground))
-            .onAppear {
-                guard !didInit else { return }
-                didInit = true
+            .defaultScrollAnchor(.bottom)      // open at the newest message, cheaply (no scrollTo over 50k rows)
+            .task {
+                guard !built else { return }
+                built = true
                 if !initialSearch.isEmpty { query = initialSearch }
-                // Jump to the searched message, else to the newest (bottom), like opening a thread.
-                DispatchQueue.main.async {
-                    if let scrollTo { withAnimation { proxy.scrollTo(scrollTo, anchor: .center) } }
-                    else { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+                let convo = conversation
+                rows = await Task.detached(priority: .userInitiated) { Self.buildRows(convo) }.value
+                // A message tapped from global search: jump to it once the rows exist.
+                if let target = scrollTo {
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    withAnimation { proxy.scrollTo(target, anchor: .center) }
                 }
-            }
-            .onChange(of: effectiveTerm) { _, term in
-                guard !term.isEmpty, let first = conversation.messages.first(where: { $0.text.localizedCaseInsensitiveContains(term) }) else { return }
-                withAnimation { proxy.scrollTo(first.id, anchor: .center) }
             }
         }
         .navigationTitle(conversation.displayName)
@@ -327,21 +355,20 @@ struct MessageThreadView: View {
         .searchable(text: $query, prompt: "Search this conversation")
     }
 
-    private static let bottomID = "tm-bottom"
-
-    // Rows: date separators interleaved with messages (chronological).
-    private var rows: [ThreadRow] {
-        let msgs = conversation.messages.sorted { ($0.date ?? .distantPast) < ($1.date ?? .distantPast) }
+    /// Date separators interleaved with messages (chronological). `nonisolated` so it can run off the
+    /// main actor for a huge thread. Messages arrive pre-sorted, so this is a single linear pass.
+    nonisolated private static func buildRows(_ conversation: TMConversation) -> [ThreadRow] {
         var out: [ThreadRow] = []
         var lastDate: Date?
         var lastSender: String? = nil
-        for m in msgs {
+        let isGroup = conversation.isGroup
+        for m in conversation.messages {
             if let d = m.date, lastDate == nil || d.timeIntervalSince(lastDate!) > 3600 {
-                out.append(ThreadRow(separator: Self.separator(d)))
+                out.append(ThreadRow(separator: separator(d)))
                 lastSender = nil
             }
             // Show the sender name above a received bubble in a group thread when the sender changes.
-            let show = conversation.isGroup && !m.isFromMe && !m.sender.isEmpty && m.sender != lastSender
+            let show = isGroup && !m.isFromMe && !m.sender.isEmpty && m.sender != lastSender
             out.append(ThreadRow(message: m, showSender: show))
             if let d = m.date { lastDate = d }
             lastSender = m.isFromMe ? nil : m.sender
@@ -360,7 +387,7 @@ struct MessageThreadView: View {
         return d.formatted(.dateTime.month(.abbreviated).day().year().hour().minute())
     }
 
-    private struct ThreadRow: Identifiable {
+    private struct ThreadRow: Identifiable, Sendable {
         let id = UUID()
         var separator: String? = nil
         var message: TMMessage? = nil
@@ -437,12 +464,17 @@ enum TextMessageParser {
     nonisolated static func parse(html raw: String) -> [TMConversation] {
         let html = stripped(raw)
         let heads = ranges(of: "<h2\\b[^>]*>([\\s\\S]*?)</h2>", in: html)
-        var conversations: [TMConversation] = []
+        // Accumulate raw messages per address key (some exports split one thread across sections),
+        // then build each TMConversation ONCE so its sort + metadata are computed a single time.
+        var byKey: [String: (display: String, address: String, messages: [TMMessage])] = [:]
+        var order: [String] = []
+        func add(_ display: String, _ key: String, _ msgs: [TMMessage]) {
+            guard !msgs.isEmpty else { return }
+            if byKey[key] == nil { order.append(key); byKey[key] = (display, key, msgs) }
+            else { byKey[key]!.messages.append(contentsOf: msgs) }
+        }
         if heads.isEmpty {
-            let msgs = messages(in: html)
-            if !msgs.isEmpty {
-                conversations.append(TMConversation(displayName: "Messages", address: "messages", messages: msgs))
-            }
+            add("Messages", "messages", messages(in: html))
         } else {
             for (i, head) in heads.enumerated() {
                 let bodyStart = head.range.upperBound
@@ -450,13 +482,14 @@ enum TextMessageParser {
                 let body = String(html[bodyStart..<bodyEnd])
                 let (name, phones) = parseHeader(head.capture)
                 let display = !name.isEmpty ? name : (phones.first ?? "Unknown")
-                let msgs = messages(in: body)
-                guard !msgs.isEmpty else { continue }
                 let key = phones.isEmpty ? display.lowercased() : phones.map(normalize).sorted().joined(separator: "|")
-                conversations.append(TMConversation(displayName: display, address: key, messages: msgs))
+                add(display, key, messages(in: body))
             }
         }
-        return mergedByAddress(conversations)
+        let conversations = order.compactMap { byKey[$0] }
+            .map { TMConversation(displayName: $0.display, address: $0.address, messages: $0.messages) }
+        // Sort by recency once here (lastDate is stored, so the inbox never re-sorts on render).
+        return conversations.sorted { ($0.lastDate ?? .distantPast) > ($1.lastDate ?? .distantPast) }
     }
 
     /// Parses an `<h2>` header ("Name: … Phone: … Email: …") into the display name and phone list.
@@ -528,23 +561,6 @@ enum TextMessageParser {
     }
 
     // MARK: helpers
-
-    /// Merges conversations that resolved to the same address key (some exports split one thread
-    /// across sections). The key is already normalized in `parse`, so it's used verbatim here.
-    nonisolated private static func mergedByAddress(_ convos: [TMConversation]) -> [TMConversation] {
-        var byKey: [String: TMConversation] = [:]
-        var order: [String] = []
-        for c in convos {
-            let key = c.address
-            if var existing = byKey[key] {
-                existing.messages.append(contentsOf: c.messages)
-                byKey[key] = existing
-            } else {
-                byKey[key] = c; order.append(key)
-            }
-        }
-        return order.compactMap { byKey[$0] }
-    }
 
     /// Removes `<script>`/`<style>` blocks and HTML comments so their contents can't be mis-parsed.
     nonisolated private static func stripped(_ html: String) -> String {
