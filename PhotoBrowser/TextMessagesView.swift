@@ -54,11 +54,12 @@ struct TextMessagesView: View {
     @State private var loadedOnce = false
     @State private var showImporter = false
     @State private var note: String?
-    @State private var queryInput = ""                        // bound to the search field
-    @State private var query = ""                             // debounced term the results reflect
-    @State private var convoHits: [TMConversation] = []       // computed once per debounced term, off-main
+    @State private var query = ""                             // the search-field text
+    @State private var convoHits: [TMConversation] = []       // results, computed off-main (debounced)
     @State private var msgHits: [MessageHit] = []
-    @State private var searchTask: Task<Void, Never>?
+    @State private var searching = false
+
+    private var searchActive: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
 
     var body: some View {
         NavigationStack {
@@ -122,42 +123,30 @@ struct TextMessagesView: View {
 
     private var conversationList: some View {
         List {
-            if query.isEmpty {
+            if searchActive {
+                searchResults
+            } else {
                 ForEach(conversations) { convo in
                     NavigationLink { MessageThreadView(conversation: convo) } label: { ConversationRow(convo: convo) }
                 }
-            } else {
-                searchResults
             }
         }
         .listStyle(.plain)
-        .searchable(text: $queryInput, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search Messages")
-        // Debounce + off-main: searching every keystroke over 100k+ messages would freeze. A beat
-        // after typing stops, compute the results once on a background task and publish them.
-        .onChange(of: queryInput) { _, v in
-            searchTask?.cancel()
-            let term = v.trimmingCharacters(in: .whitespaces)
-            let convos = conversations
-            searchTask = Task {
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                if Task.isCancelled { return }
-                if term.isEmpty { query = ""; convoHits = []; msgHits = []; return }
-                let r = await Task.detached(priority: .userInitiated) { Self.computeSearch(convos, term) }.value
-                if Task.isCancelled { return }
-                query = term; convoHits = r.convos; msgHits = r.msgs   // set together — no empty flash
-            }
-        }
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search Messages")
+        // Debounced, off-main search. `.task(id: query)` re-runs on each keystroke, cancelling the
+        // prior run; the sleep debounces and the scan happens off the main actor — so search stays
+        // live and iOS-like without scanning 100k+ messages on every keystroke.
+        .task(id: query) { await runSearch() }
     }
 
-    /// iOS-Messages-style search results (precomputed): matching conversations, then messages.
+    /// iOS-Messages-style results: matching conversations, then matching messages (name + the
+    /// matched message, highlighted). "No results" only once the search has actually settled.
     @ViewBuilder private var searchResults: some View {
-        if convoHits.isEmpty && msgHits.isEmpty {
-            Text("No results").foregroundStyle(.secondary)
-        }
+        let term = query.trimmingCharacters(in: .whitespaces)
         if !convoHits.isEmpty {
             Section("Conversations") {
                 ForEach(convoHits) { convo in
-                    NavigationLink { MessageThreadView(conversation: convo, initialSearch: query) } label: { ConversationRow(convo: convo) }
+                    NavigationLink { MessageThreadView(conversation: convo, initialSearch: term) } label: { ConversationRow(convo: convo) }
                 }
             }
         }
@@ -165,13 +154,30 @@ struct TextMessagesView: View {
             Section("Messages") {
                 ForEach(msgHits) { hit in
                     NavigationLink {
-                        MessageThreadView(conversation: hit.convo, initialSearch: query, scrollTo: hit.message.id)
+                        MessageThreadView(conversation: hit.convo, initialSearch: term, scrollTo: hit.message.id)
                     } label: {
-                        MessageHitRow(hit: hit, query: query)
+                        MessageHitRow(hit: hit, query: term)
                     }
                 }
             }
         }
+        if convoHits.isEmpty && msgHits.isEmpty && !searching {
+            Text("No results").foregroundStyle(.secondary)
+        }
+    }
+
+    /// Debounced search driven by `.task(id: query)`: a new keystroke cancels this, so the sleep
+    /// throttles and the scan (off-main, capped) runs only after typing pauses.
+    private func runSearch() async {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { convoHits = []; msgHits = []; searching = false; return }
+        searching = true
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        if Task.isCancelled { return }
+        let convos = conversations
+        let r = await Task.detached(priority: .userInitiated) { Self.computeSearch(convos, q) }.value
+        if Task.isCancelled { return }
+        convoHits = r.convos; msgHits = r.msgs; searching = false
     }
 
     /// Runs the search off the main actor: conversations by name/number, then messages (capped so a
@@ -229,7 +235,7 @@ struct TextMessagesView: View {
 
     private func clear() {
         library.clearTextMessageArchive(for: folder)
-        conversations = []; note = nil; query = ""; queryInput = ""
+        conversations = []; note = nil; query = ""; convoHits = []; msgHits = []; searching = false
     }
 }
 
