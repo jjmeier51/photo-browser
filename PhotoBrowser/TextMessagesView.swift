@@ -9,7 +9,8 @@ struct TMMessage: Identifiable, Hashable, Sendable {
     let id = UUID()
     let text: String
     let date: Date?
-    let isFromMe: Bool          // outgoing (right, blue) vs incoming (left, gray)
+    let isFromMe: Bool          // outgoing (right) vs incoming (left, gray)
+    var isSMS: Bool = false      // outgoing SMS (green) vs iMessage (blue); ignored for incoming
     let sender: String          // display sender for group threads ("" when unknown / it's me)
 }
 
@@ -373,6 +374,12 @@ private struct MessageBubble: View {
     let showSender: Bool
     let highlight: String
 
+    /// Incoming gray; outgoing iMessage blue; outgoing SMS green — like iOS.
+    private var bubbleColor: Color {
+        guard message.isFromMe else { return Color(.systemGray5) }
+        return message.isSMS ? Color.green : Color.blue
+    }
+
     var body: some View {
         HStack {
             if message.isFromMe { Spacer(minLength: 44) }
@@ -384,8 +391,7 @@ private struct MessageBubble: View {
                     .font(.body)
                     .foregroundStyle(message.isFromMe ? Color.white : Color.primary)
                     .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(message.isFromMe ? Color.blue : Color(.systemGray5),
-                                in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .background(bubbleColor, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .textSelection(.enabled)
             }
             if !message.isFromMe { Spacer(minLength: 44) }
@@ -417,111 +423,119 @@ enum MessageHighlight {
 
 // MARK: - Parser
 
-/// Parses an exported text-message HTML file into per-address conversations.
+/// Parses an exported iPhone Messages HTML file (the CopyTrans / "…iPhone's Messages" export shape)
+/// into per-conversation threads.
 ///
-/// ⚠️ Text-message HTML exports have **no single standard shape** (iMazing, iExplorer, AnyTrans,
-/// "SMS Backup & Restore", decompiled carrier exports, and hand-rolled ones all differ). This is a
-/// best-effort generic pass and the one piece meant to be tuned to the exact export the user
-/// provides — the model and the whole viewer above are format-independent, so finalizing this
-/// function is all that's needed once the real HTML is in hand.
-///
-/// The generic pass: strip scripts/styles → split into conversation sections at heading/contact
-/// markers (else treat the whole file as one) → within each, read message blocks (an element whose
-/// class hints at a message / bubble / sent / received), pulling the text, a timestamp, and the
-/// direction. Returns `[]` cleanly when nothing is recognized.
+/// Format: conversations are delimited by `<h2>Name: … Phone: … Email: …</h2>`. Inside each, elements
+/// appear in document order — `<p class="cid">sender</p>` sets the current sender (a contact name or
+/// number, emitted only when it changes, like iOS); `<p>… Date: MM-DD-YYYY HH:MM</p>` sets the current
+/// timestamp; and a message is a `<div>` whose class gives direction: `main-left` (incoming, gray),
+/// `main-right` (outgoing SMS, green), or `main-right-imsg` (outgoing iMessage, blue). Message text
+/// lives in `<td class="mid-c">`; a photo attachment is `<img src="image/N.png">` — those image files
+/// aren't part of the .html, so they render as a “📷 Photo” placeholder.
 enum TextMessageParser {
     nonisolated static func parse(html raw: String) -> [TMConversation] {
         let html = stripped(raw)
-
-        // Split into conversation chunks at common section markers; fall back to one conversation.
-        let chunks = conversationChunks(html)
+        let heads = ranges(of: "<h2\\b[^>]*>([\\s\\S]*?)</h2>", in: html)
         var conversations: [TMConversation] = []
-        for chunk in chunks {
-            let msgs = messages(in: chunk.body)
-            guard !msgs.isEmpty else { continue }
-            let name = chunk.title.isEmpty ? (inferAddress(from: msgs) ?? "Unknown") : chunk.title
-            conversations.append(TMConversation(displayName: name, address: chunk.address.isEmpty ? name : chunk.address,
-                                                messages: msgs))
+        if heads.isEmpty {
+            let msgs = messages(in: html)
+            if !msgs.isEmpty {
+                conversations.append(TMConversation(displayName: "Messages", address: "messages", messages: msgs))
+            }
+        } else {
+            for (i, head) in heads.enumerated() {
+                let bodyStart = head.range.upperBound
+                let bodyEnd = i + 1 < heads.count ? heads[i + 1].range.lowerBound : html.endIndex
+                let body = String(html[bodyStart..<bodyEnd])
+                let (name, phones) = parseHeader(head.capture)
+                let display = !name.isEmpty ? name : (phones.first ?? "Unknown")
+                let msgs = messages(in: body)
+                guard !msgs.isEmpty else { continue }
+                let key = phones.isEmpty ? display.lowercased() : phones.map(normalize).sorted().joined(separator: "|")
+                conversations.append(TMConversation(displayName: display, address: key, messages: msgs))
+            }
         }
-        // Merge chunks that resolved to the same address (some exports repeat a thread per page).
         return mergedByAddress(conversations)
     }
 
-    // MARK: chunking
-
-    private struct Chunk: Sendable { var title: String; var address: String; var body: String }
-
-    /// Splits the document at conversation headers. Recognizes a few common markers; when none are
-    /// present the whole document is one conversation.
-    nonisolated private static func conversationChunks(_ html: String) -> [Chunk] {
-        // Heading tags (h1/h2/h3) or elements whose class marks a conversation/thread/contact header.
-        let headerPattern = "<(?:h[1-3])[^>]*>([\\s\\S]*?)</(?:h[1-3])>"
-        let heads = ranges(of: headerPattern, in: html)
-        guard heads.count >= 2 else {
-            return [Chunk(title: "", address: "", body: html)]
-        }
-        var chunks: [Chunk] = []
-        for (i, head) in heads.enumerated() {
-            let bodyStart = head.range.upperBound
-            let bodyEnd = i + 1 < heads.count ? heads[i + 1].range.lowerBound : html.endIndex
-            let title = plainText(head.capture)
-            chunks.append(Chunk(title: title, address: phone(in: title) ?? "", body: String(html[bodyStart..<bodyEnd])))
-        }
-        return chunks
+    /// Parses an `<h2>` header ("Name: … Phone: … Email: …") into the display name and phone list.
+    nonisolated private static func parseHeader(_ inner: String) -> (name: String, phones: [String]) {
+        let text = plainText(inner)
+        let name = between(text, "Name:", "Phone:") ?? between(text, "Name:", "Email:") ?? ""
+        let phoneField = between(text, "Phone:", "Email:") ?? after(text, "Phone:") ?? ""
+        let phones = phoneField.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        return (name.trimmingCharacters(in: .whitespaces), phones)
     }
 
-    // MARK: messages within a chunk
-
-    nonisolated private static func messages(in html: String) -> [TMMessage] {
-        // Message blocks: elements whose class contains a message-ish word. Captures the class (for
-        // direction) and the inner HTML (for text + timestamp).
-        let pattern = "<(?:div|p|li|tr|td|span)[^>]*class=\"([^\"]*(?:message|bubble|msg|sms|imessage|sent|received|outgoing|incoming|from-me|to-me)[^\"]*)\"[^>]*>([\\s\\S]*?)</(?:div|p|li|tr|td|span)>"
+    /// Walks a conversation body's elements in document order, keeping the sticky date and sender.
+    nonisolated private static func messages(in body: String) -> [TMMessage] {
         var out: [TMMessage] = []
-        for m in matches(of: pattern, in: html) {
-            let cls = m[1].lowercased()
-            let inner = m[2]
-            let text = messageText(inner)
+        var currentDate: Date?
+        var currentSender = ""
+        // Each top-level element: a <p> (sender/date/event) or a message <div>. Non-greedy to the
+        // first close tag — messages nest only tables, never other <div>/<p>, so this is exact.
+        let elementRE = "<p\\b[^>]*>[\\s\\S]*?</p>|<div class=\"(?:main-left|main-right-imsg|main-right)\">[\\s\\S]*?</div>"
+        for m in matches(of: elementRE, in: body) {
+            let el = m[0]
+            if el.hasPrefix("<p") {
+                if el.contains("class=\"cid\"") {
+                    let s = plainText(el); if !s.isEmpty { currentSender = s }
+                } else if let d = firstCapture("Date:\\s*(\\d{1,2}-\\d{1,2}-\\d{4}\\s+\\d{1,2}:\\d{2})", in: el) {
+                    currentDate = parseExportDate(d)
+                }
+                continue
+            }
+            // A message div. Direction from the class; text from the mid-c cell(s).
+            let incoming = el.contains("\"main-left\"")
+            let outgoingSMS = el.contains("\"main-right\"")     // green; main-right-imsg is blue
+            let text = messageText(el)
             guard !text.isEmpty else { continue }
-            let fromMe = cls.contains("sent") || cls.contains("outgoing") || cls.contains("from-me")
-                || cls.contains("from_me") || cls.contains("me ") || cls.hasSuffix("me")
-            out.append(TMMessage(text: text, date: timestamp(inner), isFromMe: fromMe, sender: sender(inner)))
+            out.append(TMMessage(text: text, date: currentDate, isFromMe: !incoming,
+                                 isSMS: outgoingSMS, sender: incoming ? currentSender : ""))
         }
         return out
     }
 
-    /// The message body text — prefer an inner element that looks like the text, else all text minus
-    /// obvious timestamp/sender chrome.
-    nonisolated private static func messageText(_ inner: String) -> String {
-        if let t = firstCapture("class=\"[^\"]*(?:text|body|content|bubble-text)[^\"]*\"[^>]*>([\\s\\S]*?)<", in: inner) {
-            let s = plainText(t); if !s.isEmpty { return s }
+    /// The message body: the joined `mid-c` cell text, plus a “📷 Photo” marker for a photo
+    /// attachment (`<img src="image/…">`) whose file isn't part of the imported .html.
+    nonisolated private static func messageText(_ div: String) -> String {
+        var parts: [String] = []
+        for m in matches(of: "<td class=\"mid-c\">([\\s\\S]*?)</td>", in: div) {
+            let t = plainText(m[1]); if !t.isEmpty { parts.append(t) }
         }
-        return plainText(inner)
+        var text = parts.joined(separator: "\n")
+        if div.range(of: "<img[^>]*src=\"image/", options: [.regularExpression, .caseInsensitive]) != nil {
+            text = text.isEmpty ? "📷 Photo" : text + " 📷"
+        }
+        return text
     }
 
-    nonisolated private static func sender(_ inner: String) -> String {
-        firstCapture("class=\"[^\"]*(?:sender|author|name|from)[^\"]*\"[^>]*>([\\s\\S]*?)<", in: inner).map(plainText) ?? ""
+    nonisolated private static func parseExportDate(_ s: String) -> Date? {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "M-d-yyyy H:mm"; f.timeZone = .current
+        return f.date(from: s.trimmingCharacters(in: .whitespaces))
     }
 
-    /// A timestamp inside a block — from a `datetime`/`data-*` attribute (epoch or ISO), or visible text.
-    nonisolated private static func timestamp(_ inner: String) -> Date? {
-        if let epoch = firstCapture("data-(?:time|timestamp|date)=\"(\\d{9,13})\"", in: inner), let t = Double(epoch) {
-            return Date(timeIntervalSince1970: t > 1_000_000_000_000 ? t / 1000 : t)
-        }
-        if let iso = firstCapture("(?:datetime|data-time)=\"([^\"]+)\"", in: inner), let d = parseDate(iso) { return d }
-        // Visible timestamp text in a timestamp-classed element, else any date-looking run.
-        if let vis = firstCapture("class=\"[^\"]*(?:time|date|timestamp)[^\"]*\"[^>]*>([\\s\\S]*?)<", in: inner) {
-            if let d = parseDate(plainText(vis)) { return d }
-        }
-        return parseDate(plainText(inner))
+    /// Substring strictly between `a` and the first following `b`.
+    nonisolated private static func between(_ s: String, _ a: String, _ b: String) -> String? {
+        guard let ra = s.range(of: a), let rb = s.range(of: b, range: ra.upperBound..<s.endIndex) else { return nil }
+        return String(s[ra.upperBound..<rb.lowerBound])
+    }
+    nonisolated private static func after(_ s: String, _ a: String) -> String? {
+        guard let ra = s.range(of: a) else { return nil }
+        return String(s[ra.upperBound...])
     }
 
     // MARK: helpers
 
+    /// Merges conversations that resolved to the same address key (some exports split one thread
+    /// across sections). The key is already normalized in `parse`, so it's used verbatim here.
     nonisolated private static func mergedByAddress(_ convos: [TMConversation]) -> [TMConversation] {
         var byKey: [String: TMConversation] = [:]
         var order: [String] = []
         for c in convos {
-            let key = normalize(c.address)
+            let key = c.address
             if var existing = byKey[key] {
                 existing.messages.append(contentsOf: c.messages)
                 byKey[key] = existing
@@ -530,10 +544,6 @@ enum TextMessageParser {
             }
         }
         return order.compactMap { byKey[$0] }
-    }
-
-    nonisolated private static func inferAddress(from messages: [TMMessage]) -> String? {
-        messages.lazy.compactMap { $0.sender.isEmpty ? nil : $0.sender }.first
     }
 
     /// Removes `<script>`/`<style>` blocks and HTML comments so their contents can't be mis-parsed.
@@ -582,26 +592,10 @@ enum TextMessageParser {
         return result as String
     }
 
-    nonisolated private static func phone(in s: String) -> String? {
-        firstCapture("(\\+?\\d[\\d\\-\\(\\)\\s]{6,}\\d)", in: s).map { $0.trimmingCharacters(in: .whitespaces) }
-    }
+    /// Reduces a phone number to its comparable core (last 10 digits, so +1-631-… matches 631-…).
     nonisolated private static func normalize(_ address: String) -> String {
         let digits = address.filter { $0.isNumber }
-        return digits.count >= 7 ? String(digits.suffix(11)) : address.lowercased()
-    }
-
-    nonisolated private static let isoFormatter = ISO8601DateFormatter()
-    nonisolated private static func parseDate(_ s: String) -> Date? {
-        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= 6 else { return nil }
-        if let d = isoFormatter.date(from: trimmed) { return d }
-        for fmt in ["MMM d, yyyy h:mm:ss a", "MMM d, yyyy h:mm a", "MMM d, yyyy, h:mm a",
-                    "M/d/yy h:mm a", "M/d/yyyy h:mm a", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss",
-                    "MMMM d, yyyy 'at' h:mm a", "dd/MM/yyyy HH:mm"] {
-            let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = fmt
-            if let d = f.date(from: trimmed) { return d }
-        }
-        return nil
+        return digits.count >= 7 ? String(digits.suffix(10)) : address.lowercased()
     }
 
     // MARK: regex utilities (local — the app has no HTML DOM parser and no third-party deps)
