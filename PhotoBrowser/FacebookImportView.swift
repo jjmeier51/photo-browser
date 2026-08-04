@@ -18,6 +18,8 @@ struct FacebookImportView: View {
 
     @State private var profileURL = ""
     @State private var upscale2x = true
+    @State private var skipTagged = false
+    @State private var includeSubscriberHub = false
     @State private var loggedIn = false
     @State private var showLogin = false
 
@@ -40,8 +42,15 @@ struct FacebookImportView: View {
 
                 Section {
                     Toggle("2× AI Upscale photos", isOn: $upscale2x)
+                    Toggle("Skip tagged photos", isOn: $skipTagged)
                 } footer: {
-                    Text("Every downloaded photo is enhanced with the app’s 2× AI Upscale — denoise, sharpen, and double the resolution. The download runs in the background — you can keep using the app (or leave it briefly) and watch progress at the bottom of the screen. Facebook actively limits scraping, so coverage is best-effort.")
+                    Text("Every downloaded photo is enhanced with the app’s 2× AI Upscale — denoise, sharpen, and double the resolution. Turn on “Skip tagged photos” to download only what this profile posted, not photos other people tagged them in. The download runs in the background — you can keep using the app (or leave it briefly) and watch progress at the bottom of the screen. Facebook actively limits scraping, so coverage is best-effort.")
+                }
+
+                Section {
+                    Toggle("Include Subscriber Hub content", isOn: $includeSubscriberHub)
+                } footer: {
+                    Text("If you subscribe to this creator through Facebook Subscriptions, also pull their subscriber-only posts from the Subscriber Hub. Requires an active subscription on your logged-in account; best-effort, and it only finds anything for creators who post exclusive content.")
                 }
 
                 if !loggedIn {
@@ -98,6 +107,7 @@ struct FacebookImportView: View {
         let link = isUpdate ? (existing?.profileURL ?? "") : profileURL.trimmingCharacters(in: .whitespaces)
         guard !link.isEmpty else { return }
         let target = targetFolder, isUpd = isUpdate, upscale = upscale2x, ex = existing
+        let skipT = skipTagged, subHub = includeSubscriberHub
         let finish = onFinished
         let id = library.beginActivity(isUpd ? "Facebook — new photos" : "Downloading Facebook profile", indeterminate: true)
         library.setActivity(id, status: "Starting…")
@@ -124,7 +134,8 @@ struct FacebookImportView: View {
             }
 
             let r = await FacebookService.run(profileURL: link, into: dest, alreadyDownloaded: already,
-                                              creds: creds, upscalePhotos: upscale) { p in
+                                              creds: creds, upscalePhotos: upscale,
+                                              skipTagged: skipT, includeSubscriberHub: subHub) { p in
                 Task { @MainActor in
                     library.setActivity(id, status: p.phase.isEmpty ? "Working…" : p.phase,
                                         fraction: p.total > 0 ? p.fraction : nil)

@@ -154,6 +154,7 @@ enum FacebookService {
 
     nonisolated static func run(profileURL: String, into folder: URL, alreadyDownloaded: Set<String>,
                                 creds: Credentials, upscalePhotos: Bool,
+                                skipTagged: Bool = false, includeSubscriberHub: Bool = false,
                                 progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
         progress(Progress(phase: "Loading profile…", fraction: 0, done: 0, total: 0))
@@ -173,6 +174,7 @@ enum FacebookService {
         await log.begin("Facebook download — \(profile.name)")
         await log.log("profile: name=\(profile.name), id=\(profile.id), vanity=\(profile.vanity ?? "—"), url=\(profile.url)")
         await log.log("already downloaded: \(alreadyDownloaded.count) id(s) (skipped for dedup)")
+        await log.log("options: skipTagged=\(skipTagged), includeSubscriberHub=\(includeSubscriberHub)")
 
         // Discovery and download overlap: collectors walk concurrently and feed the
         // hub (which dedups across sets) into the stream; the consumer below starts
@@ -190,15 +192,21 @@ enum FacebookService {
                     await collectPhotos(profile, tab: "photos_by", fallbackToken: "pb.\(profile.id).-2207520000",
                                         tokenPrefixes: ["pb.", "a."], skip: alreadyDownloaded, creds: creds, hub: hub, log: log)
                 }
-                group.addTask {
-                    // Tagged photos are posted by someone else — credit the page owner.
-                    // Pin to the `t.` (Photos-of) set so the walk can't wander into a
-                    // poster's album and drag in their non-tagged uploads.
-                    await collectPhotos(profile, tab: "photos_of", fallbackToken: "t.\(profile.id)",
-                                        tokenPrefixes: ["t."], skip: alreadyDownloaded, creds: creds, hub: hub,
-                                        ownerFromPage: true, log: log)
+                if !skipTagged {
+                    group.addTask {
+                        // Tagged photos are posted by someone else — credit the page owner.
+                        // Pin to the `t.` (Photos-of) set so the walk can't wander into a
+                        // poster's album and drag in their non-tagged uploads.
+                        await collectPhotos(profile, tab: "photos_of", fallbackToken: "t.\(profile.id)",
+                                            tokenPrefixes: ["t."], skip: alreadyDownloaded, creds: creds, hub: hub,
+                                            ownerFromPage: true, log: log)
+                    }
                 }
                 group.addTask { await collectVideos(profile, skip: alreadyDownloaded, creds: creds, hub: hub, log: log) }
+                // Subscriber-only content from the creator's Subscriber Hub (Facebook Subscriptions).
+                if includeSubscriberHub {
+                    group.addTask { await collectSubscriberHub(profile, skip: alreadyDownloaded, creds: creds, hub: hub, log: log) }
+                }
             }
             await hub.discoveryFinished()
         }
@@ -505,6 +513,106 @@ enum FacebookService {
     nonisolated private static func tabPath(_ profile: Profile, _ tab: String) -> String {
         if let v = profile.vanity { return "\(v)/\(tab)" }
         return "profile.php?id=\(profile.id)&sk=\(tab)"
+    }
+
+    // MARK: - Subscriber Hub (Facebook Subscriptions / fan subscriptions)
+
+    /// Subscriber-only content from a creator's **Subscriber Hub** — the exclusive posts a paying
+    /// subscriber can see. Facebook gates the hub behind the session and doesn't publish a stable
+    /// URL for its feed, so this tries the known entry-point forms and harvests media from whichever
+    /// real (non-login) page answers, using the same parsers as the other collectors: any media-set
+    /// tokens on the page are walked in full (the complete route when exclusive photos live in a
+    /// set), and the first feed page's standalone photos/videos are fetched directly. Deep feed
+    /// pagination needs volatile GraphQL cursors, so coverage is best-effort and weighted to recent
+    /// content; the hub dedups everything against the other sets. A non-subscriber (or a profile
+    /// with no subscription) simply finds nothing — surfaced in the per-run log.
+    nonisolated private static func collectSubscriberHub(_ profile: Profile, skip: Set<String>,
+                                                         creds: Credentials, hub: Hub, log: DownloadLog? = nil) async {
+        // Candidate entry points — vanity path and id-based tab forms of the hub.
+        var candidates: [String] = []
+        if let v = profile.vanity { candidates += ["\(v)/subscriber_hub", "\(v)?sk=subscriber_hub"] }
+        if !profile.id.isEmpty, profile.id.allSatisfy({ $0.isNumber }) {
+            candidates += ["profile.php?id=\(profile.id)&sk=subscriber_hub",
+                           "subscriber_hub/?creator_id=\(profile.id)"]
+        }
+        var page: String?
+        var used = ""
+        for path in candidates {
+            guard let p = await fetchHTML(host + path, creds: creds) else { continue }
+            // A wrong hub URL can redirect to login — treat that as "this candidate isn't it" and
+            // try the next, WITHOUT signalling the global login wall (which would abort the primary
+            // collectors). A genuine session expiry is still caught by them on their own URLs.
+            if looksLikeLogin(p.html, p.finalURL) { await log?.log("subscriber hub [\(path)]: login redirect — skipping"); continue }
+            if hasMediaMarkers(p.html) { page = p.html; used = path; break }   // a real hub feed
+        }
+        guard let html = page else {
+            await log?.log("subscriber hub: no reachable feed among \(candidates.count) candidate URL(s) — you may not be subscribed, or this profile has no Subscriptions")
+            return
+        }
+
+        // Media-set tokens → walk each in full (like albums; exclusive photos are often a set).
+        var tokens: [String] = []; var seenTok = Set<String>()
+        for g in matches(html, "set=([a-z]+\\.[0-9A-Za-z%.\\-]+)") where seenTok.insert(g[1]).inserted { tokens.append(decode(g[1])) }
+        // Standalone photos/videos on the first feed page (capped — deeper pages aren't reachable).
+        var photoIDs: [String] = []; var seenP = Set<String>()
+        for g in matches(html, "fbid=(\\d{6,})") where seenP.insert(g[1]).inserted { photoIDs.append(g[1]) }
+        for g in matches(html, "\"__typename\":\"Photo\",\"id\":\"(\\d{6,})\"") where seenP.insert(g[1]).inserted { photoIDs.append(g[1]) }
+        var videoIDs: [String] = []; var seenV = Set<String>()
+        for g in matches(html, "\"video_?id\":\"(\\d{8,})\"") where seenV.insert(g[1]).inserted { videoIDs.append(g[1]) }
+        for g in matches(html, "watch/\\?v=(\\d{8,})") where seenV.insert(g[1]).inserted { videoIDs.append(g[1]) }
+        photoIDs = Array(photoIDs.prefix(80))
+        await log?.log("subscriber hub [\(used)]: \(tokens.count) set(s), \(photoIDs.count) photo id(s), \(videoIDs.count) video id(s)")
+
+        await withTaskGroup(of: Void.self) { group in
+            for token in tokens {
+                // No early stop: an exclusive set may be user-ordered, so walk it fully.
+                group.addTask { await walkSet(token, firstID: nil, skip: skip, creds: creds, hub: hub, earlyStop: false, label: "subhub \(token)", log: log) }
+            }
+            for id in photoIDs where !skip.contains(id) {
+                group.addTask { await emitPhotoPage(id: id, creds: creds, hub: hub) }
+            }
+            for id in videoIDs where !skip.contains(id) {
+                group.addTask {
+                    if await hub.hitLoginWall { return }
+                    guard let (p, u) = await fetchHTML(host + "watch/?v=\(id)", creds: creds) else { return }
+                    if looksLikeLogin(p, u) { return }
+                    guard let vurl = videoURL(p) else { return }
+                    await hub.emit(Item(id: id, isVideo: true, url: vurl, caption: photoCaption(p),
+                                        date: createdTime(p), poster: photoOwner(p)))
+                }
+            }
+        }
+    }
+
+    /// Fetches a single photo page (an exclusive feed post's attachment) and emits its media.
+    /// The owner blob is credited (an exclusive post is the creator's own, but tolerating a
+    /// crosspost is harmless — the profile name is the fallback at download time).
+    nonisolated private static func emitPhotoPage(id: String, creds: Credentials, hub: Hub) async {
+        if await hub.hitLoginWall { return }
+        var page: (html: String, finalURL: String)?
+        for form in ["photo/?fbid=\(id)", "photo.php?fbid=\(id)"] {
+            guard let p = await fetchHTML(host + form, creds: creds) else { continue }
+            page = p
+            if photoPageLooksComplete(p.html) || looksLikeLogin(p.html, p.finalURL) { break }
+        }
+        guard let (html, finalURL) = page else { return }
+        if looksLikeLogin(html, finalURL) { return }
+        if let url = imageURL(html) {
+            await hub.emit(Item(id: id, isVideo: false, url: url, caption: photoCaption(html),
+                                date: createdTime(html), poster: photoOwner(html)))
+        } else if let url = videoURL(html) {
+            await hub.emit(Item(id: id, isVideo: true, url: url, caption: photoCaption(html),
+                                date: createdTime(html), poster: photoOwner(html)))
+        }
+    }
+
+    /// Whether a page carries any media markers (a real feed/set) rather than an empty shell or a
+    /// wrong-URL redirect — used to pick the subscriber-hub entry point that actually answered.
+    nonisolated private static func hasMediaMarkers(_ html: String) -> Bool {
+        firstPhotoID(html) != nil
+            || firstMatch(html, "set=[a-z]+\\.[0-9A-Za-z]") != nil
+            || firstMatch(html, "watch/\\?v=\\d") != nil
+            || firstMatch(html, "\"video_?id\":\"\\d") != nil
     }
 
     // MARK: - Page parsing
