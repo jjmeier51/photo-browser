@@ -1798,31 +1798,19 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         if(!a) return null;
         return { href: a.href, download: a.hasAttribute('download'), name: a.getAttribute('download')||'' };
       }
-      // Upgrade a URL to its full-resolution original where the CDN encodes size in the query.
-      // Depop serves product photos through a resizer (?width=&height=&quality=…); the
-      // unconstrained URL is the stored original, and those photos are public/unsigned so dropping
-      // the size hints is safe and yields the highest quality. (Only touched for depop hosts, so
-      // signed CDN URLs elsewhere are never altered.)
-      function fullResURL(u){
-        try{
-          var url = new URL(u, location.href);
-          if(url.hostname.indexOf('depop')>=0){
-            ['width','height','w','h','size','quality','q','dpr','fit','format','auto'].forEach(function(p){ url.searchParams.delete(p); });
-          }
-          return url.href;
-        }catch(e){ return u; }
-      }
       // Highest-resolution source for an <img>. An explicit full-size data-* attribute wins
       // (galleries stash the original there); otherwise the largest candidate across the <img>'s
       // srcset AND any wrapping <picture>'s <source srcset> — which is what a desktop browser loads
       // to fill a full-window view, i.e. the "open image in a new tab" quality. The displayed src
       // (often a shrunk grid thumbnail) is the last resort. Reading <picture><source> is what lets
-      // sites like depop that ship responsive <picture> markup hand us the full-size photo.
+      // sites like depop that ship responsive <picture> markup hand us the full-size photo. The URL
+      // is used verbatim — we do NOT rewrite CDN query params, since many resizers sign or require
+      // them (stripping them 404'd depop downloads).
       function bestImgSrc(img){
         try{
           var full=['data-full','data-fullsrc','data-full-src','data-original','data-zoom-image','data-zoom','data-large','data-src-large','data-hi-res','data-hires','data-image']
             .map(function(a){ return img.getAttribute(a); }).filter(function(v){ return v && v.indexOf('data:')!==0; })[0];
-          if(full) return fullResURL(new URL(full, location.href).href);
+          if(full) return new URL(full, location.href).href;
           var best='', bestW=0;
           function addSrcset(ss){ if(!ss) return; ss.split(',').forEach(function(part){
             var t=part.trim().split(/\\s+/), u=t[0]; if(!u) return;
@@ -1833,7 +1821,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
           addSrcset(img.getAttribute('srcset') || img.srcset || '');
           if(!best) best = img.currentSrc||img.src||img.getAttribute('data-src')||'';
           if(!best) return null;
-          best = fullResURL(new URL(best, location.href).href);
+          best = new URL(best, location.href).href;
           // data:/blob: sources can't be fetched by the downloader — treat as no image so the
           // hit-test keeps looking (a real http src is usually also present).
           return (best.indexOf('data:')===0 || best.indexOf('blob:')===0) ? null : best;
@@ -1846,40 +1834,37 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
           var r=el.getBoundingClientRect(); return r.width>1 && r.height>1;
         }catch(e){ return true; }
       }
-      // EXACTLY what you SEE at the finger — the same target as "Open Image in New Tab". Instead of
-      // guessing from one element's ancestors, use the browser's own hit-stack (elementsFromPoint,
-      // topmost paint order first) and return the first VISIBLE <img>/<video>/background-image in it.
-      // The topmost painted media is what's on screen, so a photo shown over/around a stray or
-      // hidden <video> is picked correctly (invisible elements — opacity:0 overlays, zero-size — are
-      // skipped). Falls back to the topmost element's ancestor chain, then the smallest media box
-      // containing the point, only when the stack itself holds no media.
+      // The media you SEE at the finger — the "Open Image in New Tab" target. This searches by
+      // GEOMETRY, not by hit-testing: it looks at every visible <img>/<video> whose box contains
+      // the point and picks the smallest (the foreground item you tapped). That's deliberate —
+      // creator sites (passes.com) cover photos with transparent anti-save overlays and set the
+      // <img> to pointer-events:none, so elementFromPoint / elementsFromPoint return the overlay and
+      // never the photo. Geometry ignores overlays and pointer-events entirely, so the real <img> is
+      // always found. Ties favor the image (a photo laid over a background/preview video is what you
+      // see). A background-image element is used only if no <img>/<video> box matches.
       function mediaAt(x,y){
-        var stack = (document.elementsFromPoint ? document.elementsFromPoint(x,y) : null) || [document.elementFromPoint(x,y)];
-        for(var i=0;i<stack.length;i++){
-          var el=stack[i]; if(!el || el.nodeType!==1) continue;
-          if(el.tagName==='IMG'){ if(!isVisible(el)) continue; var s=bestImgSrc(el); if(s) return { image: s }; continue; }
-          if(el.tagName==='VIDEO'){ if(!isVisible(el)) continue; return { video: videoInfo(el) }; }
-          if(el.tagName==='SOURCE' && el.parentElement && el.parentElement.tagName==='VIDEO'){ return { video: videoInfo(el.parentElement) }; }
-          var bg=bgImageOf(el); if(bg && isVisible(el)) return { image: bg };
-        }
-        var n = stack[0];
-        while(n){
-          if(n.tagName==='IMG'){ var s2=bestImgSrc(n); if(s2) return { image: s2 }; }
-          if(n.tagName==='VIDEO') return { video: videoInfo(n) };
-          var bg2=bgImageOf(n); if(bg2) return { image: bg2 };
-          n=n.parentElement;
-        }
-        var pick=null, pickArea=Infinity;
+        var imgEl=null, imgArea=Infinity, vidEl=null, vidArea=Infinity;
         var els=document.querySelectorAll('img,video');
-        for(var j=0;j<els.length;j++){
-          var e=els[j], r=e.getBoundingClientRect();
-          if(r.width<40 || r.height<40) continue;
-          if(x>=r.left && x<=r.right && y>=r.top && y<=r.bottom){
-            var area=r.width*r.height; if(area<pickArea){ pickArea=area; pick=e; }
-          }
+        for(var i=0;i<els.length;i++){
+          var e=els[i]; var r=e.getBoundingClientRect();
+          if(r.width<32 || r.height<32) continue;
+          if(x<r.left || x>r.right || y<r.top || y>r.bottom) continue;
+          if(!isVisible(e)) continue;
+          var a=r.width*r.height;
+          if(e.tagName==='VIDEO'){ if(a<vidArea){ vidArea=a; vidEl=e; } }
+          else if(a<imgArea){ imgArea=a; imgEl=e; }
         }
-        if(pick){ if(pick.tagName==='VIDEO') return { video: videoInfo(pick) };
-          var s3=bestImgSrc(pick); if(s3) return { image: s3 }; }
+        // Smaller box = the foreground item actually tapped; on a tie prefer the photo.
+        if(imgEl && (!vidEl || imgArea<=vidArea)){ var s=bestImgSrc(imgEl); if(s) return { image: s }; }
+        if(vidEl) return { video: videoInfo(vidEl) };
+        if(imgEl){ var s2=bestImgSrc(imgEl); if(s2) return { image: s2 }; }
+        // No <img>/<video> box — fall back to a CSS background-image under the point (visual stack,
+        // then the touched element's ancestors).
+        var stack = (document.elementsFromPoint ? document.elementsFromPoint(x,y) : null) || [document.elementFromPoint(x,y)];
+        for(var k=0;k<stack.length;k++){ var el=stack[k];
+          if(el && el.nodeType===1 && isVisible(el)){ var bg=bgImageOf(el); if(bg) return { image: bg }; } }
+        var n = stack[0];
+        while(n){ var bg2=bgImageOf(n); if(bg2) return { image: bg2 }; n=n.parentElement; }
         return {};
       }
       // Whole-page media harvest for the "Save All Photos & Videos" action — one tap grabs a whole
