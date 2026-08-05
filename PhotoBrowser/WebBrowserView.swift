@@ -1834,35 +1834,52 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
           if(!best) best = img.currentSrc||img.src||img.getAttribute('data-src')||'';
           if(!best) return null;
           best = fullResURL(new URL(best, location.href).href);
-          return best.indexOf('data:')===0 ? null : best;
+          // data:/blob: sources can't be fetched by the downloader — treat as no image so the
+          // hit-test keeps looking (a real http src is usually also present).
+          return (best.indexOf('data:')===0 || best.indexOf('blob:')===0) ? null : best;
         }catch(e){ return null; }
       }
-      // EXACTLY what's under the finger, honoring stacking order: the nearest <video>/<img>/
-      // background-image ANCESTOR of the touched element wins, so a long-press downloads the
-      // specific photo or video you pressed — never "some other video that happens to be playing
-      // on the page" (the old code fell back to the page's single/first-playing <video>, which
-      // hijacked photo long-presses on posts that also had a video). Only when the touch lands on an
-      // overlay with NO media ancestor (a play button / gradient laid over the media) does it fall
-      // back to the smallest media box that contains the point — i.e. the foreground item there.
+      function isVisible(el){
+        try{
+          var s=getComputedStyle(el);
+          if(s.visibility==='hidden' || s.display==='none' || parseFloat(s.opacity||'1')===0) return false;
+          var r=el.getBoundingClientRect(); return r.width>1 && r.height>1;
+        }catch(e){ return true; }
+      }
+      // EXACTLY what you SEE at the finger — the same target as "Open Image in New Tab". Instead of
+      // guessing from one element's ancestors, use the browser's own hit-stack (elementsFromPoint,
+      // topmost paint order first) and return the first VISIBLE <img>/<video>/background-image in it.
+      // The topmost painted media is what's on screen, so a photo shown over/around a stray or
+      // hidden <video> is picked correctly (invisible elements — opacity:0 overlays, zero-size — are
+      // skipped). Falls back to the topmost element's ancestor chain, then the smallest media box
+      // containing the point, only when the stack itself holds no media.
       function mediaAt(x,y){
-        var n = document.elementFromPoint(x,y);
+        var stack = (document.elementsFromPoint ? document.elementsFromPoint(x,y) : null) || [document.elementFromPoint(x,y)];
+        for(var i=0;i<stack.length;i++){
+          var el=stack[i]; if(!el || el.nodeType!==1) continue;
+          if(el.tagName==='IMG'){ if(!isVisible(el)) continue; var s=bestImgSrc(el); if(s) return { image: s }; continue; }
+          if(el.tagName==='VIDEO'){ if(!isVisible(el)) continue; return { video: videoInfo(el) }; }
+          if(el.tagName==='SOURCE' && el.parentElement && el.parentElement.tagName==='VIDEO'){ return { video: videoInfo(el.parentElement) }; }
+          var bg=bgImageOf(el); if(bg && isVisible(el)) return { image: bg };
+        }
+        var n = stack[0];
         while(n){
+          if(n.tagName==='IMG'){ var s2=bestImgSrc(n); if(s2) return { image: s2 }; }
           if(n.tagName==='VIDEO') return { video: videoInfo(n) };
-          if(n.tagName==='IMG'){ var s=bestImgSrc(n); if(s) return { image: s }; }
-          var bg=bgImageOf(n); if(bg) return { image: bg };
+          var bg2=bgImageOf(n); if(bg2) return { image: bg2 };
           n=n.parentElement;
         }
         var pick=null, pickArea=Infinity;
         var els=document.querySelectorAll('img,video');
-        for(var i=0;i<els.length;i++){
-          var e=els[i], r=e.getBoundingClientRect();
+        for(var j=0;j<els.length;j++){
+          var e=els[j], r=e.getBoundingClientRect();
           if(r.width<40 || r.height<40) continue;
           if(x>=r.left && x<=r.right && y>=r.top && y<=r.bottom){
             var area=r.width*r.height; if(area<pickArea){ pickArea=area; pick=e; }
           }
         }
         if(pick){ if(pick.tagName==='VIDEO') return { video: videoInfo(pick) };
-          var s2=bestImgSrc(pick); if(s2) return { image: s2 }; }
+          var s3=bestImgSrc(pick); if(s3) return { image: s3 }; }
         return {};
       }
       // Whole-page media harvest for the "Save All Photos & Videos" action — one tap grabs a whole
