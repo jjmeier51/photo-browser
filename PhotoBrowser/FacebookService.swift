@@ -139,7 +139,7 @@ enum FacebookService {
         }
         func loginWalled() { hitLoginWall = true }
         func discoveryFinished() { finding = false; continuation.finish(); report() }
-        func savedOne() { saved += 1; if saved % 4 == 0 || saved == foundCount { report() } }
+        func savedOne() { saved += 1; if saved <= 5 || saved % 4 == 0 || saved == foundCount { report() } }
         private func report() {
             // While finding, the denominator is still growing — the bar stays idle
             // (total 0) and the phase text carries the live counts; once discovery
@@ -245,14 +245,20 @@ enum FacebookService {
             }
             for await item in stream {
                 if active >= maxConcurrent, let r = await group.next() {
-                    active -= 1; apply(r); await hub.savedOne()
+                    active -= 1; apply(r)
                 }
                 group.addTask {
-                    await download(item, into: folder, posterFallback: posterFallback, creds: creds)
+                    // Count the save from inside the task, the moment it finishes — otherwise
+                    // `savedOne` only fired when the concurrency cap forced a drain, so a run with
+                    // fewer items than `maxConcurrent` showed "downloaded 0" until the whole stream
+                    // closed even though downloads were completing all along.
+                    let r = await download(item, into: folder, posterFallback: posterFallback, creds: creds)
+                    await hub.savedOne()
+                    return r
                 }
                 active += 1
             }
-            while let r = await group.next() { apply(r); await hub.savedOne() }
+            while let r = await group.next() { apply(r) }
         }
         await discovery.value
 

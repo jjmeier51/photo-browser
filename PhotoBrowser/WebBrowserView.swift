@@ -1771,27 +1771,42 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         if(!a) return null;
         return { href: a.href, download: a.hasAttribute('download'), name: a.getAttribute('download')||'' };
       }
+      // Upgrade a URL to its full-resolution original where the CDN encodes size in the query.
+      // Depop serves product photos through a resizer (?width=&height=&quality=…); the
+      // unconstrained URL is the stored original, and those photos are public/unsigned so dropping
+      // the size hints is safe and yields the highest quality. (Only touched for depop hosts, so
+      // signed CDN URLs elsewhere are never altered.)
+      function fullResURL(u){
+        try{
+          var url = new URL(u, location.href);
+          if(url.hostname.indexOf('depop')>=0){
+            ['width','height','w','h','size','quality','q','dpr','fit','format','auto'].forEach(function(p){ url.searchParams.delete(p); });
+          }
+          return url.href;
+        }catch(e){ return u; }
+      }
       // Highest-resolution source for an <img>. An explicit full-size data-* attribute wins
-      // (galleries stash the original there); otherwise the largest `srcset` candidate — which is
-      // exactly what a desktop browser loads to fill a full-window view, i.e. the "open image in a
-      // new tab" quality; the displayed `src` (often a shrunk grid thumbnail) is the last resort.
-      // This is what makes a single long-press grab the full-res photo on sites like passes.com.
+      // (galleries stash the original there); otherwise the largest candidate across the <img>'s
+      // srcset AND any wrapping <picture>'s <source srcset> — which is what a desktop browser loads
+      // to fill a full-window view, i.e. the "open image in a new tab" quality. The displayed src
+      // (often a shrunk grid thumbnail) is the last resort. Reading <picture><source> is what lets
+      // sites like depop that ship responsive <picture> markup hand us the full-size photo.
       function bestImgSrc(img){
         try{
           var full=['data-full','data-fullsrc','data-full-src','data-original','data-zoom-image','data-zoom','data-large','data-src-large','data-hi-res','data-hires','data-image']
             .map(function(a){ return img.getAttribute(a); }).filter(function(v){ return v && v.indexOf('data:')!==0; })[0];
-          var best=full||'', bestW=0;
-          if(!best){
-            var ss = img.getAttribute('srcset') || img.srcset || '';
-            if(ss){ ss.split(',').forEach(function(part){
-              var t=part.trim().split(/\\s+/), u=t[0]; if(!u) return;
-              var w=1; if(t[1]){ if(/w$/i.test(t[1])) w=parseInt(t[1])||1; else if(/x$/i.test(t[1])) w=Math.round((parseFloat(t[1])||1)*1000); }
-              if(w>=bestW){ bestW=w; best=u; }
-            }); }
-          }
+          if(full) return fullResURL(new URL(full, location.href).href);
+          var best='', bestW=0;
+          function addSrcset(ss){ if(!ss) return; ss.split(',').forEach(function(part){
+            var t=part.trim().split(/\\s+/), u=t[0]; if(!u) return;
+            var w=1; if(t[1]){ if(/w$/i.test(t[1])) w=parseInt(t[1])||1; else if(/x$/i.test(t[1])) w=Math.round((parseFloat(t[1])||1)*1000); }
+            if(w>=bestW){ bestW=w; best=u; } }); }
+          var pic = img.closest ? img.closest('picture') : null;
+          if(pic){ var srcs=pic.querySelectorAll('source'); for(var i=0;i<srcs.length;i++){ addSrcset(srcs[i].getAttribute('srcset')); } }
+          addSrcset(img.getAttribute('srcset') || img.srcset || '');
           if(!best) best = img.currentSrc||img.src||img.getAttribute('data-src')||'';
           if(!best) return null;
-          best = new URL(best, location.href).href;
+          best = fullResURL(new URL(best, location.href).href);
           return best.indexOf('data:')===0 ? null : best;
         }catch(e){ return null; }
       }
