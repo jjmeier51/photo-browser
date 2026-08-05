@@ -41,6 +41,11 @@ struct WebBrowserView: View {
     // "Download to a New Folder…" flow: same stash, but a name prompt instead of a picker.
     @State private var showNewFolderPrompt = false
     @State private var newDownloadFolderName = ""
+    // "Save All Photos & Videos" flow: the page scan awaiting a confirm, whether a scan is running,
+    // and a scan stashed for the "Another Folder…" picker.
+    @State private var pendingScan: WebController.ScannedMedia?
+    @State private var scanning = false
+    @State private var scanForPicker: WebController.ScannedMedia?
     // Transient "saved / failed" banner for file downloads (so a photo download doesn't yank open
     // the Downloads sheet — it just confirms and fades).
     @State private var toastText: String?
@@ -163,6 +168,16 @@ struct WebBrowserView: View {
         } message: { f in
             Text((f.filename.map { "\($0)\n" } ?? "") + f.url)
         }
+        .confirmationDialog("Save all media on this page?",
+                            isPresented: Binding(get: { pendingScan != nil }, set: { if !$0 { pendingScan = nil } }),
+                            titleVisibility: .visible, presenting: pendingScan) { m in
+            Button("Download \(scanCountLabel(m)) to “\(targetFolder.lastPathComponent)”") { downloadScan(m, into: targetFolder) }
+            Button("Download to Another Folder…") { scanForPicker = m; videoForPicker = nil; fileForPicker = nil
+                DispatchQueue.main.async { showDownloadFolderPicker = true } }   // defer so the dialog dismissal doesn't swallow the sheet
+            Button("Cancel", role: .cancel) {}
+        } message: { m in
+            Text("Found \(scanCountLabel(m)) on this page.")
+        }
         .sheet(isPresented: $showDownloadFolderPicker) {
             // Default to the folder the last download went to (remembered like Move's picker),
             // falling back to the folder the browser was opened from.
@@ -171,7 +186,8 @@ struct WebBrowserView: View {
                 library.setLastWebDownloadDestination(folder)
                 if let v = videoForPicker { startDownload(v, into: folder) }
                 if let f = fileForPicker { startFileDownload(f, into: folder) }
-                videoForPicker = nil; fileForPicker = nil
+                if let m = scanForPicker { downloadScan(m, into: folder) }
+                videoForPicker = nil; fileForPicker = nil; scanForPicker = nil
             }
         }
         .alert("Download to a New Folder", isPresented: $showNewFolderPrompt) {
@@ -231,6 +247,22 @@ struct WebBrowserView: View {
 
     private var bottomBar: some View {
         VStack(spacing: 4) {
+            // passes.com: a one-tap "grab this whole purchased post" button — its galleries are
+            // tedious to save item by item. Scans the page for full-res photos + videos.
+            if controller.isPassesSite {
+                Button { saveAllMedia() } label: {
+                    HStack(spacing: 6) {
+                        if scanning { ProgressView().controlSize(.mini).tint(.white) }
+                        else { Image(systemName: "square.and.arrow.down.on.square") }
+                        Text(scanning ? "Scanning page…" : "Save All Photos & Videos")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 6)
+                    .background(Color.accentColor, in: Capsule())
+                }
+                .disabled(scanning || !controller.hasSession)
+            }
             // The gray how-to line retires after the first download ever; the green "video
             // detected" line stays (it's live state, not instruction).
             if controller.hasVideo {
@@ -297,6 +329,9 @@ struct WebBrowserView: View {
                         Button { UIPasteboard.general.string = controller.currentURLString } label: {
                             Label("Copy Page Link", systemImage: "doc.on.doc")
                         }.disabled(!controller.hasSession)
+                        Button { saveAllMedia() } label: {
+                            Label("Save All Photos & Videos", systemImage: "square.and.arrow.down.on.square")
+                        }.disabled(scanning || !controller.hasSession)
                         Button { controller.findInPage() } label: {
                             Label("Find on Page…", systemImage: "magnifyingglass")
                         }.disabled(!controller.hasSession)
@@ -385,6 +420,50 @@ struct WebBrowserView: View {
             default: break
             }
         }
+    }
+
+    /// "Save All Photos & Videos": scan the live page for every full-res photo + video, then (if any
+    /// were found) present the confirm dialog. Runs off the button so the UI shows a spinner meanwhile.
+    private func saveAllMedia() {
+        guard !scanning else { return }
+        scanning = true
+        Task {
+            let media = await controller.scanPageMedia()
+            scanning = false
+            if media.images.isEmpty && media.videos.isEmpty {
+                showToast("No downloadable photos or videos found on this page.", error: true)
+            } else {
+                pendingScan = media
+            }
+        }
+    }
+
+    /// Kick off every scanned item into the normal download pipeline (tracked in the Downloads
+    /// sheet, deduped by name). Photos get a distinct id-derived name so CDN URLs that all end in a
+    /// generic segment (…/public) don't collapse onto one filename and get skipped.
+    private func downloadScan(_ m: WebController.ScannedMedia, into folder: URL) {
+        webHintSeen = true
+        library.setLastWebDownloadDestination(folder)
+        for v in m.videos {
+            controller.startDownload(WebController.FoundVideo(url: v, pageURL: controller.currentURLString),
+                                     into: folder, suggestedName: nil) { _ in }
+        }
+        for img in m.images {
+            let file = WebController.PendingFile(url: img, pageURL: controller.currentURLString,
+                                                 filename: WebController.scannedFileName(for: img))
+            controller.startFileDownload(file, into: folder) { _ in }
+        }
+        let n = m.images.count + m.videos.count
+        showToast("Downloading \(n) item\(n == 1 ? "" : "s") — tap ⬇ for progress", error: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showDownloads = true }
+    }
+
+    /// "3 photos & 1 video" — the count summary for the Save-All dialog.
+    private func scanCountLabel(_ m: WebController.ScannedMedia) -> String {
+        let p = m.images.count, v = m.videos.count
+        let photos = p > 0 ? "\(p) photo\(p == 1 ? "" : "s")" : ""
+        let videos = v > 0 ? "\(v) video\(v == 1 ? "" : "s")" : ""
+        return [photos, videos].filter { !$0.isEmpty }.joined(separator: " & ")
     }
 
     /// A transient top banner ("Saved…" / an error) that dismisses itself after a couple of seconds.
@@ -1096,6 +1175,69 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         return FoundVideo(url: url, pageURL: currentURLString)
     }
 
+    // MARK: - Bulk page scan ("Save All Photos & Videos")
+
+    /// Every downloadable photo + video the current page shows — the whole gallery of a purchased
+    /// post — for the "Save All" action. The DOM scan (full-res `<img>` + `<video>`) is folded
+    /// together with the media URLs captured from fetch/XHR (HLS manifests, direct files), so a
+    /// streamed video whose `<video>` plays from a blob-backed MSE source is still included via its
+    /// real `.m3u8`. Deduped; images first, then videos.
+    struct ScannedMedia: Sendable { var images: [String] = []; var videos: [String] = [] }
+
+    func scanPageMedia() async -> ScannedMedia {
+        let js = "window.__pbScanMedia ? window.__pbScanMedia() : null"
+        let json: String = await withCheckedContinuation { cont in
+            webView.evaluateJavaScript(js) { result, _ in cont.resume(returning: (result as? String) ?? "") }
+        }
+        var images: [String] = [], videos: [String] = []
+        if let d = json.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+            images = (obj["images"] as? [String]) ?? []
+            videos = (obj["videos"] as? [String]) ?? []
+        }
+        // Fold in fetch/XHR-captured streams the DOM can't expose (HLS/CMAF behind a blob <video>).
+        // For HLS, keep only *master* playlists — a demuxed stream also fetches per-track media
+        // playlists ("…-video…", "…mediaplaylist…", "…bitrate…"), and downloading each of those
+        // would save several silent/partial copies of one video. The downloader picks the best
+        // variant from the master itself.
+        func isMediaRendition(_ s: String) -> Bool {
+            let l = s.lowercased()
+            return l.contains("mediaplaylist") || l.contains("-video") || l.contains("-audio") || l.contains("bitrate")
+        }
+        for u in captured where !videos.contains(u) && !images.contains(u) {
+            let l = u.lowercased()
+            if l.contains(".m3u8") {
+                if !isMediaRendition(u) { videos.append(u) }
+            } else if [".mp4", ".m4v", ".mov", ".webm"].contains(where: { l.contains($0) }) {
+                videos.append(u)
+            }
+        }
+        return ScannedMedia(images: images.filter { $0.hasPrefix("http") },
+                            videos: videos.filter { $0.hasPrefix("http") })
+    }
+
+    /// passes.com — where the "Save All" one-tap really pays off, since purchased posts are
+    /// galleries you'd otherwise long-press item by item. Drives the dedicated banner button.
+    var isPassesSite: Bool { (URL(string: currentURLString)?.host ?? "").contains("passes.com") }
+
+    /// A distinct, deterministic filename for a scanned media URL. Many creator-CDN images end in a
+    /// generic variant segment (`…/<image-id>/public`, `…/original`) whose last path component is
+    /// identical across every photo — saving them all as "public.jpg" would make the folder's
+    /// same-name skip drop all but the first. Fold the preceding id segment in so each item is
+    /// unique. Extension is left to the downloader (it sniffs the bytes). Returns nil to let the
+    /// downloader derive its own name when nothing better is available.
+    static func scannedFileName(for urlString: String) -> String? {
+        guard let comps = URLComponents(string: urlString) else { return nil }
+        let segs = comps.path.split(separator: "/").map(String.init).filter { !$0.isEmpty }
+        guard let last = segs.last else { return nil }
+        let generic: Set<String> = ["public", "original", "orig", "full", "download", "image", "img",
+                                    "photo", "media", "file", "default", "source", "large", "raw", "hd"]
+        let stem = (last as NSString).deletingPathExtension.lowercased()
+        if (generic.contains(stem) || (last as NSString).pathExtension.isEmpty || stem.count < 3), segs.count >= 2 {
+            return segs[segs.count - 2] + "_" + last
+        }
+        return last
+    }
+
     // MARK: Downloads
 
     /// Starts a download, tracking it in `downloads` with real progress; `onComplete` fires on the
@@ -1628,19 +1770,61 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         if(!a) return null;
         return { href: a.href, download: a.hasAttribute('download'), name: a.getAttribute('download')||'' };
       }
+      // Highest-resolution source for an <img>. An explicit full-size data-* attribute wins
+      // (galleries stash the original there); otherwise the largest `srcset` candidate — which is
+      // exactly what a desktop browser loads to fill a full-window view, i.e. the "open image in a
+      // new tab" quality; the displayed `src` (often a shrunk grid thumbnail) is the last resort.
+      // This is what makes a single long-press grab the full-res photo on sites like passes.com.
+      function bestImgSrc(img){
+        try{
+          var full=['data-full','data-fullsrc','data-full-src','data-original','data-zoom-image','data-zoom','data-large','data-src-large','data-hi-res','data-hires','data-image']
+            .map(function(a){ return img.getAttribute(a); }).filter(function(v){ return v && v.indexOf('data:')!==0; })[0];
+          var best=full||'', bestW=0;
+          if(!best){
+            var ss = img.getAttribute('srcset') || img.srcset || '';
+            if(ss){ ss.split(',').forEach(function(part){
+              var t=part.trim().split(/\\s+/), u=t[0]; if(!u) return;
+              var w=1; if(t[1]){ if(/w$/i.test(t[1])) w=parseInt(t[1])||1; else if(/x$/i.test(t[1])) w=Math.round((parseFloat(t[1])||1)*1000); }
+              if(w>=bestW){ bestW=w; best=u; }
+            }); }
+          }
+          if(!best) best = img.currentSrc||img.src||img.getAttribute('data-src')||'';
+          if(!best) return null;
+          best = new URL(best, location.href).href;
+          return best.indexOf('data:')===0 ? null : best;
+        }catch(e){ return null; }
+      }
       function imageAt(x,y){
         var el = document.elementFromPoint(x,y), n=el;
-        // The <img> under the finger, or its full-size src via a data-/srcset attribute.
-        while(n){ if(n.tagName==='IMG'){
-            var src = n.currentSrc || n.src || n.getAttribute('data-src') || '';
-            return src && src.indexOf('data:')!==0 ? src : null;
-          }
+        while(n){ if(n.tagName==='IMG'){ return bestImgSrc(n); }
           // CSS background image (many galleries render photos as a div background).
           if(n.nodeType===1){ var bg = getComputedStyle(n).backgroundImage||''; var m = bg.match(/url\\(["']?([^"')]+)["']?\\)/);
-            if(m && m[1] && m[1].indexOf('data:')!==0) return m[1]; }
+            if(m && m[1] && m[1].indexOf('data:')!==0){ try{ return new URL(m[1], location.href).href; }catch(e){ return m[1]; } } }
           n=n.parentElement; }
         return null;
       }
+      // Whole-page media harvest for the "Save All Photos & Videos" action — one tap grabs a whole
+      // purchased post's gallery instead of long-pressing each item. Returns every sizeable image
+      // (full-res via bestImgSrc, deduped, skipping avatars/icons under ~200px) plus every
+      // <video>/<source>. Bounded so a long feed can't hang the scan.
+      window.__pbScanMedia = function(){
+        var seen={}, images=[], videos=[];
+        function pushImg(u){ if(u && !seen[u] && u.indexOf('data:')!==0){ seen[u]=1; images.push(u); } }
+        var imgs=document.querySelectorAll('img');
+        for(var i=0;i<imgs.length && images.length<300;i++){
+          var im=imgs[i];
+          var w=im.naturalWidth||im.width||0, h=im.naturalHeight||im.height||0;
+          if(w>0 && h>0 && w<200 && h<200) continue;   // UI chrome (avatars, icons, emoji)
+          pushImg(bestImgSrc(im));
+        }
+        var vids=document.querySelectorAll('video');
+        for(var k=0;k<vids.length;k++){
+          var v=vids[k];
+          [v.currentSrc, v.src].forEach(function(s){ if(s && s.indexOf('blob:')!==0 && s.indexOf('data:')!==0 && videos.indexOf(s)<0) videos.push(s); });
+          var ss=v.querySelectorAll('source'); for(var j=0;j<ss.length;j++){ var s2=ss[j].src; if(s2 && s2.indexOf('blob:')!==0 && videos.indexOf(s2)<0) videos.push(s2); }
+        }
+        return JSON.stringify({images:images, videos:videos});
+      };
       window.__pbVideoAt = function(x,y){ var v=videoAt(x,y); return v ? JSON.stringify(v) : null; };
       // Combined hit-test for long-press: a video, an anchor link, and/or an image under the finger.
       window.__pbHitAt = function(x,y){ return JSON.stringify({ video: videoAt(x,y), link: linkAt(x,y), image: imageAt(x,y) }); };

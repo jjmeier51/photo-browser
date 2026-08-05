@@ -90,21 +90,23 @@ enum FacebookService {
         cfg.httpShouldSetCookies = false
         cfg.httpCookieStorage = nil
         cfg.timeoutIntervalForRequest = 60
-        cfg.httpMaximumConnectionsPerHost = 16      // wider CDN pipe for faster downloads
+        cfg.httpMaximumConnectionsPerHost = 24      // wider CDN pipe for faster downloads
         return URLSession(configuration: cfg)
     }()
 
     // MARK: - Coordination
 
     /// Spaces www page fetches globally — every concurrent walk draws from the one
-    /// budget, so parallel discovery stays as gentle on Facebook's rate limiting as
-    /// the old sequential walk while overlapping all the request latency.
+    /// budget, so parallel discovery stays gentle on Facebook's rate limiting while
+    /// overlapping all the request latency. 80ms (~12 pages/s) is the discovery
+    /// throughput cap: fast enough to matter, still under the threshold that trips a
+    /// re-auth wall on a logged-in session.
     private actor Pacer {
         private var next = ContinuousClock.now
         func waitTurn() async {
             let now = ContinuousClock.now
             let slot = max(next, now)
-            next = slot + .milliseconds(150)
+            next = slot + .milliseconds(80)
             if slot > now { try? await Task.sleep(until: slot, clock: .continuous) }
         }
     }
@@ -167,30 +169,40 @@ enum FacebookService {
 
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
+        // Dedup is by media id. The persisted `alreadyDownloaded` set only reflects the
+        // *last completed* run, so an interrupted run (or a folder built by an older
+        // build) would re-fetch everything. Rebuild the real ground truth from the files
+        // actually on disk — every saved item is `FB_<id>.<ext>` — and union it in. This
+        // makes "Get New" genuinely incremental: previously-saved ids are skipped, the
+        // early-stop in `walkSet` trips fast on newest-first sets, and nothing already
+        // present is downloaded again.
+        let onDiskIDs = existingMediaIDs(in: folder)
+        let skip = alreadyDownloaded.union(onDiskIDs)
+
         // A per-run diagnostic log written into the folder, so an incomplete download can be
         // traced set by set (which media-set tokens were found, how many each walk emitted,
         // and why each walk stopped) without a debugger against live Facebook.
         let log = DownloadLog(folder: folder, kind: "facebook")
         await log.begin("Facebook download — \(profile.name)")
         await log.log("profile: name=\(profile.name), id=\(profile.id), vanity=\(profile.vanity ?? "—"), url=\(profile.url)")
-        await log.log("already downloaded: \(alreadyDownloaded.count) id(s) (skipped for dedup)")
+        await log.log("already downloaded: \(alreadyDownloaded.count) recorded id(s) + \(onDiskIDs.count) on disk → \(skip.count) skipped for dedup")
         await log.log("options: skipTagged=\(skipTagged), includeSubscriberHub=\(includeSubscriberHub)")
 
         // Discovery and download overlap: collectors walk concurrently and feed the
         // hub (which dedups across sets) into the stream; the consumer below starts
         // downloading the first photo while the walks are still finding the rest.
         let (stream, continuation) = AsyncStream.makeStream(of: Item.self)
-        let hub = Hub(already: alreadyDownloaded, continuation: continuation, progress: progress)
+        let hub = Hub(already: skip, continuation: continuation, progress: progress)
 
         let discovery = Task {
             await withTaskGroup(of: Void.self) { group in
                 // Albums cover profile/cover pictures and paginate past the ~100-photo
                 // ceiling of the pb virtual set; the pb walk still runs alongside for
                 // uploads not filed under an enumerable album — the hub dedups overlap.
-                group.addTask { await collectAlbums(profile, skip: alreadyDownloaded, creds: creds, hub: hub, log: log) }
+                group.addTask { await collectAlbums(profile, skip: skip, creds: creds, hub: hub, log: log) }
                 group.addTask {
                     await collectPhotos(profile, tab: "photos_by", fallbackToken: "pb.\(profile.id).-2207520000",
-                                        tokenPrefixes: ["pb.", "a."], skip: alreadyDownloaded, creds: creds, hub: hub, log: log)
+                                        tokenPrefixes: ["pb.", "a."], skip: skip, creds: creds, hub: hub, log: log)
                 }
                 if !skipTagged {
                     group.addTask {
@@ -198,14 +210,14 @@ enum FacebookService {
                         // Pin to the `t.` (Photos-of) set so the walk can't wander into a
                         // poster's album and drag in their non-tagged uploads.
                         await collectPhotos(profile, tab: "photos_of", fallbackToken: "t.\(profile.id)",
-                                            tokenPrefixes: ["t."], skip: alreadyDownloaded, creds: creds, hub: hub,
+                                            tokenPrefixes: ["t."], skip: skip, creds: creds, hub: hub,
                                             ownerFromPage: true, log: log)
                     }
                 }
-                group.addTask { await collectVideos(profile, skip: alreadyDownloaded, creds: creds, hub: hub, log: log) }
+                group.addTask { await collectVideos(profile, skip: skip, creds: creds, hub: hub, log: log) }
                 // Subscriber-only content from the creator's Subscriber Hub (Facebook Subscriptions).
                 if includeSubscriberHub {
-                    group.addTask { await collectSubscriberHub(profile, skip: alreadyDownloaded, creds: creds, hub: hub, log: log) }
+                    group.addTask { await collectSubscriberHub(profile, skip: skip, creds: creds, hub: hub, log: log) }
                 }
             }
             await hub.discoveryFinished()
@@ -219,7 +231,7 @@ enum FacebookService {
         var upscaleTargets: [(path: String, date: Date?)] = []
         await withTaskGroup(of: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String, date: Date?).self) { group in
             var active = 0
-            let maxConcurrent = 16
+            let maxConcurrent = 24
             func apply(_ r: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String, date: Date?)) {
                 if r.ok {
                     if r.isVideo { result.videos += 1 } else { result.photos += 1 }
@@ -260,7 +272,7 @@ enum FacebookService {
         if discovered == 0 {
             result.note = loginWall
                 ? "Facebook asked for a fresh login. Tap “Log in to Facebook”, sign in again, and retry."
-                : (alreadyDownloaded.isEmpty
+                : (skip.isEmpty
                     ? "No downloadable photos or videos found (the profile may be private, empty, or Facebook may be blocking access)."
                     : "No new photos or videos.")
         } else if result.photos + result.videos == 0 {
@@ -697,7 +709,10 @@ enum FacebookService {
             return (false, item.isVideo, item.id, nil, "", poster, nil)
         }
         let ext = item.isVideo ? "mp4" : imageExt(of: item.url)
-        let dest = uniqueDestination("FB_\(item.id).\(ext)", in: folder)
+        // Deterministic name keyed by media id. Dedup already keeps us from re-fetching an
+        // id that's on disk, so this never clobbers a *different* item — and dropping the
+        // old " N" collision suffix means a re-run can't spawn `FB_<id> 1.jpg` twins.
+        let dest = folder.appendingPathComponent("FB_\(item.id).\(ext)")
         guard (try? data.write(to: dest, options: .atomic)) != nil else { return (false, item.isVideo, item.id, nil, "", poster, nil) }
         if !item.isVideo { writeImageMeta(date: item.date, caption: item.caption, poster: poster, to: dest) }
         setFileDate(dest, item.date)
@@ -878,14 +893,26 @@ enum FacebookService {
             .replacingOccurrences(of: "\\/", with: "/")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    nonisolated private static func uniqueDestination(_ name: String, in folder: URL) -> URL {
+    /// Media ids already saved in this folder, read straight off disk. Every download is
+    /// named `FB_<id>.<ext>` (older buggy runs could also leave `FB_<id> N.<ext>` twins),
+    /// so strip the `FB_` prefix, the extension, and any trailing " N" to recover the id.
+    /// This is what makes dedup survive an interrupted run: the persisted id list only
+    /// updates on a clean finish, but the files are the real record.
+    nonisolated private static func existingMediaIDs(in folder: URL) -> Set<String> {
         let fm = FileManager.default
-        var dest = folder.appendingPathComponent(name)
-        let base = dest.deletingPathExtension().lastPathComponent, ext = dest.pathExtension
-        var n = 1
-        while fm.fileExists(atPath: dest.path) {
-            dest = folder.appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)"); n += 1
+        guard let names = try? fm.contentsOfDirectory(atPath: folder.path) else { return [] }
+        var ids = Set<String>()
+        for name in names where name.hasPrefix("FB_") {
+            var stem = (name as NSString).deletingPathExtension
+            stem.removeFirst(3)   // drop "FB_"
+            // Undo an old collision suffix: "12345 1" → "12345".
+            if let sp = stem.lastIndex(of: " "),
+               stem[stem.index(after: sp)...].allSatisfy(\.isNumber),
+               stem.index(after: sp) != stem.endIndex {
+                stem = String(stem[..<sp])
+            }
+            if !stem.isEmpty { ids.insert(stem) }
         }
-        return dest
+        return ids
     }
 }
