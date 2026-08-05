@@ -40,6 +40,15 @@ actor WebDownloadHistory {
 
     func all() -> [WebDownloadRecord] { load() }
 
+    /// The saved path of a *completed* download of this exact `urlString` into this `folderPath`,
+    /// if one is on record. Drives true dedup: a re-download is a duplicate only when the same
+    /// source URL was already saved to the same folder — not merely when some file there happens
+    /// to share a name. (The old filename-only check wrongly collapsed distinct media that a site
+    /// names with a constant page title, e.g. passes.com posts.)
+    func completedDestination(urlString: String, folderPath: String) -> String? {
+        load().first { $0.status == .done && $0.urlString == urlString && $0.folderPath == folderPath }?.destPath
+    }
+
     func append(_ record: WebDownloadRecord) {
         var list = load()
         list.removeAll { $0.id == record.id }

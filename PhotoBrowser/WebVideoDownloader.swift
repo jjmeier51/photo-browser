@@ -67,11 +67,13 @@ enum WebVideoDownloader {
         }
         guard let url = URL(string: effectiveURL) else { return .failed("That video URL couldn’t be read.") }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        // Already saved here? Skip the whole transfer (matched by the filename we'd give it). Return
-        // before the metadata-stamp block below so the existing file is left untouched.
-        let existingName = baseName(suggestedName, url: url, ext: "mp4")
-        if alreadyExists(existingName, in: folder) {
-            return .saved(folder.appendingPathComponent(existingName), note: "Already in this folder")
+        // Already saved here? Skip the whole transfer — but match on the SOURCE URL (via history),
+        // not the filename we'd give it: sites that name every post with a constant page title
+        // (passes.com) would otherwise collapse distinct videos onto one name and wrongly skip them.
+        // A same-name-but-different-URL item instead gets a " 1" via uniqueDestination.
+        if let prior = await WebDownloadHistory.shared.completedDestination(urlString: urlString, folderPath: folder.path),
+           FileManager.default.fileExists(atPath: prior) {
+            return .saved(URL(fileURLWithPath: prior), note: "Already in this folder")
         }
         var outcome: Outcome
         if isHLS(url) {
@@ -194,11 +196,13 @@ enum WebVideoDownloader {
                                          progress: @escaping @Sendable (Progress) -> Void) async -> Outcome {
         guard let url = URL(string: urlString) else { return .failed("That link couldn’t be read.") }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        // Already saved here? Skip the download (matched by the filename we'd give it). This is what
-        // stops a re-tapped image/file from being saved again as a " 1" duplicate.
-        let existingName = fileName(suggested: suggestedName, url: url, response: nil, sniffedExt: nil)
-        if alreadyExists(existingName, in: folder) {
-            return .saved(folder.appendingPathComponent(existingName), note: "Already in this folder")
+        // Already saved here? Skip the download — matched on the SOURCE URL (via history), not the
+        // filename we'd give it. A re-tapped image is the same URL, so it's still skipped; but two
+        // genuinely different images a site names identically (a constant page title / a generic
+        // CDN "…/public" segment) are no longer wrongly treated as one — they get a " 1" instead.
+        if let prior = await WebDownloadHistory.shared.completedDestination(urlString: urlString, folderPath: folder.path),
+           FileManager.default.fileExists(atPath: prior) {
+            return .saved(URL(fileURLWithPath: prior), note: "Already in this folder")
         }
         progress(Progress(fraction: 0, phase: "Downloading file…"))
         guard let (tmp, resp) = await downloadToTemp(url, referer: pageURL, cookieHeader: cookieHeader, authHeader: authHeader,
@@ -941,11 +945,6 @@ enum WebVideoDownloader {
         }
     }
 
-    /// True if a file with this exact name is already in `folder` — used to SKIP re-downloading
-    /// something already saved there, rather than making a " 1" duplicate.
-    nonisolated private static func alreadyExists(_ name: String, in folder: URL) -> Bool {
-        FileManager.default.fileExists(atPath: folder.appendingPathComponent(name).path)
-    }
 
     nonisolated private static func uniqueDestination(name: String, in folder: URL) -> URL {
         let fm = FileManager.default
