@@ -1754,15 +1754,16 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
       document.addEventListener('playing', function(e){
         var v=e.target; if(v && v.tagName==='VIDEO'){ add(v.currentSrc||v.src); post({type:'playing', url: v.currentSrc||v.src||''}); }
       }, true);
-      function videoAt(x,y){
-        var el = document.elementFromPoint(x,y), v=null, n=el;
-        while(n){ if(n.tagName==='VIDEO'){ v=n; break; } n=n.parentElement; }
-        if(!v){ var vids=document.querySelectorAll('video'); if(vids.length===1) v=vids[0]; else {
-          for(var i=0;i<vids.length;i++){ if(!vids[i].paused){ v=vids[i]; break; } } } }
-        if(!v) return null;
+      function videoInfo(v){
         var srcs=[]; if(v.currentSrc) srcs.push(v.currentSrc); if(v.src) srcs.push(v.src);
         var ss=v.querySelectorAll('source'); for(var j=0;j<ss.length;j++){ if(ss[j].src) srcs.push(ss[j].src); }
         return { src: v.currentSrc||v.src||'', media: srcs };
+      }
+      function bgImageOf(n){
+        if(!n || n.nodeType!==1) return null;
+        var bg = getComputedStyle(n).backgroundImage||''; var m = bg.match(/url\\(["']?([^"')]+)["']?\\)/);
+        if(m && m[1] && m[1].indexOf('data:')!==0){ try{ return new URL(m[1], location.href).href; }catch(e){ return m[1]; } }
+        return null;
       }
       function linkAt(x,y){
         var el = document.elementFromPoint(x,y), a=null, n=el;
@@ -1794,14 +1795,33 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
           return best.indexOf('data:')===0 ? null : best;
         }catch(e){ return null; }
       }
-      function imageAt(x,y){
-        var el = document.elementFromPoint(x,y), n=el;
-        while(n){ if(n.tagName==='IMG'){ return bestImgSrc(n); }
-          // CSS background image (many galleries render photos as a div background).
-          if(n.nodeType===1){ var bg = getComputedStyle(n).backgroundImage||''; var m = bg.match(/url\\(["']?([^"')]+)["']?\\)/);
-            if(m && m[1] && m[1].indexOf('data:')!==0){ try{ return new URL(m[1], location.href).href; }catch(e){ return m[1]; } } }
-          n=n.parentElement; }
-        return null;
+      // EXACTLY what's under the finger, honoring stacking order: the nearest <video>/<img>/
+      // background-image ANCESTOR of the touched element wins, so a long-press downloads the
+      // specific photo or video you pressed — never "some other video that happens to be playing
+      // on the page" (the old code fell back to the page's single/first-playing <video>, which
+      // hijacked photo long-presses on posts that also had a video). Only when the touch lands on an
+      // overlay with NO media ancestor (a play button / gradient laid over the media) does it fall
+      // back to the smallest media box that contains the point — i.e. the foreground item there.
+      function mediaAt(x,y){
+        var n = document.elementFromPoint(x,y);
+        while(n){
+          if(n.tagName==='VIDEO') return { video: videoInfo(n) };
+          if(n.tagName==='IMG'){ var s=bestImgSrc(n); if(s) return { image: s }; }
+          var bg=bgImageOf(n); if(bg) return { image: bg };
+          n=n.parentElement;
+        }
+        var pick=null, pickArea=Infinity;
+        var els=document.querySelectorAll('img,video');
+        for(var i=0;i<els.length;i++){
+          var e=els[i], r=e.getBoundingClientRect();
+          if(r.width<40 || r.height<40) continue;
+          if(x>=r.left && x<=r.right && y>=r.top && y<=r.bottom){
+            var area=r.width*r.height; if(area<pickArea){ pickArea=area; pick=e; }
+          }
+        }
+        if(pick){ if(pick.tagName==='VIDEO') return { video: videoInfo(pick) };
+          var s2=bestImgSrc(pick); if(s2) return { image: s2 }; }
+        return {};
       }
       // Whole-page media harvest for the "Save All Photos & Videos" action — one tap grabs a whole
       // purchased post's gallery instead of long-pressing each item. Returns every sizeable image
@@ -1825,9 +1845,11 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         }
         return JSON.stringify({images:images, videos:videos});
       };
-      window.__pbVideoAt = function(x,y){ var v=videoAt(x,y); return v ? JSON.stringify(v) : null; };
-      // Combined hit-test for long-press: a video, an anchor link, and/or an image under the finger.
-      window.__pbHitAt = function(x,y){ return JSON.stringify({ video: videoAt(x,y), link: linkAt(x,y), image: imageAt(x,y) }); };
+      window.__pbVideoAt = function(x,y){ var m=mediaAt(x,y); return m.video ? JSON.stringify(m.video) : null; };
+      // Combined hit-test for long-press: the media EXACTLY under the finger (a video or an image,
+      // whichever is nearer in stacking order — never both), plus any anchor link under it.
+      window.__pbHitAt = function(x,y){ var m=mediaAt(x,y);
+        return JSON.stringify({ video: m.video||null, link: linkAt(x,y), image: m.image||null }); };
     })();
     """
 }
