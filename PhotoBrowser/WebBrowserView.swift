@@ -890,6 +890,8 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     /// The running Task per download row, so a row's ✕ can actually cancel the transfer.
     private var downloadTasks: [UUID: Task<Void, Never>] = [:]
+    /// Last progress forwarded to `downloads` per row, so `reportProgress` can drop sub-step churn.
+    private var lastProgressReport: [UUID: (fraction: Double, phase: String)] = [:]
 
     var onVideoLongPress: ((FoundVideo) -> Void)?
     /// Fired when a downloadable file is discovered (long-pressed link or an attachment response).
@@ -1328,7 +1330,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
                 // the credential lookup (it must be re-read each attempt, after a sign-in).
                 let auth = await self.authHeader(forURLString: urlString)
                 let prog: @Sendable (WebVideoDownloader.Progress) -> Void = { p in
-                    Task { @MainActor in self.update(id) { $0.progress = p.fraction; $0.phase = p.phase } }
+                    Task { @MainActor in self.reportProgress(id, p) }
                 }
                 if kind == .video {
                     return await WebVideoDownloader.download(
@@ -1356,9 +1358,21 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         downloadTasks[id] = task
     }
 
+    /// Forward a download's progress to its row, coalesced. Many concurrent downloads (a "Save All")
+    /// each fire progress rapidly, and every mutation of the @Published `downloads` re-renders the
+    /// whole browser view — a storm that made browsing sluggish while downloads ran. Forward only a
+    /// phase change, completion, or a ≥2% step; drop the churn in between so the web view stays smooth.
+    private func reportProgress(_ id: UUID, _ p: WebVideoDownloader.Progress) {
+        if p.fraction < 1, let last = lastProgressReport[id], last.phase == p.phase,
+           p.fraction - last.fraction < 0.02 { return }
+        lastProgressReport[id] = (p.fraction, p.phase)
+        update(id) { $0.progress = p.fraction; $0.phase = p.phase }
+    }
+
     /// Map a download outcome onto its Downloads-tab row, and persist it to history.
     private func finish(_ id: UUID, _ outcome: WebVideoDownloader.Outcome) {
         downloadTasks[id] = nil
+        lastProgressReport[id] = nil
         update(id) { e in
             switch outcome {
             case .saved(let u, let note): e.state = .done; e.progress = 1; e.dest = u; e.phase = "Saved"; e.message = note ?? ""
