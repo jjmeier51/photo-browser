@@ -306,10 +306,18 @@ enum WebVideoDownloader {
             try? FileManager.default.removeItem(at: audioTmp)
         }
 
-        // If TS and FFmpegKit is available, remux to a clean faststart MP4; otherwise keep .ts.
-        if finalExt == "ts", VideoTranscoder.isAvailable {
+        // A raw concatenated MPEG-TS stream isn't a normal, broadly-playable file — the app's
+        // viewer (and many players) won't open a `.ts` — so always remux TS → a clean faststart
+        // MP4 without re-encoding. Prefer FFmpegKit when it's linked; otherwise fall back to an
+        // AVFoundation passthrough (read the TS's tracks, rewrite them into an MP4 container). This
+        // is what makes passes.com (and other TS-HLS) videos actually play. Keep the `.ts` only if
+        // both remux paths fail.
+        if finalExt == "ts" {
             let mp4 = finalTmp.deletingPathExtension().appendingPathExtension("mp4")
-            if await VideoTranscoder.muxTranscode(video: finalTmp, audio: nil, to: mp4, transcode: false, date: Date(), lat: nil, lng: nil) {
+            if VideoTranscoder.isAvailable,
+               await VideoTranscoder.muxTranscode(video: finalTmp, audio: nil, to: mp4, transcode: false, date: Date(), lat: nil, lng: nil) {
+                try? FileManager.default.removeItem(at: finalTmp); finalTmp = mp4; finalExt = "mp4"
+            } else if await remuxToMP4(finalTmp, to: mp4) {
                 try? FileManager.default.removeItem(at: finalTmp); finalTmp = mp4; finalExt = "mp4"
             }
         }
@@ -557,6 +565,64 @@ enum WebVideoDownloader {
             return "writer \(writer.error.map { "\(($0 as NSError).code)" } ?? "st\(writer.status.rawValue)")"
         } catch {
             return "mux \((error as NSError).code)"
+        }
+    }
+
+    /// Remux a raw concatenated MPEG-TS file into a clean, non-fragmented MP4 with NO re-encode —
+    /// the compressed video/audio samples are copied verbatim into an MP4 container so it plays
+    /// everywhere (a bare `.ts` doesn't). Two separate `AVAssetReader`s over the same file (one per
+    /// track) demux independently, so video can be pumped fully and then audio without the
+    /// single-reader interleave stall. Returns false if the TS can't be parsed (caller keeps `.ts`).
+    nonisolated private static func remuxToMP4(_ src: URL, to out: URL) async -> Bool {
+        let opts: [String: Any] = [AVURLAssetPreferPreciseDurationAndTimingKey: true]
+        let vAsset = AVURLAsset(url: src, options: opts)
+        let aAsset = AVURLAsset(url: src, options: opts)
+        guard let vTrack = try? await vAsset.loadTracks(withMediaType: .video).first else { return false }
+        let aTrack = try? await aAsset.loadTracks(withMediaType: .audio).first
+        let vFormat = (try? await vTrack.load(.formatDescriptions))?.first
+        let transform = try? await vTrack.load(.preferredTransform)
+        let aFormat: CMFormatDescription? = aTrack == nil ? nil : (try? await aTrack!.load(.formatDescriptions))?.first
+
+        try? FileManager.default.removeItem(at: out)
+        do {
+            let writer = try AVAssetWriter(outputURL: out, fileType: .mp4)
+            writer.shouldOptimizeForNetworkUse = true
+
+            let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: vFormat)
+            vInput.expectsMediaDataInRealTime = false
+            if let transform { vInput.transform = transform }
+            guard writer.canAdd(vInput) else { return false }
+            writer.add(vInput)
+
+            let vReader = try AVAssetReader(asset: vAsset)
+            let vOut = AVAssetReaderTrackOutput(track: vTrack, outputSettings: nil)
+            guard vReader.canAdd(vOut) else { return false }
+            vReader.add(vOut)
+
+            var aInput: AVAssetWriterInput?
+            var aReader: AVAssetReader?
+            var aOut: AVAssetReaderTrackOutput?
+            if let aTrack {
+                let ai = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: aFormat)
+                ai.expectsMediaDataInRealTime = false
+                let ar = try AVAssetReader(asset: aAsset)
+                let ao = AVAssetReaderTrackOutput(track: aTrack, outputSettings: nil)
+                if ar.canAdd(ao), writer.canAdd(ai) { ar.add(ao); writer.add(ai); aInput = ai; aReader = ar; aOut = ao }
+            }
+
+            guard writer.startWriting() else { return false }
+            writer.startSession(atSourceTime: .zero)
+            vReader.startReading()
+            aReader?.startReading()
+
+            await pump(vInput, vOut)
+            if let aInput, let aOut { await pump(aInput, aOut) }
+
+            if vReader.status == .failed { return false }
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in writer.finishWriting { c.resume() } }
+            return writer.status == .completed
+        } catch {
+            return false
         }
     }
 

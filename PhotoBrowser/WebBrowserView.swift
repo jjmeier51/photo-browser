@@ -396,7 +396,14 @@ struct WebBrowserView: View {
         // refresh happen in `onAnyDownloadComplete`.
         webHintSeen = true
         showToast("Downloading — tap ⬇ for progress", error: false)
-        controller.startDownload(v, into: folder, suggestedName: controller.pageTitle) { entry in
+        // The page title is a good filename on sites where each media has its own page — but on an
+        // SPA like passes.com `document.title` is a constant marketing string, so every video would
+        // be saved under the same name (then " 1", " 2"…). There, derive a distinct name from the
+        // media URL instead; elsewhere keep the (usually meaningful) page title.
+        let suggested: String? = controller.isPassesSite
+            ? WebController.scannedFileName(for: v.url).map { ($0 as NSString).deletingPathExtension }
+            : controller.pageTitle
+        controller.startDownload(v, into: folder, suggestedName: suggested) { entry in
             switch entry.state {
             case .done:
                 let skipped = entry.message?.hasPrefix("Already") == true
@@ -445,8 +452,11 @@ struct WebBrowserView: View {
         webHintSeen = true
         library.setLastWebDownloadDestination(folder)
         for v in m.videos {
+            // Distinct, URL-derived name (extension-less — the downloader adds the real one) so
+            // videos whose manifests share a basename (…/playlist.m3u8) don't collide.
+            let name = WebController.scannedFileName(for: v).map { ($0 as NSString).deletingPathExtension }
             controller.startDownload(WebController.FoundVideo(url: v, pageURL: controller.currentURLString),
-                                     into: folder, suggestedName: nil) { _ in }
+                                     into: folder, suggestedName: name) { _ in }
         }
         for img in m.images {
             let file = WebController.PendingFile(url: img, pageURL: controller.currentURLString,
@@ -1230,7 +1240,10 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         let segs = comps.path.split(separator: "/").map(String.init).filter { !$0.isEmpty }
         guard let last = segs.last else { return nil }
         let generic: Set<String> = ["public", "original", "orig", "full", "download", "image", "img",
-                                    "photo", "media", "file", "default", "source", "large", "raw", "hd"]
+                                    "photo", "media", "file", "default", "source", "large", "raw", "hd",
+                                    // HLS/stream manifests share these across every post — fold the id in.
+                                    "playlist", "manifest", "index", "master", "video", "stream", "hls",
+                                    "chunklist", "chunk", "out", "mp4", "movie"]
         let stem = (last as NSString).deletingPathExtension.lowercased()
         if (generic.contains(stem) || (last as NSString).pathExtension.isEmpty || stem.count < 3), segs.count >= 2 {
             return segs[segs.count - 2] + "_" + last
