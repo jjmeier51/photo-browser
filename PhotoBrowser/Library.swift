@@ -1265,6 +1265,13 @@ final class Library {
                 live.finish(success: true,
                             message: "\(data.count) AI image\(data.count == 1 ? "" : "s") ready to review. Tap to see them.",
                             jobID: jobID.uuidString)
+                // Surface the results IN-APP immediately. Previously success only posted a
+                // notification, so if that banner didn't appear (permission/foreground quirk) the
+                // finished images were stranded in memory with no way to reach the review — exactly
+                // the "pill vanished, nothing saved" symptom. The results sheet is presented app-wide
+                // (ContentView observes this), so it shows over wherever the user is browsing; if the
+                // app is backgrounded it simply appears on return (and the notification still fires).
+                aiResultPresentation = done
             case .failure(let err):
                 let msg: String
                 switch err {

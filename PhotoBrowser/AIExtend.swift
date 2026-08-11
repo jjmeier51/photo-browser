@@ -216,7 +216,15 @@ enum AIExtend {
         guard !urls.isEmpty else { return .failure(.server("Generation timed out or returned no images.")) }
         var out: [Data] = []
         await withTaskGroup(of: Data?.self) { group in
-            for u in urls { group.addTask { (try? await URLSession.shared.data(from: u))?.0 } }
+            for u in urls {
+                group.addTask {
+                    guard let (d, r) = try? await URLSession.shared.data(from: u), !d.isEmpty else { return nil }
+                    // Only accept a real 2xx body — an expired/again-signed result URL can answer with
+                    // an error page, which must not be saved as a broken "image".
+                    if let http = r as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return nil }
+                    return d
+                }
+            }
             for await d in group { if let d { out.append(d) } }
         }
         return out.isEmpty ? .failure(.network) : .success(out)
