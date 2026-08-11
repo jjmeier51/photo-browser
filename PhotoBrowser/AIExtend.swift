@@ -125,7 +125,8 @@ enum AIExtend {
     /// until Astria finishes, and downloads the result image(s).
     nonisolated static func generate(model: AIModel, prompt: String, imageData: Data,
                                      count: Int, width: Int?, height: Int?,
-                                     aspectOverride: String? = nil, superResolution: Bool = false) async -> Result<[Data], AIError> {
+                                     aspectOverride: String? = nil, superResolution: Bool = false,
+                                     onPrompt: (@Sendable (Int) -> Void)? = nil) async -> Result<[Data], AIError> {
         guard isConfigured else { return .failure(.notConfigured) }
         let tune = tuneID(for: model)
         guard let url = URL(string: "\(base)/tunes/\(tune)/prompts") else { return .failure(.server("Bad endpoint URL.")) }
@@ -153,7 +154,7 @@ enum AIExtend {
         let files: [(name: String, filename: String, mime: String, data: Data)] = [
             ("prompt[input_image]", "input.jpg", "image/jpeg", imageData)
         ]
-        return await submit(tune: tune, url: url, fields: fields, files: files)
+        return await submit(tune: tune, url: url, fields: fields, files: files, onPrompt: onPrompt)
     }
 
     /// Masked outpaint via Flux (the "Extend" feature). `imageData` is the original
@@ -183,9 +184,12 @@ enum AIExtend {
         return await submit(tune: tune, url: url, fields: fields, files: files)
     }
 
-    /// Posts a prompt (multipart), polls until Astria finishes, downloads the image(s).
+    /// Posts a prompt (multipart), polls until Astria finishes, downloads the image(s). `onPrompt`
+    /// fires with the created prompt id the moment Astria accepts it — the caller persists that so a
+    /// job can be recovered (re-polled + saved) if the app is killed before generation finishes.
     private nonisolated static func submit(tune: Int, url: URL, fields: [String: String],
-                                           files: [(name: String, filename: String, mime: String, data: Data)]) async -> Result<[Data], AIError> {
+                                           files: [(name: String, filename: String, mime: String, data: Data)],
+                                           onPrompt: (@Sendable (Int) -> Void)? = nil) async -> Result<[Data], AIError> {
         let boundary = "PB-\(UUID().uuidString)"
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -200,8 +204,15 @@ enum AIExtend {
         }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let id = intValue(json["id"]) else { return .failure(.badResult) }
+        onPrompt?(id)
+        return await downloadPromptImages(promptID: id, tune: tune)
+    }
 
-        let urls = await poll(promptID: id, tune: tune)
+    /// Polls a created prompt to completion and downloads its image(s). Split out from `submit` so a
+    /// recovered job (app killed mid-generation) can re-enter here with just the prompt id — Astria
+    /// keeps the finished result server-side, so it's still fetchable on the next launch.
+    private nonisolated static func downloadPromptImages(promptID: Int, tune: Int) async -> Result<[Data], AIError> {
+        let urls = await poll(promptID: promptID, tune: tune)
         guard !urls.isEmpty else { return .failure(.server("Generation timed out or returned no images.")) }
         var out: [Data] = []
         await withTaskGroup(of: Data?.self) { group in
@@ -209,6 +220,12 @@ enum AIExtend {
             for await d in group { if let d { out.append(d) } }
         }
         return out.isEmpty ? .failure(.network) : .success(out)
+    }
+
+    /// Recover a previously-created prompt: poll for its images + download. Used at launch to finish
+    /// a job whose app was killed while Astria was still generating.
+    nonisolated static func resumePrompt(promptID: Int, tune: Int) async -> Result<[Data], AIError> {
+        await downloadPromptImages(promptID: promptID, tune: tune)
     }
 
     /// Polls the prompt until its `images` array is populated (or it times out). Any non-terminal

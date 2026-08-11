@@ -1133,15 +1133,86 @@ final class Library {
     }
 
     /// Completed jobs by id — a tapped notification looks its results up here. In-memory for the
-    /// session (the images are large and transient; a killed-and-relaunched app simply can't restore
-    /// them, which is acceptable).
+    /// session; if the app is killed before the user reviews, `resumePendingAIEdits` recovers the
+    /// finished images from Astria on the next launch (see `PendingAstriaJob`).
     @ObservationIgnored private var completedAIEdits: [UUID: AIEditJob] = [:]
     /// Set to reopen the Edit-with-AI UI showing a finished job's results (observed by ContentView).
     var aiResultPresentation: AIEditJob?
 
+    /// A durable record of an in-flight Astria prompt, persisted the moment Astria accepts it. Astria
+    /// keeps the finished images server-side, so even if iOS kills the app mid-generation (the job is
+    /// minutes long and the user navigates away), the next launch re-polls this prompt id and saves
+    /// the result — the fix for "Astria completed the images but the app never got them".
+    private struct PendingAstriaJob: Codable {
+        var jobID: String
+        var promptID: Int
+        var tune: Int
+        var originalPath: String
+        var folderPath: String
+        var prompt: String
+        var model: String
+        var startedAt: Double
+    }
+    private static let pendingAstriaKey = "photoBrowser.pendingAstria"
+    private func loadPendingAstria() -> [PendingAstriaJob] {
+        guard let d = UserDefaults.standard.data(forKey: Self.pendingAstriaKey),
+              let list = try? JSONDecoder().decode([PendingAstriaJob].self, from: d) else { return [] }
+        return list
+    }
+    private func savePendingAstria(_ list: [PendingAstriaJob]) {
+        UserDefaults.standard.set((try? JSONEncoder().encode(list)) ?? Data(), forKey: Self.pendingAstriaKey)
+    }
+    private func addPendingAstria(_ job: PendingAstriaJob) {
+        var l = loadPendingAstria(); l.removeAll { $0.jobID == job.jobID }; l.append(job); savePendingAstria(l)
+    }
+    private func removePendingAstria(jobID: String) {
+        var l = loadPendingAstria(); l.removeAll { $0.jobID == jobID }; savePendingAstria(l)
+    }
+
     /// Routes a tapped AI-completion notification back to `presentAIResult`. Call once at launch.
     func configureAINotificationRouting() {
         AINotifications.tapHandler = { [weak self] id in self?.presentAIResult(jobID: id) }
+    }
+
+    /// Recover Astria edits whose app was killed mid-generation. Astria keeps the finished images, so
+    /// for each persisted prompt re-poll and — since there's no live review session to hand them to
+    /// after a relaunch — save straight into the "AI" folder and fire the ready notification. Called
+    /// once at launch. (A job still running in this same process isn't persisted here anymore once it
+    /// finishes, so there's no double-save.)
+    func resumePendingAIEdits() {
+        let now = Date().timeIntervalSince1970
+        for p in loadPendingAstria() {
+            // Astria expires results after a while — drop anything too old to still be fetchable.
+            guard now - p.startedAt < 3600 else { removePendingAstria(jobID: p.jobID); continue }
+            // Claim it now so a second launch mid-recovery can't poll + save the same job twice.
+            removePendingAstria(jobID: p.jobID)
+            let originalURL = URL(fileURLWithPath: p.originalPath)
+            let folderURL = URL(fileURLWithPath: p.folderPath)
+            let modelRaw = p.model, promptText = p.prompt, jobID = p.jobID
+            let originalPath = p.originalPath, folderPath = p.folderPath
+            let promptID = p.promptID, tune = p.tune, startedAt = p.startedAt
+            func rePersist() {
+                self.addPendingAstria(PendingAstriaJob(jobID: jobID, promptID: promptID, tune: tune,
+                                                       originalPath: originalPath, folderPath: folderPath,
+                                                       prompt: promptText, model: modelRaw, startedAt: startedAt))
+            }
+            Task {
+                let result = await AIExtend.resumePrompt(promptID: promptID, tune: tune)
+                guard case .success(let data) = result else { rePersist(); return }   // not ready → retry next launch
+                let saved = await Task.detached(priority: .utility) { () -> Int in
+                    var n = 0
+                    for d in data where AIExtend.saveToAIFolder(d, basedOn: originalURL, model: modelRaw, prompt: promptText) != nil { n += 1 }
+                    return n
+                }.value
+                if saved > 0 {
+                    self.contentDidChange(under: folderURL)
+                    AINotifications.post(title: "AI images ready",
+                                         body: "\(saved) AI image\(saved == 1 ? "" : "s") saved to the “AI” folder in “\(folderURL.lastPathComponent)”.")
+                } else {
+                    rePersist()   // fetched nothing usable — leave it for another try
+                }
+            }
+        }
     }
 
     /// Starts an "Edit with AI" generation app-wide so the user can navigate away while it runs — a
@@ -1169,12 +1240,26 @@ final class Library {
                 activityResults.append("AI edit failed — couldn’t read the photo.")
                 return
             }
+            // Persist the prompt id the moment Astria accepts it, so a kill mid-generation can be
+            // recovered on the next launch (Astria keeps the result server-side).
+            let tune = AIExtend.tuneID(for: model), modelRaw = model.rawValue
+            let origPath = url.path, folderPath = job.folder.path
+            let startedAt = Date().timeIntervalSince1970, jobIDStr = jobID.uuidString
             let result = await AIExtend.generate(model: model, prompt: prompt, imageData: prep.data,
                                                  count: count, width: prep.width, height: prep.height,
-                                                 aspectOverride: aspect.ratio, superResolution: resolution.superResolution)
+                                                 aspectOverride: aspect.ratio, superResolution: resolution.superResolution,
+                                                 onPrompt: { [weak self] id in
+                // Build the record on the main actor (only Sendable primitives cross the boundary).
+                Task { @MainActor in
+                    self?.addPendingAstria(PendingAstriaJob(jobID: jobIDStr, promptID: id, tune: tune,
+                                                            originalPath: origPath, folderPath: folderPath,
+                                                            prompt: prompt, model: modelRaw, startedAt: startedAt))
+                }
+            })
             endActivity(activityID); bg.end()
             switch result {
             case .success(let data):
+                removePendingAstria(jobID: jobID.uuidString)   // handled in-process; no recovery needed
                 var done = job; done.results = data
                 completedAIEdits[jobID] = done
                 live.finish(success: true,
@@ -1187,6 +1272,12 @@ final class Library {
                 case .network:              msg = "Couldn’t reach the provider."
                 case .badImage, .badResult: msg = "The image couldn’t be processed."
                 case .server(let m):        msg = m
+                }
+                // Keep the pending record for a network/timeout failure — Astria may still finish, and
+                // the next launch will recover it. Drop it only for definitively unrecoverable errors.
+                switch err {
+                case .notConfigured, .badImage, .badResult: removePendingAstria(jobID: jobID.uuidString)
+                case .network, .server: break
                 }
                 live.finish(success: false, message: msg)
                 activityResults.append("AI edit failed — \(msg)")
