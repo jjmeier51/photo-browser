@@ -170,12 +170,28 @@ enum WebVideoDownloader {
             }
             return .failed("The server refused the download (HTTP \(code)).")
         }
-        let ext = magicExtension(forFileAt: tmp) ?? fileExtension(url: url, response: resp, fallback: "mp4")
+        var source = tmp
+        var ext = magicExtension(forFileAt: tmp) ?? fileExtension(url: url, response: resp, fallback: "mp4")
+        // A direct URL can hand back raw MPEG-TS (some tube CDNs serve it at a ".mp4" URL). Remux
+        // TS -> a clean faststart MP4 so it plays like any other video, no re-encode. If parsing
+        // fails the .ts is kept (it's now recognized/played as video too).
+        if ext == "ts" {
+            progress(Progress(fraction: 1, phase: "Converting…"))
+            // Give the temp a .ts name first — AVFoundation chooses its demuxer partly by extension,
+            // and the download temp has none.
+            let tsTmp = tmp.deletingPathExtension().appendingPathExtension("ts")
+            if (try? FileManager.default.moveItem(at: tmp, to: tsTmp)) != nil { source = tsTmp }
+            let mp4 = tsTmp.deletingPathExtension().appendingPathExtension("mp4")
+            if await remuxToMP4(source, to: mp4) {
+                try? FileManager.default.removeItem(at: source)
+                source = mp4; ext = "mp4"
+            }
+        }
         let dest = uniqueDestination(name: baseName(suggestedName, url: url, ext: ext), in: folder)
         do {
-            try await DriveWriter.shared.commit(tmp, to: dest)
+            try await DriveWriter.shared.commit(source, to: dest)
         } catch {
-            try? FileManager.default.removeItem(at: tmp)
+            try? FileManager.default.removeItem(at: source)
             return .failed("Couldn’t save to the folder.")
         }
         stampNow(dest)
@@ -930,11 +946,12 @@ enum WebVideoDownloader {
 
     /// The real file extension inferred from a file's leading magic bytes — trusted over a server's
     /// Content-Disposition / MIME / URL, which for these "high-res" downloads gave no extension at all
-    /// (the files showed up as a "data" tile and couldn't be recognized as zips). Reads 16 bytes.
+    /// (the files showed up as a "data" tile and couldn't be recognized as zips). Reads ~200 bytes
+    /// (enough to confirm an MPEG-TS packet cadence).
     nonisolated static func magicExtension(forFileAt url: URL) -> String? {
         guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? h.close() }
-        guard let d = try? h.read(upToCount: 16), d.count >= 4 else { return nil }
+        guard let d = try? h.read(upToCount: 200), d.count >= 4 else { return nil }
         let b = [UInt8](d)
         func has(_ sig: [UInt8], at off: Int = 0) -> Bool {
             guard b.count >= off + sig.count else { return false }
@@ -949,6 +966,10 @@ enum WebVideoDownloader {
         if has([0x52, 0x49, 0x46, 0x46]), has([0x57, 0x45, 0x42, 0x50], at: 8) { return "webp" }
         if has([0x66, 0x74, 0x79, 0x70], at: 4) { return "mp4" }        // ....ftyp
         if has([0x1A, 0x45, 0xDF, 0xA3]) { return "webm" }             // Matroska/WebM (EBML)
+        // MPEG-2 transport stream: a 0x47 sync byte at offset 0 and again one 188-byte packet later.
+        // Some tube CDNs (tnaflix et al) serve raw TS at a ".mp4" URL, so the bytes are the only
+        // reliable signal — mislabeling it .mp4 is exactly what made those downloads "unplayable".
+        if b.count > 188, b[0] == 0x47, b[188] == 0x47 { return "ts" }
         if has([0x52, 0x61, 0x72, 0x21]) { return "rar" }
         if has([0x37, 0x7A, 0xBC, 0xAF]) { return "7z" }
         if has([0x1F, 0x8B]) { return "gz" }

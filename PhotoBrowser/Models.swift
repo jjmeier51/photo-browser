@@ -168,9 +168,17 @@ enum SortKey: String, CaseIterable, Identifiable {
     var isDuration: Bool { self == .durationDesc || self == .durationAsc }
 }
 
+/// Video container extensions that don't reliably resolve to a movie UTType from the extension
+/// alone — most importantly ".ts" (the system maps it to TypeScript, not MPEG-2 transport stream),
+/// which HLS/tube-site downloads produce. Mapping these explicitly means such files are treated —
+/// and played — as video instead of showing up as unplayable "other" files.
+let extraVideoExtensions: Set<String> = ["ts", "mts", "m2ts"]
+
 func classify(url: URL, isDirectory: Bool) -> FileKind {
     if isDirectory { return .folder }
-    guard let type = UTType(filenameExtension: url.pathExtension.lowercased()) else { return .other }
+    let ext = url.pathExtension.lowercased()
+    if extraVideoExtensions.contains(ext) { return .video }
+    guard let type = UTType(filenameExtension: ext) else { return .other }
     if type.conforms(to: .image) { return .image }
     if type.conforms(to: .movie) || type.conforms(to: .video) { return .video }
     if type.conforms(to: .audio) { return .audio }
