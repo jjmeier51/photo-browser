@@ -211,23 +211,18 @@ enum AIExtend {
         return out.isEmpty ? .failure(.network) : .success(out)
     }
 
-    /// Polls the prompt until its `images` array is populated (or it times out).
+    /// Polls the prompt until its `images` array is populated (or it times out). Any non-terminal
+    /// response (a 4xx/5xx, a transient just-created 404, a Cloudflare challenge, a parse miss) is
+    /// simply retried on the next tick — Astria reports "still working" as a 200 with an empty
+    /// `images` array, so we never treat an interim status as failure and bail early.
     private nonisolated static func poll(promptID: Int, tune: Int) async -> [URL] {
         guard let url = URL(string: "\(base)/tunes/\(tune)/prompts/\(promptID)") else { return [] }
-        var notFound = 0
         for _ in 0..<130 {                                  // ~6.5 minutes at 3s — Seedream 5.0 can be slow
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             var req = URLRequest(url: url)
             applyAPIHeaders(&req)
-            guard let (data, resp) = try? await URLSession.shared.data(for: req) else { continue }
-            // A prompt that stays missing (deleted / bad id) will never produce images — stop after a
-            // few consecutive 404s (tolerating a transient just-created replication lag) rather than
-            // waiting out the whole timeout.
-            if let http = resp as? HTTPURLResponse, http.statusCode == 404 {
-                notFound += 1; if notFound >= 3 { return [] }; continue
-            }
-            notFound = 0
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            guard let (data, _) = try? await URLSession.shared.data(for: req),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             if let images = json["images"] as? [String], !images.isEmpty { return images.compactMap { URL(string: $0) } }
             if let images = json["images"] as? [[String: Any]] {
                 let us = images.compactMap { ($0["url"] as? String).flatMap { URL(string: $0) } }
