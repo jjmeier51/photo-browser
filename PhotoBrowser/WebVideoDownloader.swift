@@ -182,7 +182,13 @@ enum WebVideoDownloader {
             let tsTmp = tmp.deletingPathExtension().appendingPathExtension("ts")
             if (try? FileManager.default.moveItem(at: tmp, to: tsTmp)) != nil { source = tsTmp }
             let mp4 = tsTmp.deletingPathExtension().appendingPathExtension("mp4")
-            if await remuxToMP4(source, to: mp4) {
+            // FFmpegKit (when linked) is the reliable TS->MP4 remux — it handles streams AVFoundation
+            // can't demux; the AVFoundation passthrough is the fallback. Matches the HLS path.
+            let converted = (VideoTranscoder.isAvailable
+                             && await VideoTranscoder.muxTranscode(video: source, audio: nil, to: mp4,
+                                                                   transcode: false, date: Date(), lat: nil, lng: nil))
+                || (await remuxToMP4(source, to: mp4))
+            if converted {
                 try? FileManager.default.removeItem(at: source)
                 source = mp4; ext = "mp4"
             }
