@@ -248,12 +248,15 @@ enum AIExtend {
     /// for gain-map HEICs; clamping the extended range then handles PQ/HLG too, and encoding
     /// in sRGB gives a file any service interprets correctly.
     nonisolated static func uploadJPEG(of url: URL, maxPixel: CGFloat) -> (data: Data, width: Int, height: Int)? {
-        guard var ci = CIImage(contentsOf: url) else { return uploadJPEGViaThumbnail(of: url, maxPixel: maxPixel) }
-        // CIImage(contentsOf:) keeps raw sensor orientation — bake the EXIF orientation in.
-        if let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-           let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
-           let o = props[kCGImagePropertyOrientation] as? UInt32, o != 1 {
-            ci = ci.oriented(forExifOrientation: Int32(o))
+        // Load the base SDR image (gain map not applied — see below) WITH the EXIF orientation baked
+        // in, so a portrait photo uploads upright rather than sideways. `.applyOrientationProperty`
+        // applies the orientation exactly once, deterministically — the previous manual
+        // `oriented(forExifOrientation:)` mis-handled iPhone HEICs (the orientation, a CFNumber, did
+        // not reliably cast to `UInt32`, so it was skipped and portrait photos reached Astria on
+        // their side; and where it did fire it could double-apply). This is the actual cause of the
+        // sideways uploads (the aspect-ratio derivation only matters once the input is upright).
+        guard var ci = CIImage(contentsOf: url, options: [.applyOrientationProperty: true]) else {
+            return uploadJPEGViaThumbnail(of: url, maxPixel: maxPixel)
         }
         let long = max(ci.extent.width, ci.extent.height)
         if long > maxPixel, long > 0 {
