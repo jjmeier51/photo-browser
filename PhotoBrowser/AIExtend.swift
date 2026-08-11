@@ -54,10 +54,11 @@ enum AIExtend {
     enum OutputAspect: String, CaseIterable, Identifiable, Sendable {
         case original = "Original", square = "1:1", portrait = "4:5", story = "9:16"
         var id: String { rawValue }
-        /// Value sent as `prompt[aspect_ratio]`. "Original" sends a **blank** value so Astria keeps
-        /// the source's own proportions/size instead of snapping to a fixed ratio (e.g. 2:3). Some
-        /// models reject the sentinel `"auto"` ("auto is not a valid aspect ratio for this model"),
-        /// so the empty string — what Astria's own UI sends for automatic — is used instead.
+        /// Value sent as `prompt[aspect_ratio]`. "Original" returns an **empty** sentinel: rather
+        /// than send a blank ratio (which the tunes ignore, defaulting to landscape and rotating
+        /// portrait photos), `generate` maps the empty value to the nearest supported ratio derived
+        /// from the source's own oriented dimensions — preserving its orientation and shape. The
+        /// fixed options send their literal ratio.
         var ratio: String? {
             switch self {
             case .original: return ""
@@ -133,10 +134,12 @@ enum AIExtend {
             "prompt[text]": prompt,
             "prompt[num_images]": String(min(max(count, 1), 8))
         ]
-        // An explicit aspect (the user picked a fixed shape) wins — including the empty string
-        // "Original" sends, which tells Astria to keep the source's proportions (the model rejects
-        // the "auto" sentinel). Only when no override is given at all do we derive one from the size.
-        if let aspectOverride {
+        // A fixed shape the user picked (1:1 / 4:5 / 9:16) wins. "Original" comes through as an
+        // EMPTY override: sending a blank `aspect_ratio` doesn't make Astria keep the source's
+        // proportions — the gallery tunes fall back to their own default, which is landscape, so a
+        // portrait photo came back rotated. Instead derive the nearest supported ratio from the
+        // *oriented* upload dimensions, which preserves the source's orientation and shape.
+        if let aspectOverride, !aspectOverride.isEmpty {
             fields["prompt[aspect_ratio]"] = aspectOverride
         } else if let width, let height {
             fields["prompt[aspect_ratio]"] = aspectRatio(width, height)
@@ -186,7 +189,7 @@ enum AIExtend {
         let boundary = "PB-\(UUID().uuidString)"
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        req.timeoutInterval = 120
+        req.timeoutInterval = 180        // this leg also uploads the image — headroom for slow links
         applyAPIHeaders(&req)
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.httpBody = multipart(fields: fields, files: files, boundary: boundary)
@@ -211,12 +214,20 @@ enum AIExtend {
     /// Polls the prompt until its `images` array is populated (or it times out).
     private nonisolated static func poll(promptID: Int, tune: Int) async -> [URL] {
         guard let url = URL(string: "\(base)/tunes/\(tune)/prompts/\(promptID)") else { return [] }
-        for _ in 0..<80 {                                   // ~4 minutes at 3s
+        var notFound = 0
+        for _ in 0..<130 {                                  // ~6.5 minutes at 3s — Seedream 5.0 can be slow
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             var req = URLRequest(url: url)
             applyAPIHeaders(&req)
-            guard let (data, _) = try? await URLSession.shared.data(for: req),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            guard let (data, resp) = try? await URLSession.shared.data(for: req) else { continue }
+            // A prompt that stays missing (deleted / bad id) will never produce images — stop after a
+            // few consecutive 404s (tolerating a transient just-created replication lag) rather than
+            // waiting out the whole timeout.
+            if let http = resp as? HTTPURLResponse, http.statusCode == 404 {
+                notFound += 1; if notFound >= 3 { return [] }; continue
+            }
+            notFound = 0
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             if let images = json["images"] as? [String], !images.isEmpty { return images.compactMap { URL(string: $0) } }
             if let images = json["images"] as? [[String: Any]] {
                 let us = images.compactMap { ($0["url"] as? String).flatMap { URL(string: $0) } }
