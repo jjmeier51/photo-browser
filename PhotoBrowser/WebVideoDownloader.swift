@@ -876,6 +876,12 @@ enum WebVideoDownloader {
                         }
                         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                         if code == 206, !data.isEmpty {
+                            // The chunk MUST be exactly the bytes we asked for. Some token-secured CDNs
+                            // (tnaflix et al) answer a range with 206 but cap it short — writing that at
+                            // `start` leaves a zero-filled gap, so the assembled file is full-size but
+                            // corrupt/unplayable. On any length mismatch, bail to the sequential
+                            // single-stream path (which can't gap).
+                            guard Int64(data.count) == end - start + 1 else { return false }
                             try? await writer.write(data, at: start)
                             await prog.add(Int64(data.count))
                             return true
@@ -893,6 +899,11 @@ enum WebVideoDownloader {
         }
         await writer.close()
         guard ok else { try? FileManager.default.removeItem(at: tmp); return nil }
+        // Final guard: the assembled file must be exactly `total` bytes. If anything left it short
+        // (a gap we didn't catch), discard it and fall back to the single-stream path rather than
+        // hand back a corrupt video.
+        let size = (try? tmp.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+        guard let size, Int64(size) == total else { try? FileManager.default.removeItem(at: tmp); return nil }
         return (tmp, response)
     }
 
