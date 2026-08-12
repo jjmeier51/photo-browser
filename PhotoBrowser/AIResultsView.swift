@@ -14,6 +14,9 @@ struct AIResultsView: View {
     private enum Decision { case kept, deleted }
     @State private var decided: [Int: Decision] = [:]
     @State private var savedAny = false
+    /// Decoded once (not per body pass): re-decoding every full-res result on each Keep/Delete tap —
+    /// every one re-renders this body — is what made the review feel laggy.
+    @State private var images: [UIImage?] = []
 
     var body: some View {
         NavigationStack {
@@ -21,7 +24,7 @@ struct AIResultsView: View {
                 VStack(spacing: 20) {
                     ForEach(results.indices, id: \.self) { i in
                         VStack(spacing: 10) {
-                            if let ui = UIImage(data: results[i]) {
+                            if let ui = images.indices.contains(i) ? images[i] : UIImage(data: results[i]) {
                                 Image(uiImage: ui).resizable().scaledToFit()
                                     .frame(maxHeight: 380)
                                     .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -55,6 +58,10 @@ struct AIResultsView: View {
             }
         }
         .interactiveDismissDisabled(decided.count < results.count)
+        .task {
+            guard images.isEmpty else { return }
+            images = results.map { UIImage(data: $0) }   // decode wrappers once, reused across re-renders
+        }
     }
 
     private func keep(_ i: Int) {

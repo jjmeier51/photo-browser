@@ -54,14 +54,14 @@ enum AIExtend {
     enum OutputAspect: String, CaseIterable, Identifiable, Sendable {
         case original = "Original", square = "1:1", portrait = "4:5", story = "9:16"
         var id: String { rawValue }
-        /// Value sent as `prompt[aspect_ratio]`. "Original" returns an **empty** sentinel: rather
-        /// than send a blank ratio (which the tunes ignore, defaulting to landscape and rotating
-        /// portrait photos), `generate` maps the empty value to the nearest supported ratio derived
-        /// from the source's own oriented dimensions — preserving its orientation and shape. The
-        /// fixed options send their literal ratio.
+        /// Value sent as `prompt[aspect_ratio]`. "Original" sends `"auto"` — Seedream's own
+        /// automatic mode, which infers the shape from the (now upright) input, so a portrait photo
+        /// stays portrait without being snapped to a fixed ratio. (Earlier this sent a blank value
+        /// and got a landscape result — but that was the sideways *upload*, since fixed; with an
+        /// upright input, `auto` keeps the orientation.) The fixed options send their literal ratio.
         var ratio: String? {
             switch self {
-            case .original: return ""
+            case .original: return "auto"
             case .square:   return "1:1"
             case .portrait: return "4:5"
             case .story:    return "9:16"
@@ -135,11 +135,9 @@ enum AIExtend {
             "prompt[text]": prompt,
             "prompt[num_images]": String(min(max(count, 1), 8))
         ]
-        // A fixed shape the user picked (1:1 / 4:5 / 9:16) wins. "Original" comes through as an
-        // EMPTY override: sending a blank `aspect_ratio` doesn't make Astria keep the source's
-        // proportions — the gallery tunes fall back to their own default, which is landscape, so a
-        // portrait photo came back rotated. Instead derive the nearest supported ratio from the
-        // *oriented* upload dimensions, which preserves the source's orientation and shape.
+        // Send the chosen aspect as-is: a fixed ratio (1:1 / 4:5 / 9:16), or "auto" for "Original"
+        // (Seedream's automatic mode, which keeps the upright input's own shape). As a defensive
+        // fallback, an absent/empty override derives the nearest ratio from the input's dimensions.
         if let aspectOverride, !aspectOverride.isEmpty {
             fields["prompt[aspect_ratio]"] = aspectOverride
         } else if let width, let height {
@@ -349,7 +347,17 @@ enum AIExtend {
     nonisolated static func saveToAIFolder(_ data: Data, basedOn original: URL,
                                            model: String? = nil, prompt: String? = nil) -> URL? {
         guard let resultSrc = CGImageSourceCreateWithData(data as CFData, nil),
-              let resultCG = CGImageSourceCreateImageAtIndex(resultSrc, 0, nil) else { return nil }
+              var resultCG = CGImageSourceCreateImageAtIndex(resultSrc, 0, nil) else { return nil }
+        // Astria can hand back a JPEG whose pixels are rotated with an EXIF orientation flag (its web
+        // UI applies that flag, so it looks upright). `CGImageSourceCreateImageAtIndex` gives the RAW
+        // pixels — so forcing orientation=1 below without baking the flag in saved the photo sideways.
+        // Read the result's own orientation and bake it into upright pixels here.
+        let resultOrientation = (CGImageSourceCopyPropertiesAtIndex(resultSrc, 0, nil) as? [CFString: Any])
+            .flatMap { ($0[kCGImagePropertyOrientation] as? NSNumber)?.int32Value } ?? 1
+        if resultOrientation != 1 {
+            let ci = CIImage(cgImage: resultCG).oriented(forExifOrientation: resultOrientation)
+            if let baked = PhotoEditorIO.context.createCGImage(ci, from: ci.extent) { resultCG = baked }
+        }
         let aiDir = original.deletingLastPathComponent().appendingPathComponent("AI", isDirectory: true)
         try? FileManager.default.createDirectory(at: aiDir, withIntermediateDirectories: true)
 
