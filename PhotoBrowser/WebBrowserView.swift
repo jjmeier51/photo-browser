@@ -1497,26 +1497,47 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         decisionHandler(.allow)
     }
 
-    /// HTTP Basic/Digest/NTLM auth — present the classic username/password prompt.
+    /// HTTP Basic/Digest/NTLM auth. The user is prompted once per realm; the credential is then
+    /// reused **silently** for every later challenge — crucially the `<img>` thumbnail and `<video>`
+    /// file subresource loads on a members site, which otherwise 401 and show up broken/blank even
+    /// though the page itself authenticated. It's also stored in the shared credential storage so
+    /// WKWebView applies it to subresource requests it satisfies internally.
     func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
                  completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        let method = challenge.protectionSpace.authenticationMethod
+        let space = challenge.protectionSpace
+        let method = space.authenticationMethod
         guard method == NSURLAuthenticationMethodHTTPBasic
                 || method == NSURLAuthenticationMethodHTTPDigest
                 || method == NSURLAuthenticationMethodNTLM else {
             completionHandler(.performDefaultHandling, nil); return
         }
-        let host = challenge.protectionSpace.host
+        let host = space.host
+        // Reuse an existing credential for this realm (unless it just failed) — no re-prompt.
+        if challenge.previousFailureCount == 0 {
+            if let stored = URLCredentialStorage.shared.defaultCredential(for: space), stored.user != nil {
+                completionHandler(.useCredential, stored); return
+            }
+            // Same host, different realm/space (subresource CDN path): reuse what the user entered
+            // and register it for this space too.
+            if let c = basicCreds[host] {
+                let cred = URLCredential(user: c.user, password: c.pass, persistence: .forSession)
+                URLCredentialStorage.shared.set(cred, for: space)
+                completionHandler(.useCredential, cred); return
+            }
+        }
         let alert = UIAlertController(title: "Sign In", message: "“\(host)” requires a username and password.", preferredStyle: .alert)
         alert.addTextField { $0.placeholder = "Username"; $0.autocapitalizationType = .none; $0.autocorrectionType = .no; $0.keyboardType = .emailAddress }
         alert.addTextField { $0.placeholder = "Password"; $0.isSecureTextEntry = true }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(.cancelAuthenticationChallenge, nil) })
         alert.addAction(UIAlertAction(title: "Sign In", style: .default) { [weak self] _ in
             let u = alert.textFields?[0].text ?? "", p = alert.textFields?[1].text ?? ""
-            // Remember the credential so the separate download URLSession (which does not
-            // share WKWebView's protection space) can send it as an Authorization header.
+            // Remember it for the separate download URLSession (Authorization header), AND register
+            // it in the shared credential storage for this realm so WKWebView reuses it for the
+            // page's subresource loads (images/videos) instead of 401'ing them.
             self?.basicCreds[host] = (u, p)
-            completionHandler(.useCredential, URLCredential(user: u, password: p, persistence: .forSession))
+            let cred = URLCredential(user: u, password: p, persistence: .forSession)
+            URLCredentialStorage.shared.set(cred, for: space)
+            completionHandler(.useCredential, cred)
         })
         present(alert)
     }
