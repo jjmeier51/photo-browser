@@ -1017,17 +1017,34 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     override init() { super.init() }
 
-    /// The `Authorization: Basic …` header for a media host, if the user has signed in there.
-    /// First checks credentials captured from our own Sign-In prompt, then falls back to the shared
-    /// `URLCredentialStorage` — WKWebView can satisfy a Basic-Auth challenge silently (from a prior
-    /// login) without ever calling our prompt, which is why a members video could still 401.
+    /// The registrable-ish domain (last two labels). Members sites often serve the pages from one
+    /// host and the media/downloads from a sibling (`max-hardcore.com` page, `www.max-hardcore.com:444`
+    /// media) — a *different* Basic-auth protection space, but the same site and login. Matching on
+    /// the base domain lets the credentials entered on one apply to the other.
+    private func baseDomain(_ host: String) -> String {
+        let parts = host.split(separator: ".")
+        return parts.count >= 2 ? parts.suffix(2).joined(separator: ".") : host
+    }
+
+    /// A Basic credential the user entered for this host or any sibling host on the same site.
+    func basicCredential(forHost host: String) -> (user: String, pass: String)? {
+        if let c = basicCreds[host] { return c }
+        let base = baseDomain(host)
+        return basicCreds.first { baseDomain($0.key) == base }?.value
+    }
+
+    /// The `Authorization: Basic …` header for a media host, if the user has signed in there — or on
+    /// a sibling host of the same site. First checks credentials captured from our own Sign-In
+    /// prompt, then the shared `URLCredentialStorage` (WKWebView can satisfy a challenge silently
+    /// from a prior login without ever calling our prompt).
     func authHeader(forURLString urlString: String) -> String? {
         guard let host = URL(string: urlString)?.host else { return nil }
         func basic(_ user: String, _ pass: String) -> String? {
             ("\(user):\(pass)".data(using: .utf8)).map { "Basic " + $0.base64EncodedString() }
         }
-        if let c = basicCreds[host] { return basic(c.user, c.pass) }
-        for (space, creds) in URLCredentialStorage.shared.allCredentials where space.host == host {
+        if let c = basicCredential(forHost: host) { return basic(c.user, c.pass) }
+        let base = baseDomain(host)
+        for (space, creds) in URLCredentialStorage.shared.allCredentials where baseDomain(space.host) == base {
             let m = space.authenticationMethod
             guard m == NSURLAuthenticationMethodHTTPBasic || m == NSURLAuthenticationMethodDefault else { continue }
             if let cred = creds.values.first(where: { $0.user != nil && $0.password != nil }),
@@ -1517,10 +1534,12 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
             if let stored = URLCredentialStorage.shared.defaultCredential(for: space), stored.user != nil {
                 completionHandler(.useCredential, stored); return
             }
-            // Same host, different realm/space (subresource CDN path): reuse what the user entered
-            // and register it for this space too.
-            if let c = basicCreds[host] {
+            // A credential entered for this host OR a sibling host of the same site (the members
+            // media host on a different port, e.g. www.<site>:444) — register it for this space too
+            // so the <img>/<video> subresources on it authenticate instead of showing broken.
+            if let c = basicCredential(forHost: host) {
                 let cred = URLCredential(user: c.user, password: c.pass, persistence: .forSession)
+                basicCreds[host] = c
                 URLCredentialStorage.shared.set(cred, for: space)
                 completionHandler(.useCredential, cred); return
             }
