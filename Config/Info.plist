@@ -22,15 +22,19 @@
 	     user-chosen sites, including old members hosts on non-standard ports with legacy TLS
 	     (e.g. www.<site>:444). iOS enforces ATS on a third-party app's WKWebView subresources
 	     AND its URLSession downloads, but Safari is exempt — which is exactly why such sites'
-	     images/videos render in Safari yet come back blank in the app. Allow arbitrary loads so
-	     the browser behaves like Safari; NSAllowsArbitraryLoadsInWebContent covers the web view
-	     explicitly. Loading arbitrary sites is the feature's whole purpose, so this is required,
-	     not a convenience. -->
+	     images/videos render in Safari yet come back blank in the app.
+
+	     ONLY NSAllowsArbitraryLoads is set — deliberately WITHOUT NSAllowsArbitraryLoadsInWebContent.
+	     That's a documented ATS precedence trap: the moment a more-specific key (…InWebContent /
+	     …ForMedia / …LocalNetworking) is present, iOS 10+ IGNORES NSAllowsArbitraryLoads for every
+	     connection those keys don't cover — so adding the web-content key rescues the WKWebView but
+	     silently demotes URLSession back to default ATS, which then blocks the legacy-TLS :444 media
+	     host. That looked exactly like "the video plays in the browser but the download fails."
+	     With no specific key present, NSAllowsArbitraryLoads alone disables ATS for BOTH the web view
+	     and the downloader's URLSession — which is what loading/fetching arbitrary sites requires. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
 	</dict>
 </dict>
