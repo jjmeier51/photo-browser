@@ -773,7 +773,12 @@ enum WebVideoDownloader {
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("*/*", forHTTPHeaderField: "Accept")
         if !referer.isEmpty { req.setValue(referer, forHTTPHeaderField: "Referer") }
-        if let host = url.host, let scheme = url.scheme { req.setValue("\(scheme)://\(host)/", forHTTPHeaderField: "Origin") }
+        if let host = url.host, let scheme = url.scheme {
+            // Keep the port for non-standard ones (e.g. members sites on host:port) — an Origin that
+            // silently drops it can be rejected by a strict server.
+            let hostPort = url.port.map { "\(host):\($0)" } ?? host
+            req.setValue("\(scheme)://\(hostPort)/", forHTTPHeaderField: "Origin")
+        }
         if !cookieHeader.isEmpty { req.setValue(cookieHeader, forHTTPHeaderField: "Cookie") }
         if let authHeader, !authHeader.isEmpty { req.setValue(authHeader, forHTTPHeaderField: "Authorization") }
         return req
@@ -854,6 +859,8 @@ enum WebVideoDownloader {
         // ranged-GET probe would download the whole file if the server ignored the Range header).
         var head = request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader)
         head.httpMethod = "HEAD"
+        head.timeoutInterval = 15        // a slow/hanging HEAD must not stall the download — just fall
+                                         // through to the single-stream path (which needs no probe)
         if let (_, hresp) = try? await session.data(for: head), let http = hresp as? HTTPURLResponse, http.statusCode == 200 {
             let acceptsRanges = (http.value(forHTTPHeaderField: "Accept-Ranges") ?? "").lowercased().contains("bytes")
             let total = http.expectedContentLength
@@ -1246,9 +1253,17 @@ private final class ProgressDownloadDelegate: NSObject, URLSessionDownloadDelega
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
                     totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        guard totalBytesExpectedToWrite > 0 else { return }
-        let f = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-        if f - lastReport >= 0.01 || f >= 1 { lastReport = f; onProgress(min(f, 1)) }
+        let f: Double
+        if totalBytesExpectedToWrite > 0 {
+            f = min(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite), 1)
+        } else {
+            // No Content-Length (common on tube/members sites) — we can't compute a real fraction, but
+            // sitting at 0% reads as "stuck/broken". Show an asymptotic curve on bytes downloaded so
+            // the bar visibly advances (never reaching 1 until the file actually finishes).
+            let mb = Double(totalBytesWritten) / 1_000_000
+            f = min(1 - 1 / (1 + mb / 25), 0.99)
+        }
+        if f - lastReport >= 0.01 || f >= 1 { lastReport = f; onProgress(f) }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
