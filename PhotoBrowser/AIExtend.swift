@@ -54,14 +54,15 @@ enum AIExtend {
     enum OutputAspect: String, CaseIterable, Identifiable, Sendable {
         case original = "Original", square = "1:1", portrait = "4:5", story = "9:16"
         var id: String { rawValue }
-        /// Value sent as `prompt[aspect_ratio]`. "Original" sends `"auto"` — Seedream's own
-        /// automatic mode, which infers the shape from the (now upright) input, so a portrait photo
-        /// stays portrait without being snapped to a fixed ratio. (Earlier this sent a blank value
-        /// and got a landscape result — but that was the sideways *upload*, since fixed; with an
-        /// upright input, `auto` keeps the orientation.) The fixed options send their literal ratio.
+        /// Value sent as `prompt[aspect_ratio]`. "Original" returns nil so `generate` derives the
+        /// nearest supported ratio from the source's own (now upright) dimensions — which preserves
+        /// its orientation and shape. Astria's Seedream tune rejects the literal `"auto"`
+        /// ("auto is not a valid aspect ratio for this model"), and a blank value defaults to
+        /// landscape, so deriving the concrete ratio is the reliable way to keep the original shape.
+        /// The fixed options send their literal ratio.
         var ratio: String? {
             switch self {
-            case .original: return "auto"
+            case .original: return nil
             case .square:   return "1:1"
             case .portrait: return "4:5"
             case .story:    return "9:16"
