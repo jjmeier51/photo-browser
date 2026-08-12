@@ -1110,6 +1110,12 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     lazy var webView: WKWebView = {
         let cfg = WKWebViewConfiguration()
         cfg.allowsInlineMediaPlayback = true                  // videos play inline (and can go full-screen)
+        // Match mobile Safari: allow inline (muted) autoplay. WKWebView otherwise defaults to
+        // requiring a user gesture for ALL media, which breaks video sites whose player self-starts
+        // to render — the poster/first frame never draws (the black tile + broken-image icon) and the
+        // video won't play, even though the same site works in Safari.
+        cfg.mediaTypesRequiringUserActionForPlayback = []
+        cfg.allowsPictureInPictureMediaPlayback = true
         cfg.websiteDataStore = .default()                     // persistent cookies (logins / hotlink gates)
         // Pop-up hardening: scripts can't spawn windows on their own (only a real tap can), and
         // Safari's fraudulent-site warning is on. Together with `createWebViewWith` below, this
