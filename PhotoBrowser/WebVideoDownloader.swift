@@ -855,13 +855,19 @@ enum WebVideoDownloader {
             if let out = await dl.run(resumeData: rd) { return out }
             if Task.isCancelled { return nil }
         }
+        // Members-media hosts on a non-standard port (e.g. www.<site>:444) serving signed/tokenized
+        // URLs are finicky: the HEAD size-probe or the parallel range requests stall or the token
+        // path misbehaves, and the download hangs at 0%. Skip the fast path there and stream over a
+        // single connection (one request, carries cookies/Referer/auth cleanly). Standard :443/:80
+        // hosts keep the parallel-range speed-up.
+        let oddPort = url.port != nil && url.port != 443 && url.port != 80
         // HEAD probe: learn the size + whether ranges are supported, WITHOUT pulling any body (a
         // ranged-GET probe would download the whole file if the server ignored the Range header).
         var head = request(url, referer: referer, cookieHeader: cookieHeader, authHeader: authHeader)
         head.httpMethod = "HEAD"
         head.timeoutInterval = 15        // a slow/hanging HEAD must not stall the download — just fall
                                          // through to the single-stream path (which needs no probe)
-        if let (_, hresp) = try? await session.data(for: head), let http = hresp as? HTTPURLResponse, http.statusCode == 200 {
+        if !oddPort, let (_, hresp) = try? await session.data(for: head), let http = hresp as? HTTPURLResponse, http.statusCode == 200 {
             let acceptsRanges = (http.value(forHTTPHeaderField: "Accept-Ranges") ?? "").lowercased().contains("bytes")
             let total = http.expectedContentLength
             if acceptsRanges, total > rangeMinSize,
