@@ -47,7 +47,7 @@ enum InstagramAuth {
 /// stream. Everything is `nonisolated` — networking, ImageIO/AVFoundation, big writes.
 enum InstagramService {
     struct Credentials: Sendable { let cookie: String; let csrf: String }
-    struct Profile: Sendable { let userID: String; let handle: String; let fullName: String; let profilePicURL: String; let postCount: Int }
+    struct Profile: Sendable { let userID: String; let handle: String; let fullName: String; let profilePicURL: String; let postCount: Int; let isPrivate: Bool }
     struct Progress: Sendable { var phase: String; var fraction: Double; var done: Int; var total: Int }
 
     private struct Job: Sendable {
@@ -89,6 +89,44 @@ enum InstagramService {
         return URLSession(configuration: cfg)
     }()
 
+    // MARK: - Human-like pacing (anti-automation)
+
+    /// Paces calls to Instagram's **private API** (`api/v1/…`) globally with randomized,
+    /// human-like timing. Instagram's automated-behavior enforcement (the "Try Again Later" /
+    /// action-block screens, and account restrictions) keys on machine signatures: a burst of
+    /// API hits with no think-time, a perfectly even cadence, and no let-up after a rate-limit
+    /// signal. The web app, by contrast, fires an API call only when a human scrolls/opens
+    /// something. This spaces our calls with a jittered gap around a base, an occasional longer
+    /// pause, and an adaptive penalty that widens the spacing after a 429/checkpoint — so the
+    /// aggregate request rate to instagram.com looks like a person browsing, while a run of a few
+    /// dozen posts still completes in seconds. (CDN media fetches on a *different* host aren't paced
+    /// here — those are throttled by download concurrency + a per-item stagger instead.)
+    private actor Pacer {
+        private var next = ContinuousClock.now
+        private let baseMS: Double
+        private let jitter: Double
+        private var penaltyMS = 0.0
+        init(baseMS: Double, jitter: Double) { self.baseMS = baseMS; self.jitter = jitter }
+        func waitTurn() async {
+            let now = ContinuousClock.now
+            let slot = max(next, now)
+            var gap = baseMS * (1 + Double.random(in: -jitter...jitter)) + penaltyMS
+            if Double.random(in: 0..<1) < 0.05 { gap += Double.random(in: 500...1500) }   // rare human pause
+            next = slot + .milliseconds(Int(gap.rounded()))
+            penaltyMS = max(0, penaltyMS - baseMS)
+            if slot > now { try? await Task.sleep(until: slot, clock: .continuous) }
+        }
+        func penalize() { penaltyMS = min(penaltyMS + 2500, 12_000) }
+    }
+    nonisolated private static let apiPacer = Pacer(baseMS: 170, jitter: 0.5)
+
+    /// Paced GET of a private-API endpoint — every `api/v1/…` fetch goes through here so the one
+    /// global `apiPacer` governs the aggregate rate no matter how many collectors overlap.
+    nonisolated private static func apiData(_ url: URL, handle: String, creds: Credentials) async -> (Data, URLResponse)? {
+        await apiPacer.waitTurn()
+        return try? await session.data(for: apiRequest(url, handle: handle, creds: creds))
+    }
+
     // MARK: - Orchestration
 
     nonisolated static func run(handle: String, into folder: URL, alreadyDownloaded: Set<String>,
@@ -105,7 +143,8 @@ enum InstagramService {
             // `web_profile_info` rate-limits hard and sometimes refuses specific handles even
             // while logged in — don't let that abort an *update* when we can crawl by the known
             // id instead. (The crawl, stories and profile-pic all key off the id, not the handle.)
-            profile = Profile(userID: knownUserID, handle: handle, fullName: "", profilePicURL: "", postCount: 0)
+            // Privacy unknown on this id-only update path → assume private (keep the cookie).
+            profile = Profile(userID: knownUserID, handle: handle, fullName: "", profilePicURL: "", postCount: 0, isPrivate: true)
         } else {
             result.note = "Couldn’t load @\(handle). Check the handle, that you’re logged in, and that the profile is public or one you follow."
             return result
@@ -172,7 +211,12 @@ enum InstagramService {
             }
             return result
         }
-        result = await download(jobs: jobs, replace: replaceExisting, creds: creds, progress: progress)
+        // Public profile → download the media as a logged-out visitor (no session cookie): the CDN
+        // serves public post/story media unauthenticated, so keeping the user's session off the bulk
+        // content fetch reduces the account's automation footprint. Private/followed profiles still
+        // need the session for their auth-gated media, so they keep it.
+        result = await download(jobs: jobs, replace: replaceExisting, creds: creds,
+                                anonymousMedia: !profile.isPrivate, progress: progress)
         result.profile = profile
         result.highlightFolders = highlightDirs
         result.profilePic = await fetchProfilePic(userID: profile.userID, handle: profile.handle,
@@ -229,10 +273,13 @@ enum InstagramService {
             result.note = "Couldn’t load the post. Check that you’re logged in and it’s public or one you follow."
             return result
         }
-        let poster = ((item["user"] as? [String: Any])?["username"] as? String) ?? ""
+        let user = item["user"] as? [String: Any]
+        let poster = (user?["username"] as? String) ?? ""
         let jobs = jobsFor(item: item, id: shortcode, folder: folder, defaultPoster: poster)
         guard !jobs.isEmpty else { return result }
-        return await download(jobs: jobs, replace: false, creds: creds, progress: progress)
+        // Only a confirmed-public poster switches to the anonymous download path.
+        let anonymousMedia = (user?["is_private"] as? Bool) == false
+        return await download(jobs: jobs, replace: false, creds: creds, anonymousMedia: anonymousMedia, progress: progress)
     }
 
     /// Instagram shortcode → numeric media pk. The shortcode is the pk written in base-64 over the
@@ -293,7 +340,7 @@ enum InstagramService {
     nonisolated static func bestProfilePicURL(userID: String, handle: String, creds: Credentials, fallback: String) async -> String {
         guard !userID.isEmpty,
               let url = URL(string: "https://www.instagram.com/api/v1/users/\(userID)/info/"),
-              let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+              let (data, _) = await apiData(url, handle: handle, creds: creds),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let user = json["user"] as? [String: Any] else { return fallback }
         // Pick the largest across every size list Instagram may return.
@@ -345,9 +392,9 @@ enum InstagramService {
         guard let url = URL(string: "https://www.instagram.com/api/v1/users/web_profile_info/?username=\(handle)") else { return nil }
         for attempt in 0..<3 {
             if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_500_000_000) }
-            guard let (data, resp) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)) else { continue }
+            guard let (data, resp) = await apiData(url, handle: handle, creds: creds) else { continue }
             let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            if status == 429 || status >= 500 { continue }        // throttled — back off and retry
+            if status == 429 || status >= 500 { await apiPacer.penalize(); continue }   // throttled — back off and retry
             guard (200...299).contains(status),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let user = (json["data"] as? [String: Any])?["user"] as? [String: Any] else { return nil }
@@ -356,7 +403,10 @@ enum InstagramService {
                            handle: user["username"] as? String ?? handle,
                            fullName: user["full_name"] as? String ?? "",
                            profilePicURL: (user["profile_pic_url_hd"] as? String) ?? (user["profile_pic_url"] as? String) ?? "",
-                           postCount: media?["count"] as? Int ?? 0)
+                           postCount: media?["count"] as? Int ?? 0,
+                           // Unknown → assume private (keep the cookie); only a confirmed `false`
+                           // switches media downloads to the anonymous public path.
+                           isPrivate: user["is_private"] as? Bool ?? true)
         }
         return nil
     }
@@ -369,7 +419,7 @@ enum InstagramService {
         guard !want.isEmpty,
               let encoded = want.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
               let url = URL(string: "https://www.instagram.com/api/v1/web/search/topsearch/?context=blended&query=\(encoded)"),
-              let (data, resp) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+              let (data, resp) = await apiData(url, handle: handle, creds: creds),
               (resp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? false,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let users = json["users"] as? [[String: Any]] else { return nil }
@@ -381,7 +431,8 @@ enum InstagramService {
                            handle: u["username"] as? String ?? handle,
                            fullName: u["full_name"] as? String ?? "",
                            profilePicURL: (u["profile_pic_url"] as? String) ?? "",
-                           postCount: 0)
+                           postCount: 0,
+                           isPrivate: u["is_private"] as? Bool ?? true)
         }
         return nil
     }
@@ -390,7 +441,7 @@ enum InstagramService {
     /// renditions that the feed list omits).
     nonisolated private static func fetchMediaInfo(pk: String, handle: String, creds: Credentials) async -> [String: Any]? {
         guard let url = URL(string: "https://www.instagram.com/api/v1/media/\(pk)/info/"),
-              let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+              let (data, _) = await apiData(url, handle: handle, creds: creds),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return (json["items"] as? [[String: Any]])?.first
     }
@@ -442,13 +493,14 @@ enum InstagramService {
             var json: [String: Any]?
             attempts: for attempt in 0..<3 {
                 if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000) }
-                guard let (data, resp) = try? await session.data(for: apiRequest(url, handle: poster, creds: creds)) else {
+                guard let (data, resp) = await apiData(url, handle: poster, creds: creds) else {
                     out.failure = "the network request failed"
                     continue
                 }
                 let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                if status == 429 || status >= 500 { out.failure = "Instagram is rate-limiting requests (HTTP \(status))"; continue }
+                if status == 429 || status >= 500 { await apiPacer.penalize(); out.failure = "Instagram is rate-limiting requests (HTTP \(status))"; continue }
                 if status == 401 || status == 403 {
+                    await apiPacer.penalize()
                     out.failure = "Instagram refused the request (HTTP \(status)) — the login may have expired"
                     break attempts
                 }
@@ -520,10 +572,11 @@ enum InstagramService {
                 req.httpMethod = "POST"
                 req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
                 req.httpBody = body.data(using: .utf8)
+                await apiPacer.waitTurn()
                 guard let (data, resp) = try? await session.data(for: req) else { out.failure = "the network request failed"; continue }
                 let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                if status == 429 || status >= 500 { out.failure = "Instagram is rate-limiting requests (HTTP \(status))"; continue }
-                if status == 401 || status == 403 { out.failure = "Instagram refused the request (HTTP \(status))"; break attempts }
+                if status == 429 || status >= 500 { await apiPacer.penalize(); out.failure = "Instagram is rate-limiting requests (HTTP \(status))"; continue }
+                if status == 401 || status == 403 { await apiPacer.penalize(); out.failure = "Instagram refused the request (HTTP \(status))"; break attempts }
                 if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { json = j; out.failure = nil }
                 break attempts
             }
@@ -559,7 +612,7 @@ enum InstagramService {
 
     nonisolated private static func fetchReel(path: String, handle: String, creds: Credentials, reelKey: String? = nil) async -> [[String: Any]] {
         guard let url = URL(string: "https://www.instagram.com/api/v1/\(path)"),
-              let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+              let (data, _) = await apiData(url, handle: handle, creds: creds),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
         if let items = json["items"] as? [[String: Any]] { return items }
         if let reel = json["reel"] as? [String: Any], let items = reel["items"] as? [[String: Any]] { return items }
@@ -604,7 +657,7 @@ enum InstagramService {
     /// so a response that splits normal and exclusive stories into two reels loses neither.
     nonisolated private static func fetchReelAll(path: String, handle: String, creds: Credentials) async -> [[String: Any]] {
         guard let url = URL(string: "https://www.instagram.com/api/v1/\(path)"),
-              let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+              let (data, _) = await apiData(url, handle: handle, creds: creds),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
         var out: [[String: Any]] = []
         if let items = json["items"] as? [[String: Any]] { out += items }
@@ -623,7 +676,7 @@ enum InstagramService {
     /// the viewer follows/subscribes to with active stories, so it's exactly where such a reel shows up.
     nonisolated private static func subscriberReelIDs(forUser userID: String, handle: String, creds: Credentials) async -> [String] {
         guard let url = URL(string: "https://www.instagram.com/api/v1/feed/reels_tray/"),
-              let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+              let (data, _) = await apiData(url, handle: handle, creds: creds),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
         let tray = (json["tray"] as? [[String: Any]]) ?? []
         var ids: [String] = []
@@ -637,7 +690,7 @@ enum InstagramService {
 
     nonisolated private static func fetchHighlights(userID: String, handle: String, creds: Credentials) async -> [(id: String, title: String)] {
         guard let url = URL(string: "https://www.instagram.com/api/v1/highlights/\(userID)/highlights_tray/"),
-              let (data, _) = try? await session.data(for: apiRequest(url, handle: handle, creds: creds)),
+              let (data, _) = await apiData(url, handle: handle, creds: creds),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tray = json["tray"] as? [[String: Any]] else { return [] }
         return tray.compactMap { node in
@@ -694,6 +747,7 @@ enum InstagramService {
     // MARK: - Downloading
 
     nonisolated private static func download(jobs: [Job], replace: Bool, creds: Credentials,
+                                             anonymousMedia: Bool = false,
                                              progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
         let total = jobs.count
@@ -705,7 +759,7 @@ enum InstagramService {
             func addNext() {
                 guard idx < jobs.count else { return }
                 let job = jobs[idx]; idx += 1
-                group.addTask { await downloadJob(job, replace: replace, creds: creds) }
+                group.addTask { await downloadJob(job, replace: replace, creds: creds, anonymousMedia: anonymousMedia) }
             }
             for _ in 0..<min(maxConcurrent, jobs.count) { addNext() }
             while let r = await group.next() {
@@ -735,7 +789,13 @@ enum InstagramService {
         return result
     }
 
-    nonisolated private static func downloadJob(_ job: Job, replace: Bool, creds: Credentials) async -> (ok: Bool, isVideo: Bool, path: String, caption: String, poster: String, id: String) {
+    nonisolated private static func downloadJob(_ job: Job, replace: Bool, creds: Credentials,
+                                                anonymousMedia: Bool = false) async -> (ok: Bool, isVideo: Bool, path: String, caption: String, poster: String, id: String) {
+        // Human-like stagger so the concurrent downloads don't fire as one synchronized burst.
+        try? await Task.sleep(nanoseconds: UInt64(Double.random(in: 0...0.25) * 1_000_000_000))
+        // Public profile → nil creds = anonymous CDN fetch (no cookie / app-id). `mediaRequest`
+        // already keeps the instagram.com Referer + UA, which is all a public download needs.
+        let mediaCreds: Credentials? = anonymousMedia ? nil : creds
         try? FileManager.default.createDirectory(at: job.folder, withIntermediateDirectories: true)
         let ext = job.isVideo ? "mp4" : "jpg"
         // Re-download replaces the existing file in place; otherwise avoid collisions.
@@ -746,7 +806,7 @@ enum InstagramService {
         if job.isVideo { print("[Instagram] video \(job.name).mp4 → \(job.quality)") }
 
         if job.isVideo, let audio = job.audioURL,
-           let v = await downloadToTemp(job.url, creds: creds), let a = await downloadToTemp(audio, creds: creds) {
+           let v = await downloadToTemp(job.url, creds: mediaCreds), let a = await downloadToTemp(audio, creds: mediaCreds) {
             let ok = job.transcode
                 ? await VideoTranscoder.muxTranscode(video: v, audio: a, to: dest, transcode: true, date: job.date, lat: job.lat, lng: job.lng)
                 : await mux(video: v, audio: a, to: dest, date: job.date, lat: job.lat, lng: job.lng)
@@ -758,10 +818,16 @@ enum InstagramService {
 
         if job.isVideo {
             let progressive = job.fallbackURL ?? job.url
-            guard await downloadFile(progressive, to: dest, creds: creds) else { return (false, true, "", "", "", job.id) }
+            // Anonymous (public) fetch first; if it fails, retry once with the session so a
+            // mis-detected "public" or a CDN refusal can't lose the video.
+            guard await downloadFile(progressive, to: dest, creds: mediaCreds)
+                    || (anonymousMedia && await downloadFile(progressive, to: dest, creds: creds))
+            else { return (false, true, "", "", "", job.id) }
             await writeVideoMeta(date: job.date, lat: job.lat, lng: job.lng, to: dest)
         } else {
-            guard await downloadFile(job.url, to: dest, creds: creds) else { return (false, false, "", "", "", job.id) }
+            guard await downloadFile(job.url, to: dest, creds: mediaCreds)
+                    || (anonymousMedia && await downloadFile(job.url, to: dest, creds: creds))
+            else { return (false, false, "", "", "", job.id) }
             writeImageMeta(date: job.date, lat: job.lat, lng: job.lng, caption: job.caption, poster: job.poster, to: dest)
         }
         setFileDate(dest, job.date)

@@ -58,6 +58,7 @@ enum FacebookService {
         let name: String
         let url: String
         let picURL: String
+        let isPublic: Bool          // page renders logged-OUT → media can be pulled without the session cookie
     }
     struct Progress: Sendable { var phase: String; var fraction: Double; var done: Int; var total: Int }
     struct DownloadResult: Sendable {
@@ -90,7 +91,8 @@ enum FacebookService {
         cfg.httpShouldSetCookies = false
         cfg.httpCookieStorage = nil
         cfg.timeoutIntervalForRequest = 60
-        cfg.httpMaximumConnectionsPerHost = 24      // wider CDN pipe for faster downloads
+        cfg.httpMaximumConnectionsPerHost = 8       // enough CDN parallelism to stay fast, without
+                                                    // the 24-wide burst that reads as automated
         return URLSession(configuration: cfg)
     }()
 
@@ -98,19 +100,35 @@ enum FacebookService {
 
     /// Spaces www page fetches globally — every concurrent walk draws from the one
     /// budget, so parallel discovery stays gentle on Facebook's rate limiting while
-    /// overlapping all the request latency. 80ms (~12 pages/s) is the discovery
-    /// throughput cap: fast enough to matter, still under the threshold that trips a
-    /// re-auth wall on a logged-in session.
+    /// overlapping all the request latency.
+    ///
+    /// The gap is **randomized around a base, not a fixed interval** on purpose. Meta's
+    /// "automated behavior" / "we limit how often you can do certain things" enforcement keys
+    /// on machine signatures — a perfectly even request cadence, no idle time, sustained bursts.
+    /// A jittered gap (± the base), the occasional longer pause (as if the person stopped to read
+    /// a post), and an **adaptive penalty** that widens the spacing after a 429/checkpoint together
+    /// make the traffic look human while still averaging ~9 pages/s — fast enough to matter, under
+    /// the threshold that trips a re-auth wall on a logged-in session.
     private actor Pacer {
         private var next = ContinuousClock.now
+        private let baseMS: Double
+        private let jitter: Double
+        private var penaltyMS = 0.0
+        init(baseMS: Double, jitter: Double) { self.baseMS = baseMS; self.jitter = jitter }
         func waitTurn() async {
             let now = ContinuousClock.now
             let slot = max(next, now)
-            next = slot + .milliseconds(80)
+            var gap = baseMS * (1 + Double.random(in: -jitter...jitter)) + penaltyMS
+            if Double.random(in: 0..<1) < 0.05 { gap += Double.random(in: 500...1500) }   // rare human pause
+            next = slot + .milliseconds(Int(gap.rounded()))
+            penaltyMS = max(0, penaltyMS - baseMS)                                          // decay last penalty
             if slot > now { try? await Task.sleep(until: slot, clock: .continuous) }
         }
+        /// Back off after a rate-limit/checkpoint signal — subsequent turns space out further,
+        /// the way a person slows down after hitting an "action blocked" wall.
+        func penalize() { penaltyMS = min(penaltyMS + 2000, 10_000) }
     }
-    nonisolated private static let pacer = Pacer()
+    nonisolated private static let pacer = Pacer(baseMS: 110, jitter: 0.5)
 
 
     /// Cross-collector hub: dedups discovered ids (albums overlap the tagged set),
@@ -165,7 +183,13 @@ enum FacebookService {
             return result
         }
         result.profile = profile
-        if !profile.picURL.isEmpty { result.profilePic = await downloadData(profile.picURL, creds: creds) }
+        // Public profile → fetch the content as a logged-out visitor so the user's session cookie
+        // never rides along with the bulk media download (account-footprint reduction). Private/
+        // gated profiles still need the session, so they keep it.
+        let anon = profile.isPublic
+        if !profile.picURL.isEmpty {
+            result.profilePic = await downloadData(profile.picURL, creds: anon ? Credentials(cookie: "") : creds)
+        }
 
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
@@ -187,6 +211,7 @@ enum FacebookService {
         await log.log("profile: name=\(profile.name), id=\(profile.id), vanity=\(profile.vanity ?? "—"), url=\(profile.url)")
         await log.log("already downloaded: \(alreadyDownloaded.count) recorded id(s) + \(onDiskIDs.count) on disk → \(skip.count) skipped for dedup")
         await log.log("options: skipTagged=\(skipTagged), includeSubscriberHub=\(includeSubscriberHub)")
+        await log.log("profile is \(profile.isPublic ? "PUBLIC — downloading media anonymously (no session cookie)" : "not confirmed public — downloading with the session cookie")")
 
         // Discovery and download overlap: collectors walk concurrently and feed the
         // hub (which dedups across sets) into the stream; the consumer below starts
@@ -231,7 +256,9 @@ enum FacebookService {
         var upscaleTargets: [(path: String, date: Date?)] = []
         await withTaskGroup(of: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String, date: Date?).self) { group in
             var active = 0
-            let maxConcurrent = 24
+            // 6-wide, not 24: enough to keep the CDN pipe full, without the wide synchronized burst
+            // (plus the per-item stagger below) that reads as an automated client.
+            let maxConcurrent = 6
             func apply(_ r: (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String, date: Date?)) {
                 if r.ok {
                     if r.isVideo { result.videos += 1 } else { result.photos += 1 }
@@ -252,7 +279,7 @@ enum FacebookService {
                     // `savedOne` only fired when the concurrency cap forced a drain, so a run with
                     // fewer items than `maxConcurrent` showed "downloaded 0" until the whole stream
                     // closed even though downloads were completing all along.
-                    let r = await download(item, into: folder, posterFallback: posterFallback, creds: creds)
+                    let r = await download(item, into: folder, posterFallback: posterFallback, creds: creds, anonymous: anon)
                     await hub.savedOne()
                     return r
                 }
@@ -331,7 +358,21 @@ enum FacebookService {
             .compactMap { $0 }.first { !$0.isEmpty }
             ?? vanity ?? "Facebook Profile"
         let pic = meta(html, "og:image").map(decode) ?? ""
-        return Profile(id: pid ?? vanity ?? "", vanity: vanity, name: name, url: finalURL, picURL: pic)
+        // Is this profile viewable without a login? Probe the resolved URL with NO cookie: a
+        // public profile still renders its og-tags / photo markers logged-out, a private/gated one
+        // bounces to a login wall. When public, the media download runs anonymously (below) so the
+        // bulk content fetch is never tied to the user's own Facebook session.
+        let isPublic = await isProfilePublic(finalURL)
+        return Profile(id: pid ?? vanity ?? "", vanity: vanity, name: name, url: finalURL, picURL: pic, isPublic: isPublic)
+    }
+
+    /// Whether the profile page renders for a logged-OUT request (a real public profile) rather
+    /// than redirecting to a login wall. Best-effort and conservative: any doubt → treated as
+    /// non-public, so the download simply falls back to the authenticated path (which always works).
+    nonisolated private static func isProfilePublic(_ url: String) async -> Bool {
+        guard let (html, finalURL) = await fetchHTML(url, creds: Credentials(cookie: "")) else { return false }
+        if looksLikeLogin(html, finalURL) { return false }
+        return meta(html, "og:title") != nil || meta(html, "og:image") != nil || firstPhotoID(html) != nil
     }
 
     /// `<meta property="og:…" content="…">`, either attribute order.
@@ -709,9 +750,22 @@ enum FacebookService {
     /// Downloads one item and writes its metadata. Pure network + file I/O — no
     /// upscaling (that's a separate pass), so the download group stays wide and fast.
     nonisolated private static func download(_ item: Item, into folder: URL, posterFallback: String,
-                                             creds: Credentials) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String, date: Date?) {
+                                             creds: Credentials, anonymous: Bool) async -> (ok: Bool, isVideo: Bool, id: String, path: String?, caption: String, poster: String, date: Date?) {
+        // Human-like stagger: without it a batch of downloads fires as one synchronized burst the
+        // moment the concurrency slots free up — a classic automated signature. A small random
+        // lead-in spreads them out.
+        try? await Task.sleep(nanoseconds: UInt64(Double.random(in: 0...0.3) * 1_000_000_000))
         let poster = item.poster.isEmpty ? posterFallback : item.poster
-        guard let data = await downloadData(item.url, creds: creds), data.count >= 512 else {
+        // Public profile → pull the media as a logged-out visitor (empty cookie). fbcdn URLs are
+        // already signed (`?oh=…&oe=…`), so they serve without the session; keeping the user's
+        // cookie off the bulk content fetch is exactly what reduces the account's automation footprint.
+        let mediaCreds = anonymous ? Credentials(cookie: "") : creds
+        var data = await downloadData(item.url, creds: mediaCreds)
+        // Safety net: if the anonymous fetch came up empty (mis-detected "public", or a CDN that
+        // refused the logged-out request), fall back to the authenticated download so content is
+        // never lost — the anonymity is a best-effort footprint reduction, not a hard requirement.
+        if anonymous, (data?.count ?? 0) < 512 { data = await downloadData(item.url, creds: creds) }
+        guard let data, data.count >= 512 else {
             return (false, item.isVideo, item.id, nil, "", poster, nil)
         }
         let ext = item.isVideo ? "mp4" : imageExt(of: item.url)
@@ -799,7 +853,10 @@ enum FacebookService {
     nonisolated private static func request(_ url: URL, creds: Credentials, html: Bool) -> URLRequest {
         var req = URLRequest(url: url)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue(creds.cookie, forHTTPHeaderField: "Cookie")
+        // An empty cookie means "download this as a logged-out visitor" (public profiles) — send no
+        // Cookie header at all rather than an empty one, so the request carries nothing tying the
+        // bulk content fetch to the user's session.
+        if !creds.cookie.isEmpty { req.setValue(creds.cookie, forHTTPHeaderField: "Cookie") }
         req.setValue(html ? "text/html,application/xhtml+xml" : "*/*", forHTTPHeaderField: "Accept")
         req.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
         return req
@@ -817,7 +874,7 @@ enum FacebookService {
             await pacer.waitTurn()
             guard let (data, resp) = try? await session.data(for: request(url, creds: creds, html: true)) else { continue }
             if let code = (resp as? HTTPURLResponse)?.statusCode {
-                if code == 429 || code >= 500 { continue }       // rate-limited / transient
+                if code == 429 || code >= 500 { await pacer.penalize(); continue }   // rate-limited → back off & widen spacing
                 if code >= 400 { return nil }
             }
             guard let s = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else { return nil }
@@ -846,7 +903,7 @@ enum FacebookService {
             if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000) }
             guard let (data, resp) = try? await session.data(for: request(url, creds: creds, html: false)) else { continue }
             if let code = (resp as? HTTPURLResponse)?.statusCode {
-                if code == 429 || code >= 500 { continue }
+                if code == 429 || code >= 500 { await pacer.penalize(); continue }   // CDN pressure → slow the page walk too
                 if code >= 400 { return nil }
             }
             return data
