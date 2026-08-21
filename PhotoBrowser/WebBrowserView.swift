@@ -1933,6 +1933,19 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
           return best;
         }catch(e){ return ''; }
       }
+      // The post date for a resolved image URL, found by matching it back to the gallery link that
+      // opens it. A lightbox/fancybox injects its full-screen <img> at the TOP of the <body> (before
+      // every post), so precedingDate() finds nothing above it — but the same image URL is the href
+      // of a thumbnail link down in a post, and THAT has a date above it. Recovers the date so a
+      // download from the full-screen popup is stamped just like one from the thumbnail.
+      function dateForImageURL(u){
+        if(!u) return '';
+        try{
+          var as=document.querySelectorAll('.blog_entry a, a');
+          for(var i=0;i<as.length;i++){ if(as[i].href===u){ var d=precedingDate(as[i]); if(d) return d; } }
+        }catch(e){}
+        return '';
+      }
       // The media you SEE at the finger — the "Open Image in New Tab" target. This searches by
       // GEOMETRY, not by hit-testing: it looks at every visible <img>/<video> whose box contains
       // the point and picks the smallest (the foreground item you tapped). That's deliberate —
@@ -1942,6 +1955,13 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
       // always found. Ties favor the image (a photo laid over a background/preview video is what you
       // see). A background-image element is used only if no <img>/<video> box matches.
       function mediaAt(x,y){
+        // A lightbox/fancybox image sits on top of everything; the underlying gallery is still in the
+        // DOM behind it, so the smallest-box rule below could pick a thumbnail BEHIND the overlay
+        // instead of the full-screen photo. When a known lightbox image is under the finger, it wins.
+        var lbs=document.querySelectorAll('.fancybox-image,.pswp__img,.lg-image,.lightbox-image,.mfp-img,.blueimp-gallery img');
+        for(var q=0;q<lbs.length;q++){ var lb=lbs[q], lr=lb.getBoundingClientRect();
+          if(lr.width>=32 && lr.height>=32 && x>=lr.left && x<=lr.right && y>=lr.top && y<=lr.bottom && isVisible(lb)){
+            var ls=bestImgSrc(lb); if(ls) return { image: ls }; } }
         var imgEl=null, imgArea=Infinity, vidEl=null, vidArea=Infinity;
         var els=document.querySelectorAll('img,video');
         for(var i=0;i<els.length;i++){
@@ -1999,8 +2019,12 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
       // whichever is nearer in stacking order — never both), any anchor link under it, plus the
       // post date that applies to whatever's under the finger (so the saved file is stamped with it).
       window.__pbHitAt = function(x,y){ var m=mediaAt(x,y);
-        return JSON.stringify({ video: m.video||null, link: linkAt(x,y), image: m.image||null,
-                                date: precedingDate(document.elementFromPoint(x,y)) }); };
+        var img=m.image||null;
+        // Date from the element under the finger; if that's empty (a full-screen lightbox image
+        // lives above every post in the DOM), recover it by matching the image URL to its gallery link.
+        var date=precedingDate(document.elementFromPoint(x,y));
+        if(!date && img) date=dateForImageURL(img);
+        return JSON.stringify({ video: m.video||null, link: linkAt(x,y), image: img, date: date }); };
     })();
     """
 }
