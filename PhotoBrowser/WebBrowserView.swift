@@ -460,7 +460,8 @@ struct WebBrowserView: View {
         }
         for img in m.images {
             let file = WebController.PendingFile(url: img, pageURL: controller.currentURLString,
-                                                 filename: WebController.scannedFileName(for: img))
+                                                 filename: WebController.scannedFileName(for: img),
+                                                 captureDate: m.imageDates[img])   // stamp the blog post's date
             controller.startFileDownload(file, into: folder) { _ in }
         }
         let n = m.images.count + m.videos.count
@@ -832,7 +833,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     /// A non-streaming file the browser offers to save — either a link the user long-pressed or a
     /// response the web view can't render inline (a `Content-Disposition: attachment`).
-    struct PendingFile: Identifiable { let id = UUID(); let url: String; let pageURL: String; let filename: String? }
+    struct PendingFile: Identifiable { let id = UUID(); let url: String; let pageURL: String; let filename: String?; var captureDate: Date? = nil }
 
     /// One row in the Downloads tab. Carries everything needed to re-run itself (kind, page,
     /// destination folder, scraped date/caption) so failed/cancelled rows — and history records
@@ -1121,7 +1122,22 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         guard let d = found else { return nil }
         // Sanity window: 1970 … tomorrow — ignore garbage like a "00/00/0000".
         guard d > Date(timeIntervalSince1970: 0), d < Date().addingTimeInterval(86_400) else { return nil }
-        return Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: d) ?? d
+        // If a clock time follows the date ("08/11/2026 01:59pm"), preserve it so the photos keep
+        // their real posted time and sort in order; otherwise anchor at local noon (a timezone-stable
+        // calendar day). Uppercased so a lowercase "pm" still parses under en_US_POSIX.
+        var hour = 12, minute = 0
+        if let ts = firstMatch("\\d{1,2}:\\d{2}\\s*[apAP][mM]") ?? firstMatch("\\d{1,2}:\\d{2}") {
+            let clean = ts.uppercased().replacingOccurrences(of: " ", with: "")
+            let tf = DateFormatter(); tf.locale = Locale(identifier: "en_US_POSIX")
+            for fmt in ["hh:mma", "h:mma", "HH:mm", "H:mm"] {
+                tf.dateFormat = fmt
+                if let t = tf.date(from: clean) {
+                    let c = Calendar.current.dateComponents([.hour, .minute], from: t)
+                    hour = c.hour ?? 12; minute = c.minute ?? 0; break
+                }
+            }
+        }
+        return Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: d) ?? d
     }
 
     lazy var webView: WKWebView = {
@@ -1217,7 +1233,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     /// together with the media URLs captured from fetch/XHR (HLS manifests, direct files), so a
     /// streamed video whose `<video>` plays from a blob-backed MSE source is still included via its
     /// real `.m3u8`. Deduped; images first, then videos.
-    struct ScannedMedia: Sendable { var images: [String] = []; var videos: [String] = [] }
+    struct ScannedMedia: Sendable { var images: [String] = []; var videos: [String] = []; var imageDates: [String: Date] = [:] }
 
     func scanPageMedia() async -> ScannedMedia {
         let js = "window.__pbScanMedia ? window.__pbScanMedia() : null"
@@ -1225,9 +1241,14 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
             webView.evaluateJavaScript(js) { result, _ in cont.resume(returning: (result as? String) ?? "") }
         }
         var images: [String] = [], videos: [String] = []
+        var imageDates: [String: Date] = [:]
         if let d = json.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
             images = (obj["images"] as? [String]) ?? []
             videos = (obj["videos"] as? [String]) ?? []
+            // Per-image post dates (blog galleries): url → date-label text, parsed to a Date.
+            if let raw = obj["dates"] as? [String: String] {
+                for (url, text) in raw { if let dt = Self.parseCaptureDate(text) { imageDates[url] = dt } }
+            }
         }
         // Fold in fetch/XHR-captured streams the DOM can't expose (HLS/CMAF behind a blob <video>).
         // For HLS, keep only *master* playlists — a demuxed stream also fetches per-track media
@@ -1247,7 +1268,8 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
             }
         }
         return ScannedMedia(images: images.filter { $0.hasPrefix("http") },
-                            videos: videos.filter { $0.hasPrefix("http") })
+                            videos: videos.filter { $0.hasPrefix("http") },
+                            imageDates: imageDates)
     }
 
     /// passes.com — where the "Save All" one-tap really pays off, since purchased posts are
@@ -1293,6 +1315,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         let name = (f.filename.flatMap { $0.isEmpty ? nil : $0 }) ?? URL(string: f.url)?.lastPathComponent ?? "file"
         var entry = DownloadEntry(name: name, urlString: f.url)
         entry.pageURL = f.pageURL; entry.kind = .file; entry.folder = folder; entry.suggestedName = f.filename
+        entry.captureDate = f.captureDate       // per-item post date (blog); kept over any page-level date
         run(entry, readPageInfo: true, onComplete: onComplete)
     }
 
@@ -1341,8 +1364,11 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
             var date = entry.captureDate, caption = entry.caption
             if readPageInfo {
                 let info = await self.pageMediaInfo()         // read while the page is still loaded
-                date = info.date; caption = info.caption
-                self.update(id) { $0.caption = info.caption; $0.captureDate = info.date }
+                // A per-item date (a blog post's own date, captured at long-press/scan time) wins over
+                // the page-level reader — a blog page has many posts, so the page-level date is wrong.
+                if date == nil { date = info.date }
+                if caption == nil || caption?.isEmpty == true { caption = info.caption }
+                self.update(id) { $0.caption = caption; $0.captureDate = date }
             }
             let cookie = await cookieHeader(forURLString: urlString)
             // Loom's session API lives on www.loom.com; forward the *page-host* cookies (which include
@@ -1644,6 +1670,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
             var linkForced = false          // <a download> — an explicit download link
             var linkName: String?
             var imageSrc: String?
+            var hitDate: Date?              // the post date under the finger, stamped into the saved file
             if let json = result as? String, let data = json.data(using: .utf8),
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if let vid = obj["video"] as? [String: Any] {
@@ -1657,6 +1684,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
                     linkName = n.isEmpty ? nil : n
                 }
                 imageSrc = obj["image"] as? String
+                if let ds = obj["date"] as? String, !ds.isEmpty { hitDate = Self.parseCaptureDate(ds) }
             }
             // Priority is "what's actually under the finger" — a page-wide playing video (often an
             // ad) must NOT hijack a long-press on a photo. So a <video> directly under the finger
@@ -1672,13 +1700,13 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
             //    — prefer it over the displayed <img>, which is often just a thumbnail.
             if let href = linkHref, href.hasPrefix("http"), linkForced || Self.looksDownloadable(href) {
                 self.haptic.notificationOccurred(.success)
-                self.onFileDownload?(PendingFile(url: href, pageURL: self.currentURLString, filename: linkName))
+                self.onFileDownload?(PendingFile(url: href, pageURL: self.currentURLString, filename: linkName, captureDate: hitDate))
                 return
             }
             // 3) The image directly under the finger.
             if let img = imageSrc, img.hasPrefix("http") {
                 self.haptic.notificationOccurred(.success)
-                self.onFileDownload?(PendingFile(url: img, pageURL: self.currentURLString, filename: nil))
+                self.onFileDownload?(PendingFile(url: img, pageURL: self.currentURLString, filename: nil, captureDate: hitDate))
                 return
             }
             // 4) Nothing tangible under the finger — fall back to the page's playing video, if any.
@@ -1857,6 +1885,14 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
           var full=['data-full','data-fullsrc','data-full-src','data-original','data-zoom-image','data-zoom','data-large','data-src-large','data-hi-res','data-hires','data-image']
             .map(function(a){ return img.getAttribute(a); }).filter(function(v){ return v && v.indexOf('data:')!==0; })[0];
           if(full) return new URL(full, location.href).href;
+          // A thumbnail wrapped in a link straight to the full-size image — the classic blog/gallery
+          // pattern <a href="photo.jpg"><img src="photo_thumb.jpg"></a> (fancybox, lightbox, etc.).
+          // The <a href> IS the original, so prefer it over the shrunken <img>. Only when the href
+          // points at an image file (a link to a page/JS is left alone).
+          var anc = img.closest ? img.closest('a') : null;
+          // Use the anchor's resolved .href PROPERTY (not getAttribute) — it honors a page's
+          // <base href>, which this kind of blog uses, so a relative "content/…jpg" resolves right.
+          if(anc && anc.href && /\\.(jpe?g|png|gif|webp|bmp|tiff?|avif)(\\?|#|$)/i.test(anc.href)) return anc.href;
           var best='', bestW=0;
           function addSrcset(ss){ if(!ss) return; ss.split(',').forEach(function(part){
             var t=part.trim().split(/\\s+/), u=t[0]; if(!u) return;
@@ -1879,6 +1915,23 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
           if(s.visibility==='hidden' || s.display==='none' || parseFloat(s.opacity||'1')===0) return false;
           var r=el.getBoundingClientRect(); return r.width>1 && r.height>1;
         }catch(e){ return true; }
+      }
+      // The post date that applies to an element — the nearest date label that PRECEDES it in the
+      // document (blogs put the date at the top of each post, then the photos below it). Scans a few
+      // common date-container selectors and returns the text of the last one that comes before `el`;
+      // the Swift side parses the actual date out of that text. Empty when the page has no such label.
+      function precedingDate(el){
+        try{
+          if(!el) return '';
+          var nodes=document.querySelectorAll('.blog_date,.update_date,[class*="blog_date"],[class*="post-date"],[class*="entry-date"],time');
+          var best='';
+          for(var i=0;i<nodes.length;i++){
+            // el follows nodes[i]  ⇒  nodes[i] precedes el (bit 0x04 = DOCUMENT_POSITION_FOLLOWING).
+            if(nodes[i].compareDocumentPosition(el) & 4){ best=(nodes[i].textContent||'').trim(); }
+            else break;   // querySelectorAll is in document order: first non-preceding node ends it
+          }
+          return best;
+        }catch(e){ return ''; }
       }
       // The media you SEE at the finger — the "Open Image in New Tab" target. This searches by
       // GEOMETRY, not by hit-testing: it looks at every visible <img>/<video> whose box contains
@@ -1918,14 +1971,20 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
       // (full-res via bestImgSrc, deduped, skipping avatars/icons under ~200px) plus every
       // <video>/<source>. Bounded so a long feed can't hang the scan.
       window.__pbScanMedia = function(){
-        var seen={}, images=[], videos=[];
-        function pushImg(u){ if(u && !seen[u] && u.indexOf('data:')!==0){ seen[u]=1; images.push(u); } }
+        var seen={}, images=[], videos=[], dates={};
+        function pushImg(u){ if(u && !seen[u] && u.indexOf('data:')!==0){ seen[u]=1; images.push(u); return true; } return false; }
         var imgs=document.querySelectorAll('img');
         for(var i=0;i<imgs.length && images.length<300;i++){
           var im=imgs[i];
+          // A gallery thumbnail links to its full-size image; keep it even if the DISPLAYED thumb is
+          // tiny (it would otherwise be skipped as an icon), because bestImgSrc will return the
+          // linked full-size, not the thumbnail.
+          var anc = im.closest ? im.closest('a') : null;
+          var linked = !!(anc && anc.href && /\\.(jpe?g|png|gif|webp|bmp|tiff?|avif)(\\?|#|$)/i.test(anc.href));
           var w=im.naturalWidth||im.width||0, h=im.naturalHeight||im.height||0;
-          if(w>0 && h>0 && w<200 && h<200) continue;   // UI chrome (avatars, icons, emoji)
-          pushImg(bestImgSrc(im));
+          if(!linked && w>0 && h>0 && w<200 && h<200) continue;   // UI chrome (avatars, icons, emoji)
+          var u=bestImgSrc(im);
+          if(pushImg(u)){ var d=precedingDate(im); if(d) dates[u]=d; }
         }
         var vids=document.querySelectorAll('video');
         for(var k=0;k<vids.length;k++){
@@ -1933,13 +1992,15 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
           [v.currentSrc, v.src].forEach(function(s){ if(s && s.indexOf('blob:')!==0 && s.indexOf('data:')!==0 && videos.indexOf(s)<0) videos.push(s); });
           var ss=v.querySelectorAll('source'); for(var j=0;j<ss.length;j++){ var s2=ss[j].src; if(s2 && s2.indexOf('blob:')!==0 && videos.indexOf(s2)<0) videos.push(s2); }
         }
-        return JSON.stringify({images:images, videos:videos});
+        return JSON.stringify({images:images, videos:videos, dates:dates});
       };
       window.__pbVideoAt = function(x,y){ var m=mediaAt(x,y); return m.video ? JSON.stringify(m.video) : null; };
       // Combined hit-test for long-press: the media EXACTLY under the finger (a video or an image,
-      // whichever is nearer in stacking order — never both), plus any anchor link under it.
+      // whichever is nearer in stacking order — never both), any anchor link under it, plus the
+      // post date that applies to whatever's under the finger (so the saved file is stamped with it).
       window.__pbHitAt = function(x,y){ var m=mediaAt(x,y);
-        return JSON.stringify({ video: m.video||null, link: linkAt(x,y), image: m.image||null }); };
+        return JSON.stringify({ video: m.video||null, link: linkAt(x,y), image: m.image||null,
+                                date: precedingDate(document.elementFromPoint(x,y)) }); };
     })();
     """
 }

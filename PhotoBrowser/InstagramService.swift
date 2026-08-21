@@ -819,15 +819,16 @@ enum InstagramService {
         if job.isVideo {
             let progressive = job.fallbackURL ?? job.url
             // Anonymous (public) fetch first; if it fails, retry once with the session so a
-            // mis-detected "public" or a CDN refusal can't lose the video.
-            guard await downloadFile(progressive, to: dest, creds: mediaCreds)
-                    || (anonymousMedia && await downloadFile(progressive, to: dest, creds: creds))
-            else { return (false, true, "", "", "", job.id) }
+            // mis-detected "public" or a CDN refusal can't lose the video. (Sequential, not a
+            // `||` — `await` can't sit inside the short-circuit operator's autoclosure.)
+            var ok = await downloadFile(progressive, to: dest, creds: mediaCreds)
+            if !ok, anonymousMedia { ok = await downloadFile(progressive, to: dest, creds: creds) }
+            guard ok else { return (false, true, "", "", "", job.id) }
             await writeVideoMeta(date: job.date, lat: job.lat, lng: job.lng, to: dest)
         } else {
-            guard await downloadFile(job.url, to: dest, creds: mediaCreds)
-                    || (anonymousMedia && await downloadFile(job.url, to: dest, creds: creds))
-            else { return (false, false, "", "", "", job.id) }
+            var ok = await downloadFile(job.url, to: dest, creds: mediaCreds)
+            if !ok, anonymousMedia { ok = await downloadFile(job.url, to: dest, creds: creds) }
+            guard ok else { return (false, false, "", "", "", job.id) }
             writeImageMeta(date: job.date, lat: job.lat, lng: job.lng, caption: job.caption, poster: job.poster, to: dest)
         }
         setFileDate(dest, job.date)
