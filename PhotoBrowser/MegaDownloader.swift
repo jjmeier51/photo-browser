@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 
 /// Downloads the photos/videos inside a **public MEGA folder link** straight into
 /// a drive folder, with no third-party SDK.
@@ -45,6 +46,7 @@ private struct MegaNode: Sendable {
     let size: Int64
     let aesKey: [UInt8]     // 16-byte AES key (file content / attribute key)
     let nonce: [UInt8]      // 8-byte CTR nonce (files only)
+    let timestamp: Date?    // MEGA's stored node date (`ts`), used to date the saved file
 }
 
 enum MegaDownloader {
@@ -56,7 +58,8 @@ enum MegaDownloader {
     /// more connections directly means faster large downloads. Used for the API and every fetch.
     nonisolated private static let session: URLSession = {
         let cfg = URLSessionConfiguration.default
-        cfg.httpMaximumConnectionsPerHost = 10
+        cfg.httpMaximumConnectionsPerHost = 16     // MEGA serves a file's chunks from one host — more
+                                                   // connections = faster; the cap is the real limiter
         cfg.timeoutIntervalForRequest = 60
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData   // encrypted blobs, nothing to cache
         return URLSession(configuration: cfg)
@@ -106,42 +109,55 @@ enum MegaDownloader {
         }
 
         let total = planned.count
-        // Download several files at once (each large file is itself split into parallel range chunks
-        // by downloadFile). Kept bounded so files × chunks doesn't open too many connections; the
-        // `g` requests self-heal from rate-limit (-3) replies via apiRequest's retry.
-        let maxConcurrent = 6
-        var imported = 0, failed = 0, skipped = 0, completed = 0
+        // What's already fully on disk (a resumed/re-run import) — skipped, never re-fetched.
+        let preexisting = Set(planned.filter { isComplete($0.dest, expected: $0.node.size) }.map { $0.dest.path })
+        var completedOnDisk = preexisting.count
         var firstFailure: String?
-        await withTaskGroup(of: (ok: Bool, error: String?, skipped: Bool).self) { group in
-            var index = 0
-            func addNext() {
-                guard index < planned.count else { return }
-                let p = planned[index]; index += 1
-                group.addTask {
-                    do {
-                        try FileManager.default.createDirectory(at: p.dest.deletingLastPathComponent(),
-                                                                withIntermediateDirectories: true)
-                        // Already fully downloaded (byte-for-byte the expected size)? Leave it be.
-                        if isComplete(p.dest, expected: p.node.size) { return (true, nil, true) }
-                        try await downloadFile(p.node, folderID: folderID, to: p.dest)
-                        return (true, nil, false)
-                    } catch {
-                        return (false, friendlyError(error), false)
+        func report() {
+            progress(MegaProgress(fraction: total > 0 ? Double(completedOnDisk) / Double(total) : 1,
+                                  done: completedOnDisk, total: total, currentName: ""))
+        }
+        report()
+
+        // Two passes so a run finishes EVERYTHING rather than stalling ~95% in: a wide fast pass, then
+        // a gentle sequential gap-fill for whatever's still missing (a transient rate-limit / dropped
+        // connection). Combined with the per-file and per-chunk retries below, transient failures no
+        // longer leak files. Each pass only touches files not already complete on disk.
+        let maxConcurrent = 6
+        for pass in 0..<2 {
+            let remaining = planned.filter { !isComplete($0.dest, expected: $0.node.size) }
+            if remaining.isEmpty { break }
+            let concurrency = pass == 0 ? maxConcurrent : 2      // gap-fill runs gently to dodge rate limits
+            await withTaskGroup(of: String?.self) { group in     // returns nil on success, else an error note
+                var index = 0
+                func addNext() {
+                    guard index < remaining.count else { return }
+                    let p = remaining[index]; index += 1
+                    group.addTask {
+                        do {
+                            try FileManager.default.createDirectory(at: p.dest.deletingLastPathComponent(),
+                                                                    withIntermediateDirectories: true)
+                            try await downloadFileWithRetry(p.node, folderID: folderID, to: p.dest)
+                            return nil
+                        } catch { return friendlyError(error) }
                     }
                 }
-            }
-            for _ in 0..<min(maxConcurrent, planned.count) { addNext() }
-            while let result = await group.next() {
-                completed += 1
-                if result.ok {
-                    if result.skipped { skipped += 1 } else { imported += 1 }
-                } else {
-                    failed += 1; if firstFailure == nil { firstFailure = result.error }
+                for _ in 0..<min(concurrency, remaining.count) { addNext() }
+                while let err = await group.next() {
+                    if err == nil { completedOnDisk += 1; report() }
+                    else if firstFailure == nil { firstFailure = err }
+                    addNext()
                 }
-                progress(MegaProgress(fraction: Double(completed) / Double(total),
-                                      done: imported + skipped, total: total, currentName: ""))
-                addNext()
             }
+        }
+
+        // Final tally is the truth on disk, not a running counter — a file that failed the first pass
+        // but a retry saved is counted as imported, and only genuinely-missing files count as failed.
+        var imported = 0, failed = 0, skipped = 0
+        for p in planned {
+            if isComplete(p.dest, expected: p.node.size) {
+                if preexisting.contains(p.dest.path) { skipped += 1 } else { imported += 1 }
+            } else { failed += 1 }
         }
         progress(MegaProgress(fraction: 1, done: imported + skipped, total: total, currentName: ""))
 
@@ -200,8 +216,16 @@ enum MegaDownloader {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
-        for attempt in 0..<5 {
-            let (data, _) = try await session.data(for: req)
+        for attempt in 0..<7 {
+            // A transient network drop must not fail the whole file — back off and retry, same as a
+            // MEGA rate-limit reply. Only a real MEGA error code (below) is fatal.
+            let data: Data
+            do { (data, _) = try await session.data(for: req) }
+            catch {
+                if Task.isCancelled { throw error }
+                if attempt < 6 { try? await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_000_000_000); continue }
+                throw error
+            }
             let obj = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
             if let arr = obj as? [Any] { return arr }
             if let num = obj as? Int {
@@ -249,8 +273,9 @@ enum MegaDownloader {
         }
 
         let name = (f["a"] as? String).flatMap { MegaCrypto.decryptAttributeName($0, key: aesKey) } ?? handle
+        let ts = (f["ts"] as? Int).map { Date(timeIntervalSince1970: TimeInterval($0)) }
         return MegaNode(handle: handle, parent: parent, type: type, name: name,
-                        size: size, aesKey: aesKey, nonce: nonce)
+                        size: size, aesKey: aesKey, nonce: nonce, timestamp: ts)
     }
 
     /// The encrypted key bytes from a `k` field ("handle:keyB64[/handle:keyB64…]").
@@ -294,6 +319,22 @@ enum MegaDownloader {
     private static let chunkSize: Int64 = 4 << 20        // 4 MB per chunk (16-aligned)
     private static let chunkConcurrency = 8              // parallel range requests per large file
 
+    /// Downloads one file, retrying the WHOLE file a few times on any transient failure (a rate-limit
+    /// on the `g` URL request, a dropped connection mid-transfer). Each attempt re-requests a fresh
+    /// download URL (they expire) and writes a fresh temp, so a retry can't corrupt a partial. This
+    /// is a big part of why a run now completes 100%, not ~95%.
+    nonisolated private static func downloadFileWithRetry(_ node: MegaNode, folderID: String, to dest: URL,
+                                                          attempts: Int = 3) async throws {
+        var lastError: Error = MegaError.badResponse
+        for attempt in 0..<attempts {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_500_000_000) }
+            if Task.isCancelled { throw MegaError.io }
+            do { try await downloadFile(node, folderID: folderID, to: dest); return }
+            catch { lastError = error; if Task.isCancelled { throw error } }
+        }
+        throw lastError
+    }
+
     nonisolated private static func downloadFile(_ node: MegaNode, folderID: String, to dest: URL) async throws {
         // `ssl:1` asks MEGA for a TLS download URL; even so it often returns a plain
         // http:// gfs URL, which iOS App Transport Security blocks. The same storage
@@ -325,15 +366,21 @@ enum MegaDownloader {
             if size > chunkThreshold {
                 try await downloadChunked(url: url, size: size, key: node.aesKey, baseIV: baseIV, to: tmp)
             } else {
-                let (encrypted, _) = try await session.download(from: url)
-                defer { try? FileManager.default.removeItem(at: encrypted) }
-                try MegaCrypto.decryptCTR(input: encrypted, output: tmp, key: node.aesKey, iv: baseIV)
+                // Small file: one retried GET, decrypt in memory, write. (Retried so a single blip
+                // doesn't fail the file — the old single-shot download was a source of missed files.)
+                let encrypted = try await fetchWhole(url: url)
+                let decrypted = try MegaCrypto.decryptCTRData(encrypted, key: node.aesKey, iv: baseIV)
+                try decrypted.write(to: tmp, options: .atomic)
             }
             try await DriveWriter.shared.commit(tmp, to: dest)
         } catch {
             try? FileManager.default.removeItem(at: tmp)
             throw error
         }
+        // EXIF is already byte-preserved inside the decrypted file; restore the *filesystem* date too
+        // (otherwise every import reads as "today"). Prefer the photo's own EXIF capture date, else
+        // MEGA's stored node timestamp.
+        applyFileDate(dest, megaTS: node.timestamp)
     }
 
     /// Downloads `url` in parallel 4 MB byte-range chunks, decrypting each with the
@@ -375,18 +422,64 @@ enum MegaDownloader {
         await writer.close()
     }
 
-    /// One byte range (`start`..<start+length) of `url` as raw, still-encrypted data.
+    /// One byte range (`start`..<start+length) of `url` as raw, still-encrypted data. Retries a few
+    /// times on a transient failure (dropped connection, short read) so a single flaky chunk doesn't
+    /// sink the whole file — the main reason large-file downloads used to come up short.
     nonisolated private static func fetchRange(url: URL, start: Int64, length: Int) async throws -> Data {
-        var req = URLRequest(url: url)
-        req.setValue("bytes=\(start)-\(start + Int64(length) - 1)", forHTTPHeaderField: "Range")
-        let (data, response) = try await session.data(for: req)
-        // If the server ignored Range (200 with the whole file instead of 206) the
-        // bytes won't line up — fail rather than write a corrupt file.
-        if let http = response as? HTTPURLResponse, http.statusCode == 200, data.count != length {
-            throw MegaError.badResponse
+        var lastError: Error = MegaError.badResponse
+        for attempt in 0..<5 {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(1 << (attempt - 1)) * 300_000_000) }
+            if Task.isCancelled { throw MegaError.io }
+            do {
+                var req = URLRequest(url: url)
+                req.setValue("bytes=\(start)-\(start + Int64(length) - 1)", forHTTPHeaderField: "Range")
+                let (data, response) = try await session.data(for: req)
+                // If the server ignored Range (200 with the whole file instead of 206) the bytes
+                // won't line up — retry rather than write a corrupt file.
+                if let http = response as? HTTPURLResponse, http.statusCode == 200, data.count != length {
+                    throw MegaError.badResponse
+                }
+                guard data.count == length else { throw MegaError.badResponse }
+                return data
+            } catch { lastError = error; if Task.isCancelled { throw error } }
         }
-        guard data.count == length else { throw MegaError.badResponse }
-        return data
+        throw lastError
+    }
+
+    /// The whole file at `url` as raw encrypted bytes, retried on transient failure (small-file path).
+    nonisolated private static func fetchWhole(url: URL) async throws -> Data {
+        var lastError: Error = MegaError.badResponse
+        for attempt in 0..<5 {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(1 << (attempt - 1)) * 300_000_000) }
+            if Task.isCancelled { throw MegaError.io }
+            do { let (data, _) = try await session.data(from: url); return data }
+            catch { lastError = error; if Task.isCancelled { throw error } }
+        }
+        throw lastError
+    }
+
+    /// Sets the saved file's creation + modification date. Prefer the photo's embedded EXIF capture
+    /// date; fall back to MEGA's stored node timestamp — so the drive's date/Age/Year features show
+    /// the real date instead of the download time.
+    nonisolated private static func applyFileDate(_ url: URL, megaTS: Date?) {
+        let date = exifCaptureDate(url) ?? megaTS
+        guard let date else { return }
+        try? FileManager.default.setAttributes([.creationDate: date, .modificationDate: date],
+                                               ofItemAtPath: url.path)
+    }
+
+    /// A photo's embedded capture date (EXIF/TIFF), if it has one. Videos return nil here (their date
+    /// comes from the MEGA timestamp); the video's own metadata is untouched inside the file.
+    nonisolated private static func exifCaptureDate(_ url: URL) -> Date? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return nil }
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        guard let s = (exif?[kCGImagePropertyExifDateTimeOriginal] as? String)
+                ?? (exif?[kCGImagePropertyExifDateTimeDigitized] as? String)
+                ?? (tiff?[kCGImagePropertyTIFFDateTime] as? String) else { return nil }
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return f.date(from: s)
     }
 
     /// `base` (nonce ‖ 0) with the trailing 8-byte big-endian block counter set to

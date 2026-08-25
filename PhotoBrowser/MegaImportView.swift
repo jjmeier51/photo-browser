@@ -3,10 +3,12 @@ import UIKit
 
 /// "Add from MEGA": paste a public MEGA folder link, then download its photos and
 /// videos into the current drive folder (in a subfolder named after the MEGA
-/// folder, preserving its structure). Presented on its own screen so it doesn't
-/// collide with the folder view's other dialogs. Runs under a background-task
-/// window, so a brief app backgrounding is fine — but, like every transfer, it
-/// can't finish once the app is terminated.
+/// folder, preserving its structure).
+///
+/// The download runs as an **app-wide activity** (the progress pill), not inside this
+/// sheet: tapping Download kicks it off and closes the sheet, so the user can keep
+/// browsing / navigating while it downloads. Best-effort background window; like every
+/// transfer it can't finish once the app is fully terminated.
 struct MegaImportView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
@@ -14,9 +16,6 @@ struct MegaImportView: View {
     let onFinished: () -> Void
 
     @State private var link = ""
-    @State private var running = false
-    @State private var progress = MegaProgress(fraction: 0, done: 0, total: 0, currentName: "")
-    @State private var result: MegaImportResult?
 
     var body: some View {
         NavigationStack {
@@ -26,41 +25,15 @@ struct MegaImportView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
-                        .disabled(running)
                 } header: {
                     Text("MEGA folder link")
                 } footer: {
-                    Text("Photos and videos in the link are downloaded into “\(targetFolder.lastPathComponent)”. Nothing is uploaded.")
-                }
-
-                if running {
-                    Section {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ProgressView(value: progress.fraction)
-                            Text(progressLine)
-                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            Text("Keep the app open. It keeps going briefly if you switch away, but can’t finish once the app is closed.")
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                if let result {
-                    // Success = something downloaded, OR nothing failed and it was already all there.
-                    let ok = result.failed == 0 && (result.imported > 0 || result.skipped > 0)
-                    Section {
-                        Label(summary(result),
-                              systemImage: ok ? "checkmark.circle" : "exclamationmark.triangle")
-                            .foregroundStyle(ok ? .green : .orange)
-                        if let note = result.note {
-                            Text(note).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
+                    Text("Photos and videos in the link are downloaded into “\(targetFolder.lastPathComponent)”. "
+                        + "Downloading runs in the background — you can keep using the app while it finishes. Nothing is uploaded.")
                 }
             }
             .navigationTitle("Add from MEGA")
             .navigationBarTitleDisplayMode(.inline)
-            .interactiveDismissDisabled(running)
             // Convenience: pre-fill from the clipboard so a freshly-copied MEGA link
             // is ready to go without pasting by hand.
             .onAppear {
@@ -72,52 +45,19 @@ struct MegaImportView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(result != nil ? "Done" : "Cancel") { dismiss() }.disabled(running)
+                    Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Download") { start() }
-                        .disabled(running || link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
     }
 
-    private var progressLine: String {
-        guard progress.total > 0 else { return progress.currentName }
-        let base = "Downloading \(progress.done) of \(progress.total)"
-        return progress.currentName.isEmpty ? base + "…" : base + " — \(progress.currentName)"
-    }
-
-    private func summary(_ r: MegaImportResult) -> String {
-        if r.imported == 0 {
-            if r.failed == 0 && r.skipped > 0 {
-                return "Already up to date — \(r.skipped) file(s) present"
-                    + (r.folderName.map { " in “\($0)”" } ?? "") + "."
-            }
-            return "Nothing downloaded."
-        }
-        var base = "Downloaded \(r.imported) item(s)" + (r.folderName.map { " to “\($0)”" } ?? "")
-        if r.skipped > 0 { base += ", \(r.skipped) already there" }
-        return r.failed > 0 ? base + "; \(r.failed) failed." : base + "."
-    }
-
     private func start() {
-        let url = link
-        let dest = targetFolder
-        running = true; result = nil
-        let bg = BackgroundTaskHolder()
-        bg.begin(name: "MEGA Import")   // keep going if the app is briefly backgrounded
-        Task {
-            let r = await MegaDownloader.importFolder(link: url, into: dest) { p in
-                Task { @MainActor in progress = p }
-            }
-            running = false
-            bg.end()
-            result = r
-            if r.imported > 0 {
-                library.contentDidChange()
-                onFinished()
-            }
-        }
+        library.startMegaImport(link: link, into: targetFolder)
+        onFinished()
+        dismiss()
     }
 }

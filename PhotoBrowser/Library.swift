@@ -1469,6 +1469,40 @@ final class Library {
         return r.failed > 0 ? base + "; \(r.failed) failed." : base + "."
     }
 
+    // MARK: - MEGA import (app-wide)
+
+    /// Downloads a MEGA folder link as an app-wide **activity** (progress pill), so the user can keep
+    /// browsing / navigating while it runs instead of being pinned to the import sheet. Best-effort
+    /// background window; on completion the folder view refreshes via `contentDidChange`.
+    func startMegaImport(link: String, into folder: URL) {
+        let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let id = beginActivity("MEGA")
+        setActivity(id, status: "Reading folder…")
+        let bg = BackgroundTaskHolder(); bg.begin(name: "MEGA Import")
+        Task {
+            let r = await MegaDownloader.importFolder(link: trimmed, into: folder) { p in
+                Task { @MainActor in
+                    let line = p.total > 0 ? "Downloading \(p.done)/\(p.total)…"
+                                           : (p.currentName.isEmpty ? "Downloading…" : p.currentName)
+                    self.setActivity(id, status: line, fraction: p.fraction)
+                }
+            }
+            endActivity(id, result: megaResultMessage(r))
+            if r.imported > 0 { contentDidChange() }
+            bg.end()
+        }
+    }
+    private func megaResultMessage(_ r: MegaImportResult) -> String {
+        if r.imported == 0 && r.failed == 0 && r.skipped > 0 {
+            return "MEGA: already up to date — \(r.skipped) file(s) present."
+        }
+        if r.imported == 0 { return "MEGA: " + (r.note ?? "nothing downloaded.") }
+        var base = "MEGA: downloaded \(r.imported) item\(r.imported == 1 ? "" : "s")" + (r.folderName.map { " to “\($0)”" } ?? "")
+        if r.skipped > 0 { base += ", \(r.skipped) already there" }
+        return r.failed > 0 ? base + "; \(r.failed) failed." : base + "."
+    }
+
     // MARK: - Bulk Instagram download (app-wide)
 
     /// One mapped profile for the bulk downloader.
