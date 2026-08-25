@@ -86,6 +86,11 @@ enum MegaDownloader {
         let rootHandle = nodes.first { $0.type >= 1 && !folderHandles.contains($0.parent) }?.handle
         let rootName = nodes.first { $0.handle == rootHandle }?.name
         let files = mediaFiles(from: nodes, rootHandle: rootHandle)
+        // Any file-type nodes that aren't photos/videos are (correctly) not imported — surface the
+        // count so a folder that legitimately holds a few non-media files doesn't look like the app
+        // "lost" them. After the key-decryption hardening, media files are no longer misclassified
+        // here, so this should only ever count genuine non-media (zips, text, etc.).
+        let skippedNonMedia = nodes.filter { $0.type == 0 }.count - files.count
         guard !files.isEmpty else {
             return MegaImportResult(imported: 0, failed: 0, folderName: rootName,
                                     note: "No photos or videos found in that MEGA folder.")
@@ -170,6 +175,7 @@ enum MegaDownloader {
             var parts: [String] = []
             if skipped > 0 { parts.append("\(skipped) already present") }
             if failed > 0 { parts.append("\(failed) failed: \(firstFailure ?? "unknown error")") }
+            if skippedNonMedia > 0 { parts.append("\(skippedNonMedia) non-photo/video file(s) skipped") }
             note = parts.isEmpty ? nil : "(" + parts.joined(separator: ", ") + ")"
         }
         return MegaImportResult(imported: imported, failed: failed, skipped: skipped,
@@ -254,36 +260,55 @@ enum MegaDownloader {
         guard let handle = f["h"] as? String, let type = f["t"] as? Int else { return nil }
         let parent = f["p"] as? String ?? ""
         let size = (f["s"] as? Int).map(Int64.init) ?? 0
-
-        // The node key arrives encrypted with the folder's master key (AES-ECB).
-        var decryptedKey = masterKey
-        if let kField = f["k"] as? String, let enc = encryptedKey(from: kField) {
-            let dec = MegaCrypto.aesEcbDecrypt(key: masterKey, data: enc)
-            if !dec.isEmpty { decryptedKey = dec }
-        }
-
-        var aesKey = decryptedKey
-        var nonce: [UInt8] = []
-        if type == 0, decryptedKey.count >= 32 {
-            // File key: 32 bytes → 16-byte AES key (first ⊕ last) + 8-byte nonce.
-            aesKey = (0..<16).map { decryptedKey[$0] ^ decryptedKey[$0 + 16] }
-            nonce = Array(decryptedKey[16..<24])
-        } else if decryptedKey.count >= 16 {
-            aesKey = Array(decryptedKey.prefix(16))
-        }
-
-        let name = (f["a"] as? String).flatMap { MegaCrypto.decryptAttributeName($0, key: aesKey) } ?? handle
         let ts = (f["ts"] as? Int).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        let attr = f["a"] as? String
+
+        // The node key arrives encrypted with the folder master key (AES-ECB). The `k` field can list
+        // MORE THAN ONE "handle:key" pair (a node shared in several places), and the pair keyed under
+        // THIS folder isn't always first. Try every candidate and keep the one whose decrypted key
+        // actually unlocks the attribute name — that validates it's the right pair. The old code took
+        // only the first pair, so a node whose folder key came second decrypted to a garbage name →
+        // no extension → it was misclassified as non-media and dropped ("98 of 100 discovered").
+        var fallback: (aesKey: [UInt8], nonce: [UInt8])?
+        for enc in candidateEncryptedKeys(from: f["k"] as? String) {
+            let dec = MegaCrypto.aesEcbDecrypt(key: masterKey, data: enc)
+            guard !dec.isEmpty else { continue }
+            let fk = fileKey(from: dec, type: type)
+            if let name = attr.flatMap({ MegaCrypto.decryptAttributeName($0, key: fk.aesKey) }) {
+                return MegaNode(handle: handle, parent: parent, type: type, name: name,
+                                size: size, aesKey: fk.aesKey, nonce: fk.nonce, timestamp: ts)
+            }
+            if fallback == nil { fallback = fk }        // remember the first as a last resort
+        }
+        // No pair validated the name (unusual). Keep the node anyway — don't lose it. Use the first
+        // candidate's key (content may still decrypt) or the master key, and a handle-based name.
+        let fk = fallback ?? (aesKey: Array(masterKey.prefix(16)), nonce: [])
+        let name = attr.flatMap { MegaCrypto.decryptAttributeName($0, key: fk.aesKey) } ?? handle
         return MegaNode(handle: handle, parent: parent, type: type, name: name,
-                        size: size, aesKey: aesKey, nonce: nonce, timestamp: ts)
+                        size: size, aesKey: fk.aesKey, nonce: fk.nonce, timestamp: ts)
     }
 
-    /// The encrypted key bytes from a `k` field ("handle:keyB64[/handle:keyB64…]").
-    nonisolated private static func encryptedKey(from field: String) -> [UInt8]? {
-        let first = field.split(separator: "/").first.map(String.init) ?? field
-        guard let colon = first.firstIndex(of: ":") else { return nil }
-        let bytes = MegaCrypto.base64ToBytes(String(first[first.index(after: colon)...]))
-        return bytes.isEmpty ? nil : bytes
+    /// Every encrypted key candidate from a `k` field ("handle:keyB64[/handle:keyB64…]"), in order.
+    nonisolated private static func candidateEncryptedKeys(from field: String?) -> [[UInt8]] {
+        guard let field, !field.isEmpty else { return [] }
+        var out: [[UInt8]] = []
+        for pair in field.split(separator: "/") {
+            guard let colon = pair.firstIndex(of: ":") else { continue }
+            let bytes = MegaCrypto.base64ToBytes(String(pair[pair.index(after: colon)...]))
+            if !bytes.isEmpty { out.append(bytes) }
+        }
+        return out
+    }
+
+    /// Splits a decrypted node key into the content AES key (+ CTR nonce for files). A 32-byte file
+    /// key is the 16-byte AES key (first ⊕ last 16) plus an 8-byte nonce; folders use the first 16.
+    nonisolated private static func fileKey(from decryptedKey: [UInt8], type: Int) -> (aesKey: [UInt8], nonce: [UInt8]) {
+        if type == 0, decryptedKey.count >= 32 {
+            let aesKey = (0..<16).map { decryptedKey[$0] ^ decryptedKey[$0 + 16] }
+            return (aesKey, Array(decryptedKey[16..<24]))
+        }
+        if decryptedKey.count >= 16 { return (Array(decryptedKey.prefix(16)), []) }
+        return (decryptedKey, [])
     }
 
     // MARK: - File list / paths
