@@ -1311,8 +1311,8 @@ final class Library {
         let job = AIEditJob(target: .create(folder: folder), folder: folder, entry: nil,
                             prompt: prompt, modelLabel: modelLabel)
         let (activityID, bg, live) = beginAIJob(title: "Creating with AI", label: "AI Create", count: count)
-        // Text2img needs a concrete shape (there's no source to keep) — default a blank "Original" to 1:1.
-        let ratio = aspect.ratio.isEmpty ? "1:1" : aspect.ratio
+        // Text2img needs a concrete shape (there's no source to keep) — "Original"/nil defaults to 1:1.
+        let ratio = aspect.ratio ?? "1:1"
         Task {
             let result = await AIExtend.generate(tune: tune, token: token, prompt: prompt, imageData: nil,
                                                  count: count, width: nil, height: nil,
