@@ -1327,7 +1327,7 @@ final class Library {
 
     /// Trains a new Astria LoRA tune from `imageURLs` (drive photos), app-wide. The tune shows up in
     /// the Edit/Create pickers once training finishes (polled here; it also lands on its own later).
-    func startCreateTune(title: String, subject: String, token: String, branch: String, baseTuneID: Int?,
+    func startCreateTune(title: String, subject: String, token: String, branch: String?, baseTuneID: Int?,
                          imageURLs: [URL]) {
         guard !creatingTune, !imageURLs.isEmpty else { return }
         creatingTune = true

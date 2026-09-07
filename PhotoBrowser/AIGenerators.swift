@@ -24,25 +24,42 @@ struct AIModelTunePicker: View {
     }
 }
 
-/// The base model a NEW tune is trained on (Astria `branch`). Flux is the default and the only one
-/// that can later be composed as a LoRA on top of another prompt.
+/// The base model a NEW tune is trained on. This can be a partner gallery model (Nano Banana 2 /
+/// Seedream 5.0 Pro) — sent as `base_tune_id` with the branch inherited — or a raw branch
+/// (Flux / SDXL / SD 1.5). Flux is the only base that can later be composed as a LoRA on a prompt.
 enum TuneBaseModel: String, CaseIterable, Identifiable, Sendable {
-    case flux = "Flux", sdxl = "SDXL", sd15 = "SD 1.5"
+    case nanoBanana2 = "Nano Banana 2"
+    case seedream5Pro = "Seedream 5.0 Pro"
+    case flux = "Flux"
+    case sdxl = "SDXL"
+    case sd15 = "SD 1.5"
     var id: String { rawValue }
-    var branch: String {
+
+    /// Astria `branch` to send, or nil to inherit it from the base tune (the partner models).
+    var branch: String? {
         switch self {
         case .flux: return "flux1"
         case .sdxl: return "sdxl1"
         case .sd15: return "sd15"
+        case .nanoBanana2, .seedream5Pro: return nil     // inherited from the base gallery tune
         }
     }
-    /// Flux trains on a specific base tune; SDXL/SD1.5 default their base from the branch.
-    var baseTuneID: Int? { self == .flux ? AIExtend.trainingBaseTune : nil }
+    /// `base_tune_id` to train on, or nil to let Astria default it from the branch (SDXL / SD1.5).
+    var baseTuneID: Int? {
+        switch self {
+        case .flux:          return AIExtend.trainingBaseTune
+        case .nanoBanana2:   return AIExtend.tuneID(for: .nanoBanana2)
+        case .seedream5Pro:  return AIExtend.tuneID(for: .seedream5Pro)
+        case .sdxl, .sd15:   return nil
+        }
+    }
     var note: String {
         switch self {
-        case .flux: return "Flux — best quality, and the only base you can layer on other prompts as a tune."
-        case .sdxl: return "SDXL — faster/cheaper training."
-        case .sd15: return "SD 1.5 — smallest/oldest base."
+        case .nanoBanana2:   return "Nano Banana 2 — trains on the partner model."
+        case .seedream5Pro:  return "Seedream 5.0 Pro — trains on the partner model."
+        case .flux:          return "Flux — high quality, and the only base you can later layer on a prompt as a tune."
+        case .sdxl:          return "SDXL — faster/cheaper training."
+        case .sd15:          return "SD 1.5 — smallest/oldest base."
         }
     }
 }
