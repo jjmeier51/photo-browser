@@ -28,8 +28,10 @@ struct AIEditView: View {
                         .lineLimit(2...5)
                 }
                 if !library.aiPromptHistory.isEmpty { promptHistorySection }
-                Section("Model or Tune") {
+                Section {
                     AIGeneratorPicker(choice: $choice, tunes: tunes)
+                } header: {
+                    Text("Model or Tune")
                 } footer: {
                     if case .tune(let t) = choice, !t.token.isEmpty {
                         Text("Using your tune “\(t.label)”. Its subject word “\(t.token)” is added to the prompt automatically.")
