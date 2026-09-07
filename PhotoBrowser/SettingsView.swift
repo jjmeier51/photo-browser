@@ -7,8 +7,9 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var key = AIExtend.apiKey
     @State private var model = AIExtend.defaultModel
+    // Flux is excluded here — it shares the separate "Flux (extend)" tune field below.
     @State private var tunes: [AIExtend.AIModel: String] = Dictionary(
-        uniqueKeysWithValues: AIExtend.AIModel.allCases.map { ($0, String(AIExtend.tuneID(for: $0))) })
+        uniqueKeysWithValues: AIExtend.AIModel.partnerModels.map { ($0, String(AIExtend.tuneID(for: $0))) })
     @State private var flux = String(AIExtend.fluxTune)
     @State private var prompt = AIExtend.extendPrompt
     @State private var cdmpoolToken = OFDRM.token
@@ -20,7 +21,7 @@ struct SettingsView: View {
                     SecureField("Astria API key", text: $key)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                     Picker("Default model", selection: $model) {
-                        ForEach(AIExtend.AIModel.allCases) { Text($0.rawValue).tag($0) }
+                        ForEach(AIExtend.AIModel.partnerModels) { Text($0.rawValue).tag($0) }
                     }
                 } header: {
                     Text("AI (cloud)")
@@ -29,7 +30,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    ForEach(AIExtend.AIModel.allCases) { m in
+                    ForEach(AIExtend.AIModel.partnerModels) { m in
                         HStack {
                             Text(m.rawValue)
                             Spacer()
@@ -75,7 +76,7 @@ struct SettingsView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        for m in AIExtend.AIModel.allCases {
+                        for m in AIExtend.AIModel.partnerModels {
                             if let id = Int(tunes[m]?.trimmingCharacters(in: .whitespaces) ?? "") {
                                 AIExtend.setTune(id, for: m)
                             }

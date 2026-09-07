@@ -1,51 +1,48 @@
 import SwiftUI
 
-/// What generates an AI image: a built-in partner model, or one of the account's own fine-tunes.
-/// Both resolve to an Astria tune id (that's the endpoint we POST to); account tunes also carry a
-/// subject token to weave into the prompt.
-enum AIGenChoice: Hashable {
-    case model(AIExtend.AIModel)
-    case tune(AIExtend.AstriaTune)
-
-    var tuneID: Int {
-        switch self {
-        case .model(let m): return AIExtend.tuneID(for: m)
-        case .tune(let t):  return t.id
-        }
-    }
-    var label: String {
-        switch self {
-        case .model(let m): return m.rawValue
-        case .tune(let t):  return t.label
-        }
-    }
-    /// Subject token to weave into the prompt (account fine-tunes only).
-    var token: String? {
-        switch self {
-        case .model:        return nil
-        case .tune(let t):  return t.token.isEmpty ? nil : t.token
-        }
-    }
-}
-
-/// A menu picker listing the built-in models and — when loaded — the account's own tunes.
-struct AIGeneratorPicker: View {
-    @Binding var choice: AIGenChoice
+/// Two independent pickers for Edit / Create with AI: a base **Model** and, optionally, one of the
+/// account's own **Tunes**. Picking Flux as the model composes the tune as a LoRA on top (a real
+/// model+tune combination); a partner model can't run a LoRA, so a selected tune runs on its own base.
+struct AIModelTunePicker: View {
+    @Binding var model: AIExtend.AIModel
+    @Binding var tune: AIExtend.AstriaTune?     // nil = None
     let tunes: [AIExtend.AstriaTune]
 
     var body: some View {
-        Picker("Model", selection: $choice) {
-            Section("Built-in") {
-                ForEach(AIExtend.AIModel.allCases) { Text($0.rawValue).tag(AIGenChoice.model($0)) }
-            }
-            if !tunes.isEmpty {
-                Section("My Tunes") {
-                    ForEach(tunes) { t in
-                        Text(t.ready ? t.label : "\(t.label) (training…)").tag(AIGenChoice.tune(t))
-                    }
-                }
+        Picker("Model", selection: $model) {
+            ForEach(AIExtend.AIModel.allCases) { Text($0.rawValue).tag($0) }
+        }
+        .pickerStyle(.menu)
+        Picker("Tune", selection: $tune) {
+            Text("None").tag(AIExtend.AstriaTune?.none)
+            ForEach(tunes) { t in
+                Text(t.ready ? t.label : "\(t.label) (training…)").tag(AIExtend.AstriaTune?.some(t))
             }
         }
         .pickerStyle(.menu)
+        .disabled(tunes.isEmpty)
+    }
+}
+
+/// The base model a NEW tune is trained on (Astria `branch`). Flux is the default and the only one
+/// that can later be composed as a LoRA on top of another prompt.
+enum TuneBaseModel: String, CaseIterable, Identifiable, Sendable {
+    case flux = "Flux", sdxl = "SDXL", sd15 = "SD 1.5"
+    var id: String { rawValue }
+    var branch: String {
+        switch self {
+        case .flux: return "flux1"
+        case .sdxl: return "sdxl1"
+        case .sd15: return "sd15"
+        }
+    }
+    /// Flux trains on a specific base tune; SDXL/SD1.5 default their base from the branch.
+    var baseTuneID: Int? { self == .flux ? AIExtend.trainingBaseTune : nil }
+    var note: String {
+        switch self {
+        case .flux: return "Flux — best quality, and the only base you can layer on other prompts as a tune."
+        case .sdxl: return "SDXL — faster/cheaper training."
+        case .sd15: return "SD 1.5 — smallest/oldest base."
+        }
     }
 }

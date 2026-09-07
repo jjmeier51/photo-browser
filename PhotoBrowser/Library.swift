@@ -1235,9 +1235,11 @@ final class Library {
     /// progress pill shows it working, and on completion a notification fires (tap → the results).
     /// The finished job is stored so the tap can reopen it on the original photo. Mirrors the
     /// frame-export pattern (activity pill + best-effort background window).
-    func startAIEdit(entry: Entry, prompt: String, count: Int, tune: Int, modelLabel: String, token: String?,
+    func startAIEdit(entry: Entry, prompt: String, promptPrefix: String = "", count: Int, tune: Int,
+                     modelLabel: String, token: String?,
                      resolution: AIExtend.OutputResolution, aspect: AIExtend.OutputAspect) {
-        recordAIPrompt(prompt)      // history, newest first
+        recordAIPrompt(prompt)      // history, newest first (the raw prompt, not any <lora:…> prefix)
+        let composedPrompt = promptPrefix.isEmpty ? prompt : promptPrefix + prompt
         let job = AIEditJob(target: .edit(original: entry.url), folder: entry.url.deletingLastPathComponent(),
                             entry: entry, prompt: prompt, modelLabel: modelLabel)
         let (activityID, bg, live) = beginAIJob(title: "Editing with AI", label: "AI Edit", count: count)
@@ -1256,7 +1258,7 @@ final class Library {
             let modelRaw = modelLabel
             let origPath = url.path, folderPath = job.folder.path
             let startedAt = Date().timeIntervalSince1970, jobIDStr = job.id.uuidString
-            let result = await AIExtend.generate(tune: tune, token: token, prompt: prompt, imageData: prep.data,
+            let result = await AIExtend.generate(tune: tune, token: token, prompt: composedPrompt, imageData: prep.data,
                                                  count: count, width: prep.width, height: prep.height,
                                                  aspect: aspect.ratio, resolutionTier: resolution.tier,
                                                  onPrompt: { [weak self] id in
@@ -1305,16 +1307,18 @@ final class Library {
 
     /// Creates a brand-new image from a text prompt (no source photo) — "Create with AI". Runs
     /// app-wide like Edit; kept results save into an "AI" subfolder of `folder`.
-    func startAICreate(folder: URL, prompt: String, count: Int, tune: Int, modelLabel: String, token: String?,
+    func startAICreate(folder: URL, prompt: String, promptPrefix: String = "", count: Int, tune: Int,
+                       modelLabel: String, token: String?,
                        resolution: AIExtend.OutputResolution, aspect: AIExtend.OutputAspect) {
         recordAIPrompt(prompt)
+        let composedPrompt = promptPrefix.isEmpty ? prompt : promptPrefix + prompt
         let job = AIEditJob(target: .create(folder: folder), folder: folder, entry: nil,
                             prompt: prompt, modelLabel: modelLabel)
         let (activityID, bg, live) = beginAIJob(title: "Creating with AI", label: "AI Create", count: count)
         // Text2img needs a concrete shape (there's no source to keep) — "Original"/nil defaults to 1:1.
         let ratio = aspect.ratio ?? "1:1"
         Task {
-            let result = await AIExtend.generate(tune: tune, token: token, prompt: prompt, imageData: nil,
+            let result = await AIExtend.generate(tune: tune, token: token, prompt: composedPrompt, imageData: nil,
                                                  count: count, width: nil, height: nil,
                                                  aspect: ratio, resolutionTier: resolution.tier)
             deliverAIResult(result, job: job, activityID: activityID, bg: bg, live: live, label: "AI create")
@@ -1323,13 +1327,13 @@ final class Library {
 
     /// Trains a new Astria LoRA tune from `imageURLs` (drive photos), app-wide. The tune shows up in
     /// the Edit/Create pickers once training finishes (polled here; it also lands on its own later).
-    func startCreateTune(title: String, subject: String, token: String, imageURLs: [URL]) {
+    func startCreateTune(title: String, subject: String, token: String, branch: String, baseTuneID: Int?,
+                         imageURLs: [URL]) {
         guard !creatingTune, !imageURLs.isEmpty else { return }
         creatingTune = true
         let id = beginActivity("Training AI Tune", indeterminate: true)
         setActivity(id, status: "Uploading \(imageURLs.count) training image\(imageURLs.count == 1 ? "" : "s")…")
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Tune Training")
-        let base = AIExtend.trainingBaseTune
         Task {
             defer { creatingTune = false; bg.end() }
             let images: [Data] = await Task.detached(priority: .userInitiated) {
@@ -1337,7 +1341,8 @@ final class Library {
             }.value
             guard !images.isEmpty else { endActivity(id, result: "Couldn’t read the training images."); return }
             setActivity(id, status: "Submitting to Astria…")
-            switch await AIExtend.createTune(title: title, name: subject, token: token, baseTuneID: base, images: images) {
+            switch await AIExtend.createTune(title: title, name: subject, token: token,
+                                             branch: branch, baseTuneID: baseTuneID, images: images) {
             case .failure(let err):
                 endActivity(id, result: "Tune training failed — \(aiErrorMessage(err))")
             case .success(let tuneID):

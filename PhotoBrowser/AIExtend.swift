@@ -19,16 +19,24 @@ enum AIExtend {
     enum AIModel: String, CaseIterable, Identifiable, Sendable {
         case seedream5Pro = "Seedream 5.0 Pro"
         case nanoBanana2 = "Nano Banana 2"
+        case flux = "Flux"           // the LoRA-composable base — pick it to run one of your own tunes on top
         var id: String { rawValue }
         /// Known Astria gallery tune ids (override in Settings).
         var fallbackTune: Int {
             switch self {
             case .seedream5Pro:  return 5236038
             case .nanoBanana2:   return 4180298
+            case .flux:          return AIExtend.defaultFluxTune
             }
         }
+        /// Whether this base can run a user LoRA tune composed into the prompt (`<lora:id:…>`). Only
+        /// Flux composes LoRAs; the partner models (Seedream / Nano Banana) can't.
+        var composesLoRA: Bool { self == .flux }
         var maxLongSide: CGFloat { 2048 }
         fileprivate var tuneKey: String { "photoBrowser.astriaTune.\(rawValue)" }
+        /// The partner models offered as the built-in default / Settings overrides (Flux is offered
+        /// only in the Edit/Create pickers, and shares the separate Flux tune setting).
+        static var partnerModels: [AIModel] { [.seedream5Pro, .nanoBanana2] }
     }
 
     /// Output resolution the user picks. Sent as Astria's `prompt[resolution]` size **tier**
@@ -94,8 +102,27 @@ enum AIExtend {
     }
 
     static func tuneID(for model: AIModel) -> Int {
+        if model == .flux { return fluxTune }     // Flux shares the single editable Flux tune setting
         let v = UserDefaults.standard.integer(forKey: model.tuneKey)
         return v > 0 ? v : model.fallbackTune
+    }
+
+    /// Resolves the (model, optional tune) pair the user picked into what a prompt actually needs: the
+    /// tune id to POST to, a prompt prefix (a `<lora:…>` tag when composing a tune on Flux), the
+    /// tune's subject token, and a human label for metadata.
+    struct Generation: Sendable { let tuneID: Int; let promptPrefix: String; let token: String?; let label: String }
+    static func resolveGeneration(model: AIModel, tune: AstriaTune?) -> Generation {
+        guard let tune else {
+            return Generation(tuneID: tuneID(for: model), promptPrefix: "", token: nil, label: model.rawValue)
+        }
+        let tk = tune.token.isEmpty ? nil : tune.token
+        if model.composesLoRA {
+            // Compose the LoRA on the Flux base — this is the real "model + tune" combination.
+            return Generation(tuneID: tuneID(for: model), promptPrefix: "<lora:\(tune.id):1> ",
+                              token: tk, label: "\(model.rawValue) + \(tune.label)")
+        }
+        // A partner model can't run a LoRA — the tune runs on its own base instead.
+        return Generation(tuneID: tune.id, promptPrefix: "", token: tk, label: tune.label)
     }
     static func setTune(_ id: Int, for model: AIModel) {
         UserDefaults.standard.set(id > 0 ? id : model.fallbackTune, forKey: model.tuneKey)
@@ -313,18 +340,20 @@ enum AIExtend {
     /// The base tune a new LoRA trains on (Flux). Reuses the editable Flux tune setting.
     static var trainingBaseTune: Int { fluxTune }
 
-    /// Starts training a new LoRA tune from `images`. Returns the new tune id immediately (training
-    /// runs async on Astria — poll `waitForTune`). `name` is the class (woman/man/style), `token`
-    /// the subject word used in prompts.
-    nonisolated static func createTune(title: String, name: String, token: String,
-                                       baseTuneID: Int, images: [Data]) async -> Result<Int, AIError> {
+    /// Starts training a new tune from `images` on the chosen base model. Returns the new tune id
+    /// immediately (training runs async on Astria — poll `waitForTune`). `name` is the class
+    /// (woman/man/style), `token` the subject word used in prompts. `branch` picks the base model
+    /// (flux1 / sdxl1 / sd15); `baseTuneID` is sent only for Flux (the others default per branch).
+    nonisolated static func createTune(title: String, name: String, token: String, branch: String,
+                                       baseTuneID: Int?, images: [Data]) async -> Result<Int, AIError> {
         guard isConfigured else { return .failure(.notConfigured) }
         guard !images.isEmpty else { return .failure(.badImage) }
         guard let url = URL(string: "\(base)/tunes") else { return .failure(.server("Bad endpoint URL.")) }
         var fields: [String: String] = [
-            "tune[title]": title, "tune[name]": name, "tune[branch]": "flux1",
-            "tune[model_type]": "lora", "tune[base_tune_id]": String(baseTuneID)
+            "tune[title]": title, "tune[name]": name, "tune[branch]": branch,
+            "tune[model_type]": "lora"       // ignored on SDXL (Astria defaults to PTI there)
         ]
+        if let baseTuneID { fields["tune[base_tune_id]"] = String(baseTuneID) }
         if !token.isEmpty { fields["tune[token]"] = token }
         let files = images.enumerated().map {
             (name: "tune[images][]", filename: "img\($0.offset).jpg", mime: "image/jpeg", data: $0.element)

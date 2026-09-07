@@ -14,6 +14,7 @@ struct CreateTuneView: View {
     @State private var subject = "woman"
     @State private var title = ""
     @State private var token = "ohwx"
+    @State private var baseModel: TuneBaseModel = .flux
     @State private var showAdvanced = false
 
     private let subjects = ["woman", "man", "person", "couple", "style", "object", "animal"]
@@ -27,6 +28,9 @@ struct CreateTuneView: View {
         NavigationStack {
             Form {
                 Section {
+                    Picker("Base model", selection: $baseModel) {
+                        ForEach(TuneBaseModel.allCases) { Text($0.rawValue).tag($0) }
+                    }
                     Picker("Subject", selection: $subject) {
                         ForEach(subjects, id: \.self) { Text($0.capitalized).tag($0) }
                     }
@@ -34,7 +38,7 @@ struct CreateTuneView: View {
                 } header: {
                     Text("What are you training?")
                 } footer: {
-                    Text("“Subject” is the class the model learns (a person → woman/man/person; a look → style). The name is just for you.")
+                    Text("\(baseModel.note) “Subject” is the class the model learns (a person → woman/man/person; a look → style). The name is just for you.")
                 }
 
                 Section {
@@ -89,7 +93,8 @@ struct CreateTuneView: View {
         // Keep a stable selection order (grid order) for the upload.
         let urls = candidates.filter { selected.contains($0) }
         library.startCreateTune(title: name, subject: subject,
-                                token: token.trimmingCharacters(in: .whitespaces), imageURLs: urls)
+                                token: token.trimmingCharacters(in: .whitespaces),
+                                branch: baseModel.branch, baseTuneID: baseModel.baseTuneID, imageURLs: urls)
         dismiss()
     }
 }

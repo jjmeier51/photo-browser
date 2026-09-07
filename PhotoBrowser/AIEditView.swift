@@ -12,7 +12,8 @@ struct AIEditView: View {
 
     @State private var prompt = ""
     @State private var count = 1
-    @State private var choice: AIGenChoice = .model(AIExtend.defaultModel)
+    @State private var model = AIExtend.defaultModel
+    @State private var selectedTune: AIExtend.AstriaTune?
     @State private var tunes: [AIExtend.AstriaTune] = []
     @State private var resolution = AIExtend.OutputResolution.k2
     @State private var aspect = AIExtend.OutputAspect.original
@@ -29,13 +30,11 @@ struct AIEditView: View {
                 }
                 if !library.aiPromptHistory.isEmpty { promptHistorySection }
                 Section {
-                    AIGeneratorPicker(choice: $choice, tunes: tunes)
+                    AIModelTunePicker(model: $model, tune: $selectedTune, tunes: tunes)
                 } header: {
-                    Text("Model or Tune")
+                    Text("Model & Tune")
                 } footer: {
-                    if case .tune(let t) = choice, !t.token.isEmpty {
-                        Text("Using your tune “\(t.label)”. Its subject word “\(t.token)” is added to the prompt automatically.")
-                    }
+                    Text(comboNote)
                 }
                 Section("Output") {
                     Picker("Resolution", selection: $resolution) {
@@ -102,11 +101,19 @@ struct AIEditView: View {
         }
     }
 
+    /// Explains how the chosen Model + Tune combine (they run differently on Flux vs a partner model).
+    private var comboNote: String {
+        guard let t = selectedTune else { return "Pick a base model. Add one of your tunes to apply it too." }
+        if model.composesLoRA { return "Running your tune “\(t.label)” on \(model.rawValue)." }
+        return "\(model.rawValue) can't run a tune, so “\(t.label)” runs on its own base. Pick Flux to combine them."
+    }
+
     /// Kicks off generation app-wide (it keeps running while you browse) and closes this sheet.
     private func generate() {
         guard AIExtend.isConfigured else { showSettings = true; return }
-        library.startAIEdit(entry: entry, prompt: prompt, count: count,
-                            tune: choice.tuneID, modelLabel: choice.label, token: choice.token,
+        let gen = AIExtend.resolveGeneration(model: model, tune: selectedTune)
+        library.startAIEdit(entry: entry, prompt: prompt, promptPrefix: gen.promptPrefix, count: count,
+                            tune: gen.tuneID, modelLabel: gen.label, token: gen.token,
                             resolution: resolution, aspect: aspect)
         dismiss()
     }
