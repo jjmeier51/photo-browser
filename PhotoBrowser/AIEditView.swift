@@ -10,16 +10,30 @@ struct AIEditView: View {
     @Environment(\.dismiss) private var dismiss
     let entry: Entry
 
-    @State private var prompt = ""
-    @State private var count = 1
-    @State private var model = AIExtend.defaultModel
-    @State private var selectedTune: AIExtend.AstriaTune?
+    @State private var prompt: String
+    @State private var count: Int
+    @State private var model: AIExtend.AIModel
+    @State private var selectedTune: AIExtend.AstriaTune? = nil
+    @State private var pendingTuneID: Int          // resolved to `selectedTune` once tunes load
     @State private var tunes: [AIExtend.AstriaTune] = []
-    @State private var resolution = AIExtend.OutputResolution.k2
-    @State private var aspect = AIExtend.OutputAspect.original
+    @State private var resolution: AIExtend.OutputResolution
+    @State private var aspect: AIExtend.OutputAspect
     @State private var showSettings = false
 
     private let counts = [1, 2, 3, 4, 8]
+
+    /// Pre-fill every control from the previous Edit-with-AI run so a repeat run starts where the
+    /// last one left off (the tune is resolved once the account tunes load).
+    init(entry: Entry) {
+        self.entry = entry
+        let s = AIExtend.lastRunSettings(create: false)
+        _prompt = State(initialValue: s.prompt)
+        _count = State(initialValue: [1, 2, 3, 4, 8].contains(s.count) ? s.count : 1)
+        _model = State(initialValue: AIExtend.AIModel(rawValue: s.model) ?? AIExtend.defaultModel)
+        _pendingTuneID = State(initialValue: s.tuneID)
+        _resolution = State(initialValue: AIExtend.OutputResolution(rawValue: s.resolution) ?? .k2)
+        _aspect = State(initialValue: AIExtend.OutputAspect(rawValue: s.aspect) ?? .original)
+    }
 
     var body: some View {
         NavigationStack {
@@ -64,7 +78,12 @@ struct AIEditView: View {
                 }
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
-            .task { tunes = await library.loadAITunes() }
+            .task {
+                tunes = await library.loadAITunes()
+                if selectedTune == nil, pendingTuneID > 0 {
+                    selectedTune = tunes.first { $0.id == pendingTuneID }   // restore the previous tune
+                }
+            }
         }
     }
 
@@ -111,6 +130,11 @@ struct AIEditView: View {
     /// Kicks off generation app-wide (it keeps running while you browse) and closes this sheet.
     private func generate() {
         guard AIExtend.isConfigured else { showSettings = true; return }
+        // Remember these settings so the sheet reopens pre-filled the same way after review.
+        AIExtend.saveRunSettings(AIExtend.RunSettings(prompt: prompt, model: model.rawValue,
+                                                      tuneID: selectedTune?.id ?? 0,
+                                                      resolution: resolution.rawValue,
+                                                      aspect: aspect.rawValue, count: count), create: false)
         let gen = AIExtend.resolveGeneration(model: model, tune: selectedTune)
         library.startAIEdit(entry: entry, prompt: prompt, promptPrefix: gen.promptPrefix, count: count,
                             tune: gen.tuneID, modelLabel: gen.label, token: gen.token,

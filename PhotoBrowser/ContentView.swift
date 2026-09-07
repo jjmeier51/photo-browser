@@ -91,6 +91,14 @@ struct ContentView: View {
                           model: job.modelLabel, prompt: job.prompt)
                 .environment(library)
         }
+        // After reviewing results, reopen the creator (Edit/Create) pre-filled with the last run's
+        // settings, so the user can immediately generate again.
+        .sheet(item: $library.aiCreatorReopen) { reopen in
+            switch reopen {
+            case .create(let folder): AICreateView(folder: folder).environment(library)
+            case .edit(let entry):    AIEditView(entry: entry).environment(library)
+            }
+        }
     }
 
     private func pillTitle(_ a: Library.Activity) -> String {

@@ -77,7 +77,7 @@ struct AIResultsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { if savedAny { library.contentDidChange() }; dismiss() }
+                    Button("Done") { finish() }
                 }
             }
         }
@@ -111,7 +111,19 @@ struct AIResultsView: View {
     /// Once every result is kept or discarded, return automatically.
     private func finishIfDone() {
         guard decided.count >= results.count else { return }
+        finish()
+    }
+
+    /// Close the review and reopen the creator (Edit/Create) it came from, pre-filled with the same
+    /// settings, so the user can immediately run again. The reopen is deferred a moment so SwiftUI
+    /// finishes dismissing this sheet before presenting the next.
+    private func finish() {
         if savedAny { library.contentDidChange() }
+        let tgt = target, lib = library
         dismiss()
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            lib.reopenCreator(after: tgt)
+        }
     }
 }

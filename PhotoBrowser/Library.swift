@@ -1155,6 +1155,35 @@ final class Library {
     /// Set to reopen the Edit-with-AI UI showing a finished job's results (observed by ContentView).
     var aiResultPresentation: AIEditJob?
 
+    /// After AI results are reviewed (kept or discarded), reopen the matching creator screen — it
+    /// pre-fills from the previous run's saved settings — so the user can immediately run again.
+    /// Observed by ContentView.
+    enum AICreatorReopen: Identifiable, Equatable {
+        case create(folder: URL)
+        case edit(entry: Entry)
+        var id: String {
+            switch self {
+            case .create(let f): return "create:\(f.path)"
+            case .edit(let e):   return "edit:\(e.url.path)"
+            }
+        }
+    }
+    var aiCreatorReopen: AICreatorReopen?
+
+    /// Reopen the creator that produced a just-reviewed result set.
+    func reopenCreator(after target: AISaveTarget) {
+        switch target {
+        case .create(let folder):
+            aiCreatorReopen = .create(folder: folder)
+        case .edit(let original):
+            let vals = try? original.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let entry = Entry(url: original, name: original.lastPathComponent,
+                              kind: classify(url: original, isDirectory: false),
+                              size: Int64(vals?.fileSize ?? 0), modified: vals?.contentModificationDate ?? Date())
+            aiCreatorReopen = .edit(entry: entry)
+        }
+    }
+
     /// A durable record of an in-flight Astria prompt, persisted the moment Astria accepts it. Astria
     /// keeps the finished images server-side, so even if iOS kills the app mid-generation (the job is
     /// minutes long and the user navigates away), the next launch re-polls this prompt id and saves

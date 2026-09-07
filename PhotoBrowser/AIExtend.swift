@@ -136,6 +136,32 @@ enum AIExtend {
     }
     static func setFluxTune(_ id: Int) { UserDefaults.standard.set(id > 0 ? id : defaultFluxTune, forKey: fluxKey) }
 
+    // MARK: - Remembered run settings (per flow)
+
+    /// The settings of the last Edit / Create run, so the sheet reopens pre-filled the same way.
+    /// `tuneID == 0` means "no tune". Persisted per flow (Edit vs Create) in UserDefaults.
+    struct RunSettings: Codable, Sendable {
+        var prompt = ""
+        var model = ""            // AIModel rawValue
+        var tuneID = 0            // selected account tune id, 0 = None
+        var resolution = OutputResolution.k2.rawValue
+        var aspect = OutputAspect.original.rawValue
+        var count = 1
+    }
+    private static func runSettingsKey(create: Bool) -> String {
+        create ? "photoBrowser.aiRun.create" : "photoBrowser.aiRun.edit"
+    }
+    static func lastRunSettings(create: Bool) -> RunSettings {
+        guard let data = UserDefaults.standard.data(forKey: runSettingsKey(create: create)),
+              let s = try? JSONDecoder().decode(RunSettings.self, from: data) else { return RunSettings() }
+        return s
+    }
+    static func saveRunSettings(_ s: RunSettings, create: Bool) {
+        if let data = try? JSONEncoder().encode(s) {
+            UserDefaults.standard.set(data, forKey: runSettingsKey(create: create))
+        }
+    }
+
     static func save(apiKey: String, defaultModel: AIModel, prompt: String) {
         let d = UserDefaults.standard
         d.set(apiKey.trimmingCharacters(in: .whitespacesAndNewlines), forKey: keyKey)
