@@ -167,6 +167,8 @@ struct FolderView: View {
     @State private var studioEntry: Entry?
     @State private var resizeEntry: Entry?
     @State private var aiEditEntry: Entry?
+    @State private var showAICreate = false        // "Create with AI" (text2img, no source photo)
+    @State private var showCreateTune = false      // "Create AI Tune" (train from folder photos)
     @State private var audioEntry: Entry?          // a tapped audio file → full-screen player
     @State private var reloading = false           // single-flight guard for reload()
     @State private var reloadPending = false
@@ -1084,6 +1086,10 @@ struct FolderView: View {
             }
             .fullScreenCover(isPresented: $showMegaImport) {
                 MegaImportView(targetFolder: url) { Task { await reload() } }
+            }
+            .sheet(isPresented: $showAICreate) { AICreateView(folder: url) }
+            .sheet(isPresented: $showCreateTune) {
+                CreateTuneView(folder: url, candidates: entries.filter { $0.kind == .image }.map(\.url))
             }
             .fullScreenCover(isPresented: $showGoogleDrive) {
                 GoogleDriveBrowserView(targetFolder: url)
@@ -2154,6 +2160,12 @@ struct FolderView: View {
                             }
                         } label: {
                             Label("Download from the Web…", systemImage: "arrow.down.circle")
+                        }
+                        Button { showAICreate = true } label: {
+                            Label("Create with AI…", systemImage: "wand.and.stars.inverse")
+                        }
+                        Button { showCreateTune = true } label: {
+                            Label("Create AI Tune…", systemImage: "person.crop.rectangle.badge.plus")
                         }
                     }
                     Section {

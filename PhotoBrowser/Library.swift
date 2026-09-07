@@ -1125,11 +1125,27 @@ final class Library {
     /// which reopens the Edit-with-AI UI on the original photo.
     struct AIEditJob: Identifiable {
         let id = UUID()
-        let entry: Entry
-        let folder: URL          // the original photo's folder — where the tap navigates back to
+        let target: AISaveTarget   // where kept results save: over a source photo (edit) or into a folder (create)
+        let folder: URL            // folder the completion notification navigates back to
+        let entry: Entry?          // the source photo (edit); nil for Create with AI
         let prompt: String
-        let model: AIExtend.AIModel
+        let modelLabel: String     // built-in model name or tune title, for result metadata
         var results: [Data] = []
+    }
+
+    /// Shared tune list for the AI pickers, cached briefly so opening the sheets doesn't refetch.
+    @ObservationIgnored private var aiTunesCache: [AIExtend.AstriaTune]?
+    @ObservationIgnored private var aiTunesFetchedAt: Date?
+    var creatingTune = false
+
+    /// The account's Astria tunes for the Edit/Create pickers (cached ~2 min; `force` refetches).
+    func loadAITunes(force: Bool = false) async -> [AIExtend.AstriaTune] {
+        if !force, let cache = aiTunesCache, let at = aiTunesFetchedAt, Date().timeIntervalSince(at) < 120 {
+            return cache
+        }
+        let tunes = await AIExtend.listTunes()
+        aiTunesCache = tunes; aiTunesFetchedAt = Date()
+        return tunes
     }
 
     /// Completed jobs by id — a tapped notification looks its results up here. In-memory for the
@@ -1219,17 +1235,12 @@ final class Library {
     /// progress pill shows it working, and on completion a notification fires (tap → the results).
     /// The finished job is stored so the tap can reopen it on the original photo. Mirrors the
     /// frame-export pattern (activity pill + best-effort background window).
-    func startAIEdit(entry: Entry, prompt: String, count: Int, model: AIExtend.AIModel,
+    func startAIEdit(entry: Entry, prompt: String, count: Int, tune: Int, modelLabel: String, token: String?,
                      resolution: AIExtend.OutputResolution, aspect: AIExtend.OutputAspect) {
         recordAIPrompt(prompt)      // history, newest first
-        let job = AIEditJob(entry: entry, folder: entry.url.deletingLastPathComponent(),
-                            prompt: prompt, model: model)
-        let jobID = job.id
-        let activityID = beginActivity("Editing with AI", indeterminate: true)
-        setActivity(activityID, status: "Generating \(count) image\(count == 1 ? "" : "s") with Astria…")
-        let bg = BackgroundTaskHolder(); bg.begin(name: "AI Edit")
-        let live = AIProgressActivity()
-        live.begin(title: "AI Edit", detail: "Generating with Astria…")
+        let job = AIEditJob(target: .edit(original: entry.url), folder: entry.url.deletingLastPathComponent(),
+                            entry: entry, prompt: prompt, modelLabel: modelLabel)
+        let (activityID, bg, live) = beginAIJob(title: "Editing with AI", label: "AI Edit", count: count)
         let url = entry.url
         Task {
             guard let prep = await Task.detached(priority: .userInitiated, operation: {
@@ -1242,12 +1253,12 @@ final class Library {
             }
             // Persist the prompt id the moment Astria accepts it, so a kill mid-generation can be
             // recovered on the next launch (Astria keeps the result server-side).
-            let tune = AIExtend.tuneID(for: model), modelRaw = model.rawValue
+            let modelRaw = modelLabel
             let origPath = url.path, folderPath = job.folder.path
-            let startedAt = Date().timeIntervalSince1970, jobIDStr = jobID.uuidString
-            let result = await AIExtend.generate(model: model, prompt: prompt, imageData: prep.data,
+            let startedAt = Date().timeIntervalSince1970, jobIDStr = job.id.uuidString
+            let result = await AIExtend.generate(tune: tune, token: token, prompt: prompt, imageData: prep.data,
                                                  count: count, width: prep.width, height: prep.height,
-                                                 aspectOverride: aspect.ratio, superResolution: resolution.superResolution,
+                                                 aspect: aspect.ratio, resolutionTier: resolution.tier,
                                                  onPrompt: { [weak self] id in
                 // Build the record on the main actor (only Sendable primitives cross the boundary).
                 Task { @MainActor in
@@ -1259,12 +1270,12 @@ final class Library {
             endActivity(activityID); bg.end()
             switch result {
             case .success(let data):
-                removePendingAstria(jobID: jobID.uuidString)   // handled in-process; no recovery needed
+                removePendingAstria(jobID: jobIDStr)   // handled in-process; no recovery needed
                 var done = job; done.results = data
-                completedAIEdits[jobID] = done
+                completedAIEdits[job.id] = done
                 live.finish(success: true,
                             message: "\(data.count) AI image\(data.count == 1 ? "" : "s") ready to review. Tap to see them.",
-                            jobID: jobID.uuidString)
+                            jobID: jobIDStr)
                 // Surface the results IN-APP immediately. Previously success only posted a
                 // notification, so if that banner didn't appear (permission/foreground quirk) the
                 // finished images were stranded in memory with no way to reach the review — exactly
@@ -1283,12 +1294,100 @@ final class Library {
                 // Keep the pending record for a network/timeout failure — Astria may still finish, and
                 // the next launch will recover it. Drop it only for definitively unrecoverable errors.
                 switch err {
-                case .notConfigured, .badImage, .badResult: removePendingAstria(jobID: jobID.uuidString)
+                case .notConfigured, .badImage, .badResult: removePendingAstria(jobID: jobIDStr)
                 case .network, .server: break
                 }
                 live.finish(success: false, message: msg)
                 activityResults.append("AI edit failed — \(msg)")
             }
+        }
+    }
+
+    /// Creates a brand-new image from a text prompt (no source photo) — "Create with AI". Runs
+    /// app-wide like Edit; kept results save into an "AI" subfolder of `folder`.
+    func startAICreate(folder: URL, prompt: String, count: Int, tune: Int, modelLabel: String, token: String?,
+                       resolution: AIExtend.OutputResolution, aspect: AIExtend.OutputAspect) {
+        recordAIPrompt(prompt)
+        let job = AIEditJob(target: .create(folder: folder), folder: folder, entry: nil,
+                            prompt: prompt, modelLabel: modelLabel)
+        let (activityID, bg, live) = beginAIJob(title: "Creating with AI", label: "AI Create", count: count)
+        // Text2img needs a concrete shape (there's no source to keep) — default a blank "Original" to 1:1.
+        let ratio = aspect.ratio.isEmpty ? "1:1" : aspect.ratio
+        Task {
+            let result = await AIExtend.generate(tune: tune, token: token, prompt: prompt, imageData: nil,
+                                                 count: count, width: nil, height: nil,
+                                                 aspect: ratio, resolutionTier: resolution.tier)
+            deliverAIResult(result, job: job, activityID: activityID, bg: bg, live: live, label: "AI create")
+        }
+    }
+
+    /// Trains a new Astria LoRA tune from `imageURLs` (drive photos), app-wide. The tune shows up in
+    /// the Edit/Create pickers once training finishes (polled here; it also lands on its own later).
+    func startCreateTune(title: String, subject: String, token: String, imageURLs: [URL]) {
+        guard !creatingTune, !imageURLs.isEmpty else { return }
+        creatingTune = true
+        let id = beginActivity("Training AI Tune", indeterminate: true)
+        setActivity(id, status: "Uploading \(imageURLs.count) training image\(imageURLs.count == 1 ? "" : "s")…")
+        let bg = BackgroundTaskHolder(); bg.begin(name: "AI Tune Training")
+        let base = AIExtend.trainingBaseTune
+        Task {
+            defer { creatingTune = false; bg.end() }
+            let images: [Data] = await Task.detached(priority: .userInitiated) {
+                imageURLs.compactMap { AIExtend.uploadJPEG(of: $0, maxPixel: 1024)?.data }
+            }.value
+            guard !images.isEmpty else { endActivity(id, result: "Couldn’t read the training images."); return }
+            setActivity(id, status: "Submitting to Astria…")
+            switch await AIExtend.createTune(title: title, name: subject, token: token, baseTuneID: base, images: images) {
+            case .failure(let err):
+                endActivity(id, result: "Tune training failed — \(aiErrorMessage(err))")
+            case .success(let tuneID):
+                setActivity(id, status: "Training “\(title)” — this can take several minutes…")
+                let ready = await AIExtend.waitForTune(id: tuneID, minutes: 30)
+                aiTunesCache = nil       // refresh the pickers so the new tune appears
+                endActivity(id, result: ready
+                    ? "AI tune “\(title)” is ready — pick it in Edit or Create with AI."
+                    : "AI tune “\(title)” is still training on Astria; it'll appear in the tune list once done.")
+            }
+        }
+    }
+
+    /// Shared setup for an app-wide AI generation job: the activity pill + background window + live
+    /// activity. Returns the handles the caller finishes with `deliverAIResult`.
+    private func beginAIJob(title: String, label: String, count: Int)
+        -> (activityID: UUID, bg: BackgroundTaskHolder, live: AIProgressActivity) {
+        let activityID = beginActivity(title, indeterminate: true)
+        setActivity(activityID, status: "Generating \(count) image\(count == 1 ? "" : "s") with Astria…")
+        let bg = BackgroundTaskHolder(); bg.begin(name: label)
+        let live = AIProgressActivity(); live.begin(title: label, detail: "Generating with Astria…")
+        return (activityID, bg, live)
+    }
+
+    /// Common completion for Edit/Create: store results for review, fire the "ready" notification, or
+    /// surface the failure.
+    private func deliverAIResult(_ result: Result<[Data], AIExtend.AIError>, job: AIEditJob,
+                                 activityID: UUID, bg: BackgroundTaskHolder, live: AIProgressActivity, label: String) {
+        endActivity(activityID); bg.end()
+        switch result {
+        case .success(let data):
+            var done = job; done.results = data
+            completedAIEdits[job.id] = done
+            live.finish(success: true,
+                        message: "\(data.count) AI image\(data.count == 1 ? "" : "s") ready to review. Tap to see them.",
+                        jobID: job.id.uuidString)
+            aiResultPresentation = done   // surface results in-app immediately (also reachable via the notification)
+        case .failure(let err):
+            let msg = aiErrorMessage(err)
+            live.finish(success: false, message: msg)
+            activityResults.append("\(label) failed — \(msg)")
+        }
+    }
+
+    private func aiErrorMessage(_ err: AIExtend.AIError) -> String {
+        switch err {
+        case .notConfigured:        return "Add your Astria API key in Settings."
+        case .network:              return "Couldn’t reach the provider."
+        case .badImage, .badResult: return "The image couldn’t be processed."
+        case .server(let m):        return m
         }
     }
 

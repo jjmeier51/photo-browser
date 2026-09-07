@@ -1,31 +1,33 @@
 import SwiftUI
 import UIKit
 
-/// AI image editing (Astria): the user describes the edit, picks a model or one of their own tunes,
-/// and how many variations to generate. Generation runs app-wide (a progress pill + a notification
-/// when ready); results are reviewed via `AIResultsView`. Past prompts are kept as a tap-to-reuse
-/// history below the prompt box.
-struct AIEditView: View {
+/// "Create with AI": generate a brand-new image from a text prompt only — no source photo. Pick a
+/// built-in model or one of your own tunes, a shape and resolution, and how many to make. Runs
+/// app-wide (progress pill + a notification when ready); results are reviewed via `AIResultsView`
+/// and kept ones save into an "AI" subfolder of the current folder.
+struct AICreateView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
-    let entry: Entry
+    let folder: URL
 
     @State private var prompt = ""
     @State private var count = 1
     @State private var choice: AIGenChoice = .model(AIExtend.defaultModel)
     @State private var tunes: [AIExtend.AstriaTune] = []
     @State private var resolution = AIExtend.OutputResolution.k2
-    @State private var aspect = AIExtend.OutputAspect.original
+    @State private var aspect = AIExtend.OutputAspect.square
     @State private var showSettings = false
 
     private let counts = [1, 2, 3, 4, 8]
+    // Create has no source photo, so "Original" doesn't apply — offer the fixed shapes only.
+    private var aspects: [AIExtend.OutputAspect] { AIExtend.OutputAspect.allCases.filter { $0 != .original } }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("What would you like to change?") {
-                    TextField("e.g. make the sky a sunset, remove the sign…", text: $prompt, axis: .vertical)
-                        .lineLimit(2...5)
+                Section("Describe the image to create") {
+                    TextField("e.g. a golden retriever puppy on a beach at sunset, photorealistic", text: $prompt, axis: .vertical)
+                        .lineLimit(2...6)
                 }
                 if !library.aiPromptHistory.isEmpty { promptHistorySection }
                 Section("Model or Tune") {
@@ -41,7 +43,7 @@ struct AIEditView: View {
                     }
                     .pickerStyle(.segmented)
                     Picker("Dimensions", selection: $aspect) {
-                        ForEach(AIExtend.OutputAspect.allCases) { Text($0.rawValue).tag($0) }
+                        ForEach(aspects) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.segmented)
                 }
@@ -50,10 +52,10 @@ struct AIEditView: View {
                         ForEach(counts, id: \.self) { Text("\($0)").tag($0) }
                     }
                 } footer: {
-                    Text("Uploads the photo to Astria to generate edits — it runs in the background, so you can keep browsing while it works. You'll get a notification when the images are ready; tap it to review them. “4K” asks for the highest resolution; “Original” keeps the photo's shape. Kept results save to an “AI” subfolder, keeping the original's EXIF.")
+                    Text("Generates images from your description with Astria — no source photo needed. It runs in the background; you'll get a notification when they're ready to review. Kept results save to an “AI” subfolder of “\(folder.lastPathComponent)”.")
                 }
             }
-            .navigationTitle("Edit with AI")
+            .navigationTitle("Create with AI")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -95,17 +97,14 @@ struct AIEditView: View {
             .frame(height: min(CGFloat(library.aiPromptHistory.count) * 52, 220))
         } header: {
             Text("Previous prompts")
-        } footer: {
-            Text("Tap a prompt to use it again. Long-press to copy it or remove it.")
         }
     }
 
-    /// Kicks off generation app-wide (it keeps running while you browse) and closes this sheet.
     private func generate() {
         guard AIExtend.isConfigured else { showSettings = true; return }
-        library.startAIEdit(entry: entry, prompt: prompt, count: count,
-                            tune: choice.tuneID, modelLabel: choice.label, token: choice.token,
-                            resolution: resolution, aspect: aspect)
+        library.startAICreate(folder: folder, prompt: prompt, count: count,
+                              tune: choice.tuneID, modelLabel: choice.label, token: choice.token,
+                              resolution: resolution, aspect: aspect)
         dismiss()
     }
 }

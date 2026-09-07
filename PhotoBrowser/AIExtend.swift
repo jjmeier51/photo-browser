@@ -18,35 +18,31 @@ enum AIExtend {
     /// default that the user can override in Settings.
     enum AIModel: String, CaseIterable, Identifiable, Sendable {
         case seedream5Pro = "Seedream 5.0 Pro"
-        case seedream45 = "Seedream 4.5"
         case nanoBanana2 = "Nano Banana 2"
-        case nanoBananaPro = "Nano Banana Pro"
         var id: String { rawValue }
-        /// Known Astria gallery tune ids (Nano Banana Pro falls back to Nano
-        /// Banana 2's tune until its own id is known; override in Settings).
+        /// Known Astria gallery tune ids (override in Settings).
         var fallbackTune: Int {
             switch self {
             case .seedream5Pro:  return 5236038
-            case .seedream45:    return 3691308
             case .nanoBanana2:   return 4180298
-            case .nanoBananaPro: return 4180298
             }
         }
         var maxLongSide: CGFloat { 2048 }
         fileprivate var tuneKey: String { "photoBrowser.astriaTune.\(rawValue)" }
     }
 
-    /// Output resolution the user picks in the Edit-with-AI sheet. Astria's gallery tunes
-    /// reject explicit sizes larger than ~2048 ("use aspect_ratio instead"), so higher
-    /// resolution is requested by (a) uploading a larger input where allowed and (b) asking
-    /// Astria to super-resolve the result rather than by sending a bigger `w`/`h`.
+    /// Output resolution the user picks. Sent as Astria's `prompt[resolution]` size **tier**
+    /// (1K / 2K / 4K) — the documented way to control output size on the gallery tunes. (The old
+    /// path only set `super_resolution` for 4K, which Nano Banana 2 ignored, so it capped at 2K.)
+    /// The uploaded input is still capped at 2048 px (the tune's input limit); the tier drives the
+    /// generated size.
     enum OutputResolution: String, CaseIterable, Identifiable, Sendable {
         case k1 = "1K", k2 = "2K", k4 = "4K"
         var id: String { rawValue }
         /// Long side (px) of the uploaded input. Capped at 2048 — the tune limit.
         var uploadLongSide: CGFloat { self == .k1 ? 1024 : 2048 }
-        /// 4K asks Astria to super-resolve the result (~2×), since we can't upload larger.
-        var superResolution: Bool { self == .k4 }
+        /// Value for `prompt[resolution]` — the output size tier.
+        var tier: String { rawValue }
     }
 
     /// Output shape the user picks. `.original` keeps the source photo's aspect (the prior
@@ -122,37 +118,44 @@ enum AIExtend {
 
     // MARK: - Generation
 
-    /// Creates a prompt against `model`'s tune (img2img from `imageData`), polls
-    /// until Astria finishes, and downloads the result image(s).
-    nonisolated static func generate(model: AIModel, prompt: String, imageData: Data,
+    /// Creates a prompt against `tune`, polls until Astria finishes, and downloads the result(s).
+    /// Works for both **Edit with AI** (pass `imageData` → img2img) and **Create with AI** (pass
+    /// `imageData: nil` → text2img). `token` is a fine-tune's subject word (e.g. `ohwx`) for a
+    /// user's own account tune — it's prefixed into the prompt when missing so the trained subject
+    /// actually appears. `resolutionTier` is "1K"/"2K"/"4K".
+    nonisolated static func generate(tune: Int, token: String? = nil, prompt: String, imageData: Data?,
                                      count: Int, width: Int?, height: Int?,
-                                     aspectOverride: String? = nil, superResolution: Bool = false,
+                                     aspect: String?, resolutionTier: String?,
                                      onPrompt: (@Sendable (Int) -> Void)? = nil) async -> Result<[Data], AIError> {
         guard isConfigured else { return .failure(.notConfigured) }
-        let tune = tuneID(for: model)
         guard let url = URL(string: "\(base)/tunes/\(tune)/prompts") else { return .failure(.server("Bad endpoint URL.")) }
 
+        var text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let token, !token.isEmpty, !text.localizedCaseInsensitiveContains(token) {
+            text = "\(token) \(text)"          // ensure the fine-tune's subject token is present
+        }
         var fields: [String: String] = [
-            "prompt[text]": prompt,
+            "prompt[text]": text,
             "prompt[num_images]": String(min(max(count, 1), 8))
         ]
-        // Send the chosen aspect as-is: a fixed ratio (1:1 / 4:5 / 9:16), or "auto" for "Original"
-        // (Seedream's automatic mode, which keeps the upright input's own shape). As a defensive
-        // fallback, an absent/empty override derives the nearest ratio from the input's dimensions.
-        if let aspectOverride, !aspectOverride.isEmpty {
-            fields["prompt[aspect_ratio]"] = aspectOverride
+        // A fixed shape (1:1 / 4:5 / 9:16) wins. "Original" resolves to nil, so we derive the nearest
+        // supported ratio from the (upright) input's dimensions — which keeps its shape/orientation
+        // (Astria's tunes reject "auto" and a blank value defaults to landscape). Create-with-AI
+        // always passes a concrete ratio, so it never hits the derive branch.
+        if let aspect, !aspect.isEmpty {
+            fields["prompt[aspect_ratio]"] = aspect
         } else if let width, let height {
             fields["prompt[aspect_ratio]"] = aspectRatio(width, height)
         }
-        // Note: only `super_resolution` here — the partner gallery tunes (Seedream / Nano
-        // Banana) reject `hires_fix` ("not supported on Partner"); that flag is Flux-only and
-        // lives on the Extend path instead.
-        if superResolution {
-            fields["prompt[super_resolution]"] = "true"
+        // Output size tier (1K/2K/4K) — the documented control that actually lifts a gallery tune to
+        // 4K (super_resolution alone left Nano Banana 2 at 2K).
+        if let resolutionTier, !resolutionTier.isEmpty {
+            fields["prompt[resolution]"] = resolutionTier
         }
-        let files: [(name: String, filename: String, mime: String, data: Data)] = [
-            ("prompt[input_image]", "input.jpg", "image/jpeg", imageData)
-        ]
+        var files: [(name: String, filename: String, mime: String, data: Data)] = []
+        if let imageData {
+            files.append(("prompt[input_image]", "input.jpg", "image/jpeg", imageData))
+        }
         return await submit(tune: tune, url: url, fields: fields, files: files, onPrompt: onPrompt)
     }
 
@@ -254,6 +257,106 @@ enum AIExtend {
             }
         }
         return []
+    }
+
+    // MARK: - Tunes (the account's own fine-tunes)
+
+    /// One of the user's Astria tunes, for the picker in Edit/Create with AI.
+    struct AstriaTune: Identifiable, Sendable, Hashable {
+        let id: Int
+        let title: String
+        let name: String        // class descriptor (woman / man / style / object…)
+        let branch: String      // flux1 / sdxl1 / …
+        let modelType: String   // lora / pti / faceid / checkpoint
+        let token: String       // subject word to include in prompts (e.g. ohwx)
+        let ready: Bool         // finished training (trained_at present)
+        var label: String {
+            let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let base = t.isEmpty ? name : t
+            return base.isEmpty ? "Tune \(id)" : base
+        }
+    }
+
+    /// Lists the account's own tunes, newest first, following keyset pagination a few pages deep.
+    nonisolated static func listTunes(limit: Int = 100, maxPages: Int = 4) async -> [AstriaTune] {
+        guard isConfigured else { return [] }
+        var out: [AstriaTune] = []
+        var beforeID: Int?
+        for _ in 0..<maxPages {
+            var comps = URLComponents(string: "\(base)/tunes")!
+            var q = [URLQueryItem(name: "limit", value: String(limit))]
+            if let beforeID { q.append(URLQueryItem(name: "before_id", value: String(beforeID))) }
+            comps.queryItems = q
+            guard let url = comps.url else { break }
+            var req = URLRequest(url: url); applyAPIHeaders(&req)
+            guard let (data, resp) = try? await URLSession.shared.data(for: req),
+                  let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                  let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]], !arr.isEmpty else { break }
+            for t in arr { if let tune = astriaTune(from: t) { out.append(tune) } }
+            guard arr.count == limit, let last = out.last?.id else { break }   // full page → maybe more
+            beforeID = last
+        }
+        return out
+    }
+
+    private nonisolated static func astriaTune(from t: [String: Any]) -> AstriaTune? {
+        guard let id = intValue(t["id"]) else { return nil }
+        return AstriaTune(id: id,
+                          title: (t["title"] as? String) ?? "",
+                          name: (t["name"] as? String) ?? "",
+                          branch: (t["branch"] as? String) ?? "",
+                          modelType: (t["model_type"] as? String) ?? "",
+                          token: (t["token"] as? String) ?? "",
+                          ready: (t["trained_at"] as? String).map { !$0.isEmpty } ?? false)
+    }
+
+    /// The base tune a new LoRA trains on (Flux). Reuses the editable Flux tune setting.
+    static var trainingBaseTune: Int { fluxTune }
+
+    /// Starts training a new LoRA tune from `images`. Returns the new tune id immediately (training
+    /// runs async on Astria — poll `waitForTune`). `name` is the class (woman/man/style), `token`
+    /// the subject word used in prompts.
+    nonisolated static func createTune(title: String, name: String, token: String,
+                                       baseTuneID: Int, images: [Data]) async -> Result<Int, AIError> {
+        guard isConfigured else { return .failure(.notConfigured) }
+        guard !images.isEmpty else { return .failure(.badImage) }
+        guard let url = URL(string: "\(base)/tunes") else { return .failure(.server("Bad endpoint URL.")) }
+        var fields: [String: String] = [
+            "tune[title]": title, "tune[name]": name, "tune[branch]": "flux1",
+            "tune[model_type]": "lora", "tune[base_tune_id]": String(baseTuneID)
+        ]
+        if !token.isEmpty { fields["tune[token]"] = token }
+        let files = images.enumerated().map {
+            (name: "tune[images][]", filename: "img\($0.offset).jpg", mime: "image/jpeg", data: $0.element)
+        }
+        let boundary = "PB-\(UUID().uuidString)"
+        var req = URLRequest(url: url); req.httpMethod = "POST"; req.timeoutInterval = 300
+        applyAPIHeaders(&req)
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        req.httpBody = multipart(fields: fields, files: files, boundary: boundary)
+        guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return .failure(.network) }
+        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            return .failure(.server(message(from: data)))
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = intValue(json["id"]) else { return .failure(.badResult) }
+        return .success(id)
+    }
+
+    /// Polls a tune until `trained_at` is set (finished training). Returns false if it's still
+    /// training when the bounded wait gives up (the tune still exists and finishes on Astria's side).
+    nonisolated static func waitForTune(id: Int, minutes: Int = 30) async -> Bool {
+        guard let url = URL(string: "\(base)/tunes/\(id)") else { return false }
+        for _ in 0..<max(1, minutes * 6) {          // every 10s
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            var req = URLRequest(url: url); applyAPIHeaders(&req)
+            if let (data, _) = try? await URLSession.shared.data(for: req),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let trained = json["trained_at"] as? String, !trained.isEmpty {
+                return true
+            }
+        }
+        return false
     }
 
     // MARK: - Preparing input + saving results
@@ -404,6 +507,45 @@ enum AIExtend {
             try? FileManager.default.setAttributes([.creationDate: captureDate, .modificationDate: captureDate], ofItemAtPath: dest.path)
         }
         return dest
+    }
+
+    /// Saves a **Create with AI** result (there's no source photo) into an "AI" subfolder of
+    /// `folder`, stamping today's date and the model/prompt provenance. Returns the new URL.
+    nonisolated static func saveGeneratedToFolder(_ data: Data, in folder: URL,
+                                                  model: String? = nil, prompt: String? = nil) -> URL? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        let aiDir = folder.appendingPathComponent("AI", isDirectory: true)
+        try? FileManager.default.createDirectory(at: aiDir, withIntermediateDirectories: true)
+        let now = Date()
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
+        let stamp = f.string(from: now)
+        let trimmed = (prompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        var exif: [CFString: Any] = [kCGImagePropertyExifDateTimeOriginal: stamp,
+                                     kCGImagePropertyExifDateTimeDigitized: stamp]
+        exif[kCGImagePropertyExifUserComment] = trimmed.isEmpty ? "AI-generated" : "AI-generated · Prompt: \(trimmed)"
+        let props: [CFString: Any] = [
+            kCGImagePropertyExifDictionary: exif,
+            kCGImagePropertyTIFFDictionary: [
+                kCGImagePropertyTIFFDateTime: stamp,
+                kCGImagePropertyTIFFSoftware: (model?.isEmpty == false) ? "PhotoBrowser AI — \(model!)" : "PhotoBrowser AI"
+            ] as [CFString: Any],
+            kCGImagePropertyOrientation: 1,
+            kCGImagePropertyPixelWidth: cg.width, kCGImagePropertyPixelHeight: cg.height]
+        let base = trimmed.isEmpty ? "AI Creation" : String(trimmed.prefix(40))
+        let dest = uniqueURL(for: "\(sanitizeName(base)).jpg", in: aiDir)
+        guard let d = CGImageDestinationCreateWithURL(dest as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(d, cg, props as CFDictionary)
+        guard CGImageDestinationFinalize(d) else { return nil }
+        try? FileManager.default.setAttributes([.creationDate: now, .modificationDate: now], ofItemAtPath: dest.path)
+        return dest
+    }
+
+    private nonisolated static func sanitizeName(_ s: String) -> String {
+        let cleaned = s.components(separatedBy: CharacterSet(charactersIn: "/\\:?%*|\"<>\n\r"))
+            .joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "AI Creation" : cleaned
     }
 
     // MARK: - Helpers

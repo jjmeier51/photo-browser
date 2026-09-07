@@ -116,7 +116,7 @@ struct ResizeEditorView: View {
             } message: { Text(aiError ?? "") }
             .sheet(item: Binding(get: { aiResults.map { ResultsBox(data: $0) } }, set: { aiResults = $0?.data }),
                    onDismiss: { dismiss() }) { box in
-                AIResultsView(original: entry.url, results: box.data)
+                AIResultsView(target: .edit(original: entry.url), results: box.data)
             }
             .overlay { if saving && !aiStatus.isEmpty { aiProgressOverlay } }
         }

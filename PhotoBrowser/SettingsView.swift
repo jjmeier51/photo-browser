@@ -25,7 +25,7 @@ struct SettingsView: View {
                 } header: {
                     Text("AI (cloud)")
                 } footer: {
-                    Text("Used only for “Extend with AI” (Flux, masked outpaint) and “Edit with AI” (the model below). Those upload the photo to Astria; the rest of the app stays offline. Leave the key blank to disable. Note: providers run content moderation and may refuse some edits.")
+                    Text("Used for the AI features — Edit with AI, Create with AI (text→image), Extend with AI (Flux outpaint), and training your own Tunes. Your account's Tunes are pulled automatically and can be picked in Edit/Create. These upload to Astria; the rest of the app stays offline. Leave the key blank to disable. Note: providers run content moderation and may refuse some prompts.")
                 }
 
                 Section {
@@ -52,7 +52,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Model tune IDs")
                 } footer: {
-                    Text("Each model is an Astria gallery tune. Paste the tune ID from its gallery page to override the built-in default. “Edit with AI” uses the chosen model; “Extend with AI” uses Flux (it’s the one that supports masked outpainting).")
+                    Text("Each model is an Astria gallery tune — paste a tune ID from its gallery page to override the built-in default. The Flux tune powers “Extend with AI” (masked outpaint) and is also the base new Tunes are trained on.")
                 }
 
                 Section("Extend prompt") {
