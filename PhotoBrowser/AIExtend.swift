@@ -374,17 +374,18 @@ enum AIExtend {
     /// partner models (Nano Banana 2, Seedream 5.0 Pro). For a partner/gallery base, pass its
     /// `baseTuneID` and leave `branch` nil so Astria inherits the branch from that base tune.
     nonisolated static func createTune(title: String, name: String, token: String, branch: String?,
-                                       baseTuneID: Int?, images: [Data]) async -> Result<Int, AIError> {
+                                       baseTuneID: Int?, modelType: String, images: [Data]) async -> Result<Int, AIError> {
         guard isConfigured else { return .failure(.notConfigured) }
         guard !images.isEmpty else { return .failure(.badImage) }
         guard let url = URL(string: "\(base)/tunes") else { return .failure(.server("Bad endpoint URL.")) }
         var fields: [String: String] = [
             "tune[title]": title, "tune[name]": name,
-            "tune[model_type]": "lora"       // ignored on SDXL (Astria defaults to PTI there)
+            "tune[model_type]": modelType     // faceid for partner bases; lora for Flux/SD (ignored→PTI on SDXL)
         ]
         if let branch, !branch.isEmpty { fields["tune[branch]"] = branch }   // else inherit from the base tune
         if let baseTuneID { fields["tune[base_tune_id]"] = String(baseTuneID) }
-        if !token.isEmpty { fields["tune[token]"] = token }
+        // FaceID tunes reject a custom token ("not allowed for FaceID") — only send one otherwise.
+        if modelType != "faceid", !token.isEmpty { fields["tune[token]"] = token }
         let files = images.enumerated().map {
             (name: "tune[images][]", filename: "img\($0.offset).jpg", mime: "image/jpeg", data: $0.element)
         }

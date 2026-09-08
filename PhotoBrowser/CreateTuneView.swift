@@ -41,19 +41,26 @@ struct CreateTuneView: View {
                     Text("\(baseModel.note) “Subject” is the class the model learns (a person → woman/man/person; a look → style). The name is just for you.")
                 }
 
-                Section {
-                    DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
-                        HStack {
-                            Text("Subject word")
-                            Spacer()
-                            TextField("ohwx", text: $token)
-                                .multilineTextAlignment(.trailing)
-                                .textInputAutocapitalization(.never).autocorrectionDisabled()
-                                .frame(width: 120)
+                if baseModel.usesToken {
+                    Section {
+                        DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
+                            HStack {
+                                Text("Subject word")
+                                Spacer()
+                                TextField("ohwx", text: $token)
+                                    .multilineTextAlignment(.trailing)
+                                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                                    .frame(width: 120)
+                            }
                         }
+                    } footer: {
+                        Text("The unique word used to summon this subject in prompts. The default is fine.")
                     }
-                } footer: {
-                    Text("The unique word used to summon this subject in prompts. The default is fine.")
+                } else {
+                    Section {
+                        Text("This base trains a FaceID model — it recognizes the face directly, so there's no subject word to set.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
 
                 Section {
@@ -93,8 +100,9 @@ struct CreateTuneView: View {
         // Keep a stable selection order (grid order) for the upload.
         let urls = candidates.filter { selected.contains($0) }
         library.startCreateTune(title: name, subject: subject,
-                                token: token.trimmingCharacters(in: .whitespaces),
-                                branch: baseModel.branch, baseTuneID: baseModel.baseTuneID, imageURLs: urls)
+                                token: baseModel.usesToken ? token.trimmingCharacters(in: .whitespaces) : "",
+                                branch: baseModel.branch, baseTuneID: baseModel.baseTuneID,
+                                modelType: baseModel.modelType, imageURLs: urls)
         dismiss()
     }
 }

@@ -53,6 +53,16 @@ enum TuneBaseModel: String, CaseIterable, Identifiable, Sendable {
         case .sdxl, .sd15:   return nil
         }
     }
+    /// Astria `model_type`. The partner models train as **FaceID** (identify by face, no token);
+    /// the rest train as LoRA (SDXL is silently switched to PTI by Astria).
+    var modelType: String {
+        switch self {
+        case .nanoBanana2, .seedream5Pro: return "faceid"
+        case .flux, .sdxl, .sd15:         return "lora"
+        }
+    }
+    /// FaceID tunes don't use a subject token; the others do.
+    var usesToken: Bool { modelType != "faceid" }
     var note: String {
         switch self {
         case .nanoBanana2:   return "Nano Banana 2 — trains on the partner model."

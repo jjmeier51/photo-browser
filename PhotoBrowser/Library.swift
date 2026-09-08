@@ -1357,7 +1357,7 @@ final class Library {
     /// Trains a new Astria LoRA tune from `imageURLs` (drive photos), app-wide. The tune shows up in
     /// the Edit/Create pickers once training finishes (polled here; it also lands on its own later).
     func startCreateTune(title: String, subject: String, token: String, branch: String?, baseTuneID: Int?,
-                         imageURLs: [URL]) {
+                         modelType: String, imageURLs: [URL]) {
         guard !creatingTune, !imageURLs.isEmpty else { return }
         creatingTune = true
         let id = beginActivity("Training AI Tune", indeterminate: true)
@@ -1371,7 +1371,8 @@ final class Library {
             guard !images.isEmpty else { endActivity(id, result: "Couldn’t read the training images."); return }
             setActivity(id, status: "Submitting to Astria…")
             switch await AIExtend.createTune(title: title, name: subject, token: token,
-                                             branch: branch, baseTuneID: baseTuneID, images: images) {
+                                             branch: branch, baseTuneID: baseTuneID,
+                                             modelType: modelType, images: images) {
             case .failure(let err):
                 endActivity(id, result: "Tune training failed — \(aiErrorMessage(err))")
             case .success(let tuneID):
