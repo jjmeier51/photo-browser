@@ -13,6 +13,29 @@ import UIKit
 enum AIExtend {
     static let base = "https://api.astria.ai"
 
+    /// Two dedicated sessions instead of `URLSession.shared`, so AI traffic doesn't fight the rest of
+    /// the app (browsing, MEGA, thumbnails) for `URLSession.shared`'s tiny ~6-connection pool — which
+    /// is what made the UI hitch while several edits generated at once.
+    /// * `apiSession` — small, timely requests (submit a prompt, poll, list/create tunes).
+    /// * `downloadSession` — the RESULT-image fetches. `.background` service class = it uses spare
+    ///   bandwidth and YIELDS to interactive traffic, and the per-host cap bounds it across every job,
+    ///   so multiple edits' results stream in smoothly without stealing the network from the UI.
+    nonisolated static let apiSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.httpMaximumConnectionsPerHost = 6
+        cfg.timeoutIntervalForRequest = 60
+        cfg.waitsForConnectivity = true
+        return URLSession(configuration: cfg)
+    }()
+    nonisolated static let downloadSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.httpMaximumConnectionsPerHost = 6
+        cfg.timeoutIntervalForRequest = 120
+        cfg.networkServiceType = .background
+        cfg.waitsForConnectivity = true
+        return URLSession(configuration: cfg)
+    }()
+
     /// The partner models, each backed by an Astria gallery "tune". The exact tune
     /// ids for these newest versions aren't published, so each has a best-known
     /// default that the user can override in Settings.
@@ -253,7 +276,7 @@ enum AIExtend {
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.httpBody = multipart(fields: fields, files: files, boundary: boundary)
 
-        guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return .failure(.network) }
+        guard let (data, resp) = try? await apiSession.data(for: req) else { return .failure(.network) }
         guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             return .failure(.server(message(from: data)))
         }
@@ -273,7 +296,7 @@ enum AIExtend {
         await withTaskGroup(of: Data?.self) { group in
             for u in urls {
                 group.addTask {
-                    guard let (d, r) = try? await URLSession.shared.data(from: u), !d.isEmpty else { return nil }
+                    guard let (d, r) = try? await downloadSession.data(from: u), !d.isEmpty else { return nil }
                     // Only accept a real 2xx body — an expired/again-signed result URL can answer with
                     // an error page, which must not be saved as a broken "image".
                     if let http = r as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return nil }
@@ -301,7 +324,7 @@ enum AIExtend {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             var req = URLRequest(url: url)
             applyAPIHeaders(&req)
-            guard let (data, _) = try? await URLSession.shared.data(for: req),
+            guard let (data, _) = try? await apiSession.data(for: req),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             if let images = json["images"] as? [String], !images.isEmpty { return images.compactMap { URL(string: $0) } }
             if let images = json["images"] as? [[String: Any]] {
@@ -342,7 +365,7 @@ enum AIExtend {
             comps.queryItems = q
             guard let url = comps.url else { break }
             var req = URLRequest(url: url); applyAPIHeaders(&req)
-            guard let (data, resp) = try? await URLSession.shared.data(for: req),
+            guard let (data, resp) = try? await apiSession.data(for: req),
                   let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
                   let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]], !arr.isEmpty else { break }
             for t in arr { if let tune = astriaTune(from: t) { out.append(tune) } }
@@ -394,7 +417,7 @@ enum AIExtend {
         applyAPIHeaders(&req)
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.httpBody = multipart(fields: fields, files: files, boundary: boundary)
-        guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return .failure(.network) }
+        guard let (data, resp) = try? await apiSession.data(for: req) else { return .failure(.network) }
         guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             return .failure(.server(message(from: data)))
         }
@@ -410,7 +433,7 @@ enum AIExtend {
         for _ in 0..<max(1, minutes * 6) {          // every 10s
             try? await Task.sleep(nanoseconds: 10_000_000_000)
             var req = URLRequest(url: url); applyAPIHeaders(&req)
-            if let (data, _) = try? await URLSession.shared.data(for: req),
+            if let (data, _) = try? await apiSession.data(for: req),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let trained = json["trained_at"] as? String, !trained.isEmpty {
                 return true

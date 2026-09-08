@@ -1274,7 +1274,11 @@ final class Library {
         let (activityID, bg, live) = beginAIJob(title: "Editing with AI", label: "AI Edit", count: count)
         let url = entry.url
         Task {
-            guard let prep = await Task.detached(priority: .userInitiated, operation: {
+            // `.utility` (not `.userInitiated`): the tone-map + JPEG re-encode is CPU-heavy, and when
+            // several AI edits are kicked off at once it must yield to scrolling/thumbnailing. The
+            // generation that follows is all async network waiting anyway, so a slightly later start
+            // costs nothing perceptible.
+            guard let prep = await Task.detached(priority: .utility, operation: {
                 AIExtend.uploadJPEG(of: url, maxPixel: resolution.uploadLongSide)
             }).value else {
                 endActivity(activityID); bg.end()
@@ -1365,7 +1369,7 @@ final class Library {
         let bg = BackgroundTaskHolder(); bg.begin(name: "AI Tune Training")
         Task {
             defer { creatingTune = false; bg.end() }
-            let images: [Data] = await Task.detached(priority: .userInitiated) {
+            let images: [Data] = await Task.detached(priority: .utility) {
                 imageURLs.compactMap { AIExtend.uploadJPEG(of: $0, maxPixel: 1024)?.data }
             }.value
             guard !images.isEmpty else { endActivity(id, result: "Couldn’t read the training images."); return }

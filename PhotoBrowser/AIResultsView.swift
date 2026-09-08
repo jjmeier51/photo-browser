@@ -1,4 +1,6 @@
 import SwiftUI
+import ImageIO
+import UniformTypeIdentifiers
 
 /// Where a kept AI result is saved.
 /// - `.edit`: over a source photo — saves into an "AI" subfolder beside it, inheriting its EXIF/date.
@@ -40,10 +42,14 @@ struct AIResultsView: View {
                 VStack(spacing: 20) {
                     ForEach(results.indices, id: \.self) { i in
                         VStack(spacing: 10) {
-                            if let ui = images.indices.contains(i) ? images[i] : UIImage(data: results[i]) {
+                            if let ui = images.indices.contains(i) ? images[i] : nil {
                                 Image(uiImage: ui).resizable().scaledToFit()
                                     .frame(maxHeight: 380)
                                     .clipShape(RoundedRectangle(cornerRadius: 10))
+                            } else {
+                                RoundedRectangle(cornerRadius: 10).fill(.quaternary)
+                                    .frame(height: 240)
+                                    .overlay { ProgressView() }
                             }
                             switch decided[i] {
                             case .kept:
@@ -84,8 +90,31 @@ struct AIResultsView: View {
         .interactiveDismissDisabled(decided.count < results.count)
         .task {
             guard images.isEmpty else { return }
-            images = results.map { UIImage(data: $0) }   // decode wrappers once, reused across re-renders
+            images = Array(repeating: nil, count: results.count)   // show placeholders while decoding
+            let data = results
+            // Decode DOWNSAMPLED and OFF the main thread. `UIImage(data:)` defers decode to first
+            // draw on the main thread — several full-res (up to 4K) results decoding at render time is
+            // what made reviewing a batch hitch. ImageIO downsamples to ~display size with immediate
+            // caching, so the SwiftUI render is cheap. The full-res `results` Data is still used for
+            // saving. Fill them in one at a time so the first result appears fast.
+            for i in data.indices {
+                let ui = await Task.detached(priority: .userInitiated) { Self.downsample(data[i], maxPixel: 1400) }.value
+                if images.indices.contains(i) { images[i] = ui }
+            }
         }
+    }
+
+    /// Decodes `data` to a display-sized `UIImage` via ImageIO (bounded long side), fully decoded so
+    /// no work happens on the main thread at draw time. Falls back to a plain wrapper if it can't.
+    private nonisolated static func downsample(_ data: Data, maxPixel: CGFloat) -> UIImage? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return UIImage(data: data) }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return UIImage(data: data) }
+        return UIImage(cgImage: cg)
     }
 
     private func keep(_ i: Int) {
