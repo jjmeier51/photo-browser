@@ -8,6 +8,10 @@ struct AIModelTunePicker: View {
     @Binding var tune: AIExtend.AstriaTune?     // nil = None
     let tunes: [AIExtend.AstriaTune]
 
+    /// Only the tunes that can actually run on the chosen model — a Flux LoRA can't run on a partner
+    /// model and vice-versa, so filtering here keeps the user from ever building an impossible pair.
+    private var compatible: [AIExtend.AstriaTune] { AIExtend.tunes(tunes, compatibleWith: model) }
+
     var body: some View {
         Picker("Model", selection: $model) {
             ForEach(AIExtend.AIModel.allCases) { Text($0.rawValue).tag($0) }
@@ -15,12 +19,17 @@ struct AIModelTunePicker: View {
         .pickerStyle(.menu)
         Picker("Tune", selection: $tune) {
             Text("None").tag(AIExtend.AstriaTune?.none)
-            ForEach(tunes) { t in
+            ForEach(compatible) { t in
                 Text(t.ready ? t.label : "\(t.label) (training…)").tag(AIExtend.AstriaTune?.some(t))
             }
         }
         .pickerStyle(.menu)
-        .disabled(tunes.isEmpty)
+        .disabled(compatible.isEmpty)
+        .onChange(of: model) { _, _ in
+            // Switching to a model the selected tune can't run on clears it, so the impossible pair
+            // (and its cryptic Astria error) can never be submitted.
+            if let t = tune, !compatible.contains(where: { $0.id == t.id }) { tune = nil }
+        }
     }
 }
 
@@ -65,11 +74,11 @@ enum TuneBaseModel: String, CaseIterable, Identifiable, Sendable {
     var usesToken: Bool { modelType != "faceid" }
     var note: String {
         switch self {
-        case .nanoBanana2:   return "Nano Banana 2 — trains on the partner model."
-        case .seedream5Pro:  return "Seedream 5.0 Pro — trains on the partner model."
-        case .flux:          return "Flux — high quality, and the only base you can later layer on a prompt as a tune."
-        case .sdxl:          return "SDXL — faster/cheaper training."
-        case .sd15:          return "SD 1.5 — smallest/oldest base."
+        case .nanoBanana2:   return "Nano Banana 2 — FaceID: builds a face adapter from only your ~3 sharpest photos (extra photos aren't used for training), then generates on Nano Banana 2."
+        case .seedream5Pro:  return "Seedream 5.0 Pro — FaceID: builds a face adapter from only your ~3 sharpest photos (extra photos aren't used for training), then generates on Seedream 5.0 Pro."
+        case .flux:          return "Flux — a real LoRA trained on ALL your selected photos; the only base you can later layer on a prompt as a tune. Choose this to train on many photos."
+        case .sdxl:          return "SDXL — a real fine-tune on all your selected photos; faster/cheaper training."
+        case .sd15:          return "SD 1.5 — a real fine-tune on all your selected photos; smallest/oldest base."
         }
     }
 }

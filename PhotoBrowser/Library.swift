@@ -1265,7 +1265,7 @@ final class Library {
     /// The finished job is stored so the tap can reopen it on the original photo. Mirrors the
     /// frame-export pattern (activity pill + best-effort background window).
     func startAIEdit(entry: Entry, prompt: String, promptPrefix: String = "", count: Int, tune: Int,
-                     modelLabel: String, token: String?,
+                     modelLabel: String, token: String?, supportsResolution: Bool = true,
                      resolution: AIExtend.OutputResolution, aspect: AIExtend.OutputAspect) {
         recordAIPrompt(prompt)      // history, newest first (the raw prompt, not any <lora:…> prefix)
         let composedPrompt = promptPrefix.isEmpty ? prompt : promptPrefix + prompt
@@ -1293,7 +1293,8 @@ final class Library {
             let startedAt = Date().timeIntervalSince1970, jobIDStr = job.id.uuidString
             let result = await AIExtend.generate(tune: tune, token: token, prompt: composedPrompt, imageData: prep.data,
                                                  count: count, width: prep.width, height: prep.height,
-                                                 aspect: aspect.ratio, resolutionTier: resolution.tier,
+                                                 aspect: aspect.ratio,
+                                                 resolutionTier: supportsResolution ? resolution.tier : nil,
                                                  onPrompt: { [weak self] id in
                 // Build the record on the main actor (only Sendable primitives cross the boundary).
                 Task { @MainActor in
@@ -1341,7 +1342,7 @@ final class Library {
     /// Creates a brand-new image from a text prompt (no source photo) — "Create with AI". Runs
     /// app-wide like Edit; kept results save into an "AI" subfolder of `folder`.
     func startAICreate(folder: URL, prompt: String, promptPrefix: String = "", count: Int, tune: Int,
-                       modelLabel: String, token: String?,
+                       modelLabel: String, token: String?, supportsResolution: Bool = true,
                        resolution: AIExtend.OutputResolution, aspect: AIExtend.OutputAspect) {
         recordAIPrompt(prompt)
         let composedPrompt = promptPrefix.isEmpty ? prompt : promptPrefix + prompt
@@ -1353,7 +1354,8 @@ final class Library {
         Task {
             let result = await AIExtend.generate(tune: tune, token: token, prompt: composedPrompt, imageData: nil,
                                                  count: count, width: nil, height: nil,
-                                                 aspect: ratio, resolutionTier: resolution.tier)
+                                                 aspect: ratio,
+                                                 resolutionTier: supportsResolution ? resolution.tier : nil)
             deliverAIResult(result, job: job, activityID: activityID, bg: bg, live: live, label: "AI create")
         }
     }

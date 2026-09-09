@@ -79,7 +79,9 @@ struct CreateTuneView: View {
                 } header: {
                     Text("Training photos — \(selected.count) selected")
                 } footer: {
-                    Text("Pick 4–20 clear photos of the same subject (varied angles/lighting, one subject per photo). Training uploads them to Astria and takes several minutes; you can keep using the app.")
+                    Text(baseModel.usesToken
+                         ? "Pick 4–20 clear photos of the same subject (varied angles/lighting, one subject per photo). All of them train the tune. Uploading takes several minutes; you can keep using the app."
+                         : "FaceID trains from only your ~3 sharpest, front-lit face photos — quality matters far more than quantity, and extra photos won't be used. To train on many photos instead, choose the Flux base above.")
                 }
             }
             .navigationTitle("Create AI Tune")

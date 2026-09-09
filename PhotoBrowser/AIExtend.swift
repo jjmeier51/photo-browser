@@ -133,19 +133,27 @@ enum AIExtend {
     /// Resolves the (model, optional tune) pair the user picked into what a prompt actually needs: the
     /// tune id to POST to, a prompt prefix (a `<lora:…>` tag when composing a tune on Flux), the
     /// tune's subject token, and a human label for metadata.
-    struct Generation: Sendable { let tuneID: Int; let promptPrefix: String; let token: String?; let label: String }
+    /// `token` carries the full trigger phrase (`<token> <class>`, e.g. `ohwx woman`) a LoRA/PTI tune
+    /// requires in the prompt. `supportsResolution` is false for any Flux base, which rejects
+    /// `prompt[resolution]` — only the newer partner models accept the size tier.
+    struct Generation: Sendable { let tuneID: Int; let promptPrefix: String; let token: String?; let label: String; let supportsResolution: Bool }
     static func resolveGeneration(model: AIModel, tune: AstriaTune?) -> Generation {
         guard let tune else {
-            return Generation(tuneID: tuneID(for: model), promptPrefix: "", token: nil, label: model.rawValue)
+            // A gallery model with no tune: only the partner models accept the resolution tier.
+            return Generation(tuneID: tuneID(for: model), promptPrefix: "", token: nil,
+                              label: model.rawValue, supportsResolution: model != .flux)
         }
-        let tk = tune.token.isEmpty ? nil : tune.token
         if model.composesLoRA {
-            // Compose the LoRA on the Flux base — this is the real "model + tune" combination.
+            // Compose the LoRA on the Flux base — the real "model + tune" combination. Flux rejects
+            // prompt[resolution], and the LoRA needs its "<token> <class>" trigger word in the text.
             return Generation(tuneID: tuneID(for: model), promptPrefix: "<lora:\(tune.id):1> ",
-                              token: tk, label: "\(model.rawValue) + \(tune.label)")
+                              token: tune.triggerPhrase, label: "\(model.rawValue) + \(tune.label)",
+                              supportsResolution: false)
         }
-        // A partner model can't run a LoRA — the tune runs on its own base instead.
-        return Generation(tuneID: tune.id, promptPrefix: "", token: tk, label: tune.label)
+        // A partner model can't run a Flux LoRA — the tune runs on its own base instead. That base
+        // accepts the resolution tier unless the tune is itself Flux (which the picker won't offer here).
+        return Generation(tuneID: tune.id, promptPrefix: "", token: tune.triggerPhrase,
+                          label: tune.label, supportsResolution: !tune.isFluxLoRA)
     }
     static func setTune(_ id: Int, for model: AIModel) {
         UserDefaults.standard.set(id > 0 ? id : model.fallbackTune, forKey: model.tuneKey)
@@ -207,8 +215,12 @@ enum AIExtend {
         guard let url = URL(string: "\(base)/tunes/\(tune)/prompts") else { return .failure(.server("Bad endpoint URL.")) }
 
         var text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let token, !token.isEmpty, !text.localizedCaseInsensitiveContains(token) {
-            text = "\(token) \(text)"          // ensure the fine-tune's subject token is present
+        // `token` is the full trigger phrase (e.g. "ohwx woman") a LoRA/PTI tune requires. Test for
+        // its distinctive first word so we prepend the phrase only when the user hasn't already typed
+        // the subject — Astria rejects the prompt outright ("must include `ohwx woman`") without it.
+        if let token, !token.isEmpty {
+            let key = token.split(separator: " ").first.map(String.init) ?? token
+            if !text.localizedCaseInsensitiveContains(key) { text = "\(token) \(text)" }
         }
         var fields: [String: String] = [
             "prompt[text]": text,
@@ -346,10 +358,36 @@ enum AIExtend {
         let modelType: String   // lora / pti / faceid / checkpoint
         let token: String       // subject word to include in prompts (e.g. ohwx)
         let ready: Bool         // finished training (trained_at present)
+        var baseTuneID: Int? = nil   // base_tune_id it was trained on (partner tunes → the partner id)
         var label: String {
             let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
             let base = t.isEmpty ? name : t
             return base.isEmpty ? "Tune \(id)" : base
+        }
+        /// A Flux LoRA — the only kind that composes onto the Flux base as `<lora:…>`.
+        var isFluxLoRA: Bool { branch == "flux1" }
+        /// The trigger phrase Astria requires in the prompt for a LoRA/PTI tune with a subject word
+        /// (e.g. `ohwx woman`). FaceID tunes have no token, so this is nil for them.
+        var triggerPhrase: String? {
+            let tok = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !tok.isEmpty else { return nil }
+            let cls = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            return cls.isEmpty ? tok : "\(tok) \(cls)"
+        }
+    }
+
+    /// The account tunes that can actually be used with `model`, so the Tune picker never offers an
+    /// impossible pair (a Flux LoRA can't run on Seedream/Nano, and vice-versa). Flux shows its
+    /// LoRAs; a partner model shows the tunes trained on that partner (matched by `base_tune_id`
+    /// when known, otherwise any non-Flux tune — those run on their own embedded base regardless of
+    /// which partner is picked, so no invalid request results).
+    static func tunes(_ all: [AstriaTune], compatibleWith model: AIModel) -> [AstriaTune] {
+        if model.composesLoRA { return all.filter { $0.isFluxLoRA } }
+        let partnerID = tuneID(for: model)
+        return all.filter { t in
+            guard !t.isFluxLoRA else { return false }          // Flux LoRAs never run on a partner base
+            if let base = t.baseTuneID { return base == partnerID }
+            return true                                         // base unknown → safe to offer
         }
     }
 
@@ -383,7 +421,8 @@ enum AIExtend {
                           branch: (t["branch"] as? String) ?? "",
                           modelType: (t["model_type"] as? String) ?? "",
                           token: (t["token"] as? String) ?? "",
-                          ready: (t["trained_at"] as? String).map { !$0.isEmpty } ?? false)
+                          ready: (t["trained_at"] as? String).map { !$0.isEmpty } ?? false,
+                          baseTuneID: intValue(t["base_tune_id"]))
     }
 
     /// The base tune a new LoRA trains on (Flux). Reuses the editable Flux tune setting.

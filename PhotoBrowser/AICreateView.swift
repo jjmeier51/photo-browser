@@ -84,7 +84,8 @@ struct AICreateView: View {
             .task {
                 tunes = await library.loadAITunes()
                 if selectedTune == nil, pendingTuneID > 0 {
-                    selectedTune = tunes.first { $0.id == pendingTuneID }   // restore the previous tune
+                    // Restore the previous tune only if it's compatible with the restored model.
+                    selectedTune = AIExtend.tunes(tunes, compatibleWith: model).first { $0.id == pendingTuneID }
                 }
             }
         }
@@ -123,9 +124,11 @@ struct AICreateView: View {
 
     /// Explains how the chosen Model + Tune combine.
     private var comboNote: String {
-        guard let t = selectedTune else { return "Pick a base model. Add one of your tunes to apply it too." }
+        guard let t = selectedTune else {
+            return "Pick a base model, and optionally one of your tunes. The Tune list only shows tunes that work with the chosen model — Flux shows your trained LoRAs, Seedream/Nano show your FaceID tunes."
+        }
         if model.composesLoRA { return "Running your tune “\(t.label)” on \(model.rawValue)." }
-        return "\(model.rawValue) can't run a tune, so “\(t.label)” runs on its own base. Pick Flux to combine them."
+        return "Using your \(model.rawValue) tune “\(t.label)”."
     }
 
     private func generate() {
@@ -138,7 +141,7 @@ struct AICreateView: View {
         let gen = AIExtend.resolveGeneration(model: model, tune: selectedTune)
         library.startAICreate(folder: folder, prompt: prompt, promptPrefix: gen.promptPrefix, count: count,
                               tune: gen.tuneID, modelLabel: gen.label, token: gen.token,
-                              resolution: resolution, aspect: aspect)
+                              supportsResolution: gen.supportsResolution, resolution: resolution, aspect: aspect)
         dismiss()
     }
 }
