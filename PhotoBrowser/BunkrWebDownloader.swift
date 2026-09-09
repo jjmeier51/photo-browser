@@ -34,40 +34,61 @@ enum BunkrWebDownloader {
         async -> (downloaded: Int, failed: Int, statuses: [Int: Int], debug: String) {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         pageDebug = ""; respDebug = ""
-        var downloaded = 0, failed = 0, statuses: [Int: Int] = [:]
-        var done = 0
+        var downloaded = 0, statuses: [Int: Int] = [:]
+        var completed = 0                 // files that reached a terminal state (saved or permanently failed)
         let maxConcurrent = 4
 
         // Unlock step: present a VISIBLE browser at the ALBUM page. The user browses it
         // like Safari (tap a video → its page → Download), building a real interactive
         // session inside our WebView. We save whatever they download, and the session/CDN
         // cookie it establishes then lets the rest download automatically.
-        let pool = items
         if let album = albumURL {
             await log?.log("unlock: presenting album browser — download a file manually to unlock…")
             let saved = await BunkrLiveBrowser().browse(albumURL: album, into: folder, log: log)
             downloaded += saved
             let cdn = await BunkrWebSupport.cookieCount("cdn")
-            await log?.log("after manual browse: saved \(saved) manually; cdn cookies:\(cdn); now auto-downloading \(pool.count)")
+            await log?.log("after manual browse: saved \(saved) manually; cdn cookies:\(cdn); now auto-downloading \(items.count)")
         }
 
-        await withTaskGroup(of: Int.self) { group in
-            var idx = 0
-            func addNext() {
-                guard idx < pool.count else { return }
-                let item = pool[idx]; let verbose = idx == 0; idx += 1
-                // The first auto file logs its full navigation sequence, so we can see whether
-                // the CDN cookie the tap set now lets the priming/download proceed.
-                group.addTask { @MainActor in await BunkrWebJob().run(item, into: folder, log: log, verbose: verbose) }
+        // A file that fails with a transient CDN/origin status (522 & the other Cloudflare 52x,
+        // a 5xx, a rate-limit, a hub/button timeout, or a mid-transfer download error) is often
+        // just a momentary origin blip on these hosts — so retry those across a few passes with a
+        // short pause between. Non-transient failures (403 fingerprint block, 409 challenge HTML,
+        // 404 no URL, 411 empty/placeholder) won't improve on retry, so they're terminal at once.
+        func retryable(_ s: Int) -> Bool { s == 408 || s == 410 || LinkDownloadService.isTransient(s) }
+        var pending = items
+        for pass in 0..<3 {               // initial attempt + up to 2 retries
+            if pass > 0 {
+                await log?.log("bunkr: retry pass \(pass) — \(pending.count) transient failure(s)")
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
             }
-            for _ in 0..<min(maxConcurrent, pool.count) { addNext() }
-            while let status = await group.next() {
-                done += 1
-                if status == 0 { downloaded += 1 } else { failed += 1; statuses[status, default: 0] += 1 }
-                onProgress(done)
-                addNext()
+            var nextPending: [LinkDownloadService.MediaItem] = []
+            await withTaskGroup(of: (LinkDownloadService.MediaItem, Int).self) { group in
+                var idx = 0
+                func addNext() {
+                    guard idx < pending.count else { return }
+                    let item = pending[idx]; let verbose = (pass == 0 && idx == 0); idx += 1
+                    // The first auto file logs its full navigation sequence, so we can see whether
+                    // the CDN cookie the tap set now lets the priming/download proceed.
+                    group.addTask { @MainActor in (item, await BunkrWebJob().run(item, into: folder, log: log, verbose: verbose)) }
+                }
+                for _ in 0..<min(maxConcurrent, pending.count) { addNext() }
+                while let (item, status) = await group.next() {
+                    if status == 0 {
+                        downloaded += 1; completed += 1
+                    } else if retryable(status), pass < 2 {
+                        nextPending.append(item)                       // not terminal yet — retry next pass
+                    } else {
+                        completed += 1; statuses[status, default: 0] += 1   // permanent failure
+                    }
+                    onProgress(completed)
+                    addNext()
+                }
             }
+            pending = nextPending
+            if pending.isEmpty { break }
         }
+        let failed = statuses.values.reduce(0, +)
         let debug = [pageDebug, respDebug].filter { !$0.isEmpty }.joined(separator: "; ")
         return (downloaded, failed, statuses, debug)
     }

@@ -44,10 +44,24 @@ enum LinkDownloadService {
 
     nonisolated static let userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-    /// TEMPORARY: caps how many bunkr files the WebKit path attempts, so diagnosing its
-    /// protection takes seconds instead of ~20 min. Raise to a large number (e.g. 10000)
-    /// once bunkr downloads work, to restore whole-album downloads.
-    nonisolated static let bunkrTestCap = 3
+    /// Cap on how many bunkr files the WebKit path attempts in one run. Effectively unlimited
+    /// (whole albums download) — kept as a knob to shorten a diagnostic run if the CDN regresses.
+    nonisolated static let bunkrTestCap = 10000
+
+    /// bunkr and its forks/mirrors share the same album-page shape, DDoS-Guarded CDN, and
+    /// just-in-time *armed* file URLs, so they all take the bunkr resolver + WebKit download
+    /// path. `simp*.cuckcapital.cr` and `goonbox.cr` are bunkr-family CDN hosts.
+    nonisolated static func isBunkrFamily(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return h.contains("bunkr") || h.contains("turbo.") || h.contains("goonbox") || h.contains("cuckcapital")
+    }
+
+    /// Cloudflare/origin errors that are worth retrying: request timeout, too-early, rate-limit,
+    /// the 5xx family, and the Cloudflare origin-reachability codes (520–524, of which 522 —
+    /// "origin connection timed out" — is what these bunkr-family hosts throw in waves).
+    nonisolated static func isTransient(_ code: Int) -> Bool {
+        code == 408 || code == 425 || code == 429 || (500...504).contains(code) || (520...524).contains(code)
+    }
 
     nonisolated static let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
@@ -113,7 +127,10 @@ enum LinkDownloadService {
         } else {
         await withTaskGroup(of: Int.self) { group in
             var active = 0
-            let maxConcurrent = 12          // streams straight to disk — as wide as OF
+            // Clean APIs (pixeldrain/gofile) take a wide fan-out; scrape/generic hosts are more
+            // 522-prone, so hit them gently — a narrower pool on a struggling origin causes far
+            // fewer origin-timeouts than hammering it 12-wide.
+            let maxConcurrent = (host.contains("pixeldrain") || host.contains("gofile")) ? 12 : 6
             var done = 0
             func tally(_ status: Int) {
                 done += 1
@@ -167,9 +184,17 @@ enum LinkDownloadService {
     /// can report *why* a download failed.
     nonisolated private static func downloadOne(_ item: MediaItem, into folder: URL, log: DownloadLog? = nil) async -> Int {
         let dest = uniqueDestination(sanitize(item.filename), in: folder)
+        let maxAttempts = 5
         var last = -1
-        for attempt in 0..<3 {
-            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000) }
+        var nextDelay = 0.0        // seconds to wait before the next attempt (backoff / Retry-After)
+        for attempt in 0..<maxAttempts {
+            if attempt > 0, nextDelay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(nextDelay * 1_000_000_000))
+            }
+            // Default backoff for the *next* try: exponential (2,4,8,16s) with jitter, capped. A 522
+            // wave on these origins usually clears within a few seconds — often on a recovered CDN
+            // node or a freshly-armed URL — so a patient retry recovers most of them.
+            nextDelay = min(20.0, pow(2.0, Double(attempt + 1))) + Double.random(in: 0...0.75)
             // Resolve the URL fresh per attempt when a just-in-time resolver is set (bunkr
             // arms short-lived CDN URLs) — a stale/absent URL is a resolve failure, retry.
             let urlString: String
@@ -199,8 +224,17 @@ enum LinkDownloadService {
             guard let (tmp, resp) = try? await session.download(for: req) else {
                 last = -1; await log?.log("• \(item.filename): network error (attempt \(attempt + 1)) \(url.host ?? "")"); continue
             }
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
-            if code == 429 || code >= 500 { last = code; await log?.log("• \(item.filename): HTTP \(code) (attempt \(attempt + 1)), retrying"); continue }
+            let http = resp as? HTTPURLResponse
+            let code = http?.statusCode ?? 200
+            if isTransient(code) {
+                last = code
+                // Honor a numeric Retry-After (429/503 often send one) over the default backoff.
+                if let ra = http?.value(forHTTPHeaderField: "Retry-After").flatMap({ Double($0) }) {
+                    nextDelay = min(30.0, ra)
+                }
+                await log?.log("• \(item.filename): HTTP \(code) (attempt \(attempt + 1)/\(maxAttempts)), retry in \(String(format: "%.1f", nextDelay))s")
+                continue
+            }
             if code >= 400 { await log?.log("• \(item.filename): HTTP \(code) — giving up. url \(urlString.prefix(120))"); return code }
             do {
                 // Commit through the serialized drive writer so concurrent downloads never
@@ -213,7 +247,7 @@ enum LinkDownloadService {
                 return -2
             } catch { await log?.log("• \(item.filename): couldn’t write to drive — \(error.localizedDescription)"); return -4 }
         }
-        await log?.log("• \(item.filename): failed after 3 attempts (last \(last))")
+        await log?.log("• \(item.filename): failed after \(maxAttempts) attempts (last \(last))")
         return last
     }
 
@@ -229,7 +263,7 @@ enum LinkDownloadService {
         if host.contains("pixeldrain")                                   { return await pixeldrain(url) }
         if host.contains("gofile")                                       { return await gofile(url, log: log) }
         if host.contains("cyberdrop")                                    { return await cyberdrop(url, host: host) }
-        if host.contains("bunkr") || host.contains("turbo.") || host.contains("goonbox") { return await bunkr(url, log: log) }
+        if isBunkrFamily(host)                                           { return await bunkr(url, log: log) }
         if host.contains("pixl.")                                        { return await chevereto(url) }
         return await generic(url)     // cyberfile.me, filester.gg, or any unrecognized host
     }
