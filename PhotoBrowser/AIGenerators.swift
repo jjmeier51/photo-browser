@@ -72,6 +72,10 @@ enum TuneBaseModel: String, CaseIterable, Identifiable, Sendable {
     }
     /// FaceID tunes don't use a subject token; the others do.
     var usesToken: Bool { modelType != "faceid" }
+    /// Fewest training photos the Train button requires. FaceID only builds an embedding from a
+    /// few faces (Astria uses ~3), so requiring 4 made no sense for it; a real fine-tune (LoRA/PTI)
+    /// still wants at least a handful.
+    var minPhotos: Int { modelType == "faceid" ? 3 : 4 }
     var note: String {
         switch self {
         case .nanoBanana2:   return "Nano Banana 2 — FaceID: builds a face adapter from only your ~3 sharpest photos (extra photos aren't used for training), then generates on Nano Banana 2."

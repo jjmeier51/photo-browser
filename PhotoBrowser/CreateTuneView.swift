@@ -21,7 +21,7 @@ struct CreateTuneView: View {
     private let columns = [GridItem(.adaptive(minimum: 84), spacing: 6)]
 
     private var canCreate: Bool {
-        selected.count >= 4 && !subject.trimmingCharacters(in: .whitespaces).isEmpty && !library.creatingTune
+        selected.count >= baseModel.minPhotos && !subject.trimmingCharacters(in: .whitespaces).isEmpty && !library.creatingTune
     }
 
     var body: some View {
