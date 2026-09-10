@@ -3353,12 +3353,30 @@ final class Library {
 
     nonisolated static func scanSubfolders(of folder: URL) async -> [Entry] {
         await Task.detached(priority: .userInitiated) {
-            let urls = (try? FileManager.default.contentsOfDirectory(
-                at: folder, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+            let urls = coordinatedContents(of: folder, keys: [.isDirectoryKey])
             return urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
                 .map { Entry(url: $0, name: $0.lastPathComponent, kind: .folder, size: 0, modified: .distantPast) }
                 .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         }.value
+    }
+
+    /// Lists a directory's immediate contents **through `NSFileCoordinator`**. On an exFAT /
+    /// external drive surfaced by iOS's file provider, an uncoordinated `contentsOfDirectory`
+    /// can return the provider's *stale* cached enumeration — so folders another app (e.g.
+    /// Finder copying from the Mac) added to the volume sometimes never appear in the grid.
+    /// A coordinated read makes the system reconcile those outside changes before enumerating.
+    /// Falls back to a direct read if coordination is unavailable (never worse than before).
+    nonisolated static func coordinatedContents(of folder: URL, keys: [URLResourceKey]) -> [URL] {
+        let fm = FileManager.default
+        func direct() -> [URL] {
+            (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
+        }
+        var result: [URL] = []
+        var coordErr: NSError?
+        NSFileCoordinator().coordinate(readingItemAt: folder, options: [], error: &coordErr) { u in
+            result = (try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
+        }
+        return coordErr == nil ? result : direct()
     }
 
     nonisolated func listing(of folder: URL, sort: SortKey) async -> [Entry] {
@@ -3368,8 +3386,15 @@ final class Library {
         // SSD it's neutral. The directory read itself stays on a detached task.
         let urls: [URL] = await Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
-            let all = (try? fm.contentsOfDirectory(
-                at: folder, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? []
+            // Coordinated read so folders added on the exFAT/external drive by another app are
+            // reconciled before enumeration (see `coordinatedContents`). Retry once if the drive
+            // hands back nothing while the folder plainly exists — the provider can still be
+            // materializing right after a remount, which is the intermittent "empty grid" case.
+            var all = Self.coordinatedContents(of: folder, keys: [.contentModificationDateKey])
+            if all.isEmpty, fm.fileExists(atPath: folder.path) {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                all = Self.coordinatedContents(of: folder, keys: [.contentModificationDateKey])
+            }
             // The Files / exFAT file-provider often ignores `.skipsHiddenFiles`, so dot-files leak
             // into the grid: our own `.pbtmp_*` transients, and macOS's `.sb-*` atomic-write temps.
             // Hide every dot-file — and sweep away STALE `.sb-*` orphans (a brown-out interrupted the
