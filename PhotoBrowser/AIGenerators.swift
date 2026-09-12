@@ -5,31 +5,82 @@ import SwiftUI
 /// model+tune combination); a partner model can't run a LoRA, so a selected tune runs on its own base.
 struct AIModelTunePicker: View {
     @Binding var model: AIExtend.AIModel
-    @Binding var tune: AIExtend.AstriaTune?     // nil = None
-    let tunes: [AIExtend.AstriaTune]
+    @Binding var tunes: [AIExtend.AstriaTune]   // selected tunes (0…maxTunes), layering order preserved
+    let allTunes: [AIExtend.AstriaTune]
 
     /// Only the tunes that can actually run on the chosen model — a Flux LoRA can't run on a partner
     /// model and vice-versa, so filtering here keeps the user from ever building an impossible pair.
-    private var compatible: [AIExtend.AstriaTune] { AIExtend.tunes(tunes, compatibleWith: model) }
+    private var compatible: [AIExtend.AstriaTune] { AIExtend.tunes(allTunes, compatibleWith: model) }
 
     var body: some View {
         Picker("Model", selection: $model) {
             ForEach(AIExtend.AIModel.allCases) { Text($0.rawValue).tag($0) }
         }
         .pickerStyle(.menu)
-        Picker("Tune", selection: $tune) {
-            Text("None").tag(AIExtend.AstriaTune?.none)
-            ForEach(compatible) { t in
-                Text(t.ready ? t.label : "\(t.label) (training…)").tag(AIExtend.AstriaTune?.some(t))
+        .onChange(of: model) { _, _ in
+            // Switching to a model the selected tunes can't run on drops the incompatible ones, so an
+            // impossible combination (and its cryptic Astria error) can never be submitted.
+            tunes = tunes.filter { t in compatible.contains { $0.id == t.id } }
+        }
+        NavigationLink {
+            TuneMultiSelectView(selected: $tunes, options: compatible)
+        } label: {
+            HStack {
+                Text("Tunes")
+                Spacer()
+                Text(summary).foregroundStyle(.secondary)
             }
         }
-        .pickerStyle(.menu)
         .disabled(compatible.isEmpty)
-        .onChange(of: model) { _, _ in
-            // Switching to a model the selected tune can't run on clears it, so the impossible pair
-            // (and its cryptic Astria error) can never be submitted.
-            if let t = tune, !compatible.contains(where: { $0.id == t.id }) { tune = nil }
+    }
+
+    private var summary: String {
+        switch tunes.count {
+        case 0: return "None"
+        case 1: return tunes[0].label
+        default: return "\(tunes.count) selected"
         }
+    }
+}
+
+/// Multi-select list of the tunes compatible with the chosen model. Tapping toggles membership
+/// (up to `AIExtend.maxTunes`); the selection order is the layering order used in the prompt.
+struct TuneMultiSelectView: View {
+    @Binding var selected: [AIExtend.AstriaTune]
+    let options: [AIExtend.AstriaTune]
+
+    private func isSelected(_ t: AIExtend.AstriaTune) -> Bool { selected.contains { $0.id == t.id } }
+    private func toggle(_ t: AIExtend.AstriaTune) {
+        if let i = selected.firstIndex(where: { $0.id == t.id }) { selected.remove(at: i) }
+        else if selected.count < AIExtend.maxTunes { selected.append(t) }
+    }
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(options) { t in
+                    Button { toggle(t) } label: {
+                        HStack {
+                            Text(t.ready ? t.label : "\(t.label) (training…)")
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            if let n = selected.firstIndex(where: { $0.id == t.id }) {
+                                // Show the layering order (1-based) next to the check.
+                                Text("\(n + 1)").foregroundStyle(.secondary)
+                                Image(systemName: "checkmark").foregroundStyle(.tint)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!isSelected(t) && selected.count >= AIExtend.maxTunes)
+                }
+            } footer: {
+                Text("Combine up to \(AIExtend.maxTunes) tunes in one generation. On Flux they stack as LoRAs; on Seedream/Nano as FaceIDs. Fewer, complementary tunes (e.g. a subject + a style) work best — many of the same subject can dilute the likeness.")
+            }
+        }
+        .navigationTitle("Tunes — \(selected.count) selected")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

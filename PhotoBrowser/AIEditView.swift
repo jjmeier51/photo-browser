@@ -13,8 +13,8 @@ struct AIEditView: View {
     @State private var prompt: String
     @State private var count: Int
     @State private var model: AIExtend.AIModel
-    @State private var selectedTune: AIExtend.AstriaTune? = nil
-    @State private var pendingTuneID: Int          // resolved to `selectedTune` once tunes load
+    @State private var selectedTunes: [AIExtend.AstriaTune] = []
+    @State private var pendingTuneIDs: [Int]       // resolved to `selectedTunes` once tunes load
     @State private var tunes: [AIExtend.AstriaTune] = []
     @State private var resolution: AIExtend.OutputResolution
     @State private var aspect: AIExtend.OutputAspect
@@ -30,7 +30,7 @@ struct AIEditView: View {
         _prompt = State(initialValue: s.prompt)
         _count = State(initialValue: [1, 2, 3, 4, 8].contains(s.count) ? s.count : 1)
         _model = State(initialValue: AIExtend.AIModel(rawValue: s.model) ?? AIExtend.defaultModel)
-        _pendingTuneID = State(initialValue: s.tuneID)
+        _pendingTuneIDs = State(initialValue: s.tuneIDs)
         _resolution = State(initialValue: AIExtend.OutputResolution(rawValue: s.resolution) ?? .k2)
         _aspect = State(initialValue: AIExtend.OutputAspect(rawValue: s.aspect) ?? .original)
     }
@@ -44,9 +44,9 @@ struct AIEditView: View {
                 }
                 if !library.aiPromptHistory.isEmpty { promptHistorySection }
                 Section {
-                    AIModelTunePicker(model: $model, tune: $selectedTune, tunes: tunes)
+                    AIModelTunePicker(model: $model, tunes: $selectedTunes, allTunes: tunes)
                 } header: {
-                    Text("Model & Tune")
+                    Text("Model & Tunes")
                 } footer: {
                     Text(comboNote)
                 }
@@ -80,9 +80,10 @@ struct AIEditView: View {
             .sheet(isPresented: $showSettings) { SettingsView() }
             .task {
                 tunes = await library.loadAITunes()
-                if selectedTune == nil, pendingTuneID > 0 {
-                    // Restore the previous tune only if it's compatible with the restored model.
-                    selectedTune = AIExtend.tunes(tunes, compatibleWith: model).first { $0.id == pendingTuneID }
+                if selectedTunes.isEmpty, !pendingTuneIDs.isEmpty {
+                    // Restore the previous tunes (in saved order), keeping only those still compatible.
+                    let compatible = AIExtend.tunes(tunes, compatibleWith: model)
+                    selectedTunes = pendingTuneIDs.compactMap { id in compatible.first { $0.id == id } }
                 }
             }
         }
@@ -123,11 +124,15 @@ struct AIEditView: View {
 
     /// Explains how the chosen Model + Tune combine (they run differently on Flux vs a partner model).
     private var comboNote: String {
-        guard let t = selectedTune else {
-            return "Pick a base model, and optionally one of your tunes. The Tune list only shows tunes that work with the chosen model — Flux shows your trained LoRAs, Seedream/Nano show your FaceID tunes."
+        switch selectedTunes.count {
+        case 0:
+            return "Pick a base model, and optionally one or more of your tunes. The Tunes list only shows tunes that work with the chosen model — Flux shows your trained LoRAs, Seedream/Nano show your FaceID tunes."
+        case 1:
+            let t = selectedTunes[0]
+            return model.composesLoRA ? "Running your tune “\(t.label)” on \(model.rawValue)." : "Using your \(model.rawValue) tune “\(t.label)”."
+        default:
+            return "Combining \(selectedTunes.count) tunes on \(model.rawValue)\(model.composesLoRA ? " (stacked as LoRAs)" : " (stacked as FaceIDs)")."
         }
-        if model.composesLoRA { return "Running your tune “\(t.label)” on \(model.rawValue)." }
-        return "Using your \(model.rawValue) tune “\(t.label)”."
     }
 
     /// Kicks off generation app-wide (it keeps running while you browse) and closes this sheet.
@@ -135,10 +140,10 @@ struct AIEditView: View {
         guard AIExtend.isConfigured else { showSettings = true; return }
         // Remember these settings so the sheet reopens pre-filled the same way after review.
         AIExtend.saveRunSettings(AIExtend.RunSettings(prompt: prompt, model: model.rawValue,
-                                                      tuneID: selectedTune?.id ?? 0,
+                                                      tuneIDs: selectedTunes.map(\.id),
                                                       resolution: resolution.rawValue,
                                                       aspect: aspect.rawValue, count: count), create: false)
-        let gen = AIExtend.resolveGeneration(model: model, tune: selectedTune)
+        let gen = AIExtend.resolveGeneration(model: model, tunes: selectedTunes)
         library.startAIEdit(entry: entry, prompt: prompt, promptPrefix: gen.promptPrefix, count: count,
                             tune: gen.tuneID, modelLabel: gen.label, token: gen.token,
                             supportsResolution: gen.supportsResolution, resolution: resolution, aspect: aspect)

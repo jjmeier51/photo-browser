@@ -137,12 +137,41 @@ enum AIExtend {
     /// requires in the prompt. `supportsResolution` is false for any Flux base, which rejects
     /// `prompt[resolution]` — only the newer partner models accept the size tier.
     struct Generation: Sendable { let tuneID: Int; let promptPrefix: String; let token: String?; let label: String; let supportsResolution: Bool }
-    static func resolveGeneration(model: AIModel, tune: AstriaTune?) -> Generation {
-        guard let tune else {
+
+    /// Most tunes that can be combined into one generation.
+    static let maxTunes = 10
+
+    /// Resolves the picked model + selected tunes (0…`maxTunes`) into what a prompt needs. A single
+    /// tune keeps the original behaviour; multiple tunes are **stacked** into the prompt — several
+    /// `<lora:…>` tags on the Flux base, or several `<faceid:…>` tags on a partner gallery model —
+    /// which is Astria's documented way to compose more than one fine-tune in one image.
+    static func resolveGeneration(model: AIModel, tunes: [AstriaTune]) -> Generation {
+        let picked = Array(tunes.prefix(maxTunes))
+        guard !picked.isEmpty else {
             // A gallery model with no tune: only the partner models accept the resolution tier.
             return Generation(tuneID: tuneID(for: model), promptPrefix: "", token: nil,
                               label: model.rawValue, supportsResolution: model != .flux)
         }
+        if picked.count == 1 { return resolveSingle(model: model, tune: picked[0]) }
+
+        if model.composesLoRA {
+            // Flux: POST to the Flux base and stack every selected tune as a LoRA, naming each
+            // subject by its trigger phrase so it's summoned. Flux rejects prompt[resolution].
+            let tags = picked.map { "<lora:\($0.id):1>" }.joined()
+            let triggers = picked.compactMap { $0.triggerPhrase }.joined(separator: ", ")
+            let prefix = triggers.isEmpty ? "\(tags) " : "\(tags) \(triggers), "
+            return Generation(tuneID: tuneID(for: model), promptPrefix: prefix, token: nil,
+                              label: "\(model.rawValue) + \(picked.count) tunes", supportsResolution: false)
+        }
+        // Partner model (FaceID tunes): POST to the partner gallery model and compose each selected
+        // tune as a `<faceid:…>` — the partner base accepts the resolution tier.
+        let tags = picked.map { "<faceid:\($0.id):1>" }.joined()
+        return Generation(tuneID: tuneID(for: model), promptPrefix: "\(tags) ", token: nil,
+                          label: "\(model.rawValue) + \(picked.count) tunes", supportsResolution: true)
+    }
+
+    /// One model + one tune — the common case, kept exactly as before.
+    private static func resolveSingle(model: AIModel, tune: AstriaTune) -> Generation {
         if model.composesLoRA {
             // Compose the LoRA on the Flux base — the real "model + tune" combination. Flux rejects
             // prompt[resolution], and the LoRA needs its "<token> <class>" trigger word in the text.
@@ -174,10 +203,38 @@ enum AIExtend {
     struct RunSettings: Codable, Sendable {
         var prompt = ""
         var model = ""            // AIModel rawValue
-        var tuneID = 0            // selected account tune id, 0 = None
+        var tuneIDs: [Int] = []   // selected account tune ids (empty = None)
         var resolution = OutputResolution.k2.rawValue
         var aspect = OutputAspect.original.rawValue
         var count = 1
+
+        init() {}
+        init(prompt: String, model: String, tuneIDs: [Int], resolution: String, aspect: String, count: Int) {
+            self.prompt = prompt; self.model = model; self.tuneIDs = tuneIDs
+            self.resolution = resolution; self.aspect = aspect; self.count = count
+        }
+        // Lenient decoding so an older saved blob (a single `tuneID`, or any missing key) still
+        // restores the rest of the settings instead of resetting them all.
+        enum CodingKeys: String, CodingKey { case prompt, model, tuneIDs, tuneID, resolution, aspect, count }
+        init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            prompt = (try? c.decode(String.self, forKey: .prompt)) ?? ""
+            model = (try? c.decode(String.self, forKey: .model)) ?? ""
+            if let ids = try? c.decode([Int].self, forKey: .tuneIDs) { tuneIDs = ids }
+            else if let one = try? c.decode(Int.self, forKey: .tuneID), one > 0 { tuneIDs = [one] }
+            resolution = (try? c.decode(String.self, forKey: .resolution)) ?? OutputResolution.k2.rawValue
+            aspect = (try? c.decode(String.self, forKey: .aspect)) ?? OutputAspect.original.rawValue
+            count = (try? c.decode(Int.self, forKey: .count)) ?? 1
+        }
+        func encode(to e: Encoder) throws {
+            var c = e.container(keyedBy: CodingKeys.self)
+            try c.encode(prompt, forKey: .prompt)
+            try c.encode(model, forKey: .model)
+            try c.encode(tuneIDs, forKey: .tuneIDs)
+            try c.encode(resolution, forKey: .resolution)
+            try c.encode(aspect, forKey: .aspect)
+            try c.encode(count, forKey: .count)
+        }
     }
     private static func runSettingsKey(create: Bool) -> String {
         create ? "photoBrowser.aiRun.create" : "photoBrowser.aiRun.edit"
