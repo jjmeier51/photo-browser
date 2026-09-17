@@ -83,10 +83,16 @@ struct AICreateView: View {
             .sheet(isPresented: $showSettings) { SettingsView() }
             .task {
                 tunes = await library.loadAITunes()
-                if selectedTunes.isEmpty, !pendingTuneIDs.isEmpty {
+                if !pendingTuneIDs.isEmpty {
                     // Restore the previous tunes (in saved order), keeping only those still compatible.
-                    let compatible = AIExtend.tunes(tunes, compatibleWith: model)
-                    selectedTunes = pendingTuneIDs.compactMap { id in compatible.first { $0.id == id } }
+                    // Then clear pendingTuneIDs so this is a TRUE one-shot: `.task` re-runs when we
+                    // return from the tune picker, and without clearing it would re-restore the old
+                    // selection and clobber a deliberate clear-to-none.
+                    if selectedTunes.isEmpty {
+                        let compatible = AIExtend.tunes(tunes, compatibleWith: model)
+                        selectedTunes = pendingTuneIDs.compactMap { id in compatible.first { $0.id == id } }
+                    }
+                    pendingTuneIDs = []
                 }
             }
         }
