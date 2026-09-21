@@ -131,9 +131,10 @@ struct DriveHealthView: View {
                     issues.append(DriveIssue(url: dir, kind: .unreadableFolder, detail: error))
                     continue
                 }
+                let statKeys = Set(keys)
                 for u in kids {
-                    var rv = try? u.resourceValues(forKeys: keys)
-                    if rv == nil { rv = try? u.resourceValues(forKeys: keys) }   // one retry before judging
+                    var rv = try? u.resourceValues(forKeys: statKeys)
+                    if rv == nil { rv = try? u.resourceValues(forKeys: statKeys) }   // one retry before judging
                     if rv?.isDirectory == true {
                         stack.append(u)
                     } else if rv == nil {
