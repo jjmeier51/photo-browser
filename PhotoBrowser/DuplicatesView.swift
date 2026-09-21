@@ -43,7 +43,7 @@ struct DuplicatesView: View {
                     }
                 } else if groups.isEmpty {
                     ContentUnavailableView("No Duplicates", systemImage: "checkmark.circle",
-                        description: Text("No files in this folder share the same size & dimensions or a similar name."))
+                        description: Text("No files here share the same size & dimensions, look visually alike, or share a copy-style name."))
                 } else {
                     VStack(spacing: 0) {
                         Picker("Filter", selection: $exactOnly) {
@@ -67,7 +67,7 @@ struct DuplicatesView: View {
                             } footer: {
                                 Text(exactOnly
                                      ? "Exact matches share identical size and pixel dimensions — almost always true duplicates."
-                                     : "“Exact” groups share identical size & dimensions; “Similar name” groups share a copy-style name (like “name (1)”). Tap to compare, or select groups and mark them Not Duplicates.")
+                                     : "“Exact” = identical size & dimensions; “Visually similar” = the same picture re-encoded/resized/lightly edited; “Similar name” = a copy-style name (like “name (1)”). Tap to compare and delete, or select groups and mark them Not Duplicates.")
                             }
                         }
                     }
@@ -132,26 +132,68 @@ struct DuplicatesView: View {
 
         var result: [DuplicateGroup] = []
         var seenSets = Set<Set<String>>()
-        func addGroup(_ indices: [Int], kind: DuplicateMatchKind) {
-            guard indices.count > 1 else { return }
-            let paths = indices.map { media[$0].url.path }
+        func addEntries(_ groupEntries: [Entry], kind: DuplicateMatchKind) {
+            guard groupEntries.count > 1 else { return }
+            let paths = groupEntries.map { $0.url.path }
             if allPairsDismissed(paths) { return }                       // user already confirmed not-dupes
-            guard seenSets.insert(Set(paths)).inserted else { return }   // same set already added (prefer Exact)
-            let entries = indices.map { media[$0] }
-                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            guard seenSets.insert(Set(paths)).inserted else { return }   // same set already added (prefer stronger kind)
+            let entries = groupEntries.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             let rep = entries.max { $0.size < $1.size } ?? entries[0]
             let spec = specs[rep.url] ?? MediaSpec()
             result.append(DuplicateGroup(entries: entries, size: rep.size,
                                          longSide: spec.longSide, pixels: spec.pixels, matchKind: kind))
         }
-        for g in bySizeDims.values { addGroup(g, kind: .exact) }         // exact first, so it wins a dedupe tie
-        for g in byName.values { addGroup(g, kind: .name) }
+        for g in bySizeDims.values { addEntries(g.map { media[$0] }, kind: .exact) }   // exact wins a dedupe tie
 
-        // Exact matches first, then biggest payoff.
+        // Visually-similar images (perceptual dHash), clustered by Hamming distance. Images only —
+        // videos can't be perceptually hashed here. Added AFTER exact so an identical set that also
+        // hashes alike stays labelled "exact"; the looser name grouping is added last.
+        for g in await similarGroups(among: media) { addEntries(g, kind: .similar) }
+        for g in byName.values { addEntries(g.map { media[$0] }, kind: .name) }
+
+        // Strongest kind first (exact → similar → name), then biggest payoff.
         groups = result.sorted {
-            $0.matchKind != $1.matchKind ? $0.matchKind == .exact : $0.size > $1.size
+            $0.matchKind.rank != $1.matchKind.rank ? $0.matchKind.rank < $1.matchKind.rank : $0.size > $1.size
         }
         scanning = false
+    }
+
+    /// Clusters images that look the same via a perceptual dHash (Hamming distance ≤ threshold),
+    /// using union-find so a run of near-identical shots forms one group. Hashing decodes each image
+    /// once at a tiny size, off the main actor with bounded concurrency, so a big folder stays smooth.
+    private func similarGroups(among media: [Entry]) async -> [[Entry]] {
+        let images = media.filter { $0.kind == .image }
+        guard images.count > 1 else { return [] }
+        // Hash AND cluster off the main actor — the O(n²) pairwise compare would hitch the UI on a
+        // big folder if it ran on the main thread.
+        return await Task.detached(priority: .userInitiated) {
+            var hashes = [UInt64?](repeating: nil, count: images.count)
+            await withTaskGroup(of: (Int, UInt64?).self) { group in
+                var idx = 0
+                let maxConcurrent = 8
+                func addNext() {
+                    guard idx < images.count else { return }
+                    let i = idx; let url = images[i].url; idx += 1
+                    group.addTask { (i, PerceptualHash.dHash(url)) }
+                }
+                for _ in 0..<min(maxConcurrent, images.count) { addNext() }
+                while let (i, h) = await group.next() { hashes[i] = h; addNext() }
+            }
+            // Union-find over all pairs within a tight Hamming threshold.
+            var parent = Array(images.indices)
+            func find(_ x: Int) -> Int { var r = x; while parent[r] != r { parent[r] = parent[parent[r]]; r = parent[r] }; return r }
+            let threshold = 10
+            for i in images.indices {
+                guard let hi = hashes[i] else { continue }
+                for j in (i + 1)..<images.count {
+                    guard let hj = hashes[j] else { continue }
+                    if PerceptualHash.distance(hi, hj) <= threshold { parent[find(i)] = find(j) }
+                }
+            }
+            var clusters: [Int: [Entry]] = [:]
+            for i in images.indices where hashes[i] != nil { clusters[find(i), default: []].append(images[i]) }
+            return clusters.values.filter { $0.count > 1 }
+        }.value
     }
 
     /// True only if every pair among `paths` was marked Not Duplicates.
@@ -189,8 +231,12 @@ struct DuplicatesView: View {
 }
 
 /// Why a group was formed: identical size **and** pixel dimensions (a near-certain
-/// duplicate), or just a similar/copy name (a weaker signal).
-enum DuplicateMatchKind { case exact, name }
+/// duplicate), a **visually** matching picture (perceptual hash — catches re-encodes,
+/// resizes and light edits), or just a similar/copy name (a weaker signal).
+enum DuplicateMatchKind { case exact, similar, name
+    /// Sort/display rank: exact first, then visual, then name-only.
+    var rank: Int { switch self { case .exact: return 0; case .similar: return 1; case .name: return 2 } }
+}
 
 /// A set of files in one folder that share size + dimensions, or a similar (copy) name.
 struct DuplicateGroup: Identifiable {
@@ -206,6 +252,23 @@ struct DuplicateGroup: Identifiable {
         guard longSide > 0 else { return "—" }
         return "\(longSide) × \(pixels / longSide)"
     }
+
+    var kindNoun: String {
+        switch matchKind { case .exact: return "exact"; case .similar: return "visually similar"; case .name: return "similarly-named" }
+    }
+    var kindLabel: String {
+        switch matchKind {
+        case .exact: return "Exact match (size & dimensions)"
+        case .similar: return "Visually similar (same picture)"
+        case .name: return "Similar name"
+        }
+    }
+    var kindIcon: String {
+        switch matchKind { case .exact: return "checkmark.seal.fill"; case .similar: return "photo.on.rectangle.angled"; case .name: return "textformat.abc" }
+    }
+    var kindColor: Color {
+        switch matchKind { case .exact: return .green; case .similar: return .blue; case .name: return .orange }
+    }
 }
 
 /// One row in the duplicate-groups list: a couple of thumbnails plus a summary.
@@ -217,14 +280,13 @@ private struct DuplicateGroupRow: View {
                 ForEach(group.entries.prefix(2)) { DuplicateThumb(entry: $0, side: 52) }
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text("\(group.entries.count) \(group.matchKind == .exact ? "exact" : "similarly-named") files")
+                Text("\(group.entries.count) \(group.kindNoun) files")
                     .font(.subheadline.weight(.medium))
                 Text("\(group.size.sizeString) · \(group.dimensionLabel)")
                     .font(.caption).foregroundStyle(.secondary)
-                Label(group.matchKind == .exact ? "Exact match (size & dimensions)" : "Similar name",
-                      systemImage: group.matchKind == .exact ? "checkmark.seal.fill" : "textformat.abc")
+                Label(group.kindLabel, systemImage: group.kindIcon)
                     .font(.caption2)
-                    .foregroundStyle(group.matchKind == .exact ? Color.green : Color.orange)
+                    .foregroundStyle(group.kindColor)
             }
         }
         .padding(.vertical, 4)
@@ -278,6 +340,9 @@ private struct DuplicateCompareView: View {
     @State private var captionTarget: URLBox?
     @State private var captionDraft = ""
     @State private var confirmDelete: Entry?
+    /// Multi-select delete: the files ticked for removal, and its confirmation.
+    @State private var selected = Set<URL>()
+    @State private var confirmMultiDelete = false
     /// Bumped after an edit to force the metadata to reload.
     @State private var reloadToken = 0
 
@@ -305,6 +370,7 @@ private struct DuplicateCompareView: View {
 
                     legend
                     comparison
+                    multiDeleteSection
 
                     Button { onNotDuplicates(); dismiss() } label: {
                         Label("Not Duplicates", systemImage: "checkmark.circle")
@@ -345,6 +411,11 @@ private struct DuplicateCompareView: View {
                             titleVisibility: .visible) {
             Button("Delete", role: .destructive) { if let e = confirmDelete { delete(e) } }
             Button("Cancel", role: .cancel) { confirmDelete = nil }
+        }
+        .confirmationDialog("Delete \(selected.count) file\(selected.count == 1 ? "" : "s")? This permanently removes \(selected.count == 1 ? "it" : "them") from the drive.",
+                            isPresented: $confirmMultiDelete, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) { deleteMultiple() }
+            Button("Cancel", role: .cancel) {}
         }
         .task(id: "left-\(entries[safe: leftIndex]?.url.path ?? "")-\(reloadToken)") {
             if let e = entries[safe: leftIndex] { leftInfo = await MetadataLoader.load(for: e) }
@@ -447,6 +518,63 @@ private struct DuplicateCompareView: View {
                             in: RoundedRectangle(cornerRadius: 8))
             }
         }
+    }
+
+    /// A checklist of every file in the group so several can be removed at once — pick one of the two
+    /// on show, and/or tick any of the others, then delete them together.
+    private var multiDeleteSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Delete files").font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("Tap the copies you don't want, then remove them all at once.")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(entries) { e in
+                Button { toggle(e.url) } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: selected.contains(e.url) ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(selected.contains(e.url) ? .red : .secondary)
+                            .font(.title3)
+                        DuplicateThumb(entry: e, side: 44)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(e.name).font(.caption).lineLimit(1)
+                            Text(e.size.sizeString).font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            Button(role: .destructive) { confirmMultiDelete = true } label: {
+                Label("Delete Selected (\(selected.count))", systemImage: "trash")
+                    .frame(maxWidth: .infinity).padding(.vertical, 8)
+            }
+            .buttonStyle(.borderedProminent).tint(.red)
+            .disabled(selected.isEmpty)
+        }
+        .padding(.top, 4)
+    }
+
+    private func toggle(_ url: URL) {
+        if selected.contains(url) { selected.remove(url) } else { selected.insert(url) }
+    }
+
+    /// Deletes every ticked file in one pass (re-keying labels/origins and notifying the parent list).
+    private func deleteMultiple() {
+        let urls = selected
+        let targets = items.filter { urls.contains($0.url) }
+        guard !targets.isEmpty else { return }
+        FileActions.delete(targets)
+        for e in targets { library.clearOrigins([e.url]); library.clearLabels([e.url]); onDelete(e.url) }
+        library.contentDidChange()
+        items.removeAll { urls.contains($0.url) }
+        selected.removeAll()
+        guard items.count >= 2 else { dismiss(); return }   // no longer a duplicate group
+        leftIndex = min(leftIndex, items.count - 1)
+        rightIndex = min(rightIndex, items.count - 1)
+        if leftIndex == rightIndex { rightIndex = leftIndex == 0 ? 1 : 0 }
+        reloadToken += 1
     }
 
     // MARK: - Data
