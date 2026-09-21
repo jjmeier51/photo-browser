@@ -3397,8 +3397,9 @@ final class Library {
         var urls: [URL] = []
         while let entry = readdir(dirp) {
             var d = entry.pointee
+            let cap = MemoryLayout.size(ofValue: d.d_name)   // compute before borrowing d.d_name exclusively
             let name = withUnsafePointer(to: &d.d_name) {
-                $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: d.d_name)) { String(cString: $0) }
+                $0.withMemoryRebound(to: CChar.self, capacity: cap) { String(cString: $0) }
             }
             if name == "." || name == ".." || name.hasPrefix(".") { continue }
             urls.append(folder.appendingPathComponent(name))
