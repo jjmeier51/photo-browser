@@ -3380,9 +3380,18 @@ final class Library {
         }
         if result.isEmpty { result = fmRead(folder, keys) }   // coordination unavailable → plain read
         // Some exFAT/file-provider folders (large directories especially) fail FileManager's
-        // resource-value prefetch — retry with no prefetch, then drop to a raw POSIX readdir, which
-        // streams entries and reads directories iOS's FileManager rejects but macOS reads fine.
+        // resource-value prefetch — retry with no prefetch.
         if result.isEmpty { result = fmRead(folder, []) }
+        // Streaming enumerator: a shallow, lazy walk that can survive very large exFAT directories
+        // (thousands of entries) where contentsOfDirectory — which materializes the whole listing and
+        // prefetches through the file provider — times out with NSCocoaErrorDomain 256.
+        if result.isEmpty, let en = fm.enumerator(at: folder, includingPropertiesForKeys: nil,
+                                                  options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]) {
+            var urls: [URL] = []
+            for case let u as URL in en { urls.append(u) }
+            result = urls
+        }
+        // Last resort: a raw POSIX readdir (rarely works on the iOS file provider, but harmless).
         if result.isEmpty, let posix = posixContents(of: folder) { result = posix }
         return result
     }
