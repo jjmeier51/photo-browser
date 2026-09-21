@@ -62,6 +62,15 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    NavigationLink { StorageView() } label: { Label("Storage", systemImage: "internaldrive") }
+                    NavigationLink { DriveHealthView() } label: { Label("Drive Health", systemImage: "stethoscope") }
+                } header: {
+                    Text("Maintenance")
+                } footer: {
+                    Text("Storage shows what the app keeps on this device (and lets you clear caches). Drive Health scans the SSD for folders or files it can't read — useful for the exFAT “didn't copy cleanly” cases.")
+                }
+
+                Section {
                     SecureField("CDMPOOL API token", text: $cdmpoolToken)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                 } header: {
