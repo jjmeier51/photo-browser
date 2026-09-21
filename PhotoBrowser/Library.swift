@@ -1272,6 +1272,7 @@ final class Library {
         let job = AIEditJob(target: .edit(original: entry.url), folder: entry.url.deletingLastPathComponent(),
                             entry: entry, prompt: prompt, modelLabel: modelLabel)
         let (activityID, bg, live) = beginAIJob(title: "Editing with AI", label: "AI Edit", count: count)
+        live.armFallback(jobID: job.id.uuidString)   // notify even if iOS suspends the app mid-generation
         let url = entry.url
         Task {
             // `.utility` (not `.userInitiated`): the tone-map + JPEG re-encode is CPU-heavy, and when
@@ -1349,6 +1350,7 @@ final class Library {
         let job = AIEditJob(target: .create(folder: folder), folder: folder, entry: nil,
                             prompt: prompt, modelLabel: modelLabel)
         let (activityID, bg, live) = beginAIJob(title: "Creating with AI", label: "AI Create", count: count)
+        live.armFallback(jobID: job.id.uuidString)   // notify even if iOS suspends the app mid-generation
         // Text2img needs a concrete shape (there's no source to keep) — "Original"/nil defaults to 1:1.
         let ratio = aspect.ratio ?? "1:1"
         Task {

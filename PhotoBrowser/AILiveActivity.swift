@@ -16,6 +16,17 @@ import ActivityKit
 @MainActor
 final class AIProgressActivity {
     private var activityID: String?
+    private var fallbackJobID: String?
+
+    /// Arms a time-triggered "check your AI images" notification for `jobID`. A local alert can only
+    /// be *posted* while the app is running, so a job that finishes after iOS suspends the app never
+    /// notified until the user reopened it — the residual unreliability. A scheduled notification, by
+    /// contrast, fires even while suspended. `finish` cancels it, so it only ever reaches the user
+    /// when the in-process completion didn't (i.e. the app was suspended mid-generation).
+    func armFallback(jobID: String, after seconds: TimeInterval = 180) {
+        fallbackJobID = jobID
+        AINotifications.scheduleFallback(jobID: jobID, after: seconds)
+    }
 
     /// Start: request notification permission and (when possible) raise the activity.
     func begin(title: String, detail: String) {
@@ -37,6 +48,8 @@ final class AIProgressActivity {
     /// Finish: end the Live Activity with a final state and post the notification. `jobID` is
     /// carried on the notification so tapping it can reopen the exact photo's results.
     func finish(success: Bool, message: String, jobID: String? = nil) {
+        // The job finished in-process, so the scheduled fallback is no longer needed.
+        if let id = fallbackJobID { AINotifications.cancelFallback(jobID: id); fallbackJobID = nil }
         AINotifications.post(title: success ? "AI images ready" : "AI couldn’t finish", body: message,
                              jobID: success ? jobID : nil)
         #if canImport(ActivityKit)
@@ -79,6 +92,29 @@ enum AINotifications {
         center.delegate = presenter        // must be set before any notification is posted
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
+    private static func fallbackID(_ jobID: String) -> String { "aiFallback.\(jobID)" }
+
+    /// Schedules the suspended-app fallback alert (see `AIProgressActivity.armFallback`).
+    static func scheduleFallback(jobID: String, after seconds: TimeInterval) {
+        UNUserNotificationCenter.current().delegate = presenter
+        let content = UNMutableNotificationContent()
+        content.title = "Check your AI images"
+        content.body = "Your AI request may be ready — tap to review."
+        content.sound = .default
+        content.userInfo = [jobIDKey: jobID]
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(1, seconds), repeats: false)
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: fallbackID(jobID), content: content, trigger: trigger))
+    }
+
+    /// Cancels a scheduled fallback (and removes it if already delivered) once the job finishes.
+    static func cancelFallback(jobID: String) {
+        let id = fallbackID(jobID)
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: [id])
+        center.removeDeliveredNotifications(withIdentifiers: [id])
+    }
+
     static func post(title: String, body: String, jobID: String? = nil) {
         // Ensure the presenter is installed even if `post` is somehow reached without a
         // prior `requestAuthorization` (belt-and-braces so foreground alerts never drop).
