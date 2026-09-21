@@ -115,7 +115,16 @@ struct DriveHealthView: View {
                     do { return (try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]), nil) }
                     catch {
                         let ns = error as NSError
-                        if attempt == 2 { return ([], "\(ns.domain) \(ns.code) — \(ns.localizedDescription)") }
+                        if attempt == 2 {
+                            var detail = "\(ns.domain) \(ns.code) — \(ns.localizedDescription)"
+                            // Probe the low-level cause: if opendir also fails, its errno pinpoints
+                            // whether it's an I/O/driver refusal (EIO 5), path length (ENAMETOOLONG 63),
+                            // a missing/renamed entry (ENOENT 2), permissions (EACCES 13), etc.
+                            errno = 0
+                            if let dirp = opendir(dir.path) { closedir(dirp) }
+                            else { let e = errno; detail += " · opendir errno \(e) (\(String(cString: strerror(e))))" }
+                            return ([], detail)
+                        }
                         try? await Task.sleep(nanoseconds: UInt64(200_000_000) * UInt64(attempt + 1))
                     }
                 }
