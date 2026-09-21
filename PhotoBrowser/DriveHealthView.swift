@@ -50,7 +50,14 @@ struct DriveHealthView: View {
         .navigationTitle("Drive Health")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if !scanning { ToolbarItem(placement: .topBarTrailing) { Button("Rescan") { Task { await runScan() } } } }
+            if !scanning {
+                if !unreadableFolderPaths.isEmpty {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        ShareLink(item: exportText) { Image(systemName: "square.and.arrow.up") }
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) { Button("Rescan") { Task { await runScan() } } }
+            }
         }
         .task { if scanning { await runScan() } }
     }
@@ -70,6 +77,19 @@ struct DriveHealthView: View {
             }
         }
     }
+
+    /// Drive-relative paths of the unreadable folders, shallowest first (so rebuilding a parent on
+    /// the Mac covers any bad children before they're processed). Shared as plain text for a Mac
+    /// script to re-copy in place.
+    private var unreadableFolderPaths: [String] {
+        issues.filter { $0.kind == .unreadableFolder }
+            .map { relativePath($0.url) }
+            .sorted { a, b in
+                let da = a.components(separatedBy: "/").count, db = b.components(separatedBy: "/").count
+                return da != db ? da < db : a.localizedStandardCompare(b) == .orderedAscending
+            }
+    }
+    private var exportText: String { unreadableFolderPaths.joined(separator: "\n") }
 
     private func relativePath(_ url: URL) -> String {
         guard let root = library.rootURL else { return url.path }
