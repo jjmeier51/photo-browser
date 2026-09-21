@@ -89,31 +89,44 @@ struct DriveHealthView: View {
         scanning = false
     }
 
-    /// Recursively checks every folder under `root`, off the main actor. Uses the coordinated read so
-    /// an exFAT/file-provider folder is reconciled before we judge it (an uncoordinated read can look
-    /// empty when it isn't). Distinguishes a real read error from a genuinely empty folder by
-    /// attempting a direct read only when the coordinated one comes back empty.
+    /// Recursively checks every folder under `root`, off the main actor. iOS's file provider for an
+    /// external/exFAT drive **throttles a fast full-tree walk**, so a single failed read means
+    /// nothing — it's retried with backoff, and a folder is only reported as unreadable when it keeps
+    /// failing (a genuinely corrupt folder fails every attempt; a throttled one recovers). Plain
+    /// reads, not coordinated ones, to keep the walk light. An *empty* folder (a clean `[]`) is fine
+    /// and never flagged.
     nonisolated static func scan(root: URL, progress: @escaping @Sendable (Int) -> Void) async -> [DriveIssue] {
         await Task.detached(priority: .utility) {
             let fm = FileManager.default
+            let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey]
             var issues: [DriveIssue] = []
             var stack = [root]
             var count = 0
+
+            /// Reads a directory, retrying transient throttling failures with growing backoff.
+            /// Returns nil only if it kept failing (a real problem); an empty folder returns `[]`.
+            func read(_ dir: URL) async -> [URL]? {
+                for attempt in 0..<4 {
+                    do { return try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) }
+                    catch {
+                        if attempt < 3 { try? await Task.sleep(nanoseconds: UInt64(200_000_000) * UInt64(attempt + 1)) }
+                    }
+                }
+                return nil
+            }
+
             while let dir = stack.popLast() {
                 count += 1
                 if count % 25 == 0 { progress(count) }
-                if count > 50_000 { break }        // safety bound on pathological trees
-                let kids = Library.coordinatedContents(of: dir, keys: [.isDirectoryKey, .fileSizeKey])
-                if kids.isEmpty {
-                    // Empty vs unreadable: a direct read that throws means the directory is bad.
-                    if (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) == nil {
-                        issues.append(DriveIssue(url: dir, kind: .unreadableFolder,
-                                                 detail: "The folder couldn't be read"))
-                    }
+                if count > 200_000 { break }        // safety bound on pathological trees
+                guard let kids = await read(dir) else {
+                    issues.append(DriveIssue(url: dir, kind: .unreadableFolder,
+                                             detail: "The folder kept failing to read"))
                     continue
                 }
                 for u in kids {
-                    let rv = try? u.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                    var rv = try? u.resourceValues(forKeys: keys)
+                    if rv == nil { rv = try? u.resourceValues(forKeys: keys) }   // one retry before judging
                     if rv?.isDirectory == true {
                         stack.append(u)
                     } else if rv == nil {
@@ -165,7 +178,7 @@ enum DriveIssueKind: Int, Sendable, Comparable {
     var advice: String {
         switch self {
         case .unreadableFolder:
-            return "These folders errored on read — often a half-committed copy. Re-copy them from the Mac, then eject the drive properly (Finder ⏏ or `diskutil eject`) before unplugging."
+            return "These folders kept failing to read even after retries. On a slow external drive that's often heavy throttling, not damage — Rescan when the drive is idle and most should clear. If one still fails, re-copy it from the Mac and eject the drive properly (Finder ⏏ or `diskutil eject`) before unplugging."
         case .unreadableFile:
             return "The file's attributes couldn't be read. Delete and re-copy it cleanly."
         case .emptyFile:
