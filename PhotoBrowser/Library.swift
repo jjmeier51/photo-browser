@@ -3370,15 +3370,40 @@ final class Library {
     /// Falls back to a direct read if coordination is unavailable (never worse than before).
     nonisolated static func coordinatedContents(of folder: URL, keys: [URLResourceKey]) -> [URL] {
         let fm = FileManager.default
-        func direct() -> [URL] {
-            (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
+        func fmRead(_ u: URL, _ prefetch: [URLResourceKey]) -> [URL] {
+            (try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: prefetch, options: [.skipsHiddenFiles])) ?? []
         }
         var result: [URL] = []
         var coordErr: NSError?
         NSFileCoordinator().coordinate(readingItemAt: folder, options: [], error: &coordErr) { u in
-            result = (try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
+            result = fmRead(u, keys)
         }
-        return coordErr == nil ? result : direct()
+        if result.isEmpty { result = fmRead(folder, keys) }   // coordination unavailable → plain read
+        // Some exFAT/file-provider folders (large directories especially) fail FileManager's
+        // resource-value prefetch — retry with no prefetch, then drop to a raw POSIX readdir, which
+        // streams entries and reads directories iOS's FileManager rejects but macOS reads fine.
+        if result.isEmpty { result = fmRead(folder, []) }
+        if result.isEmpty, let posix = posixContents(of: folder) { result = posix }
+        return result
+    }
+
+    /// Raw POSIX `opendir`/`readdir` listing (non-recursive), skipping dot-files. Returns nil only if
+    /// the directory can't be opened at all. This succeeds on some large/awkward exFAT directories
+    /// that `FileManager.contentsOfDirectory` fails on, because it neither prefetches attributes nor
+    /// materializes the whole listing up front.
+    nonisolated static func posixContents(of folder: URL) -> [URL]? {
+        guard let dirp = opendir(folder.path) else { return nil }
+        defer { closedir(dirp) }
+        var urls: [URL] = []
+        while let entry = readdir(dirp) {
+            var d = entry.pointee
+            let name = withUnsafePointer(to: &d.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: d.d_name)) { String(cString: $0) }
+            }
+            if name == "." || name == ".." || name.hasPrefix(".") { continue }
+            urls.append(folder.appendingPathComponent(name))
+        }
+        return urls
     }
 
     nonisolated func listing(of folder: URL, sort: SortKey) async -> [Entry] {

@@ -60,6 +60,7 @@ struct DriveHealthView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(issue.url.lastPathComponent).font(.subheadline)
                 Text(relativePath(issue.url)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                Text(issue.detail).font(.caption2).foregroundStyle(.tertiary).lineLimit(2)
             }
             Spacer()
         }
@@ -103,25 +104,31 @@ struct DriveHealthView: View {
             var stack = [root]
             var count = 0
 
-            /// Reads a directory, retrying transient throttling failures with growing backoff.
-            /// Returns nil only if it kept failing (a real problem); an empty folder returns `[]`.
-            func read(_ dir: URL) async -> [URL]? {
-                for attempt in 0..<4 {
-                    do { return try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) }
+            /// Reads a directory through the full fallback chain (coordinated → plain → no-prefetch →
+            /// POSIX). A non-empty result means it's readable — including large exFAT dirs that only
+            /// POSIX can enumerate. If the result is empty, a direct read with retries decides whether
+            /// it's genuinely empty (fine) or a hard error, and captures the real reason to show.
+            func readDir(_ dir: URL) async -> (urls: [URL], error: String?) {
+                let kids = Library.coordinatedContents(of: dir, keys: keys)
+                if !kids.isEmpty { return (kids, nil) }
+                for attempt in 0..<3 {
+                    do { return (try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]), nil) }
                     catch {
-                        if attempt < 3 { try? await Task.sleep(nanoseconds: UInt64(200_000_000) * UInt64(attempt + 1)) }
+                        let ns = error as NSError
+                        if attempt == 2 { return ([], "\(ns.domain) \(ns.code) — \(ns.localizedDescription)") }
+                        try? await Task.sleep(nanoseconds: UInt64(200_000_000) * UInt64(attempt + 1))
                     }
                 }
-                return nil
+                return ([], nil)
             }
 
             while let dir = stack.popLast() {
                 count += 1
                 if count % 25 == 0 { progress(count) }
                 if count > 200_000 { break }        // safety bound on pathological trees
-                guard let kids = await read(dir) else {
-                    issues.append(DriveIssue(url: dir, kind: .unreadableFolder,
-                                             detail: "The folder kept failing to read"))
+                let (kids, error) = await readDir(dir)
+                if let error {
+                    issues.append(DriveIssue(url: dir, kind: .unreadableFolder, detail: error))
                     continue
                 }
                 for u in kids {
