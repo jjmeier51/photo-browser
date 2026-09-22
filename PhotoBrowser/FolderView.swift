@@ -70,6 +70,7 @@ struct FolderView: View {
     @State private var loaded = false
     @State private var yearFilter: Int?
     @State private var typeFilter: TypeFilter = .all
+    @State private var formatFilter: FormatFilter = .all
     @State private var showEditedOnly = false
     @State private var showHiddenFolders = false
     @State private var showFavoritesOnly = false
@@ -253,7 +254,7 @@ struct FolderView: View {
     }
 
     private var filtered: [Entry] {
-        let list = filteredRaw
+        let list = applyFormat(filteredRaw)
         if library.sort.isAge { return sortByAge(list) }
         if library.sort.isLikes { return sortByLikes(list) }
         if library.sort.isDuration { return sortByDuration(list) }
@@ -397,6 +398,13 @@ struct FolderView: View {
         // *media* is narrowed to in-app-edited items. (Hiding folders made "Today's Instagram Stories" and
         // newly-created folders seem to vanish.)
         showEditedOnly ? list.filter { $0.isFolder || library.isEditedInApp($0.url) } : list
+    }
+
+    /// File-format filter (JPEG/PNG/HEIF/RAW/GIF/MOV/MP4/AVI), matched on extension. Hides
+    /// subfolders while active, like the content-type filter.
+    private func applyFormat(_ list: [Entry]) -> [Entry] {
+        guard formatFilter != .all else { return list }
+        return list.filter { !$0.isFolder && formatFilter.matches($0.url) }
     }
 
     /// Content-type filter (hides subfolders when a type is chosen).
@@ -1512,13 +1520,13 @@ struct FolderView: View {
                              : tsLabelMode ? "No items match these labels"
                              : showFavoritesOnly ? "No favorites here yet"
                              : showAIOnly ? "Nothing marked To AI yet"
-                             : advancedActive ? "No matches for this filter"
+                             : (advancedActive || typeFilter != .all || formatFilter != .all || yearFilter != nil || ageFilter != nil) ? "No matches for this filter"
                              : "This folder is empty")
                             .foregroundStyle(.secondary)
                         // A genuinely empty folder (no filter hiding things) gets the two ways to
                         // fill it, instead of a dead end.
                         if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !showEditedOnly
-                            && !advancedActive && yearFilter == nil && typeFilter == .all && ageFilter == nil {
+                            && !advancedActive && yearFilter == nil && typeFilter == .all && formatFilter == .all && ageFilter == nil {
                             HStack(spacing: 12) {
                                 Button { showPhotosPicker = true } label: {
                                     Label("Add from Photos", systemImage: "photo.badge.plus")
@@ -1978,10 +1986,19 @@ struct FolderView: View {
                             .foregroundStyle(typeFilter != .all ? Color.accentColor : Color.primary)
                     }
 
+                    Menu {
+                        ForEach(FormatFilter.allCases) { fmt in
+                            Button { formatFilter = fmt } label: { check(fmt.rawValue, formatFilter == fmt) }
+                        }
+                    } label: {
+                        chip("Format: \(formatFilter.rawValue)")
+                            .foregroundStyle(formatFilter != .all ? Color.accentColor : Color.primary)
+                    }
+
                     // One tap back to an unfiltered view once any menu-driven filter is active.
-                    if yearFilter != nil || typeFilter != .all || ageFilter != nil || advancedActive {
+                    if yearFilter != nil || typeFilter != .all || formatFilter != .all || ageFilter != nil || advancedActive {
                         Button {
-                            yearFilter = nil; typeFilter = .all; ageFilter = nil
+                            yearFilter = nil; typeFilter = .all; formatFilter = .all; ageFilter = nil
                             videoRes = .all; imageRes = .all; hdrOnly = false
                         } label: {
                             HStack(spacing: 4) {

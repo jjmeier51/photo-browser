@@ -88,6 +88,29 @@ enum TypeFilter: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// Filter by concrete file format (container/codec), matched on the file extension.
+enum FormatFilter: String, CaseIterable, Identifiable {
+    case all = "All", jpeg = "JPEG", png = "PNG", heif = "HEIF", raw = "RAW"
+    case gif = "GIF", mov = "MOV", mp4 = "MP4", avi = "AVI"
+    var id: String { rawValue }
+
+    /// Lowercased extensions this format matches (empty for `.all`).
+    var extensions: Set<String> {
+        switch self {
+        case .all:  return []
+        case .jpeg: return ["jpg", "jpeg", "jpe"]
+        case .png:  return ["png"]
+        case .heif: return ["heic", "heif", "hif", "heics"]
+        case .raw:  return ["dng", "raw", "cr2", "cr3", "nef", "arw", "raf", "rw2", "orf", "srw", "pef", "sr2", "3fr", "erf", "nrw"]
+        case .gif:  return ["gif"]
+        case .mov:  return ["mov", "qt"]
+        case .mp4:  return ["mp4", "m4v"]
+        case .avi:  return ["avi"]
+        }
+    }
+    func matches(_ url: URL) -> Bool { self == .all || extensions.contains(url.pathExtension.lowercased()) }
+}
+
 /// Resolution filter for videos.
 enum VideoRes: String, CaseIterable, Identifiable {
     case all = "All", uhd = "4K", fhd = "1080p", hd = "720p", low = "Low-Res"
