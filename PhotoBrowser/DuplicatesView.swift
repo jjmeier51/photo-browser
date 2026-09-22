@@ -26,6 +26,11 @@ struct DuplicatesView: View {
     @State private var scanning = true
     @State private var selection = Set<UUID>()
     @State private var exactOnly = false
+    @State private var confirmDeleteDupes = false
+
+    private var selectedGroups: [DuplicateGroup] { groups.filter { selection.contains($0.id) } }
+    /// How many files a bulk delete would remove: everything but the one kept in each selected group.
+    private var deleteCount: Int { selectedGroups.reduce(0) { $0 + max(0, $1.entries.count - 1) } }
 
     /// The groups currently shown, honoring the Exact-Matches filter.
     private var shownGroups: [DuplicateGroup] {
@@ -67,7 +72,7 @@ struct DuplicatesView: View {
                             } footer: {
                                 Text(exactOnly
                                      ? "Exact matches share identical size and pixel dimensions — almost always true duplicates."
-                                     : "“Exact” = identical size & dimensions; “Visually similar” = the same picture re-encoded/resized/lightly edited; “Similar name” = a copy-style name (like “name (1)”). Tap to compare and delete, or select groups and mark them Not Duplicates.")
+                                     : "“Exact” = identical size & dimensions; “Visually similar” = the same picture re-encoded/resized/lightly edited; “Similar name” = a copy-style name (like “name (1)”). Tap Edit to select groups, then Delete Duplicates (keeps the largest in each) or mark them Not Duplicates.")
                             }
                         }
                     }
@@ -78,17 +83,43 @@ struct DuplicatesView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { if !groups.isEmpty { EditButton() } }
                 ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
-                ToolbarItem(placement: .bottomBar) {
+                ToolbarItemGroup(placement: .bottomBar) {
                     if !selection.isEmpty {
                         Button("Not Duplicates (\(selection.count))") {
-                            markNotDuplicates(groups.filter { selection.contains($0.id) })
+                            markNotDuplicates(selectedGroups)
                             selection.removeAll()
                         }
+                        Spacer()
+                        Button(role: .destructive) { confirmDeleteDupes = true } label: {
+                            Text("Delete Duplicates (\(deleteCount))")
+                        }
+                        .disabled(deleteCount == 0)
                     }
                 }
             }
+            .confirmationDialog("Delete \(deleteCount) file\(deleteCount == 1 ? "" : "s")? This keeps the largest file in each selected group and permanently deletes the rest.",
+                                isPresented: $confirmDeleteDupes, titleVisibility: .visible) {
+                Button("Delete \(deleteCount)", role: .destructive) { deleteDuplicates(selectedGroups); selection.removeAll() }
+                Button("Cancel", role: .cancel) {}
+            }
             .task { await scan() }
         }
+    }
+
+    /// Bulk delete across selected groups: keep the largest file in each group, delete the rest.
+    /// (For a false grouping, the user can mark it Not Duplicates instead — nothing is deleted until
+    /// this explicit action + confirmation.)
+    private func deleteDuplicates(_ marked: [DuplicateGroup]) {
+        for g in marked {
+            let ordered = g.entries.sorted { $0.size > $1.size }   // largest kept
+            let toDelete = Array(ordered.dropFirst())
+            guard !toDelete.isEmpty else { continue }
+            FileActions.delete(toDelete)
+            for e in toDelete { library.clearOrigins([e.url]); library.clearLabels([e.url]) }
+        }
+        library.contentDidChange()
+        let ids = Set(marked.map { $0.id })
+        groups.removeAll { ids.contains($0.id) }   // each is resolved down to a single kept file
     }
 
     /// Records each group's items as confirmed non-duplicates (so they're hidden in
@@ -179,10 +210,12 @@ struct DuplicatesView: View {
                 for _ in 0..<min(maxConcurrent, images.count) { addNext() }
                 while let (i, h) = await group.next() { hashes[i] = h; addNext() }
             }
-            // Union-find over all pairs within a tight Hamming threshold.
+            // Union-find over all pairs within a tight Hamming threshold. Kept low (≈ same picture
+            // re-encoded/resized/lightly edited) so a whole photoshoot of similar poses doesn't chain
+            // into one giant group — 6/64 bits is close without over-clustering.
             var parent = Array(images.indices)
             func find(_ x: Int) -> Int { var r = x; while parent[r] != r { parent[r] = parent[parent[r]]; r = parent[r] }; return r }
-            let threshold = 10
+            let threshold = 6
             for i in images.indices {
                 guard let hi = hashes[i] else { continue }
                 for j in (i + 1)..<images.count {
@@ -269,6 +302,11 @@ struct DuplicateGroup: Identifiable {
     var kindColor: Color {
         switch matchKind { case .exact: return .green; case .similar: return .blue; case .name: return .orange }
     }
+    /// The file type(s) in the group, e.g. "JPG" or "JPG/PNG" when mixed.
+    var typeLabel: String {
+        let exts = Set(entries.map { $0.url.pathExtension.uppercased() }.filter { !$0.isEmpty })
+        return exts.sorted().joined(separator: "/")
+    }
 }
 
 /// One row in the duplicate-groups list: a couple of thumbnails plus a summary.
@@ -282,7 +320,7 @@ private struct DuplicateGroupRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("\(group.entries.count) \(group.kindNoun) files")
                     .font(.subheadline.weight(.medium))
-                Text("\(group.size.sizeString) · \(group.dimensionLabel)")
+                Text("\(group.size.sizeString) · \(group.dimensionLabel)\(group.typeLabel.isEmpty ? "" : " · \(group.typeLabel)")")
                     .font(.caption).foregroundStyle(.secondary)
                 Label(group.kindLabel, systemImage: group.kindIcon)
                     .font(.caption2)
