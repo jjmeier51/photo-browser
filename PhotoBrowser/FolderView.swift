@@ -2967,8 +2967,12 @@ struct FolderView: View {
         // slow external drive, reading EXIF from every file otherwise starves the
         // thumbnails of disk bandwidth. Embedded captions load lazily (only while
         // searching). Media specs load on demand (resolution/HDR filter).
-        let needsDates = [SortKey.smart, .dateDesc, .dateAsc].contains(library.sort)
-            || library.sort.isAge || yearFilter != nil || ageFilter != nil
+        // Skip the bulk capture-date read for very large folders — reading EXIF from tens of
+        // thousands of files would re-introduce the same hang the lazy listing just avoided. Such a
+        // folder falls back to name/modified order until the user narrows it down.
+        let needsDates = ([SortKey.smart, .dateDesc, .dateAsc].contains(library.sort)
+            || library.sort.isAge || yearFilter != nil || ageFilter != nil)
+            && list.count <= 8000
         if needsDates {
             captureDates = await library.captureDates(for: list)
             // Now that real capture dates are in, re-order so "newest" reflects when

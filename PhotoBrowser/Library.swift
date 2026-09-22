@@ -3385,7 +3385,7 @@ final class Library {
         // Streaming enumerator: a shallow, lazy walk that can survive very large exFAT directories
         // (thousands of entries) where contentsOfDirectory — which materializes the whole listing and
         // prefetches through the file provider — times out with NSCocoaErrorDomain 256.
-        if result.isEmpty, let en = fm.enumerator(at: folder, includingPropertiesForKeys: nil,
+        if result.isEmpty, let en = fm.enumerator(at: folder, includingPropertiesForKeys: [.isDirectoryKey],
                                                   options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]) {
             var urls: [URL] = []
             for case let u as URL in en { urls.append(u) }
@@ -3427,10 +3427,13 @@ final class Library {
             // reconciled before enumeration (see `coordinatedContents`). Retry once if the drive
             // hands back nothing while the folder plainly exists — the provider can still be
             // materializing right after a remount, which is the intermittent "empty grid" case.
-            var all = Self.coordinatedContents(of: folder, keys: [.contentModificationDateKey])
+            // Prefetch `.isDirectoryKey` so the returned URLs already know folder-vs-file (and carry a
+            // trailing slash) — that lets the huge-folder path below classify each entry with zero
+            // extra stats.
+            var all = Self.coordinatedContents(of: folder, keys: [.isDirectoryKey])
             if all.isEmpty, fm.fileExists(atPath: folder.path) {
                 try? await Task.sleep(nanoseconds: 400_000_000)
-                all = Self.coordinatedContents(of: folder, keys: [.contentModificationDateKey])
+                all = Self.coordinatedContents(of: folder, keys: [.isDirectoryKey])
             }
             // The Files / exFAT file-provider often ignores `.skipsHiddenFiles`, so dot-files leak
             // into the grid: our own `.pbtmp_*` transients, and macOS's `.sb-*` atomic-write temps.
@@ -3453,6 +3456,22 @@ final class Library {
             return visible
         }.value
         guard !urls.isEmpty else { return [] }
+
+        // Very large folders: DON'T stat every entry up front. A folder with tens of thousands of
+        // files would otherwise fire that many file-provider round-trips before the grid could paint,
+        // which is what made huge folders (e.g. 90k items) appear to "never open" while the Files app
+        // — which is lazy — shows them instantly. Here we classify folder-vs-file from the directory
+        // flag the enumeration already prefetched (a trailing-slash URL / cached `.isDirectoryKey`,
+        // no new stat) and defer size/date; those load lazily only when a size/date sort needs them.
+        let huge = urls.count > 8000
+        if huge {
+            let entries = urls.map { url -> Entry in
+                let isDir = url.hasDirectoryPath || ((try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false)
+                return Entry(url: url, name: url.lastPathComponent,
+                             kind: classify(url: url, isDirectory: isDir), size: 0, modified: .distantPast)
+            }
+            return Self.sortEntries(entries, by: sort)
+        }
 
         var slots = [Entry?](repeating: nil, count: urls.count)
         await withTaskGroup(of: (Int, Entry).self) { group in
