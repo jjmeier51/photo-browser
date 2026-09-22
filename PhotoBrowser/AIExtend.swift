@@ -106,6 +106,12 @@ enum AIExtend {
     private static let promptKey = "photoBrowser.astriaPrompt"
     static let defaultPrompt = "Expand this exact photo outward to fill the larger frame, generating realistic new surroundings that seamlessly continue the existing scene. Keep the original subject, framing and details unchanged and sharp. Output one single seamless photograph — no borders, frames, padding, or duplicated copies."
 
+    /// Prompts kept on hand to reuse in Edit / Create with AI — shown in a "Reusable Prompts" section
+    /// with one-tap Use (fills the prompt field) and Copy.
+    static let reusablePrompts: [String] = [
+        "A full-body portrait of a 5'5\" woman with an elegant 8-heads-tall artistic structure and long legs. She has high-waisted proportions, with her legs making up the majority of her height. Low-angle shot looking up. Her body has a completely smooth, seamless silhouette with soft skin texture and no visible muscle or bone definition. Soft, flat diffuse lighting eliminates all harsh shadows on her body."
+    ]
+
     static var apiKey: String { UserDefaults.standard.string(forKey: keyKey) ?? "" }
     static var isConfigured: Bool { !apiKey.isEmpty }
     static var extendPrompt: String {

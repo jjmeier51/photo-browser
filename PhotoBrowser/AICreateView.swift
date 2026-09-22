@@ -45,6 +45,7 @@ struct AICreateView: View {
                     TextField("e.g. a golden retriever puppy on a beach at sunset, photorealistic", text: $prompt, axis: .vertical)
                         .lineLimit(2...6)
                 }
+                reusablePromptSection
                 if !library.aiPromptHistory.isEmpty { promptHistorySection }
                 Section {
                     AIModelTunePicker(model: $model, tunes: $selectedTunes, allTunes: tunes)
@@ -95,6 +96,28 @@ struct AICreateView: View {
                     pendingTuneIDs = []
                 }
             }
+        }
+    }
+
+    /// Always-available saved prompts: one-tap Use (fills the prompt) or Copy.
+    private var reusablePromptSection: some View {
+        Section {
+            ForEach(AIExtend.reusablePrompts, id: \.self) { p in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(p).font(.callout)
+                    HStack(spacing: 10) {
+                        Button { prompt = p } label: { Label("Use", systemImage: "text.insert") }
+                            .buttonStyle(.borderedProminent).controlSize(.small)
+                        Button { UIPasteboard.general.string = p } label: { Label("Copy", systemImage: "doc.on.doc") }
+                            .buttonStyle(.bordered).controlSize(.small)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        } header: {
+            Text("Reusable Prompts")
+        } footer: {
+            Text("Tap Use to drop one into the prompt above, or Copy it.")
         }
     }
 
