@@ -7,6 +7,13 @@ Guidance for AI assistants working in this repository.
 > [`docs/photo-editor-capabilities.md`](docs/photo-editor-capabilities.md). Read it
 > before changing anything under `PhotoBrowser/PhotoEditor*.swift`.
 
+> **Feature & change notes:** for in-depth notes on the cloud AI (Astria) features,
+> Find Duplicates, exFAT/large-folder reading, Drive Health, Storage, folder
+> filters, and the downloaders — with the *why* behind each and the hard-won
+> constraints — see [`docs/feature-notes.md`](docs/feature-notes.md). Read it before
+> touching `AIExtend.swift`, the AI views, `DuplicatesView.swift`,
+> `coordinatedContents`/`listing` in `Library.swift`, or the downloaders.
+
 ## What this is
 
 **Photo Browser** is a native iOS/iPadOS app (SwiftUI) for browsing and managing
