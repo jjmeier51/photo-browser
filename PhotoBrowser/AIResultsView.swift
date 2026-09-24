@@ -28,6 +28,7 @@ struct AIResultsView: View {
     let results: [Data]
     var model: String? = nil       // AI model / tune used, for metadata + search
     var prompt: String? = nil      // the prompt used
+    var note: String? = nil        // e.g. "Astria returned 3 of 4 images" — shown above the results
 
     private enum Decision { case kept, deleted }
     @State private var decided: [Int: Decision] = [:]
@@ -40,6 +41,11 @@ struct AIResultsView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 20) {
+                    if let note {
+                        Label(note, systemImage: "exclamationmark.triangle")
+                            .font(.footnote).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     ForEach(results.indices, id: \.self) { i in
                         VStack(spacing: 10) {
                             if let ui = images.indices.contains(i) ? images[i] : nil {

@@ -84,21 +84,9 @@ struct ContentView: View {
             set: { if !$0 { library.pendingShares = []; StorySharing.clear() } })) {
             StoryImportView()
         }
-        // Tapping an "AI images ready" notification opens the results for review (the path was
-        // already navigated to the original photo's folder). Works for both Edit and Create with AI.
-        .sheet(item: $library.aiResultPresentation) { job in
-            AIResultsView(target: job.target, results: job.results,
-                          model: job.modelLabel, prompt: job.prompt)
-                .environment(library)
-        }
-        // After reviewing results, reopen the creator (Edit/Create) pre-filled with the last run's
-        // settings, so the user can immediately generate again.
-        .sheet(item: $library.aiCreatorReopen) { reopen in
-            switch reopen {
-            case .create(let folder): AICreateView(folder: folder).environment(library)
-            case .edit(let entry):    AIEditView(entry: entry).environment(library)
-            }
-        }
+        // AI results (and the creator reopened after review) are NOT sheets here: a root-view sheet
+        // can't present while the viewer's full-screen cover is up, so they go through
+        // `ModalPresenter` onto whatever is top-most (see `Library.showAIResults`).
     }
 
     private func pillTitle(_ a: Library.Activity) -> String {

@@ -20,12 +20,15 @@ struct PhotoBrowserApp: App {
                 }
                 // On every return to foreground: retry the drive if it was missing
                 // (or moved to a new mount path), then file any background downloads
-                // that completed while we were away.
+                // that completed while we were away, and finish any Astria job whose
+                // wait was cut short (suspended app, lost network) — Astria keeps the
+                // images, so this is when they can finally be fetched.
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
                         library.reconnectIfNeeded()
                         library.processPendingTikTok()
                         library.refreshPendingShares()
+                        library.resumePendingAIEdits()
                     } else if phase == .background {
                         // Arm the drive's "safe to remove" state on the way out. This drains
                         // any commit already in flight and flushes the drive root, so if the

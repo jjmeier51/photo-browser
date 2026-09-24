@@ -256,9 +256,12 @@ struct ResizeEditorView: View {
                 showSettings = true; activity.finish(success: false, message: "Add your Astria API key in Settings.")
             case .failure(.network):
                 aiError = "Couldn’t reach the provider."; activity.finish(success: false, message: "Couldn’t reach the provider.")
+            case .failure(.timedOut):
+                let msg = "Astria is taking longer than expected — try again in a few minutes."
+                aiError = msg; activity.finish(success: false, message: msg)
             case .failure(.badImage), .failure(.badResult):
                 aiError = "The image couldn’t be processed."; activity.finish(success: false, message: "The image couldn’t be processed.")
-            case .failure(.server(let msg)):
+            case .failure(.server(let msg)), .failure(.generationFailed(let msg)):
                 aiError = msg; activity.finish(success: false, message: msg)
             }
         }

@@ -139,32 +139,91 @@ history. On generate they save `RunSettings`, call `resolveGeneration`, then
 
 - `startAIEdit` / `startAICreate` run app-wide behind the activity-pill system
   (`beginActivity`/`setActivity`/`endActivity`, `BackgroundTaskHolder`), plus an
-  `AIProgressActivity` live activity and completion notification.
-- **Durability:** the moment Astria accepts a prompt, `onPrompt` persists a `PendingAstriaJob`
-  (jobID, promptID, tune, paths, prompt, model, startedAt) to `photoBrowser.pendingAstria`.
-  `resumePendingAIEdits()` on launch re-polls and downloads any job the app was killed during
-  (Astria keeps results server-side). Network/server failures **keep** the pending record;
-  only definitively-unrecoverable errors drop it.
+  `AIProgressActivity` live activity and completion notification. `beginAIJob` marks the job
+  live in `activeAIJobIDs`; `deliverAIResult` is the single completion path for both flows.
+- **Durability:** the moment Astria accepts a prompt, `onPrompt` (built by `pendingRecorder`)
+  persists a `PendingAstriaJob` (jobID, promptID, tune, paths, prompt, model, startedAt, plus
+  `count`, `isCreate`, `attempts` — optional, so older records still decode) to
+  `photoBrowser.pendingAstria`. **Both** Edit and Create are recorded (Create used not to be —
+  a Create job killed mid-generation was simply lost).
+- **Recovery — `resumePendingAIEdits()`** re-polls each record and saves the images straight into
+  the "AI" folder (there's no review session to hand them to after a relaunch), then posts the
+  ready alert (tap → that folder). It runs at **launch, on every return to the foreground, on a
+  notification tap, and ~1–2 min after an in-process failure** — the old launch-only pass left
+  a job stranded until the next cold start whenever the app was merely suspended. It skips jobs
+  in `activeAIJobIDs` (live in this process) and `recoveringAIJobIDs` (a pass already running),
+  so nothing is ever double-polled or double-saved. A pass that times out increments `attempts`
+  and retries later; after `maxAIRecoveryAttempts` (3) the record is dropped with a message, so a
+  prompt wedged on Astria's side can't keep a pill up forever. Records age out after 48 h.
+- **Failure semantics** (`AIExtend.AIError`): `.timedOut` / `.network` mean "our wait ended,
+  Astria may still deliver" → the record is **kept** and recovery takes over (the user is told the
+  images will land in the "AI" folder, not "failed"). `.generationFailed` (Astria reported the
+  prompt failed, e.g. moderation) and `.server` (request rejected) are terminal → record dropped.
+- **Presentation — `ModalPresenter.swift`:** results (and the creator reopened after review) are
+  presented with UIKit on the **top-most** view controller, not via a `.sheet` on `ContentView`.
+  A root-view sheet silently failed to appear whenever the viewer's full-screen cover (or any
+  modal) was up — exactly when most edits are started and finish — which stranded finished images
+  in memory. The presenter retries on a short timer while the top controller is mid-transition or
+  is an alert, so a presentation is delayed, never dropped. `ContentView` no longer observes an
+  `aiResultPresentation`/`aiCreatorReopen`; the viewer no longer tears itself down for results.
 - **`AIResultsView`** — Keep/Delete review of each result. `AISaveTarget` is `.edit(original:)`
   (saves into an "AI" subfolder beside the source, inheriting EXIF/date) or `.create(folder:)`.
   Results are **decoded downsampled OFF the main thread** via ImageIO (`downsample`,
   `maxPixel 1400`) so reviewing a batch of up to-4K images doesn't hitch; the full-res `Data`
-  is still what gets saved. After finishing, `reopenCreator(after:)` reopens the creator with
-  the same settings (`AICreatorReopen` in `ContentView`).
+  is still what gets saved. An optional `note` ("Astria returned 3 of 4 images") is shown when a
+  batch came back short. After finishing, `reopenCreator(after:)` reopens the creator with the
+  same settings.
 - Upload encodes (`uploadJPEG`) run at **`.utility`** priority (CPU-heavy tone-map/JPEG must
   yield to scrolling when several edits run at once).
+
+### 1.9a The Astria request path (speed + consistency): `AIExtend.swift`
+
+Every item here was a real symptom ("no results", "partial results"):
+
+- **`createPrompt`** — the prompt POST retries **safe** transient failures (429/5xx/52x, or a
+  connection that never got established: `isPreSendFailure`) with backoff + jitter honouring
+  `Retry-After`. An **ambiguous** failure (timeout / connection lost after the upload may have
+  landed) is reconciled via `findRecentPrompt` — list the tune's newest prompts, adopt the one
+  with our exact text created since we started — so a prompt Astria created but whose response
+  we never saw is still polled instead of orphaned. Only a definitive "not found" allows a
+  re-POST; a listing failure returns `.network` rather than risk a duplicate (billed) prompt.
+- **Progressive `images`.** Astria fills a prompt's `images` array **one at a time**; the old
+  "first non-empty array wins" returned partial batches. `downloadPromptImages` waits for
+  `expected` (`num_images` — from the request, or the prompt itself on recovery) and only accepts
+  fewer once the list has stopped growing for `stableTicks` (20) polls.
+- **Downloads start the moment each URL appears** (a task group fed from inside the poll loop),
+  overlapping fetches with the rest of the generation. Each download **retries** (3×) and is
+  validated with ImageIO (`downloadImage`) — an error page or a fetch truncated by suspension is
+  never saved as a "result".
+- **Poll budget is counted in polls, not wall-clock** (`maxTicks` 320 at an adaptive 2s→4s→6s
+  cadence ≈ 25 min active), so a suspended app resumes where it left off instead of "timing out"
+  on return. The old cap (130 × 3 s ≈ 6.5 min) was routinely exceeded by Seedream 5.0 Pro at 4K.
+- A prompt-level `error` from Astria (with no images) → `.generationFailed(message)`.
+- Both sessions cap `timeoutIntervalForResource`: with `waitsForConnectivity` on, a request made
+  while offline otherwise waits up to the default *week* for connectivity, pinning a job.
+- `heartbeat(ready, expected)` fires every poll tick → the pill shows "2 of 4 images ready —
+  downloading…" and the fallback alert is re-armed (see 1.10).
 
 ### 1.10 Completion notifications: `AILiveActivity.swift`
 
 - `AINotifications` installs a retained `ForegroundPresenter` (`UNUserNotificationCenterDelegate`)
   **at launch** so alerts appear even while the app is foregrounded, and requests authorization
-  at launch. Tapping an alert routes its `jobID` back via `tapHandler` → `presentAIResult`.
+  at launch. Tapping an alert routes `(jobID, folderPath)` via `tapHandler` → `presentAIResult`:
+  a job still in memory reopens its results; otherwise (relaunch, or still pending) it navigates to
+  the folder's "AI" subfolder and kicks a recovery pass — previously an unknown id did nothing,
+  which read as "the notification is broken". A tap that *launched* the app arrives before the
+  handler is installed and is held in `pendingTap` until it is.
 - **Suspended-app fallback (important):** a local alert can only be *posted* while the app runs,
-  so a job finishing after iOS suspends the app never notified until reopen. `AIProgressActivity.
-  armFallback(jobID:after:180)` schedules a **time-triggered** notification (delivered even while
-  suspended) at job start; `finish()` cancels it once the job completes in-process. So the
-  fallback only reaches the user when the normal alert couldn't. (True "server pushed the instant
-  it's done" delivery would need a push server or a BackgroundTasks capability — not added.)
+  so a job finishing after iOS suspends the app never notified until reopen. `armFallback` schedules
+  a **time-triggered** notification (delivered even while suspended). It is a **dead-man's
+  switch**: `heartbeat()` re-arms it (~150 s ahead, throttled to every 30 s) on every poll tick, so
+  while the process is alive and polling it never fires; it lands only once the process stopped
+  (suspended/killed). The old fixed 3-minute alarm fired mid-generation whenever a job simply took
+  longer, telling the user to "check" images that didn't exist yet. Its wording is now honest
+  ("AI images still in progress — the app was paused… open it to finish"), and `finish()` cancels
+  it (`notify: false` cancels without posting, for a job handed to recovery). (True "server pushed
+  the instant it's done" delivery would need a push server or a BackgroundTasks capability — not
+  added.)
 
 ### 1.11 Reusable Prompts
 
@@ -365,7 +424,12 @@ image behind a thumbnail; captures the blog post **date** and keeps it with the 
    are FaceID-only (~3 images); `prompt[resolution]` is Flux-incompatible; LoRA/PTI tunes require
    `"<token> <class>"` in the prompt; FaceID tunes reject a token (1.4, 1.6).
 6. **Local notifications** can't be posted while suspended — use a time-triggered fallback for
-   long jobs (1.10).
+   long jobs, re-armed as a dead-man's switch so it never fires while the job is alive (1.10).
+7. **A `.sheet` on the root view can't present over the viewer's full-screen cover** (UIKit
+   refuses a second presentation from the same hosting controller). Anything that must appear
+   "wherever the user is" goes through `ModalPresenter` onto the top-most controller (1.9).
+8. **Astria fills `images` progressively** — wait for `num_images`, never take the first
+   non-empty array (1.9a).
 
 ---
 
@@ -380,6 +444,7 @@ image behind a thumbnail; captures the blog post **date** and keeps it with the 
 | AI results review | `AIResultsView.swift` |
 | AI live activity / notifications | `AILiveActivity.swift` |
 | AI jobs, durability, state | `Library.swift` |
+| Top-most modal presentation (AI results / creator) | `ModalPresenter.swift` |
 | Find duplicates | `DuplicatesView.swift`, `PerceptualHash.swift` |
 | Storage / Drive Health | `StorageView.swift`, `DriveHealthView.swift` |
 | Directory reading / large folders | `Library.swift` (`coordinatedContents`, `listing`) |

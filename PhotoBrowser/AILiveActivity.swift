@@ -17,15 +17,37 @@ import ActivityKit
 final class AIProgressActivity {
     private var activityID: String?
     private var fallbackJobID: String?
+    private var fallbackFolderPath: String?
+    private var fallbackArmedAt: Date?
 
-    /// Arms a time-triggered "check your AI images" notification for `jobID`. A local alert can only
-    /// be *posted* while the app is running, so a job that finishes after iOS suspends the app never
-    /// notified until the user reopened it — the residual unreliability. A scheduled notification, by
-    /// contrast, fires even while suspended. `finish` cancels it, so it only ever reaches the user
-    /// when the in-process completion didn't (i.e. the app was suspended mid-generation).
-    func armFallback(jobID: String, after seconds: TimeInterval = 180) {
+    /// How far ahead the fallback alert is scheduled each time it's (re)armed. Once the app stops
+    /// ticking, the alert lands this soon after — long enough that a poll gap never trips it.
+    private static let fallbackLead: TimeInterval = 150
+    /// Re-arm at most this often (a scheduled request is replaced by re-adding its identifier).
+    private static let fallbackRearmInterval: TimeInterval = 30
+
+    /// Arms the "the app was suspended mid-generation" alert for `jobID`. A local alert can only be
+    /// *posted* while the app is running, so a job finishing after iOS suspends the app never notified
+    /// until the user reopened it. A scheduled notification fires even while suspended.
+    ///
+    /// It's a **dead-man's switch**, not a timer: `heartbeat()` keeps pushing it out on every poll
+    /// tick, so as long as this process is alive and polling it never fires — it lands only once the
+    /// process stopped (suspended or killed), ~2½ minutes later. The previous fixed 3-minute alarm
+    /// fired mid-generation whenever a job simply took longer, telling the user to "check" images
+    /// that didn't exist yet — a big part of "the notifications are wrong".
+    func armFallback(jobID: String, folderPath: String?) {
         fallbackJobID = jobID
-        AINotifications.scheduleFallback(jobID: jobID, after: seconds)
+        fallbackFolderPath = folderPath
+        fallbackArmedAt = Date()
+        AINotifications.scheduleFallback(jobID: jobID, folderPath: folderPath, after: Self.fallbackLead)
+    }
+
+    /// Call on every poll tick: pushes the armed fallback out again (throttled).
+    func heartbeat() {
+        guard let id = fallbackJobID else { return }
+        if let at = fallbackArmedAt, Date().timeIntervalSince(at) < Self.fallbackRearmInterval { return }
+        fallbackArmedAt = Date()
+        AINotifications.scheduleFallback(jobID: id, folderPath: fallbackFolderPath, after: Self.fallbackLead)
     }
 
     /// Start: request notification permission and (when possible) raise the activity.
@@ -46,12 +68,17 @@ final class AIProgressActivity {
     }
 
     /// Finish: end the Live Activity with a final state and post the notification. `jobID` is
-    /// carried on the notification so tapping it can reopen the exact photo's results.
-    func finish(success: Bool, message: String, jobID: String? = nil) {
+    /// carried on the notification so tapping it can reopen the exact results; `folderPath` lets a
+    /// tap land in the right folder even when the results are no longer in memory (relaunch).
+    /// `notify: false` ends the activity and cancels the fallback without posting an alert — for a
+    /// wait that ended but whose job is being handed to recovery (the "ready" alert comes later).
+    func finish(success: Bool, message: String, jobID: String? = nil, folderPath: String? = nil, notify: Bool = true) {
         // The job finished in-process, so the scheduled fallback is no longer needed.
         if let id = fallbackJobID { AINotifications.cancelFallback(jobID: id); fallbackJobID = nil }
-        AINotifications.post(title: success ? "AI images ready" : "AI couldn’t finish", body: message,
-                             jobID: success ? jobID : nil)
+        if notify {
+            AINotifications.post(title: success ? "AI images ready" : "AI couldn’t finish", body: message,
+                                 jobID: success ? jobID : nil, folderPath: success ? folderPath : nil)
+        }
         #if canImport(ActivityKit)
         if #available(iOS 16.2, *), let id = activityID,
            let activity = Activity<AIActivityAttributes>.activities.first(where: { $0.id == id }) {
@@ -67,9 +94,23 @@ final class AIProgressActivity {
 enum AINotifications {
     /// userInfo key carrying the finished AI job's id, so a tap can reopen its results.
     static let jobIDKey = "aiJobID"
-    /// Set once at launch by `Library`: routes a tapped completion notification (its job id)
-    /// back to the app so it can navigate to the photo and show the results.
-    @MainActor static var tapHandler: ((String) -> Void)?
+    /// userInfo key carrying the job's folder path, so a tap can navigate there even after a relaunch
+    /// (when the results were saved straight into that folder's "AI" subfolder by recovery).
+    static let folderPathKey = "aiFolderPath"
+    /// Set once at launch by `Library`: routes a tapped AI notification (job id, folder path — either
+    /// may be missing) back to the app. A tap that arrives before this is set — the app was
+    /// *launched* by the tap, and `didReceive` runs before SwiftUI's `.task` installs the handler —
+    /// is held in `pendingTap` and delivered the moment the handler lands, instead of being lost.
+    @MainActor static var tapHandler: ((String?, String?) -> Void)? {
+        didSet {
+            if let tapHandler, let tap = pendingTap { pendingTap = nil; tapHandler(tap.jobID, tap.folderPath) }
+        }
+    }
+    @MainActor private static var pendingTap: (jobID: String?, folderPath: String?)?
+
+    @MainActor fileprivate static func routeTap(jobID: String?, folderPath: String?) {
+        if let tapHandler { tapHandler(jobID, folderPath) } else { pendingTap = (jobID, folderPath) }
+    }
 
     /// Retained delegate that lets the completion alert appear **while the app is in the
     /// foreground**. Without it iOS silently drops immediate notifications whenever the app
@@ -94,14 +135,18 @@ enum AINotifications {
     }
     private static func fallbackID(_ jobID: String) -> String { "aiFallback.\(jobID)" }
 
-    /// Schedules the suspended-app fallback alert (see `AIProgressActivity.armFallback`).
-    static func scheduleFallback(jobID: String, after seconds: TimeInterval) {
+    /// Schedules (or re-schedules — same identifier replaces) the suspended-app fallback alert, see
+    /// `AIProgressActivity.armFallback`. Its wording is honest about what happened: the app was put
+    /// to sleep while Astria worked, and opening it is what lets the images finish and save.
+    static func scheduleFallback(jobID: String, folderPath: String?, after seconds: TimeInterval) {
         UNUserNotificationCenter.current().delegate = presenter
         let content = UNMutableNotificationContent()
-        content.title = "Check your AI images"
-        content.body = "Your AI request may be ready — tap to review."
+        content.title = "AI images still in progress"
+        content.body = "The app was paused while Astria was generating. Open it to finish and save your images."
         content.sound = .default
-        content.userInfo = [jobIDKey: jobID]
+        var info: [String: Any] = [jobIDKey: jobID]
+        if let folderPath { info[folderPathKey] = folderPath }
+        content.userInfo = info
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(1, seconds), repeats: false)
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: fallbackID(jobID), content: content, trigger: trigger))
@@ -115,7 +160,7 @@ enum AINotifications {
         center.removeDeliveredNotifications(withIdentifiers: [id])
     }
 
-    static func post(title: String, body: String, jobID: String? = nil) {
+    static func post(title: String, body: String, jobID: String? = nil, folderPath: String? = nil) {
         // Ensure the presenter is installed even if `post` is somehow reached without a
         // prior `requestAuthorization` (belt-and-braces so foreground alerts never drop).
         UNUserNotificationCenter.current().delegate = presenter
@@ -123,7 +168,10 @@ enum AINotifications {
         content.title = title
         content.body = body
         content.sound = .default
-        if let jobID { content.userInfo = [jobIDKey: jobID] }
+        var info: [String: Any] = [:]
+        if let jobID { info[jobIDKey] = jobID }
+        if let folderPath { info[folderPathKey] = folderPath }
+        content.userInfo = info
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))   // nil = deliver now
     }
@@ -141,9 +189,11 @@ private final class ForegroundPresenter: NSObject, UNUserNotificationCenterDeleg
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
-        let jobID = response.notification.request.content.userInfo[AINotifications.jobIDKey] as? String
-        if let jobID {
-            Task { @MainActor in AINotifications.tapHandler?(jobID) }
+        let info = response.notification.request.content.userInfo
+        let jobID = info[AINotifications.jobIDKey] as? String
+        let folderPath = info[AINotifications.folderPathKey] as? String
+        if jobID != nil || folderPath != nil {
+            Task { @MainActor in AINotifications.routeTap(jobID: jobID, folderPath: folderPath) }
         }
         completionHandler()
     }

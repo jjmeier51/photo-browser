@@ -20,10 +20,15 @@ enum AIExtend {
     /// * `downloadSession` — the RESULT-image fetches. `.background` service class = it uses spare
     ///   bandwidth and YIELDS to interactive traffic, and the per-host cap bounds it across every job,
     ///   so multiple edits' results stream in smoothly without stealing the network from the UI.
+    ///
+    /// Both cap `timeoutIntervalForResource`: with `waitsForConnectivity` on, a request made while
+    /// offline otherwise waits for connectivity up to the *resource* timeout (a week by default), so
+    /// one poll issued in a tunnel could pin a job for hours. Bounded, the poll loop just retries.
     nonisolated static let apiSession: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.httpMaximumConnectionsPerHost = 6
         cfg.timeoutIntervalForRequest = 60
+        cfg.timeoutIntervalForResource = 300
         cfg.waitsForConnectivity = true
         return URLSession(configuration: cfg)
     }()
@@ -31,6 +36,7 @@ enum AIExtend {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.httpMaximumConnectionsPerHost = 6
         cfg.timeoutIntervalForRequest = 120
+        cfg.timeoutIntervalForResource = 600
         cfg.networkServiceType = .background
         cfg.waitsForConnectivity = true
         return URLSession(configuration: cfg)
@@ -97,7 +103,17 @@ enum AIExtend {
         }
     }
 
-    enum AIError: Error { case notConfigured, badImage, network, badResult, server(String) }
+    /// * `network` — couldn't reach Astria / couldn't fetch the finished images. The prompt (if one
+    ///   was created) may still complete server-side, so callers keep its recovery record.
+    /// * `timedOut` — the prompt was created but its images didn't arrive within the poll budget.
+    ///   Astria is still working; the recovery record is kept and re-polled later.
+    /// * `generationFailed` — Astria reported the prompt itself failed (e.g. moderation). Terminal.
+    /// * `server` — the request was rejected outright (validation, auth, Cloudflare). Terminal.
+    enum AIError: Error {
+        case notConfigured, badImage, network, badResult, timedOut
+        case generationFailed(String)
+        case server(String)
+    }
 
     // MARK: - Config
 
@@ -270,10 +286,14 @@ enum AIExtend {
     /// `imageData: nil` → text2img). `token` is a fine-tune's subject word (e.g. `ohwx`) for a
     /// user's own account tune — it's prefixed into the prompt when missing so the trained subject
     /// actually appears. `resolutionTier` is "1K"/"2K"/"4K".
+    /// `heartbeat(ready, expected)` fires on every poll tick while this process is still waiting on
+    /// Astria (how many images exist so far, and how many are expected when known) — the caller
+    /// uses it to update progress and keep the "app was suspended mid-generation" alert pushed out.
     nonisolated static func generate(tune: Int, token: String? = nil, prompt: String, imageData: Data?,
                                      count: Int, width: Int?, height: Int?,
                                      aspect: String?, resolutionTier: String?,
-                                     onPrompt: (@Sendable (Int) -> Void)? = nil) async -> Result<[Data], AIError> {
+                                     onPrompt: (@Sendable (Int) -> Void)? = nil,
+                                     heartbeat: (@Sendable (Int, Int?) -> Void)? = nil) async -> Result<[Data], AIError> {
         guard isConfigured else { return .failure(.notConfigured) }
         guard let url = URL(string: "\(base)/tunes/\(tune)/prompts") else { return .failure(.server("Bad endpoint URL.")) }
 
@@ -285,9 +305,10 @@ enum AIExtend {
             let key = token.split(separator: " ").first.map(String.init) ?? token
             if !text.localizedCaseInsensitiveContains(key) { text = "\(token) \(text)" }
         }
+        let expected = min(max(count, 1), 8)
         var fields: [String: String] = [
             "prompt[text]": text,
-            "prompt[num_images]": String(min(max(count, 1), 8))
+            "prompt[num_images]": String(expected)
         ]
         // A fixed shape (1:1 / 4:5 / 9:16) wins. "Original" resolves to nil, so we derive the nearest
         // supported ratio from the (upright) input's dimensions — which keeps its shape/orientation
@@ -307,7 +328,8 @@ enum AIExtend {
         if let imageData {
             files.append(("prompt[input_image]", "input.jpg", "image/jpeg", imageData))
         }
-        return await submit(tune: tune, url: url, fields: fields, files: files, onPrompt: onPrompt)
+        return await submit(tune: tune, url: url, fields: fields, files: files, expected: expected,
+                            onPrompt: onPrompt, heartbeat: heartbeat)
     }
 
     /// Masked outpaint via Flux (the "Extend" feature). `imageData` is the original
@@ -334,7 +356,7 @@ enum AIExtend {
             ("prompt[input_image]", "input.jpg", "image/jpeg", imageData),
             ("prompt[mask_image]", "mask.png", "image/png", maskData)
         ]
-        return await submit(tune: tune, url: url, fields: fields, files: files)
+        return await submit(tune: tune, url: url, fields: fields, files: files, expected: 1)
     }
 
     /// Posts a prompt (multipart), polls until Astria finishes, downloads the image(s). `onPrompt`
@@ -342,72 +364,259 @@ enum AIExtend {
     /// job can be recovered (re-polled + saved) if the app is killed before generation finishes.
     private nonisolated static func submit(tune: Int, url: URL, fields: [String: String],
                                            files: [(name: String, filename: String, mime: String, data: Data)],
-                                           onPrompt: (@Sendable (Int) -> Void)? = nil) async -> Result<[Data], AIError> {
-        let boundary = "PB-\(UUID().uuidString)"
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.timeoutInterval = 180        // this leg also uploads the image — headroom for slow links
-        applyAPIHeaders(&req)
-        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        req.httpBody = multipart(fields: fields, files: files, boundary: boundary)
+                                           expected: Int,
+                                           onPrompt: (@Sendable (Int) -> Void)? = nil,
+                                           heartbeat: (@Sendable (Int, Int?) -> Void)? = nil) async -> Result<[Data], AIError> {
+        switch await createPrompt(tune: tune, url: url, fields: fields, files: files) {
+        case .failure(let err):
+            return .failure(err)
+        case .success(let id):
+            onPrompt?(id)
+            return await downloadPromptImages(promptID: id, tune: tune, expected: expected, heartbeat: heartbeat)
+        }
+    }
 
-        guard let (data, resp) = try? await apiSession.data(for: req) else { return .failure(.network) }
-        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+    /// Creates the prompt, surviving the two ways the single-shot POST used to lose a job:
+    /// * A **transient rejection** (429 / 5xx / Cloudflare 52x, or a connection that never got
+    ///   established) — retried with backoff + jitter, honouring `Retry-After`. Safe: Astria never
+    ///   saw (or explicitly refused) the request, so a retry can't double-create.
+    /// * An **ambiguous** failure (timeout / connection lost *after* the upload may have landed) —
+    ///   the prompt may exist server-side with nobody polling it, which is the "Astria has my
+    ///   images but the app never got them" case. We reconcile by listing the tune's newest prompts
+    ///   and adopting the one with our exact text created since we started; only a *definitive*
+    ///   "not there" allows a re-POST, so a job is never created twice.
+    private nonisolated static func createPrompt(tune: Int, url: URL, fields: [String: String],
+                                                 files: [(name: String, filename: String, mime: String, data: Data)]) async -> Result<Int, AIError> {
+        let text = fields["prompt[text]"] ?? ""
+        let boundary = "PB-\(UUID().uuidString)"
+        let body = multipart(fields: fields, files: files, boundary: boundary)
+        let maxAttempts = 4
+        for attempt in 1...maxAttempts {
+            let startedAt = Date()
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.timeoutInterval = 180        // this leg also uploads the image — headroom for slow links
+            applyAPIHeaders(&req)
+            req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+            req.httpBody = body
+
+            let response: (Data, URLResponse)
+            do {
+                response = try await apiSession.data(for: req)
+            } catch {
+                if isPreSendFailure(error) {
+                    // The request never reached Astria — plain retry.
+                    guard attempt < maxAttempts else { return .failure(.network) }
+                    await backoff(attempt: attempt, retryAfter: nil)
+                    continue
+                }
+                // Ambiguous: the upload may have completed. Look for the prompt before re-posting.
+                switch await findRecentPrompt(tune: tune, text: text, since: startedAt.addingTimeInterval(-30)) {
+                case .found(let id): return .success(id)
+                case .unavailable:   return .failure(.network)        // can't tell → don't risk a duplicate
+                case .notFound:
+                    guard attempt < maxAttempts else { return .failure(.network) }
+                    await backoff(attempt: attempt, retryAfter: nil)
+                    continue
+                }
+            }
+            let (data, resp) = response
+            guard let http = resp as? HTTPURLResponse else { return .failure(.network) }
+            if (200...299).contains(http.statusCode) {
+                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let id = intValue(json["id"]) else { return .failure(.badResult) }
+                return .success(id)
+            }
+            if isTransientStatus(http.statusCode), attempt < maxAttempts {
+                await backoff(attempt: attempt, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
+                continue
+            }
             return .failure(.server(message(from: data)))
         }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let id = intValue(json["id"]) else { return .failure(.badResult) }
-        onPrompt?(id)
-        return await downloadPromptImages(promptID: id, tune: tune)
+        return .failure(.network)
+    }
+
+    /// Outcome of looking for a prompt Astria may have created although we never saw its response.
+    private enum PromptLookup { case found(Int), notFound, unavailable }
+
+    /// Newest prompts on `tune` (Astria lists a tune's prompts newest first) → the first whose text
+    /// matches ours and was created after `since`. `.unavailable` when the listing itself failed.
+    private nonisolated static func findRecentPrompt(tune: Int, text: String, since: Date) async -> PromptLookup {
+        guard var comps = URLComponents(string: "\(base)/tunes/\(tune)/prompts") else { return .unavailable }
+        comps.queryItems = [URLQueryItem(name: "limit", value: "20")]
+        guard let url = comps.url else { return .unavailable }
+        var req = URLRequest(url: url); req.timeoutInterval = 30; applyAPIHeaders(&req)
+        guard let (data, resp) = try? await apiSession.data(for: req),
+              let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return .unavailable }
+        let wanted = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for p in arr {
+            guard let id = intValue(p["id"]),
+                  let t = p["text"] as? String,
+                  t.trimmingCharacters(in: .whitespacesAndNewlines) == wanted else { continue }
+            // Only adopt a prompt created around our attempt — an identical older prompt is a
+            // different job (and its images may already have been reviewed).
+            if let created = (p["created_at"] as? String).flatMap(parseISODate), created < since { continue }
+            return .found(id)
+        }
+        return .notFound
+    }
+
+    /// Errors that mean the request was never transmitted, so a retry can't duplicate anything.
+    private nonisolated static func isPreSendFailure(_ error: Error) -> Bool {
+        guard let e = error as? URLError else { return false }
+        switch e.code {
+        case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .notConnectedToInternet,
+             .secureConnectionFailed, .serverCertificateUntrusted, .internationalRoamingOff,
+             .dataNotAllowed, .callIsActive:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// HTTP statuses worth retrying: rate limits, server hiccups, and Cloudflare's origin errors.
+    private nonisolated static func isTransientStatus(_ code: Int) -> Bool {
+        code == 408 || code == 425 || code == 429 || (500...599).contains(code)
+    }
+
+    /// Exponential backoff with jitter (≈2s, 4s, 8s…), or the server's `Retry-After` when given.
+    private nonisolated static func backoff(attempt: Int, retryAfter: String?) async {
+        var seconds = min(pow(2.0, Double(attempt)), 30) * Double.random(in: 0.75...1.25)
+        if let retryAfter, let s = Double(retryAfter.trimmingCharacters(in: .whitespaces)), s > 0 {
+            seconds = min(s, 60)
+        }
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+    }
+
+    /// What one poll of a prompt told us.
+    private struct PromptState: Sendable {
+        var urls: [URL]          // result images so far (Astria fills `images` progressively)
+        var expected: Int?       // `num_images` on the prompt, when Astria reports it
+        var error: String?       // a prompt-level failure Astria reported (moderation etc.)
+    }
+
+    /// One GET of the prompt. Any non-terminal answer (4xx/5xx, a just-created 404, a Cloudflare
+    /// challenge, a parse miss) returns nil and the loop simply tries again next tick.
+    private nonisolated static func fetchPromptState(promptID: Int, tune: Int) async -> PromptState? {
+        guard let url = URL(string: "\(base)/tunes/\(tune)/prompts/\(promptID)") else { return nil }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 25          // a hung poll must not stall the loop for a whole minute
+        applyAPIHeaders(&req)
+        guard let (data, resp) = try? await apiSession.data(for: req) else { return nil }
+        if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return nil }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        var urls: [URL] = []
+        if let images = json["images"] as? [String] {
+            urls = images.compactMap { URL(string: $0) }
+        } else if let images = json["images"] as? [[String: Any]] {
+            urls = images.compactMap { ($0["url"] as? String).flatMap { URL(string: $0) } }
+        }
+        var error: String?
+        if let e = json["error"] as? String, !e.trimmingCharacters(in: .whitespaces).isEmpty { error = e }
+        return PromptState(urls: urls, expected: intValue(json["num_images"]), error: error)
     }
 
     /// Polls a created prompt to completion and downloads its image(s). Split out from `submit` so a
     /// recovered job (app killed mid-generation) can re-enter here with just the prompt id — Astria
-    /// keeps the finished result server-side, so it's still fetchable on the next launch.
-    private nonisolated static func downloadPromptImages(promptID: Int, tune: Int) async -> Result<[Data], AIError> {
-        let urls = await poll(promptID: promptID, tune: tune)
-        guard !urls.isEmpty else { return .failure(.server("Generation timed out or returned no images.")) }
-        var out: [Data] = []
-        await withTaskGroup(of: Data?.self) { group in
-            for u in urls {
-                group.addTask {
-                    guard let (d, r) = try? await downloadSession.data(from: u), !d.isEmpty else { return nil }
-                    // Only accept a real 2xx body — an expired/again-signed result URL can answer with
-                    // an error page, which must not be saved as a broken "image".
-                    if let http = r as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return nil }
-                    return d
+    /// keeps the finished result server-side, so it's still fetchable later.
+    ///
+    /// Why this is shaped the way it is (each point was a real symptom):
+    /// * Astria fills a prompt's `images` **progressively** — a 4-image job shows 1, then 2, … so
+    ///   "first non-empty array wins" returned partial batches. Now we wait for `expected`
+    ///   (`num_images`, from the request or the prompt itself), only accepting fewer once the list
+    ///   has stopped growing for a good while.
+    /// * Each image is downloaded **the moment its URL appears**, overlapping downloads with the
+    ///   rest of the generation — a multi-image 4K batch is ready to review much sooner.
+    /// * Downloads **retry** and are validated as decodable images; a single dropped connection
+    ///   (typically the app being suspended mid-fetch) no longer silently loses a result.
+    /// * The budget is counted in **polls, not wall-clock**, so a suspended app resumes where it
+    ///   left off instead of "timing out" on return. ~25 minutes of active polling — Seedream 5.0
+    ///   Pro at 4K × 8 images can run well past the old 6.5-minute cap.
+    private nonisolated static func downloadPromptImages(promptID: Int, tune: Int, expected: Int?,
+                                                         heartbeat: (@Sendable (Int, Int?) -> Void)? = nil) async -> Result<[Data], AIError> {
+        let maxTicks = 320                 // ≈25 min active at the adaptive cadence below
+        let stableTicks = 20               // no growth for this many polls → accept what we have
+        var known: [URL] = []
+        var want = expected
+        var terminalError: String?
+        let slots: [Int: Data] = await withTaskGroup(of: (Int, Data?).self, returning: [Int: Data].self) { group in
+            var tick = 0
+            var lastGrowth = 0
+            while tick < maxTicks, !Task.isCancelled {
+                // Fast at first (most edits land in under a minute), easing off for long jobs so
+                // the API isn't hammered for the whole run.
+                let delay: UInt64 = tick < 15 ? 2 : (tick < 60 ? 4 : 6)
+                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                tick += 1
+                heartbeat?(known.count, want)
+                guard let state = await fetchPromptState(promptID: promptID, tune: tune) else { continue }
+                if want == nil, let e = state.expected, e > 0 { want = e }
+                if state.urls.count > known.count {
+                    for i in known.count..<state.urls.count {
+                        let u = state.urls[i]
+                        group.addTask {
+                            let d = await downloadImage(u)
+                            return (i, d)
+                        }
+                    }
+                    known = state.urls
+                    lastGrowth = tick
                 }
+                if let want, known.count >= want { break }
+                if !known.isEmpty, tick - lastGrowth >= stableTicks { break }
+                if known.isEmpty, let err = state.error { terminalError = err; break }
             }
-            for await d in group { if let d { out.append(d) } }
+            var out: [Int: Data] = [:]
+            for await (i, d) in group { if let d { out[i] = d } }
+            return out
         }
-        return out.isEmpty ? .failure(.network) : .success(out)
+        if slots.isEmpty {
+            if let terminalError { return .failure(.generationFailed(terminalError)) }
+            return .failure(known.isEmpty ? .timedOut : .network)
+        }
+        return .success(slots.keys.sorted().compactMap { slots[$0] })
     }
 
-    /// Recover a previously-created prompt: poll for its images + download. Used at launch to finish
-    /// a job whose app was killed while Astria was still generating.
-    nonisolated static func resumePrompt(promptID: Int, tune: Int) async -> Result<[Data], AIError> {
-        await downloadPromptImages(promptID: promptID, tune: tune)
-    }
-
-    /// Polls the prompt until its `images` array is populated (or it times out). Any non-terminal
-    /// response (a 4xx/5xx, a transient just-created 404, a Cloudflare challenge, a parse miss) is
-    /// simply retried on the next tick — Astria reports "still working" as a 200 with an empty
-    /// `images` array, so we never treat an interim status as failure and bail early.
-    private nonisolated static func poll(promptID: Int, tune: Int) async -> [URL] {
-        guard let url = URL(string: "\(base)/tunes/\(tune)/prompts/\(promptID)") else { return [] }
-        for _ in 0..<130 {                                  // ~6.5 minutes at 3s — Seedream 5.0 can be slow
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+    /// Fetches one result image, retrying transient failures (≈1.5s, 3s, 6s). Only a 2xx body that
+    /// ImageIO can actually open counts — an expired/re-signed result URL can answer with an error
+    /// page, and a fetch cut short by app suspension yields a truncated file; neither may be saved
+    /// as a "result".
+    private nonisolated static func downloadImage(_ url: URL) async -> Data? {
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                let seconds = 1.5 * pow(2.0, Double(attempt - 1))
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            }
             var req = URLRequest(url: url)
-            applyAPIHeaders(&req)
-            guard let (data, _) = try? await apiSession.data(for: req),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-            if let images = json["images"] as? [String], !images.isEmpty { return images.compactMap { URL(string: $0) } }
-            if let images = json["images"] as? [[String: Any]] {
-                let us = images.compactMap { ($0["url"] as? String).flatMap { URL(string: $0) } }
-                if !us.isEmpty { return us }
+            req.setValue("PhotoBrowser/1.0 (iOS; Astria client)", forHTTPHeaderField: "User-Agent")
+            guard let (d, r) = try? await downloadSession.data(for: req), !d.isEmpty else { continue }
+            if let http = r as? HTTPURLResponse {
+                if isTransientStatus(http.statusCode) { continue }
+                if !(200...299).contains(http.statusCode) { return nil }   // definitive (403/404) — retrying won't help
             }
+            guard let src = CGImageSourceCreateWithData(d as CFData, nil),
+                  CGImageSourceGetCount(src) > 0, CGImageSourceGetStatus(src) == .statusComplete else { continue }
+            return d
         }
-        return []
+        return nil
+    }
+
+    /// Recover a previously-created prompt: poll for its images + download. Used to finish a job whose
+    /// app was suspended or killed while Astria was still generating. `expected` is the requested
+    /// image count when known (older records don't carry it; the prompt's own `num_images` fills in).
+    nonisolated static func resumePrompt(promptID: Int, tune: Int, expected: Int? = nil,
+                                         heartbeat: (@Sendable (Int, Int?) -> Void)? = nil) async -> Result<[Data], AIError> {
+        await downloadPromptImages(promptID: promptID, tune: tune, expected: expected, heartbeat: heartbeat)
+    }
+
+    /// Astria timestamps are ISO-8601, with or without fractional seconds.
+    private nonisolated static func parseISODate(_ s: String) -> Date? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f.date(from: s) { return d }
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: s)
     }
 
     // MARK: - Tunes (the account's own fine-tunes)
