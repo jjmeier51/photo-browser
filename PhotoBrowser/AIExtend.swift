@@ -569,6 +569,22 @@ enum AIExtend {
             }
             var out: [Int: Data] = [:]
             for await (i, d) in group { if let d { out[i] = d } }
+            // Second sweep for anything still missing, with URLs re-read from the prompt: a result
+            // URL is signed and can expire (a 403 the first pass rightly treats as definitive), and
+            // a fetch cut short by suspension may have exhausted its retries while offline. One
+            // more pass against fresh URLs turns most "3 of 4" batches into 4 of 4.
+            if out.count < known.count, !Task.isCancelled {
+                let fresh = await fetchPromptState(promptID: promptID, tune: tune)?.urls ?? []
+                let urls = fresh.count >= known.count ? fresh : known
+                for i in 0..<known.count where out[i] == nil {
+                    let u = urls[i]
+                    group.addTask {
+                        let d = await downloadImage(u, attempts: 2)
+                        return (i, d)
+                    }
+                }
+                for await (i, d) in group { if let d { out[i] = d } }
+            }
             return out
         }
         if slots.isEmpty {
@@ -582,8 +598,8 @@ enum AIExtend {
     /// ImageIO can actually open counts — an expired/re-signed result URL can answer with an error
     /// page, and a fetch cut short by app suspension yields a truncated file; neither may be saved
     /// as a "result".
-    private nonisolated static func downloadImage(_ url: URL) async -> Data? {
-        for attempt in 0..<3 {
+    nonisolated static func downloadImage(_ url: URL, attempts: Int = 3) async -> Data? {
+        for attempt in 0..<max(1, attempts) {
             if attempt > 0 {
                 let seconds = 1.5 * pow(2.0, Double(attempt - 1))
                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
@@ -608,6 +624,94 @@ enum AIExtend {
     nonisolated static func resumePrompt(promptID: Int, tune: Int, expected: Int? = nil,
                                          heartbeat: (@Sendable (Int, Int?) -> Void)? = nil) async -> Result<[Data], AIError> {
         await downloadPromptImages(promptID: promptID, tune: tune, expected: expected, heartbeat: heartbeat)
+    }
+
+    // MARK: - Past generations (the Astria.ai Browser)
+
+    /// One past generation on the account: the prompt and every image Astria produced for it.
+    struct AstriaPrompt: Identifiable, Sendable, Hashable {
+        let id: Int
+        let text: String
+        let tuneID: Int?
+        let createdAt: Date?
+        let images: [URL]
+        let numImages: Int?
+    }
+
+    /// Every prompt on the account, newest first, for the Astria.ai Browser. Astria's cross-tune
+    /// listing (`/prompts`, offset-paginated) is tried first; if it's unavailable, the same listing
+    /// is assembled per tune (the gallery models the app uses + the account's own tunes) — slower,
+    /// but it never leaves the browser empty because one endpoint changed. Read-only.
+    nonisolated static func listPrompts(maxPages: Int = 12, pageSize: Int = 50) async -> [AstriaPrompt] {
+        guard isConfigured else { return [] }
+        var out = await promptPages(path: "/prompts", maxPages: maxPages, pageSize: pageSize)
+        if out == nil {
+            // The tune-id settings are main-actor state; read them there.
+            var ids: [Int] = await MainActor.run { AIModel.allCases.map { tuneID(for: $0) } + [fluxTune] }
+            for t in await listTunes() { ids.append(t.id) }
+            var merged: [AstriaPrompt] = []
+            for id in Array(Set(ids)) {
+                merged += await promptPages(path: "/tunes/\(id)/prompts", maxPages: 4, pageSize: pageSize) ?? []
+            }
+            out = merged
+        }
+        var seen = Set<Int>()
+        let unique = (out ?? []).filter { seen.insert($0.id).inserted }
+        return unique.sorted {
+            switch ($0.createdAt, $1.createdAt) {
+            case let (a?, b?): return a > b
+            default:           return $0.id > $1.id
+            }
+        }
+    }
+
+    /// Offset-paginated prompt listing. nil when the first page can't be fetched at all (the caller
+    /// falls back); a later page failing just ends the listing with what's been read.
+    private nonisolated static func promptPages(path: String, maxPages: Int, pageSize: Int) async -> [AstriaPrompt]? {
+        var out: [AstriaPrompt] = []
+        var seen = Set<Int>()
+        for page in 0..<maxPages {
+            guard var comps = URLComponents(string: "\(base)\(path)") else { return page == 0 ? nil : out }
+            comps.queryItems = [URLQueryItem(name: "limit", value: String(pageSize)),
+                                URLQueryItem(name: "offset", value: String(out.count))]
+            guard let url = comps.url else { return page == 0 ? nil : out }
+            var req = URLRequest(url: url); req.timeoutInterval = 40; applyAPIHeaders(&req)
+            guard let (data, resp) = try? await apiSession.data(for: req),
+                  let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                  let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                return page == 0 ? nil : out
+            }
+            let fresh = arr.compactMap(astriaPrompt).filter { seen.insert($0.id).inserted }
+            guard !fresh.isEmpty else { break }            // empty page, or the server ignored offset
+            out += fresh
+            if arr.count < pageSize { break }              // short page → last one
+        }
+        return out
+    }
+
+    private nonisolated static func astriaPrompt(from p: [String: Any]) -> AstriaPrompt? {
+        guard let id = intValue(p["id"]) else { return nil }
+        var urls: [URL] = []
+        if let images = p["images"] as? [String] {
+            urls = images.compactMap { URL(string: $0) }
+        } else if let images = p["images"] as? [[String: Any]] {
+            urls = images.compactMap { ($0["url"] as? String).flatMap { URL(string: $0) } }
+        }
+        return AstriaPrompt(id: id,
+                            text: (p["text"] as? String) ?? "",
+                            tuneID: intValue(p["tune_id"]),
+                            createdAt: (p["created_at"] as? String).flatMap(parseISODate),
+                            images: urls,
+                            numImages: intValue(p["num_images"]))
+    }
+
+    /// A readable name for the tune a past prompt ran on: a built-in model, one of the account's
+    /// tunes, or the bare id.
+    static func modelName(forTune id: Int?, tunes: [AstriaTune]) -> String {
+        guard let id else { return "Astria" }
+        if let m = AIModel.allCases.first(where: { tuneID(for: $0) == id }) { return m.rawValue }
+        if let t = tunes.first(where: { $0.id == id }) { return t.label }
+        return "Tune \(id)"
     }
 
     /// Astria timestamps are ISO-8601, with or without fractional seconds.
@@ -904,14 +1008,17 @@ enum AIExtend {
     }
 
     /// Saves a **Create with AI** result (there's no source photo) into an "AI" subfolder of
-    /// `folder`, stamping today's date and the model/prompt provenance. Returns the new URL.
+    /// `folder` (or straight into `folder` when `intoAISubfolder` is false — the Astria browser
+    /// saves wherever the user pointed), stamping `date` (default: now) and the model/prompt
+    /// provenance. Returns the new URL.
     nonisolated static func saveGeneratedToFolder(_ data: Data, in folder: URL,
-                                                  model: String? = nil, prompt: String? = nil) -> URL? {
+                                                  model: String? = nil, prompt: String? = nil,
+                                                  date: Date? = nil, intoAISubfolder: Bool = true) -> URL? {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil),
               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
-        let aiDir = folder.appendingPathComponent("AI", isDirectory: true)
+        let aiDir = intoAISubfolder ? folder.appendingPathComponent("AI", isDirectory: true) : folder
         try? FileManager.default.createDirectory(at: aiDir, withIntermediateDirectories: true)
-        let now = Date()
+        let now = date ?? Date()
         let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
         let stamp = f.string(from: now)

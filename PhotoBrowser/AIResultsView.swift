@@ -29,6 +29,7 @@ struct AIResultsView: View {
     var model: String? = nil       // AI model / tune used, for metadata + search
     var prompt: String? = nil      // the prompt used
     var note: String? = nil        // e.g. "Astria returned 3 of 4 images" — shown above the results
+    var jobID: String? = nil       // the app-wide job under review; reported back to Library when done
 
     private enum Decision { case kept, deleted }
     @State private var decided: [Int: Decision] = [:]
@@ -154,6 +155,7 @@ struct AIResultsView: View {
     /// finishes dismissing this sheet before presenting the next.
     private func finish() {
         if savedAny { library.contentDidChange() }
+        if let jobID { library.aiReviewFinished(jobID: jobID) }   // the job's recovery record can go now
         let tgt = target, lib = library
         dismiss()
         Task { @MainActor in

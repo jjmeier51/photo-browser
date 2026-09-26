@@ -169,6 +169,7 @@ struct FolderView: View {
     @State private var resizeEntry: Entry?
     @State private var aiEditEntry: Entry?
     @State private var showAICreate = false        // "Create with AI" (text2img, no source photo)
+    @State private var showAstriaBrowser = false   // "Astria.ai Browser" (every past generation, save anywhere)
     @State private var showCreateTune = false      // "Create AI Tune" (train from folder photos)
     @State private var audioEntry: Entry?          // a tapped audio file → full-screen player
     @State private var reloading = false           // single-flight guard for reload()
@@ -1096,6 +1097,7 @@ struct FolderView: View {
                 MegaImportView(targetFolder: url) { Task { await reload() } }
             }
             .sheet(isPresented: $showAICreate) { AICreateView(folder: url) }
+            .fullScreenCover(isPresented: $showAstriaBrowser) { AstriaBrowserView(currentFolder: url) }
             .sheet(isPresented: $showCreateTune) {
                 CreateTuneView(folder: url, candidates: entries.filter { $0.kind == .image }.map(\.url))
             }
@@ -2180,6 +2182,9 @@ struct FolderView: View {
                         }
                         Button { showAICreate = true } label: {
                             Label("Create with AI…", systemImage: "wand.and.stars.inverse")
+                        }
+                        Button { showAstriaBrowser = true } label: {
+                            Label("Astria.ai Browser…", systemImage: "photo.stack")
                         }
                         Button { showCreateTune = true } label: {
                             Label("Create AI Tune…", systemImage: "person.crop.rectangle.badge.plus")

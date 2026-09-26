@@ -225,6 +225,38 @@ Every item here was a real symptom ("no results", "partial results"):
   the instant it's done" delivery would need a push server or a BackgroundTasks capability — not
   added.)
 
+### 1.9b Results survive the review — record lifetime
+
+The recovery record is **not** dropped when the images arrive; it stays until the review sheet
+finishes (`AIResultsView.finish` → `Library.aiReviewFinished`). The job also stays in
+`activeAIJobIDs` and `aiJobsUnderReview` meanwhile, so a foreground recovery pass never re-saves
+what's on screen and a notification tap never stacks a second sheet. If the process is killed with
+results on screen (or before they were shown), the next pass re-fetches them from Astria and saves
+them to the "AI" folder. `downloadPromptImages` also runs a **second sweep** for any image the first
+pass lost, against URLs re-read from the prompt (result URLs are signed and can expire).
+
+### 1.12 Astria.ai Browser — `AstriaBrowserView.swift`
+
+Folder menu → **"Astria.ai Browser…"** (full-screen cover, `currentFolder` = the folder it was
+opened from). Lists **every** prompt on the account newest first (`AIExtend.listPrompts`: the
+cross-tune `/prompts` listing, offset-paginated; if that endpoint fails it's assembled per tune —
+gallery models the app uses + the account's tunes — so the browser is never empty because one
+endpoint changed), grouped by prompt with model name (`modelName(forTune:tunes:)`), date and text.
+
+- **Thumbnails**: `AstriaImageCache` (all `nonisolated`) — memory `NSCache` + disk
+  (Caches/`astriaThumbs`, SHA-256 of the image URL, ≤ 480 px JPEG); full images cached in memory
+  by cost. Downloads go through `AIExtend.downloadImage` (retries + ImageIO validation). The disk
+  cache is listed/clearable in Storage.
+- **Preview** (`AstriaImagePreview`): full-size decode at ≤ 2200 px off-main, prompt/date/model,
+  Copy Prompt, and the two save buttons.
+- **Saving**: single (preview / context menu) or **Select** + per-prompt Select All → bottom bar.
+  Destination is either **"Save to “<last folder>”"** (one tap; `Library.astriaSaveFolder`,
+  persisted under `photoBrowser.astriaBrowser.lastFolder` and set on every save) or **"Save to
+  Folder…"** (`FolderPicker`, opened at the remembered folder, else the current folder). Files are
+  written **directly into the chosen folder** (`saveGeneratedToFolder(… intoAISubfolder: false)`)
+  stamped with the prompt's `created_at` and provenance, marked AI-generated, and remembered in
+  `Library.astriaSavedImages` (image URL → path) so the grid badges what's already on the drive.
+
 ### 1.11 Reusable Prompts
 
 - `AIExtend.reusablePrompts: [String]` — a shared list surfaced as a **"Reusable Prompts"**
@@ -445,6 +477,7 @@ image behind a thumbnail; captures the blog post **date** and keeps it with the 
 | AI live activity / notifications | `AILiveActivity.swift` |
 | AI jobs, durability, state | `Library.swift` |
 | Top-most modal presentation (AI results / creator) | `ModalPresenter.swift` |
+| Astria.ai Browser (past generations, save anywhere) | `AstriaBrowserView.swift` |
 | Find duplicates | `DuplicatesView.swift`, `PerceptualHash.swift` |
 | Storage / Drive Health | `StorageView.swift`, `DriveHealthView.swift` |
 | Directory reading / large folders | `Library.swift` (`coordinatedContents`, `listing`) |

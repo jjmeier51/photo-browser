@@ -1158,10 +1158,28 @@ final class Library {
     /// full-screen cover (or any other modal) was up — which is exactly when most edits are started
     /// and finish — leaving finished images stranded in memory: a major "nothing came back" cause.
     private func showAIResults(_ job: AIEditJob, note: String? = nil) {
+        let jobID = job.id.uuidString
+        guard aiJobsUnderReview.insert(jobID).inserted else { return }   // already on screen
         ModalPresenter.present(
-            AIResultsView(target: job.target, results: job.results, model: job.modelLabel, prompt: job.prompt, note: note)
+            AIResultsView(target: job.target, results: job.results, model: job.modelLabel, prompt: job.prompt,
+                          note: note, jobID: jobID)
                 .environment(self),
             modalInPresentation: true)
+    }
+
+    /// Job ids whose results sheet is currently on screen (a notification tap must not stack a
+    /// second copy, and a foreground recovery pass must not re-save what's being reviewed).
+    @ObservationIgnored private var aiJobsUnderReview: Set<String> = []
+
+    /// The review (Keep/Delete) of a job's results is over — only now is its recovery record
+    /// dropped. Until then the record stays, so if the app is killed with the results still on
+    /// screen (or before they were ever shown), the next pass re-fetches them from Astria and
+    /// saves them to the "AI" folder instead of losing them with the process.
+    func aiReviewFinished(jobID: String) {
+        aiJobsUnderReview.remove(jobID)
+        activeAIJobIDs.remove(jobID)
+        removePendingAstria(jobID: jobID)
+        if let uuid = UUID(uuidString: jobID) { completedAIEdits.removeValue(forKey: uuid) }
     }
 
     /// After AI results are reviewed (kept or discarded), reopen the creator that produced them,
@@ -1479,10 +1497,10 @@ final class Library {
                                  activityID: UUID, bg: BackgroundTaskHolder, live: AIProgressActivity, label: String) {
         let jobID = job.id.uuidString
         endActivity(activityID); bg.end()
-        activeAIJobIDs.remove(jobID)
         switch result {
         case .success(let data):
-            removePendingAstria(jobID: jobID)   // handled in-process; nothing left to recover
+            // The job stays "active" and its recovery record stays put until the review finishes
+            // (`aiReviewFinished`) — results held only in memory are otherwise lost with the process.
             var done = job; done.results = data
             completedAIEdits[job.id] = done
             live.finish(success: true,
@@ -1492,6 +1510,7 @@ final class Library {
             let note = data.count < count ? "Astria returned \(data.count) of \(count) images." : nil
             showAIResults(done, note: note)
         case .failure(let err):
+            activeAIJobIDs.remove(jobID)
             let msg = aiErrorMessage(err)
             if isRetryableAIError(err), hasPendingAstria(jobID: jobID) {
                 // The prompt exists on Astria; only our wait ended. Recovery finishes it — the
@@ -1534,6 +1553,7 @@ final class Library {
     /// did nothing at all, which read as "the notification is broken".
     func presentAIResult(jobID: String?, folderPath: String?) {
         if let jobID, let uuid = UUID(uuidString: jobID), let job = completedAIEdits[uuid] {
+            guard !aiJobsUnderReview.contains(jobID) else { return }   // already being reviewed
             navigate(toFolder: job.folder)
             showAIResults(job)
             return
@@ -1544,6 +1564,28 @@ final class Library {
             navigate(toFolder: FileManager.default.fileExists(atPath: ai.path) ? ai : folder)
         }
         resumePendingAIEdits()
+    }
+
+    // MARK: - Astria.ai Browser (past generations)
+
+    private static let astriaSaveFolderKey = "photoBrowser.astriaBrowser.lastFolder"
+    private static let astriaSavedKey = "photoBrowser.astriaBrowser.saved"
+
+    /// Where the Astria browser last saved to — offered as a one-tap destination next time.
+    var astriaSaveFolder: URL? = UserDefaults.standard.string(forKey: Library.astriaSaveFolderKey)
+        .map { URL(fileURLWithPath: $0, isDirectory: true) }
+    func setAstriaSaveFolder(_ url: URL) {
+        astriaSaveFolder = url
+        UserDefaults.standard.set(url.path, forKey: Self.astriaSaveFolderKey)
+    }
+
+    /// Astria image URL → the file it was saved as, so the browser can badge what's already on the
+    /// drive across sessions (and so a re-save is a deliberate choice, not an accident).
+    var astriaSavedImages: [String: String] =
+        (UserDefaults.standard.dictionary(forKey: Library.astriaSavedKey) as? [String: String]) ?? [:]
+    func markAstriaImageSaved(_ imageURL: URL, as file: URL) {
+        astriaSavedImages[imageURL.absoluteString] = file.path
+        UserDefaults.standard.set(astriaSavedImages, forKey: Self.astriaSavedKey)
     }
 
     private func navigate(toFolder folder: URL) {

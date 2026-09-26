@@ -117,6 +117,7 @@ struct StorageView: View {
             StorageItem(name: "Folder snapshots", detail: "Instant-open listings", urls: [caches.appendingPathComponent("listings")], clearable: true),
             StorageItem(name: "Download staging", detail: "Temporary background downloads", urls: [s("bgInbox")], clearable: true),
             StorageItem(name: "Web album cache", detail: "Browsed gallery indexes", urls: [s("accessKardashian")], clearable: true),
+            StorageItem(name: "Astria browser thumbnails", detail: "Past-generation previews", urls: [caches.appendingPathComponent("astriaThumbs")], clearable: true),
         ]
     }
 
