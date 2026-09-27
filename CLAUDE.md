@@ -38,8 +38,14 @@ actions the app makes no network calls.
 > subdirectory (built with XcodeGen, bundle id `com.example.photobrowser`) and
 > also contained an unrelated Python forum-crawler. **This repo is the cleaned-up
 > version** — the iOS app is at the root, built from a committed `.xcodeproj`
-> (no XcodeGen), bundle id `jayymei.PhotoBrowser`, and there is no Python code.
+> (no XcodeGen), bundle id `jayymei.PhotoBrowser`.
 > If you see references to `ios-app/` or `project.yml`, they are stale.
+
+> **Mac companion (`mac/`):** a separate Python/PySide6 desktop app, *Photo Browser
+> for Mac*, that browses the same SSD with the same look and bulk-edits EXIF,
+> capture dates, filenames and captions via ExifTool. It shares no code with the
+> iOS app — see `mac/README.md`. It is the only Python in the repo; keep it under
+> `mac/` and don't add Python elsewhere.
 
 ### Feature surface (so you know where things live)
 - **Browsing** — pick a folder → recursively scans it; square thumbnails for
