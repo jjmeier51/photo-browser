@@ -589,8 +589,18 @@ final class Library {
     }
 
     func setBirthday(_ date: Date?, for folder: URL) {
-        if let date { folderBirthdays[folder.path] = date.timeIntervalSince1970 }
-        else { folderBirthdays.removeValue(forKey: folder.path) }
+        setBirthdays([folder: date])
+    }
+
+    /// Applies many birthday changes at once (nil clears) — one write and one change
+    /// notification, so the Folder Birthdays mapping screen doesn't reload every folder view
+    /// once per row.
+    func setBirthdays(_ changes: [URL: Date?]) {
+        guard !changes.isEmpty else { return }
+        for (folder, date) in changes {
+            if let date { folderBirthdays[folder.path] = date.timeIntervalSince1970 }
+            else { folderBirthdays.removeValue(forKey: folder.path) }
+        }
         UserDefaults.standard.set(folderBirthdays, forKey: "photoBrowser.birthdays")
         labelsVersion += 1
         changeToken += 1

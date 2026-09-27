@@ -376,6 +376,24 @@ Support subdirs + Caches/listings). Useful because sideload reinstalls wipe the 
 
 ---
 
+## 5a. Folder Birthdays mapping — `BirthdayMappingView.swift` (Settings → Library)
+
+One screen mapping every **top-level folder** (`library.subfolders(of: root)`) to a birthday.
+Edits are **staged** in a `draft` dictionary and written together on Save via
+`Library.setBirthdays(_:)` (one UserDefaults write + one `labelsVersion`/`changeToken` bump —
+`setBirthday(_:for:)` now delegates to it). Rows: inline compact `DatePicker` (or "Add"), swipe to
+Clear / Revert, an unsaved dot; filters All / Missing / Set + search; Cancel confirms discarding.
+Bulk tools:
+- **Paste a List of Birthdays…** (`BirthdayTextImportView`): one folder per line; the date is
+  found anywhere in the line (a hand-parsed ISO `yyyy-mm-dd` first, then `NSDataDetector` for
+  numeric / written-out forms), the rest is the name, matched case-insensitively to a folder —
+  exact, else a *unique* prefix/containment match. A name with no date **clears** that folder.
+  Shows matched/unmatched before "Use N".
+- **Copy Mapping as Text**: `Name = yyyy-MM-dd` per folder (blank when unset) to the clipboard,
+  in list order — the same shape the importer reads, so the whole mapping round-trips through
+  Notes.
+- **Clear All Birthdays** (staged, confirmed).
+
 ## 6. Folder file-format filter — `Models.swift`, `FolderView.swift`
 
 `FormatFilter` (`all/jpeg/png/heif/raw/gif/mov/mp4/avi`) matches on file **extension** (RAW
@@ -482,4 +500,5 @@ image behind a thumbnail; captures the blog post **date** and keeps it with the 
 | Storage / Drive Health | `StorageView.swift`, `DriveHealthView.swift` |
 | Directory reading / large folders | `Library.swift` (`coordinatedContents`, `listing`) |
 | Folder filters | `Models.swift` (`FormatFilter`), `FolderView.swift` |
+| Folder Birthdays mapping (bulk) | `BirthdayMappingView.swift`, `Library.setBirthdays` |
 | Downloaders | `LinkDownloadService.swift`, `BunkrWebDownloader.swift`, `MegaDownloader.swift`, `InstagramService.swift`, `FacebookService.swift`, `WebBrowserView.swift` |

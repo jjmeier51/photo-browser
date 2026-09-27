@@ -62,6 +62,14 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    NavigationLink { BirthdayMappingView() } label: { Label("Folder Birthdays", systemImage: "birthday.cake") }
+                } header: {
+                    Text("Library")
+                } footer: {
+                    Text("Map every top-level folder to a birthday in one place — add, edit or clear them in bulk, or paste a list. Files in a folder then show an Age from their capture date.")
+                }
+
+                Section {
                     NavigationLink { StorageView() } label: { Label("Storage", systemImage: "internaldrive") }
                     NavigationLink { DriveHealthView() } label: { Label("Drive Health", systemImage: "stethoscope") }
                 } header: {
