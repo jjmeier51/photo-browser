@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreLocation
+import CryptoKit
 
 /// Finds likely-duplicate photos/videos in a single folder and lets the user
 /// compare and prune them.
@@ -17,6 +18,12 @@ import CoreLocation
 /// The scan is **non-recursive** (the chosen folder only). Dimension reads go
 /// through `Library.mediaSpecs` (cached, bounded concurrency, off the main
 /// actor) so a big folder on a slow external drive doesn't stall the UI.
+///
+/// **Deleting is per file, never "keep the largest":** every group row shows each of its files as
+/// a tile; the user ticks the exact copies to remove and deletes them together (one file in every
+/// group is always kept). **Results are remembered** (`DuplicateScanCache`): reopening the screen
+/// shows the last scan instantly, deletions / renames / Not-Duplicates update the saved result in
+/// place, and a full rescan only happens when files were added or changed, or on Rescan.
 struct DuplicatesView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
@@ -24,13 +31,13 @@ struct DuplicatesView: View {
 
     @State private var groups: [DuplicateGroup] = []
     @State private var scanning = true
-    @State private var selection = Set<UUID>()
+    @State private var loaded = false                    // `.task` guard: never rescan on a re-appear
+    @State private var scannedAt: Date?
+    @State private var fingerprint: [String: String] = [:]   // path → "size|mtime" of every file the result covers
+    @State private var selectedFiles = Set<URL>()         // files ticked for deletion
     @State private var exactOnly = false
-    @State private var confirmDeleteDupes = false
-
-    private var selectedGroups: [DuplicateGroup] { groups.filter { selection.contains($0.id) } }
-    /// How many files a bulk delete would remove: everything but the one kept in each selected group.
-    private var deleteCount: Int { selectedGroups.reduce(0) { $0 + max(0, $1.entries.count - 1) } }
+    @State private var confirmDelete = false
+    @State private var compareGroup: DuplicateGroup?
 
     /// The groups currently shown, honoring the Exact-Matches filter.
     private var shownGroups: [DuplicateGroup] {
@@ -47,8 +54,13 @@ struct DuplicatesView: View {
                         Text("Scanning for duplicates…").foregroundStyle(.secondary)
                     }
                 } else if groups.isEmpty {
-                    ContentUnavailableView("No Duplicates", systemImage: "checkmark.circle",
-                        description: Text("No files here share the same size & dimensions, look visually alike, or share a copy-style name."))
+                    ContentUnavailableView {
+                        Label("No Duplicates", systemImage: "checkmark.circle")
+                    } description: {
+                        Text("No files here share the same size & dimensions, look visually alike, or share a copy-style name.")
+                    } actions: {
+                        Button("Rescan") { Task { await load(force: true) } }.buttonStyle(.bordered)
+                    }
                 } else {
                     VStack(spacing: 0) {
                         Picker("Filter", selection: $exactOnly) {
@@ -58,21 +70,31 @@ struct DuplicatesView: View {
                         .pickerStyle(.segmented)
                         .padding(.horizontal).padding(.vertical, 8)
 
-                        List(selection: $selection) {
+                        List {
                             Section {
                                 ForEach(shownGroups) { group in
-                                    NavigationLink {
-                                        DuplicateCompareView(group: group) { removed in remove(removed, from: group) }
-                                            onNotDuplicates: { markNotDuplicates([group]) }
-                                    } label: {
-                                        DuplicateGroupRow(group: group)
+                                    DuplicateGroupRow(group: group, selectedFiles: $selectedFiles,
+                                                      onToggle: { toggle($0, in: group) },
+                                                      onCompare: { compareGroup = group })
+                                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                        Button { markNotDuplicates([group]) } label: {
+                                            Label("Not Duplicates", systemImage: "checkmark.circle")
+                                        }
+                                        .tint(.green)
                                     }
-                                    .tag(group.id)
+                                    .contextMenu {
+                                        Button { compareGroup = group } label: { Label("Compare", systemImage: "rectangle.split.2x1") }
+                                        Button { markNotDuplicates([group]) } label: { Label("Not Duplicates", systemImage: "checkmark.circle") }
+                                    }
+                                }
+                            } header: {
+                                if let scannedAt {
+                                    Text("Results from \(scannedAt.formatted(.relative(presentation: .named))) · tap ↻ to rescan")
                                 }
                             } footer: {
                                 Text(exactOnly
-                                     ? "Exact matches share identical size and pixel dimensions — almost always true duplicates."
-                                     : "“Exact” = identical size & dimensions; “Visually similar” = the same picture re-encoded/resized/lightly edited; “Similar name” = a copy-style name (like “name (1)”). Tap Edit to select groups, then Delete Duplicates (keeps the largest in each) or mark them Not Duplicates.")
+                                     ? "Exact matches share identical size and pixel dimensions — almost always true duplicates. Tap the copies you don't want, then Delete Selected; one file in each group is always kept."
+                                     : "“Exact” = identical size & dimensions; “Visually similar” = the same picture re-encoded/resized/lightly edited; “Similar name” = a copy-style name (like “name (1)”). Tap the copies you don't want, then Delete Selected — one file in each group is always kept. Swipe a group to mark it Not Duplicates; › compares the files side by side.")
                             }
                         }
                     }
@@ -80,46 +102,66 @@ struct DuplicatesView: View {
             }
             .navigationTitle("Find Duplicates")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(item: $compareGroup) { group in
+                DuplicateCompareView(group: group,
+                                     onDelete: { removed in remove(removed, from: group) },
+                                     onRename: { old, new in renamed(old, to: new, in: group) },
+                                     onNotDuplicates: { markNotDuplicates([group]) })
+            }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) { if !groups.isEmpty { EditButton() } }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { Task { await load(force: true) } } label: { Image(systemName: "arrow.clockwise") }
+                        .disabled(scanning)
+                        .accessibilityLabel("Rescan")
+                }
                 ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
                 ToolbarItemGroup(placement: .bottomBar) {
-                    if !selection.isEmpty {
-                        Button("Not Duplicates (\(selection.count))") {
-                            markNotDuplicates(selectedGroups)
-                            selection.removeAll()
-                        }
+                    if !selectedFiles.isEmpty {
+                        Button("Clear Selection") { selectedFiles.removeAll() }
                         Spacer()
-                        Button(role: .destructive) { confirmDeleteDupes = true } label: {
-                            Text("Delete Duplicates (\(deleteCount))")
+                        Button(role: .destructive) { confirmDelete = true } label: {
+                            Text("Delete Selected (\(selectedFiles.count))")
                         }
-                        .disabled(deleteCount == 0)
                     }
                 }
             }
-            .confirmationDialog("Delete \(deleteCount) file\(deleteCount == 1 ? "" : "s")? This keeps the largest file in each selected group and permanently deletes the rest.",
-                                isPresented: $confirmDeleteDupes, titleVisibility: .visible) {
-                Button("Delete \(deleteCount)", role: .destructive) { deleteDuplicates(selectedGroups); selection.removeAll() }
+            .confirmationDialog("Delete \(selectedFiles.count) file\(selectedFiles.count == 1 ? "" : "s")? This permanently removes the copies you ticked from the drive.",
+                                isPresented: $confirmDelete, titleVisibility: .visible) {
+                Button("Delete \(selectedFiles.count)", role: .destructive) { deleteSelectedFiles() }
                 Button("Cancel", role: .cancel) {}
             }
-            .task { await scan() }
+            .task(id: folder) { await load(force: false) }
         }
     }
 
-    /// Bulk delete across selected groups: keep the largest file in each group, delete the rest.
-    /// (For a false grouping, the user can mark it Not Duplicates instead — nothing is deleted until
-    /// this explicit action + confirmation.)
-    private func deleteDuplicates(_ marked: [DuplicateGroup]) {
-        for g in marked {
-            let ordered = g.entries.sorted { $0.size > $1.size }   // largest kept
-            let toDelete = Array(ordered.dropFirst())
-            guard !toDelete.isEmpty else { continue }
-            FileActions.delete(toDelete)
-            for e in toDelete { library.clearOrigins([e.url]); library.clearLabels([e.url]) }
+    // MARK: - Selection
+
+    /// Ticks/unticks one file for deletion. The last unticked file of a group can't be ticked —
+    /// something always stays.
+    private func toggle(_ url: URL, in group: DuplicateGroup) {
+        if selectedFiles.contains(url) { selectedFiles.remove(url); return }
+        let othersAllTicked = group.entries.filter { $0.url != url }.allSatisfy { selectedFiles.contains($0.url) }
+        guard !othersAllTicked else { return }
+        selectedFiles.insert(url)
+    }
+
+    /// Deletes exactly the ticked files (a file that sits in two groups is deleted once), then
+    /// trims the groups and updates the remembered result.
+    private func deleteSelectedFiles() {
+        let urls = selectedFiles
+        var seen = Set<URL>()
+        let targets = groups.flatMap { $0.entries }.filter { urls.contains($0.url) && seen.insert($0.url).inserted }
+        guard !targets.isEmpty else { return }
+        FileActions.delete(targets)
+        for e in targets { library.clearOrigins([e.url]); library.clearLabels([e.url]) }
+        library.contentDidChange(under: folder)
+        for i in groups.indices.reversed() {
+            groups[i].entries.removeAll { urls.contains($0.url) }
+            if groups[i].entries.count < 2 { groups.remove(at: i) }   // no longer a duplicate
         }
-        library.contentDidChange()
-        let ids = Set(marked.map { $0.id })
-        groups.removeAll { ids.contains($0.id) }   // each is resolved down to a single kept file
+        for u in urls { fingerprint.removeValue(forKey: u.path) }
+        selectedFiles.removeAll()
+        persist()
     }
 
     /// Records each group's items as confirmed non-duplicates (so they're hidden in
@@ -128,13 +170,63 @@ struct DuplicatesView: View {
         for g in marked { library.markNotDuplicates(g.entries.map { $0.url.path }) }
         let ids = Set(marked.map { $0.id })
         groups.removeAll { ids.contains($0.id) }
+        for g in marked { for e in g.entries { selectedFiles.remove(e.url) } }
+        persist()
     }
 
-    private func scan() async {
+    /// A file renamed from the Compare screen keeps its place in every group (and in the
+    /// remembered result) under its new name, instead of counting as a removed + added file that
+    /// would force a rescan next time.
+    private func renamed(_ old: URL, to new: Entry, in group: DuplicateGroup) {
+        for i in groups.indices {
+            if let j = groups[i].entries.firstIndex(where: { $0.url == old }) { groups[i].entries[j] = new }
+        }
+        if let v = fingerprint.removeValue(forKey: old.path) { fingerprint[new.url.path] = v }
+        if selectedFiles.remove(old) != nil { selectedFiles.insert(new.url) }
+        persist()
+    }
+
+    // MARK: - Loading (remembered result first, full scan only when needed)
+
+    private func load(force: Bool) async {
+        if loaded && !force { return }
+        loaded = true
         scanning = true
         // All viewable media (images AND videos). Dimensions are only used for the
         // size+dimensions match; the filename match needs none, so videos always count.
         let media = await library.listing(of: folder, sort: .nameAsc).filter { $0.isViewable }
+        let current = DuplicateScanCache.fingerprint(media)
+
+        if !force, let record = await DuplicateScanCache.load(folder: folder) {
+            // Files that vanished (deleted/moved elsewhere) just drop out of their groups; only a
+            // file that is NEW or CHANGED (size/mtime) can create a match we don't know about, and
+            // only that forces a rescan.
+            let changed = current.contains { path, value in record.files[path] != value }
+            if !changed {
+                groups = record.rebuild(with: media, dismissed: allPairsDismissed)
+                fingerprint = current
+                scannedAt = Date(timeIntervalSince1970: record.scannedAt)
+                scanning = false
+                persist()          // write back the pruned result
+                return
+            }
+        }
+
+        groups = await fullScan(media: media)
+        fingerprint = current
+        scannedAt = Date()
+        scanning = false
+        persist()
+    }
+
+    private func persist() {
+        let record = DuplicateScanCache.Record(scannedAt: scannedAt?.timeIntervalSince1970 ?? Date().timeIntervalSince1970,
+                                               files: fingerprint, groups: groups.map(DuplicateScanCache.StoredGroup.init))
+        let folder = folder
+        Task.detached(priority: .utility) { DuplicateScanCache.save(record, folder: folder) }
+    }
+
+    private func fullScan(media: [Entry]) async -> [DuplicateGroup] {
         let specs = await library.mediaSpecs(for: media)
 
         // Build the two kinds of group SEPARATELY — never chaining across them. The old
@@ -183,10 +275,9 @@ struct DuplicatesView: View {
         for g in byName.values { addEntries(g.map { media[$0] }, kind: .name) }
 
         // Strongest kind first (exact → similar → name), then biggest payoff.
-        groups = result.sorted {
+        return result.sorted {
             $0.matchKind.rank != $1.matchKind.rank ? $0.matchKind.rank < $1.matchKind.rank : $0.size > $1.size
         }
-        scanning = false
     }
 
     /// Clusters images that look the same via a perceptual dHash (Hamming distance ≤ threshold),
@@ -256,23 +347,29 @@ struct DuplicatesView: View {
         return base
     }
 
+    /// A file deleted from the Compare screen leaves every group it was in (a file can sit in an
+    /// exact group and a name group at once) and the remembered result.
     private func remove(_ url: URL, from group: DuplicateGroup) {
-        guard let gi = groups.firstIndex(where: { $0.id == group.id }) else { return }
-        groups[gi].entries.removeAll { $0.url == url }
-        if groups[gi].entries.count < 2 { groups.remove(at: gi) }   // no longer a duplicate
+        for i in groups.indices.reversed() {
+            groups[i].entries.removeAll { $0.url == url }
+            if groups[i].entries.count < 2 { groups.remove(at: i) }   // no longer a duplicate
+        }
+        fingerprint.removeValue(forKey: url.path)
+        selectedFiles.remove(url)
+        persist()
     }
 }
 
 /// Why a group was formed: identical size **and** pixel dimensions (a near-certain
 /// duplicate), a **visually** matching picture (perceptual hash — catches re-encodes,
 /// resizes and light edits), or just a similar/copy name (a weaker signal).
-enum DuplicateMatchKind { case exact, similar, name
+enum DuplicateMatchKind: Int, Hashable, Codable { case exact = 0, similar = 1, name = 2
     /// Sort/display rank: exact first, then visual, then name-only.
-    var rank: Int { switch self { case .exact: return 0; case .similar: return 1; case .name: return 2 } }
+    var rank: Int { rawValue }
 }
 
 /// A set of files in one folder that share size + dimensions, or a similar (copy) name.
-struct DuplicateGroup: Identifiable {
+struct DuplicateGroup: Identifiable, Hashable {
     let id = UUID()
     var entries: [Entry]
     let size: Int64
@@ -309,25 +406,70 @@ struct DuplicateGroup: Identifiable {
     }
 }
 
-/// One row in the duplicate-groups list: a couple of thumbnails plus a summary.
+/// One row in the duplicate-groups list: the summary, a › to compare, and **every file in the group
+/// as a tile** — tap a tile to tick that specific copy for deletion (it gets a red ring and a trash
+/// badge). The tiles and the › are separate buttons so a tap never lands on the wrong thing.
 private struct DuplicateGroupRow: View {
     let group: DuplicateGroup
+    @Binding var selectedFiles: Set<URL>
+    let onToggle: (URL) -> Void
+    let onCompare: () -> Void
+
     var body: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 4) {
-                ForEach(group.entries.prefix(2)) { DuplicateThumb(entry: $0, side: 52) }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(group.entries.count) \(group.kindNoun) files")
+                        .font(.subheadline.weight(.medium))
+                    Text("\(group.size.sizeString) · \(group.dimensionLabel)\(group.typeLabel.isEmpty ? "" : " · \(group.typeLabel)")")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Label(group.kindLabel, systemImage: group.kindIcon)
+                        .font(.caption2)
+                        .foregroundStyle(group.kindColor)
+                }
+                Spacer(minLength: 6)
+                Button(action: onCompare) {
+                    Label("Compare", systemImage: "chevron.right")
+                        .labelStyle(.iconOnly)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(8)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Compare side by side")
             }
-            VStack(alignment: .leading, spacing: 3) {
-                Text("\(group.entries.count) \(group.kindNoun) files")
-                    .font(.subheadline.weight(.medium))
-                Text("\(group.size.sizeString) · \(group.dimensionLabel)\(group.typeLabel.isEmpty ? "" : " · \(group.typeLabel)")")
-                    .font(.caption).foregroundStyle(.secondary)
-                Label(group.kindLabel, systemImage: group.kindIcon)
-                    .font(.caption2)
-                    .foregroundStyle(group.kindColor)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 10) {
+                    ForEach(group.entries) { e in fileTile(e) }
+                }
+                .padding(.vertical, 2)
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func fileTile(_ e: Entry) -> some View {
+        let ticked = selectedFiles.contains(e.url)
+        return Button { onToggle(e.url) } label: {
+            VStack(spacing: 4) {
+                ZStack(alignment: .topTrailing) {
+                    DuplicateThumb(entry: e, side: 88)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(ticked ? Color.red : .clear, lineWidth: 3))
+                        .opacity(ticked ? 0.75 : 1)
+                    Image(systemName: ticked ? "trash.circle.fill" : "circle")
+                        .font(.title3)
+                        .foregroundStyle(ticked ? Color.red : Color.white)
+                        .shadow(radius: 2)
+                        .padding(5)
+                }
+                Text(e.name).font(.caption2).lineLimit(1).truncationMode(.middle).frame(width: 88)
+                Text(e.size.sizeString).font(.caption2).foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(ticked ? "Unmark \(e.name)" : "Mark \(e.name) for deletion")
     }
 }
 
@@ -363,6 +505,7 @@ private struct DuplicateCompareView: View {
     @Environment(\.dismiss) private var dismiss
     let group: DuplicateGroup
     var onDelete: (URL) -> Void
+    var onRename: (URL, Entry) -> Void = { _, _ in }
     var onNotDuplicates: () -> Void = {}
 
     /// A mutable copy of the group's items so a rename (which changes a URL) is
@@ -384,9 +527,12 @@ private struct DuplicateCompareView: View {
     /// Bumped after an edit to force the metadata to reload.
     @State private var reloadToken = 0
 
-    init(group: DuplicateGroup, onDelete: @escaping (URL) -> Void, onNotDuplicates: @escaping () -> Void = {}) {
+    init(group: DuplicateGroup, onDelete: @escaping (URL) -> Void,
+         onRename: @escaping (URL, Entry) -> Void = { _, _ in },
+         onNotDuplicates: @escaping () -> Void = {}) {
         self.group = group
         self.onDelete = onDelete
+        self.onRename = onRename
         self.onNotDuplicates = onNotDuplicates
         _items = State(initialValue: group.entries)
     }
@@ -657,8 +803,10 @@ private struct DuplicateCompareView: View {
               let newURL = FileActions.rename(target.url, to: renameDraft) else { return }
         library.itemMoved(from: target.url, to: newURL)
         let old = items[idx]
-        items[idx] = Entry(url: newURL, name: newURL.lastPathComponent,
-                           kind: old.kind, size: old.size, modified: old.modified)
+        let renamed = Entry(url: newURL, name: newURL.lastPathComponent,
+                            kind: old.kind, size: old.size, modified: old.modified)
+        items[idx] = renamed
+        onRename(target.url, renamed)      // the list (and the remembered result) follow the new name
         library.contentDidChange()
         reloadToken += 1
     }
@@ -702,5 +850,71 @@ private struct URLBox: Identifiable { let url: URL; var id: URL { url } }
 private struct DotLabelStyle: LabelStyle {
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 4) { configuration.icon.font(.system(size: 8)); configuration.title }
+    }
+}
+
+/// The remembered result of a folder's last duplicate scan — one JSON file per folder in
+/// Application Support/`duplicateScans` (not Caches: iOS purges those under pressure, and a scan of
+/// a big folder is minutes of work). Holds the groups (as paths) and a fingerprint (`size|mtime`) of
+/// **every** file the scan covered, so the next open can tell "nothing new" (show it instantly,
+/// dropping files that vanished) from "something was added or changed" (rescan). `nonisolated`:
+/// read and written off the main actor.
+nonisolated enum DuplicateScanCache {
+    struct StoredGroup: Codable {
+        var paths: [String]
+        var size: Int64
+        var longSide: Int
+        var pixels: Int
+        var kind: DuplicateMatchKind
+        init(_ g: DuplicateGroup) {
+            paths = g.entries.map { $0.url.path }; size = g.size; longSide = g.longSide; pixels = g.pixels; kind = g.matchKind
+        }
+    }
+    struct Record: Codable {
+        var scannedAt: Double
+        var files: [String: String]
+        var groups: [StoredGroup]
+
+        /// Groups rebuilt against the folder's *current* listing: files that are gone drop out,
+        /// pairs since marked Not Duplicates are skipped, groups left with one file disappear.
+        func rebuild(with media: [Entry], dismissed: ([String]) -> Bool) -> [DuplicateGroup] {
+            let byPath = Dictionary(media.map { ($0.url.path, $0) }, uniquingKeysWith: { a, _ in a })
+            var out: [DuplicateGroup] = []
+            for sg in groups {
+                let entries = sg.paths.compactMap { byPath[$0] }
+                guard entries.count > 1, !dismissed(entries.map { $0.url.path }) else { continue }
+                out.append(DuplicateGroup(entries: entries, size: sg.size, longSide: sg.longSide, pixels: sg.pixels, matchKind: sg.kind))
+            }
+            return out
+        }
+    }
+
+    static func fingerprint(_ media: [Entry]) -> [String: String] {
+        Dictionary(media.map { ($0.url.path, "\($0.size)|\(Int($0.modified.timeIntervalSince1970))") },
+                   uniquingKeysWith: { a, _ in a })
+    }
+
+    private static var directory: URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = support.appendingPathComponent("duplicateScans", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+    private static func file(for folder: URL) -> URL {
+        let key = SHA256.hash(data: Data(folder.standardizedFileURL.path.utf8)).map { String(format: "%02x", $0) }.joined()
+        return directory.appendingPathComponent(key).appendingPathExtension("json")
+    }
+
+    static func load(folder: URL) async -> Record? {
+        let url = file(for: folder)
+        return await Task.detached(priority: .userInitiated) {
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return try? JSONDecoder().decode(Record.self, from: data)
+        }.value
+    }
+
+    static func save(_ record: Record, folder: URL) {
+        guard let data = try? JSONEncoder().encode(record) else { return }
+        try? data.write(to: file(for: folder), options: .atomic)
     }
 }

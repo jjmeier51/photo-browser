@@ -291,12 +291,22 @@ then largest first). `DuplicateGroup` carries display helpers `kindNoun/kindLabe
 kindColor` and **`typeLabel`** (the file type(s), e.g. "JPG" or "JPG/PNG").
 
 UI:
-- Rows show count, size · dimensions · **file type(s)**, and a colored kind badge.
-- **List-level multi-select** (Edit → select groups): bottom bar offers **"Not Duplicates"**
-  (records the group as non-dupes so future scans skip it — `library.markNotDuplicates`) and
-  **"Delete Duplicates (N)"**, which keeps the **largest** file in each selected group and
-  deletes the rest, behind a confirmation. (Because visual clusters can occasionally be wrong,
-  deletion is always explicit + confirmed; a false group can be marked Not Duplicates instead.)
+- Rows show count, size · dimensions · **file type(s)**, a colored kind badge, a › that opens
+  Compare (`navigationDestination(item:)`), and **every file of the group as a tile**. Tapping a
+  tile ticks that specific copy for deletion (red ring + trash badge); the bottom bar's **"Delete
+  Selected (N)"** removes exactly the ticked files behind a confirmation. There is deliberately
+  **no "keep the largest" bulk delete** — the user chooses which copy goes. `toggle` refuses to
+  tick the last unticked file of a group, so one file per group always survives. **Not
+  Duplicates** is a swipe action / context-menu item on the row (`library.markNotDuplicates`).
+- **Results are remembered** — `DuplicateScanCache` (one JSON per folder in Application
+  Support/`duplicateScans`, listed in Storage): the groups as paths plus a `size|mtime`
+  fingerprint of every file the scan covered. On open, `load(force:false)` lists the folder and
+  compares fingerprints: if no file is new or changed, the stored groups are rebuilt against the
+  current listing (vanished files drop out, dismissed pairs are skipped) and shown instantly;
+  otherwise a full scan runs. Deleting, renaming (Compare's `onRename` keeps the file in its
+  groups under the new name) and Not Duplicates all update the record in place (`persist()`), so
+  nothing re-scans until files actually change or the user taps ↻ Rescan. `.task(id: folder)` is
+  guarded by `loaded`, so returning from Compare never triggers a scan either.
 - **Compare view** (`DuplicateCompareView`): side-by-side of two items with a same/different
   metadata breakdown, per-item edit menu (rename/date/caption/labels), per-side delete, a
   **"Delete files" multi-select checklist** (tick several, delete together), and "Not Duplicates".
