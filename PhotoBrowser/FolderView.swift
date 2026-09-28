@@ -761,21 +761,23 @@ struct FolderView: View {
                 Button { infoEntry = entry } label: {
                     Label("Get Info", systemImage: "info.circle")
                 }
-                Button { editEntry = entry } label: {
-                    Label("Crop & Rotate", systemImage: "crop.rotate")
-                }
-                if entry.kind == .image {
-                    Button { studioEntry = entry } label: {
-                        Label("Edit Photo", systemImage: "slider.horizontal.3")
+                if !library.pureTransferMode {   // pixel editors are out of scope for Pure File Transfer
+                    Button { editEntry = entry } label: {
+                        Label("Crop & Rotate", systemImage: "crop.rotate")
                     }
-                    Button { resizeEntry = entry } label: {
-                        Label("Resize / Extend", systemImage: "aspectratio")
-                    }
-                    Button { aiEditEntry = entry } label: {
-                        Label("Edit with AI", systemImage: "wand.and.stars")
-                    }
-                    Button { aiUpscale(entry) } label: {
-                        Label("AI Upscale", systemImage: "wand.and.rays")
+                    if entry.kind == .image {
+                        Button { studioEntry = entry } label: {
+                            Label("Edit Photo", systemImage: "slider.horizontal.3")
+                        }
+                        Button { resizeEntry = entry } label: {
+                            Label("Resize / Extend", systemImage: "aspectratio")
+                        }
+                        Button { aiEditEntry = entry } label: {
+                            Label("Edit with AI", systemImage: "wand.and.stars")
+                        }
+                        Button { aiUpscale(entry) } label: {
+                            Label("AI Upscale", systemImage: "wand.and.rays")
+                        }
                     }
                 }
                 Button { metadataTargets = [entry.url]; showMetadataEditor = true } label: {
@@ -2051,9 +2053,11 @@ struct FolderView: View {
             } else {
                 // Always visible so the browser is one tap away, not buried in the "…" menu.
                 // The icon is intentionally static: FolderView doesn't observe WebController,
-                // so a hasSession-dependent icon would go stale.
-                Button { showWebBrowser = true } label: { Image(systemName: "safari") }
-                    .accessibilityLabel("Browser")
+                // so a hasSession-dependent icon would go stale. (Not in Pure File Transfer.)
+                if !library.pureTransferMode {
+                    Button { showWebBrowser = true } label: { Image(systemName: "safari") }
+                        .accessibilityLabel("Browser")
+                }
                 if !isRoot {
                     Button { library.goHome() } label: { Image(systemName: "house") }
                 }
@@ -2089,8 +2093,10 @@ struct FolderView: View {
                         Button { showNewReviewsFolder = true } label: {
                             Label("Create Reviews Folder", systemImage: "star.square.on.square")
                         }
-                        Button { showTextMessages = true } label: {
-                            Label("Import Your Text Messages", systemImage: "message")
+                        if !library.pureTransferMode {
+                            Button { showTextMessages = true } label: {
+                                Label("Import Your Text Messages", systemImage: "message")
+                            }
                         }
                         Toggle(isOn: $showHiddenFolders) { Label("Show Hidden Items", systemImage: "eye.slash") }
                         Button {
@@ -2113,6 +2119,9 @@ struct FolderView: View {
                             Label("Add from iOS Album…", systemImage: "photo.badge.arrow.down")
                         }
                         Button { photosLibraryMoves = false; showPhotosLibrary = true } label: { Label("Photos Library", systemImage: "photo.stack") }
+                        // Pure File Transfer: the downloaders and the AI tools are not offered at all —
+                        // moving files from the phone to the drive is the whole job.
+                        if !library.pureTransferMode {
                         // Grouped into a submenu so the parent "…" menu doesn't build all ~16 of these
                         // eagerly on every open (that was the 1–2s stall). SwiftUI builds submenu content
                         // lazily, only when this item is opened.
@@ -2189,6 +2198,7 @@ struct FolderView: View {
                         Button { showCreateTune = true } label: {
                             Label("Create AI Tune…", systemImage: "person.crop.rectangle.badge.plus")
                         }
+                        }   // !pureTransferMode
                     }
                     Section {
                         // A lazy submenu like "Download from the Web…" above: these are rarely
@@ -2219,9 +2229,11 @@ struct FolderView: View {
                         }
                     }
                     Section("Library") {
-                        Button { showPeople = true } label: { Label("People", systemImage: "person.2.crop.square.stack") }
-                        Button { showPlaces = true } label: { Label("Places", systemImage: "map") }
-                        Button { showMemories = true } label: { Label("On This Day", systemImage: "calendar") }
+                        if !library.pureTransferMode {
+                            Button { showPeople = true } label: { Label("People", systemImage: "person.2.crop.square.stack") }
+                            Button { showPlaces = true } label: { Label("Places", systemImage: "map") }
+                            Button { showMemories = true } label: { Label("On This Day", systemImage: "calendar") }
+                        }
                         Button { showTrash = true } label: {
                             Label(library.trash.isEmpty ? "Recently Deleted" : "Recently Deleted (\(library.trash.count))",
                                   systemImage: "trash")
@@ -2229,19 +2241,23 @@ struct FolderView: View {
                         // Less-used maintenance tools stay in a submenu — same reason as above:
                         // keep the parent menu cheap to build so it opens instantly.
                         Menu {
-                            if library.thumbnailCacheRunning {
-                                Button(role: .destructive) { library.stopThumbnailCaching() } label: {
-                                    Label("Stop Caching Process", systemImage: "stop.circle")
-                                }
-                            } else {
-                                Button { library.startThumbnailCaching() } label: {
-                                    Label("Cache All Thumbnails", systemImage: "square.grid.3x3.square")
+                            if !library.pureTransferMode {
+                                if library.thumbnailCacheRunning {
+                                    Button(role: .destructive) { library.stopThumbnailCaching() } label: {
+                                        Label("Stop Caching Process", systemImage: "stop.circle")
+                                    }
+                                } else {
+                                    Button { library.startThumbnailCaching() } label: {
+                                        Label("Cache All Thumbnails", systemImage: "square.grid.3x3.square")
+                                    }
                                 }
                             }
                             Button { showDuplicates = true } label: { Label("Find Duplicates", systemImage: "doc.on.doc") }
                             Button { confirmFixDates = true } label: { Label("Restore Capture Dates", systemImage: "clock.arrow.circlepath") }
-                            Button { runTextIndex() } label: { Label("Index Text in Photos", systemImage: "text.viewfinder") }
-                            Button { runLocationIndex() } label: { Label("Index Locations", systemImage: "location.viewfinder") }
+                            if !library.pureTransferMode {
+                                Button { runTextIndex() } label: { Label("Index Text in Photos", systemImage: "text.viewfinder") }
+                                Button { runLocationIndex() } label: { Label("Index Locations", systemImage: "location.viewfinder") }
+                            }
                             Button { confirmPhoneCheck = true } label: { Label("Check if on iPhone", systemImage: "iphone") }
                                 .disabled(!hasViewableMedia)
                         } label: {
@@ -2437,6 +2453,7 @@ struct FolderView: View {
                         }
                     } label: { Label(customLabelMenuTitle, systemImage: "tag") }
                 }
+                if !library.pureTransferMode {   // pixel editing — not offered in Pure File Transfer
                 Menu {
                     Button { bulkRotate(2) } label: { Label("Rotate 180°", systemImage: "arrow.clockwise") }
                     Button { bulkRotate(-1) } label: { Label("Rotate Left", systemImage: "rotate.left") }
@@ -2480,6 +2497,7 @@ struct FolderView: View {
                 if selectedEntries().filter({ $0.kind == .video }).count >= 2 {
                     Button { startCombine() } label: { Label("Combine Videos", systemImage: "film.stack") }
                 }
+                }   // !pureTransferMode
                 Button { duplicateEntries(selectedEntries()) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
                 Button { compress(selectedEntries()) } label: { Label("Compress to Zip", systemImage: "archivebox") }
                 Button { showCopyPicker = true } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
@@ -2494,7 +2512,7 @@ struct FolderView: View {
                 if let tsRoot = taylorSwiftRoot {
                     Button { performMove(to: tsRoot) } label: { Label("Move to “Taylor Swift”", systemImage: "music.mic") }
                 }
-                if let pair = selectedLivePhotoPair {
+                if !library.pureTransferMode, let pair = selectedLivePhotoPair {
                     Button { makeLivePhoto(pair) } label: { Label("Make Live Photo", systemImage: "livephoto") }
                 }
                 Divider()

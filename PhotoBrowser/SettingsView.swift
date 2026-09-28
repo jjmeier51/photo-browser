@@ -4,6 +4,7 @@ import SwiftUI
 /// app fully offline. Each model maps to an Astria gallery "tune"; the newest
 /// versions' tune ids aren't published, so they're editable here.
 struct SettingsView: View {
+    @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
     @State private var key = AIExtend.apiKey
     @State private var model = AIExtend.defaultModel
@@ -18,6 +19,15 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Toggle("Pure File Transfer", isOn: Binding(get: { library.pureTransferMode },
+                                                                set: { library.setPureTransferMode($0) }))
+                } header: {
+                    Text("Mode")
+                } footer: {
+                    Text("Use the app only for moving files from this phone onto the drive: no thumbnail library is kept on the phone (tiles are memory-only), and the downloaders and photo editors are hidden. Moving, copying, renaming, deleting, metadata, captions, labels and duplicate detection all stay available. Takes effect immediately; thumbnails already cached are kept but not used while it's on.")
+                }
+
                 Section {
                     SecureField("Astria API key", text: $key)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()

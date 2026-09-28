@@ -280,23 +280,25 @@ struct ViewerView: View {
                     }
                     Spacer()
                     Menu {
-                        if current?.kind == .image {
-                            Button { showStudio = true } label: {
-                                Label("Edit Photo", systemImage: "slider.horizontal.3")
+                        if !library.pureTransferMode {   // pixel editors — not offered in Pure File Transfer
+                            if current?.kind == .image {
+                                Button { showStudio = true } label: {
+                                    Label("Edit Photo", systemImage: "slider.horizontal.3")
+                                }
                             }
-                        }
-                        Button { showEditor = true } label: {
-                            Label("Crop & Rotate", systemImage: "crop.rotate")
-                        }
-                        if current?.kind == .image {
-                            Button { showResize = true } label: {
-                                Label("Resize / Extend", systemImage: "aspectratio")
+                            Button { showEditor = true } label: {
+                                Label("Crop & Rotate", systemImage: "crop.rotate")
                             }
-                            Button { showChangeSize = true } label: {
-                                Label("Change Size…", systemImage: "arrow.up.left.and.arrow.down.right")
-                            }
-                            Button { showAIEdit = true } label: {
-                                Label("Edit with AI", systemImage: "wand.and.stars")
+                            if current?.kind == .image {
+                                Button { showResize = true } label: {
+                                    Label("Resize / Extend", systemImage: "aspectratio")
+                                }
+                                Button { showChangeSize = true } label: {
+                                    Label("Change Size…", systemImage: "arrow.up.left.and.arrow.down.right")
+                                }
+                                Button { showAIEdit = true } label: {
+                                    Label("Edit with AI", systemImage: "wand.and.stars")
+                                }
                             }
                         }
                         Button { useAsAlbumCover() } label: {

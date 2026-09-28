@@ -399,6 +399,31 @@ Bulk tools:
   Notes.
 - **Clear All Birthdays** (staged, confirmed).
 
+## 5c. Pure File Transfer mode — `Library.pureTransferMode`
+
+A switch on the pre-drive screens (`EmptyState`, `WaitingForDrive` → `PureTransferToggle` in
+`ContentView.swift`) and in Settings, persisted under `photoBrowser.pureTransfer`. Its purpose:
+use the app as a plain conduit for moving files from this phone onto the exFAT SSD, leaving
+nothing behind on the phone and nothing else in the way.
+
+- **Thumbnails are memory-only**: `Thumbnailer.diskCacheEnabled` (set by
+  `Library.applyPureTransferMode`, also at launch) skips the Application Support read/write and the
+  legacy-key adoption in `produce`. Tiles still render — the grid, the pickers and duplicate
+  review need them — they just aren't persisted.
+- **Hidden UI** (all behind `if !library.pureTransferMode`): the toolbar Safari button, "Import Your
+  Text Messages", the whole "Download from the Web…" submenu, Create with AI / Astria.ai Browser /
+  Create AI Tune, People / Places / On This Day, Cache All Thumbnails, the text and location
+  indexers; the pixel editors in the item context menu (Crop & Rotate, Edit Photo, Resize/Extend,
+  Edit with AI, AI Upscale), in the selection bar (Rotate, Rotate preview, Edits, Upscale Video,
+  AI Upscale Photos, Export Frames, Extract Audio, Combine Videos, Make Live Photo) and in the
+  viewer menu.
+- **Kept**: browsing, select, Move/Copy (with duplicate detection), rename, delete, New Folder,
+  Get Info, Edit Metadata, captions, Favorites/labels, Save to Photos/Files, Add from iOS Album /
+  Photos Library, Drives & Backup, Recently Deleted, Find Duplicates, Restore Capture Dates,
+  Check if on iPhone, Clean Up, Settings.
+- **No background jobs**: `PhotoBrowserApp` skips `refreshPendingShares`, `resumePendingAIEdits`
+  and `processPendingTikTok` at launch and on foreground while the mode is on.
+
 ## 5b. Move/copy duplicate detection — `DuplicateDetection.swift`, `FileActions.moveItems/copyItems`
 
 Before each photo is written into a destination folder, `FileActions.moveItems` / `copyItems`
@@ -540,4 +565,5 @@ image behind a thumbnail; captures the blog post **date** and keeps it with the 
 | Folder filters | `Models.swift` (`FormatFilter`), `FolderView.swift` |
 | Folder Birthdays mapping (bulk) | `BirthdayMappingView.swift`, `Library.setBirthdays` |
 | Move/copy duplicate detection | `DuplicateDetection.swift`, `FileActions.moveItems/copyItems`, `PhotoBrowserTests/` |
+| Pure File Transfer mode | `Library.pureTransferMode`, `ContentView.swift` (`PureTransferToggle`), `Thumbnailer.diskCacheEnabled` |
 | Downloaders | `LinkDownloadService.swift`, `BunkrWebDownloader.swift`, `MegaDownloader.swift`, `InstagramService.swift`, `FacebookService.swift`, `WebBrowserView.swift` |

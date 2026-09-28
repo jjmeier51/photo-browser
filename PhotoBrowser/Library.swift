@@ -52,6 +52,27 @@ final class Library {
     /// viewer's dismissal. Needed because changing `path` under a full-screen cover is hidden.
     var pendingFolderNavigation: URL?
     var sort: SortKey = .smart
+
+    // MARK: - Pure File Transfer mode
+
+    /// **Pure File Transfer**: the app as a plain conduit for moving files from this phone onto the
+    /// exFAT SSD — chosen on the first screen, before a drive is plugged in. On, it keeps every
+    /// file-management tool (browse, select, move/copy with duplicate detection, rename, delete,
+    /// metadata/captions/labels, import from the Photos library) and drops everything else: no
+    /// thumbnail library is written to the phone (tiles are memory-only), the downloaders and the
+    /// pixel editors (crop/rotate, Photo Studio, resize, AI) are hidden, and the launch/foreground
+    /// background jobs (AI recovery, TikTok filing, share-extension pickup) don't run.
+    private static let pureTransferKey = "photoBrowser.pureTransfer"
+    var pureTransferMode: Bool = UserDefaults.standard.bool(forKey: Library.pureTransferKey)
+    func setPureTransferMode(_ on: Bool) {
+        pureTransferMode = on
+        UserDefaults.standard.set(on, forKey: Self.pureTransferKey)
+        applyPureTransferMode()
+    }
+    /// Pushes the mode into the engines that aren't observing `Library`. Call at launch too.
+    func applyPureTransferMode() {
+        Thumbnailer.shared.diskCacheEnabled = !pureTransferMode
+    }
     var favorites: Set<String> = Library.migrateBulk("favorites", legacyKey: "photoBrowser.favorites") {
         Set(UserDefaults.standard.stringArray(forKey: $0) ?? [])
     }

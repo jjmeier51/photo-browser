@@ -123,6 +123,8 @@ struct WaitingForDrive: View {
             }
             .buttonStyle(.bordered)
             .padding(.top, 8)
+            PureTransferToggle()
+                .padding(.top, 24)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppGradient())
@@ -144,6 +146,31 @@ struct WaitingForDrive: View {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }
+    }
+}
+
+/// The Pure File Transfer switch shown before a drive is connected (and in Settings). See
+/// `Library.pureTransferMode` for exactly what it turns off.
+struct PureTransferToggle: View {
+    @Environment(Library.self) private var library
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle(isOn: Binding(get: { library.pureTransferMode }, set: { library.setPureTransferMode($0) })) {
+                Label("Pure File Transfer", systemImage: "arrow.left.arrow.right.square")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .tint(.accentColor)
+            Text(library.pureTransferMode
+                 ? "On: just move and copy files from this phone to the drive. No thumbnail library is kept on the phone, and the downloaders and photo editors stay out of the way. Duplicate detection still runs on every move."
+                 : "Turn on to use the app only for moving files onto the drive — nothing is cached on the phone and the extra tools are hidden.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 28)
     }
 }
 
@@ -176,6 +203,8 @@ struct EmptyState: View {
                 Label("Add Photo Library", systemImage: "photo.stack").padding(.horizontal, 8)
             }
             .buttonStyle(.bordered)
+            PureTransferToggle()
+                .padding(.top, 24)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppGradient())

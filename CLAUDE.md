@@ -79,6 +79,12 @@ actions the app makes no network calls.
 - **Copy** — "Copy to Folder…" (single item via long-press, or bulk via the
   selection bar's More menu) copies into a picked folder; copies are fresh files
   and intentionally carry *no* labels (the originals keep theirs). (`FileActions.copy`)
+- **Pure File Transfer mode** — a switch on the pre-drive screen (and Settings) that
+  turns the app into a plain phone→SSD conduit: thumbnails become memory-only (no
+  disk cache), the downloaders / AI / pixel editors are hidden, background jobs are
+  skipped; all file management (move/copy with duplicate detection, rename, delete,
+  metadata, captions, labels) stays. (`Library.pureTransferMode`, see
+  `docs/feature-notes.md` §5c.)
 - **Add from MEGA** — "Add from MEGA…" downloads the media inside a public
   `mega.nz/folder/…` link into a subfolder of the current folder, preserving
   structure. Pure-Swift implementation of MEGA's encrypted client protocol (no

@@ -12,7 +12,16 @@ struct PhotoBrowserApp: App {
             ContentView()
                 .environment(library)
                 .preferredColorScheme(.dark)
-                .task { library.restoreLastFolder(); library.refreshPendingShares(); library.configureAINotificationRouting(); library.resumePendingAIEdits() }
+                .task {
+                    library.applyPureTransferMode()
+                    library.restoreLastFolder()
+                    library.configureAINotificationRouting()
+                    // Pure File Transfer: no background jobs — the app is only here to move files.
+                    if !library.pureTransferMode {
+                        library.refreshPendingShares()
+                        library.resumePendingAIEdits()
+                    }
+                }
                 // The Share Extension opens us via photobrowser://share after stashing what was
                 // shared in the App Group; pick it up so ContentView can present the import sheet.
                 .onOpenURL { url in
@@ -26,9 +35,11 @@ struct PhotoBrowserApp: App {
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
                         library.reconnectIfNeeded()
-                        library.processPendingTikTok()
-                        library.refreshPendingShares()
-                        library.resumePendingAIEdits()
+                        if !library.pureTransferMode {
+                            library.processPendingTikTok()
+                            library.refreshPendingShares()
+                            library.resumePendingAIEdits()
+                        }
                     } else if phase == .background {
                         // Arm the drive's "safe to remove" state on the way out. This drains
                         // any commit already in flight and flushes the drive root, so if the

@@ -24,6 +24,16 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
     private let lock = NSLock()
     private var inFlight: [String: Task<UIImage?, Never>] = [:]
     private var prefetchTask: Task<Void, Never>?     // single-flight: only the latest folder prefetches
+    private var _diskCacheEnabled = true
+
+    /// Off in **Pure File Transfer** mode: thumbnails are still generated (the grid, the move/copy
+    /// pickers and duplicate review need them) but live in memory only — nothing is written to, or
+    /// read from, the Application Support cache, so a transfer session leaves no thumbnail library
+    /// behind on the phone.
+    var diskCacheEnabled: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _diskCacheEnabled }
+        set { lock.lock(); _diskCacheEnabled = newValue; lock.unlock() }
+    }
 
     init() {
         // Thumbnails live in Application Support, NOT Caches. iOS is free to purge
@@ -130,7 +140,8 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
     private func produce(key: String, url: URL, kind: FileKind, size: CGSize, scale: CGFloat) async -> UIImage? {
         let nsKey = key as NSString
         let diskURL = diskDir.appendingPathComponent(key).appendingPathExtension("jpg")
-        if let data = try? Data(contentsOf: diskURL), let raw = UIImage(data: data) {
+        let useDisk = diskCacheEnabled
+        if useDisk, let data = try? Data(contentsOf: diskURL), let raw = UIImage(data: data) {
             // Force the JPEG decode here, off-main — UIImage(data:) defers it to first render,
             // which shows up as scroll hitches on the main thread.
             let img = raw.preparingForDisplay() ?? raw
@@ -143,7 +154,7 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         // legacy key still resolves); already-moved files were orphaned before this build and
         // regenerate as they always would. After adoption the new-key file exists, so this
         // branch never runs for that file again.
-        if let legacy = legacyCacheKey(forFileAt: url) {
+        if useDisk, let legacy = legacyCacheKey(forFileAt: url) {
             let legacyURL = diskDir.appendingPathComponent(legacy).appendingPathExtension("jpg")
             if let data = try? Data(contentsOf: legacyURL), let raw = UIImage(data: data) {
                 do { try FileManager.default.moveItem(at: legacyURL, to: diskURL) }
@@ -155,7 +166,7 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         }
         guard let img = await generate(url: url, kind: kind, size: size, scale: scale) else { return nil }
         memory.setObject(img, forKey: nsKey, cost: cost(of: img))
-        if let data = img.jpegData(compressionQuality: 0.8) {
+        if useDisk, let data = img.jpegData(compressionQuality: 0.8) {
             try? data.write(to: diskURL, options: .atomic)
         }
         return img
@@ -267,7 +278,7 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
     /// Generates at the largest size a grid tile can ask for (the key ignores size, so one
     /// stored thumbnail satisfies every future request).
     func precache(fileAt url: URL, kind: FileKind) async {
-        guard let key = cacheKey(forFileAt: url) else { return }
+        guard diskCacheEnabled, let key = cacheKey(forFileAt: url) else { return }   // nothing to persist in Pure File Transfer
         let fm = FileManager.default
         let diskURL = diskDir.appendingPathComponent(key).appendingPathExtension("jpg")
         if fm.fileExists(atPath: diskURL.path) { return }
