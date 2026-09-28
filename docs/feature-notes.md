@@ -298,10 +298,16 @@ UI:
   **no "keep the largest" bulk delete** — the user chooses which copy goes. `toggle` refuses to
   tick the last unticked file of a group, so one file per group always survives. **Not
   Duplicates** is a swipe action / context-menu item on the row (`library.markNotDuplicates`).
-- **Older / Newer markers**: `DuplicatesView` loads capture dates for every file in the result
-  (`library.captureDates`, per-file cached; file date as fallback) and each row computes `ages`:
-  when a group's dates differ by more than a second, the oldest tile gets an orange "Oldest"
-  capsule and the newest a cyan "Newest" one, and the tiles show their dates instead of sizes.
+- **Oldest / Newest markers**: `DuplicatesView.loadCaptureDates` reads a **millisecond-precise**
+  date for every file in the result off-main (`preciseDate`: `DuplicateDetection.readFacts` →
+  EXIF `DateTimeOriginal` + `SubSecTimeOriginal` as a decimal fraction; file mtime as fallback,
+  which also carries fractions). The whole-second capture-date cache is deliberately not used —
+  burst shots and re-saves differ only in sub-seconds. Each row's `ages` marks the oldest tile
+  (orange "Oldest") and newest (cyan "Newest") when the spread is ≥ 1 ms, and the tiles then show
+  the day plus `HH:mm:ss.SSS` instead of the size.
+- **Multi-select has full rein**: any number of a group's files can be ticked, including all of
+  them (`toggle` no longer keeps one); the confirmation says how many groups would lose every
+  copy. The row's context menu adds "Select All Copies" / "Deselect Group".
 - **"Leave out “Frame” files"** toggle (`@AppStorage photoBrowser.duplicatesExcludeFrames`):
   video-frame screenshots are hundreds of visually similar, never-duplicate images. On, frame
   files are dropped from the scan itself (no hashing) *and* filtered out of remembered results

@@ -38,8 +38,10 @@ struct DuplicatesView: View {
     @State private var exactOnly = false
     @State private var confirmDelete = false
     @State private var compareGroup: DuplicateGroup?
-    /// Capture dates (EXIF, falling back to the file date) for every file in the result — drives
-    /// the Older / Newer markers on the tiles. Loaded once per result from the per-file cache.
+    /// Capture dates for every file in the result — drives the Oldest / Newest markers. Read
+    /// straight from each file's EXIF **with sub-seconds** (`DateTimeOriginal` +
+    /// `SubSecTimeOriginal`), falling back to the file's modification time (which carries
+    /// fractional seconds too), so two copies shot a few milliseconds apart are told apart.
     @State private var captureDates: [URL: Date] = [:]
     /// Leave out files with "Frame" in the name (video-frame screenshots): a folder full of frames
     /// from one video is hundreds of visually similar images that are never duplicates.
@@ -115,6 +117,13 @@ struct DuplicatesView: View {
                                     .contextMenu {
                                         Button { compareGroup = group } label: { Label("Compare", systemImage: "rectangle.split.2x1") }
                                         Button { markNotDuplicates([group]) } label: { Label("Not Duplicates", systemImage: "checkmark.circle") }
+                                        Divider()
+                                        Button { for e in group.entries { selectedFiles.insert(e.url) } } label: {
+                                            Label("Select All Copies", systemImage: "checkmark.circle.fill")
+                                        }
+                                        Button { for e in group.entries { selectedFiles.remove(e.url) } } label: {
+                                            Label("Deselect Group", systemImage: "circle")
+                                        }
                                     }
                                 }
                             } header: {
@@ -123,8 +132,8 @@ struct DuplicatesView: View {
                                 }
                             } footer: {
                                 Text(exactOnly
-                                     ? "Exact matches share identical size and pixel dimensions — almost always true duplicates. Tap the copies you don't want, then Delete Selected; one file in each group is always kept. When capture dates differ, the oldest and newest copies are marked."
-                                     : "“Exact” = identical size & dimensions; “Visually similar” = the same picture re-encoded/resized/lightly edited; “Similar name” = a copy-style name (like “name (1)”). Tap the copies you don't want, then Delete Selected — one file in each group is always kept. When capture dates differ, the oldest and newest copies are marked. Swipe a group to mark it Not Duplicates; › compares the files side by side.")
+                                     ? "Exact matches share identical size and pixel dimensions — almost always true duplicates. Tap the copies you don't want (any number, even all of them), then Delete Selected. When capture dates differ — down to the millisecond — the oldest and newest copies are marked."
+                                     : "“Exact” = identical size & dimensions; “Visually similar” = the same picture re-encoded/resized/lightly edited; “Similar name” = a copy-style name (like “name (1)”). Tap the copies you don't want (any number, even all of them), then Delete Selected. When capture dates differ — down to the millisecond — the oldest and newest copies are marked. Swipe a group to mark it Not Duplicates; › compares the files side by side.")
                             }
                         }
                     }
@@ -155,7 +164,8 @@ struct DuplicatesView: View {
                     }
                 }
             }
-            .confirmationDialog("Delete \(selectedFiles.count) file\(selectedFiles.count == 1 ? "" : "s")? This permanently removes the copies you ticked from the drive.",
+            .confirmationDialog("Delete \(selectedFiles.count) file\(selectedFiles.count == 1 ? "" : "s")? This permanently removes the copies you ticked from the drive."
+                                + (fullyTickedGroups > 0 ? " \(fullyTickedGroups) group\(fullyTickedGroups == 1 ? " loses" : "s lose") every copy — nothing of \(fullyTickedGroups == 1 ? "that photo" : "those photos") will remain." : ""),
                                 isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("Delete \(selectedFiles.count)", role: .destructive) { deleteSelectedFiles() }
                 Button("Cancel", role: .cancel) {}
@@ -177,21 +187,47 @@ struct DuplicatesView: View {
         return out
     }
 
+    /// Millisecond-precise dates for the files in the result, read off the main actor with bounded
+    /// fan-out. The whole-second capture-date cache isn't enough here: burst shots and re-saves
+    /// differ only in sub-seconds, and that's exactly what decides "oldest" vs "newest".
     private func loadCaptureDates() async {
         let all = groups.flatMap { $0.entries }
         guard !all.isEmpty else { captureDates = [:]; return }
-        captureDates = await library.captureDates(for: all)
+        captureDates = await Task.detached(priority: .userInitiated) { () -> [URL: Date] in
+            var out: [URL: Date] = [:]
+            await withTaskGroup(of: (URL, Date?).self) { group in
+                var it = all.makeIterator()
+                for _ in 0..<8 { if let e = it.next() { group.addTask { (e.url, Self.preciseDate(for: e)) } } }
+                for await (url, date) in group {
+                    if let date { out[url] = date }
+                    if let e = it.next() { group.addTask { (e.url, Self.preciseDate(for: e)) } }
+                }
+            }
+            return out
+        }.value
+    }
+
+    /// EXIF capture date + sub-seconds when the file has them; else the modification time.
+    nonisolated static func preciseDate(for e: Entry) -> Date? {
+        let facts = DuplicateDetection.readFacts(e.url)
+        guard let base = facts.captureDate else { return e.modified }
+        guard let sub = facts.subSecond, let digits = Double(sub) else { return base }
+        // "123" → .123 s, "45" → .45 s, "7" → .7 s — the EXIF sub-second string is a decimal fraction.
+        let fraction = digits / pow(10, Double(sub.count))
+        return base.addingTimeInterval(fraction)
     }
 
     // MARK: - Selection
 
-    /// Ticks/unticks one file for deletion. The last unticked file of a group can't be ticked —
-    /// something always stays.
+    /// Ticks/unticks one file for deletion. Every file in a group may be ticked — the user has
+    /// full say; the confirmation spells out when a group would lose all its copies.
     private func toggle(_ url: URL, in group: DuplicateGroup) {
-        if selectedFiles.contains(url) { selectedFiles.remove(url); return }
-        let othersAllTicked = group.entries.filter { $0.url != url }.allSatisfy { selectedFiles.contains($0.url) }
-        guard !othersAllTicked else { return }
-        selectedFiles.insert(url)
+        if selectedFiles.contains(url) { selectedFiles.remove(url) } else { selectedFiles.insert(url) }
+    }
+
+    /// Groups whose every file is ticked — called out in the delete confirmation.
+    private var fullyTickedGroups: Int {
+        shownGroups.filter { g in g.entries.allSatisfy { selectedFiles.contains($0.url) } }.count
     }
 
     /// Deletes exactly the ticked files (a file that sits in two groups is deleted once), then
@@ -478,17 +514,24 @@ private struct DuplicateGroupRow: View {
     let onCompare: () -> Void
 
     private enum Age { case oldest, newest }
-    /// Age markers, only when the group's dates actually differ (by more than a second).
+    /// Age markers, only when the group's dates actually differ — compared to the millisecond.
     private var ages: [URL: Age] {
         let ds = group.entries.compactMap { e in dates[e.url].map { (e.url, $0) } }
         guard let lo = ds.min(by: { $0.1 < $1.1 }), let hi = ds.max(by: { $0.1 < $1.1 }),
-              hi.1.timeIntervalSince(lo.1) > 1 else { return [:] }
+              hi.1.timeIntervalSince(lo.1) >= 0.001 else { return [:] }
         var out: [URL: Age] = [:]
-        for (u, d) in ds where abs(d.timeIntervalSince(lo.1)) <= 1 { out[u] = .oldest }
-        for (u, d) in ds where abs(d.timeIntervalSince(hi.1)) <= 1 { out[u] = .newest }
+        for (u, d) in ds where abs(d.timeIntervalSince(lo.1)) < 0.001 { out[u] = .oldest }
+        for (u, d) in ds where abs(d.timeIntervalSince(hi.1)) < 0.001 { out[u] = .newest }
         return out
     }
     private var datesDiffer: Bool { !ages.isEmpty }
+
+    /// The two lines shown under a tile when dates differ: the day, and the time with milliseconds
+    /// (the milliseconds are what separate burst shots and re-saves).
+    private static let dayFormat: Date.FormatStyle = .init(date: .abbreviated, time: .omitted)
+    private static let msFormatter: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "HH:mm:ss.SSS"; return f
+    }()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -544,10 +587,15 @@ private struct DuplicateGroupRow: View {
                 }
                 Text(e.name).font(.caption2).lineLimit(1).truncationMode(.middle).frame(width: 88)
                 if datesDiffer, let d = dates[e.url] {
-                    // The date is what tells the copies apart, so show it under each tile.
-                    Text(d.formatted(date: .abbreviated, time: .shortened))
+                    // The date is what tells the copies apart, so show it under each tile —
+                    // the day, then the time to the millisecond.
+                    let tint: Color = age == .oldest ? .orange : age == .newest ? .cyan : .secondary
+                    Text(d.formatted(Self.dayFormat))
                         .font(.caption2).lineLimit(1).minimumScaleFactor(0.8).frame(width: 88)
-                        .foregroundStyle(age == .oldest ? Color.orange : age == .newest ? Color.cyan : .secondary)
+                        .foregroundStyle(tint)
+                    Text(Self.msFormatter.string(from: d))
+                        .font(.caption2.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.7).frame(width: 88)
+                        .foregroundStyle(tint)
                 } else {
                     Text(e.size.sizeString).font(.caption2).foregroundStyle(.secondary)
                 }
