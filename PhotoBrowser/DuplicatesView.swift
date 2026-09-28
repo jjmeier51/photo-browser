@@ -38,6 +38,9 @@ struct DuplicatesView: View {
     @State private var exactOnly = false
     @State private var confirmDelete = false
     @State private var compareGroup: DuplicateGroup?
+    /// Full-size viewing: the group's files in the normal viewer, starting at the tapped one, so
+    /// the copies can be swiped between and zoomed — thumbnails alone can't settle "same photo?".
+    @State private var viewer: DuplicateViewerPresentation?
     /// Capture dates for every file in the result — drives the Oldest / Newest markers. Read
     /// straight from each file's EXIF **with sub-seconds** (`DateTimeOriginal` +
     /// `SubSecTimeOriginal`), falling back to the file's modification time (which carries
@@ -107,6 +110,7 @@ struct DuplicatesView: View {
                                     DuplicateGroupRow(group: group, selectedFiles: $selectedFiles,
                                                       dates: dates(for: group),
                                                       onToggle: { toggle($0, in: group) },
+                                                      onView: { view(group.entries, at: $0) },
                                                       onCompare: { compareGroup = group })
                                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                         Button { markNotDuplicates([group]) } label: {
@@ -133,7 +137,7 @@ struct DuplicatesView: View {
                             } footer: {
                                 Text(exactOnly
                                      ? "Exact matches share identical size and pixel dimensions — almost always true duplicates. Tap the copies you don't want (any number, even all of them), then Delete Selected. When capture dates differ — down to the millisecond — the oldest and newest copies are marked."
-                                     : "“Exact” = identical size & dimensions; “Visually similar” = the same picture re-encoded/resized/lightly edited; “Similar name” = a copy-style name (like “name (1)”). Tap the copies you don't want (any number, even all of them), then Delete Selected. When capture dates differ — down to the millisecond — the oldest and newest copies are marked. Swipe a group to mark it Not Duplicates; › compares the files side by side.")
+                                     : "“Exact” = identical size & dimensions; “Visually similar” = the same picture re-encoded/resized/lightly edited; “Similar name” = a copy-style name (like “name (1)”). Tap a picture to see it full size and swipe between the copies; tap the circle on the copies you don't want (any number, even all of them), then Delete Selected. When capture dates differ — down to the millisecond — the oldest and newest copies are marked. Swipe a group to mark it Not Duplicates; › compares the files side by side.")
                             }
                         }
                     }
@@ -145,7 +149,14 @@ struct DuplicatesView: View {
                 DuplicateCompareView(group: group,
                                      onDelete: { removed in remove(removed, from: group) },
                                      onRename: { old, new in renamed(old, to: new, in: group) },
+                                     onView: { items, i in view(items, at: i) },
                                      onNotDuplicates: { markNotDuplicates([group]) })
+            }
+            // The viewer can delete or move a file itself; when it closes, drop anything that's
+            // gone from the drive so the groups (and the remembered result) stay truthful.
+            .fullScreenCover(item: $viewer, onDismiss: pruneMissingFiles) { p in
+                ViewerView(items: p.items, startIndex: p.startIndex)
+                    .environment(library)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -176,6 +187,28 @@ struct DuplicatesView: View {
             // display filter.
             .onChange(of: excludeFrames) { _, isOn in if !isOn { Task { await load(force: false, reloadOnly: true) } } }
         }
+    }
+
+    // MARK: - Full-size viewing
+
+    private func view(_ items: [Entry], at index: Int) {
+        guard items.indices.contains(index) else { return }
+        viewer = DuplicateViewerPresentation(items: items, startIndex: index)
+    }
+
+    private func pruneMissingFiles() {
+        let fm = FileManager.default
+        var removed: [URL] = []
+        for i in groups.indices.reversed() {
+            let gone = groups[i].entries.filter { !fm.fileExists(atPath: $0.url.path) }
+            guard !gone.isEmpty else { continue }
+            removed += gone.map(\.url)
+            groups[i].entries.removeAll { e in gone.contains { $0.url == e.url } }
+            if groups[i].entries.count < 2 { groups.remove(at: i) }
+        }
+        guard !removed.isEmpty else { return }
+        for u in removed { fingerprint.removeValue(forKey: u.path); selectedFiles.remove(u) }
+        persist()
     }
 
     // MARK: - Dates (Older / Newer markers)
@@ -502,8 +535,10 @@ struct DuplicateGroup: Identifiable, Hashable {
 }
 
 /// One row in the duplicate-groups list: the summary, a › to compare, and **every file in the group
-/// as a tile** — tap a tile to tick that specific copy for deletion (it gets a red ring and a trash
-/// badge). The tiles and the › are separate buttons so a tap never lands on the wrong thing.
+/// as a tile** — tap the picture to see it full size (and swipe between the copies), tap the circle
+/// or caption to tick that specific copy for deletion (it gets a red ring and a trash badge). The
+/// picture, the circle, the caption and the › are separate buttons so a tap never lands on the
+/// wrong thing.
 private struct DuplicateGroupRow: View {
     let group: DuplicateGroup
     @Binding var selectedFiles: Set<URL>
@@ -511,6 +546,7 @@ private struct DuplicateGroupRow: View {
     /// oldest tile is marked "Oldest" and the newest "Newest" — the cue for which copy to keep.
     var dates: [URL: Date] = [:]
     let onToggle: (URL) -> Void
+    let onView: (Int) -> Void          // index into group.entries → open full size
     let onCompare: () -> Void
 
     private enum Age { case oldest, newest }
@@ -559,7 +595,7 @@ private struct DuplicateGroupRow: View {
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: 10) {
-                    ForEach(group.entries) { e in fileTile(e) }
+                    ForEach(Array(group.entries.enumerated()), id: \.element.id) { i, e in fileTile(e, index: i) }
                 }
                 .padding(.vertical, 2)
             }
@@ -567,44 +603,59 @@ private struct DuplicateGroupRow: View {
         .padding(.vertical, 4)
     }
 
-    private func fileTile(_ e: Entry) -> some View {
+    /// A tile is two targets: the **picture** opens it full size (swipe to the other copies), the
+    /// **circle and the text** tick it for deletion. Kept as separate buttons so a tap never does
+    /// the other thing.
+    private func fileTile(_ e: Entry, index: Int) -> some View {
         let ticked = selectedFiles.contains(e.url)
         let age = ages[e.url]
-        return Button { onToggle(e.url) } label: {
-            VStack(spacing: 4) {
-                ZStack(alignment: .topTrailing) {
+        return VStack(spacing: 4) {
+            ZStack(alignment: .topTrailing) {
+                Button { onView(index) } label: {
                     DuplicateThumb(entry: e, side: 88)
                         .overlay(RoundedRectangle(cornerRadius: 6).stroke(ticked ? Color.red : .clear, lineWidth: 3))
                         .opacity(ticked ? 0.75 : 1)
                         .overlay(alignment: .bottomLeading) {
                             if let age { ageBadge(age) }
                         }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("View \(e.name) full size")
+                Button { onToggle(e.url) } label: {
                     Image(systemName: ticked ? "trash.circle.fill" : "circle")
-                        .font(.title3)
+                        .font(.title2)
                         .foregroundStyle(ticked ? Color.red : Color.white)
                         .shadow(radius: 2)
-                        .padding(5)
+                        .padding(6)
+                        .contentShape(Rectangle())
                 }
-                Text(e.name).font(.caption2).lineLimit(1).truncationMode(.middle).frame(width: 88)
-                if datesDiffer, let d = dates[e.url] {
-                    // The date is what tells the copies apart, so show it under each tile —
-                    // the day, then the time to the millisecond.
-                    let tint: Color = age == .oldest ? .orange : age == .newest ? .cyan : .secondary
-                    Text(d.formatted(Self.dayFormat))
-                        .font(.caption2).lineLimit(1).minimumScaleFactor(0.8).frame(width: 88)
-                        .foregroundStyle(tint)
-                    Text(Self.msFormatter.string(from: d))
-                        .font(.caption2.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.7).frame(width: 88)
-                        .foregroundStyle(tint)
-                } else {
-                    Text(e.size.sizeString).font(.caption2).foregroundStyle(.secondary)
-                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(ticked ? "Unmark \(e.name)" : "Mark \(e.name) for deletion")
             }
-            .contentShape(Rectangle())
+            Button { onToggle(e.url) } label: { tileCaption(e, age: age).contentShape(Rectangle()) }
+                .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel((ticked ? "Unmark \(e.name)" : "Mark \(e.name) for deletion")
-                            + (age == .oldest ? ", oldest copy" : age == .newest ? ", newest copy" : ""))
+    }
+
+    private func tileCaption(_ e: Entry, age: Age?) -> some View {
+        VStack(spacing: 4) {
+            Text(e.name).font(.caption2).lineLimit(1).truncationMode(.middle).frame(width: 88)
+            if datesDiffer, let d = dates[e.url] {
+                // The date is what tells the copies apart, so show it under each tile —
+                // the day, then the time to the millisecond.
+                let tint: Color = age == .oldest ? .orange : age == .newest ? .cyan : .secondary
+                Text(d.formatted(Self.dayFormat))
+                    .font(.caption2).lineLimit(1).minimumScaleFactor(0.8).frame(width: 88)
+                    .foregroundStyle(tint)
+                Text(Self.msFormatter.string(from: d))
+                    .font(.caption2.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.7).frame(width: 88)
+                    .foregroundStyle(tint)
+            } else {
+                Text(e.size.sizeString).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityLabel(e.name + (age == .oldest ? ", oldest copy" : age == .newest ? ", newest copy" : ""))
     }
 
     /// "Oldest" (orange, clock) / "Newest" (cyan, sparkle) capsule on the tile's corner.
@@ -651,6 +702,7 @@ private struct DuplicateCompareView: View {
     let group: DuplicateGroup
     var onDelete: (URL) -> Void
     var onRename: (URL, Entry) -> Void = { _, _ in }
+    var onView: ([Entry], Int) -> Void = { _, _ in }     // open the items full size at an index
     var onNotDuplicates: () -> Void = {}
 
     /// A mutable copy of the group's items so a rename (which changes a URL) is
@@ -674,10 +726,12 @@ private struct DuplicateCompareView: View {
 
     init(group: DuplicateGroup, onDelete: @escaping (URL) -> Void,
          onRename: @escaping (URL, Entry) -> Void = { _, _ in },
+         onView: @escaping ([Entry], Int) -> Void = { _, _ in },
          onNotDuplicates: @escaping () -> Void = {}) {
         self.group = group
         self.onDelete = onDelete
         self.onRename = onRename
+        self.onView = onView
         self.onNotDuplicates = onNotDuplicates
         _items = State(initialValue: group.entries)
     }
@@ -773,7 +827,16 @@ private struct DuplicateCompareView: View {
     private func column(index: Int) -> some View {
         let entry = entries[index]
         return VStack(spacing: 8) {
-            DuplicateThumb(entry: entry, side: 150)
+            Button { onView(entries, index) } label: {
+                DuplicateThumb(entry: entry, side: 150)
+                    .overlay(alignment: .bottomTrailing) {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.caption2.weight(.bold)).foregroundStyle(.white)
+                            .padding(5).background(.black.opacity(0.5), in: Circle()).padding(4)
+                    }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("View \(entry.name) full size")
             Text(entry.name).font(.caption).lineLimit(2).multilineTextAlignment(.center)
             Menu {
                 Button { renameTarget = entry; renameDraft = entry.name } label: {
@@ -990,6 +1053,13 @@ private struct CompareRow: Identifiable {
 
 /// `URL` isn't `Identifiable`; this wraps it for `.sheet(item:)`.
 private struct URLBox: Identifiable { let url: URL; var id: URL { url } }
+
+/// What to show in the full-screen viewer: a duplicate group's files, starting at the tapped one.
+private struct DuplicateViewerPresentation: Identifiable {
+    let id = UUID()
+    let items: [Entry]
+    let startIndex: Int
+}
 
 /// Shows just the dot (no text) for the comparison legend.
 private struct DotLabelStyle: LabelStyle {

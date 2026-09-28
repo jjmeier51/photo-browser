@@ -252,6 +252,10 @@ endpoint changed), grouped by prompt with model name (`modelName(forTune:tunes:)
   (Caches/`astriaThumbs`, SHA-256 of the image URL, ≤ 480 px JPEG); full images cached in memory
   by cost. Downloads go through `AIExtend.downloadImage` (retries + ImageIO validation). The disk
   cache is listed/clearable in Storage.
+- **Search**: a `.searchable` field (always shown) filters prompts by free text — every typed word
+  must appear in the prompt text or the model/tune name, case-insensitively, in any order
+  (`filteredPrompts`); the grid, selection and Save-all follow the filtered set, and a line above
+  the grid reports how many prompts/images match.
 - **Preview** (`AstriaImagePreview`): full-size decode at ≤ 2200 px off-main, prompt/date/model,
   Copy Prompt, and the two save buttons.
 - **Saving**: single (preview / context menu) or **Select** + per-prompt Select All → bottom bar.
@@ -305,6 +309,12 @@ UI:
   burst shots and re-saves differ only in sub-seconds. Each row's `ages` marks the oldest tile
   (orange "Oldest") and newest (cyan "Newest") when the spread is ≥ 1 ms, and the tiles then show
   the day plus `HH:mm:ss.SSS` instead of the size.
+- **Full-size viewing**: tapping a tile's picture (or a column thumbnail in Compare) opens the
+  group's files in the normal `ViewerView` (`DuplicateViewerPresentation`, a nested
+  `fullScreenCover`) starting at that file, so the copies can be swiped between and zoomed. The
+  tick circle and the caption are separate buttons, so a tap never does the other thing. On
+  dismiss, `pruneMissingFiles` drops anything the viewer deleted/moved from the groups and the
+  remembered result.
 - **Multi-select has full rein**: any number of a group's files can be ticked, including all of
   them (`toggle` no longer keeps one); the confirmation says how many groups would lose every
   copy. The row's context menu adds "Select All Copies" / "Deselect Group".

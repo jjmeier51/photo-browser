@@ -29,12 +29,24 @@ struct AstriaBrowserView: View {
     @State private var saving: String?                      // progress line while saving
     @State private var savedNote: String?                   // completion alert
     @State private var showSettings = false
+    /// Free-text search over past prompts: every word typed must appear in the prompt text or the
+    /// model/tune name (case-insensitive, any order), so "beach sunset" finds "sunset on the beach".
+    @State private var search = ""
 
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 3)]
 
-    /// Flat list of every image, in display order.
+    private var filteredPrompts: [AIExtend.AstriaPrompt] {
+        let terms = search.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard !terms.isEmpty else { return prompts }
+        return prompts.filter { p in
+            let haystack = (p.text + " " + modelName(for: p)).lowercased()
+            return terms.allSatisfy { haystack.contains($0) }
+        }
+    }
+
+    /// Flat list of every image shown, in display order.
     private var refs: [AstriaImageRef] {
-        prompts.flatMap { p in p.images.indices.map { AstriaImageRef(prompt: p, index: $0) } }
+        filteredPrompts.flatMap { p in p.images.indices.map { AstriaImageRef(prompt: p, index: $0) } }
     }
 
     var body: some View {
@@ -64,6 +76,7 @@ struct AstriaBrowserView: View {
             }
             .navigationTitle(selecting ? "\(selected.count) selected" : "Astria.ai Browser")
             .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search prompts")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }.disabled(saving != nil)
@@ -124,7 +137,12 @@ struct AstriaBrowserView: View {
                 if let note {
                     Text(note).font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
                 }
-                ForEach(prompts) { p in
+                if !search.isEmpty {
+                    let n = filteredPrompts.count
+                    Text(n == 0 ? "No prompts match “\(search)”." : "\(n) prompt\(n == 1 ? "" : "s") match · \(refs.count) image\(refs.count == 1 ? "" : "s")")
+                        .font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
+                }
+                ForEach(filteredPrompts) { p in
                     if !p.images.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
                             promptHeader(p)
