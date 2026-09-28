@@ -3186,6 +3186,7 @@ struct FolderView: View {
             editProcessing = false; bg.end()
             var msg = "Moved \(outcome.moved.count) item(s)."
             if !skip.isEmpty { msg += " Skipped \(skip.count) with matching names." }
+            msg += Self.duplicateSummary(incomingDestinations: outcome.moved.map(\.to), relocated: outcome.relocated.map(\.to))
             resultMessage = msg
             await reload()
         }
@@ -3222,9 +3223,28 @@ struct FolderView: View {
             editProcessing = false; bg.end()
             var msg = "Copied \(outcome.copied.count) item(s)."
             if !skip.isEmpty { msg += " Skipped \(skip.count) duplicate name(s)." }
+            msg += Self.duplicateSummary(incomingDestinations: outcome.copied.map(\.to), relocated: outcome.relocated.map(\.to))
             resultMessage = msg
             if dest.standardizedFileURL == url.standardizedFileURL { await reload() }
         }
+    }
+
+    /// " 2 set aside in DUPLICATES, 1 in Duplicate PNGs." — the duplicate-detection tail of a
+    /// move/copy result message (empty when nothing was set aside). Counts both incoming files
+    /// diverted into a helper folder and destination files relocated there.
+    private static func duplicateSummary(incomingDestinations: [URL], relocated: [URL]) -> String {
+        var counts: [String: Int] = [:]
+        for url in incomingDestinations + relocated {
+            let parent = url.deletingLastPathComponent().lastPathComponent
+            if DuplicateDetection.helperFolders.contains(parent) { counts[parent, default: 0] += 1 }
+        }
+        guard !counts.isEmpty else { return "" }
+        var parts: [String] = []
+        for name in [DuplicateDetection.duplicatesFolder, DuplicateDetection.duplicatePNGsFolder] {
+            guard let n = counts[name] else { continue }
+            parts.append(parts.isEmpty ? "\(n) set aside in \(name)" : "\(n) in \(name)")
+        }
+        return " " + parts.joined(separator: ", ") + "."
     }
 
     /// Everything selectable in this view — the grid plus the bubble folders (when shown).
