@@ -38,12 +38,30 @@ struct DuplicatesView: View {
     @State private var exactOnly = false
     @State private var confirmDelete = false
     @State private var compareGroup: DuplicateGroup?
+    /// Capture dates (EXIF, falling back to the file date) for every file in the result — drives
+    /// the Older / Newer markers on the tiles. Loaded once per result from the per-file cache.
+    @State private var captureDates: [URL: Date] = [:]
+    /// Leave out files with "Frame" in the name (video-frame screenshots): a folder full of frames
+    /// from one video is hundreds of visually similar images that are never duplicates.
+    @AppStorage("photoBrowser.duplicatesExcludeFrames") private var excludeFrames = false
 
-    /// The groups currently shown, honoring the Exact-Matches filter.
+    /// The groups currently shown, honoring the Exact-Matches filter and the Frame exclusion.
     private var shownGroups: [DuplicateGroup] {
-        exactOnly ? groups.filter { $0.matchKind == .exact } : groups
+        let base = exactOnly ? groups.filter { $0.matchKind == .exact } : groups
+        return excludeFrames ? Self.withoutFrames(base) : base
     }
-    private var exactCount: Int { groups.filter { $0.matchKind == .exact }.count }
+    private var visibleGroups: [DuplicateGroup] { excludeFrames ? Self.withoutFrames(groups) : groups }
+    private var exactCount: Int { visibleGroups.filter { $0.matchKind == .exact }.count }
+
+    static func isFrameFile(_ e: Entry) -> Bool { e.name.localizedCaseInsensitiveContains("frame") }
+    /// Groups with the Frame files taken out; a group left with one file is no longer a duplicate.
+    static func withoutFrames(_ groups: [DuplicateGroup]) -> [DuplicateGroup] {
+        groups.compactMap { g in
+            var copy = g
+            copy.entries.removeAll(where: isFrameFile)
+            return copy.entries.count > 1 ? copy : nil
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -53,27 +71,39 @@ struct DuplicatesView: View {
                         ProgressView()
                         Text("Scanning for duplicates…").foregroundStyle(.secondary)
                     }
-                } else if groups.isEmpty {
+                } else if visibleGroups.isEmpty {
                     ContentUnavailableView {
                         Label("No Duplicates", systemImage: "checkmark.circle")
                     } description: {
-                        Text("No files here share the same size & dimensions, look visually alike, or share a copy-style name.")
+                        Text(excludeFrames && !groups.isEmpty
+                             ? "Every group found here only involves “Frame” files, which are being left out."
+                             : "No files here share the same size & dimensions, look visually alike, or share a copy-style name.")
                     } actions: {
+                        if excludeFrames && !groups.isEmpty {
+                            Button("Include Frame Files") { excludeFrames = false }.buttonStyle(.bordered)
+                        }
                         Button("Rescan") { Task { await load(force: true) } }.buttonStyle(.bordered)
                     }
                 } else {
                     VStack(spacing: 0) {
                         Picker("Filter", selection: $exactOnly) {
-                            Text("All (\(groups.count))").tag(false)
+                            Text("All (\(visibleGroups.count))").tag(false)
                             Text("Exact Matches (\(exactCount))").tag(true)
                         }
                         .pickerStyle(.segmented)
-                        .padding(.horizontal).padding(.vertical, 8)
+                        .padding(.horizontal).padding(.top, 8)
+                        Toggle(isOn: $excludeFrames) {
+                            Label("Leave out “Frame” files", systemImage: "film")
+                                .font(.subheadline)
+                        }
+                        .tint(.accentColor)
+                        .padding(.horizontal).padding(.vertical, 6)
 
                         List {
                             Section {
                                 ForEach(shownGroups) { group in
                                     DuplicateGroupRow(group: group, selectedFiles: $selectedFiles,
+                                                      dates: dates(for: group),
                                                       onToggle: { toggle($0, in: group) },
                                                       onCompare: { compareGroup = group })
                                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -93,8 +123,8 @@ struct DuplicatesView: View {
                                 }
                             } footer: {
                                 Text(exactOnly
-                                     ? "Exact matches share identical size and pixel dimensions — almost always true duplicates. Tap the copies you don't want, then Delete Selected; one file in each group is always kept."
-                                     : "“Exact” = identical size & dimensions; “Visually similar” = the same picture re-encoded/resized/lightly edited; “Similar name” = a copy-style name (like “name (1)”). Tap the copies you don't want, then Delete Selected — one file in each group is always kept. Swipe a group to mark it Not Duplicates; › compares the files side by side.")
+                                     ? "Exact matches share identical size and pixel dimensions — almost always true duplicates. Tap the copies you don't want, then Delete Selected; one file in each group is always kept. When capture dates differ, the oldest and newest copies are marked."
+                                     : "“Exact” = identical size & dimensions; “Visually similar” = the same picture re-encoded/resized/lightly edited; “Similar name” = a copy-style name (like “name (1)”). Tap the copies you don't want, then Delete Selected — one file in each group is always kept. When capture dates differ, the oldest and newest copies are marked. Swipe a group to mark it Not Duplicates; › compares the files side by side.")
                             }
                         }
                     }
@@ -131,7 +161,26 @@ struct DuplicatesView: View {
                 Button("Cancel", role: .cancel) {}
             }
             .task(id: folder) { await load(force: false) }
+            // Turning the Frame exclusion OFF may need files the last scan skipped: reload, which
+            // rescans only if the remembered result doesn't cover them. Turning it ON is just a
+            // display filter.
+            .onChange(of: excludeFrames) { _, isOn in if !isOn { Task { await load(force: false, reloadOnly: true) } } }
         }
+    }
+
+    // MARK: - Dates (Older / Newer markers)
+
+    /// Each file's date for the markers: EXIF capture date, else the file's modified date.
+    private func dates(for group: DuplicateGroup) -> [URL: Date] {
+        var out: [URL: Date] = [:]
+        for e in group.entries { out[e.url] = captureDates[e.url] ?? e.modified }
+        return out
+    }
+
+    private func loadCaptureDates() async {
+        let all = groups.flatMap { $0.entries }
+        guard !all.isEmpty else { captureDates = [:]; return }
+        captureDates = await library.captureDates(for: all)
     }
 
     // MARK: - Selection
@@ -188,13 +237,18 @@ struct DuplicatesView: View {
 
     // MARK: - Loading (remembered result first, full scan only when needed)
 
-    private func load(force: Bool) async {
-        if loaded && !force { return }
+    /// `reloadOnly` re-checks the remembered result against the folder (used when the Frame
+    /// exclusion is switched off) without the "already loaded" short-circuit.
+    private func load(force: Bool, reloadOnly: Bool = false) async {
+        if loaded && !force && !reloadOnly { return }
         loaded = true
         scanning = true
         // All viewable media (images AND videos). Dimensions are only used for the
         // size+dimensions match; the filename match needs none, so videos always count.
-        let media = await library.listing(of: folder, sort: .nameAsc).filter { $0.isViewable }
+        // With the Frame exclusion on, frame files are left out of the scan itself — they are
+        // the bulk of the hashing work in a screenshot-heavy folder and never true duplicates.
+        var media = await library.listing(of: folder, sort: .nameAsc).filter { $0.isViewable }
+        if excludeFrames { media.removeAll(where: Self.isFrameFile) }
         let current = DuplicateScanCache.fingerprint(media)
 
         if !force, let record = await DuplicateScanCache.load(folder: folder) {
@@ -204,9 +258,13 @@ struct DuplicatesView: View {
             let changed = current.contains { path, value in record.files[path] != value }
             if !changed {
                 groups = record.rebuild(with: media, dismissed: allPairsDismissed)
-                fingerprint = current
+                // Keep the record's knowledge of files this pass didn't look at (frames left out),
+                // so switching the exclusion back off doesn't read as "new files".
+                fingerprint = record.files.merging(current) { _, new in new }
+                    .filter { path, _ in current[path] != nil || (excludeFrames && record.files[path] != nil) }
                 scannedAt = Date(timeIntervalSince1970: record.scannedAt)
                 scanning = false
+                await loadCaptureDates()
                 persist()          // write back the pruned result
                 return
             }
@@ -216,6 +274,7 @@ struct DuplicatesView: View {
         fingerprint = current
         scannedAt = Date()
         scanning = false
+        await loadCaptureDates()
         persist()
     }
 
@@ -412,8 +471,24 @@ struct DuplicateGroup: Identifiable, Hashable {
 private struct DuplicateGroupRow: View {
     let group: DuplicateGroup
     @Binding var selectedFiles: Set<URL>
+    /// Per-file date (capture date, else file date). When they differ within the group, the
+    /// oldest tile is marked "Oldest" and the newest "Newest" — the cue for which copy to keep.
+    var dates: [URL: Date] = [:]
     let onToggle: (URL) -> Void
     let onCompare: () -> Void
+
+    private enum Age { case oldest, newest }
+    /// Age markers, only when the group's dates actually differ (by more than a second).
+    private var ages: [URL: Age] {
+        let ds = group.entries.compactMap { e in dates[e.url].map { (e.url, $0) } }
+        guard let lo = ds.min(by: { $0.1 < $1.1 }), let hi = ds.max(by: { $0.1 < $1.1 }),
+              hi.1.timeIntervalSince(lo.1) > 1 else { return [:] }
+        var out: [URL: Age] = [:]
+        for (u, d) in ds where abs(d.timeIntervalSince(lo.1)) <= 1 { out[u] = .oldest }
+        for (u, d) in ds where abs(d.timeIntervalSince(hi.1)) <= 1 { out[u] = .newest }
+        return out
+    }
+    private var datesDiffer: Bool { !ages.isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -451,12 +526,16 @@ private struct DuplicateGroupRow: View {
 
     private func fileTile(_ e: Entry) -> some View {
         let ticked = selectedFiles.contains(e.url)
+        let age = ages[e.url]
         return Button { onToggle(e.url) } label: {
             VStack(spacing: 4) {
                 ZStack(alignment: .topTrailing) {
                     DuplicateThumb(entry: e, side: 88)
                         .overlay(RoundedRectangle(cornerRadius: 6).stroke(ticked ? Color.red : .clear, lineWidth: 3))
                         .opacity(ticked ? 0.75 : 1)
+                        .overlay(alignment: .bottomLeading) {
+                            if let age { ageBadge(age) }
+                        }
                     Image(systemName: ticked ? "trash.circle.fill" : "circle")
                         .font(.title3)
                         .foregroundStyle(ticked ? Color.red : Color.white)
@@ -464,12 +543,30 @@ private struct DuplicateGroupRow: View {
                         .padding(5)
                 }
                 Text(e.name).font(.caption2).lineLimit(1).truncationMode(.middle).frame(width: 88)
-                Text(e.size.sizeString).font(.caption2).foregroundStyle(.secondary)
+                if datesDiffer, let d = dates[e.url] {
+                    // The date is what tells the copies apart, so show it under each tile.
+                    Text(d.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption2).lineLimit(1).minimumScaleFactor(0.8).frame(width: 88)
+                        .foregroundStyle(age == .oldest ? Color.orange : age == .newest ? Color.cyan : .secondary)
+                } else {
+                    Text(e.size.sizeString).font(.caption2).foregroundStyle(.secondary)
+                }
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(ticked ? "Unmark \(e.name)" : "Mark \(e.name) for deletion")
+        .accessibilityLabel((ticked ? "Unmark \(e.name)" : "Mark \(e.name) for deletion")
+                            + (age == .oldest ? ", oldest copy" : age == .newest ? ", newest copy" : ""))
+    }
+
+    /// "Oldest" (orange, clock) / "Newest" (cyan, sparkle) capsule on the tile's corner.
+    private func ageBadge(_ age: Age) -> some View {
+        Label(age == .oldest ? "Oldest" : "Newest", systemImage: age == .oldest ? "clock" : "sparkle")
+            .font(.system(size: 9, weight: .bold))
+            .padding(.horizontal, 6).padding(.vertical, 3)
+            .background((age == .oldest ? Color.orange : Color.cyan).opacity(0.9), in: Capsule())
+            .foregroundStyle(.black)
+            .padding(4)
     }
 }
 

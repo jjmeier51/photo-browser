@@ -298,6 +298,16 @@ UI:
   **no "keep the largest" bulk delete** — the user chooses which copy goes. `toggle` refuses to
   tick the last unticked file of a group, so one file per group always survives. **Not
   Duplicates** is a swipe action / context-menu item on the row (`library.markNotDuplicates`).
+- **Older / Newer markers**: `DuplicatesView` loads capture dates for every file in the result
+  (`library.captureDates`, per-file cached; file date as fallback) and each row computes `ages`:
+  when a group's dates differ by more than a second, the oldest tile gets an orange "Oldest"
+  capsule and the newest a cyan "Newest" one, and the tiles show their dates instead of sizes.
+- **"Leave out “Frame” files"** toggle (`@AppStorage photoBrowser.duplicatesExcludeFrames`):
+  video-frame screenshots are hundreds of visually similar, never-duplicate images. On, frame
+  files are dropped from the scan itself (no hashing) *and* filtered out of remembered results
+  (`withoutFrames`; a group left with one file disappears). Turning it off reloads: the
+  remembered fingerprint keeps the skipped files' entries so this doesn't read as "new files"
+  unless the frames were never scanned, in which case it rescans.
 - **Results are remembered** — `DuplicateScanCache` (one JSON per folder in Application
   Support/`duplicateScans`, listed in Storage): the groups as paths plus a `size|mtime`
   fingerprint of every file the scan covered. On open, `load(force:false)` lists the folder and
