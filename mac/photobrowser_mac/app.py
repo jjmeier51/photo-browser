@@ -17,7 +17,7 @@ from PySide6.QtCore import QUrl
 
 from . import APP_NAME, __version__
 from .exiftool import ExifTool, FIELD_BY_KEY, date_tags_for, install_hint, DATE_WRITE_TAGS, VIDEO_DATE_WRITE_TAGS, is_video
-from .library import Entry, scan, unique_path
+from .library import Entry, entry_for, scan
 from .models import FileGridModel, GridProxy, EntryRole
 from .theme import STYLESHEET
 from .thumbnails import Thumbnailer
@@ -91,10 +91,18 @@ class MainWindow(QMainWindow):
         self.search = QLineEdit(); self.search.setPlaceholderText("Search this folder"); self.search.setClearButtonEnabled(True)
         self.search.setMinimumWidth(170)
         self.search.textChanged.connect(lambda t: self.proxy.apply(search=t))
-        self.sort = QComboBox(); self.sort.addItems(["Name", "Date", "Size"])
-        self.sort.currentIndexChanged.connect(lambda i: self.proxy.apply(sort_key=i))
-        self.desc = QToolButton(); self.desc.setText("↓"); self.desc.setCheckable(True); self.desc.setToolTip("Reverse order")
-        self.desc.toggled.connect(lambda b: self.proxy.apply(descending=b))
+        self.sort = QComboBox(); self.sort.addItems(GridProxy.LABELS)
+        self.desc = QToolButton(); self.desc.setCheckable(True); self.desc.setToolTip("Flip the order")
+        self.desc.toggled.connect(self._direction_toggled)
+        self.sort.currentIndexChanged.connect(self._sort_key_changed)
+        # Restore the last sort (default: capture date, newest first — the iOS "smart" order).
+        key = int(self.settings.value("sortKey", GridProxy.SORT_CAPTURE))
+        desc = self.settings.value("sortDesc", GridProxy.default_descending(key))
+        desc = desc in (True, "true", "True", 1, "1")
+        self.sort.setCurrentIndex(key)
+        self.desc.setChecked(desc)
+        self.proxy.apply(sort_key=key, descending=desc)
+        self._update_direction_glyph()
         self.kind = QComboBox(); self.kind.addItems(["All", "Photos", "Videos"])
         self.kind.currentIndexChanged.connect(lambda i: self.proxy.apply(kind=["all", "photos", "videos"][i]))
         self.size = QSlider(Qt.Horizontal); self.size.setRange(96, 320); self.size.setValue(int(self.settings.value("tile", 160)))
@@ -116,6 +124,29 @@ class MainWindow(QMainWindow):
             lay.addWidget(b)
         QTimer.singleShot(0, lambda: self._tile_size(self.size.value()))
         return bar
+
+    def _sort_key_changed(self, key: int):
+        """A new key starts in its natural direction (dates newest-first, names A–Z) — the ↓/↑
+        button then flips it."""
+        desc = GridProxy.default_descending(key)
+        self.desc.blockSignals(True); self.desc.setChecked(desc); self.desc.blockSignals(False)
+        self.proxy.apply(sort_key=key, descending=desc)
+        self.settings.setValue("sortKey", key); self.settings.setValue("sortDesc", desc)
+        self._update_direction_glyph()
+
+    def _direction_toggled(self, desc: bool):
+        self.proxy.apply(descending=desc)
+        self.settings.setValue("sortDesc", desc)
+        self._update_direction_glyph()
+
+    def _update_direction_glyph(self):
+        key = self.proxy.sort_key
+        if key in GridProxy.DATE_KEYS:
+            self.desc.setText("Newest first" if self.proxy.descending else "Oldest first")
+        elif key == GridProxy.SORT_SIZE:
+            self.desc.setText("Largest first" if self.proxy.descending else "Smallest first")
+        else:
+            self.desc.setText("Z → A" if self.proxy.descending else "A → Z")
 
     def _build_menu(self):
         mb = self.menuBar()
@@ -203,7 +234,9 @@ class MainWindow(QMainWindow):
             self.pills.end("meta")
             if token != self._meta_job_token:
                 return
-            self.model.meta.update(meta)
+            self.model.update_meta(meta)
+            if self.proxy.sort_key == GridProxy.SORT_CAPTURE:
+                self.proxy.apply()      # real capture dates are in — re-order (iOS does the same)
             self.grid.viewport().update()
             self._selection_changed()
 
@@ -261,8 +294,10 @@ class MainWindow(QMainWindow):
                 if os.path.exists(new) and os.path.normcase(new) != os.path.normcase(old):
                     raise FileExistsError(new_name)
                 os.rename(old, new)
-                st = os.stat(new)
-                replaced.append((old, Entry(path=new, name=new_name, is_dir=False, size=st.st_size, mtime=st.st_mtime)))
+                fresh = entry_for(new)
+                if fresh is None:
+                    raise FileNotFoundError(new_name)
+                replaced.append((old, fresh))
                 done += 1
             except OSError as e:
                 errors.append(f"{os.path.basename(old)}: {e}")
@@ -275,20 +310,18 @@ class MainWindow(QMainWindow):
             self.model.replace_entry(old, new)
         paths = []
         for p in changed_paths:
-            row = self.model._row_by_path.get(p)
-            if row is None:
+            if self.model.row_for(p) is None:
                 continue
-            e = self.model.entries[row]
-            try:
-                st = os.stat(p)
-            except OSError:
+            fresh = entry_for(p)
+            if fresh is None:
                 continue
-            self.model.replace_entry(p, Entry(path=p, name=e.name, is_dir=False, size=st.st_size, mtime=st.st_mtime))
+            self.model.replace_entry(p, fresh)
             paths.append(p)
         paths += [n.path for _, n in renamed]
         for p in paths:
-            self.model.meta.pop(p, None)
+            self.model.forget_meta(p)
         self._load_metadata(paths)
+        self.proxy.apply()                  # dates/names may have changed → re-sort
         self.grid.viewport().update()
 
     def _report(self, what: str, done: int, errors: list[str]):

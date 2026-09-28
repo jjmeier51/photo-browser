@@ -44,8 +44,11 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 1. Pick the drive in the top-left menu (everything under `/Volumes`), or **Folder…** for any folder.
    The last drive reopens on launch.
 2. Click a folder in the tree; the grid fills with square tiles (double-click a folder tile to go
-   in, a photo to open it in the default app). Search, sort (name/date/size), filter photos/videos,
-   and drag the slider for tile size.
+   in, a photo to open it in the default app). Search, filter photos/videos, drag the slider for
+   tile size, and sort by **Capture Date** (the default — folders A–Z, then media newest-first by
+   EXIF/QuickTime date, exactly the iOS app's default order), **Modified Date**, **Created Date**,
+   Name or Size; the button next to the sort flips the direction. The inspector shows all three
+   dates for the selection (capture date editable; the Dates editor can make the file dates follow).
 3. Click one item to edit it in the inspector. Shift/⌘-click, rubber-band or **Select All** for
    many, then **Rename…**, **Dates…** or **Metadata…** (also in the Edit menu: ⌘⇧N / ⌘⇧D / ⌘⇧M).
 4. Every write shows a progress pill at the bottom of the grid; the affected tiles and their

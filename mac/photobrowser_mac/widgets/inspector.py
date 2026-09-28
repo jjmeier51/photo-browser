@@ -56,6 +56,12 @@ class Inspector(QWidget):
         self.date_clear = QPushButton("No date"); self.date_clear.setObjectName("Flat"); self.date_clear.setCheckable(True)
         drow = QHBoxLayout(); drow.addWidget(self.date_edit, 1); drow.addWidget(self.date_clear)
         self.form.addRow("Capture date", drow)
+        # File-system dates are shown beside the capture date (read-only here; the Dates editor can
+        # make them follow the capture date).
+        self.modified_lbl = QLineEdit(); self.modified_lbl.setReadOnly(True)
+        self.created_lbl = QLineEdit(); self.created_lbl.setReadOnly(True)
+        self.form.addRow("Modified date", self.modified_lbl)
+        self.form.addRow("Created date", self.created_lbl)
         self.field_edits: dict[str, QLineEdit | QTextEdit] = {}
         for f in FIELDS:
             if f.multiline:
@@ -110,6 +116,7 @@ class Inspector(QWidget):
             self.headline.setText("Nothing selected")
             self.subline.setText("Select a photo or video to see and edit its details. Select several to bulk edit.")
             self.name_edit.clear(); self._set_date(None)
+            self.modified_lbl.clear(); self.created_lbl.clear()
             for w in self.field_edits.values():
                 self._set_text(w, "")
             self.facts.setText("")
@@ -122,6 +129,8 @@ class Inspector(QWidget):
             self.subline.setText(d.strftime("%A, %d %B %Y · %H:%M") if d else "No capture date")
             self.name_edit.setText(e.name)
             self._set_date(d)
+            self.modified_lbl.setText(self._fs_date(e.mtime))
+            self.created_lbl.setText(self._fs_date(e.ctime))
             for f in FIELDS:
                 self._set_text(self.field_edits[f.key], field_value(m, f))
             self.facts.setText(self._facts(e, m))
@@ -135,6 +144,9 @@ class Inspector(QWidget):
             self.name_edit.setText("(varies)")
             dates = {capture_date(meta.get(e.path, {})) for e in self.entries}
             self._set_date(next(iter(dates)) if len(dates) == 1 else None)
+            mods = sorted(e.mtime for e in self.entries); crs = sorted(e.ctime for e in self.entries)
+            self.modified_lbl.setText(self._fs_range(mods))
+            self.created_lbl.setText(self._fs_range(crs))
             for f in FIELDS:
                 vals = {field_value(meta.get(e.path, {}), f) for e in self.entries}
                 self._set_text(self.field_edits[f.key], next(iter(vals)) if len(vals) == 1 else "Mixed")
@@ -159,6 +171,20 @@ class Inspector(QWidget):
         else:
             self.date_edit.setDateTime(QDateTime.currentDateTime())
             self.date_clear.setChecked(True)
+
+    @staticmethod
+    def _fs_date(ts: float) -> str:
+        if not ts:
+            return "—"
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d  %H:%M:%S")
+
+    def _fs_range(self, ts: list[float]) -> str:
+        if not ts:
+            return "—"
+        lo, hi = datetime.fromtimestamp(ts[0]), datetime.fromtimestamp(ts[-1])
+        if lo.date() == hi.date():
+            return lo.strftime("%Y-%m-%d") + (f"  {lo:%H:%M} – {hi:%H:%M}" if lo != hi else f"  {lo:%H:%M:%S}")
+        return f"{lo:%Y-%m-%d} – {hi:%Y-%m-%d}"
 
     @staticmethod
     def _set_text(w, text: str):
@@ -197,7 +223,6 @@ class Inspector(QWidget):
         gps = ""
         if m.get("GPSLatitude") is not None and m.get("GPSLongitude") is not None:
             gps = f"GPS {float(m['GPSLatitude']):.5f}, {float(m['GPSLongitude']):.5f}"
-        mod = m.get("FileModifyDate")
         lines = [line1]
         if cam:
             lines.append(cam)
@@ -205,8 +230,6 @@ class Inspector(QWidget):
             lines.append(" · ".join(exp))
         if gps:
             lines.append(gps)
-        if mod:
-            lines.append(f"Modified {str(mod)[:19].replace(':', '-', 2)}")
         lines.append(os.path.dirname(e.path))
         return "\n".join(lines)
 

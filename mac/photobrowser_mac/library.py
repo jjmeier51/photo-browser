@@ -25,7 +25,8 @@ class Entry:
     name: str
     is_dir: bool
     size: int
-    mtime: float
+    mtime: float            # modified date (file system)
+    ctime: float = 0.0      # created date (macOS birth time; falls back to ctime elsewhere)
 
     @property
     def ext(self) -> str:
@@ -87,6 +88,26 @@ def list_volumes() -> list[Volume]:
     return out
 
 
+def created_time(st: os.stat_result) -> float:
+    """The file's creation date: the real birth time on macOS/BSD, else the inode change time
+    (the closest thing Linux exposes without extra syscalls)."""
+    return float(getattr(st, "st_birthtime", None) or st.st_ctime)
+
+
+def entry_from_stat(path: str, name: str, is_dir: bool, st: os.stat_result) -> Entry:
+    return Entry(path=path, name=name, is_dir=is_dir, size=0 if is_dir else st.st_size,
+                 mtime=st.st_mtime, ctime=created_time(st))
+
+
+def entry_for(path: str) -> Entry | None:
+    """A fresh Entry for `path` (after a rename / rewrite), or None if it's gone."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return entry_from_stat(path, os.path.basename(path), os.path.isdir(path), st)
+
+
 def scan(folder: str) -> list[Entry]:
     """Immediate contents of `folder`: subfolders first (A–Z), then media files. Hidden files and
     macOS AppleDouble `._` sidecars (which exFAT drives written from a Mac are full of) are skipped."""
@@ -102,8 +123,7 @@ def scan(folder: str) -> list[Entry]:
                     is_dir = de.is_dir(follow_symlinks=True)
                 except OSError:
                     continue
-                e = Entry(path=de.path, name=name, is_dir=is_dir,
-                          size=0 if is_dir else st.st_size, mtime=st.st_mtime)
+                e = entry_from_stat(de.path, name, is_dir, st)
                 if is_dir or e.is_media:
                     entries.append(e)
     except OSError:

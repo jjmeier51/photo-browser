@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, QSortFilterProxyModel, Qt
 
+from .exiftool import capture_date
 from .library import Entry
 from .thumbnails import Thumbnailer
 
@@ -18,14 +19,36 @@ class FileGridModel(QAbstractListModel):
         self.entries: list[Entry] = []
         self.thumbs = thumbs
         self.meta: dict[str, dict] = {}         # path → exiftool dict (filled by the window)
+        self._capture_ts: dict[str, float] = {}  # path → capture date as a timestamp (from meta)
         self._row_by_path: dict[str, int] = {}
         thumbs.ready.connect(self._thumb_ready)
+
+    # -- dates
+    def capture_ts(self, e: Entry) -> float:
+        """The capture date to sort by: EXIF/QuickTime from the metadata read, else the modified
+        date — exactly the iOS grid's `captureDates[url] ?? modified`."""
+        ts = self._capture_ts.get(e.path)
+        if ts is None:
+            d = capture_date(self.meta.get(e.path, {})) if e.path in self.meta else None
+            ts = d.timestamp() if d else e.mtime
+            self._capture_ts[e.path] = ts
+        return ts
+
+    def update_meta(self, meta: dict[str, dict]):
+        self.meta.update(meta)
+        for p in meta:
+            self._capture_ts.pop(p, None)
+
+    def forget_meta(self, path: str):
+        self.meta.pop(path, None)
+        self._capture_ts.pop(path, None)
 
     # -- population
     def set_entries(self, entries: list[Entry]):
         self.beginResetModel()
         self.entries = list(entries)
         self._row_by_path = {e.path: i for i, e in enumerate(self.entries)}
+        self._capture_ts = {}
         self.endResetModel()
 
     def replace_entry(self, old_path: str, new: Entry):
@@ -36,8 +59,13 @@ class FileGridModel(QAbstractListModel):
         self._row_by_path[new.path] = row
         if old_path in self.meta:
             self.meta[new.path] = self.meta.pop(old_path)
+        self._capture_ts.pop(old_path, None)
+        self._capture_ts.pop(new.path, None)
         idx = self.index(row)
         self.dataChanged.emit(idx, idx)
+
+    def row_for(self, path: str) -> int | None:
+        return self._row_by_path.get(path)
 
     def entry_at(self, row: int) -> Entry | None:
         return self.entries[row] if 0 <= row < len(self.entries) else None
@@ -78,18 +106,28 @@ class FileGridModel(QAbstractListModel):
 
 
 class GridProxy(QSortFilterProxyModel):
-    """Search (name contains), kind filter (all / photos / videos), and sort by name / date / size.
-    Folders always sort first, like the iOS grid."""
+    """Search (name contains), kind filter (all / photos / videos), and sorting.
 
-    SORT_NAME, SORT_DATE, SORT_SIZE = range(3)
+    Sort keys mirror the iOS app: the default is its "smart" order — folders A–Z first, then media
+    by **capture date** newest-first (EXIF/QuickTime, falling back to the modified date), ties by
+    name. Modified / Created / Name / Size are the alternatives; folders always come first."""
+
+    SORT_CAPTURE, SORT_MODIFIED, SORT_CREATED, SORT_NAME, SORT_SIZE = range(5)
+    LABELS = ["Capture Date", "Modified Date", "Created Date", "Name", "Size"]
+    DATE_KEYS = (SORT_CAPTURE, SORT_MODIFIED, SORT_CREATED)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.search = ""
         self.kind = "all"
-        self.sort_key = self.SORT_NAME
-        self.descending = False
+        self.sort_key = self.SORT_CAPTURE
+        self.descending = True                   # newest first, like iOS
         self.setDynamicSortFilter(False)
+
+    @classmethod
+    def default_descending(cls, key: int) -> bool:
+        """Dates read newest-first by default; names and sizes ascending."""
+        return key in cls.DATE_KEYS
 
     def apply(self, *, search=None, kind=None, sort_key=None, descending=None):
         if search is not None:
@@ -114,16 +152,26 @@ class GridProxy(QSortFilterProxyModel):
         return True
 
     def lessThan(self, left, right):
-        a: Entry = self.sourceModel().entries[left.row()]
-        b: Entry = self.sourceModel().entries[right.row()]
+        src: FileGridModel = self.sourceModel()
+        a: Entry = src.entries[left.row()]
+        b: Entry = src.entries[right.row()]
         if a.is_dir != b.is_dir:
             return a.is_dir                      # folders first, regardless of direction
-        if self.sort_key == self.SORT_DATE:
+        if a.is_dir and self.sort_key in (self.SORT_CAPTURE, self.SORT_NAME, self.SORT_SIZE):
+            # Folders have no capture date or size to speak of — they stay alphabetical (iOS smart).
+            na, nb = a.name.lower(), b.name.lower()
+            return (na > nb) if (self.descending and self.sort_key == self.SORT_NAME) else (na < nb)
+        if self.sort_key == self.SORT_CAPTURE:
+            ka, kb = src.capture_ts(a), src.capture_ts(b)
+        elif self.sort_key == self.SORT_MODIFIED:
             ka, kb = a.mtime, b.mtime
+        elif self.sort_key == self.SORT_CREATED:
+            ka, kb = a.ctime, b.ctime
         elif self.sort_key == self.SORT_SIZE:
             ka, kb = a.size, b.size
         else:
             ka, kb = a.name.lower(), b.name.lower()
         if ka == kb:
-            ka, kb = a.name.lower(), b.name.lower()
+            # Ties (same second, same size) fall back to name A–Z whichever way the sort runs.
+            return a.name.lower() < b.name.lower()
         return (ka > kb) if self.descending else (ka < kb)
