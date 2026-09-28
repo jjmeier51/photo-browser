@@ -12,6 +12,7 @@ struct SettingsView: View {
         uniqueKeysWithValues: AIExtend.AIModel.partnerModels.map { ($0, String(AIExtend.tuneID(for: $0))) })
     @State private var flux = String(AIExtend.fluxTune)
     @State private var prompt = AIExtend.extendPrompt
+    @State private var pauseReminders = AINotifications.pauseRemindersEnabled
     @State private var cdmpoolToken = OFDRM.token
 
     var body: some View {
@@ -62,6 +63,14 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("Remind me if the app is paused mid-generation", isOn: $pauseReminders)
+                } header: {
+                    Text("AI notifications")
+                } footer: {
+                    Text("You always get an alert when AI images are ready. iOS pauses the app a short while after you leave it, so a generation you started can't finish until you come back; with this on, one reminder per job tells you that. Off (the default), the images simply finish and save the next time you open the app.")
+                }
+
+                Section {
                     NavigationLink { BirthdayMappingView() } label: { Label("Folder Birthdays", systemImage: "birthday.cake") }
                 } header: {
                     Text("Library")
@@ -100,6 +109,7 @@ struct SettingsView: View {
                         }
                         if let id = Int(flux.trimmingCharacters(in: .whitespaces)) { AIExtend.setFluxTune(id) }
                         AIExtend.save(apiKey: key, defaultModel: model, prompt: prompt)
+                        AINotifications.pauseRemindersEnabled = pauseReminders
                         OFDRM.setToken(cdmpoolToken)
                         dismiss()
                     }

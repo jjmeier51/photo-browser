@@ -1255,6 +1255,10 @@ final class Library {
     @ObservationIgnored private var aiRecoveryRetryScheduled = false
     /// Recovery passes that time out on the same job before it's abandoned as stuck on Astria's side.
     private static let maxAIRecoveryAttempts = 3
+    /// A job still unfinished this long after it started is stuck (Astria generations take minutes,
+    /// not hours). Abandoned quietly — the old 48-hour retention kept a dead prompt alive across
+    /// days of app switches, each one re-polling it.
+    private static let maxAIJobAge: TimeInterval = 6 * 3600
 
     /// Routes a tapped AI notification back into the app (see `presentAIResult`). Call once at launch.
     func configureAINotificationRouting() {
@@ -1321,8 +1325,12 @@ final class Library {
         let now = Date().timeIntervalSince1970
         for p in loadPendingAstria() {
             let jobID = p.jobID
-            // Astria retains results for a long time, but not forever — drop genuinely stale records.
-            guard now - p.startedAt < 48 * 3600 else { removePendingAstria(jobID: jobID); continue }
+            // A job this old is stuck — stop chasing it (silently: the user moved on long ago).
+            guard now - p.startedAt < Self.maxAIJobAge else {
+                removePendingAstria(jobID: jobID)
+                AINotifications.cancelFallback(jobID: jobID)
+                continue
+            }
             guard !activeAIJobIDs.contains(jobID), !recoveringAIJobIDs.contains(jobID) else { continue }
             recoveringAIJobIDs.insert(jobID)
 
@@ -1333,8 +1341,11 @@ final class Library {
             let activityID = beginActivity("Finishing AI images", indeterminate: true)
             setActivity(activityID, status: "Checking Astria for “\(folderURL.lastPathComponent)”…")
             let bg = BackgroundTaskHolder(); bg.begin(name: "AI Recovery")
+            // No "paused" reminder for a recovery pass: the user didn't just start this job, so
+            // being pinged about it every time they open and leave the app is exactly the nag
+            // that was reported. The pass just finishes next time the app is open long enough,
+            // and the normal "ready" alert follows.
             let live = AIProgressActivity()
-            live.armFallback(jobID: jobID, folderPath: p.folderPath)
             Task {
                 let result = await AIExtend.resumePrompt(promptID: promptID, tune: tune, expected: count,
                                                          heartbeat: heartbeatRelay(live, activityID: activityID, count: count ?? 1))

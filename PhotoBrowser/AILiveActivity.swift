@@ -26,16 +26,22 @@ final class AIProgressActivity {
     /// Re-arm at most this often (a scheduled request is replaced by re-adding its identifier).
     private static let fallbackRearmInterval: TimeInterval = 30
 
-    /// Arms the "the app was suspended mid-generation" alert for `jobID`. A local alert can only be
+    /// Arms the "the app was paused mid-generation" reminder for `jobID`. A local alert can only be
     /// *posted* while the app is running, so a job finishing after iOS suspends the app never notified
     /// until the user reopened it. A scheduled notification fires even while suspended.
     ///
     /// It's a **dead-man's switch**, not a timer: `heartbeat()` keeps pushing it out on every poll
     /// tick, so as long as this process is alive and polling it never fires — it lands only once the
-    /// process stopped (suspended or killed), ~2½ minutes later. The previous fixed 3-minute alarm
-    /// fired mid-generation whenever a job simply took longer, telling the user to "check" images
-    /// that didn't exist yet — a big part of "the notifications are wrong".
+    /// process stopped (suspended or killed), ~2½ minutes later.
+    ///
+    /// Three guards keep it from nagging (it did: a reminder on every app switch, for days):
+    /// * it's **opt-in** (`AINotifications.pauseRemindersEnabled`, Settings; off by default) — most
+    ///   of the time the right experience is silence until the images are actually ready;
+    /// * only a job the user **just started** arms it — recovery passes never do (they're
+    ///   housekeeping the user didn't ask for at that moment);
+    /// * it fires **at most once per job**, ever (`AINotifications.reminderAlreadyFired`).
     func armFallback(jobID: String, folderPath: String?) {
+        guard AINotifications.pauseRemindersEnabled, !AINotifications.reminderAlreadyFired(jobID: jobID) else { return }
         fallbackJobID = jobID
         fallbackFolderPath = folderPath
         fallbackArmedAt = Date()
@@ -46,6 +52,9 @@ final class AIProgressActivity {
     func heartbeat() {
         guard let id = fallbackJobID else { return }
         if let at = fallbackArmedAt, Date().timeIntervalSince(at) < Self.fallbackRearmInterval { return }
+        // If the previously scheduled one has already come due, the process was asleep and it
+        // fired — that was this job's one reminder. Don't schedule another.
+        if AINotifications.reminderAlreadyFired(jobID: id) { fallbackJobID = nil; return }
         fallbackArmedAt = Date()
         AINotifications.scheduleFallback(jobID: id, folderPath: fallbackFolderPath, after: Self.fallbackLead)
     }
@@ -126,6 +135,7 @@ enum AINotifications {
     static func configureAtLaunch() {
         UNUserNotificationCenter.current().delegate = presenter
         requestAuthorization()
+        clearStaleReminders()
     }
 
     static func requestAuthorization() {
@@ -133,13 +143,55 @@ enum AINotifications {
         center.delegate = presenter        // must be set before any notification is posted
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
-    private static func fallbackID(_ jobID: String) -> String { "aiFallback.\(jobID)" }
+    private static let fallbackPrefix = "aiFallback."
+    private static func fallbackID(_ jobID: String) -> String { fallbackPrefix + jobID }
+
+    /// Settings: "Remind me if the app is paused mid-generation". Off by default — the reminder
+    /// is only worth having if you *want* to be pulled back into the app; otherwise the images
+    /// simply finish the next time it's opened, with the normal "ready" alert then.
+    static let pauseRemindersKey = "photoBrowser.aiPauseReminders"
+    static var pauseRemindersEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: pauseRemindersKey) }
+        set { UserDefaults.standard.set(newValue, forKey: pauseRemindersKey) }
+    }
+
+    /// jobID → the moment its scheduled reminder was due. Once that moment has passed, the alert
+    /// was delivered (the process was asleep, which is the only way it gets that far), so the job
+    /// never arms another. Persisted, so a relaunch can't reset the count.
+    private static let reminderDueKey = "photoBrowser.aiReminderDue"
+    private static func reminderDue() -> [String: Double] {
+        (UserDefaults.standard.dictionary(forKey: reminderDueKey) as? [String: Double]) ?? [:]
+    }
+    static func reminderAlreadyFired(jobID: String) -> Bool {
+        guard let due = reminderDue()[jobID] else { return false }
+        return Date().timeIntervalSince1970 >= due
+    }
+    private static func setReminderDue(jobID: String, at: Date?) {
+        var d = reminderDue()
+        if let at { d[jobID] = at.timeIntervalSince1970 } else { d.removeValue(forKey: jobID) }
+        // Keep the table small: anything older than a week is irrelevant.
+        let cutoff = Date().timeIntervalSince1970 - 7 * 86400
+        d = d.filter { $0.value > cutoff }
+        UserDefaults.standard.set(d, forKey: reminderDueKey)
+    }
+
+    /// At launch: any reminder still scheduled belongs to a previous process that's gone — the job
+    /// it was about is either finished or now handled by recovery. Drop them so a stale "paused"
+    /// alert can't land minutes after the user last closed the app.
+    static func clearStaleReminders() {
+        let center = UNUserNotificationCenter.current()
+        center.getPendingNotificationRequests { requests in
+            let ids = requests.map(\.identifier).filter { $0.hasPrefix(fallbackPrefix) }
+            if !ids.isEmpty { center.removePendingNotificationRequests(withIdentifiers: ids) }
+        }
+    }
 
     /// Schedules (or re-schedules — same identifier replaces) the suspended-app fallback alert, see
     /// `AIProgressActivity.armFallback`. Its wording is honest about what happened: the app was put
     /// to sleep while Astria worked, and opening it is what lets the images finish and save.
     static func scheduleFallback(jobID: String, folderPath: String?, after seconds: TimeInterval) {
         UNUserNotificationCenter.current().delegate = presenter
+        setReminderDue(jobID: jobID, at: Date().addingTimeInterval(max(1, seconds)))
         let content = UNMutableNotificationContent()
         content.title = "AI images still in progress"
         content.body = "The app was paused while Astria was generating. Open it to finish and save your images."
@@ -158,6 +210,9 @@ enum AINotifications {
         let center = UNUserNotificationCenter.current()
         center.removePendingNotificationRequests(withIdentifiers: [id])
         center.removeDeliveredNotifications(withIdentifiers: [id])
+        // Cancelled before it came due → it never fired; forget the deadline (a later arm for the
+        // same job — e.g. after a retry — is allowed).
+        if !reminderAlreadyFired(jobID: jobID) { setReminderDue(jobID: jobID, at: nil) }
     }
 
     static func post(title: String, body: String, jobID: String? = nil, folderPath: String? = nil) {

@@ -213,17 +213,22 @@ Every item here was a real symptom ("no results", "partial results"):
   the folder's "AI" subfolder and kicks a recovery pass — previously an unknown id did nothing,
   which read as "the notification is broken". A tap that *launched* the app arrives before the
   handler is installed and is held in `pendingTap` until it is.
-- **Suspended-app fallback (important):** a local alert can only be *posted* while the app runs,
+- **Suspended-app reminder (opt-in):** a local alert can only be *posted* while the app runs,
   so a job finishing after iOS suspends the app never notified until reopen. `armFallback` schedules
   a **time-triggered** notification (delivered even while suspended). It is a **dead-man's
   switch**: `heartbeat()` re-arms it (~150 s ahead, throttled to every 30 s) on every poll tick, so
   while the process is alive and polling it never fires; it lands only once the process stopped
-  (suspended/killed). The old fixed 3-minute alarm fired mid-generation whenever a job simply took
-  longer, telling the user to "check" images that didn't exist yet. Its wording is now honest
-  ("AI images still in progress — the app was paused… open it to finish"), and `finish()` cancels
-  it (`notify: false` cancels without posting, for a job handed to recovery). (True "server pushed
-  the instant it's done" delivery would need a push server or a BackgroundTasks capability — not
-  added.)
+  (suspended/killed). Wording: "AI images still in progress — the app was paused… open it to
+  finish"; `finish()` cancels it (`notify: false` cancels without posting).
+  **It nagged** (a reminder on every app switch, for days) because recovery passes armed it too and
+  nothing capped it per job, so now: it is **off by default** (Settings → "Remind me if the app is
+  paused mid-generation", `AINotifications.pauseRemindersEnabled`); only a job started in this
+  session arms it — `resumePendingAIEdits` never does; it fires **at most once per job**
+  (`reminderAlreadyFired`: the scheduled due time is persisted and, once past, the job is done
+  reminding); stale scheduled reminders are removed at launch (`clearStaleReminders`); and a job
+  older than `maxAIJobAge` (6 h) is dropped as stuck instead of being re-polled for 48 h. (True
+  "server pushed the instant it's done" delivery would need a push server or a BackgroundTasks
+  capability — not added.)
 
 ### 1.9b Results survive the review — record lifetime
 
