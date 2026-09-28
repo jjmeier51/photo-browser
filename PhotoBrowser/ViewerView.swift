@@ -204,6 +204,7 @@ struct ViewerView: View {
         let src = current.url
         Task {
             let outcome = await FileActions.copyItems([src], to: dest, skipCollisions: false) { _ in }
+            library.itemsMoved(outcome.relocated)
             if !outcome.copied.isEmpty { library.setLastTransferDestination(dest) }
             library.contentDidChange(under: dest)   // a copy into the visible folder should appear
             note(outcome.copied.isEmpty ? "Couldn’t copy" : "Copied")
@@ -216,7 +217,7 @@ struct ViewerView: View {
         Task {
             let outcome = await FileActions.moveItems([src], to: dest, renameOnCollision: true) { _ in }
             guard !outcome.moved.isEmpty else { note("Couldn’t move"); return }
-            library.itemsMoved(outcome.moved)            // labels/captions follow the file
+            library.itemsMoved(outcome.moved + outcome.relocated)   // labels/captions follow the file (and any duplicate set aside)
             library.setLastTransferDestination(dest)
             library.contentDidChange(under: src.deletingLastPathComponent())
             library.contentDidChange(under: dest)

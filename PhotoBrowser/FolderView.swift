@@ -3181,7 +3181,7 @@ struct FolderView: View {
             let outcome = await FileActions.moveItems(moveURLs, to: dest, renameOnCollision: true) { p in
                 Task { @MainActor in editProgress = p }
             }
-            library.itemsMoved(outcome.moved)                 // labels follow, one persist
+            library.itemsMoved(outcome.moved + outcome.relocated)   // labels follow (incl. files set aside as duplicates), one persist
             if !outcome.moved.isEmpty { library.setLastTransferDestination(dest) }
             editProcessing = false; bg.end()
             var msg = "Moved \(outcome.moved.count) item(s)."
@@ -3217,6 +3217,7 @@ struct FolderView: View {
             let outcome = await FileActions.copyItems(copyURLs, to: dest, skipCollisions: false) { p in
                 Task { @MainActor in editProgress = p }
             }
+            library.itemsMoved(outcome.relocated)               // destination files set aside as duplicates keep their labels
             if !outcome.copied.isEmpty { library.setLastTransferDestination(dest) }
             editProcessing = false; bg.end()
             var msg = "Copied \(outcome.copied.count) item(s)."

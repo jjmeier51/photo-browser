@@ -399,6 +399,39 @@ Bulk tools:
   Notes.
 - **Clear All Birthdays** (staged, confirmed).
 
+## 5b. Move/copy duplicate detection — `DuplicateDetection.swift`, `FileActions.moveItems/copyItems`
+
+Before each photo is written into a destination folder, `FileActions.moveItems` / `copyItems`
+(the batch paths behind the grid's Move/Copy and the viewer's) ask `DuplicateDetection.plan` what
+to do; everything the rules don't touch (videos, unmatched files, same-name-different-picture)
+follows the pre-existing path verbatim. Callers opt out with `detectDuplicates: false`.
+
+- **Same photo** (`samePhoto`, all must hold): aspect within 1% either orientation; capture date
+  equal to the second when both have one (sub-second too when both carry it); make/model equal and
+  exposure/f-number/focal/ISO within 5% when both have them; dHash Hamming ≤ 8. A side that can't
+  be hashed downgrades to `.same(verified: false)` and is logged as unverified. Name alone never
+  matches. Capture date is EXIF `DateTimeOriginal` → `DateTimeDigitized` → TIFF `DateTime` via
+  ImageIO with `kCGImageSourceShouldCache: false` — never the file's mtime.
+- **Stem**: name minus extension, lowercased; PNGs also lose a trailing `_` + 6–12 hex chars
+  (upscaler suffix).
+- **Rules** (`plan(incoming:candidates:)`, pure, unit-tested): A — incoming ORIGINAL vs existing
+  ORIGINAL: same byte size and not newer → existing to `DUPLICATES/`, incoming takes its place;
+  else incoming to `DUPLICATES/`. B — incoming ORIGINAL vs PNG(s): incoming goes in, every
+  matching PNG to `Duplicate PNGs/` (A before B when both apply). C — passthrough. An incoming
+  PNG matching an ORIGINAL → `Duplicate PNGs/`; PNG vs PNG unchanged.
+- **Candidates** = destination top-level files with the same stem ∪ same capture second
+  (`DestinationIndex`, built **once per batch**, bounded fan-out of 8, off-main; helper folders
+  and subfolders are never scanned). Hashes are computed **lazily** only for pairs that already
+  pass rules 1–3, through `HashCache` (JSON in Application Support, key `name|size|mtime`).
+- **Execution**: `relocateExisting` moves a destination file into the helper folder (created on
+  first use, `_1`/`_2`… on clash — `uniqueURL`), `divertIncoming` moves/copies the incoming file
+  there, `placeIncoming` is the old code path (collision rules intact). Files are only ever moved
+  with `FileManager.moveItem` / cloned-copied — never re-encoded. Outcomes carry `relocated`
+  (callers pass them to `library.itemsMoved` so labels follow) and `duplicateLog` (also written to
+  the unified log, category "Duplicates").
+- Tests: `PhotoBrowserTests/DuplicateDetectionTests.swift` (see its README for adding the target).
+- The whole enum is `nonisolated` — it runs inside the batch's detached task.
+
 ## 6. Folder file-format filter — `Models.swift`, `FolderView.swift`
 
 `FormatFilter` (`all/jpeg/png/heif/raw/gif/mov/mp4/avi`) matches on file **extension** (RAW
@@ -506,4 +539,5 @@ image behind a thumbnail; captures the blog post **date** and keeps it with the 
 | Directory reading / large folders | `Library.swift` (`coordinatedContents`, `listing`) |
 | Folder filters | `Models.swift` (`FormatFilter`), `FolderView.swift` |
 | Folder Birthdays mapping (bulk) | `BirthdayMappingView.swift`, `Library.setBirthdays` |
+| Move/copy duplicate detection | `DuplicateDetection.swift`, `FileActions.moveItems/copyItems`, `PhotoBrowserTests/` |
 | Downloaders | `LinkDownloadService.swift`, `BunkrWebDownloader.swift`, `MegaDownloader.swift`, `InstagramService.swift`, `FacebookService.swift`, `WebBrowserView.swift` |

@@ -264,30 +264,75 @@ enum FileActions {
         return (try? FileManager.default.moveItem(at: url, to: dest)) != nil ? dest : nil
     }
 
-    struct MoveOutcome: Sendable { var moved: [(from: URL, to: URL)] = []; var skipped: [(name: String, reason: String)] = [] }
-    struct CopyOutcome: Sendable { var copied: [(from: URL, to: URL)] = []; var skipped: [String] = [] }
+    /// `moved` includes incoming files diverted into `DUPLICATES/` / `Duplicate PNGs/` (they did
+    /// move, just not where asked). `relocated` are files that were *already* in the destination
+    /// and were set aside by the duplicate rules — callers must re-key their labels too
+    /// (`library.itemsMoved`). `duplicateLog` is the human-readable trail of every rule decision.
+    struct MoveOutcome: Sendable {
+        var moved: [(from: URL, to: URL)] = []
+        var skipped: [(name: String, reason: String)] = []
+        var relocated: [(from: URL, to: URL)] = []
+        var duplicateLog: [String] = []
+    }
+    struct CopyOutcome: Sendable {
+        var copied: [(from: URL, to: URL)] = []
+        var skipped: [String] = []
+        var relocated: [(from: URL, to: URL)] = []
+        var duplicateLog: [String] = []
+    }
 
     /// Off-main batch move with progress, so a large selection can't block (and get
     /// the app killed by the watchdog). Same collision rule as `move`.
+    ///
+    /// With `detectDuplicates` (the default) each photo first goes through
+    /// `DuplicateDetection.plan`: a photo that's already in the destination — as an original or as
+    /// a PNG made from it — is set aside in `DUPLICATES/` / `Duplicate PNGs/` instead of being
+    /// written twice. Anything the rules don't touch (videos, unmatched files) moves exactly as
+    /// before. The destination's metadata is read once for the whole batch.
     nonisolated static func moveItems(_ urls: [URL], to folder: URL, renameOnCollision: Bool,
+                                      detectDuplicates: Bool = true,
                                       progress: @escaping @Sendable (Double) -> Void) async -> MoveOutcome {
         await Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var outcome = MoveOutcome()
             let total = max(urls.count, 1)
+            let index = detectDuplicates ? await DuplicateDetection.DestinationIndex.build(folder: folder) : nil
+            defer { DuplicateDetection.HashCache.shared.flush() }
             for (i, url) in urls.enumerated() {
                 defer { progress(Double(i + 1) / Double(total)) }
                 let name = url.lastPathComponent
                 if url.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
                     outcome.skipped.append((name, "already in this folder")); continue
                 }
-                var dest = folder.appendingPathComponent(name)
-                if fm.fileExists(atPath: dest.path) {
-                    guard renameOnCollision else { outcome.skipped.append((name, "name already exists")); continue }
-                    dest = uniqueDest(name, in: folder)
+                let plan = index.map { DuplicateDetection.plan(incoming: url, in: $0) } ?? .passthrough
+                outcome.duplicateLog += plan.log
+                for op in plan.operations {
+                    switch op {
+                    case .relocateExisting(let existing, let sub):
+                        if let target = relocateExisting(existing, into: folder.appendingPathComponent(sub, isDirectory: true), index: index) {
+                            outcome.relocated.append((from: existing, to: target))
+                        } else {
+                            outcome.duplicateLog.append("couldn't move \(existing.lastPathComponent) to \(sub)/")
+                        }
+                    case .divertIncoming(let sub):
+                        let target = DuplicateDetection.uniqueURL(for: name, in: folder.appendingPathComponent(sub, isDirectory: true))
+                        if moveOne(url, to: target) { outcome.moved.append((from: url, to: target)) }
+                        else { outcome.skipped.append((name, "couldn't move")) }
+                    case .placeIncoming:
+                        // The pre-existing behaviour, verbatim.
+                        var dest = folder.appendingPathComponent(name)
+                        if fm.fileExists(atPath: dest.path) {
+                            guard renameOnCollision else { outcome.skipped.append((name, "name already exists")); continue }
+                            dest = uniqueDest(name, in: folder)
+                        }
+                        if moveOne(url, to: dest) {
+                            outcome.moved.append((from: url, to: dest))
+                            index?.add(DuplicateDetection.readFacts(dest))   // later files in this batch see it
+                        } else {
+                            outcome.skipped.append((name, "couldn't move"))
+                        }
+                    }
                 }
-                if moveOne(url, to: dest) { outcome.moved.append((from: url, to: dest)) }
-                else { outcome.skipped.append((name, "couldn't move")) }
             }
             return outcome
         }.value
@@ -295,24 +340,62 @@ enum FileActions {
 
     /// Off-main batch copy with progress. `skipCollisions` skips items whose name
     /// already exists in the destination (treats them as duplicates), like move.
+    /// Duplicate detection works as in `moveItems`; the only difference is that the *incoming*
+    /// file is copied (its source is never touched) — files already in the destination that the
+    /// rules set aside are moved, exactly as for a move.
     nonisolated static func copyItems(_ urls: [URL], to folder: URL, skipCollisions: Bool,
+                                      detectDuplicates: Bool = true,
                                       progress: @escaping @Sendable (Double) -> Void) async -> CopyOutcome {
         await Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var outcome = CopyOutcome()
             let total = max(urls.count, 1)
+            let index = detectDuplicates ? await DuplicateDetection.DestinationIndex.build(folder: folder) : nil
+            defer { DuplicateDetection.HashCache.shared.flush() }
             for (i, url) in urls.enumerated() {
                 defer { progress(Double(i + 1) / Double(total)) }
                 let name = url.lastPathComponent
-                if skipCollisions, fm.fileExists(atPath: folder.appendingPathComponent(name).path) {
-                    outcome.skipped.append(name); continue
+                let plan = index.map { DuplicateDetection.plan(incoming: url, in: $0) } ?? .passthrough
+                outcome.duplicateLog += plan.log
+                for op in plan.operations {
+                    switch op {
+                    case .relocateExisting(let existing, let sub):
+                        if let target = relocateExisting(existing, into: folder.appendingPathComponent(sub, isDirectory: true), index: index) {
+                            outcome.relocated.append((from: existing, to: target))
+                        } else {
+                            outcome.duplicateLog.append("couldn't move \(existing.lastPathComponent) to \(sub)/")
+                        }
+                    case .divertIncoming(let sub):
+                        let target = DuplicateDetection.uniqueURL(for: name, in: folder.appendingPathComponent(sub, isDirectory: true))
+                        if (try? DriveWriter.copyItem(at: url, to: target)) != nil { DriveWriter.fullSyncFileAndParent(target); outcome.copied.append((from: url, to: target)) }
+                        else { outcome.skipped.append(name) }
+                    case .placeIncoming:
+                        // The pre-existing behaviour, verbatim.
+                        if skipCollisions, fm.fileExists(atPath: folder.appendingPathComponent(name).path) {
+                            outcome.skipped.append(name); continue
+                        }
+                        let dest = uniqueDest(name, in: folder)
+                        if (try? DriveWriter.copyItem(at: url, to: dest)) != nil {
+                            DriveWriter.fullSyncFileAndParent(dest); outcome.copied.append((from: url, to: dest))
+                            index?.add(DuplicateDetection.readFacts(dest))
+                        } else {
+                            outcome.skipped.append(name)
+                        }
+                    }
                 }
-                let dest = uniqueDest(name, in: folder)
-                if (try? DriveWriter.copyItem(at: url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); outcome.copied.append((from: url, to: dest)) }
-                else { outcome.skipped.append(name) }
             }
             return outcome
         }.value
+    }
+
+    /// Moves a file that's already in the destination into one of the duplicate helper folders
+    /// (created on first use; `_1`, `_2`… on a name clash — never overwrites). Bytes untouched.
+    private nonisolated static func relocateExisting(_ existing: URL, into helper: URL,
+                                                     index: DuplicateDetection.DestinationIndex?) -> URL? {
+        let target = DuplicateDetection.uniqueURL(for: existing.lastPathComponent, in: helper)
+        guard moveOne(existing, to: target) else { return nil }
+        index?.remove(existing)
+        return target
     }
 
     private nonisolated static func moveOne(_ url: URL, to dest: URL) -> Bool {
