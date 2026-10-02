@@ -119,6 +119,7 @@ struct StorageView: View {
             StorageItem(name: "Web album cache", detail: "Browsed gallery indexes", urls: [s("accessKardashian")], clearable: true),
             StorageItem(name: "Astria browser thumbnails", detail: "Past-generation previews", urls: [caches.appendingPathComponent("astriaThumbs")], clearable: true),
             StorageItem(name: "Duplicate scan results", detail: "Remembered Find Duplicates results", urls: [s("duplicateScans")], clearable: true),
+            StorageItem(name: "PNG comparison results", detail: "Remembered Compare PNGs results", urls: [s("pngMatchScans")], clearable: true),
         ]
     }
 

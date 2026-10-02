@@ -14,6 +14,7 @@ struct SettingsView: View {
     @State private var flux = String(AIExtend.fluxTune)
     @State private var prompt = AIExtend.extendPrompt
     @State private var pauseReminders = AINotifications.pauseRemindersEnabled
+    @State private var confirmStopWaiting = false
     @State private var cdmpoolToken = OFDRM.token
 
     var body: some View {
@@ -78,6 +79,28 @@ struct SettingsView: View {
                     Text("AI notifications")
                 } footer: {
                     Text("You always get an alert when AI images are ready. iOS pauses the app a short while after you leave it, so a generation you started can't finish until you come back; with this on, one reminder per job tells you that. Off (the default), the images simply finish and save the next time you open the app.")
+                }
+
+                Section {
+                    HStack {
+                        Text("Unfinished AI jobs")
+                        Spacer()
+                        Text(library.pendingAIJobCount == 0 ? "None" : "\(library.pendingAIJobCount)")
+                            .foregroundStyle(.secondary)
+                    }
+                    Button(role: .destructive) { confirmStopWaiting = true } label: {
+                        Label("Stop Waiting for Them", systemImage: "xmark.circle")
+                    }
+                    .disabled(library.pendingAIJobCount == 0)
+                } header: {
+                    Text("AI jobs in progress")
+                } footer: {
+                    Text("A generation that was still running when you left the app is finished quietly the next time you open it: one short check per job, at most every 10 minutes and a handful of times in total, with no alerts unless images actually arrive. Jobs older than two hours are dropped on their own. Stop Waiting forgets them now — nothing is removed from your Astria account, and anything that did finish is in the Astria.ai Browser.")
+                }
+                .confirmationDialog("Stop waiting for \(library.pendingAIJobCount) unfinished AI job\(library.pendingAIJobCount == 1 ? "" : "s")? The app won't check on them again. Images Astria has already made stay in your account (see the Astria.ai Browser).",
+                                    isPresented: $confirmStopWaiting, titleVisibility: .visible) {
+                    Button("Stop Waiting", role: .destructive) { library.cancelPendingAIJobs() }
+                    Button("Cancel", role: .cancel) {}
                 }
 
                 Section {

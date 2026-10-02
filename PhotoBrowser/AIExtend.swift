@@ -534,8 +534,8 @@ enum AIExtend {
     ///   left off instead of "timing out" on return. ~25 minutes of active polling — Seedream 5.0
     ///   Pro at 4K × 8 images can run well past the old 6.5-minute cap.
     private nonisolated static func downloadPromptImages(promptID: Int, tune: Int, expected: Int?,
+                                                         maxTicks: Int = 320,     // ≈25 min active at the adaptive cadence below
                                                          heartbeat: (@Sendable (Int, Int?) -> Void)? = nil) async -> Result<[Data], AIError> {
-        let maxTicks = 320                 // ≈25 min active at the adaptive cadence below
         let stableTicks = 20               // no growth for this many polls → accept what we have
         var known: [URL] = []
         var want = expected
@@ -621,9 +621,11 @@ enum AIExtend {
     /// Recover a previously-created prompt: poll for its images + download. Used to finish a job whose
     /// app was suspended or killed while Astria was still generating. `expected` is the requested
     /// image count when known (older records don't carry it; the prompt's own `num_images` fills in).
-    nonisolated static func resumePrompt(promptID: Int, tune: Int, expected: Int? = nil,
+    /// `maxTicks` bounds the poll: a recovery pass passes a small budget so a prompt that isn't done
+    /// is handed back quickly (checked again later) instead of being watched for 25 minutes.
+    nonisolated static func resumePrompt(promptID: Int, tune: Int, expected: Int? = nil, maxTicks: Int = 320,
                                          heartbeat: (@Sendable (Int, Int?) -> Void)? = nil) async -> Result<[Data], AIError> {
-        await downloadPromptImages(promptID: promptID, tune: tune, expected: expected, heartbeat: heartbeat)
+        await downloadPromptImages(promptID: promptID, tune: tune, expected: expected, maxTicks: maxTicks, heartbeat: heartbeat)
     }
 
     // MARK: - Past generations (the Astria.ai Browser)

@@ -669,8 +669,8 @@ private struct DuplicateGroupRow: View {
     }
 }
 
-/// Small cached thumbnail used in the list and column headers.
-private struct DuplicateThumb: View {
+/// Small cached thumbnail used in the list and column headers (also by Compare PNGs).
+struct DuplicateThumb: View {
     let entry: Entry
     var side: CGFloat
     @State private var image: UIImage?
@@ -695,11 +695,13 @@ private struct DuplicateThumb: View {
 
 /// Side-by-side comparison of two items in a duplicate group, with a
 /// same/different metadata breakdown, full per-file editing (rename, EXIF date &
-/// location, caption, Favorite / To AI / Taylor Swift labels), and delete.
-private struct DuplicateCompareView: View {
+/// location, caption, hide, Favorite / To AI / Taylor Swift labels), and delete.
+/// Shared with Compare PNGs, which passes its own `dismissLabel` ("Not the Same Photo").
+struct DuplicateCompareView: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
     let group: DuplicateGroup
+    var dismissLabel = "Not Duplicates"
     var onDelete: (URL) -> Void
     var onRename: (URL, Entry) -> Void = { _, _ in }
     var onView: ([Entry], Int) -> Void = { _, _ in }     // open the items full size at an index
@@ -724,11 +726,12 @@ private struct DuplicateCompareView: View {
     /// Bumped after an edit to force the metadata to reload.
     @State private var reloadToken = 0
 
-    init(group: DuplicateGroup, onDelete: @escaping (URL) -> Void,
+    init(group: DuplicateGroup, dismissLabel: String = "Not Duplicates", onDelete: @escaping (URL) -> Void,
          onRename: @escaping (URL, Entry) -> Void = { _, _ in },
          onView: @escaping ([Entry], Int) -> Void = { _, _ in },
          onNotDuplicates: @escaping () -> Void = {}) {
         self.group = group
+        self.dismissLabel = dismissLabel
         self.onDelete = onDelete
         self.onRename = onRename
         self.onView = onView
@@ -756,7 +759,7 @@ private struct DuplicateCompareView: View {
                     multiDeleteSection
 
                     Button { onNotDuplicates(); dismiss() } label: {
-                        Label("Not Duplicates", systemImage: "checkmark.circle")
+                        Label(dismissLabel, systemImage: "checkmark.circle")
                             .font(.subheadline.weight(.semibold))
                             .frame(maxWidth: .infinity).padding(.vertical, 10)
                             .background(Color.green.opacity(0.2), in: RoundedRectangle(cornerRadius: 10))
@@ -770,7 +773,7 @@ private struct DuplicateCompareView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button { onNotDuplicates(); dismiss() } label: { Label("Not Duplicates", systemImage: "checkmark.circle") }
+                Button { onNotDuplicates(); dismiss() } label: { Label(dismissLabel, systemImage: "checkmark.circle") }
             }
         }
         .sheet(item: $editURL, onDismiss: { reloadToken += 1 }) { wrapper in
@@ -847,6 +850,10 @@ private struct DuplicateCompareView: View {
                 }
                 Button { captionTarget = URLBox(url: entry.url); captionDraft = library.captions[entry.url.path] ?? "" } label: {
                     Label("Caption…", systemImage: "text.bubble")
+                }
+                Button { library.setFileHidden(!library.isHiddenFile(entry.url), for: entry.url) } label: {
+                    Label(library.isHiddenFile(entry.url) ? "Unhide File" : "Hide File",
+                          systemImage: library.isHiddenFile(entry.url) ? "eye" : "eye.slash")
                 }
                 Divider()
                 Button { library.toggleFavorite(entry.url) } label: {

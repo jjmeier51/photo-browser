@@ -1246,7 +1246,8 @@ final class Library {
         var startedAt: Double
         var count: Int?          // images requested — lets recovery wait for the whole batch
         var isCreate: Bool?      // Create with AI (save into the folder) vs Edit (beside the original)
-        var attempts: Int?       // recovery passes that gave up (timeout / no network) so far
+        var attempts: Int?       // recovery passes spent on this job so far (every pass counts)
+        var lastAttemptAt: Double?   // when the last recovery pass ran — passes are rate-limited per job
     }
     private static let pendingAstriaKey = "photoBrowser.pendingAstria"
     private func loadPendingAstria() -> [PendingAstriaJob] {
@@ -1256,6 +1257,19 @@ final class Library {
     }
     private func savePendingAstria(_ list: [PendingAstriaJob]) {
         UserDefaults.standard.set((try? JSONEncoder().encode(list)) ?? Data(), forKey: Self.pendingAstriaKey)
+        pendingAIJobCount = list.count
+    }
+
+    /// How many Astria jobs the app is still waiting to finish (Settings shows it, with a way to
+    /// stop waiting). Mirrors the persisted record list.
+    var pendingAIJobCount: Int = 0
+
+    /// Settings → "Stop Waiting": forget every unfinished Astria job. Nothing is deleted on
+    /// Astria's side — the images, if they ever finish, stay in the account and can be saved from
+    /// the Astria.ai Browser. This is the user's off switch for a job they've stopped caring about.
+    func cancelPendingAIJobs() {
+        for p in loadPendingAstria() { AINotifications.cancelFallback(jobID: p.jobID) }
+        savePendingAstria([])
     }
     private func addPendingAstria(_ job: PendingAstriaJob) {
         var l = loadPendingAstria(); l.removeAll { $0.jobID == job.jobID }; l.append(job); savePendingAstria(l)
@@ -1274,12 +1288,22 @@ final class Library {
     /// Job ids a recovery pass is currently finishing, so overlapping passes don't collide.
     @ObservationIgnored private var recoveringAIJobIDs: Set<String> = []
     @ObservationIgnored private var aiRecoveryRetryScheduled = false
-    /// Recovery passes that time out on the same job before it's abandoned as stuck on Astria's side.
-    private static let maxAIRecoveryAttempts = 3
+    /// Recovery passes spent on one job before it's abandoned. Every pass counts — a timeout, a
+    /// lost network, images that came back but couldn't be written (drive unplugged) — so no
+    /// failure mode can loop. The old code only counted timeouts: a job whose drive was away
+    /// re-downloaded its images and failed to save them every two minutes, for six hours.
+    private static let maxAIRecoveryAttempts = 4
     /// A job still unfinished this long after it started is stuck (Astria generations take minutes,
-    /// not hours). Abandoned quietly — the old 48-hour retention kept a dead prompt alive across
-    /// days of app switches, each one re-polling it.
-    private static let maxAIJobAge: TimeInterval = 6 * 3600
+    /// not hours). Abandoned quietly: anything Astria did produce is still in the account and shows
+    /// up in the Astria.ai Browser, so nothing is lost by letting go.
+    private static let maxAIJobAge: TimeInterval = 2 * 3600
+    /// Minimum gap between two recovery passes on the same job. A pass happens on launch/foreground,
+    /// so without this every quick app switch re-polled every pending job.
+    private static let aiRecoveryCooldown: TimeInterval = 10 * 60
+    /// How many polls a recovery pass spends before giving the job back (≈90 s at the adaptive
+    /// cadence). A recovery pass is housekeeping: if the prompt isn't done yet it checks again
+    /// later rather than keeping a "Finishing AI images" pill up for 25 minutes.
+    private static let aiRecoveryPollTicks = 30
 
     /// Routes a tapped AI notification back into the app (see `presentAIResult`). Call once at launch.
     func configureAINotificationRouting() {
@@ -1320,8 +1344,9 @@ final class Library {
         }
     }
 
-    /// Runs `resumePendingAIEdits` again a little later (coalesced) — after an in-process wait gave
-    /// up while Astria kept working, or after a recovery pass that couldn't finish yet.
+    /// Runs `resumePendingAIEdits` once, a little later (coalesced) — only after an in-process wait
+    /// gave up while Astria kept working. Recovery passes never schedule themselves again: the
+    /// next one happens when the user next opens the app, subject to the per-job cooldown.
     private func scheduleAIRecoveryRetry(after seconds: TimeInterval) {
         guard !aiRecoveryRetryScheduled else { return }
         aiRecoveryRetryScheduled = true
@@ -1341,18 +1366,46 @@ final class Library {
     /// Idempotent and free when nothing is pending, so it runs at launch, on **every return to the
     /// foreground** (a suspended app's job resumes exactly when the user comes back, not only after
     /// a relaunch — the old launch-only pass left "timed out" jobs stranded until the next cold
-    /// start), on a notification tap, and again shortly after an in-process failure.
+    /// start), on a notification tap, and once shortly after an in-process failure.
+    ///
+    /// **It is quiet and it is bounded.** The one thing it may announce is success (images saved).
+    /// Everything else — the prompt isn't done yet, no network, the drive isn't plugged in, Astria
+    /// failed the prompt, the job is abandoned — happens silently: no alert, no pop-up. Each job
+    /// gets at most one pass per `aiRecoveryCooldown`, at most `maxAIRecoveryAttempts` passes in
+    /// total, each pass polls for ~90 s at most, and a job older than `maxAIJobAge` is dropped
+    /// unexamined. A pass never schedules another pass. (The previous version re-polled every job
+    /// on every foreground, retried every two minutes within a session, never counted a failed
+    /// save as an attempt, and posted an alert and a pop-up on every failure — the "it keeps
+    /// retrying hours later and the pop-up is annoying" report.) Settings shows the pending count
+    /// with a "Stop Waiting" button (`cancelPendingAIJobs`) for a job the user has given up on.
     func resumePendingAIEdits() {
         let now = Date().timeIntervalSince1970
-        for p in loadPendingAstria() {
+        var list = loadPendingAstria()
+        // Age out stuck jobs and drop ones that have used up their passes — silently.
+        let dropped = list.filter { now - $0.startedAt >= Self.maxAIJobAge || ($0.attempts ?? 0) >= Self.maxAIRecoveryAttempts }
+        if !dropped.isEmpty {
+            for p in dropped { AINotifications.cancelFallback(jobID: p.jobID) }
+            list.removeAll { p in dropped.contains { $0.jobID == p.jobID } }
+        }
+        savePendingAstria(list)     // also refreshes `pendingAIJobCount`
+
+        let fm = FileManager.default
+        for p in list {
             let jobID = p.jobID
-            // A job this old is stuck — stop chasing it (silently: the user moved on long ago).
-            guard now - p.startedAt < Self.maxAIJobAge else {
-                removePendingAstria(jobID: jobID)
-                AINotifications.cancelFallback(jobID: jobID)
-                continue
-            }
             guard !activeAIJobIDs.contains(jobID), !recoveringAIJobIDs.contains(jobID) else { continue }
+            // Rate limit per job: a quick app switch must not re-poll everything.
+            if let last = p.lastAttemptAt, now - last < Self.aiRecoveryCooldown { continue }
+            // Nowhere to save to (drive unplugged / folder gone): don't spend a pass, don't show a
+            // pill — wait for a foreground when the folder is reachable. The age limit still applies.
+            guard fm.fileExists(atPath: p.folderPath) else { continue }
+
+            // The pass is counted before it runs, so a kill mid-pass still counts.
+            var l = loadPendingAstria()
+            if let i = l.firstIndex(where: { $0.jobID == jobID }) {
+                l[i].attempts = (l[i].attempts ?? 0) + 1
+                l[i].lastAttemptAt = now
+                savePendingAstria(l)
+            }
             recoveringAIJobIDs.insert(jobID)
 
             let folderURL = URL(fileURLWithPath: p.folderPath)
@@ -1362,13 +1415,11 @@ final class Library {
             let activityID = beginActivity("Finishing AI images", indeterminate: true)
             setActivity(activityID, status: "Checking Astria for “\(folderURL.lastPathComponent)”…")
             let bg = BackgroundTaskHolder(); bg.begin(name: "AI Recovery")
-            // No "paused" reminder for a recovery pass: the user didn't just start this job, so
-            // being pinged about it every time they open and leave the app is exactly the nag
-            // that was reported. The pass just finishes next time the app is open long enough,
-            // and the normal "ready" alert follows.
+            // No "paused" reminder for a recovery pass: the user didn't just start this job.
             let live = AIProgressActivity()
             Task {
                 let result = await AIExtend.resumePrompt(promptID: promptID, tune: tune, expected: count,
+                                                         maxTicks: Self.aiRecoveryPollTicks,
                                                          heartbeat: heartbeatRelay(live, activityID: activityID, count: count ?? 1))
                 recoveringAIJobIDs.remove(jobID)
                 endActivity(activityID); bg.end()
@@ -1395,32 +1446,20 @@ final class Library {
                         live.finish(success: true, message: msg, jobID: jobID, folderPath: folderURL.path)
                         activityResults.append(msg)
                     } else {
-                        // Images came back but none could be written (drive unplugged?) — keep the
-                        // record and try again later rather than losing them.
-                        live.finish(success: false, message: "The AI images couldn’t be saved to the drive — will retry.")
-                        scheduleAIRecoveryRetry(after: 120)
+                        // Images came back but none could be written. The pass is already counted;
+                        // the record stays for a later foreground (up to the attempt/age limits).
+                        live.finish(success: false, message: "", notify: false)
                     }
                 case .failure(let err) where isRetryableAIError(err):
-                    // Astria may still be working (or we were offline). Count the attempt; give up
-                    // only once it's clearly stuck, so a wedged prompt can't keep a pill up forever.
-                    var l = loadPendingAstria()
-                    if let i = l.firstIndex(where: { $0.jobID == jobID }) {
-                        let attempts = (l[i].attempts ?? 0) + 1
-                        if attempts >= Self.maxAIRecoveryAttempts {
-                            l.remove(at: i); savePendingAstria(l)
-                            live.finish(success: false, message: "Gave up waiting for Astria on an AI job in “\(folderURL.lastPathComponent)”.")
-                            activityResults.append("Gave up waiting for Astria on an AI job in “\(folderURL.lastPathComponent)” — it never finished. Check your Astria account, then try again.")
-                        } else {
-                            l[i].attempts = attempts; savePendingAstria(l)
-                            live.finish(success: false, message: aiErrorMessage(err), notify: false)
-                            scheduleAIRecoveryRetry(after: 120)
-                        }
-                    }
-                case .failure(let err):
+                    // Astria may still be working, or we were offline. Nothing to say; the next
+                    // foreground after the cooldown checks again, until the attempts run out.
+                    live.finish(success: false, message: "", notify: false)
+                case .failure:
+                    // Astria reported the prompt failed (moderation etc.) or rejected the request:
+                    // terminal. Dropped quietly — the user saw the failure when it happened, or the
+                    // job is long stale; a fresh pop-up about it helps nobody.
                     removePendingAstria(jobID: jobID)
-                    let msg = aiErrorMessage(err)
-                    live.finish(success: false, message: msg)
-                    activityResults.append("An AI job in “\(folderURL.lastPathComponent)” couldn’t finish — \(msg)")
+                    live.finish(success: false, message: "", notify: false)
                 }
             }
         }
@@ -1557,9 +1596,10 @@ final class Library {
             if isRetryableAIError(err), hasPendingAstria(jobID: jobID) {
                 // The prompt exists on Astria; only our wait ended. Recovery finishes it — the
                 // images land in the "AI" folder — so tell the user that instead of "failed"
-                // (no alert: recovery posts the real "ready" one when the images arrive).
+                // (no alert: recovery posts the real "ready" one when the images arrive). This
+                // is the one message about it: recovery itself stays silent until it succeeds.
                 live.finish(success: false, message: msg, notify: false)
-                activityResults.append("\(label): \(msg) The app keeps checking in the background and will save the images to the “AI” folder when Astria finishes.")
+                activityResults.append("\(label): \(msg) The app will check once more in a minute and again the next few times you open it, and save the images to the “AI” folder if they finish. Anything Astria completes is also in the Astria.ai Browser.")
                 scheduleAIRecoveryRetry(after: 60)
                 return
             }

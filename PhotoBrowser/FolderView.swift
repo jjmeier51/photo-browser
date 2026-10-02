@@ -111,6 +111,7 @@ struct FolderView: View {
     @State private var tsNoLabel = false
     @State private var tsLabelEntries: [Entry] = []
     @State private var showDuplicates = false
+    @State private var showPNGMatches = false
     @State private var showCleanup = false
     @State private var showRandomCleanup = false
     @State private var bubbleItems: [Entry] = []       // live order while dragging highlight bubbles
@@ -1108,6 +1109,9 @@ struct FolderView: View {
             }
             .fullScreenCover(isPresented: $showDuplicates) {
                 DuplicatesView(folder: url)
+            }
+            .fullScreenCover(isPresented: $showPNGMatches) {
+                PNGMatchesView(folder: url)
             }
             .fullScreenCover(isPresented: $showCleanup, onDismiss: { Task { await reload() } }) {
                 FrameCleanupView(folder: url, items: cleanupItems)
@@ -2253,6 +2257,7 @@ struct FolderView: View {
                                 }
                             }
                             Button { showDuplicates = true } label: { Label("Find Duplicates", systemImage: "doc.on.doc") }
+                            Button { showPNGMatches = true } label: { Label("Compare PNGs", systemImage: "photo.on.rectangle") }
                             Button { confirmFixDates = true } label: { Label("Restore Capture Dates", systemImage: "clock.arrow.circlepath") }
                             if !library.pureTransferMode {
                                 Button { runTextIndex() } label: { Label("Index Text in Photos", systemImage: "text.viewfinder") }

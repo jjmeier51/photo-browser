@@ -149,12 +149,24 @@ history. On generate they save `RunSettings`, call `resolveGeneration`, then
 - **Recovery — `resumePendingAIEdits()`** re-polls each record and saves the images straight into
   the "AI" folder (there's no review session to hand them to after a relaunch), then posts the
   ready alert (tap → that folder). It runs at **launch, on every return to the foreground, on a
-  notification tap, and ~1–2 min after an in-process failure** — the old launch-only pass left
+  notification tap, and once ~1 min after an in-process failure** — the old launch-only pass left
   a job stranded until the next cold start whenever the app was merely suspended. It skips jobs
   in `activeAIJobIDs` (live in this process) and `recoveringAIJobIDs` (a pass already running),
-  so nothing is ever double-polled or double-saved. A pass that times out increments `attempts`
-  and retries later; after `maxAIRecoveryAttempts` (3) the record is dropped with a message, so a
-  prompt wedged on Astria's side can't keep a pill up forever. Records age out after 48 h.
+  so nothing is ever double-polled or double-saved.
+- **Recovery is quiet and bounded** (the "it keeps retrying hours later and the pop-up is
+  annoying" fix). The only thing a pass may announce is success. Every other outcome — prompt not
+  done, offline, drive unplugged, Astria failed the prompt, job abandoned — is **silent**: no
+  alert, no `activityResults` pop-up. Limits, all in `Library`: a pass per job at most every
+  `aiRecoveryCooldown` (10 min; `lastAttemptAt` on the record), **every pass counts** toward
+  `maxAIRecoveryAttempts` (4) — including "images arrived but couldn't be written", which before
+  retried every 2 min for 6 h with an alert each time — each pass polls at most
+  `aiRecoveryPollTicks` (30 ≈ 90 s; `resumePrompt(maxTicks:)`) instead of 25 min, a job older than
+  `maxAIJobAge` (2 h) is dropped unexamined, a job whose folder isn't reachable (drive away) is
+  skipped without spending a pass or showing a pill, and **a pass never schedules another pass**.
+  The attempt is counted *before* the poll so a kill mid-pass still counts. Settings → "AI jobs in
+  progress" shows `pendingAIJobCount` with **Stop Waiting for Them** (`cancelPendingAIJobs`): the
+  user's off switch. Nothing is lost by dropping a job — whatever Astria made is in the account and
+  in the Astria.ai Browser.
 - **Failure semantics** (`AIExtend.AIError`): `.timedOut` / `.network` mean "our wait ended,
   Astria may still deliver" → the record is **kept** and recovery takes over (the user is told the
   images will land in the "AI" folder, not "failed"). `.generationFailed` (Astria reported the
@@ -226,7 +238,7 @@ Every item here was a real symptom ("no results", "partial results"):
   session arms it — `resumePendingAIEdits` never does; it fires **at most once per job**
   (`reminderAlreadyFired`: the scheduled due time is persisted and, once past, the job is done
   reminding); stale scheduled reminders are removed at launch (`clearStaleReminders`); and a job
-  older than `maxAIJobAge` (6 h) is dropped as stuck instead of being re-polled for 48 h. (True
+  older than `maxAIJobAge` (2 h) is dropped as stuck instead of being re-polled for 48 h. (True
   "server pushed the instant it's done" delivery would need a push server or a BackgroundTasks
   capability — not added.)
 
@@ -337,6 +349,61 @@ UI:
   metadata breakdown, per-item edit menu (rename/date/caption/labels), per-side delete, a
   **"Delete files" multi-select checklist** (tick several, delete together), and "Not Duplicates".
 - Deletions re-key labels/origins (`clearLabels`/`clearOrigins`) and call `contentDidChange()`.
+
+## 2a. Compare PNGs — `PNGMatchesView.swift` (+ `PNGMatching`, `PNGMatchScanCache`)
+
+Folder menu → Maintenance → **Compare PNGs**. Built to look and work like Find Duplicates, but
+asks one narrower question: *which PNGs here are another photo in this folder?* Every group has at
+least one PNG; two JPEGs are never compared (that's Find Duplicates).
+
+Rules — `PNGMatching`, a `nonisolated enum` of **pure** functions over `Candidate` values
+(url, isPNG, isFrame, nameKey, aspect, hash), unit-tested in `PhotoBrowserTests/PNGMatchingTests.swift`:
+- **Same name** (`Reason.name`): `nameKey` = lowercased, extension off, " (1)" / " copy N" stripped
+  (numbers in the name are *kept* — `Frame 97` must not become `Frame`). `similarNames` = keys
+  equal, or one is the other plus `_`/`-` + a tag that contains a letter (`img_2225_402c6dbe`,
+  `frame 97_xhdn3`) or is ≤ 2 digits (`img_2225_1`). A bare space is **not** a separator and an
+  all-digit tag of 3+ digits is **not** a match, so `Frame` ↔ `Frame 97` and `frame 9` ↔ `frame 97`
+  stay apart.
+- **Look alike** (`Reason.visual`): `PerceptualHash` dHash distance ≤ `maxHashDistance` (7) **and**
+  aspect ratios within 1% (unknown aspect never blocks). Hashes come from the shared persistent
+  `DuplicateDetection.HashCache` (`name|size|mtime`), so a folder is hashed once across this
+  screen and the move/copy dedupe.
+- **"Frame" files** (name contains "frame", any case) are **name-only, PNG-to-PNG**: never hashed
+  (not even opened with ImageIO — `candidate(for:)` returns before `readFacts`), never paired with
+  a JPEG/HEIC, never paired with a non-frame PNG by look. This is the user's rule: a folder of
+  frames from one video is hundreds of look-alike, not-the-same images.
+- `pairs` iterates PNGs × files (not files²); `cluster` is union-find with reasons merged per
+  cluster. Dismissed pairs are filtered **on the main actor** between `pairs` and `cluster`
+  (`Library.areNotDuplicates` — the same store as Find Duplicates, so "Not the Same Photo" here
+  and "Not Duplicates" there agree).
+
+UI (`PNGMatchesView`, full-screen cover from `FolderView.showPNGMatches`):
+- Segmented filter All / Same name / Look alike. Rows: "IMG_2225.png ↔ IMG_2225.jpg" (or "↔ N
+  photos"), count · types, a colored kind badge (green = both reasons, orange = name, blue = look),
+  › to Compare, and every file as a tile with an extension capsule (purple PNG / grey other).
+- **Tap the picture** → the group's files in `ViewerView` (swipe between, zoom); **tap the circle /
+  caption** → tick; **long-press the picture** → Hide File / Unhide File, Mark for Deletion.
+  Bottom bar: Clear · **Hide (N)** · **Delete (N)** (delete behind a confirmation that says how
+  many groups lose every file). Swipe / context menu → **Not the Same** (`markNotDuplicates`),
+  Select All in Group / Deselect Group.
+- **Hide** = the app's existing per-file hide (`Library.setFileHidden`): the file leaves the grid
+  (unless Show Hidden Items) and leaves future scans here, but stays on the drive. Within the
+  visit the tile stays, dimmed with an eye-slash "Hidden" badge, so the choice can be undone.
+  Deleting a hidden file clears its hidden mark. Hidden files are excluded from the scan
+  (`!library.isHiddenFile`), which is how a pair settled by hiding stays settled.
+- Compare reuses `DuplicateCompareView` (made internal, with a `dismissLabel` parameter — "Not the
+  Same Photo" here) via `PNGMatchGroup.asDuplicateGroup`; its Edit menu gained **Hide File /
+  Unhide File** (so Find Duplicates has it too). Renames flow back through `onRename` and keep
+  the file in its group under the new name.
+- **Remembered results** — `PNGMatchScanCache` (Application Support/`pngMatchScans`, listed in
+  Storage as "PNG comparison results"), identical in shape and logic to `DuplicateScanCache`:
+  groups as paths + a `size|mtime` fingerprint of every candidate; on open, if nothing is new or
+  changed the record is rebuilt against the current listing (gone/hidden files drop out, dismissed
+  groups skipped, groups left with one file or no PNG vanish) and shown instantly; the fingerprint
+  keeps entries for files now hidden so unhiding one doesn't read as "new". Delete / hide / rename
+  / Not the Same update the record in place. `.task(id:)` is `loaded`-guarded; ↻ forces a rescan.
+- Scan work (ImageIO property reads + hashing) runs in a detached task with fan-out 8, and the
+  hash cache is flushed once at the end of the scan.
 
 ---
 
@@ -596,6 +663,7 @@ image behind a thumbnail; captures the blog post **date** and keeps it with the 
 | Top-most modal presentation (AI results / creator) | `ModalPresenter.swift` |
 | Astria.ai Browser (past generations, save anywhere) | `AstriaBrowserView.swift` |
 | Find duplicates | `DuplicatesView.swift`, `PerceptualHash.swift` |
+| Compare PNGs (PNG ↔ original/PNG matches, hide or delete) | `PNGMatchesView.swift` (`PNGMatching`, `PNGMatchScanCache`), `PhotoBrowserTests/PNGMatchingTests.swift` |
 | Storage / Drive Health | `StorageView.swift`, `DriveHealthView.swift` |
 | Directory reading / large folders | `Library.swift` (`coordinatedContents`, `listing`) |
 | Folder filters | `Models.swift` (`FormatFilter`), `FolderView.swift` |
