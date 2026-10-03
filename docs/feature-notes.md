@@ -283,6 +283,23 @@ endpoint changed), grouped by prompt with model name (`modelName(forTune:tunes:)
 - `AIExtend.reusablePrompts: [String]` — a shared list surfaced as a **"Reusable Prompts"**
   section in both `AICreateView` and `AIEditView`, each with one-tap **Use** (fills the prompt
   field) and **Copy** (UIPasteboard). Extend by appending to the array; both views update.
+  Currently: the 8-heads-tall full-body portrait, and the braided-hair description ("long hair
+  with a soft center part … three-strand braid draped over the right shoulder …").
+
+### 1.11a Negative Prompt
+
+- A **"Negative Prompt" switch** (`NegativePromptField`, in `AIEditView.swift`) sits directly
+  under the prompt box in both Edit and Create. On, it reveals a text field. On Generate the text
+  is appended to the prompt **as free text** — the user's prompt, a blank line, then
+  `Negative Prompt: <text>` (`AIExtend.composePrompt(_:negative:)`) — because the partner models
+  (Seedream, Nano) have no separate negative field. Example of what Astria receives:
+  "A cinematic photo of a man carrying an umbrella in the dark.⏎⏎Negative Prompt: light, woman,
+  no umbrella." Off (or blank), the prompt is sent untouched; the text is kept for next time.
+- Plumbing: `startAIEdit`/`startAICreate` take `negativePrompt: String?`; the **history** records
+  the bare prompt (so reusing a past prompt never drags "Negative Prompt:" into the field), while
+  the job's `prompt` — and therefore the saved files' provenance — is the full text sent. The
+  `<lora:…>` prefix still goes in front of everything. `RunSettings` remembers `negativeEnabled`
+  and `negativePrompt` per flow (lenient-decoded like the rest).
 
 ---
 

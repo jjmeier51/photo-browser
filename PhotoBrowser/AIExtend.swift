@@ -125,8 +125,18 @@ enum AIExtend {
     /// Prompts kept on hand to reuse in Edit / Create with AI — shown in a "Reusable Prompts" section
     /// with one-tap Use (fills the prompt field) and Copy.
     static let reusablePrompts: [String] = [
-        "A full-body portrait of a 5'5\" woman with an elegant 8-heads-tall artistic structure and long legs. She has high-waisted proportions, with her legs making up the majority of her height. Low-angle shot looking up. Her body has a completely smooth, seamless silhouette with soft skin texture and no visible muscle or bone definition. Soft, flat diffuse lighting eliminates all harsh shadows on her body."
+        "A full-body portrait of a 5'5\" woman with an elegant 8-heads-tall artistic structure and long legs. She has high-waisted proportions, with her legs making up the majority of her height. Low-angle shot looking up. Her body has a completely smooth, seamless silhouette with soft skin texture and no visible muscle or bone definition. Soft, flat diffuse lighting eliminates all harsh shadows on her body.",
+        "long hair with a soft center part, brushed back off the face and tucked fully behind both ears, natural volume at the crown, gathered into a three-strand braid draped over the right shoulder, forehead and temples clear, matte natural texture."
     ]
+
+    /// The prompt as Astria receives it when a negative prompt is given: the user's prompt, a blank
+    /// line, then "Negative Prompt: …" in free text — the partner models (Seedream, Nano) take no
+    /// separate negative field, so it travels inside the prompt. An empty/blank negative prompt
+    /// leaves the prompt untouched.
+    static func composePrompt(_ prompt: String, negative: String?) -> String {
+        guard let n = negative?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty else { return prompt }
+        return prompt.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\nNegative Prompt: " + n
+    }
 
     static var apiKey: String { UserDefaults.standard.string(forKey: keyKey) ?? "" }
     static var isConfigured: Bool { !apiKey.isEmpty }
@@ -229,15 +239,19 @@ enum AIExtend {
         var resolution = OutputResolution.k2.rawValue
         var aspect = OutputAspect.original.rawValue
         var count = 1
+        var negativeEnabled = false     // the "Negative Prompt" switch under the prompt
+        var negativePrompt = ""         // its text (kept even while the switch is off)
 
         init() {}
-        init(prompt: String, model: String, tuneIDs: [Int], resolution: String, aspect: String, count: Int) {
+        init(prompt: String, model: String, tuneIDs: [Int], resolution: String, aspect: String, count: Int,
+             negativeEnabled: Bool = false, negativePrompt: String = "") {
             self.prompt = prompt; self.model = model; self.tuneIDs = tuneIDs
             self.resolution = resolution; self.aspect = aspect; self.count = count
+            self.negativeEnabled = negativeEnabled; self.negativePrompt = negativePrompt
         }
         // Lenient decoding so an older saved blob (a single `tuneID`, or any missing key) still
         // restores the rest of the settings instead of resetting them all.
-        enum CodingKeys: String, CodingKey { case prompt, model, tuneIDs, tuneID, resolution, aspect, count }
+        enum CodingKeys: String, CodingKey { case prompt, model, tuneIDs, tuneID, resolution, aspect, count, negativeEnabled, negativePrompt }
         init(from d: Decoder) throws {
             let c = try d.container(keyedBy: CodingKeys.self)
             prompt = (try? c.decode(String.self, forKey: .prompt)) ?? ""
@@ -247,6 +261,8 @@ enum AIExtend {
             resolution = (try? c.decode(String.self, forKey: .resolution)) ?? OutputResolution.k2.rawValue
             aspect = (try? c.decode(String.self, forKey: .aspect)) ?? OutputAspect.original.rawValue
             count = (try? c.decode(Int.self, forKey: .count)) ?? 1
+            negativeEnabled = (try? c.decode(Bool.self, forKey: .negativeEnabled)) ?? false
+            negativePrompt = (try? c.decode(String.self, forKey: .negativePrompt)) ?? ""
         }
         func encode(to e: Encoder) throws {
             var c = e.container(keyedBy: CodingKeys.self)
@@ -256,6 +272,8 @@ enum AIExtend {
             try c.encode(resolution, forKey: .resolution)
             try c.encode(aspect, forKey: .aspect)
             try c.encode(count, forKey: .count)
+            try c.encode(negativeEnabled, forKey: .negativeEnabled)
+            try c.encode(negativePrompt, forKey: .negativePrompt)
         }
     }
     private static func runSettingsKey(create: Bool) -> String {

@@ -1469,13 +1469,17 @@ final class Library {
     /// progress pill shows it working, and on completion the results are shown for review (and a
     /// notification fires; tap → the results). Mirrors the frame-export pattern (activity pill +
     /// best-effort background window).
-    func startAIEdit(entry: Entry, prompt: String, promptPrefix: String = "", count: Int, tune: Int,
-                     modelLabel: String, token: String?, supportsResolution: Bool = true,
+    /// `negativePrompt`, when given, is appended to the prompt as free text ("Negative Prompt: …",
+    /// see `AIExtend.composePrompt`). The history keeps the bare prompt; the job (and the saved
+    /// files' provenance) carry the full text Astria saw.
+    func startAIEdit(entry: Entry, prompt: String, negativePrompt: String? = nil, promptPrefix: String = "",
+                     count: Int, tune: Int, modelLabel: String, token: String?, supportsResolution: Bool = true,
                      resolution: AIExtend.OutputResolution, aspect: AIExtend.OutputAspect) {
         recordAIPrompt(prompt)      // history, newest first (the raw prompt, not any <lora:…> prefix)
-        let composedPrompt = promptPrefix.isEmpty ? prompt : promptPrefix + prompt
+        let userPrompt = AIExtend.composePrompt(prompt, negative: negativePrompt)
+        let composedPrompt = promptPrefix.isEmpty ? userPrompt : promptPrefix + userPrompt
         let job = AIEditJob(target: .edit(original: entry.url), folder: entry.url.deletingLastPathComponent(),
-                            entry: entry, prompt: prompt, modelLabel: modelLabel)
+                            entry: entry, prompt: userPrompt, modelLabel: modelLabel)
         let (activityID, bg, live) = beginAIJob(job: job, title: "Editing with AI", label: "AI Edit", count: count)
         let url = entry.url
         Task {
@@ -1504,13 +1508,14 @@ final class Library {
     /// Creates a brand-new image from a text prompt (no source photo) — "Create with AI". Runs
     /// app-wide like Edit; kept results save into an "AI" subfolder of `folder`. Persisted for
     /// recovery exactly like Edit (it used not to be — a Create job killed mid-generation was lost).
-    func startAICreate(folder: URL, prompt: String, promptPrefix: String = "", count: Int, tune: Int,
-                       modelLabel: String, token: String?, supportsResolution: Bool = true,
+    func startAICreate(folder: URL, prompt: String, negativePrompt: String? = nil, promptPrefix: String = "",
+                       count: Int, tune: Int, modelLabel: String, token: String?, supportsResolution: Bool = true,
                        resolution: AIExtend.OutputResolution, aspect: AIExtend.OutputAspect) {
         recordAIPrompt(prompt)
-        let composedPrompt = promptPrefix.isEmpty ? prompt : promptPrefix + prompt
+        let userPrompt = AIExtend.composePrompt(prompt, negative: negativePrompt)
+        let composedPrompt = promptPrefix.isEmpty ? userPrompt : promptPrefix + userPrompt
         let job = AIEditJob(target: .create(folder: folder), folder: folder, entry: nil,
-                            prompt: prompt, modelLabel: modelLabel)
+                            prompt: userPrompt, modelLabel: modelLabel)
         let (activityID, bg, live) = beginAIJob(job: job, title: "Creating with AI", label: "AI Create", count: count)
         // Text2img needs a concrete shape (there's no source to keep) — "Original"/nil defaults to 1:1.
         let ratio = aspect.ratio ?? "1:1"

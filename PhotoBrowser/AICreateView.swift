@@ -11,6 +11,8 @@ struct AICreateView: View {
     let folder: URL
 
     @State private var prompt: String
+    @State private var negativeEnabled: Bool
+    @State private var negativePrompt: String
     @State private var count: Int
     @State private var model: AIExtend.AIModel
     @State private var selectedTunes: [AIExtend.AstriaTune] = []
@@ -29,6 +31,8 @@ struct AICreateView: View {
         self.folder = folder
         let s = AIExtend.lastRunSettings(create: true)
         _prompt = State(initialValue: s.prompt)
+        _negativeEnabled = State(initialValue: s.negativeEnabled)
+        _negativePrompt = State(initialValue: s.negativePrompt)
         _count = State(initialValue: [1, 2, 3, 4, 8].contains(s.count) ? s.count : 1)
         _model = State(initialValue: AIExtend.AIModel(rawValue: s.model) ?? AIExtend.defaultModel)
         _pendingTuneIDs = State(initialValue: s.tuneIDs)
@@ -41,9 +45,14 @@ struct AICreateView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Describe the image to create") {
+                Section {
                     TextField("e.g. a golden retriever puppy on a beach at sunset, photorealistic", text: $prompt, axis: .vertical)
                         .lineLimit(2...6)
+                    NegativePromptField(enabled: $negativeEnabled, text: $negativePrompt)
+                } header: {
+                    Text("Describe the image to create")
+                } footer: {
+                    if negativeEnabled { Text(NegativePromptField.footer) }
                 }
                 reusablePromptSection
                 if !library.aiPromptHistory.isEmpty { promptHistorySection }
@@ -171,9 +180,12 @@ struct AICreateView: View {
         AIExtend.saveRunSettings(AIExtend.RunSettings(prompt: prompt, model: model.rawValue,
                                                       tuneIDs: selectedTunes.map(\.id),
                                                       resolution: resolution.rawValue,
-                                                      aspect: aspect.rawValue, count: count), create: true)
+                                                      aspect: aspect.rawValue, count: count,
+                                                      negativeEnabled: negativeEnabled, negativePrompt: negativePrompt),
+                                 create: true)
         let gen = AIExtend.resolveGeneration(model: model, tunes: selectedTunes)
-        library.startAICreate(folder: folder, prompt: prompt, promptPrefix: gen.promptPrefix, count: count,
+        library.startAICreate(folder: folder, prompt: prompt, negativePrompt: negativeEnabled ? negativePrompt : nil,
+                              promptPrefix: gen.promptPrefix, count: count,
                               tune: gen.tuneID, modelLabel: gen.label, token: gen.token,
                               supportsResolution: gen.supportsResolution, resolution: resolution, aspect: aspect)
         dismiss()

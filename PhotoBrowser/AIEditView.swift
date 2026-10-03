@@ -11,6 +11,8 @@ struct AIEditView: View {
     let entry: Entry
 
     @State private var prompt: String
+    @State private var negativeEnabled: Bool
+    @State private var negativePrompt: String
     @State private var count: Int
     @State private var model: AIExtend.AIModel
     @State private var selectedTunes: [AIExtend.AstriaTune] = []
@@ -28,6 +30,8 @@ struct AIEditView: View {
         self.entry = entry
         let s = AIExtend.lastRunSettings(create: false)
         _prompt = State(initialValue: s.prompt)
+        _negativeEnabled = State(initialValue: s.negativeEnabled)
+        _negativePrompt = State(initialValue: s.negativePrompt)
         _count = State(initialValue: [1, 2, 3, 4, 8].contains(s.count) ? s.count : 1)
         _model = State(initialValue: AIExtend.AIModel(rawValue: s.model) ?? AIExtend.defaultModel)
         _pendingTuneIDs = State(initialValue: s.tuneIDs)
@@ -38,9 +42,14 @@ struct AIEditView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("What would you like to change?") {
+                Section {
                     TextField("e.g. make the sky a sunset, remove the sign…", text: $prompt, axis: .vertical)
                         .lineLimit(2...5)
+                    NegativePromptField(enabled: $negativeEnabled, text: $negativePrompt)
+                } header: {
+                    Text("What would you like to change?")
+                } footer: {
+                    if negativeEnabled { Text(NegativePromptField.footer) }
                 }
                 reusablePromptSection
                 if !library.aiPromptHistory.isEmpty { promptHistorySection }
@@ -171,11 +180,35 @@ struct AIEditView: View {
         AIExtend.saveRunSettings(AIExtend.RunSettings(prompt: prompt, model: model.rawValue,
                                                       tuneIDs: selectedTunes.map(\.id),
                                                       resolution: resolution.rawValue,
-                                                      aspect: aspect.rawValue, count: count), create: false)
+                                                      aspect: aspect.rawValue, count: count,
+                                                      negativeEnabled: negativeEnabled, negativePrompt: negativePrompt),
+                                 create: false)
         let gen = AIExtend.resolveGeneration(model: model, tunes: selectedTunes)
-        library.startAIEdit(entry: entry, prompt: prompt, promptPrefix: gen.promptPrefix, count: count,
+        library.startAIEdit(entry: entry, prompt: prompt, negativePrompt: negativeEnabled ? negativePrompt : nil,
+                            promptPrefix: gen.promptPrefix, count: count,
                             tune: gen.tuneID, modelLabel: gen.label, token: gen.token,
                             supportsResolution: gen.supportsResolution, resolution: resolution, aspect: aspect)
         dismiss()
+    }
+}
+
+/// The "Negative Prompt" switch that sits under the prompt box in Edit and Create with AI. On, it
+/// reveals a text field; what's typed there is appended to the prompt as free text when the job is
+/// sent — a blank line, then "Negative Prompt: …" (`AIExtend.composePrompt`) — because the partner
+/// models take no separate negative field. Off, the text is kept but not sent.
+struct NegativePromptField: View {
+    @Binding var enabled: Bool
+    @Binding var text: String
+
+    static let footer = "Sent as the last line of your prompt, e.g. “A cinematic photo of a man carrying an umbrella in the dark.” then “Negative Prompt: light, woman, no umbrella.” Turn the switch off to keep the text without sending it."
+
+    var body: some View {
+        Toggle(isOn: $enabled.animation()) {
+            Label("Negative Prompt", systemImage: "minus.circle")
+        }
+        if enabled {
+            TextField("e.g. light, woman, no umbrella", text: $text, axis: .vertical)
+                .lineLimit(1...4)
+        }
     }
 }
