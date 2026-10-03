@@ -51,8 +51,9 @@ struct AIEditView: View {
                 } footer: {
                     if negativeEnabled { Text(NegativePromptField.footer) }
                 }
-                reusablePromptSection
-                if !library.aiPromptHistory.isEmpty { promptHistorySection }
+                PromptingReminderSection()
+                ReusablePromptsSection(prompt: $prompt)
+                if !library.aiPromptHistory.isEmpty { PromptHistorySection(prompt: $prompt) }
                 Section {
                     AIModelTunePicker(model: $model, tunes: $selectedTunes, allTunes: tunes)
                 } header: {
@@ -102,61 +103,6 @@ struct AIEditView: View {
                     pendingTuneIDs = []
                 }
             }
-        }
-    }
-
-    /// Always-available saved prompts: one-tap Use (fills the prompt) or Copy.
-    private var reusablePromptSection: some View {
-        Section {
-            ForEach(AIExtend.reusablePrompts, id: \.self) { p in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(p).font(.callout)
-                    HStack(spacing: 10) {
-                        Button { prompt = p } label: { Label("Use", systemImage: "text.insert") }
-                            .buttonStyle(.borderedProminent).controlSize(.small)
-                        Button { UIPasteboard.general.string = p } label: { Label("Copy", systemImage: "doc.on.doc") }
-                            .buttonStyle(.bordered).controlSize(.small)
-                    }
-                }
-                .padding(.vertical, 2)
-            }
-        } header: {
-            Text("Reusable Prompts")
-        } footer: {
-            Text("Tap Use to drop one into the prompt above, or Copy it.")
-        }
-    }
-
-    private var promptHistorySection: some View {
-        Section {
-            ScrollView {
-                VStack(spacing: 0) {
-                    ForEach(library.aiPromptHistory, id: \.self) { past in
-                        Button { prompt = past } label: {
-                            HStack {
-                                Text(past).lineLimit(2).foregroundStyle(.primary)
-                                Spacer()
-                                Image(systemName: "arrow.up.circle").font(.callout).foregroundStyle(.secondary)
-                            }
-                            .padding(.vertical, 10).contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            Button { prompt = past } label: { Label("Use as Prompt", systemImage: "text.insert") }
-                            Button { UIPasteboard.general.string = past } label: { Label("Copy", systemImage: "doc.on.doc") }
-                            Button(role: .destructive) { library.deleteAIPrompt(past) } label: {
-                                Label("Remove from History", systemImage: "trash")
-                            }
-                        }
-                        if past != library.aiPromptHistory.last { Divider() }
-                    }
-                }
-            }
-            .frame(height: min(CGFloat(library.aiPromptHistory.count) * 52, 220))
-        } header: {
-            Text("Previous prompts")
-        } footer: {
-            Text("Tap a prompt to use it again. Long-press to copy it or remove it.")
         }
     }
 

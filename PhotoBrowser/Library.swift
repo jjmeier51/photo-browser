@@ -1007,21 +1007,44 @@ final class Library {
     /// a past prompt can be dropped back into the prompt box with a tap. Deduped
     /// case-insensitively (reusing a prompt moves it to the top), capped at 50.
     var aiPromptHistory: [String] = UserDefaults.standard.stringArray(forKey: "photoBrowser.aiPromptHistory") ?? []
+    /// Hearted prompts — a subset of the history the user wants to find again. Never evicted by
+    /// the 50-prompt cap (the oldest *unhearted* ones go first), and listed under their own filter.
+    var favoriteAIPrompts: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.aiPromptFavorites") ?? [])
+    func isFavoriteAIPrompt(_ text: String) -> Bool { favoriteAIPrompts.contains(text) }
+    func toggleFavoriteAIPrompt(_ text: String) {
+        if favoriteAIPrompts.contains(text) { favoriteAIPrompts.remove(text) } else { favoriteAIPrompts.insert(text) }
+        UserDefaults.standard.set(Array(favoriteAIPrompts), forKey: "photoBrowser.aiPromptFavorites")
+    }
     func recordAIPrompt(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        // Reusing a hearted prompt under different casing keeps the heart on the new spelling.
+        let wasFavorite = aiPromptHistory.contains { $0.caseInsensitiveCompare(trimmed) == .orderedSame && favoriteAIPrompts.contains($0) }
+        for old in aiPromptHistory where old.caseInsensitiveCompare(trimmed) == .orderedSame { favoriteAIPrompts.remove(old) }
         aiPromptHistory.removeAll { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
         aiPromptHistory.insert(trimmed, at: 0)
-        if aiPromptHistory.count > 50 { aiPromptHistory.removeLast(aiPromptHistory.count - 50) }
+        if wasFavorite { favoriteAIPrompts.insert(trimmed) }
+        // Cap at 50, dropping the oldest prompts that aren't hearted; hearted ones always stay.
+        var excess = aiPromptHistory.count - 50
+        if excess > 0 {
+            for i in aiPromptHistory.indices.reversed() where excess > 0 && !favoriteAIPrompts.contains(aiPromptHistory[i]) {
+                aiPromptHistory.remove(at: i); excess -= 1
+            }
+        }
         UserDefaults.standard.set(aiPromptHistory, forKey: "photoBrowser.aiPromptHistory")
+        UserDefaults.standard.set(Array(favoriteAIPrompts), forKey: "photoBrowser.aiPromptFavorites")
     }
     func deleteAIPrompt(_ text: String) {
         aiPromptHistory.removeAll { $0 == text }
+        favoriteAIPrompts.remove(text)
         UserDefaults.standard.set(aiPromptHistory, forKey: "photoBrowser.aiPromptHistory")
+        UserDefaults.standard.set(Array(favoriteAIPrompts), forKey: "photoBrowser.aiPromptFavorites")
     }
     func deleteAIPrompts(at offsets: IndexSet) {
+        for i in offsets { favoriteAIPrompts.remove(aiPromptHistory[i]) }
         aiPromptHistory.remove(atOffsets: offsets)
         UserDefaults.standard.set(aiPromptHistory, forKey: "photoBrowser.aiPromptHistory")
+        UserDefaults.standard.set(Array(favoriteAIPrompts), forKey: "photoBrowser.aiPromptFavorites")
     }
 
     // MARK: - AI-generated images

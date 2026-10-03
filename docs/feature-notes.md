@@ -278,13 +278,29 @@ endpoint changed), grouped by prompt with model name (`modelName(forTune:tunes:)
   stamped with the prompt's `created_at` and provenance, marked AI-generated, and remembered in
   `Library.astriaSavedImages` (image URL → path) so the grid badges what's already on the drive.
 
-### 1.11 Reusable Prompts
+### 1.11 Reusable Prompts, prompt history with hearts, prompting reminder — `AIPromptSections.swift`
 
-- `AIExtend.reusablePrompts: [String]` — a shared list surfaced as a **"Reusable Prompts"**
-  section in both `AICreateView` and `AIEditView`, each with one-tap **Use** (fills the prompt
-  field) and **Copy** (UIPasteboard). Extend by appending to the array; both views update.
-  Currently: the 8-heads-tall full-body portrait, and the braided-hair description ("long hair
-  with a soft center part … three-strand braid draped over the right shoulder …").
+The prompt-helper sections are shared views (one file) used by both `AICreateView` and
+`AIEditView`, in this order under the prompt box: `PromptingReminderSection`,
+`ReusablePromptsSection`, `PromptHistorySection`.
+
+- **Prompting reminder** — one fine-print row (`.caption2`, secondary, lightbulb) right under the
+  prompt: "Order: subject → wardrobe → scene → framing (crop and camera position) → camera details
+  (natural sensor noise, slight handheld imperfections, subtle HDR). Add imperfection keywords;
+  ban beauty filters for realistic, non-plasticky skin." (`PromptingReminderSection.text`).
+- `AIExtend.reusablePrompts: [String]` — a shared list surfaced as **"Reusable Prompts"** with
+  one-tap **Use** (fills the prompt field) and **Copy** (UIPasteboard). Extend by appending to
+  the array; both views update. Currently: the 8-heads-tall full-body portrait, and the
+  braided-hair description ("long hair with a soft center part … three-strand braid draped over
+  the right shoulder …"). The Use/Copy pair is `PromptActionButtons`: **plain-style buttons with
+  explicit capsule padding, centred** — the stock `.borderedProminent` inside a Form row rendered
+  Use as a tall, off-centre block.
+- **Prompt history with hearts** — `Library.favoriteAIPrompts` (`photoBrowser.aiPromptFavorites`,
+  a subset of `aiPromptHistory`; `isFavoriteAIPrompt` / `toggleFavoriteAIPrompt`). Each history
+  row has a ♥ button (and Favorite/Unfavorite in its context menu); a segmented **All /
+  Favorites** filter at the top of the section shows only hearted prompts. Hearted prompts are
+  **never evicted** by the 50-prompt cap (`recordAIPrompt` drops the oldest unhearted ones), a
+  re-run under different casing keeps its heart, and "Remove from History" also unhearts.
 
 ### 1.11a Negative Prompt
 
