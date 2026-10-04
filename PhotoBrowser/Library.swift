@@ -2671,6 +2671,12 @@ final class Library {
         lastTikTokHandleByFolder = remapKeys(lastTikTokHandleByFolder, remap)
         vscoFolders = remapKeys(vscoFolders, remap)
         lastVSCOUsernameByFolder = remapKeys(lastVSCOUsernameByFolder, remap)
+        // These four were missing until the Drive Health audit: a rename of a person folder
+        // silently dropped its OF profile record, OF/Facebook prefill and Messages archive.
+        ofFolders = remapKeys(ofFolders, remap)
+        lastOFUsernameByFolder = remapKeys(lastOFUsernameByFolder, remap)
+        lastFacebookURLByFolder = remapKeys(lastFacebookURLByFolder, remap)
+        textMessageArchives = remapKeys(textMessageArchives, remap)
         bubbleOrders = Dictionary(bubbleOrders.map { (remap($0.key), $0.value.map(remap)) }, uniquingKeysWith: { a, _ in a })
         for (name, var state) in accessKardashian {
             let nf = remap(state.folderPath)
@@ -2729,6 +2735,8 @@ final class Library {
         let accessKardashian = self.accessKardashian
         let aiGenerations = self.aiGenerations
         let vscoFolders = self.vscoFolders, lastVSCOUsernameByFolder = self.lastVSCOUsernameByFolder
+        let ofFolders = self.ofFolders, lastOFUsernameByFolder = self.lastOFUsernameByFolder
+        let lastFacebookURLByFolder = self.lastFacebookURLByFolder, textMessageArchives = self.textMessageArchives
         Self.persistQueue.async {
             Self.saveBulk(favorites, "favorites")
             Self.saveBulk(aiLabels, "ai")
@@ -2763,91 +2771,63 @@ final class Library {
             if let data = try? JSONEncoder().encode(aiGenerations) { ud.set(data, forKey: "photoBrowser.aiGenerations") }
             if let data = try? JSONEncoder().encode(vscoFolders) { ud.set(data, forKey: "photoBrowser.vscoFolders") }
             ud.set(lastVSCOUsernameByFolder, forKey: "photoBrowser.lastVSCOUsername")
+            if let data = try? JSONEncoder().encode(ofFolders) { ud.set(data, forKey: "photoBrowser.onlyfansFolders") }
+            ud.set(lastOFUsernameByFolder, forKey: "photoBrowser.lastOFUsername")
+            ud.set(lastFacebookURLByFolder, forKey: "photoBrowser.lastFacebookURL")
+            ud.set(textMessageArchives, forKey: "photoBrowser.textMessageArchives")
         }
     }
+
+    /// Writes every path-keyed store to disk now (all of them, including the ones with their own
+    /// persisters) — for callers outside this file that have just rewritten the stores wholesale,
+    /// such as a metadata restore. The bulk stores go through the serial persist queue as usual.
+    func persistAllMetadataNow() {
+        persistCustomLabels()
+        persistPeople()
+        persistAIGenerations()
+        persistInstagramFolders()
+        persistFacebookFolders()
+        persistOFFolders()
+        persistTikTokFolders()
+        persistTikTokLikes()
+        persistVSCOFolders()
+        persistAllPathKeyed()
+        labelsVersion += 1
+        changeToken += 1
+    }
+
+    /// The Not-Duplicates pair key, for code outside this file that rebuilds the set (restore).
+    static func notDuplicatePairKey(_ a: String, _ b: String) -> String { pairKey(a, b) }
+    /// The two paths of a stored Not-Duplicates pair key.
+    static func notDuplicatePairPaths(_ key: String) -> (String, String)? {
+        let parts = key.split(separator: "\n", maxSplits: 1).map(String.init)
+        return parts.count == 2 ? (parts[0], parts[1]) : nil
+    }
+    /// Where folder-cover and custom-item-thumbnail images live (for backup/restore).
+    var coverImagesDirectory: URL { coversDirectory }
+    var itemThumbnailImagesDirectory: URL { itemThumbsDirectory }
+    var textMessageArchivesDirectory: URL { textMessagesDirectory }
 
     private func remapKeys<V>(_ dict: [String: V], _ remap: (String) -> String) -> [String: V] {
         Dictionary(dict.map { (remap($0.key), $0.value) }, uniquingKeysWith: { a, _ in a })
     }
 
-    /// Re-keys all per-item data (Favorites, To AI, captions, album covers, Photos
-    /// origins) from items under `fromRoot` to the matching paths under `toRoot` —
-    /// used to carry labels across drives. `removeSource` removes the originals (a
-    /// move); `verifyExists` only migrates keys whose target file actually exists
-    /// at the new location (used by the re-link tool).
+    /// Re-keys **every** piece of path-keyed data from items under `fromRoot` to the matching
+    /// paths under `toRoot` — used to carry labels across drives (the drive-to-drive move) and by
+    /// "Re-link Favorites from a Drive…". `removeSource` removes the originals (a move);
+    /// `verifyExists` only migrates keys whose target actually exists at the new location (the
+    /// re-link tool). Until the Drive Health audit this carried only Favorites, To AI, custom
+    /// labels, captions, origins, covers and birthdays — a cross-drive move quietly dropped
+    /// Instagram/Facebook/TikTok/VSCO/OF profile records, highlights, hidden items, People, AI
+    /// provenance and the rest. It now shares one transfer with `duplicateMetadata`.
     func migrateMetadata(fromRoot: URL, toRoot: URL, removeSource: Bool, verifyExists: Bool) {
-        let from = fromRoot.path, to = toRoot.path
-        let fm = FileManager.default
-        func mapped(_ old: String) -> String? {
-            guard old == from || old.hasPrefix(from + "/") else { return nil }
-            let np = to + old.dropFirst(from.count)
-            if verifyExists, !fm.fileExists(atPath: np) { return nil }
-            return np
-        }
-        favorites = migrateSet(favorites, map: mapped, removeSource: removeSource)
-        aiLabels  = migrateSet(aiLabels,  map: mapped, removeSource: removeSource)
-        customLabels = customLabels.mapValues { migrateSet($0, map: mapped, removeSource: removeSource) }
-        captions     = migrateDict(captions, map: mapped, removeSource: removeSource)
-        photoOrigins = migrateDict(photoOrigins, map: mapped, removeSource: removeSource)
-
-        // Folder covers: copy each cover image so the new path owns its own file.
-        var newCovers = folderCovers
-        for (key, filename) in folderCovers {
-            guard let np = mapped(key) else { continue }
-            let newName = UUID().uuidString + ".jpg"
-            try? fm.copyItem(at: coversDirectory.appendingPathComponent(filename),
-                             to: coversDirectory.appendingPathComponent(newName))
-            newCovers[np] = newName
-            if removeSource {
-                try? fm.removeItem(at: coversDirectory.appendingPathComponent(filename))
-                newCovers.removeValue(forKey: key)
-            }
-        }
-        folderCovers = newCovers
-
-        // Folder birthdays follow their folders too.
-        var newBirthdays = folderBirthdays
-        for (key, ts) in folderBirthdays {
-            guard let np = mapped(key) else { continue }
-            newBirthdays[np] = ts
-            if removeSource { newBirthdays.removeValue(forKey: key) }
-        }
-        folderBirthdays = newBirthdays
-        UserDefaults.standard.set(folderBirthdays, forKey: "photoBrowser.birthdays")
-
-        Self.saveBulk(favorites, "favorites")
-        Self.saveBulk(aiLabels, "ai")
-        Self.saveBulk(captions, "captions")
-        UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
-        Self.saveBulk(photoOrigins, "photoOrigins")
-        persistCustomLabels()
-        labelsVersion += 1
+        _ = transferMetadata(from: fromRoot, to: toRoot, removeSource: removeSource, verifyExists: verifyExists)
         changeToken += 1
-    }
-
-    private func migrateSet(_ set: Set<String>, map: (String) -> String?, removeSource: Bool) -> Set<String> {
-        var result = set
-        for path in set {
-            guard let np = map(path) else { continue }
-            result.insert(np)
-            if removeSource { result.remove(path) }
-        }
-        return result
-    }
-
-    private func migrateDict(_ dict: [String: String], map: (String) -> String?, removeSource: Bool) -> [String: String] {
-        var result = dict
-        for (key, value) in dict {
-            guard let np = map(key) else { continue }
-            result[np] = value
-            if removeSource { result.removeValue(forKey: key) }
-        }
-        return result
     }
 
     /// Duplicates every piece of path-keyed data under `oldRoot` — Favorites, To AI,
     /// custom labels, captions, covers, birthdays, edited/AI badges, frames folders,
-    /// Instagram/Facebook/TikTok records, highlights, bubble order, story links,
+    /// Instagram/Facebook/TikTok/VSCO/OF records, highlights, bubble order, story links,
     /// likes, Clean Up progress, not-duplicate pairs, People faces — onto the same
     /// relative paths under `newRoot`, **keeping the originals**. For a backup drive
     /// holding a copy of the library: browsing the backup then shows everything the
@@ -2857,99 +2837,119 @@ final class Library {
     /// external drive would take minutes, and an entry for a file the backup lacks
     /// is inert. Returns the number of entries added.
     func duplicateMetadata(from oldRoot: URL, to newRoot: URL) -> Int {
+        transferMetadata(from: oldRoot, to: newRoot, removeSource: false, verifyExists: false)
+    }
+
+    /// The one transfer behind `duplicateMetadata` (copy) and `migrateMetadata` (move / re-link):
+    /// maps each key under `oldRoot` to the same relative path under `newRoot`, in every store.
+    /// Existing entries at the destination are kept (a copy never clobbers what the other side
+    /// already has). Returns the number of entries added.
+    private func transferMetadata(from oldRoot: URL, to newRoot: URL, removeSource: Bool, verifyExists: Bool) -> Int {
         let from = oldRoot.path, to = newRoot.path
         guard from != to, !to.hasPrefix(from + "/"), !from.hasPrefix(to + "/") else { return 0 }
+        let fm = FileManager.default
         var added = 0
         func mapped(_ p: String) -> String? {
             guard p == from || p.hasPrefix(from + "/") else { return nil }
-            return to + p.dropFirst(from.count)
+            let np = to + p.dropFirst(from.count)
+            if verifyExists, !fm.fileExists(atPath: np) { return nil }
+            return np
         }
-        func dupSet(_ set: inout Set<String>) {
-            for p in Array(set) { if let np = mapped(p), set.insert(np).inserted { added += 1 } }
+        func moveSet(_ set: inout Set<String>) {
+            for p in Array(set) {
+                guard let np = mapped(p) else { continue }
+                if set.insert(np).inserted { added += 1 }
+                if removeSource { set.remove(p) }
+            }
         }
-        func dupDict<V>(_ dict: inout [String: V], value: (V) -> V = { $0 }) {
-            for (k, v) in dict { if let nk = mapped(k), dict[nk] == nil { dict[nk] = value(v); added += 1 } }
+        func moveDict<V>(_ dict: inout [String: V], value: (V) -> V = { $0 }) {
+            for (k, v) in dict {
+                guard let nk = mapped(k) else { continue }
+                if dict[nk] == nil { dict[nk] = value(v); added += 1 }
+                if removeSource { dict.removeValue(forKey: k) }
+            }
         }
 
-        dupSet(&favorites); dupSet(&aiLabels); dupSet(&editedInAppPaths); dupSet(&aiGeneratedPaths)
-        dupSet(&framesFolders); dupSet(&kardashianFolders); dupSet(&instagramHighlights); dupSet(&albumHighlights)
-        dupSet(&reviewsFolders); dupSet(&hiddenFolders); dupSet(&hiddenFiles)
-        customLabels = customLabels.mapValues { paths in
-            var s = paths
-            for p in paths { if let np = mapped(p), s.insert(np).inserted { added += 1 } }
-            return s
-        }
-        dupDict(&captions); dupDict(&photoOrigins); dupDict(&igPostedBy); dupDict(&igLastHandle)
-        dupDict(&lastTikTokHandleByFolder); dupDict(&tiktokLikes); dupDict(&folderBirthdays)
-        dupDict(&instagramFolders); dupDict(&facebookFolders); dupDict(&tiktokFolders)
-        dupDict(&cleanupReviewed, value: { $0.map { mapped($0) ?? $0 } })
-        dupDict(&bubbleOrders, value: { $0.map { mapped($0) ?? $0 } })
+        moveSet(&favorites); moveSet(&aiLabels); moveSet(&editedInAppPaths); moveSet(&aiGeneratedPaths)
+        moveSet(&framesFolders); moveSet(&kardashianFolders); moveSet(&instagramHighlights); moveSet(&albumHighlights)
+        moveSet(&reviewsFolders); moveSet(&hiddenFolders); moveSet(&hiddenFiles)
+        customLabels = customLabels.mapValues { paths in var s = paths; moveSet(&s); return s }
+        moveDict(&captions); moveDict(&photoOrigins); moveDict(&igPostedBy); moveDict(&igLastHandle)
+        moveDict(&lastTikTokHandleByFolder); moveDict(&tiktokLikes); moveDict(&folderBirthdays)
+        moveDict(&instagramFolders); moveDict(&facebookFolders); moveDict(&tiktokFolders)
+        moveDict(&vscoFolders); moveDict(&lastVSCOUsernameByFolder)
+        moveDict(&ofFolders); moveDict(&lastOFUsernameByFolder); moveDict(&lastFacebookURLByFolder)
+        moveDict(&textMessageArchives); moveDict(&aiGenerations)
+        moveDict(&cleanupReviewed, value: { $0.map { mapped($0) ?? $0 } })
+        moveDict(&bubbleOrders, value: { $0.map { mapped($0) ?? $0 } })
         for (k, v) in storyLinks {
-            if let nk = mapped(k), storyLinks[nk] == nil { storyLinks[nk] = mapped(v) ?? v; added += 1 }
+            guard let nk = mapped(k) else { continue }
+            if storyLinks[nk] == nil { storyLinks[nk] = mapped(v) ?? v; added += 1 }
+            if removeSource { storyLinks.removeValue(forKey: k) }
         }
         for pair in Array(notDuplicatePairs) {
             let parts = pair.split(separator: "\n", maxSplits: 1).map(String.init)
             guard parts.count == 2, let a = mapped(parts[0]), let b = mapped(parts[1]) else { continue }
             if notDuplicatePairs.insert(Self.pairKey(a, b)).inserted { added += 1 }
+            if removeSource { notDuplicatePairs.remove(pair) }
         }
-        // People: each person gains her backup-side face references (same groups).
+        for (name, var state) in accessKardashian {
+            guard let nf = mapped(state.folderPath) else { continue }
+            state.folderPath = nf; accessKardashian[name] = state; added += 1
+        }
+        // People: each person gains the destination-side face references (same groups).
         for (name, ids) in people {
             var set = ids
             for id in ids {
                 let path = Self.pathOfFaceID(id)
                 guard let np = mapped(path) else { continue }
                 if set.insert(np + id.dropFirst(path.count)).inserted { added += 1 }
+                if removeSource { set.remove(id) }
             }
             people[name] = set
         }
-        FaceStore.shared.duplicatePrefix(from: from, to: to)
-        // Covers: the backup key gets its own copy of the image file, so deleting
-        // either side later can't strip the other's cover.
-        let fm = FileManager.default
-        var newCovers = folderCovers
-        for (key, filename) in folderCovers {
-            guard let nk = mapped(key), newCovers[nk] == nil else { continue }
-            let newName = UUID().uuidString + ".jpg"
-            if (try? fm.copyItem(at: coversDirectory.appendingPathComponent(filename),
-                                 to: coversDirectory.appendingPathComponent(newName))) != nil {
-                newCovers[nk] = newName; added += 1
-            }
+        if removeSource {
+            FaceStore.shared.remap { p in mapped(p) ?? p }
+        } else {
+            FaceStore.shared.duplicatePrefix(from: from, to: to)
         }
-        folderCovers = newCovers
-        // Per-file caches are keyed drive-relative — a no-op when the backup's
-        // in-volume layout matches the primary (they already hit as-is).
+        // Covers and custom item thumbnails: the destination key gets its own copy of the image
+        // file, so deleting either side later can't strip the other's.
+        func moveImages(_ table: inout [String: String], in dir: URL) {
+            var out = table
+            for (key, filename) in table {
+                guard let nk = mapped(key) else { continue }
+                if out[nk] == nil {
+                    let newName = UUID().uuidString + "." + ((filename as NSString).pathExtension.isEmpty ? "jpg" : (filename as NSString).pathExtension)
+                    if (try? fm.copyItem(at: dir.appendingPathComponent(filename), to: dir.appendingPathComponent(newName))) != nil {
+                        out[nk] = newName; added += 1
+                    }
+                }
+                if removeSource {
+                    try? fm.removeItem(at: dir.appendingPathComponent(filename))
+                    out.removeValue(forKey: key)
+                }
+            }
+            table = out
+        }
+        moveImages(&folderCovers, in: coversDirectory)
+        moveImages(&itemThumbnails, in: itemThumbsDirectory)
+        // Per-file caches are keyed drive-relative — a no-op when the destination's
+        // in-volume layout matches the source (they already hit as-is).
         MetadataLoader.duplicateStores(fromStablePrefix: oldRoot.stableCacheID,
                                        toStablePrefix: newRoot.stableCacheID)
 
-        guard added > 0 else { return 0 }
-        Self.saveBulk(favorites, "favorites")
-        Self.saveBulk(aiLabels, "ai")
-        Self.saveBulk(editedInAppPaths, "editedInApp")
-        Self.saveBulk(aiGeneratedPaths, "aiGenerated")
-        Self.saveBulk(cleanupReviewed, "cleanupReviewed")
-        Self.saveBulk(notDuplicatePairs, "notDuplicates")
-        Self.saveBulk(people, "people")
-        Self.saveBulk(captions, "captions")
-        Self.saveBulk(photoOrigins, "photoOrigins")
-        Self.saveBulk(igPostedBy, "igPostedBy")
-        UserDefaults.standard.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
-        UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
-        UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
-        UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
-        UserDefaults.standard.set(Array(reviewsFolders), forKey: "photoBrowser.reviewsFolders")
-        UserDefaults.standard.set(Array(hiddenFolders), forKey: "photoBrowser.hiddenFolders")
-        UserDefaults.standard.set(Array(hiddenFiles), forKey: "photoBrowser.hiddenFiles")
-        UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
-        UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
-        UserDefaults.standard.set(storyLinks, forKey: "photoBrowser.storyLinks")
-        UserDefaults.standard.set(folderBirthdays, forKey: "photoBrowser.birthdays")
-        UserDefaults.standard.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
-        UserDefaults.standard.set(lastTikTokHandleByFolder, forKey: "photoBrowser.lastTikTokHandle")
+        guard added > 0 || removeSource else { return 0 }
         persistCustomLabels()
+        persistPeople()
+        persistAIGenerations()
         persistInstagramFolders()
         persistFacebookFolders()
+        persistOFFolders()
         persistTikTokFolders()
         persistTikTokLikes()
+        persistVSCOFolders()
+        persistAllPathKeyed()
         labelsVersion += 1
         return added
     }

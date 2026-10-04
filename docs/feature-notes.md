@@ -480,10 +480,15 @@ exists (the provider can still be materializing right after a remount).
 
 ---
 
-## 4. Drive Health — `DriveHealthView.swift` (Settings → Maintenance)
+## 4. Drive Health — `DriveHealthView.swift`, `DriveRepair.swift`, `MetadataSnapshot.swift` (Settings → Maintenance)
 
 Recursively scans the SSD and flags **unreadable folders**, **unreadable files** (attributes
-won't stat), and **empty (0-byte) media** (the hallmark of an interrupted exFAT copy).
+won't stat), **empty (0-byte) media** (the hallmark of an interrupted exFAT copy) and — with the
+**"Also check file contents"** toggle (`photoBrowser.driveHealthDeepCheck`) — **files with no
+data** (first 16 bytes all zero: exFAT allocated the size, the copy never landed) and **contents
+that don't match the extension** (magic-number check for JPEG/PNG/GIF/HEIC/MP4/MOV/WebP/TIFF-RAW;
+flagged yellow as "often just mislabelled"). `DriveRepair.probeHeader` does the 16-byte read;
+probes fan out 8 at a time per folder.
 - Uses the same `coordinatedContents` chain; a folder is only flagged after retries with
   backoff (external drives **throttle** a fast full-tree walk, and a single transient failure
   must not be reported as corruption — an early over-aggressive version cried wolf on 223
@@ -491,9 +496,63 @@ won't stat), and **empty (0-byte) media** (the hallmark of an interrupted exFAT 
 - Captures the real error (`NSCocoaError` domain/code + `opendir` errno) into the row for
   diagnosis. (Field lesson: `opendir` returning `errno 22 (EINVAL)` here was a **red herring** —
   POSIX doesn't work on this provider; the true signal was directory *size*, see 3.2.)
+- The scan returns a `ScanResult`: issues, folder/file counts (shown live while scanning), the
+  set of **every path seen**, a **name → paths** table and the unreadable-folder list — so the
+  metadata audit below needs no second walk. `complete` is false if the 200k-folder safety bound
+  stopped it (the audit is then skipped rather than crying orphan).
 - **Share button** exports the unreadable-folder paths (drive-relative, shallowest-first) as
   text, for a Mac-side rebuild/split script.
-- Bad files can be deleted in place; unreadable folders get guidance (re-copy + clean eject).
+
+### 4.1 Metadata safety (the "fixing a drive must keep everything" rules)
+
+The app's metadata is keyed by **absolute path**, so a fix that keeps names and places loses
+nothing, and a fix that doesn't needs help. Three layers now guarantee it:
+
+1. **Every store follows every move.** `Library.applyRemap` (in-app moves/renames, remounts)
+   and the new shared `transferMetadata` behind `migrateMetadata` (cross-drive move, "Re-link
+   Favorites from a Drive…") and `duplicateMetadata` (backup copy) cover the **whole** list:
+   Favorites, To AI, custom labels, captions, covers, custom item thumbnails, Photos origins,
+   birthdays, hidden folders/files, frames / reviews / Kardashian / highlight folders, bubble
+   order, Instagram / Facebook / TikTok / VSCO / **OF** profile records and their last-handle
+   prefills, Facebook URL prefill, likes, posted-by, story links, Messages archives, AI
+   provenance (`aiGenerated`, `aiGenerations`, `editedInApp`), Clean Up progress,
+   Not-Duplicates pairs, People faces (+ `FaceStore`), Access Kardashian state. Before this
+   audit `migrateMetadata` carried only seven of these (a drive-to-drive move dropped every
+   linked profile), and `applyRemap` missed OF records, OF/Facebook prefills and Messages
+   archives. `persistAllMetadataNow()` writes everything at once (used by restore).
+2. **Backup / restore — `MetadataSnapshot`.** `Library.makeMetadataSnapshot(root:)` serialises
+   every store with **drive-relative** keys (so a reformat, rename, re-copy or reinstall that
+   changes the mount path still matches); `MetadataBackup.write` stores `metadata.json` plus
+   copies of the referenced cover / thumbnail / Messages-archive files, into the app container
+   (Application Support/`metadataBackups/<timestamp>`, last three kept, listed in Storage) and,
+   on request, into **`.Photo Browser Metadata/` at the drive root** (dot-prefixed: invisible to
+   every listing and scan; travels with the photos). `restoreMetadata` **merges**: adds what's
+   missing under the current root, never overwrites, copies image files in by their UUID names.
+   Drive Health → "Metadata safety" shows both backup dates with Back Up / Restore buttons; a
+   Rebuild takes an automatic container backup first.
+3. **Orphan audit + Re-link by Filename.** After a scan, `Library.metadataPaths(under:)` is
+   checked against the paths seen; entries whose item is gone are listed by `MetadataCategory`
+   ("Metadata pointing at missing items"). Paths under unreadable folders are *unknown*, not
+   orphaned. **Re-link by Filename** finds each missing name elsewhere on the drive and, for a
+   unique match (preferring the same parent-folder name), re-keys it through
+   `Library.itemsMoved` — the exact machinery an in-app move uses, so all stores follow. Nothing
+   is ever deleted; ambiguous and unmatched names are counted and left alone.
+
+### 4.2 Rebuild Folder in place — `DriveRepair.rebuildFolder`
+
+Swipe an unreadable folder → **Rebuild**. The folder is inventoried through the full fallback
+chain (coordinated → plain → enumerator → POSIX; a tree that can't be listed at all is refused
+with a "re-copy from the Mac, keep the name and place" message), free space for a second copy is
+checked, every file is copied into a hidden sibling `.<name>.rebuilding` with its **modification
+date carried over** (keeps the `path|mtime|size` caches warm) and verified by size, and only if
+*every* item copied are the two swapped: original → `<name>.damaged` (parked, never deleted),
+rebuilt → the original's exact name and path. **The path never changes, so every piece of
+metadata stays attached with no re-keying at all.** Parked originals show up in later scans as
+"Parked originals from rebuilds" with a confirmed Delete. Any failure removes the temp copy and
+leaves the original exactly as it was.
+
+- Bad files can be deleted in place; unreadable folders get Rebuild or the re-copy guidance
+  (same name, same place, clean eject).
 
 ### 4.1 Companion Mac scripts (not in the repo — delivered to the user)
 
@@ -697,7 +756,7 @@ image behind a thumbnail; captures the blog post **date** and keeps it with the 
 | Astria.ai Browser (past generations, save anywhere) | `AstriaBrowserView.swift` |
 | Find duplicates | `DuplicatesView.swift`, `PerceptualHash.swift` |
 | Compare PNGs (PNG ↔ original/PNG matches, hide or delete) | `PNGMatchesView.swift` (`PNGMatching`, `PNGMatchScanCache`), `PhotoBrowserTests/PNGMatchingTests.swift` |
-| Storage / Drive Health | `StorageView.swift`, `DriveHealthView.swift` |
+| Storage / Drive Health | `StorageView.swift`, `DriveHealthView.swift`, `DriveRepair.swift` (rebuild, header probe), `MetadataSnapshot.swift` (backup/restore, orphan audit) |
 | Directory reading / large folders | `Library.swift` (`coordinatedContents`, `listing`) |
 | Folder filters | `Models.swift` (`FormatFilter`), `FolderView.swift` |
 | Folder Birthdays mapping (bulk) | `BirthdayMappingView.swift`, `Library.setBirthdays` |

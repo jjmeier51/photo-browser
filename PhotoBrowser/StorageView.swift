@@ -111,6 +111,7 @@ struct StorageView: View {
             StorageItem(name: "Custom thumbnails", detail: "Per-item cover overrides", urls: [s("itemThumbs")], clearable: false),
             StorageItem(name: "Text-message archives", detail: "Saved message threads", urls: [s("textMessages")], clearable: false),
             StorageItem(name: "Web download history", detail: "Recent link/web downloads", urls: [s("webDownloadHistory.json")], clearable: false),
+            StorageItem(name: "Metadata backups", detail: "Drive Health backups (last three)", urls: [s("metadataBackups")], clearable: false),
             StorageItem(name: "Thumbnails", detail: "Grid preview cache", urls: [s("thumbs")], clearable: true),
             StorageItem(name: "Metadata caches", detail: "Dates, dimensions, places, text, faces",
                         urls: ["captureDates", "mediaSpecs", "ocrText", "placeIndex", "faces", "taylorIndex"].map { s("\($0).json") }, clearable: true),
