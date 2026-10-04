@@ -699,6 +699,36 @@ via CommonCrypto (bridging header), which CryptoKit can't do.
 If an account is **public**, downloads without using the user's cookie. Meta anti-automation
 mitigations: human-like pacing/headers while still downloading reasonably fast.
 
+### 7.4a MPEG-TS → MP4 — `TSRemuxer.swift`
+
+**iOS cannot play a `.ts` file.** AVFoundation has no file-level MPEG-2 transport-stream demuxer
+(it only consumes TS inside a live HLS session), so `AVURLAsset` on a `.ts` reports no tracks.
+The HLS downloader's old TS→MP4 step was an `AVAssetReader` passthrough — it silently failed on
+every TS stream and the download was saved as an unplayable `.ts` (adultdvdempire.com was the
+report; passes.com-style TS-HLS was the same). FFmpegKit isn't linked.
+
+`TSRemuxer` is a pure-Swift demuxer feeding `AVAssetWriter` as **passthrough** (no re-encode):
+- Walks 188-byte packets (resyncs on a lost boundary), PAT → PMT → PIDs; refuses scrambled
+  streams. Video: H.264 (`0x1B`) / HEVC (`0x24`); audio: **AAC/ADTS (`0x0F`) only** — MP3 /
+  AC-3 / LATM are noted but not written, so the video still saves (silent) instead of failing.
+- Reassembles PES per PID, reads PTS/DTS, unwraps the 33-bit clock (`TSWrap`), re-bases to the
+  earliest timestamp and applies a shared **discontinuity offset** when video DTS goes backwards
+  or jumps > 10 s, so the writer always sees monotonic DTS.
+- Video: Annex-B NALs → 4-byte length-prefixed samples; SPS/PPS(/VPS) collected into the format
+  description (`CMVideoFormatDescriptionCreateFromH264/HEVCParameterSets`), AUD/filler/parameter
+  NALs stripped from samples, IDR/CRA/BLA marked sync via `kCMSampleAttachmentKey_NotSync`, and
+  **nothing is emitted before the first sync frame**. Durations = one-sample look-ahead on DTS.
+- Audio: each ADTS frame → one 1024-sample packet; `CMAudioFormatDescriptionCreate` with an
+  AudioSpecificConfig cookie built from the ADTS profile/rate/channels. Frames spanning a PES
+  boundary are carried over (`audioLeftover`); timing runs from the PES PTS by frame count.
+- Three passes over the file: a bounded **probe** (formats + first timestamps), then all video,
+  then all audio — same shape as the fMP4 mux (`pump` with the once-only continuation resume).
+- Wired in `WebVideoDownloader` (HLS and direct-`.ts` paths) between FFmpegKit and the old
+  AVFoundation fallback; a `.ts` that still can't convert is saved with a note.
+- **Convert to MP4** (long-press a `.ts`, or select several → More) runs
+  `TSRemuxer.convertInPlace`: sibling `.mp4` with the same name, modification date kept, the
+  `.ts` removed on success, metadata re-keyed via `library.itemMoved`.
+
 ### 7.5 In-app browser downloads — `WebBrowserView.swift`
 Long-press to save; `bestImgSrc` prefers the anchor's (base-aware) href so it grabs the full-size
 image behind a thumbnail; captures the blog post **date** and keeps it with the photo

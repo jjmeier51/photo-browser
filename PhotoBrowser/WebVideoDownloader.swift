@@ -11,8 +11,10 @@ import CoreMedia
 /// * **HLS** (`.m3u8`) — fetch the playlist, pick the highest-bitrate variant, download every
 ///   segment (bounded-concurrent, in order), decrypt AES-128 segments on the fly (CommonCrypto),
 ///   and concatenate: an fMP4/CMAF stream (has an `EXT-X-MAP` init) merges into a clean `.mp4`;
-///   an MPEG-TS stream is concatenated to `.ts`. If FFmpegKit happens to be linked
-///   (`VideoTranscoder`), the TS result is remuxed to a faststart `.mp4`.
+///   an MPEG-TS stream is concatenated to `.ts` and then **remuxed to `.mp4` by `TSRemuxer`**
+///   (a pure-Swift transport-stream demuxer feeding `AVAssetWriter`, no re-encode) — iOS can't
+///   play a `.ts` file at all, so without this the download was unplayable. FFmpegKit, when
+///   linked, is tried first; the AVFoundation passthrough stays as a last resort.
 ///
 /// All requests carry the browser's cookies + a real UA + the page as `Referer`, so hotlink-/
 /// login-gated media downloads the same way it played. `nonisolated` throughout — network,
@@ -189,6 +191,9 @@ enum WebVideoDownloader {
                 converted = await VideoTranscoder.muxTranscode(video: source, audio: nil, to: mp4,
                                                                transcode: false, date: Date(), lat: nil, lng: nil)
             }
+            // TSRemuxer is the one that actually works without FFmpeg: AVFoundation has no file-level
+            // TS demuxer, so the reader-based remux below finds no tracks and fails.
+            if !converted { converted = await TSRemuxer.remux(source, to: mp4) }
             if !converted { converted = await remuxToMP4(source, to: mp4) }
             if converted {
                 try? FileManager.default.removeItem(at: source)
@@ -337,12 +342,20 @@ enum WebVideoDownloader {
         // is what makes passes.com (and other TS-HLS) videos actually play. Keep the `.ts` only if
         // both remux paths fail.
         if finalExt == "ts" {
+            progress(Progress(fraction: 1, phase: "Converting to MP4…"))
             let mp4 = finalTmp.deletingPathExtension().appendingPathExtension("mp4")
             if VideoTranscoder.isAvailable,
                await VideoTranscoder.muxTranscode(video: finalTmp, audio: nil, to: mp4, transcode: false, date: Date(), lat: nil, lng: nil) {
                 try? FileManager.default.removeItem(at: finalTmp); finalTmp = mp4; finalExt = "mp4"
+            } else if await TSRemuxer.remux(finalTmp, to: mp4) {
+                // The pure-Swift TS demuxer — AVFoundation can't open a .ts file, so the reader-based
+                // fallback below never worked for TS streams and the download stayed unplayable.
+                try? FileManager.default.removeItem(at: finalTmp); finalTmp = mp4; finalExt = "mp4"
             } else if await remuxToMP4(finalTmp, to: mp4) {
                 try? FileManager.default.removeItem(at: finalTmp); finalTmp = mp4; finalExt = "mp4"
+            } else {
+                audioNote = [audioNote, "kept as .ts (couldn’t convert — long-press it later for Convert to MP4)"]
+                    .filter { !$0.isEmpty }.joined(separator: " · ")
             }
         }
         let dest = uniqueDestination(name: baseName(suggestedName, url: manifestURL, ext: finalExt), in: folder)

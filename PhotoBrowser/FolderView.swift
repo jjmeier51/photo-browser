@@ -841,6 +841,13 @@ struct FolderView: View {
                     Label("Trim Video…", systemImage: "scissors")
                 }
             }
+            // A transport-stream download (.ts) that an earlier build couldn't convert: iOS can't play
+            // it as-is, so offer the in-place remux to MP4 (no re-encode; metadata follows the file).
+            if extraVideoExtensions.contains(entry.url.pathExtension.lowercased()) {
+                Button { convertTransportStreams([entry]) } label: {
+                    Label("Convert to MP4", systemImage: "film.stack")
+                }
+            }
             // File utilities for every file, including non-viewable ones (e.g. a downloaded .zip).
             // Offer Extract for a .zip, or any extension-less "data" file (a zip saved without a
             // suffix) — the extractor validates the contents and reports cleanly if it isn't one.
@@ -860,6 +867,32 @@ struct FolderView: View {
             Button(role: .destructive) { startSingleDelete(entry) } label: {
                 Label("Delete", systemImage: "trash")
             }
+        }
+    }
+
+    /// Remuxes `.ts` transport-stream files into playable `.mp4`s next to them (same name, no
+    /// re-encode), app-wide behind a progress pill. Each converted file's Favorites, captions and
+    /// labels move to the new name; a file that can't be converted is left untouched.
+    private func convertTransportStreams(_ targets: [Entry]) {
+        let files = targets.filter { !$0.isFolder && extraVideoExtensions.contains($0.url.pathExtension.lowercased()) }
+        guard !files.isEmpty else { return }
+        let id = library.beginActivity("Converting to MP4", indeterminate: true)
+        Task {
+            var done = 0, failed = 0
+            for (i, e) in files.enumerated() {
+                library.setActivity(id, status: "\(i + 1) of \(files.count): \(e.name)")
+                if let new = await TSRemuxer.convertInPlace(e.url) {
+                    library.itemMoved(from: e.url, to: new)
+                    done += 1
+                } else {
+                    failed += 1
+                }
+            }
+            selection.removeAll()
+            await reload()
+            library.endActivity(id, result: failed == 0
+                ? "Converted \(done) video\(done == 1 ? "" : "s") to MP4."
+                : "Converted \(done) to MP4; \(failed) couldn’t be converted (not an H.264/HEVC stream, or the file is damaged) and \(failed == 1 ? "was" : "were") left as .ts.")
         }
     }
 
@@ -2503,6 +2536,9 @@ struct FolderView: View {
                     Button { startCombine() } label: { Label("Combine Videos", systemImage: "film.stack") }
                 }
                 }   // !pureTransferMode
+                if selectedEntries().contains(where: { extraVideoExtensions.contains($0.url.pathExtension.lowercased()) }) {
+                    Button { convertTransportStreams(selectedEntries()) } label: { Label("Convert .ts to MP4", systemImage: "film.stack") }
+                }
                 Button { duplicateEntries(selectedEntries()) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
                 Button { compress(selectedEntries()) } label: { Label("Compress to Zip", systemImage: "archivebox") }
                 Button { showCopyPicker = true } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
