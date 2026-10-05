@@ -1,4 +1,5 @@
 import XCTest
+import CoreImage
 @testable import PhotoBrowser
 
 /// Video editor Phase 1 (NFR-10): document round-trips with unknown keys preserved, every command's
@@ -81,6 +82,78 @@ final class VideoEditorTests: XCTestCase {
         XCTAssertEqual(VETimeUtil.snapToFrame(50_000, fps: 30), 66_666)   // 50 ms → nearest frame boundary (2 frames)
         XCTAssertEqual(VETimeUtil.format(65_300_000, fps: 30), "1:05.3")
         XCTAssertEqual(VETimeUtil.format(65_500_000, fps: 30, frames: true), "1:05:15")
+    }
+
+    // MARK: Filters, HDR, export dates
+
+    func testFilterRoundTripAndDefaults() throws {
+        var p = sampleProject()
+        p.tracks.main[0].filter = VEFilter(id: "vivid", intensity: 0.4)
+        let data = try VEJSON.encoder.encode(p)
+        let back = try VEJSON.decoder.decode(VEProject.self, from: data)
+        XCTAssertEqual(back.tracks.main[0].filter, VEFilter(id: "vivid", intensity: 0.4))
+        XCTAssertNil(back.tracks.main[1].filter)
+        // A filter written without an intensity is the full look; "none" and 0 are inactive.
+        let lenient = try VEJSON.decoder.decode(VEFilter.self, from: Data(#"{"id":"mono"}"#.utf8))
+        XCTAssertEqual(lenient.intensity, 1)
+        XCTAssertTrue(lenient.isActive)
+        XCTAssertFalse(VEFilter(id: "none").isActive)
+        XCTAssertFalse(VEFilter(id: "mono", intensity: 0).isActive)
+        XCTAssertNotNil(VEFilterCatalog.def("vivid"))
+        XCTAssertEqual(Set(VEFilterCatalog.all.map(\.id)).count, VEFilterCatalog.all.count)   // ids unique
+    }
+
+    func testHDRResolvesFromMediaAndMode() {
+        var p = sampleProject()
+        XCTAssertFalse(p.hasHDRMedia)
+        p.refreshHDR()
+        XCTAssertFalse(p.settings.hdr)
+        p.media[0].colorTransfer = "HLG"
+        XCTAssertTrue(p.media[0].isHDR)
+        p.refreshHDR()
+        XCTAssertTrue(p.settings.hdr, "Auto follows the media")
+        p.settings.hdrMode = .off
+        p.refreshHDR()
+        XCTAssertFalse(p.settings.hdr)
+        p.settings.hdrMode = .on
+        p.media[0].colorTransfer = "SDR"
+        p.refreshHDR()
+        XCTAssertTrue(p.settings.hdr, "On forces HDR without HDR media")
+        // Only media on the timeline counts.
+        p.settings.hdrMode = .auto
+        p.media.append(VEMediaSource(id: "m3", kind: .video, path: "media/unused.mov", identity: p.media[0].identity,
+                                     duration: 1_000_000, width: 1920, height: 1080, originalName: "unused.mov"))
+        p.media[2].colorTransfer = "PQ"
+        p.refreshHDR()
+        XCTAssertFalse(p.settings.hdr)
+    }
+
+    func testOldestCaptureDateAcrossUsedMedia() {
+        var p = sampleProject()
+        XCTAssertNil(p.oldestCaptureDate)
+        p.media[0].createdAt = Date(timeIntervalSince1970: 2_000)
+        p.media[1].createdAt = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(p.oldestCaptureDate, Date(timeIntervalSince1970: 1_000))
+        p.media.append(VEMediaSource(id: "m3", kind: .video, path: "media/unused.mov", identity: p.media[0].identity,
+                                     duration: 1_000_000, width: 1920, height: 1080, originalName: "unused.mov"))
+        p.media[2].createdAt = Date(timeIntervalSince1970: 10)
+        XCTAssertEqual(p.oldestCaptureDate, Date(timeIntervalSince1970: 1_000), "media not on the timeline doesn't vote")
+    }
+
+    func testRotationFromPreferredTransform() {
+        // A portrait phone clip: 90° clockwise on screen.
+        XCTAssertEqual(VEMediaService.rotation(from: CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 1080, ty: 0)), .rotate90)
+        XCTAssertEqual(VEMediaService.rotation(from: CGAffineTransform(a: 0, b: -1, c: 1, d: 0, tx: 0, ty: 1920)), .rotate270)
+        XCTAssertEqual(VEMediaService.rotation(from: CGAffineTransform(a: -1, b: 0, c: 0, d: -1, tx: 1920, ty: 1080)), .rotate180)
+        XCTAssertEqual(VEMediaService.rotation(from: .identity), .none)
+        // The oriented size swaps for 90/270 and the compositor's orient() produces that extent.
+        var s = VEMediaSource(id: "m", kind: .video, path: "drive://a.mov", identity: VEIdentity(size: 1, mtime: Date(), hash: ""),
+                              duration: 1, width: 1920, height: 1080, originalName: "a.mov")
+        s.transform = .rotate90
+        XCTAssertEqual(s.displaySize, VESize(width: 1080, height: 1920))
+        let frame = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 0, width: 1920, height: 1080))
+        let oriented = VELayerMath.orient(frame, rotation: .rotate90)
+        XCTAssertEqual(oriented.extent, CGRect(x: 0, y: 0, width: 1080, height: 1920))
     }
 
     // MARK: Canvas
@@ -226,7 +299,7 @@ final class VideoEditorTests: XCTestCase {
         XCTAssertEqual(VEExportSettings.recommendedMbps(resolution: .p2160, frameRate: 60, codec: .h264), 70)
         XCTAssertEqual(VEExportSettings.recommendedMbps(resolution: .p1080, frameRate: 24, codec: .h264), 9.6, accuracy: 0.001)
         XCTAssertEqual(VEExportSettings.recommendedMbps(resolution: .p1080, frameRate: 50, codec: .h264), 15, accuracy: 0.001)
-        var s = VEExportSettings(resolution: .p1080, frameRate: 30, quality: .lower, customMbps: 0, codec: .h264, fileName: "x", saveToPhotos: false)
+        var s = VEExportSettings(resolution: .p1080, frameRate: 30, quality: .lower, customMbps: 0, codec: .h264, fileName: "x", saveToPhotos: false, hdr: false)
         XCTAssertEqual(s.videoBitrateBps, 7_200_000)
         s.quality = .higher
         XCTAssertEqual(s.videoBitrateBps, 19_200_000)

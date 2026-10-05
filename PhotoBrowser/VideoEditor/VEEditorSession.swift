@@ -83,6 +83,9 @@ import AVFoundation
         })
         if document.recoveredFromBackup { toast = "The last save couldn't be read, so the previous good save was restored." }
         if let reason = document.readOnlyReason { toast = reason }
+        // Projects saved before HDR existed carry `hdr: false` with the default "Auto" mode; resolve
+        // it from the media now so an HLG project opens in HDR without an undo entry.
+        if !document.readOnly { document.refreshDerivedState { $0.refreshHDR() } }
         validateReferences()
         scheduleDerivedAssets()
         rebuildPreview()
@@ -321,7 +324,8 @@ import AVFoundation
         }
     }
 
-    func setProjectSettings(frameRate: Int, resolution: VEResolution, photoDuration: VETime, freeze: VETime, layer: VETime, proxy: VEProxyMode) {
+    func setProjectSettings(frameRate: Int, resolution: VEResolution, photoDuration: VETime, freeze: VETime, layer: VETime, proxy: VEProxyMode,
+                            hdr: VEHDRMode) {
         edit("Project settings") { p in
             p.settings.frameRate = frameRate
             p.settings.resolution = resolution
@@ -329,7 +333,9 @@ import AVFoundation
             p.settings.defaultFreezeDuration = freeze
             p.settings.defaultLayerDuration = layer
             p.settings.proxyPlayback = proxy
+            p.settings.hdrMode = hdr
             p.refreshCanvas()
+            p.refreshHDR()
         }
         settings.proxyPlayback = proxy
         store.saveSettings(settings)
@@ -432,22 +438,44 @@ import AVFoundation
 
     // MARK: Import (IMP-5)
 
-    /// Import picked URLs and place them on the main track (end, or the cut nearest the playhead).
+    /// Each import gets a generation number so only *its* progress ticks reach the overlay and
+    /// only it may clear the overlay. Progress arrives as separately enqueued main-actor tasks, so
+    /// without this a tick enqueued just before the import finished could land *after* the overlay
+    /// was cleared and leave "Importing…" on screen for good.
+    @ObservationIgnored private var importGeneration = 0
+
+    /// Import picked URLs and place them on the main track (end, or the cut nearest the playhead),
+    /// showing the editor's own progress overlay.
     func importURLs(_ urls: [URL], insertAtPlayhead: Bool) {
+        Task { await importAndWait(urls, insertAtPlayhead: insertAtPlayhead, progress: nil) }
+    }
+
+    /// The import itself. With `progress` nil the editor's overlay shows; a caller with its own
+    /// progress UI (the host's opening screen) passes a handler instead. Returns once the clips are
+    /// on the timeline.
+    func importAndWait(_ urls: [URL], insertAtPlayhead: Bool, progress: (@MainActor (Double, String) -> Void)?) async {
         guard !urls.isEmpty, !document.readOnly else { return }
         let package = document.packageURL
         let store = self.store
         let existing = project.media
-        importProgress = VEImportProgress(fraction: 0, name: "")
-        Task {
-            let result = await VEMediaService.shared.importFiles(urls, into: package, existing: existing, store: store) { f, name in
-                Task { @MainActor [weak self] in self?.importProgress = VEImportProgress(fraction: f, name: name) }
+        importGeneration += 1
+        let gen = importGeneration
+        let overlay = progress == nil
+        if overlay { importProgress = VEImportProgress(fraction: 0, name: "") }
+        let result = await VEMediaService.shared.importFiles(urls, into: package, existing: existing, store: store) { f, name in
+            Task { @MainActor [weak self] in
+                guard let self, self.importGeneration == gen else { return }
+                if let progress {
+                    progress(f, name)
+                } else if self.importProgress != nil {
+                    self.importProgress = VEImportProgress(fraction: f, name: name)
+                }
             }
-            importProgress = nil
-            if result.driveLost { driveLost = true; monitor.report(NSError(domain: NSPOSIXErrorDomain, code: Int(ENODEV))) }
-            importSkipped = result.skipped
-            appendSources(result.sources, insertAtPlayhead: insertAtPlayhead)
         }
+        if overlay, importGeneration == gen { importProgress = nil }
+        if result.driveLost { driveLost = true; monitor.report(NSError(domain: NSPOSIXErrorDomain, code: Int(ENODEV))) }
+        importSkipped = result.skipped
+        appendSources(result.sources, insertAtPlayhead: insertAtPlayhead)
     }
 
     func appendSources(_ sources: [VEMediaSource], insertAtPlayhead: Bool) {
@@ -487,9 +515,38 @@ import AVFoundation
                 insertIndex += 1
             }
             p.refreshCanvas()
+            p.refreshHDR()        // CAN-7: an HLG/PQ clip flips an "Auto" project to HDR
         }
         if let id = firstNewID { selectedClipID = id }
         scheduleDerivedAssets()
+    }
+
+    // MARK: Filters
+
+    /// Filters tool: `commit == false` while the strip/slider are live, one undo step on ✓.
+    func setFilter(_ filter: VEFilter?, commit: Bool) {
+        applyToSelected("Filter", commit: commit) { c in c.filter = filter }
+    }
+
+    /// The selected clip's look (or none) onto every main-track clip, inside the open tool
+    /// transaction when there is one.
+    func applyFilterToAllClips() {
+        let f = selectedClip?.filter
+        if document.inTransaction {
+            document.updateTransaction { p in for i in p.tracks.main.indices { p.tracks.main[i].filter = f } }
+            rebuildPreview()
+        } else {
+            edit("Filter all clips") { p in for i in p.tracks.main.indices { p.tracks.main[i].filter = f } }
+        }
+    }
+
+    // MARK: HDR (CAN-7)
+
+    func setHDRMode(_ mode: VEHDRMode) {
+        edit("HDR") { p in
+            p.settings.hdrMode = mode
+            p.refreshHDR()
+        }
     }
 
     // MARK: Derived assets (IMP-7: thumbnails first, then waveforms, then proxies)
@@ -622,6 +679,7 @@ import AVFoundation
                     m[i].path = ref; m[i].identity = ident; m[i].derived = VEDerived()
                     m[i].duration = probe.duration > 0 ? probe.duration : m[i].duration
                     m[i].width = probe.width; m[i].height = probe.height; m[i].transform = probe.transform
+                    m[i].colorTransfer = probe.colorTransfer; m[i].bitDepth = probe.bitDepth; m[i].createdAt = probe.createdAt ?? m[i].createdAt
                 }
             }
             scheduleDerivedAssets()

@@ -8,35 +8,65 @@ import UIKit
 
 /// The one renderer behind preview, export and thumbnails (ARC-3): a Core Image graph on a
 /// Metal-backed `CIContext`. For each request it fetches the source frame per layer, orients and
-/// crops it, places it on the canvas (fit → scale → rotate → flip → position), applies opacity and
-/// composites over the clip's background. Runs on AVFoundation's rendering queue; reads only the
-/// immutable `VEInstruction` and never touches the document.
-nonisolated final class VECompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
+/// crops it, applies the clip's filter, places it on the canvas (fit → scale → rotate → flip →
+/// position), applies opacity and composites over the clip's background. Runs on AVFoundation's
+/// rendering queue; reads only the immutable `VEInstruction` and never touches the document.
+///
+/// The SDR class renders 8-bit BGRA in sRGB. `VECompositorHDR` (chosen by the builder for HDR
+/// projects, CAN-7) is the same graph with HDR plumbing: it accepts 10-bit source frames, keeps a
+/// 16-bit float working format so highlights above SDR white survive the graph, and writes
+/// 64-bit RGBA half frames in the BT.2020 / HLG colour space that the composition declares.
+nonisolated class VECompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
+    /// Overridden by the HDR subclass. AVFoundation only ever calls `init()`, so this is how the
+    /// instance learns which pipeline it is.
+    class var isHDR: Bool { false }
+
     private let renderQueue = DispatchQueue(label: "VideoEditor.compositor", qos: .userInteractive)
     private var renderContext: AVVideoCompositionRenderContext?
     private let ciContext: CIContext
-    private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+    private let colorSpace: CGColorSpace
+    private let hdr: Bool
 
-    override init() {
+    override required init() {
+        let hdr = Self.isHDR
+        self.hdr = hdr
+        colorSpace = (hdr ? CGColorSpace(name: CGColorSpace.itur_2100_HLG) : nil) ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        var options: [CIContextOption: Any] = [.cacheIntermediates: false, .name: hdr ? "VideoEditor.HDR" : "VideoEditor"]
+        if hdr {
+            // Linear, extended-range working space: values above 1.0 are the HDR highlights.
+            options[.workingFormat] = CIFormat.RGBAh
+            if let linear = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) { options[.workingColorSpace] = linear }
+        }
         if let device = MTLCreateSystemDefaultDevice() {
-            ciContext = CIContext(mtlDevice: device, options: [.cacheIntermediates: false, .name: "VideoEditor"])
+            ciContext = CIContext(mtlDevice: device, options: options)
         } else {
-            ciContext = CIContext(options: [.cacheIntermediates: false])
+            ciContext = CIContext(options: options)
         }
         super.init()
     }
 
     var sourcePixelBufferAttributes: [String: any Sendable]? {
-        [kCVPixelBufferPixelFormatTypeKey as String: [kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-                                                      kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-                                                      kCVPixelFormatType_32BGRA],
-         kCVPixelBufferMetalCompatibilityKey as String: true]
+        var formats: [OSType] = [kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                                 kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                                 kCVPixelFormatType_32BGRA]
+        if hdr {
+            formats = [kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                       kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
+                       kCVPixelFormatType_64RGBAHalf] + formats
+        }
+        return [kCVPixelBufferPixelFormatTypeKey as String: formats,
+                kCVPixelBufferMetalCompatibilityKey as String: true]
     }
 
     var requiredPixelBufferAttributesForRenderContext: [String: any Sendable] {
-        [kCVPixelBufferPixelFormatTypeKey as String: [kCVPixelFormatType_32BGRA],
+        [kCVPixelBufferPixelFormatTypeKey as String: [hdr ? kCVPixelFormatType_64RGBAHalf : kCVPixelFormatType_32BGRA],
          kCVPixelBufferMetalCompatibilityKey as String: true]
     }
+
+    /// Without these AVFoundation tone-maps HDR sources to SDR before handing frames over (which
+    /// is exactly right for the SDR class).
+    var supportsWideColorSourceFrames: Bool { hdr }
+    var supportsHDRSourceFrames: Bool { hdr }
 
     func renderContextChanged(_ newRenderContext: AVVideoCompositionRenderContext) {
         renderQueue.sync { renderContext = newRenderContext }
@@ -116,6 +146,8 @@ nonisolated final class VECompositor: NSObject, AVVideoCompositing, @unchecked S
                 img = img.transformed(by: t)
             }
             img = img.cropped(to: cropRect).transformed(by: CGAffineTransform(translationX: -cropRect.origin.x, y: -cropRect.origin.y))
+            // The clip's look, in source pixels so preview and export agree exactly.
+            if let f = layer.filter, f.isActive { img = VEFilterCatalog.apply(f, to: img) }
             // Place on the canvas, then into render pixels.
             var place = VELayerMath.placement(cropSize: cropRect.size, canvasSize: canvas, transform: layer.transform)
             place = place.concatenating(CGAffineTransform(scaleX: scale, y: scale))
@@ -169,6 +201,13 @@ nonisolated final class VECompositor: NSObject, AVVideoCompositing, @unchecked S
             return CIImage(color: VEColor.ciColor(layer.background.color)).cropped(to: bounds).composited(over: over)
         }
     }
+}
+
+/// The HDR pipeline (see `VECompositor`). A separate class rather than a flag because
+/// `AVMutableVideoComposition.customVideoCompositorClass` is the only way the builder can tell
+/// AVFoundation which pixel formats to deliver and expect.
+nonisolated final class VECompositorHDR: VECompositor {
+    override class var isHDR: Bool { true }
 }
 
 /// Decoded stills (and GIF frame sets) for the compositor, keyed by path and size, capped at
@@ -245,7 +284,7 @@ nonisolated final class VEImageCacheEntry: @unchecked Sendable {
 nonisolated enum VEFrameRenderer {
     /// Renders one composed frame of a built composition (project cover, export completion
     /// thumbnail) through the same compositor as playback.
-    static func image(of built: VEBuiltComposition, at time: VETime, maxPixel: CGFloat) async -> UIImage? {
+    @concurrent static func image(of built: VEBuiltComposition, at time: VETime, maxPixel: CGFloat) async -> UIImage? {
         let gen = AVAssetImageGenerator(asset: built.composition)
         gen.videoComposition = built.videoComposition
         gen.appliesPreferredTrackTransform = false

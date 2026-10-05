@@ -52,6 +52,7 @@ struct VEEditorHostView: View {
     @State private var choosing = false
     @State private var pendingItems: [URL] = []
     @State private var navigateTo: URL?
+    @State private var progress = VEOpenProgress(fraction: 0.02, label: "Checking the drive…")
 
     var body: some View {
         Group {
@@ -76,7 +77,7 @@ struct VEEditorHostView: View {
                         }
                         .padding(32)
                     } else {
-                        ProgressView("Opening…")
+                        VEOpenProgressView(progress: progress)
                     }
                 }
                 .preferredColorScheme(.dark)
@@ -88,8 +89,13 @@ struct VEEditorHostView: View {
         }
     }
 
+    private func report(_ fraction: Double, _ label: String, _ detail: String? = nil) {
+        progress = VEOpenProgress(fraction: max(progress.fraction, fraction), label: label, detail: detail)
+    }
+
     private func resolve() async {
         guard let store = VideoEditorModule.store(for: library) else { error = .driveUnavailable; return }
+        report(0.05, "Checking the drive…")
         do { try await Task.detached { try store.ensureLayout() }.value } catch {
             self.error = store.isReadOnly ? .readOnlyVolume : .driveUnavailable
             return
@@ -111,11 +117,11 @@ struct VEEditorHostView: View {
         ps.defaultPhotoDuration = settings.defaultPhotoDuration
         ps.proxyPlayback = settings.proxyPlayback
         ps.canvas.ratio = .original     // re-fitted from the first clip once media lands (CAN-1)
+        report(0.15, "Creating the project…")
         do {
             let doc = try await VEDocument.create(name: VENames.defaultProjectName(), settings: ps, store: store)
             let s = VEEditorSession(document: doc, store: store, settings: settings)
-            session = s
-            if !items.isEmpty { s.importURLs(items, insertAtPlayhead: false) }
+            await present(s, adding: items)
         } catch let e as VEError {
             error = e
         } catch {
@@ -125,11 +131,12 @@ struct VEEditorHostView: View {
 
     private func open(_ pkg: URL, thenAdd items: [URL]) async {
         guard let store = VideoEditorModule.store(for: library) else { error = .driveUnavailable; return }
+        report(0.15, "Reading the project…")
         do {
             let doc = try await VEDocument.open(packageURL: pkg, store: store)
             let s = VEEditorSession(document: doc, store: store, settings: store.loadSettings())
-            session = s
-            if !items.isEmpty { s.importURLs(items, insertAtPlayhead: false) }
+            await warm(doc, store: store)
+            await present(s, adding: items)
         } catch let e as VEError {
             error = e
             if case .documentCorrupt = e { corruptPackage = pkg }
@@ -142,12 +149,76 @@ struct VEEditorHostView: View {
     private func rebuild(_ pkg: URL) async {
         guard let store = VideoEditorModule.store(for: library) else { return }
         error = nil
+        report(0.15, "Rebuilding from media…")
         do {
             let doc = try await VEDocument.rebuild(packageURL: pkg, store: store)
-            session = VEEditorSession(document: doc, store: store, settings: store.loadSettings())
+            let s = VEEditorSession(document: doc, store: store, settings: store.loadSettings())
+            await warm(doc, store: store)
+            await present(s, adding: [])
         } catch {
             self.error = .exportFailed("The project couldn't be rebuilt from its media.")
         }
+    }
+
+    /// Imports the launch items (if any) while the progress screen is still up — the bar tracks
+    /// the copy, so "Edit in Video Editor" on a clip never shows a black screen or a second
+    /// "Importing…" pop-up — then hands over to the editor.
+    private func present(_ s: VEEditorSession, adding items: [URL]) async {
+        if !items.isEmpty {
+            report(0.3, "Importing…")
+            await s.importAndWait(items, insertAtPlayhead: false) { f, name in
+                report(0.3 + 0.65 * f, "Importing…", name.isEmpty ? nil : name)
+            }
+        }
+        report(0.97, "Building the preview…")
+        session = s
+    }
+
+    /// Opening an existing project: parse the video files it uses now, with the bar moving per
+    /// file, so the first preview build inside the editor is instant instead of a frozen canvas
+    /// while AVFoundation reads every clip over USB.
+    private func warm(_ doc: VEDocument, store: VEDriveStore) async {
+        let p = doc.project
+        let used = p.usedMediaIDs
+        let videos = p.media.filter { used.contains($0.id) && $0.kind == .video }
+        guard !videos.isEmpty else { return }
+        let package = doc.packageURL
+        for (i, s) in videos.enumerated() {
+            report(0.3 + 0.6 * Double(i) / Double(videos.count), "Loading media…", s.displayName)
+            let url = store.resolve(s.path, package: package)
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            _ = try? await VEAssetCache.shared.asset(for: url)
+        }
+    }
+}
+
+/// What the opening screen shows while the editor is being prepared.
+struct VEOpenProgress: Equatable {
+    var fraction: Double
+    var label: String
+    var detail: String? = nil
+}
+
+/// The determinate opening screen (replaces a bare "Opening…" spinner): stage label, bar, the
+/// file being worked on and a percentage.
+struct VEOpenProgressView: View {
+    let progress: VEOpenProgress
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "film.stack").font(.system(size: 40)).foregroundStyle(.secondary)
+            Text(progress.label).font(.headline)
+            ProgressView(value: min(1, max(0, progress.fraction)))
+                .tint(.accentColor)
+                .frame(maxWidth: 320)
+            Text(progress.detail ?? " ")
+                .font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+                .frame(maxWidth: 320)
+            Text("\(Int((min(1, max(0, progress.fraction)) * 100).rounded()))%")
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+        }
+        .padding(32)
+        .animation(.easeInOut(duration: 0.2), value: progress.fraction)
     }
 }
 

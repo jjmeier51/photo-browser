@@ -2,6 +2,7 @@ import Foundation
 import os
 import AVFoundation
 import CoreImage
+import ImageIO
 import UIKit
 import Photos
 import UserNotifications
@@ -34,6 +35,11 @@ nonisolated struct VEExportSettings: Sendable, Equatable {
     var codec: VEExportCodec
     var fileName: String
     var saveToPhotos: Bool
+    /// 10-bit HEVC in BT.2020 / HLG (CAN-7). Off exports an HDR project tone-mapped to SDR.
+    var hdr: Bool
+
+    /// HDR is only expressible in HEVC Main 10; the codec picker is overridden when HDR is on.
+    var effectiveCodec: VEExportCodec { hdr ? .hevc : codec }
 
     /// EXP-3 Recommended table (Mb/s): [resolution: (30 fps, 60 fps)].
     static func recommendedMbps(resolution: VEResolution, frameRate: Int, codec: VEExportCodec) -> Double {
@@ -46,7 +52,7 @@ nonisolated struct VEExportSettings: Sendable, Equatable {
     }
 
     var videoBitrateBps: Int {
-        let rec = Self.recommendedMbps(resolution: resolution, frameRate: frameRate, codec: codec)
+        let rec = Self.recommendedMbps(resolution: resolution, frameRate: frameRate, codec: effectiveCodec)
         let mbps: Double
         switch quality {
         case .lower: mbps = rec * 0.6
@@ -209,6 +215,101 @@ nonisolated enum VEExportPreflight {
     }
 }
 
+// MARK: - Source metadata carried into the export
+
+/// What the exported file says about itself (EXP): the sources' own metadata rather than a fresh
+/// "created now" stamp. The creation date is the **oldest capture date** across the media in use
+/// (embedded QuickTime creation date or EXIF DateTimeOriginal; file dates only when no source has
+/// one), written as both the common and QuickTime keys so Photos, the Files app and this browser
+/// all agree. Location, device make/model and the rest ride along from the video that owns that
+/// date (or the first video); a photo's GPS fills in location when no video has one.
+nonisolated struct VEExportMetadata: @unchecked Sendable {
+    var items: [AVMetadataItem] = []
+    var date: Date?
+
+    @concurrent static func collect(project: VEProject, package: URL, store: VEDriveStore) async -> VEExportMetadata {
+        // Main-track order first so ties resolve to the first clip, then anything else in use.
+        var ordered: [VEMediaSource] = []
+        for c in project.tracks.main {
+            if let s = project.source(c.mediaId), !ordered.contains(where: { $0.id == s.id }) { ordered.append(s) }
+        }
+        let used = project.usedMediaIDs
+        for s in project.media where used.contains(s.id) && !ordered.contains(where: { $0.id == s.id }) { ordered.append(s) }
+
+        var embedded: [(Date, VEMediaSource)] = []
+        var fileDates: [Date] = []
+        for s in ordered {
+            let url = store.resolve(s.path, package: package)
+            var d = s.createdAt
+            if d == nil, s.kind == .video, let asset = try? await VEAssetCache.shared.asset(for: url),
+               let item = try? await asset.load(.creationDate), let v = try? await item.load(.dateValue) {
+                d = v
+            }
+            if let d { embedded.append((d, s)) }
+            else if let c = (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate { fileDates.append(c) }
+        }
+        let oldest = embedded.min { $0.0 < $1.0 }
+        var result = VEExportMetadata()
+        result.date = oldest?.0 ?? (embedded.isEmpty ? fileDates.min() : nil)
+
+        // Donor for the rest of the metadata: the video that owns the oldest date, else the first video.
+        let donor = (oldest?.1.kind == .video ? oldest?.1 : nil) ?? ordered.first { $0.kind == .video }
+        if let donor, let asset = try? await VEAssetCache.shared.asset(for: store.resolve(donor.path, package: package)),
+           let md = try? await asset.load(.metadata) {
+            result.items = md.filter { $0.identifier != nil && !isCreationDate($0) }
+        }
+        if !result.items.contains(where: isLocation) {
+            for s in ordered where s.kind == .image {
+                if let iso = imageLocationISO6709(store.resolve(s.path, package: package)) {
+                    result.items += locationItems(iso)
+                    break
+                }
+            }
+        }
+        if let d = result.date { result.items += dateItems(d) }
+        return result
+    }
+
+    static func isCreationDate(_ item: AVMetadataItem) -> Bool {
+        item.commonKey == .commonKeyCreationDate || item.identifier == .commonIdentifierCreationDate || item.identifier == .quickTimeMetadataCreationDate
+    }
+    static func isLocation(_ item: AVMetadataItem) -> Bool {
+        item.commonKey == .commonKeyLocation || item.identifier == .commonIdentifierLocation || item.identifier == .quickTimeMetadataLocationISO6709
+    }
+
+    static func dateItems(_ date: Date) -> [AVMetadataItem] {
+        let iso = ISO8601DateFormatter().string(from: date)
+        return [AVMetadataIdentifier.commonIdentifierCreationDate, .quickTimeMetadataCreationDate].map { id in
+            let item = AVMutableMetadataItem()
+            item.identifier = id
+            item.value = iso as NSString
+            return item
+        }
+    }
+
+    static func locationItems(_ iso6709: String) -> [AVMetadataItem] {
+        [AVMetadataIdentifier.quickTimeMetadataLocationISO6709, .commonIdentifierLocation].map { id in
+            let item = AVMutableMetadataItem()
+            item.identifier = id
+            item.value = iso6709 as NSString
+            return item
+        }
+    }
+
+    /// A photo's EXIF GPS as the `±DD.DDDDD±DDD.DDDDD/` string QuickTime stores.
+    static func imageLocationISO6709(_ url: URL) -> String? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any],
+              let lat = (gps[kCGImagePropertyGPSLatitude] as? NSNumber)?.doubleValue,
+              let lng = (gps[kCGImagePropertyGPSLongitude] as? NSNumber)?.doubleValue else { return nil }
+        let latSigned = (gps[kCGImagePropertyGPSLatitudeRef] as? String) == "S" ? -lat : lat
+        let lngSigned = (gps[kCGImagePropertyGPSLongitudeRef] as? String) == "W" ? -lng : lng
+        guard latSigned.isFinite, lngSigned.isFinite, abs(latSigned) <= 90, abs(lngSigned) <= 180, !(latSigned == 0 && lngSigned == 0) else { return nil }
+        return String(format: "%+09.5f%+010.5f/", latSigned, lngSigned)
+    }
+}
+
 nonisolated final class VECancelFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var flag = false
@@ -229,8 +330,10 @@ nonisolated enum VEExportService {
         case thumbnail(UIImage)
     }
 
-    static func run(project: VEProject, package: URL, store: VEDriveStore, settings: VEExportSettings, cancel: VECancelFlag,
-                    update: @escaping @Sendable (Update) -> Void) async -> Result<URL, VEError> {
+    /// `@concurrent`: started from the main actor by `VEExportJob`; the pre-flight file checks,
+    /// the composition build and the metadata reads must not run there.
+    @concurrent static func run(project: VEProject, package: URL, store: VEDriveStore, settings: VEExportSettings, cancel: VECancelFlag,
+                                update: @escaping @Sendable (Update) -> Void) async -> Result<URL, VEError> {
         let pre = VEExportPreflight.check(project: project, settings: settings, store: store, package: package)
         if let b = pre.blockers.first { return .failure(b) }
         guard project.duration > 0 else { return .failure(.exportFailed("The project has no clips.")) }
@@ -240,6 +343,7 @@ nonisolated enum VEExportService {
         var opts = VECompositionBuilder.Options()
         opts.useProxies = false
         opts.frameRate = settings.frameRate
+        opts.hdr = settings.hdr
         let built: VEBuiltComposition
         do {
             built = try await VECompositionBuilder.build(project, package: package, store: store, options: opts)
@@ -248,6 +352,9 @@ nonisolated enum VEExportService {
         }
         built.videoComposition.renderSize = exportCanvas.size
         if !built.missingClipIDs.isEmpty { return .failure(.missingMedia(built.missingClipIDs)) }
+
+        // What the file says about itself: the sources' metadata with the oldest capture date.
+        let metadata = await VEExportMetadata.collect(project: project, package: package, store: store)
 
         let rendersDir = VEDriveLayout.renders(package)
         let exportsDir = VEDriveLayout.exports(store.editorRoot)
@@ -262,7 +369,8 @@ nonisolated enum VEExportService {
         // cooperative-pool thread.
         let result: Result<URL, VEError> = await withCheckedContinuation { cont in
             DispatchQueue(label: "VideoEditor.export", qos: .userInitiated).async {
-                cont.resume(returning: encode(built: built, to: partial, canvas: exportCanvas, settings: settings, cancel: cancel, update: update))
+                cont.resume(returning: encode(built: built, to: partial, canvas: exportCanvas, settings: settings, metadata: metadata,
+                                              cancel: cancel, update: update))
             }
         }
 
@@ -273,6 +381,13 @@ nonisolated enum VEExportService {
         case .success:
             update(.status(.finishing))
             let dest = exportsDir.appendingPathComponent(finalName)
+            // File-system dates = the oldest source date too, so the browser's date sort, year
+            // filter and Age treat the export like the footage it came from. Set on the temp so the
+            // final directory entry is written once.
+            if let d = metadata.date {
+                try? FileManager.default.setAttributes([.creationDate: d, .modificationDate: d], ofItemAtPath: partial.path)
+                DriveWriter.fullSync(partial)
+            }
             do {
                 try store.coordinatedMove(from: partial, to: dest)
                 VELog.export.log("exported \(finalName)")
@@ -286,9 +401,10 @@ nonisolated enum VEExportService {
         }
     }
 
-    private static func encode(built: VEBuiltComposition, to url: URL, canvas: VECanvas, settings: VEExportSettings,
+    private static func encode(built: VEBuiltComposition, to url: URL, canvas: VECanvas, settings: VEExportSettings, metadata: VEExportMetadata,
                                cancel: VECancelFlag, update: @escaping @Sendable (Update) -> Void) -> Result<URL, VEError> {
         let composition = built.composition
+        let hdr = built.isHDR
         let reader: AVAssetReader
         let writer: AVAssetWriter
         do {
@@ -298,10 +414,12 @@ nonisolated enum VEExportService {
             return .failure(.exportFailed("The encoder couldn't be started."))
         }
 
-        // Reader outputs.
+        // Reader outputs. HDR frames come out of the compositor as 64-bit RGBA half; the reader
+        // hands them to the encoder as 10-bit 4:2:0 (the HEVC Main 10 native input).
         let videoTracks = composition.tracks(withMediaType: .video)
+        let readerFormat: OSType = hdr ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_32BGRA
         let videoOut = AVAssetReaderVideoCompositionOutput(videoTracks: videoTracks,
-                                                           videoSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+                                                           videoSettings: [kCVPixelBufferPixelFormatTypeKey as String: readerFormat])
         videoOut.videoComposition = built.videoComposition
         videoOut.alwaysCopiesSampleData = false
         guard reader.canAdd(videoOut) else { return .failure(.exportFailed("The video track couldn't be read.")) }
@@ -320,26 +438,36 @@ nonisolated enum VEExportService {
             if reader.canAdd(a) { reader.add(a); audioOut = a }
         }
 
-        // Writer inputs (EXP-3).
-        let isHEVC = settings.codec == .hevc
+        // Writer inputs (EXP-3). HDR is HEVC Main 10 tagged BT.2020 / HLG (CAN-7).
+        let isHEVC = settings.effectiveCodec == .hevc || hdr
         var compression: [String: Any] = [
             AVVideoAverageBitRateKey: settings.videoBitrateBps,
             AVVideoMaxKeyFrameIntervalDurationKey: 2,
             AVVideoExpectedSourceFrameRateKey: settings.frameRate,
             AVVideoAllowFrameReorderingKey: true,
         ]
-        compression[AVVideoProfileLevelKey] = isHEVC ? (kVTProfileLevel_HEVC_Main_AutoLevel as String) : AVVideoProfileLevelH264HighAutoLevel
+        if hdr {
+            compression[AVVideoProfileLevelKey] = kVTProfileLevel_HEVC_Main10_AutoLevel as String
+        } else {
+            compression[AVVideoProfileLevelKey] = isHEVC ? (kVTProfileLevel_HEVC_Main_AutoLevel as String) : AVVideoProfileLevelH264HighAutoLevel
+        }
+        let color: [String: Any] = hdr
+            ? [AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_2020,
+               AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_2100_HLG,
+               AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_2020]
+            : [AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+               AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+               AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2]
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: isHEVC ? AVVideoCodecType.hevc : AVVideoCodecType.h264,
             AVVideoWidthKey: canvas.width,
             AVVideoHeightKey: canvas.height,
             AVVideoCompressionPropertiesKey: compression,
-            AVVideoColorPropertiesKey: [AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                                        AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-                                        AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2],
+            AVVideoColorPropertiesKey: color,
         ]
         guard writer.canApply(outputSettings: videoSettings, forMediaType: .video) else {
-            return .failure(.exportFailed("This device can't encode \(settings.codec.label) at \(settings.resolution.label)."))
+            let what = hdr ? "10-bit HDR HEVC" : settings.effectiveCodec.label
+            return .failure(.exportFailed("This device can't encode \(what) at \(settings.resolution.label)."))
         }
         let videoIn = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoIn.expectsMediaDataInRealTime = false
@@ -355,10 +483,7 @@ nonisolated enum VEExportService {
             if writer.canAdd(a) { writer.add(a); audioIn = a }
         }
         writer.shouldOptimizeForNetworkUse = true
-        let created = AVMutableMetadataItem()
-        created.identifier = .commonIdentifierCreationDate
-        created.value = ISO8601DateFormatter().string(from: Date()) as NSString
-        writer.metadata = [created]
+        writer.metadata = metadata.items
 
         guard reader.startReading() else {
             return .failure(.exportFailed("The timeline couldn't be read: \(reader.error?.localizedDescription ?? "unknown error")."))

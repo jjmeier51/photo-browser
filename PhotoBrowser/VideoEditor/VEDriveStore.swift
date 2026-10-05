@@ -406,12 +406,14 @@ nonisolated struct VEExportPreferences: Codable, Equatable, Sendable {
     var customBitrateMbps: Double = 12
     var codec: String = "auto"            // auto | h264 | hevc
     var saveToPhotos: Bool = false
+    var hdr: Bool? = nil                  // nil = follow the project's HDR state
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
         resolution = VECoding.get(c, "resolution", VEResolution.p1080); frameRate = VECoding.opt(c, "frameRate")
         quality = VECoding.get(c, "quality", "recommended"); customBitrateMbps = VECoding.get(c, "customBitrateMbps", 12.0)
         codec = VECoding.get(c, "codec", "auto"); saveToPhotos = VECoding.get(c, "saveToPhotos", false)
+        hdr = VECoding.opt(c, "hdr")
     }
 }
 

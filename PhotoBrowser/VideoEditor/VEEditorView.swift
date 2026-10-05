@@ -127,6 +127,10 @@ struct VEEditorView: View {
                         Text("Proxy").font(.caption2.bold()).padding(.horizontal, 6).padding(.vertical, 2)
                             .background(.ultraThinMaterial, in: Capsule())
                     }
+                    if project.settings.hdr {
+                        Text("HDR").font(.caption2.bold()).padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(.ultraThinMaterial, in: Capsule())
+                    }
                     if session.playback.isBuilding { ProgressView().controlSize(.small) }
                     Spacer()
                     if !session.missingSources.isEmpty {
@@ -254,6 +258,7 @@ struct VEEditorView: View {
                 if isStill { toolButton("Duration", "timer") { tool = .duration } }
                 toolButton("Delete", "trash") { session.deleteSelected() }
                 toolButton("Edit", "crop.rotate") { tool = .edit }
+                toolButton("Filters", "camera.filters") { tool = .filter }
                 toolButton("Opacity", "circle.lefthalf.filled") { tool = .opacity }
                 toolButton("Copy", "plus.square.on.square") { session.duplicateSelected() }
                 toolButton("Canvas", "rectangle.on.rectangle") { tool = .canvas }
@@ -314,7 +319,7 @@ struct VEEditorView: View {
     }
 }
 
-enum VETool: Equatable { case speed, volume, opacity, duration, edit, ratio, canvas }
+enum VETool: Equatable { case speed, volume, opacity, duration, edit, filter, ratio, canvas }
 
 /// The bottom tool sheet with ✕ / ✓ (TL-2). Cancel restores the pre-sheet state as one undo step.
 struct VEToolSheet: View {
@@ -374,6 +379,7 @@ struct VEToolSheet: View {
         case .opacity: return "Opacity"
         case .duration: return "Duration"
         case .edit: return "Edit"
+        case .filter: return "Filters"
         case .ratio: return "Ratio"
         case .canvas: return "Canvas"
         }
@@ -416,6 +422,8 @@ struct VEToolSheet: View {
             .padding(.horizontal, 16)
         case .edit:
             VEEditToolRow(session: session)
+        case .filter:
+            VEFilterToolRow(session: session)
         case .ratio:
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -466,6 +474,102 @@ struct VEEditToolRow: View {
         }
         .foregroundStyle(.white)
     }
+}
+
+/// Filters: the clip's poster wearing each look in `VEFilterCatalog`, an intensity slider and
+/// "Apply to all clips". Every change updates the open tool transaction (✓ = one undo step).
+struct VEFilterToolRow: View {
+    let session: VEEditorSession
+    @State private var intensity: Double = 100
+    @State private var base: UIImage?
+    @State private var previews: [String: UIImage] = [:]
+
+    private var current: VEFilter? { session.selectedClip?.filter }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    chip(name: "None", image: base, on: current?.isActive != true) { session.setFilter(nil, commit: false) }
+                    ForEach(VEFilterCatalog.all) { d in
+                        chip(name: d.name, image: previews[d.id], on: current?.isActive == true && current?.id == d.id) {
+                            session.setFilter(VEFilter(id: d.id, intensity: intensity / 100), commit: false)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+            HStack(spacing: 10) {
+                Text("\(Int(intensity))").font(.caption.monospacedDigit()).frame(width: 36)
+                Slider(value: $intensity, in: 0...100, step: 1)
+                    .disabled(current == nil)
+                    .onChange(of: intensity) { _, v in
+                        guard let c = current else { return }
+                        session.setFilter(VEFilter(id: c.id, intensity: v / 100), commit: false)
+                    }
+                Button("Apply to all") { session.applyFilterToAllClips() }.font(.caption)
+            }
+            .padding(.horizontal, 16)
+        }
+        .foregroundStyle(.white)
+        .onAppear { if let c = current { intensity = c.intensity * 100 } }
+        .task { await loadPreviews() }
+    }
+
+    private func chip(name: String, image: UIImage?, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8).fill(Color(white: 0.2))
+                    if let image { Image(uiImage: image).resizable().scaledToFill() }
+                }
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(on ? Color.accentColor : Color.clear, lineWidth: 2.5))
+                Text(name).font(.caption2).lineLimit(1)
+            }
+            .frame(width: 64)
+        }
+    }
+
+    /// The poster (or a frame / downsampled still when thumbnails haven't landed yet) rendered
+    /// through every preset once, off the main actor.
+    private func loadPreviews() async {
+        guard let clip = session.selectedClip, let src = session.project.source(clip.mediaId) else { return }
+        let package = session.document.packageURL
+        let store = session.store
+        let url = store.resolve(src.path, package: package)
+        let poster = VEDriveLayout.thumbs(package).appendingPathComponent(src.id, isDirectory: true).appendingPathComponent("poster.jpg")
+        let kind = src.kind
+        let time = clip.sourceRange.start
+        let rendered = await Task.detached(priority: .userInitiated) { () async -> VEFilterPreviews in
+            var img = UIImage(contentsOfFile: poster.path)
+            if img == nil {
+                img = kind == .video ? await VEMediaService.shared.frame(of: url, at: time, maxPixel: 160) : VEMediaService.downsampledImage(url, maxPixel: 160)
+            }
+            guard let loaded = img else { return VEFilterPreviews() }
+            let small = VEMediaService.resized(loaded, maxPixel: 112)
+            guard let cg = small.cgImage else { return VEFilterPreviews() }
+            let ci = CIImage(cgImage: cg)
+            let ctx = CIContext(options: [.cacheIntermediates: false])
+            var out = VEFilterPreviews()
+            out.base = small
+            for d in VEFilterCatalog.all {
+                let f = d.apply(ci).cropped(to: ci.extent)
+                if let r = ctx.createCGImage(f, from: ci.extent) { out.filtered[d.id] = UIImage(cgImage: r) }
+            }
+            return out
+        }.value
+        base = rendered.base
+        previews = rendered.filtered
+    }
+}
+
+/// The rendered filter chips for one clip (a struct rather than a tuple so it crosses the
+/// detached-task boundary as one Sendable value).
+struct VEFilterPreviews: Sendable {
+    var base: UIImage?
+    var filtered: [String: UIImage] = [:]
 }
 
 /// Canvas background per clip (CAN-4, colour tab + blur in Phase 1) with "Apply to all".
@@ -576,6 +680,7 @@ struct VEProjectSettingsSheet: View {
     @State private var freeze: Double = 3
     @State private var layer: Double = 3
     @State private var proxy: VEProxyMode = .auto
+    @State private var hdrMode: VEHDRMode = .auto
     @State private var snapping = true
     @State private var haptics = true
     @State private var diagnostics = false
@@ -588,6 +693,15 @@ struct VEProjectSettingsSheet: View {
                     Picker("Frame rate", selection: $frameRate) { ForEach([24, 25, 30, 50, 60], id: \.self) { Text("\($0) fps").tag($0) } }
                     LabeledContent("Canvas", value: "\(session.project.settings.canvas.width) × \(session.project.settings.canvas.height)")
                     LabeledContent("Aspect ratio", value: session.project.settings.canvas.ratio.rawValue)
+                }
+                Section {
+                    Picker("HDR", selection: $hdrMode) {
+                        Text("Auto").tag(VEHDRMode.auto); Text("On").tag(VEHDRMode.on); Text("Off").tag(VEHDRMode.off)
+                    }
+                    LabeledContent("Renders in", value: session.project.settings.hdr ? "HDR (BT.2020 / HLG)" : "SDR (BT.709)")
+                    LabeledContent("HDR clips", value: session.project.hasHDRMedia ? "Yes" : "None")
+                } header: { Text("Colour") } footer: {
+                    Text("Auto switches the project to HDR as soon as an HLG or PQ clip is on the timeline. HDR projects preview in HDR on capable screens and export as 10-bit HEVC; SDR clips and photos are placed at standard white.")
                 }
                 Section("Defaults") {
                     Stepper("Photo duration: \(photo, specifier: "%.1f") s", value: $photo, in: 0.5...30, step: 0.5)
@@ -621,7 +735,8 @@ struct VEProjectSettingsSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
                         session.setProjectSettings(frameRate: frameRate, resolution: resolution, photoDuration: VETimeUtil.fromSeconds(photo),
-                                                   freeze: VETimeUtil.fromSeconds(freeze), layer: VETimeUtil.fromSeconds(layer), proxy: proxy)
+                                                   freeze: VETimeUtil.fromSeconds(freeze), layer: VETimeUtil.fromSeconds(layer), proxy: proxy,
+                                                   hdr: hdrMode)
                         session.settings.snapping = snapping; session.settings.haptics = haptics; session.settings.diagnostics = diagnostics
                         session.settings.defaultPhotoDuration = VETimeUtil.fromSeconds(photo)
                         VELog.diagnosticsRoot = diagnostics ? session.store.editorRoot : nil
@@ -635,6 +750,7 @@ struct VEProjectSettingsSheet: View {
                 frameRate = s.frameRate; resolution = s.resolution
                 photo = VETimeUtil.seconds(s.defaultPhotoDuration); freeze = VETimeUtil.seconds(s.defaultFreezeDuration); layer = VETimeUtil.seconds(s.defaultLayerDuration)
                 proxy = s.proxyPlayback
+                hdrMode = s.hdrMode
                 snapping = session.settings.snapping; haptics = session.settings.haptics; diagnostics = session.settings.diagnostics
             }
         }

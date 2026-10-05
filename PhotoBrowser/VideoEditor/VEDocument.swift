@@ -274,6 +274,17 @@ nonisolated struct VELockInfo: Codable, Sendable {
         revision &+= 1
     }
 
+    /// Non-undoable derived-state refresh (e.g. resolving `settings.hdr` from the media when a
+    /// project opens). Same contract as `updateMedia`: saved, not an undo step.
+    func refreshDerivedState(_ mutate: (inout VEProject) -> Void) {
+        var p = project
+        mutate(&p)
+        guard p.editableState != project.editableState else { return }
+        project = p
+        markDirty()
+        revision &+= 1
+    }
+
     private func changed() {
         revision &+= 1
         markDirty()

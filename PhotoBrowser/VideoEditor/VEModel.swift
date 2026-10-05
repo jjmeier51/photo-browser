@@ -222,11 +222,18 @@ nonisolated struct VECanvas: Codable, Equatable, Sendable, Hashable {
 
 // MARK: - Settings
 
+/// How a project decides whether it renders in HDR (CAN-7). `auto` follows the media: HDR as soon
+/// as any HLG/PQ video is on the timeline. The resolved answer is cached in `hdr` so the builder,
+/// export and UI read one bool.
+nonisolated enum VEHDRMode: String, Codable, CaseIterable, Sendable { case auto, on, off }
+
 nonisolated struct VEProjectSettings: Codable, Equatable, Sendable {
     var frameRate: Int = 30
     var resolution: VEResolution = .p1080
     var canvas: VECanvas = VECanvas(ratio: .r9x16, width: 1080, height: 1920)
+    /// Resolved HDR state (see `hdrMode`); true = BT.2020 / HLG working space and 10-bit HEVC export.
     var hdr: Bool = false
+    var hdrMode: VEHDRMode = .auto
     var muteOriginalAudio: Bool = false
     var defaultPhotoDuration: VETime = 3 * VETimeUtil.second
     var defaultFreezeDuration: VETime = 3 * VETimeUtil.second
@@ -241,6 +248,7 @@ nonisolated struct VEProjectSettings: Codable, Equatable, Sendable {
         resolution = VECoding.get(c, "resolution", VEResolution.p1080)
         canvas = VECoding.get(c, "canvas", VECanvas(ratio: .r9x16, width: 1080, height: 1920))
         hdr = VECoding.get(c, "hdr", false)
+        hdrMode = VECoding.get(c, "hdrMode", VEHDRMode.auto)
         muteOriginalAudio = VECoding.get(c, "muteOriginalAudio", false)
         defaultPhotoDuration = VECoding.get(c, "defaultPhotoDuration", 3 * VETimeUtil.second)
         defaultFreezeDuration = VECoding.get(c, "defaultFreezeDuration", 3 * VETimeUtil.second)
@@ -297,6 +305,8 @@ nonisolated struct VEMediaSource: Codable, Equatable, Sendable, Identifiable {
     }
     var displayName: String { originalName.isEmpty ? (path as NSString).lastPathComponent : originalName }
     var isStill: Bool { kind == .image }
+    /// HLG or PQ video (what the probe found in the format description).
+    var isHDR: Bool { kind == .video && (colorTransfer == "HLG" || colorTransfer == "PQ") }
 
     private static let known: Set<String> = ["id", "kind", "path", "identity", "duration", "width", "height", "transform", "fps", "vfr",
                                              "codec", "bitDepth", "colorTransfer", "hasAudio", "hasAlpha", "audioChannels",
@@ -418,6 +428,20 @@ nonisolated struct VEBackground: Codable, Equatable, Sendable {
     }
 }
 
+/// A colour look on a clip: one of `VEFilterCatalog`'s presets, mixed with the original at
+/// `intensity` (0 = off, 1 = the full look). Stored as `{ "id": …, "intensity": … }`.
+nonisolated struct VEFilter: Codable, Equatable, Sendable {
+    var id: String
+    var intensity: Double = 1
+    init(id: String, intensity: Double = 1) { self.id = id; self.intensity = intensity }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: VEDynamicKey.self)
+        id = try VECoding.req(c, "id")
+        intensity = VECoding.get(c, "intensity", 1.0)
+    }
+    var isActive: Bool { intensity > 0.001 && id != "none" }
+}
+
 nonisolated struct VEClip: Codable, Equatable, Sendable, Identifiable {
     var id: String
     var mediaId: String
@@ -436,7 +460,7 @@ nonisolated struct VEClip: Codable, Equatable, Sendable, Identifiable {
     var fadeOut: VETime = 0
     var audioMuted: Bool = false
     var audioExtracted: Bool = false
-    var filter: JSONValue?
+    var filter: VEFilter?
     var adjust: JSONValue?
     var lut: String?
     var mask: JSONValue?
@@ -701,6 +725,30 @@ nonisolated struct VEProject: Codable, Equatable, Sendable, Identifiable {
     mutating func refreshCanvas() {
         settings.canvas = VECanvas.make(ratio: settings.canvas.ratio, resolution: settings.resolution,
                                         originalAspect: settings.canvas.ratio == .original ? originalAspect() : settings.canvas.aspect)
+    }
+
+    /// Any HLG/PQ video actually on the timeline.
+    var hasHDRMedia: Bool {
+        let used = usedMediaIDs
+        return media.contains { used.contains($0.id) && $0.isHDR }
+    }
+
+    /// Resolve `settings.hdr` from `settings.hdrMode` and the media (CAN-7). Called whenever media
+    /// or the mode changes, so the builder, export and UI only ever read the bool.
+    mutating func refreshHDR() {
+        switch settings.hdrMode {
+        case .on: settings.hdr = true
+        case .off: settings.hdr = false
+        case .auto: settings.hdr = hasHDRMedia
+        }
+    }
+
+    /// The earliest capture date across the media in use (EXP: the export carries the oldest
+    /// source date). `createdAt` is the embedded date the probe found (QuickTime creation date or
+    /// EXIF DateTimeOriginal); files without one don't vote.
+    var oldestCaptureDate: Date? {
+        let used = usedMediaIDs
+        return media.filter { used.contains($0.id) }.compactMap(\.createdAt).min()
     }
 }
 

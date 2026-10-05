@@ -315,6 +315,13 @@ These were discovered the painful way; the current code already respects them.
     sync `writeDataSync`, never `Data.write`/`CGImageDestinationCreateWithURL` to a
     final drive path, and hold a `BackgroundTaskHolder` across the write when the
     user may have left the app (see `docs/feature-notes.md` §12).
+13. **`nonisolated async` is not "off the main thread".** The target builds with
+    `SWIFT_APPROACHABLE_CONCURRENCY` (NonisolatedNonsendingByDefault), so a plain
+    `nonisolated async func` runs on whatever actor *awaited* it — awaited from a
+    `@MainActor` type's `Task { }`, it runs on main. That silently put the video
+    editor's imports, composition builds and export pre-flight on the main thread.
+    Mark heavy async entry points `@concurrent` (or call them from `Task.detached`);
+    synchronous `nonisolated` work still needs `Task.detached`.
 
 ## Git workflow
 

@@ -839,13 +839,14 @@ keyframes, masks, chroma key and effects — all as **additive** schema fields.
 | `VEDocument.swift` | `VEDocument` (undo stack of 200 state snapshots, transactions for gestures, 500 ms/2 s autosave, lock heartbeat, `.bak` recovery, "Rebuild from media"), `VEProjectCatalog` (list/rename/duplicate/delete/sizes/clear caches). |
 | `VEMediaService.swift` | Probe by format descriptions (unsupported codecs named), identity (size + mtime + SHA-256 of first/last MiB), import by reference or chunked copy with progress, relink search, throughput measurement, thumbnails (poster + 1 fps strips of 60 frames), waveforms (`.pk`, 10 ms Int16 min/max), 720p proxies. |
 | `VECompositionBuilder.swift` | Project → `AVMutableComposition` (A/B main video tracks, A/B embedded-audio tracks, one track per audio lane), `AVMutableVideoComposition` with `VEInstruction`s, `AVMutableAudioMix`; `VELayerMath` (crop → fit → scale → rotate → flip → position, shared with the on-canvas gizmo). |
-| `VECompositor.swift` | The one `AVVideoCompositing` renderer (Core Image on a Metal `CIContext`) for preview, export and covers; `VEImageCache` for stills/GIF frames; `VEFrameRenderer`. |
-| `VEExportService.swift` | EXP-3 tiers, pre-flight (missing media, 1.5× space, FAT32 4 GiB, read-only), reader → writer pipeline on a dedicated queue, `renders/` → `Exports/` rename, background task + "export interrupted" notification, optional Photos copy. |
+| `VECompositor.swift` | The one `AVVideoCompositing` renderer (Core Image on a Metal `CIContext`) for preview, export and covers — `VECompositor` (8-bit BGRA, sRGB) and its subclass `VECompositorHDR` (10-bit sources, RGBAh working format, 64-bit half output in BT.2020/HLG); `VEImageCache` for stills/GIF frames; `VEFrameRenderer`. |
+| `VEFilters.swift` | `VEFilterCatalog`: the Filters tool's presets as pure `CIImage → CIImage` looks (`VEFilterDef`), mixed with the original at `VEFilter.intensity` via a dissolve. The compositor applies a clip's filter in source pixels, after crop and before placement. |
+| `VEExportService.swift` | EXP-3 tiers, pre-flight (missing media, 1.5× space, FAT32 4 GiB, read-only), reader → writer pipeline on a dedicated queue (HEVC Main 10 + BT.2020/HLG tags for HDR), `VEExportMetadata` (the sources' metadata with the **oldest capture date** as the file's creation date, also set as the file-system dates), `renders/` → `Exports/` rename, background task + "export interrupted" notification, optional Photos copy. |
 | `VEPlayback.swift` | `VEPlayback` (item swap keeps the playhead, coalesced zero-tolerance seeks ≤ 60/s, frame step, stall → proxy), `VEPreviewView` (player layer + pinch/drag/twist gizmo with centre-line and right-angle snapping). |
 | `VETimelineView.swift` | UIKit timeline: fixed centre playhead, pinch zoom (1 min/screen … 20 pt/frame), ruler, filmstrips + waveform overlay, badges, trim handles with ripple and snapping, long-press reorder, cover/add tiles, cut handles. |
 | `VEEditorSession.swift` | All edit commands, timeline delegate, import flow, derived-asset queue (2-wide, thermal-aware), relink, cover regeneration, drive-loss wiring; `VEThumbStore`. |
-| `VEEditorView.swift` | The screen, tool bars, tool sheets (✓/✕ = one undo step), project settings, cover sheet, drive-lost sheet. |
-| `VECropScreen.swift`, `VEImportPicker.swift`, `VEExportSheet.swift`, `VEProjectsView.swift`, `VEHost.swift` | Crop UI, Drive/Files/Photos picker, export sheet + progress + completion, Projects screen, host adapter and entry points. |
+| `VEEditorView.swift` | The screen, tool bars, tool sheets (✓/✕ = one undo step; Speed, Volume, Opacity, Duration, Edit, **Filters**, Ratio, Canvas), project settings (incl. the HDR mode), cover sheet, drive-lost sheet. |
+| `VECropScreen.swift`, `VEImportPicker.swift`, `VEExportSheet.swift`, `VEProjectsView.swift`, `VEHost.swift` | Crop UI, Drive/Files/Photos picker, export sheet + progress + completion, Projects screen, host adapter and entry points. `VEHost` shows a **determinate opening screen** (`VEOpenProgressView`): drive check → read/create project → per-file asset warm-up (existing projects) or the launch items' import (new projects) → preview build, so "Edit in Video Editor" never shows a black "Opening…" screen followed by a second "Importing…" pop-up. |
 
 ### 11.2 Rules that must survive future changes
 
@@ -863,8 +864,33 @@ keyframes, masks, chroma key and effects — all as **additive** schema fields.
   compositor from the file (`VELayerSpec.imageURL`) — no bundled blank video. If a device ever
   refuses to call the compositor for an instruction with no source tracks, the fallback is a
   one-frame placeholder insert; nothing else needs to change.
-- **SDR working space.** The video composition sets BT.709 colour properties so AVFoundation
-  converts HDR sources before compositing; HDR projects are a Phase 3 item.
+- **Colour space follows the media (CAN-7).** `VEProjectSettings.hdrMode` is Auto / On / Off and
+  `refreshHDR()` resolves it into `settings.hdr` (Auto = any HLG/PQ video *on the timeline*;
+  re-resolved on every import, relink, settings change and on open). SDR projects declare BT.709
+  on the video composition, so AVFoundation tone-maps HDR sources before the compositor sees them.
+  HDR projects declare BT.2020/HLG and use `VECompositorHDR` (`supportsHDRSourceFrames`, 10-bit
+  source formats, RGBAh working format, `kCVPixelFormatType_64RGBAHalf` output rendered into the
+  `itur_2100_HLG` colour space); SDR clips and stills are lifted to standard white. Export of an
+  HDR composition is HEVC Main 10 with BT.2020/HLG colour tags and a 10-bit 4:2:0 reader output;
+  the export sheet's HDR toggle (default = the project's state) can force SDR instead. HDR sources
+  no longer force proxies, and the proxies made for them use the 1080p **HEVC** preset (the H.264
+  presets tone-map to SDR).
+- **Orientation comes from the decoded track, not the source record.** A custom compositor
+  receives raw, un-rotated frames; the builder reads `preferredTransform` from the track it
+  actually inserted (original *or* proxy — `AVAssetExportSession` keeps the rotation flag rather
+  than baking it in) and the compositor orients, then scales to the recorded display size. This
+  is what fixed "portrait clip sideways and squished" when the preview was on proxies.
+- **Progress is generation-stamped.** `VEEditorSession.importAndWait` tags each import; only its
+  own ticks update the overlay and only it may clear it (ticks are separately enqueued main-actor
+  tasks, so a late one used to leave "Importing…" up forever). `importFiles` reports per-file
+  stages (identity → probe → copy) so a single file still moves the bar.
+- **`@concurrent` on the heavy async entry points.** The target builds with
+  `SWIFT_APPROACHABLE_CONCURRENCY` (NonisolatedNonsendingByDefault): a plain `nonisolated async`
+  function runs on whatever actor *called* it, and the session, playback and export job call these
+  from the main actor. `VEMediaService` (probe/import/copy/thumbs/waveform/proxy/frame),
+  `VEAssetCache.asset(for:)`, `VECompositionBuilder.build`, `VEExportService.run`,
+  `VEExportMetadata.collect` and `VEFrameRenderer.image` are `@concurrent` so they always run on
+  the cooperative pool. Keep that attribute on anything new that touches the drive or AVFoundation.
 - **Tool sheets are transactions.** `beginTool` → live `updateTransaction`s → `confirmTool` pushes
   one undo entry; `cancelTool` restores the pre-sheet state. Gestures (trim, canvas moves) use the
   same transaction API, so every PRD "one undo step" rule holds.
@@ -879,10 +905,11 @@ keyframes, masks, chroma key and effects — all as **additive** schema fields.
 
 Phase 2: transitions (the cut handles are drawn but tell the user they're coming), overlays, the
 audio menu (music/SFX/voiceover/extract audio/fades UI), text, EXP-9 audio-only export. Phase 3:
-keyframes, masks, chroma key, filters/adjust/LUTs, effects, canvas images/eyedropper, HDR,
-replace, GIF export. Phase 4: frame blending, iPad two-pane, loop, beat detection. The schema
-already carries placeholders for all of these (`tracks.overlays/audio/text/…`, `filter`, `adjust`,
-`mask`, `chromaKey`, `animation`, `keyframes`, `transitions`, `beats`).
+keyframes, masks, chroma key, adjust/LUTs, effects, canvas images/eyedropper, replace, GIF
+export (filters and HDR were brought forward and are built — see above). Phase 4: frame
+blending, iPad two-pane, loop, beat detection. The schema already carries placeholders for all of
+these (`tracks.overlays/audio/text/…`, `adjust`, `mask`, `chromaKey`, `animation`, `keyframes`,
+`transitions`, `beats`).
 
 ### 11.4 Tests
 

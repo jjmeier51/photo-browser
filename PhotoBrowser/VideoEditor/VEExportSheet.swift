@@ -17,6 +17,7 @@ struct VEExportSheet: View {
     @State private var codecChoice = "auto"
     @State private var fileName = ""
     @State private var saveToPhotos = false
+    @State private var hdr = false
     @State private var report = VEPreflightReport()
     @State private var job: VEExportJob?
     @State private var loaded = false
@@ -24,12 +25,19 @@ struct VEExportSheet: View {
     private var project: VEProject { session.project }
 
     private var codec: VEExportCodec {
-        codecChoice == "h264" ? .h264 : (codecChoice == "hevc" ? .hevc : VEExportSettings.codecDefault(for: resolution))
+        if hdr { return .hevc }
+        return codecChoice == "h264" ? .h264 : (codecChoice == "hevc" ? .hevc : VEExportSettings.codecDefault(for: resolution))
     }
 
     private var exportSettings: VEExportSettings {
         VEExportSettings(resolution: resolution, frameRate: frameRate, quality: quality, customMbps: customMbps, codec: codec,
-                         fileName: fileName, saveToPhotos: saveToPhotos)
+                         fileName: fileName, saveToPhotos: saveToPhotos, hdr: hdr)
+    }
+
+    /// The date the export will carry (the oldest embedded capture date; the service falls back
+    /// to file dates when no source has one).
+    private var captureDateText: String {
+        project.oldestCaptureDate.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "From the files' dates"
     }
 
     /// 2K / 4K are offered always but labelled when no source is that large (EXP-1).
@@ -74,11 +82,20 @@ struct VEExportSheet: View {
                         Text("H.264").tag("h264")
                         Text("HEVC").tag("hevc")
                     }
+                    .disabled(hdr)
+                    Toggle("HDR (10-bit HEVC, HLG)", isOn: $hdr)
                 }
-                Section("File") {
+                Section {
                     TextField("File name", text: $fileName)
                     LabeledContent("Destination", value: "VideoEditor/Exports")
+                    LabeledContent("Capture date", value: captureDateText)
                     Toggle("Also save a copy to Photos", isOn: $saveToPhotos)
+                } header: { Text("File") } footer: {
+                    Text(hdr
+                         ? "The file keeps the clips' location, camera and dates; its date is the oldest clip's capture date. HDR exports need HEVC and show as HDR in Photos."
+                         : (project.settings.hdr
+                            ? "The file keeps the clips' location, camera and dates; its date is the oldest clip's capture date. HDR is off, so the HDR footage is tone-mapped to SDR."
+                            : "The file keeps the clips' location, camera and dates; its date is the oldest clip's capture date."))
                 }
                 Section {
                     LabeledContent("Estimated size", value: ByteCountFormatter.string(fromByteCount: report.estimatedBytes, countStyle: .file))
@@ -109,6 +126,7 @@ struct VEExportSheet: View {
             .onChange(of: quality) { _, _ in refreshPreflight() }
             .onChange(of: customMbps) { _, _ in refreshPreflight() }
             .onChange(of: codecChoice) { _, _ in refreshPreflight() }
+            .onChange(of: hdr) { _, _ in refreshPreflight() }
             .fullScreenCover(item: $job) { j in
                 VEExportProgressView(job: j, project: project) { url in
                     job = nil
@@ -128,6 +146,9 @@ struct VEExportSheet: View {
         customMbps = prefs.customBitrateMbps
         codecChoice = prefs.codec
         saveToPhotos = prefs.saveToPhotos
+        // HDR follows the project unless the user chose otherwise last time; an SDR project can't
+        // become HDR by exporting, so the remembered "on" only applies when there is HDR footage.
+        hdr = project.settings.hdr ? (prefs.hdr ?? true) : false
         fileName = VENames.exportName(project: project.name)
     }
 
@@ -146,6 +167,7 @@ struct VEExportSheet: View {
         var prefs = session.settings.lastExport
         prefs.resolution = resolution; prefs.frameRate = frameRate; prefs.quality = quality.rawValue
         prefs.customBitrateMbps = customMbps; prefs.codec = codecChoice; prefs.saveToPhotos = saveToPhotos
+        if project.settings.hdr { prefs.hdr = hdr }
         session.settings.lastExport = prefs
         session.store.saveSettings(session.settings)
         session.playback.pause()
@@ -235,7 +257,7 @@ struct VEExportProgressView: View {
             Image(systemName: "checkmark.circle.fill").font(.system(size: 40)).foregroundStyle(.green)
             Text(url.lastPathComponent).font(.headline).multilineTextAlignment(.center)
             let canvas = project.settings.canvas.scaled(to: job.settings.resolution)
-            Text("\(ByteCountFormatter.string(fromByteCount: job.outputBytes, countStyle: .file)) · \(VETimeUtil.format(job.duration, fps: job.settings.frameRate)) · \(canvas.width)×\(canvas.height) · \(job.settings.frameRate) fps · \(job.settings.codec.label)")
+            Text("\(ByteCountFormatter.string(fromByteCount: job.outputBytes, countStyle: .file)) · \(VETimeUtil.format(job.duration, fps: job.settings.frameRate)) · \(canvas.width)×\(canvas.height) · \(job.settings.frameRate) fps · \(job.settings.effectiveCodec.label)\(job.settings.hdr ? " · HDR" : "")")
                 .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
             Text("VideoEditor/Exports/\(url.lastPathComponent)").font(.caption2.monospaced()).foregroundStyle(.secondary)
             HStack(spacing: 12) {

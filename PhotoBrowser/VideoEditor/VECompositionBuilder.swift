@@ -20,6 +20,7 @@ nonisolated struct VELayerSpec: @unchecked Sendable {
     var crop: VECrop
     var transform: VETransform
     var opacity: Double
+    var filter: VEFilter?
     var background: VEBackground
     var compositionStart: CMTime
     var compositionDuration: CMTime
@@ -57,6 +58,8 @@ nonisolated struct VEBuiltComposition: @unchecked Sendable {
     let duration: CMTime
     let usesProxy: Bool
     let missingClipIDs: [String]
+    /// BT.2020 / HLG working space (CAN-7); false = BT.709 SDR.
+    let isHDR: Bool
 
     func playerItem() -> AVPlayerItem {
         let item = AVPlayerItem(asset: composition)
@@ -74,7 +77,10 @@ nonisolated final class VEAssetCache: @unchecked Sendable {
     private let lock = NSLock()
     private var assets: [String: AVURLAsset] = [:]
 
-    func asset(for url: URL) async throws -> AVURLAsset {
+    /// `@concurrent`: the project builds with approachable concurrency, under which a plain
+    /// `nonisolated async` function runs on its *caller's* actor — and this is called from
+    /// main-actor code, so parsing a file over USB would otherwise happen on the main thread.
+    @concurrent func asset(for url: URL) async throws -> AVURLAsset {
         lock.lock()
         if let a = assets[url.path] { lock.unlock(); return a }
         lock.unlock()
@@ -99,9 +105,12 @@ nonisolated enum VECompositionBuilder {
         var renderSize: CGSize? = nil        // nil = canvas size (export); preview passes its view size
         var frameRate: Int? = nil            // nil = project frame rate
         var muteAll = false                  // scrubbing preview
+        var hdr: Bool? = nil                 // nil = the project's resolved setting; export can force SDR
     }
 
-    static func build(_ project: VEProject, package: URL, store: VEDriveStore, options: Options = Options()) async throws -> VEBuiltComposition {
+    /// `@concurrent` so the asset loads run on the cooperative pool even when the preview rebuild
+    /// or the export starts this from the main actor (see `VEAssetCache.asset(for:)`).
+    @concurrent static func build(_ project: VEProject, package: URL, store: VEDriveStore, options: Options = Options()) async throws -> VEBuiltComposition {
         let composition = AVMutableComposition()
         let videoA = composition.addMutableTrack(withMediaType: .video, preferredTrackID: 1)!
         let videoB = composition.addMutableTrack(withMediaType: .video, preferredTrackID: 2)!
@@ -113,6 +122,7 @@ nonisolated enum VECompositionBuilder {
         var usesProxy = false
         let canvas = project.settings.canvas.size
         let fps = options.frameRate ?? project.settings.frameRate
+        let hdr = options.hdr ?? project.settings.hdr
         let starts = project.mainStarts()
         let total = project.duration
         let fm = FileManager.default
@@ -123,7 +133,7 @@ nonisolated enum VECompositionBuilder {
             let source = project.source(clip.mediaId)
             var spec = VELayerSpec(clipID: clip.id, kind: clip.kind, trackID: kCMPersistentTrackID_Invalid, imageURL: nil, isMissing: false,
                                    sourceSize: CGSize(width: 1920, height: 1080), rotation: .none, crop: clip.crop, transform: clip.transform,
-                                   opacity: clip.opacity, background: clip.background, compositionStart: start, compositionDuration: dur,
+                                   opacity: clip.opacity, filter: clip.filter, background: clip.background, compositionStart: start, compositionDuration: dur,
                                    sourceStart: clip.sourceRange.start, rate: clip.rate, reversed: clip.reversed, loopDuration: 0)
             let vTrack = (i % 2 == 0) ? videoA : videoB
             let aTrack = (i % 2 == 0) ? audioA : audioB
@@ -145,12 +155,23 @@ nonisolated enum VECompositionBuilder {
                         // Proxy for preview when allowed and present (PRV-3); export always uses originals.
                         if options.useProxies, let p = source.derived.proxy {
                             let proxyURL = store.resolve(p, package: package)
-                            if fm.fileExists(atPath: proxyURL.path) { url = proxyURL; usesProxy = true; spec.rotation = .none }
+                            if fm.fileExists(atPath: proxyURL.path) { url = proxyURL; usesProxy = true }
                         }
                         if let asset = try? await VEAssetCache.shared.asset(for: url),
                            let srcVideo = try? await asset.loadTracks(withMediaType: .video).first {
                             let assetDurationCM = try await asset.load(.duration)
                             let assetDur = VETimeUtil.us(assetDurationCM)
+                            // The orientation of the file *being decoded*. A custom compositor gets raw,
+                            // un-rotated frames plus the track's `preferredTransform`; proxies made by
+                            // `AVAssetExportSession` keep that flag rather than baking the rotation in,
+                            // so reading it from the actual track (not the source record) is what keeps
+                            // a portrait phone clip upright whether the preview plays the original or
+                            // the proxy. The compositor then scales the oriented frame to the recorded
+                            // display size, so a proxy's lower resolution never changes the aspect.
+                            if let preferred = try? await srcVideo.load(.preferredTransform) {
+                                spec.rotation = VEMediaService.rotation(from: preferred)
+                            }
+                            spec.sourceSize = source.displaySize.cgSize
                             let srcStart = min(clip.sourceRange.start, max(0, assetDur - 1))
                             let srcDur = max(1, min(clip.sourceRange.duration, assetDur - srcStart))
                             let srcRange = CMTimeRange(start: VETimeUtil.cm(srcStart), duration: VETimeUtil.cm(srcDur))
@@ -161,8 +182,6 @@ nonisolated enum VECompositionBuilder {
                                 }
                                 spec.trackID = vTrack.trackID
                                 placedVideo = true
-                                // Proxies are re-encoded upright; originals keep their rotation flag.
-                                if url != store.resolve(source.path, package: package) { spec.sourceSize = source.displaySize.cgSize }
                             } catch {
                                 VELog.render.error("insert failed for \(source.displayName): \(error.localizedDescription)")
                                 spec.isMissing = true
@@ -255,16 +274,25 @@ nonisolated enum VECompositionBuilder {
         }
 
         let video = AVMutableVideoComposition()
-        video.customVideoCompositorClass = VECompositor.self
+        // The working colour space decides the compositor class (CAN-7): AVFoundation converts every
+        // source frame into the composition's declared space before the compositor sees it, so an
+        // SDR project gets HDR footage tone-mapped to BT.709, and an HDR project gets SDR clips and
+        // stills lifted into BT.2020 / HLG, where the HDR compositor renders 16-bit float frames.
+        video.customVideoCompositorClass = hdr ? VECompositorHDR.self : VECompositor.self
         video.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(1, fps)))
         video.renderSize = Self.renderSize(canvas: canvas, requested: options.renderSize)
         video.renderScale = 1
         video.instructions = instructions
         video.sourceTrackIDForFrameTiming = kCMPersistentTrackID_Invalid
-        // SDR project: BT.709 working space, so HDR sources are converted before compositing (CAN-7).
-        video.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
-        video.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
-        video.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
+        if hdr {
+            video.colorPrimaries = AVVideoColorPrimaries_ITU_R_2020
+            video.colorTransferFunction = AVVideoTransferFunction_ITU_R_2100_HLG
+            video.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_2020
+        } else {
+            video.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
+            video.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
+            video.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
+        }
 
         var mix: AVMutableAudioMix?
         if !mixParams.isEmpty {
@@ -273,7 +301,7 @@ nonisolated enum VECompositionBuilder {
             mix = m
         }
         return VEBuiltComposition(composition: composition, videoComposition: video, audioMix: mix,
-                                  duration: VETimeUtil.cm(total), usesProxy: usesProxy, missingClipIDs: missing)
+                                  duration: VETimeUtil.cm(total), usesProxy: usesProxy, missingClipIDs: missing, isHDR: hdr)
     }
 
     /// Preview renders at the view's pixel size capped at 1920 on the long edge (PRV-3); export at

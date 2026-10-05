@@ -11,6 +11,12 @@ import UIKit
 /// Import, identity hashing and derived assets (ARC-1 MediaService). Everything here runs off the
 /// main actor: probing an asset over USB, hashing, copying and generating thumbnails are all slow.
 /// Sources are opened read-only and never moved, renamed, rewritten or deleted (IMP-11).
+///
+/// The async entry points are `@concurrent`. The project builds with approachable concurrency
+/// (`SWIFT_APPROACHABLE_CONCURRENCY`), under which a plain `nonisolated async` function runs on
+/// whatever actor *called* it — and the session calls these from the main actor. Without the
+/// attribute an import copied files and flushed exFAT on the main thread, which is why a small
+/// clip "took a while" and the progress overlay couldn't update until the copy finished.
 nonisolated final class VEMediaService: @unchecked Sendable {
     static let shared = VEMediaService()
 
@@ -53,7 +59,7 @@ nonisolated final class VEMediaService: @unchecked Sendable {
     ]
 
     /// Format detection by track format descriptions, not extensions (IMP-3).
-    func probe(_ url: URL) async throws -> Probe {
+    @concurrent func probe(_ url: URL) async throws -> Probe {
         let name = url.lastPathComponent
         if let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .image) {
             return try probeImage(url)
@@ -205,7 +211,7 @@ nonisolated final class VEMediaService: @unchecked Sendable {
     }
 
     /// A reference record for a file already on the drive or inside the package (no copy).
-    func makeSource(for url: URL, package: URL, store: VEDriveStore) async throws -> VEMediaSource {
+    @concurrent func makeSource(for url: URL, package: URL, store: VEDriveStore) async throws -> VEMediaSource {
         guard let ref = store.reference(for: url, package: package) else {
             throw VEError.unsupportedMedia(name: url.lastPathComponent, codec: "a location outside the drive")
         }
@@ -239,11 +245,13 @@ nonisolated final class VEMediaService: @unchecked Sendable {
     /// Imports `urls` for a project. Files on the drive are referenced in place; files elsewhere
     /// are copied into `media/` (`destination` overrides that, e.g. `Library/Music`). Items whose
     /// identity already exists in `existing` are reused rather than copied twice.
-    func importFiles(_ urls: [URL], into package: URL, existing: [VEMediaSource], store: VEDriveStore,
-                     destination: URL? = nil,
-                     progress: @escaping @Sendable (_ fraction: Double, _ name: String) -> Void) async -> ImportResult {
+    @concurrent func importFiles(_ urls: [URL], into package: URL, existing: [VEMediaSource], store: VEDriveStore,
+                                 destination: URL? = nil,
+                                 progress: @escaping @Sendable (_ fraction: Double, _ name: String) -> Void) async -> ImportResult {
         var result = ImportResult()
         let total = max(1, urls.count)
+        // Per-file progress: identity → probe → copy, so a single file still moves the bar.
+        let span = 1.0 / Double(total)
         // Space check for everything that will be copied (1.1× + 500 MB headroom).
         var copyBytes: Int64 = 0
         for u in urls where !store.isUnderDrive(u) { copyBytes += store.fileSize(u) }
@@ -257,12 +265,14 @@ nonisolated final class VEMediaService: @unchecked Sendable {
         for (i, url) in urls.enumerated() {
             if Task.isCancelled { break }
             let name = url.lastPathComponent
-            progress(Double(i) / Double(total), name)
+            let base0 = Double(i) * span
+            progress(base0, name)
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             do {
                 // Identity first: a re-import of a known file reuses its record (IMP-2, IMP-9).
                 let ident = try identity(of: url)
+                progress(base0 + 0.1 * span, name)
                 if let known = existing.first(where: { $0.identity == ident }) ?? result.sources.first(where: { $0.identity == ident }) {
                     result.sources.append(known)
                     continue
@@ -271,17 +281,19 @@ nonisolated final class VEMediaService: @unchecked Sendable {
                     let p = try await probe(url)
                     guard let ref = store.reference(for: url, package: package) else { continue }
                     result.sources.append(Self.source(from: p, path: ref, identity: ident, name: name))
+                    progress(base0 + span, name)
                 } else {
                     // Probe before copying so an unsupported file never lands on the drive.
                     let p = try await probe(url)
+                    progress(base0 + 0.25 * span, name)
                     let dir = destination ?? VEDriveLayout.media(package)
                     try DriveWriter.createDirectory(at: dir)
                     let base = (name as NSString).deletingPathExtension
                     let unique = VENames.unique(VENames.sanitize(base, fallback: "media"), ext: url.pathExtension, in: dir)
                     let dst = dir.appendingPathComponent(unique)
-                    let base0 = Double(i) / Double(total), span = 1.0 / Double(total)
-                    try await copyWithProgress(from: url, to: dst) { f in progress(base0 + f * span, name) }
+                    try await copyWithProgress(from: url, to: dst) { f in progress(base0 + (0.25 + 0.7 * f) * span, name) }
                     DriveWriter.fullSyncFileAndParent(dst)
+                    progress(base0 + span, name)
                     let copiedIdent = (try? identity(of: dst)) ?? ident
                     guard let ref = store.reference(for: dst, package: package) else { continue }
                     result.sources.append(Self.source(from: p, path: ref, identity: copiedIdent, name: name))
@@ -298,7 +310,7 @@ nonisolated final class VEMediaService: @unchecked Sendable {
     }
 
     /// Chunked copy with progress at ~10 Hz; cancellation deletes the partial file (IMP-9).
-    func copyWithProgress(from src: URL, to dst: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+    @concurrent func copyWithProgress(from src: URL, to dst: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
         let size = Int64((try? src.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         let fm = FileManager.default
         try DriveWriter.createDirectory(at: dst.deletingLastPathComponent())
@@ -385,10 +397,12 @@ nonisolated final class VEMediaService: @unchecked Sendable {
         return mbps
     }
 
-    /// IMP-7: proxy when the source is heavier than 1080p30 8-bit SDR or the drive is slow.
+    /// IMP-7: proxy when the source is heavier than 1080p30 or the drive is slow. HDR / 10-bit
+    /// alone no longer forces one: a 1080p HLG clip plays natively, and the HDR project pipeline
+    /// (CAN-7) previews it in HDR, which a proxy would lose.
     func needsProxy(_ s: VEMediaSource, throughputMBps: Double) -> Bool {
         guard s.kind == .video else { return false }
-        if s.width > 1920 || s.fps > 31 || (s.bitDepth ?? 8) > 8 || (s.colorTransfer ?? "SDR") != "SDR" { return true }
+        if max(s.width, s.height) > 1920 || s.fps > 31 { return true }
         return throughputMBps < 80
     }
 
@@ -415,7 +429,7 @@ nonisolated final class VEMediaService: @unchecked Sendable {
     /// Poster (320 px) + filmstrip strips (160 px tall, 1 fps, 60 frames per strip) in
     /// `thumbs/<id>/`. Returns the package-relative folder path, or nil when already in flight or
     /// the source can't be read.
-    func generateThumbnails(for source: VEMediaSource, package: URL, store: VEDriveStore) async -> String? {
+    @concurrent func generateThumbnails(for source: VEMediaSource, package: URL, store: VEDriveStore) async -> String? {
         let key = "thumbs:" + source.id
         guard begin(key) else { return nil }
         defer { end(key) }
@@ -526,7 +540,7 @@ nonisolated final class VEMediaService: @unchecked Sendable {
     }
 
     /// Waveform peaks: mono mix-down, 10 ms buckets of (min, max) as Int16 pairs → `waveforms/<id>.pk`.
-    func generateWaveform(for source: VEMediaSource, package: URL, store: VEDriveStore) async -> String? {
+    @concurrent func generateWaveform(for source: VEMediaSource, package: URL, store: VEDriveStore) async -> String? {
         guard source.hasAudio || source.kind == .audio else { return nil }
         let key = "wave:" + source.id
         guard begin(key) else { return nil }
@@ -610,10 +624,14 @@ nonisolated final class VEMediaService: @unchecked Sendable {
         return (out, Int(interval))
     }
 
-    /// 1280×720 H.264 preview proxy via `AVAssetExportPreset1280x720`, written straight to
-    /// `proxies/<id>.mp4`; scratch files stay in the package's `renders/` (STO-4).
-    func generateProxy(for source: VEMediaSource, package: URL, store: VEDriveStore,
-                       progress: (@Sendable (Double) -> Void)? = nil) async -> String? {
+    /// Preview proxy written straight to `proxies/<id>.mp4`; scratch files stay in the package's
+    /// `renders/` (STO-4). SDR sources get 1280×720 H.264; HDR sources get the 1080p **HEVC**
+    /// preset, the smallest one that keeps 10-bit HLG/PQ (the H.264 presets tone-map to SDR, which
+    /// would make an HDR project's preview silently SDR). The output keeps the source's rotation
+    /// flag rather than baking it in — the builder reads it from the track (see
+    /// `VECompositionBuilder`).
+    @concurrent func generateProxy(for source: VEMediaSource, package: URL, store: VEDriveStore,
+                                   progress: (@Sendable (Double) -> Void)? = nil) async -> String? {
         guard source.kind == .video else { return nil }
         let key = "proxy:" + source.id
         guard begin(key) else { return nil }
@@ -624,7 +642,8 @@ nonisolated final class VEMediaService: @unchecked Sendable {
         if let free = store.freeSpace(), free < 2 * 1024 * 1024 * 1024 { return nil }   // leave 2 GB headroom
         let url = store.resolve(source.path, package: package)
         let asset = AVURLAsset(url: url)
-        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPreset1280x720) else { return nil }
+        let preset = source.isHDR ? AVAssetExportPresetHEVC1920x1080 : AVAssetExportPreset1280x720
+        guard let session = AVAssetExportSession(asset: asset, presetName: preset) else { return nil }
         let partial = VEDriveLayout.renders(package).appendingPathComponent("\(source.id).proxy.part.mp4")
         try? DriveWriter.createDirectory(at: VEDriveLayout.renders(package))
         try? FileManager.default.removeItem(at: partial)
@@ -657,7 +676,7 @@ nonisolated final class VEMediaService: @unchecked Sendable {
     }
 
     /// Full-resolution still of one source frame (freeze frames, crop UI, covers).
-    func frame(of url: URL, at time: VETime, maxPixel: CGFloat = 0) async -> UIImage? {
+    @concurrent func frame(of url: URL, at time: VETime, maxPixel: CGFloat = 0) async -> UIImage? {
         let asset = AVURLAsset(url: url)
         let gen = AVAssetImageGenerator(asset: asset)
         gen.appliesPreferredTrackTransform = true
