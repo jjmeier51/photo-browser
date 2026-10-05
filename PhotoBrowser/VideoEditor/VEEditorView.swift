@@ -206,8 +206,8 @@ struct VEEditorView: View {
 
     private var toolArea: some View {
         Group {
-            if let tool {
-                VEToolSheet(session: session, tool: tool) { tool = nil }
+            if let activeTool = tool {
+                VEToolSheet(session: session, tool: activeTool, onDismiss: closeTool)
                     .transition(.move(edge: .bottom))
             } else if session.selectedClip != nil {
                 clipToolBar
@@ -218,6 +218,13 @@ struct VEEditorView: View {
         .frame(maxWidth: .infinity)
         .background(Color(white: 0.08))
         .animation(.easeInOut(duration: 0.15), value: tool)
+    }
+
+    /// Closes the open tool sheet. A named method rather than an inline `{ tool = nil }`: inside
+    /// `if let tool` the shorthand binding shadows the `@State` property, and the Swift 6.4
+    /// type-checker asserts (NamingPatternRequest) instead of diagnosing the assignment.
+    private func closeTool() {
+        tool = nil
     }
 
     private var topToolBar: some View {
