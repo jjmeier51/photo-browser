@@ -121,7 +121,10 @@ nonisolated final class VECompositor: NSObject, AVVideoCompositing, @unchecked S
             place = place.concatenating(CGAffineTransform(scaleX: scale, y: scale))
             img = img.transformed(by: place, highQualityDownsample: true)
             if layer.opacity < 0.999 {
-                img = img.applyingFilter("CIColorMatrix", parameters: [kCIInputAVectorKey: CIVector(x: 0, y: 0, z: 0, w: CGFloat(max(0, layer.opacity)))])
+                let matrix = CIFilter.colorMatrix()
+                matrix.inputImage = img
+                matrix.aVector = CIVector(x: 0, y: 0, z: 0, w: CGFloat(max(0, layer.opacity)))
+                if let faded = matrix.outputImage { img = faded }
             }
             result = img.cropped(to: bounds).composited(over: result)
         }

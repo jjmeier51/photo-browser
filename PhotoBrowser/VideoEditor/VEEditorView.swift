@@ -348,6 +348,18 @@ struct VEToolSheet: View {
         }
     }
 
+    /// Log slider 0.1x–100x (SPD-1 range) with 1x in the middle; snaps to 1x within ±4 %.
+    private var speedBinding: Binding<Double> {
+        Binding<Double>(
+            get: { log10(speed) },
+            set: { (v: Double) in
+                var s: Double = pow(10.0, v)
+                if abs(s - 1) < 0.04 { s = 1 }
+                speed = (s * 100).rounded() / 100
+                session.setSpeed(speed, keepPitch: keepPitch, commit: false)
+            })
+    }
+
     private var title: String {
         switch tool {
         case .speed: return "Speed"
@@ -367,12 +379,7 @@ struct VEToolSheet: View {
                 HStack {
                     Text(String(format: "%.2fx", speed)).font(.caption.monospacedDigit()).frame(width: 56)
                     // Log slider 0.1x–100x (SPD-1 range), 1x in the middle.
-                    Slider(value: Binding(get: { log10(speed) }, set: { v in
-                        var s = pow(10, v)
-                        if abs(s - 1) < 0.04 { s = 1 }
-                        speed = (s * 100).rounded() / 100
-                        session.setSpeed(speed, keepPitch: keepPitch, commit: false)
-                    }), in: -1...2)
+                    Slider(value: speedBinding, in: -1.0...2.0)
                     Toggle("Keep pitch", isOn: $keepPitch).labelsHidden()
                         .onChange(of: keepPitch) { _, v in session.setSpeed(speed, keepPitch: v, commit: false) }
                 }

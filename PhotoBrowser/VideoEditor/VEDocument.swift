@@ -110,13 +110,9 @@ nonisolated struct VELockInfo: Codable, Sendable {
     static func open(packageURL: URL, store: VEDriveStore) async throws -> VEDocument {
         let docURL = VEDriveLayout.document(packageURL)
         let bakURL = VEDriveLayout.documentBackup(packageURL)
-        let loaded: (VEProject, Bool) = try await Task.detached(priority: .userInitiated) {
-            func parse(_ url: URL) -> VEProject? {
-                guard let data = try? store.readData(url) else { return nil }
-                return try? VEJSON.decoder.decode(VEProject.self, from: data)
-            }
-            if let p = parse(docURL) { return (p, false) }
-            if let p = parse(bakURL) { return (p, true) }
+        let loaded: (VEProject, Bool) = try await Task.detached(priority: .userInitiated) { () throws -> (VEProject, Bool) in
+            if let p = VEDocument.parseDocument(at: docURL, store: store) { return (p, false) }
+            if let p = VEDocument.parseDocument(at: bakURL, store: store) { return (p, true) }
             throw VEError.documentCorrupt(recovered: false)
         }.value
         var project = loaded.0
@@ -141,6 +137,12 @@ nonisolated struct VELockInfo: Codable, Sendable {
         doc.startHeartbeat()
         if loaded.1 && !readOnly { doc.markDirty() }   // persist the restored backup as the live document
         return doc
+    }
+
+    /// Read and decode one document file; nil when unreadable or malformed.
+    nonisolated static func parseDocument(at url: URL, store: VEDriveStore) -> VEProject? {
+        guard let data = try? store.readData(url) else { return nil }
+        return try? VEJSON.decoder.decode(VEProject.self, from: data)
     }
 
     /// Create a fresh package in `Projects/` and open it.
@@ -168,8 +170,7 @@ nonisolated struct VELockInfo: Codable, Sendable {
         let files = await Task.detached(priority: .userInitiated) { () -> [URL] in
             let media = store.contents(of: VEDriveLayout.media(packageURL)).filter { !$0.hasDirectoryPath }
             let audio = store.contents(of: VEDriveLayout.audio(packageURL)).filter { !$0.hasDirectoryPath }
-            func date(_ u: URL) -> Date { (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast }
-            return (media + audio).sorted { date($0) < date($1) }
+            return (media + audio).sorted { VEDocument.modificationDate($0) < VEDocument.modificationDate($1) }
         }.value
         for url in files {
             guard let src = try? await VEMediaService.shared.makeSource(for: url, package: packageURL, store: store) else { continue }
@@ -188,6 +189,10 @@ nonisolated struct VELockInfo: Codable, Sendable {
         let data = try VEJSON.encoder.encode(project)
         try await Task.detached { try store.saveDocument(data, to: VEDriveLayout.document(packageURL), backupName: "project.json.bak") }.value
         return try await open(packageURL: packageURL, store: store)
+    }
+
+    nonisolated static func modificationDate(_ u: URL) -> Date {
+        (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
     }
 
     // MARK: Editing
