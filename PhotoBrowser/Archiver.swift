@@ -87,7 +87,7 @@ enum Archiver {
     nonisolated static func zip(items: [URL], to dest: URL, stagingName: String) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let staging = root.appendingPathComponent(stagingName, isDirectory: true)
-        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        try DriveWriter.createDirectory(at: staging)
         defer { try? FileManager.default.removeItem(at: root) }
         for item in items {
             var d = staging.appendingPathComponent(item.lastPathComponent)
@@ -116,7 +116,7 @@ enum Archiver {
         defer { if scoped { archive.stopAccessingSecurityScopedResource() } }
         let data = try Data(contentsOf: archive)
         let entries = try centralDirectory(data)
-        do { try retrying { try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true) } }
+        do { try retrying { try DriveWriter.createDirectory(at: destDir) } }
         catch { throw ArchiveError.driveWrite(writeFailureReason(error)) }
         DriveWriter.fullSync(destDir)
         let total = max(entries.count, 1)
@@ -206,7 +206,7 @@ enum Archiver {
         let isDir = e.name.hasSuffix("/")
         let outURL = destDir.appendingPathComponent(rel, isDirectory: isDir)
         if isDir {
-            try? FileManager.default.createDirectory(at: outURL, withIntermediateDirectories: true)
+            try? DriveWriter.createDirectory(at: outURL)
             applyDate(e, to: outURL)
             return
         }
@@ -227,7 +227,7 @@ enum Archiver {
         let parent = outURL.deletingLastPathComponent()
         var lastErr: Error?
         do {
-            try retrying { try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true) }
+            try retrying { try DriveWriter.createDirectory(at: parent) }
             DriveWriter.fullSync(parent)                                // commit the new dir before writing into it
         } catch { throw ArchiveError.driveWrite(writeFailureReason(error)) }
         // Write each entry through the temp→fsync→rename path: the final name only appears once the

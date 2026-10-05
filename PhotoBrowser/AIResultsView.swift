@@ -124,18 +124,28 @@ struct AIResultsView: View {
         return UIImage(cgImage: cg)
     }
 
+    /// Saves in flight → one background-task window stays open until the last one lands, so leaving
+    /// the app right after "Keep all" can't suspend us mid-write on the drive (exFAT torn "AI" folder).
+    @State private var saveWindow = BackgroundTaskHolder()
+    @State private var savesInFlight = 0
+
     private func keep(_ i: Int) {
         guard decided[i] == nil else { return }
         decided[i] = .kept                       // optimistic — avoids a double-tap re-saving
         let data = results[i], tgt = target, m = model, p = prompt
+        savesInFlight += 1
+        if savesInFlight == 1 { saveWindow.begin(name: "AI Save") }
         Task {
+            // The write itself is serialized and fsync'd by `DriveWriter` (see `AIExtend.saveToAIFolder`).
             let url = await Task.detached(priority: .userInitiated) { () -> URL? in
                 switch tgt {
-                case .edit(let original): return AIExtend.saveToAIFolder(data, basedOn: original, model: m, prompt: p)
-                case .create(let folder): return AIExtend.saveGeneratedToFolder(data, in: folder, model: m, prompt: p)
+                case .edit(let original): return await AIExtend.saveToAIFolder(data, basedOn: original, model: m, prompt: p)
+                case .create(let folder): return await AIExtend.saveGeneratedToFolder(data, in: folder, model: m, prompt: p)
                 }
             }.value
             if let url { savedAny = true; library.markAIGenerated(url, model: m, prompt: p) }
+            savesInFlight -= 1
+            if savesInFlight == 0 { saveWindow.end() }
             finishIfDone()
         }
     }

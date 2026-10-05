@@ -274,7 +274,7 @@ nonisolated final class VEMediaService: @unchecked Sendable {
                     // Probe before copying so an unsupported file never lands on the drive.
                     let p = try await probe(url)
                     let dir = destination ?? VEDriveLayout.media(package)
-                    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    try DriveWriter.createDirectory(at: dir)
                     let base = (name as NSString).deletingPathExtension
                     let unique = VENames.unique(VENames.sanitize(base, fallback: "media"), ext: url.pathExtension, in: dir)
                     let dst = dir.appendingPathComponent(unique)
@@ -300,39 +300,46 @@ nonisolated final class VEMediaService: @unchecked Sendable {
     func copyWithProgress(from src: URL, to dst: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
         let size = Int64((try? src.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         let fm = FileManager.default
+        try DriveWriter.createDirectory(at: dst.deletingLastPathComponent())
         try? fm.removeItem(at: dst)
-        // Small files or same-volume clones: let the system do it in one go.
+        // The bytes land in a hidden `.pbtmp_` sibling (which the browser hides and sweeps) and are
+        // flushed before the same-volume rename, so `dst` only ever appears complete — a yanked cable
+        // mid-copy leaves no half-written entry in the folder (the exFAT corruption pattern).
+        let tmp = dst.deletingLastPathComponent().appendingPathComponent(".pbtmp_" + UUID().uuidString)
+        defer { try? fm.removeItem(at: tmp) }
         if size < 8 * 1024 * 1024 {
-            try DriveWriter.copyItem(at: src, to: dst)
-            progress(1)
-            return
-        }
-        guard fm.createFile(atPath: dst.path, contents: nil) else { throw CocoaError(.fileWriteUnknown) }
-        let input = try FileHandle(forReadingFrom: src)
-        let output = try FileHandle(forWritingTo: dst)
-        defer { try? input.close(); try? output.close() }
-        var written: Int64 = 0
-        var lastReport = Date.distantPast
-        let chunk = 4 * 1024 * 1024
-        while true {
-            if Task.isCancelled { try? output.close(); try? fm.removeItem(at: dst); throw VEError.cancelled }
-            let data = input.readData(ofLength: chunk)
-            if data.isEmpty { break }
-            try output.write(contentsOf: data)
-            written += Int64(data.count)
-            if Date().timeIntervalSince(lastReport) > 0.1 {
-                lastReport = Date()
-                progress(size > 0 ? Double(written) / Double(size) : 1)
+            try DriveWriter.copyItem(at: src, to: tmp)
+        } else {
+            guard fm.createFile(atPath: tmp.path, contents: nil) else { throw CocoaError(.fileWriteUnknown) }
+            let input = try FileHandle(forReadingFrom: src)
+            let output = try FileHandle(forWritingTo: tmp)
+            defer { try? input.close(); try? output.close() }
+            var written: Int64 = 0
+            var lastReport = Date.distantPast
+            let chunk = 4 * 1024 * 1024
+            while true {
+                if Task.isCancelled { throw VEError.cancelled }   // the temp is removed by the defer above
+                let data = input.readData(ofLength: chunk)
+                if data.isEmpty { break }
+                try output.write(contentsOf: data)
+                written += Int64(data.count)
+                if Date().timeIntervalSince(lastReport) > 0.1 {
+                    lastReport = Date()
+                    progress(size > 0 ? Double(written) / Double(size) : 1)
+                }
+                await Task.yield()
             }
-            await Task.yield()
         }
         // Carry the source's dates so identity and sorting behave like a plain copy.
         if let rv = try? src.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey]) {
             var attrs: [FileAttributeKey: Any] = [:]
             if let m = rv.contentModificationDate { attrs[.modificationDate] = m }
             if let c = rv.creationDate { attrs[.creationDate] = c }
-            try? fm.setAttributes(attrs, ofItemAtPath: dst.path)
+            try? fm.setAttributes(attrs, ofItemAtPath: tmp.path)
         }
+        DriveWriter.fullSync(tmp)
+        try fm.moveItem(at: tmp, to: dst)
+        DriveWriter.fullSyncFileAndParent(dst)
         progress(1)
     }
 
@@ -415,7 +422,7 @@ nonisolated final class VEMediaService: @unchecked Sendable {
         let rel = "thumbs/\(source.id)/"
         let indexURL = dir.appendingPathComponent("index.json")
         if FileManager.default.fileExists(atPath: indexURL.path) { return rel }
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: dir)
         let url = store.resolve(source.path, package: package)
         let display = source.displaySize
         let aspect = display.height > 0 ? Double(display.width) / Double(display.height) : 1
@@ -618,7 +625,7 @@ nonisolated final class VEMediaService: @unchecked Sendable {
         let asset = AVURLAsset(url: url)
         guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPreset1280x720) else { return nil }
         let partial = VEDriveLayout.renders(package).appendingPathComponent("\(source.id).proxy.part.mp4")
-        try? FileManager.default.createDirectory(at: VEDriveLayout.renders(package), withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: VEDriveLayout.renders(package))
         try? FileManager.default.removeItem(at: partial)
         session.outputURL = partial
         session.outputFileType = .mp4

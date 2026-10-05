@@ -889,3 +889,47 @@ already carries placeholders for all of these (`tracks.overlays/audio/text/…`,
 `PhotoBrowserTests/VideoEditorTests.swift` covers the document round-trip, time mapping, canvas
 sizes, placement maths, names/paths, the sandbox audit, undo/redo and recovery. Render and
 performance tests need a device (custom compositors don't run in the Simulator).
+
+## 12. exFAT write durability — `DriveWriter` (the "AI folder corruption" fix)
+
+**Symptom (Oct 2026).** `fsck_exfat` on the SSD kept finding `Cluster chain for /X/AI overlaps a
+previously allocated cluster`, `Directory /X/AI has zero length` and `Found an unexpected critical
+primary directory entry in /X/AI` — mostly in the "AI" subfolders where Astria results are saved,
+plus the occasional download folder.
+
+**Root causes (all in our code).**
+
+1. `AIExtend.saveToAIFolder` / `saveGeneratedToFolder` created the "AI" folder with a bare
+   `createDirectory` (no flush) and then wrote the JPEG **straight to its final path** with
+   `CGImageDestinationCreateWithURL`, then `setAttributes` — three unflushed directory mutations
+   per image, none of them atomic.
+2. "Keep all" in `AIResultsView` fired one detached task per image, so several writers created
+   the same brand-new folder and chose the same "unique" file name at once (the second write
+   clobbered the first) while mutating one exFAT directory concurrently.
+3. The foreground recovery pass (`resumePendingAIEdits`) ended its `BackgroundTaskHolder`
+   **before** saving the images, so a quick app switch suspended the app mid-write.
+4. Dozens of other places created drive folders with a bare `createDirectory` — the folder's
+   cluster allocation and the parent's new entry sat in the drive's cache until an unplug.
+
+**Fix.**
+
+- `DriveWriter.createDirectory(at:)` — creates the missing levels and, on exFAT/FAT, flushes each
+  new directory plus the parent that gained the entry. Every drive-folder creation in the app
+  (download services, import views, FileActions, Library, the video editor) now uses it; only
+  container-side caches (Thumbnailer, DownloadLog, BackgroundDownloader inbox, dup-scan caches)
+  keep the plain call. `FileActions.createFolder` (the user's New Folder) uses it too.
+- `DriveWriter.shared.writeData(_:to:dates:)` now creates the parent folder inside the actor and
+  stamps creation/modification dates on the temp, so the final entry is written exactly once.
+  `writeDataUnique(_:named:in:dates:)` picks the non-colliding name **and** writes in one actor
+  turn (no suspension between) — concurrent savers can't collide. `writeDataSync` is the same
+  temp → fsync → rename → flush recipe for callers that can't await (screenshots).
+- The AI saves encode to `Data` in memory and go through `writeDataUnique`; both save functions
+  are `async`. `AIResultsView` holds one background window while any save is in flight; the
+  recovery pass keeps its window open until the images are on the drive (`defer { bg.end() }`).
+- TikTok inbox filing flushes each placed file; the video editor's chunked import copy and the
+  Photos-picker staging copy write into a hidden `.pbtmp_` sibling and rename.
+
+**What this does not cover.** A cable pulled during an active write can still tear the FAT —
+exFAT has no journal, which is why "Prepare Drive for Removal…" exists. The fixes shrink the
+window to a single in-flight, fsync'd entry and make every folder/file either fully present or
+absent. Run Drive Health's deep check after any repair session.

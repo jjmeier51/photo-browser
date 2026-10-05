@@ -100,7 +100,7 @@ enum MegaDownloader {
         // Reuse an existing folder of the same name instead of making "Name 1". This is what lets a
         // re-import fill in only the files that aren't there yet (e.g. ones that failed last time).
         let destRoot = parent.appendingPathComponent(sanitize(rootName ?? "MEGA Import"), isDirectory: true)
-        try? fm.createDirectory(at: destRoot, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: destRoot)
 
         // Assign every file a stable destination up front, single-threaded: duplicate names in the
         // same MEGA folder de-dupe deterministically (by order, NOT by what's on disk), so a re-run
@@ -140,8 +140,7 @@ enum MegaDownloader {
                     let p = remaining[index]; index += 1
                     group.addTask {
                         do {
-                            try FileManager.default.createDirectory(at: p.dest.deletingLastPathComponent(),
-                                                                    withIntermediateDirectories: true)
+                            try DriveWriter.createDirectory(at: p.dest.deletingLastPathComponent())
                             try await downloadFileWithRetry(p.node, folderID: folderID, to: p.dest)
                             return nil
                         } catch { return friendlyError(error) }

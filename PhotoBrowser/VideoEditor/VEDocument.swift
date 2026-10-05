@@ -477,7 +477,7 @@ nonisolated enum VEProjectCatalog {
     static func clearCaches(_ pkg: URL, store: VEDriveStore) {
         for d in VEDriveLayout.cacheFolders(pkg) {
             try? store.coordinatedRemove(d)
-            try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+            try? DriveWriter.createDirectory(at: d)
         }
         // Forget derived paths so the editor regenerates instead of pointing at deleted files.
         let docURL = VEDriveLayout.document(pkg)

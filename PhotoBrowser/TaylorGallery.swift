@@ -98,7 +98,7 @@ enum TaylorGallery {
         guard !images.isEmpty else { return DownloadResult(downloaded: 0, failed: 0, folderName: nil, note: "No images found in this album.") }
 
         let folder = uniqueDestination(for: sanitize(album.title.isEmpty ? "Album \(album.id)" : album.title), in: parent)
-        guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)) != nil else {
+        guard (try? DriveWriter.createDirectory(at: folder)) != nil else {
             return DownloadResult(downloaded: 0, failed: 0, folderName: nil, note: "Couldn’t create the album folder.")
         }
         // The event date parsed from the album title (gallery JPGs usually carry no
@@ -496,7 +496,7 @@ extension TaylorGallery {
 
     private nonisolated static func saveIndex(_ index: SiteIndex) {
         let dir = indexCacheURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: dir)
         if let data = try? JSONEncoder().encode(index) { try? data.write(to: indexCacheURL) }
     }
 

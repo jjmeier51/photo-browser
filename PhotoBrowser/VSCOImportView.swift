@@ -63,7 +63,7 @@ struct VSCOImportView: View {
             if upd, library.isVSCOFolder(target) { dest = target }
             else {
                 dest = target.appendingPathComponent(u, isDirectory: true)
-                try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+                try? DriveWriter.createDirectory(at: dest)
             }
             let prior = library.vscoInfo(for: dest) ?? existing
             let already = Set(prior?.downloaded ?? [])

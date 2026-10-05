@@ -95,14 +95,54 @@ actor DriveWriter {
     /// media, then does a same-volume rename into place. So: no stray `.sb-*`, the payload is durable
     /// before the file becomes visible, and `dest` only ever appears complete — a partial download
     /// can't masquerade as a finished photo (a re-run correctly re-fetches it).
-    func writeData(_ data: Data, to dest: URL) async throws {
+    func writeData(_ data: Data, to dest: URL, dates: (created: Date?, modified: Date?)? = nil) async throws {
         while paused { await waitForResume() }
+        try performWrite(data, to: dest, dates: dates)
+    }
+
+    /// `writeData` that also **picks the file name inside the actor**: `name`, then `base 1.ext`,
+    /// `base 2.ext`… — the first that doesn't exist. Several results saving into one folder at the
+    /// same time (an AI batch's "Keep all") used to compute the same "unique" name in parallel and
+    /// the second write clobbered the first; choosing the name and writing in one actor turn (no
+    /// suspension in between) makes that impossible. Returns the URL actually written.
+    func writeDataUnique(_ data: Data, named name: String, in folder: URL,
+                         dates: (created: Date?, modified: Date?)? = nil) async throws -> URL {
+        while paused { await waitForResume() }
+        let dest = Self.uniqueURL(for: name, in: folder)
+        try performWrite(data, to: dest, dates: dates)
+        return dest
+    }
+
+    /// `name`, else `base 1.ext`, `base 2.ext`… (the AI folders' naming scheme).
+    nonisolated static func uniqueURL(for name: String, in folder: URL) -> URL {
+        let fm = FileManager.default
+        var dest = folder.appendingPathComponent(name)
+        let base = dest.deletingPathExtension().lastPathComponent, ext = dest.pathExtension
+        var n = 1
+        while fm.fileExists(atPath: dest.path) {
+            dest = folder.appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)")
+            n += 1
+        }
+        return dest
+    }
+
+    private func performWrite(_ data: Data, to dest: URL, dates: (created: Date?, modified: Date?)?) throws {
         inFlight += 1
         defer { inFlight -= 1 }
         let fm = FileManager.default
+        // The destination folder is created *inside* the actor (durably, see `createDirectory`), so
+        // several callers saving into the same brand-new folder can't race to create it.
+        try Self.createDirectory(at: dest.deletingLastPathComponent())
         let tmp = dest.deletingLastPathComponent().appendingPathComponent(".pbtmp_" + UUID().uuidString)
         do {
             try data.write(to: tmp)                       // plain write → no `.sb-*` atomic temp
+            if let dates {
+                // Stamp the temp so the final directory entry is written exactly once.
+                var attrs: [FileAttributeKey: Any] = [:]
+                if let c = dates.created { attrs[.creationDate] = c }
+                if let m = dates.modified { attrs[.modificationDate] = m }
+                if !attrs.isEmpty { try? fm.setAttributes(attrs, ofItemAtPath: tmp.path) }
+            }
             Self.fullSync(tmp)                            // payload durable on media BEFORE it's named
             if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
             try fm.moveItem(at: tmp, to: dest)            // same-volume rename = atomic
@@ -188,6 +228,62 @@ actor DriveWriter {
     nonisolated static func copyItem(at src: URL, to dest: URL) throws {
         if clonefile(src.path, dest.path, 0) == 0 { return }
         try FileManager.default.copyItem(at: src, to: dest)
+    }
+
+    /// Create `dir` (and any missing parents) **durably**: on exFAT/FAT every directory this call
+    /// creates, plus the parent that gained the entry, is flushed to media before returning.
+    ///
+    /// A plain `createDirectory` is the other half of the corruption story: exFAT allocates the new
+    /// directory's cluster and writes the entry into the parent, but both sit in the drive's cache. An
+    /// unplug (or a jetsam kill followed by an unplug) in that window is exactly what `fsck_exfat`
+    /// later reports as "Directory /X/AI has zero length" and "cluster chain … overlaps a previously
+    /// allocated cluster" — the folder was half-born. Flushing per level closes the window. A
+    /// directory that already exists costs one `stat` and no flush, so this is safe on hot paths.
+    nonisolated static func createDirectory(at dir: URL) throws {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: dir.path, isDirectory: &isDir) {
+            if isDir.boolValue { return }
+            throw CocoaError(.fileWriteFileExists)
+        }
+        // Walk up to the deepest existing ancestor so every level we create gets flushed.
+        var created: [URL] = []
+        var cursor = dir.standardizedFileURL
+        while !fm.fileExists(atPath: cursor.path), cursor.pathComponents.count > 1 {
+            created.append(cursor)
+            cursor = cursor.deletingLastPathComponent()
+        }
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard syncMode == .full else { return }
+        for d in created.reversed() { fullSync(d) }   // new directories, top-down
+        fullSync(cursor)                                // the parent that gained an entry
+    }
+
+    /// Synchronous durable write for callers that can't `await` the actor: controlled `.pbtmp_` temp
+    /// in the destination folder → payload flushed → same-volume rename → file + directory flushed.
+    /// Not serialized against other commits (prefer the actor's `writeData` where possible), but the
+    /// destination only ever appears complete and nothing is left half-written. `dates` are set on
+    /// the temp so the final directory entry is written once.
+    nonisolated static func writeDataSync(_ data: Data, to dest: URL, dates: (created: Date?, modified: Date?)? = nil) throws {
+        let fm = FileManager.default
+        try createDirectory(at: dest.deletingLastPathComponent())
+        let tmp = dest.deletingLastPathComponent().appendingPathComponent(".pbtmp_" + UUID().uuidString)
+        do {
+            try data.write(to: tmp)
+            if let dates {
+                var attrs: [FileAttributeKey: Any] = [:]
+                if let c = dates.created { attrs[.creationDate] = c }
+                if let m = dates.modified { attrs[.modificationDate] = m }
+                if !attrs.isEmpty { try? fm.setAttributes(attrs, ofItemAtPath: tmp.path) }
+            }
+            fullSync(tmp)
+            if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
+            try fm.moveItem(at: tmp, to: dest)
+            fullSyncFileAndParent(dest)
+        } catch {
+            try? fm.removeItem(at: tmp)
+            throw error
+        }
     }
 
     /// Flush a just-written file, plus (on exFAT/FAT) the directory entry that names it — the pair

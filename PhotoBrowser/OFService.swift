@@ -306,7 +306,7 @@ enum OFService {
                                 creds: Credentials, includeMessages: Bool,
                                 progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: folder)
         sweepStaleTemps()        // reclaim any orphaned download temps left by earlier failed runs
         // Verbose per-run log written into the creator's folder (of-log.txt) so
         // failures can be inspected and shared. Best-effort, never affects the download.

@@ -379,7 +379,7 @@ struct WebBrowserView: View {
         defer { videoForPicker = nil; fileForPicker = nil }
         guard !name.isEmpty else { return }
         let dest = targetFolder.appendingPathComponent(name, isDirectory: true)
-        try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: dest)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: dest.path, isDirectory: &isDir), isDir.boolValue else {
             showToast("Couldn’t create “\(name)”", error: true)

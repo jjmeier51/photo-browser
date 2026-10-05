@@ -326,7 +326,7 @@ nonisolated enum MetadataBackup {
     nonisolated static var containerRoot: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = support.appendingPathComponent("metadataBackups", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: dir)
         return dir
     }
     nonisolated static func newContainerDirectory() -> URL {
@@ -357,13 +357,13 @@ nonisolated enum MetadataBackup {
     /// JSON itself couldn't be written (a missing cover file is tolerated).
     nonisolated static func write(_ s: MetadataSnapshot, covers: URL, thumbs: URL, messages: URL, to dir: URL) -> Bool {
         let fm = FileManager.default
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: dir)
         let enc = JSONEncoder(); enc.outputFormatting = [.sortedKeys]
         guard let data = try? enc.encode(s),
               (try? data.write(to: dir.appendingPathComponent(jsonName), options: .atomic)) != nil else { return false }
         func copyAll(_ names: some Sequence<String>, from src: URL, sub: String) {
             let d = dir.appendingPathComponent(sub, isDirectory: true)
-            try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+            try? DriveWriter.createDirectory(at: d)
             for n in names {
                 let to = d.appendingPathComponent(n)
                 guard !fm.fileExists(atPath: to.path) else { continue }

@@ -137,12 +137,17 @@ struct VEImportPicker: View {
             _ = provider.loadFileRepresentation(forTypeIdentifier: type.identifier) { tmp, _ in
                 guard let tmp else { cont.resume(returning: nil); return }
                 do {
-                    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    try DriveWriter.createDirectory(at: dir)
                     let base = VENames.sanitize(tmp.deletingPathExtension().lastPathComponent, fallback: "Photo")
                     let name = VENames.unique(base, ext: tmp.pathExtension, in: dir)
                     let dst = dir.appendingPathComponent(name)
                     store.assertUnderDrive(dst)
-                    try FileManager.default.copyItem(at: tmp, to: dst)   // must finish before this handler returns
+                    // Copy into a hidden temp, flush, then rename — must all finish before this handler
+                    // returns (iOS deletes `tmp` then), and `dst` only ever appears complete on the drive.
+                    let staging = dir.appendingPathComponent(".pbtmp_" + UUID().uuidString)
+                    try FileManager.default.copyItem(at: tmp, to: staging)
+                    DriveWriter.fullSync(staging)
+                    try FileManager.default.moveItem(at: staging, to: dst)
                     DriveWriter.fullSyncFileAndParent(dst)
                     cont.resume(returning: dst)
                 } catch {

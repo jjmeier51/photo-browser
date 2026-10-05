@@ -149,7 +149,7 @@ struct TikTokImportView: View {
                         // On the first resolved video, register the profile (pinned bubble +
                         // remembered handle) and create its folder so the bubble can appear.
                         if library.tiktokInfo(for: dest) == nil {
-                            try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+                            try? DriveWriter.createDirectory(at: dest)
                             let info = TTFolderInfo(handle: user, secUid: prior?.secUid ?? "",
                                                     lastUpdated: Date().timeIntervalSince1970,
                                                     downloaded: prior?.downloaded ?? [], videos: prior?.videos ?? 0,

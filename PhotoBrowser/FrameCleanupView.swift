@@ -342,7 +342,7 @@ struct FrameCleanupView: View {
     private func sortTo(_ person: String) {
         let base = library.rootURL ?? folder.deletingLastPathComponent()
         let dest = base.appendingPathComponent(person, isDirectory: true)
-        try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: dest)
         moveCurrent(to: dest, confirm: person)
     }
 

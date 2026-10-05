@@ -796,7 +796,7 @@ enum InstagramService {
         // Public profile → nil creds = anonymous CDN fetch (no cookie / app-id). `mediaRequest`
         // already keeps the instagram.com Referer + UA, which is all a public download needs.
         let mediaCreds: Credentials? = anonymousMedia ? nil : creds
-        try? FileManager.default.createDirectory(at: job.folder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: job.folder)
         let ext = job.isVideo ? "mp4" : "jpg"
         // Re-download replaces the existing file in place; otherwise avoid collisions.
         let dest = replace ? job.folder.appendingPathComponent("\(job.name).\(ext)")

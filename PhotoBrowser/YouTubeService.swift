@@ -180,7 +180,7 @@ enum YouTubeService {
     /// video title and stamping the upload date. Returns the final file URL, or nil on failure.
     nonisolated static func download(_ r: Resolved, into folder: URL,
                                      progress: @escaping @Sendable (String) -> Void) async -> URL? {
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: folder)
         let base = sanitizeFilename(r.title)
         let dest = uniqueURL(in: folder, base: base.isEmpty ? "YouTube video" : base, ext: "mp4")
 

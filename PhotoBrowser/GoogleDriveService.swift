@@ -160,7 +160,7 @@ enum GoogleDrive {
         // alongside what's already there and the per-file existence check can see it.
         let safe = name.replacingOccurrences(of: "/", with: "-")
         let root = parent.appendingPathComponent(safe)
-        try? fm.createDirectory(at: root, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: root)
         var result: [(item: Item, dest: URL)] = []
         var skipped = 0
         let children = await list(folderID: folderID)

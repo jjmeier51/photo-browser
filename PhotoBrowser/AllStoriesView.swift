@@ -199,7 +199,7 @@ struct AllStoriesView: View {
         let picData = folder.hasCover ? nil
             : await InstagramService.fetchProfilePic(userID: userID, handle: folder.info.handle, creds: creds, fallback: "")
         let storiesFolder = folder.url.appendingPathComponent("Stories", isDirectory: true)
-        try? FileManager.default.createDirectory(at: storiesFolder, withIntermediateDirectories: true)   // create @handle/Stories on demand
+        try? DriveWriter.createDirectory(at: storiesFolder)   // create @handle/Stories on demand
         let r = await InstagramService.runStories(handle: folder.info.handle, userID: userID, into: storiesFolder,
                                                   already: Set(folder.info.downloaded), creds: creds) { _ in }
         guard r.photos + r.videos > 0 else {

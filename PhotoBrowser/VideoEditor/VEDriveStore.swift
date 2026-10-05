@@ -72,7 +72,7 @@ nonisolated enum VELog {
         let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
         queue.async {
             let dir = VEDriveLayout.logs(root)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? DriveWriter.createDirectory(at: dir)
             let url = dir.appendingPathComponent("editor.log")
             if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
                let size = attrs[.size] as? Int, size > maxBytes {
@@ -109,14 +109,14 @@ nonisolated final class VEDriveStore: @unchecked Sendable {
         var dirs = [editorRoot, VEDriveLayout.projects(editorRoot), VEDriveLayout.exports(editorRoot), VEDriveLayout.library(editorRoot)]
         dirs += VEDriveLayout.libraryFolders.map { VEDriveLayout.library(editorRoot, $0) }
         for d in dirs where !fm.fileExists(atPath: d.path) {
-            try fm.createDirectory(at: d, withIntermediateDirectories: true)
+            try DriveWriter.createDirectory(at: d)
         }
     }
 
     func ensurePackageLayout(_ pkg: URL) throws {
         let fm = FileManager.default
         for d in [pkg] + VEDriveLayout.packageFolders(pkg) where !fm.fileExists(atPath: d.path) {
-            try fm.createDirectory(at: d, withIntermediateDirectories: true)
+            try DriveWriter.createDirectory(at: d)
         }
     }
 
@@ -148,7 +148,7 @@ nonisolated final class VEDriveStore: @unchecked Sendable {
     /// Writes a sibling temp file then swaps it in. Used for caches and settings.
     func writeData(_ data: Data, to url: URL) throws {
         assertUnderDrive(url)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try DriveWriter.createDirectory(at: url.deletingLastPathComponent())
         var coordError: NSError?
         var writeError: Error?
         NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &coordError) { u in
@@ -170,7 +170,7 @@ nonisolated final class VEDriveStore: @unchecked Sendable {
     func saveDocument(_ data: Data, to url: URL, backupName: String) throws {
         assertUnderDrive(url)
         let dir = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try DriveWriter.createDirectory(at: dir)
         var coordError: NSError?
         var writeError: Error?
         NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &coordError) { u in
@@ -199,7 +199,7 @@ nonisolated final class VEDriveStore: @unchecked Sendable {
 
     func coordinatedCopy(from src: URL, to dst: URL) throws {
         assertUnderDrive(dst)
-        try FileManager.default.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try DriveWriter.createDirectory(at: dst.deletingLastPathComponent())
         var coordError: NSError?
         var opError: Error?
         NSFileCoordinator().coordinate(readingItemAt: src, options: [], writingItemAt: dst, options: .forReplacing, error: &coordError) { s, d in
@@ -215,7 +215,7 @@ nonisolated final class VEDriveStore: @unchecked Sendable {
 
     func coordinatedMove(from src: URL, to dst: URL) throws {
         assertUnderDrive(dst)
-        try FileManager.default.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try DriveWriter.createDirectory(at: dst.deletingLastPathComponent())
         var coordError: NSError?
         var opError: Error?
         NSFileCoordinator().coordinate(writingItemAt: src, options: .forMoving, writingItemAt: dst, options: .forReplacing, error: &coordError) { s, d in

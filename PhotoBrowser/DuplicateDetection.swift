@@ -391,7 +391,7 @@ nonisolated enum DuplicateDetection {
     /// before the extension on a clash.
     nonisolated static func uniqueURL(for name: String, in folder: URL) -> URL {
         let fm = FileManager.default
-        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: folder)
         let ns = name as NSString
         let base = ns.deletingPathExtension, ext = ns.pathExtension
         var candidate = folder.appendingPathComponent(name)

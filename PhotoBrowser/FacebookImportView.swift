@@ -125,7 +125,7 @@ struct FacebookImportView: View {
             if isUpd { dest = target }
             else if let p = await FacebookService.resolveProfile(link, creds: creds) {
                 let sub = target.appendingPathComponent(sanitize(p.name), isDirectory: true)
-                try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+                try? DriveWriter.createDirectory(at: sub)
                 dest = sub
                 library.setLastFacebookURL(link, for: target)
             } else {

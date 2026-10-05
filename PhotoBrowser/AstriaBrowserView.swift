@@ -295,7 +295,7 @@ struct AstriaBrowserView: View {
                 let model = modelName(for: ref.prompt)
                 let dest: URL? = await Task.detached(priority: .userInitiated) { () -> URL? in
                     guard let data = await AstriaImageCache.fullImage(for: url) else { return nil }
-                    return AIExtend.saveGeneratedToFolder(data, in: folder, model: model, prompt: text,
+                    return await AIExtend.saveGeneratedToFolder(data, in: folder, model: model, prompt: text,
                                                           date: date, intoAISubfolder: false)
                 }.value
                 if let dest {
@@ -496,7 +496,7 @@ nonisolated enum AstriaImageCache {
         guard let data = await fullImage(for: url) else { return nil }
         let made: UIImage? = await Task.detached(priority: .utility) {
             guard let ui = decode(data, maxPixel: thumbSide) else { return nil }
-            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try? DriveWriter.createDirectory(at: directory)
             if let jpeg = ui.jpegData(compressionQuality: 0.82) { try? jpeg.write(to: file, options: .atomic) }
             return ui
         }.value

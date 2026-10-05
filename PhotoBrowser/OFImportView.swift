@@ -109,7 +109,7 @@ struct OFImportView: View {
             if isUpd { dest = target }
             else {
                 dest = target.appendingPathComponent(h, isDirectory: true)
-                try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+                try? DriveWriter.createDirectory(at: dest)
             }
             let prior = isUpd ? ex : library.ofInfo(for: dest)
             let already = Set(prior?.downloaded ?? [])

@@ -68,7 +68,7 @@ enum WebVideoDownloader {
             diag = "Loom: \(note)"
         }
         guard let url = URL(string: effectiveURL) else { return .failed("That video URL couldn’t be read.") }
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: folder)
         // Already saved here? Skip the whole transfer — but match on the SOURCE URL (via history),
         // not the filename we'd give it: sites that name every post with a constant page title
         // (passes.com) would otherwise collapse distinct videos onto one name and wrongly skip them.
@@ -224,7 +224,7 @@ enum WebVideoDownloader {
                                          captureDate: Date? = nil, caption: String? = nil,
                                          progress: @escaping @Sendable (Progress) -> Void) async -> Outcome {
         guard let url = URL(string: urlString) else { return .failed("That link couldn’t be read.") }
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: folder)
         // Already saved here? Skip the download — matched on the SOURCE URL (via history), not the
         // filename we'd give it. A re-tapped image is the same URL, so it's still skipped; but two
         // genuinely different images a site names identically (a constant page title / a generic

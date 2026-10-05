@@ -1001,7 +1001,7 @@ enum AIExtend {
     /// original's EXIF/GPS and forcing its capture date (EXIF + the file's own date)
     /// so it sorts correctly. Tags it AI-generated. Returns the new URL.
     nonisolated static func saveToAIFolder(_ data: Data, basedOn original: URL,
-                                           model: String? = nil, prompt: String? = nil) -> URL? {
+                                           model: String? = nil, prompt: String? = nil) async -> URL? {
         guard let resultSrc = CGImageSourceCreateWithData(data as CFData, nil),
               var resultCG = CGImageSourceCreateImageAtIndex(resultSrc, 0, nil) else { return nil }
         // Astria can hand back a JPEG whose pixels are rotated with an EXIF orientation flag (its web
@@ -1015,7 +1015,6 @@ enum AIExtend {
             if let baked = PhotoEditorIO.context.createCGImage(ci, from: ci.extent) { resultCG = baked }
         }
         let aiDir = original.deletingLastPathComponent().appendingPathComponent("AI", isDirectory: true)
-        try? FileManager.default.createDirectory(at: aiDir, withIntermediateDirectories: true)
 
         var props: [CFString: Any] = [:]
         if let src = CGImageSourceCreateWithURL(original as CFURL, nil) {
@@ -1051,14 +1050,24 @@ enum AIExtend {
         props[kCGImagePropertyPixelWidth] = resultCG.width
         props[kCGImagePropertyPixelHeight] = resultCG.height
 
-        let dest = uniqueURL(for: "\(original.deletingPathExtension().lastPathComponent) AI.jpg", in: aiDir)
-        guard let d = CGImageDestinationCreateWithURL(dest as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(d, resultCG, props as CFDictionary)
+        // Encode in memory, then let `DriveWriter` place it: serialized against every other drive
+        // write, temp → fsync → rename, name chosen inside the actor, dates stamped before the rename.
+        // Writing straight to the final path with ImageIO (the old way) left a half-written entry in a
+        // freshly created "AI" folder whenever the app was suspended or the drive pulled mid-write —
+        // the exFAT "unexpected directory entry" / "zero-length directory" repairs.
+        guard let jpeg = encodeJPEG(resultCG, properties: props) else { return nil }
+        let name = "\(original.deletingPathExtension().lastPathComponent) AI.jpg"
+        let dates: (created: Date?, modified: Date?)? = captureDate.map { (created: Optional($0), modified: Optional($0)) }
+        return try? await DriveWriter.shared.writeDataUnique(jpeg, named: name, in: aiDir, dates: dates)
+    }
+
+    /// JPEG bytes for `cg` with `properties` as the image metadata.
+    private nonisolated static func encodeJPEG(_ cg: CGImage, properties: [CFString: Any]) -> Data? {
+        let out = NSMutableData()
+        guard let d = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(d, cg, properties as CFDictionary)
         guard CGImageDestinationFinalize(d) else { return nil }
-        if let captureDate {
-            try? FileManager.default.setAttributes([.creationDate: captureDate, .modificationDate: captureDate], ofItemAtPath: dest.path)
-        }
-        return dest
+        return out as Data
     }
 
     /// Saves a **Create with AI** result (there's no source photo) into an "AI" subfolder of
@@ -1067,11 +1076,10 @@ enum AIExtend {
     /// provenance. Returns the new URL.
     nonisolated static func saveGeneratedToFolder(_ data: Data, in folder: URL,
                                                   model: String? = nil, prompt: String? = nil,
-                                                  date: Date? = nil, intoAISubfolder: Bool = true) -> URL? {
+                                                  date: Date? = nil, intoAISubfolder: Bool = true) async -> URL? {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil),
               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
         let aiDir = intoAISubfolder ? folder.appendingPathComponent("AI", isDirectory: true) : folder
-        try? FileManager.default.createDirectory(at: aiDir, withIntermediateDirectories: true)
         let now = date ?? Date()
         let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
@@ -1089,12 +1097,10 @@ enum AIExtend {
             kCGImagePropertyOrientation: 1,
             kCGImagePropertyPixelWidth: cg.width, kCGImagePropertyPixelHeight: cg.height]
         let base = trimmed.isEmpty ? "AI Creation" : String(trimmed.prefix(40))
-        let dest = uniqueURL(for: "\(sanitizeName(base)).jpg", in: aiDir)
-        guard let d = CGImageDestinationCreateWithURL(dest as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(d, cg, props as CFDictionary)
-        guard CGImageDestinationFinalize(d) else { return nil }
-        try? FileManager.default.setAttributes([.creationDate: now, .modificationDate: now], ofItemAtPath: dest.path)
-        return dest
+        guard let jpeg = encodeJPEG(cg, properties: props) else { return nil }
+        // Same durable, serialized placement as `saveToAIFolder` (see the note there).
+        return try? await DriveWriter.shared.writeDataUnique(jpeg, named: "\(sanitizeName(base)).jpg", in: aiDir,
+                                                              dates: (created: now, modified: now))
     }
 
     private nonisolated static func sanitizeName(_ s: String) -> String {
@@ -1198,15 +1204,6 @@ enum AIExtend {
         f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
         for case let s? in candidates { if let d = f.date(from: s) { return d } }
         return nil
-    }
-
-    private nonisolated static func uniqueURL(for name: String, in folder: URL) -> URL {
-        let fm = FileManager.default
-        var dest = folder.appendingPathComponent(name)
-        let base = dest.deletingPathExtension().lastPathComponent, ext = dest.pathExtension
-        var n = 1
-        while fm.fileExists(atPath: dest.path) { dest = folder.appendingPathComponent("\(base) \(n).\(ext)"); n += 1 }
-        return dest
     }
 
     /// Standard headers for Astria's API. `Accept: application/json` + a real `User-Agent` are what stop

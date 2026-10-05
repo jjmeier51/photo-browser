@@ -32,7 +32,7 @@ enum BunkrWebDownloader {
                          log: DownloadLog? = nil,
                          onProgress: @escaping @MainActor (Int) -> Void)
         async -> (downloaded: Int, failed: Int, statuses: [Int: Int], debug: String) {
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: folder)
         pageDebug = ""; respDebug = ""
         var downloaded = 0, statuses: [Int: Int] = [:]
         var completed = 0                 // files that reached a terminal state (saved or permanently failed)

@@ -481,7 +481,7 @@ enum PhotosBackupImporter {
     nonisolated static func move(_ items: [ScanItem], into destination: URL, deleteOriginals: Bool,
                                  progress: @escaping @Sendable (Double, String) -> Void) async -> (moved: [URL], failed: Int, reason: String?) {
         let fm = FileManager.default
-        try? fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: destination)
         var moved: [URL] = []
         var failed = 0
         var reason: String?

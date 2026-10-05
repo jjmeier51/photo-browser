@@ -57,12 +57,12 @@ nonisolated enum DriveRepair {
             // 3. Copy into a hidden sibling.
             let temp = parent.appendingPathComponent("." + name + ".rebuilding", isDirectory: true)
             try? fm.removeItem(at: temp)
-            do { try fm.createDirectory(at: temp, withIntermediateDirectories: true) }
+            do { try DriveWriter.createDirectory(at: temp) }
             catch { result.error = "Couldn't create a working folder next to it: \(error.localizedDescription)"; return result }
 
             for d in plan.directories {
                 let dest = temp.appendingPathComponent(d, isDirectory: true)
-                if (try? fm.createDirectory(at: dest, withIntermediateDirectories: true)) == nil { result.failed.append(d) }
+                if (try? DriveWriter.createDirectory(at: dest)) == nil { result.failed.append(d) }
             }
             var copied: Int64 = 0
             for f in plan.files {

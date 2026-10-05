@@ -89,7 +89,7 @@ enum LinkDownloadService {
         let host = URL(string: link.hasPrefix("http") ? link : "https://\(link.trimmingCharacters(in: .whitespaces))")?.host ?? "link"
         // Verbose per-run log written into the download folder (link-download-log.txt) so
         // failures can be inspected and shared. Best-effort, never affects the download.
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: folder)
         let log = DownloadLog(folder: folder, kind: "link-download")
         await log.begin("\(host) — \(link)")
         progress(Progress(phase: "Resolving link…", fraction: 0, done: 0, total: 0))

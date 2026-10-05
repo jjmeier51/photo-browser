@@ -221,7 +221,7 @@ struct BulkInstagramView: View {
                 statusLine = "@\(job.handle) → \(job.name) (\(i + 1) of \(jobs.count))…"
                 // Register the "@handle" subfolder (a bubble inside the regular person folder).
                 let dest = igFolder(for: job.folder, handle: job.handle)
-                try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+                try? DriveWriter.createDirectory(at: dest)
                 var info = library.instagramInfo(for: dest)
                     ?? IGFolderInfo(handle: job.handle, userID: "", lastUpdated: now,
                                     downloaded: [], photos: 0, videos: 0)

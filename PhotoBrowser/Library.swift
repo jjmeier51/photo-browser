@@ -134,7 +134,7 @@ final class Library {
     @ObservationIgnored nonisolated static let bulkDir: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("bulkStore", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: dir)
         return dir
     }()
     nonisolated static func loadBulk<T: Decodable>(_ name: String, as type: T.Type = T.self) -> T? {
@@ -177,7 +177,7 @@ final class Library {
     @ObservationIgnored nonisolated private static let listingsDir: URL = {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("listings", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: dir)
         return dir
     }()
     nonisolated private static func listingFile(for folder: URL) -> URL {
@@ -393,13 +393,14 @@ final class Library {
             guard let inbox = rec["inbox"] as? String, let dest = rec["dest"] as? String else { continue }
             guard fm.fileExists(atPath: inbox) else { continue }     // inbox file gone (already filed) — drop
             let inboxURL = URL(fileURLWithPath: inbox), destURL = URL(fileURLWithPath: dest)
-            try? fm.createDirectory(at: destURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? DriveWriter.createDirectory(at: destURL.deletingLastPathComponent())
             if fm.fileExists(atPath: dest) {
                 try? fm.removeItem(at: inboxURL)                     // already have it — drop the dupe
             } else if (try? fm.moveItem(at: inboxURL, to: destURL)) == nil {
                 _ = try? fm.copyItem(at: inboxURL, to: destURL)
                 if fm.fileExists(atPath: dest) { try? fm.removeItem(at: inboxURL) }
             }
+            if fm.fileExists(atPath: dest) { DriveWriter.fullSyncFileAndParent(destURL) }   // exFAT: entry durable before the next
             guard fm.fileExists(atPath: dest) else { requeue.append(rec); continue }   // couldn't file — keep for retry
             if let ct = rec["createTime"] as? Double, ct > 0 {
                 let date = Date(timeIntervalSince1970: ct)
@@ -473,19 +474,19 @@ final class Library {
     @ObservationIgnored private lazy var coversDirectory: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("folderCovers", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: dir)
         return dir
     }()
     @ObservationIgnored private lazy var itemThumbsDirectory: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("itemThumbs", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: dir)
         return dir
     }()
     @ObservationIgnored private lazy var textMessagesDirectory: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("textMessages", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: dir)
         return dir
     }()
 
@@ -891,7 +892,7 @@ final class Library {
 
     nonisolated private static var labelsDir: URL {
         let dir = bulkDir.appendingPathComponent("customLabels", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: dir)
         return dir
     }
     nonisolated private static func labelFileURL(_ name: String) -> URL {
@@ -1445,7 +1446,11 @@ final class Library {
                                                          maxTicks: Self.aiRecoveryPollTicks,
                                                          heartbeat: heartbeatRelay(live, activityID: activityID, count: count ?? 1))
                 recoveringAIJobIDs.remove(jobID)
-                endActivity(activityID); bg.end()
+                endActivity(activityID)
+                // The background window stays open until the images are *on the drive*. Ending it
+                // before the saves (as this used to) let iOS suspend the app mid-write into a freshly
+                // created "AI" folder — on exFAT that is a torn directory the next fsck has to repair.
+                defer { bg.end() }
                 switch result {
                 case .success(let data):
                     let saved = await Task.detached(priority: .utility) { () -> Int in
@@ -1453,9 +1458,9 @@ final class Library {
                         for d in data {
                             let url: URL?
                             if let originalURL {
-                                url = AIExtend.saveToAIFolder(d, basedOn: originalURL, model: modelRaw, prompt: promptText)
+                                url = await AIExtend.saveToAIFolder(d, basedOn: originalURL, model: modelRaw, prompt: promptText)
                             } else {
-                                url = AIExtend.saveGeneratedToFolder(d, in: folderURL, model: modelRaw, prompt: promptText)
+                                url = await AIExtend.saveGeneratedToFolder(d, in: folderURL, model: modelRaw, prompt: promptText)
                             }
                             if url != nil { n += 1 }
                         }
@@ -1969,7 +1974,7 @@ final class Library {
             for (i, job) in jobs.enumerated() {
                 setLastIGHandle(job.handle, for: job.folder)      // remember the mapping
                 let dest = resolveIGDestination(person: job.folder, handle: job.handle)
-                try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+                try? DriveWriter.createDirectory(at: dest)
                 let prior = instagramInfo(for: dest)
                 let already = Set(prior?.downloaded ?? [])
                 setActivity(id, status: "@\(job.handle) — \(already.isEmpty ? "downloading" : "checking for new posts") (\(i + 1) of \(jobs.count))",
@@ -2065,7 +2070,7 @@ final class Library {
                          overwrite: Bool, refreshIndex: Bool) {
         guard !akRunning.contains(member.name) else { return }
         let folder = parentFolder.appendingPathComponent(member.name, isDirectory: true)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: folder)
         markKardashianFolder(folder)
         if let d = AccessKardashian.birthdayDate(member) { setBirthday(d, for: folder) }
 
@@ -2209,7 +2214,7 @@ final class Library {
             let igFolder = person.appendingPathComponent(info.handle, isDirectory: true)
 
             if instagramFolders[igFolder.path] == nil {
-                try? fm.createDirectory(at: igFolder, withIntermediateDirectories: true)
+                try? DriveWriter.createDirectory(at: igFolder)
                 // Move only this folder's *Instagram* content down into the @handle folder:
                 // its highlight/Stories subfolders, and files we know came from Instagram.
                 let children = (try? fm.contentsOfDirectory(
@@ -2416,7 +2421,7 @@ final class Library {
             storyLinks = [:]                                  // the linked temp files are gone now
             UserDefaults.standard.set(storyLinks, forKey: "photoBrowser.storyLinks")
         }
-        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: folder)
         flattenStoriesSubfolders(in: folder)
         return folder
     }

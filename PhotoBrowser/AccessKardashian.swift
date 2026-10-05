@@ -302,7 +302,7 @@ enum AccessKardashian {
     nonisolated private static func planCacheURL(_ member: Member) -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("accessKardashian", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: dir)
         return dir.appendingPathComponent("\(member.token).json")
     }
     nonisolated private static func loadCachedPlan(_ member: Member) -> [Planned]? {

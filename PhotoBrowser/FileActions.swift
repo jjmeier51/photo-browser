@@ -197,7 +197,7 @@ enum FileActions {
     /// plain move is refused; a file that can't be moved at all is left in place (not silently lost).
     static func moveToTrash(_ entries: [Entry], trashFolder: URL) -> [TrashEntry] {
         let fm = FileManager.default
-        try? fm.createDirectory(at: trashFolder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: trashFolder)
         var records: [TrashEntry] = []
         for e in entries {
             let dest = uniqueDestination(for: e.url.lastPathComponent, in: trashFolder)
@@ -222,7 +222,7 @@ enum FileActions {
         guard fm.fileExists(atPath: src.path) else { return nil }
         let original = URL(fileURLWithPath: item.originalPath)
         let parent = original.deletingLastPathComponent()
-        try? fm.createDirectory(at: parent, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: parent)
         let dest = uniqueDestination(for: original.lastPathComponent, in: parent)
         return (try? fm.moveItem(at: src, to: dest)) != nil ? dest : nil
     }
@@ -252,7 +252,8 @@ enum FileActions {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         let dest = parent.appendingPathComponent(trimmed, isDirectory: true)
-        return (try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: false)) != nil
+        guard !FileManager.default.fileExists(atPath: dest.path) else { return false }
+        return (try? DriveWriter.createDirectory(at: dest)) != nil   // flushed: a half-born folder is what fsck later deletes
     }
 
     /// Renames an item; returns its new URL on success so labels can follow it.
@@ -501,7 +502,7 @@ enum FileActions {
         let fm = FileManager.default
         let folderName = source.lastPathComponent.isEmpty ? "Imported Drive" : source.lastPathComponent
         let destFolder = reuseDestination ?? uniqueDestination(for: folderName, in: parent)
-        try? fm.createDirectory(at: destFolder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: destFolder)
 
         progress(TransferProgress(fraction: 0, done: 0, total: 0, currentName: "Scanning…"))
         // Every regular file under the source, recursively, with its size (used to tell
@@ -544,7 +545,7 @@ enum FileActions {
                         if move { try? fm.removeItem(at: file) }
                         return (true, file.lastPathComponent)
                     }
-                    try? fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try? DriveWriter.createDirectory(at: target.deletingLastPathComponent())
                     if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: target) }   // partial leftover
                     do {
                         if move { try fm.moveItem(at: file, to: target) }
@@ -606,7 +607,7 @@ enum FileActions {
         let fm = FileManager.default
         let folderName = source.lastPathComponent.isEmpty ? "Imported Drive" : source.lastPathComponent
         let destFolder = reuseDestination ?? uniqueDestination(for: folderName, in: parent)
-        try? fm.createDirectory(at: destFolder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: destFolder)
 
         let files = items
         let total = files.count
@@ -635,7 +636,7 @@ enum FileActions {
                         if move { try? fm.removeItem(at: srcURL) }
                         return (true, srcURL.lastPathComponent)
                     }
-                    try? fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try? DriveWriter.createDirectory(at: target.deletingLastPathComponent())
                     if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: target) }   // partial leftover
                     do {
                         if move { try fm.moveItem(at: srcURL, to: target) }
@@ -1221,7 +1222,7 @@ enum FileActions {
     static func screenshotsFolder(beside fileURL: URL) -> URL? {
         let dir = fileURL.deletingLastPathComponent().appendingPathComponent("Screenshots", isDirectory: true)
         if !FileManager.default.fileExists(atPath: dir.path) {
-            guard (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil else { return nil }
+            guard (try? DriveWriter.createDirectory(at: dir)) != nil else { return nil }
         }
         return dir
     }
@@ -1249,7 +1250,8 @@ enum FileActions {
         f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
         let ext = data.starts(with: [0x89, 0x50, 0x4E, 0x47] as [UInt8]) ? "png" : "heic"   // PNG magic → png
         let dest = uniqueDestination(for: "Screenshot \(f.string(from: Date())).\(ext)", in: folder)
-        return (try? data.write(to: dest)) != nil ? dest : nil
+        // Temp → fsync → rename → flush: the screenshot only ever appears complete on the drive.
+        return (try? DriveWriter.writeDataSync(data, to: dest)) != nil ? dest : nil
     }
 
     // MARK: - Export-progress persistence (resume after a crash/suspension)
@@ -1348,7 +1350,7 @@ enum FileActions {
                 suffix += 1
             }
             createdFresh = !fm.fileExists(atPath: candidate.path)
-            try? fm.createDirectory(at: candidate, withIntermediateDirectories: true)
+            try? DriveWriter.createDirectory(at: candidate)
             guard fm.fileExists(atPath: candidate.path, isDirectory: &isDir), isDir.boolValue else {
                 return (nil, 0, nil, "the frames folder couldn’t be created on the drive — it may be full, read-only, or need repair (Disk Utility First Aid).")
             }

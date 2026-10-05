@@ -191,7 +191,7 @@ enum FacebookService {
             result.profilePic = await downloadData(profile.picURL, creds: anon ? Credentials(cookie: "") : creds)
         }
 
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: folder)
 
         // Dedup is by media id. The persisted `alreadyDownloaded` set only reflects the
         // *last completed* run, so an interrupted run (or a folder built by an older

@@ -304,6 +304,17 @@ These were discovered the painful way; the current code already respects them.
     provide — that's why CommonCrypto is bridged in. Keep all MEGA work
     `nonisolated`/off-main (it's network + crypto + large file writes), and treat
     the reverse-engineered protocol as best-effort: surface failures as notes.
+12. **Every write to the drive goes through `DriveWriter`.** The SSD is exFAT (no
+    journal): a folder created with a bare `createDirectory`, a file written straight
+    to its final path, or a write still in flight when iOS suspends the app leaves a
+    torn directory that `fsck_exfat` later reports as "zero length directory",
+    "cluster chain overlaps" or "unexpected critical primary directory entry" (the
+    AI-folder corruption). Rules: create folders with `DriveWriter.createDirectory`
+    (flushes each new level), place files with `DriveWriter.shared.writeData` /
+    `writeDataUnique` / `commit` (temp → fsync → rename → flush, serialized) or the
+    sync `writeDataSync`, never `Data.write`/`CGImageDestinationCreateWithURL` to a
+    final drive path, and hold a `BackgroundTaskHolder` across the write when the
+    user may have left the app (see `docs/feature-notes.md` §12).
 
 ## Git workflow
 

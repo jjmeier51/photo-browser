@@ -82,7 +82,7 @@ enum VSCOService {
         result.siteID = site.id
         await log.log("site: id=\(site.id) name=\(site.name)")
         if !site.picURL.isEmpty { result.profilePic = await downloadData(site.picURL) }
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: folder)
 
         // Page through the whole gallery.
         progress(Progress(phase: "Listing @\(user)’s posts…", fraction: 0, done: 0, total: 0))

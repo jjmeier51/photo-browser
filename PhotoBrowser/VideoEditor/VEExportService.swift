@@ -250,8 +250,8 @@ nonisolated enum VEExportService {
 
         let rendersDir = VEDriveLayout.renders(package)
         let exportsDir = VEDriveLayout.exports(store.editorRoot)
-        try? FileManager.default.createDirectory(at: rendersDir, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: exportsDir, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: rendersDir)
+        try? DriveWriter.createDirectory(at: exportsDir)
         let finalName = VENames.unique(VENames.sanitize(settings.fileName, fallback: "Export"), ext: "mp4", in: exportsDir)
         let partial = rendersDir.appendingPathComponent(".\(finalName).part.mp4")
         try? FileManager.default.removeItem(at: partial)
