@@ -652,6 +652,19 @@ follows the pre-existing path verbatim. Callers opt out with `detectDuplicates: 
 - Tests: `PhotoBrowserTests/DuplicateDetectionTests.swift` (see its README for adding the target).
 - The whole enum is `nonisolated` — it runs inside the batch's detached task.
 
+## 5d. Video delay for CarPlay — `PlaybackSettings`, `VideoPage.swift`
+
+Settings → Playback → **Delay video** (Off / 1 s / 2 s / 3 s, `photoBrowser.videoDelay`). CarPlay
+and Bluetooth add audio latency the phone can't measure, so sound trails the picture. With a delay
+set, `ZoomableVideoController` plays an `AVMutableComposition` instead of the file: audio tracks
+inserted at 0, the video track inserted at `delay` (`delayedItem`), so the picture is held back by
+that much and lines up with the late audio. No re-encode, orientation carried over, the first
+`delay` seconds are black. The player is created empty and the composition built async (asset
+loads must not block the main thread on an external drive); everything that hangs off the item
+(looping notification, frame-capture output, pitch, orientation, ready observation) moved into
+`attachItem()`, called immediately for a plain file or after `replaceCurrentItem`. Frame capture,
+stepping and Slo-Mo all work on the composition item.
+
 ## 6. Folder file-format filter — `Models.swift`, `FolderView.swift`
 
 `FormatFilter` (`all/jpeg/png/heif/raw/gif/mov/mp4/avi`) matches on file **extension** (RAW

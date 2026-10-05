@@ -15,6 +15,7 @@ struct SettingsView: View {
     @State private var prompt = AIExtend.extendPrompt
     @State private var pauseReminders = AINotifications.pauseRemindersEnabled
     @State private var confirmStopWaiting = false
+    @State private var videoDelay = PlaybackSettings.videoDelay
     @State private var cdmpoolToken = OFDRM.token
 
     var body: some View {
@@ -27,6 +28,20 @@ struct SettingsView: View {
                     Text("Mode")
                 } footer: {
                     Text("Use the app only for moving files from this phone onto the drive: no thumbnail library is kept on the phone (tiles are memory-only), and the downloaders and photo editors are hidden. Moving, copying, renaming, deleting, metadata, captions, labels and duplicate detection all stay available. Takes effect immediately; thumbnails already cached are kept but not used while it's on.")
+                }
+
+                Section {
+                    Picker("Delay video", selection: $videoDelay) {
+                        Text("Off").tag(0.0)
+                        Text("1 s").tag(1.0)
+                        Text("2 s").tag(2.0)
+                        Text("3 s").tag(3.0)
+                    }
+                    .onChange(of: videoDelay) { _, v in PlaybackSettings.videoDelay = v }
+                } header: {
+                    Text("Playback")
+                } footer: {
+                    Text("For CarPlay and Bluetooth, where the sound arrives a moment late: holds the picture back by this much so it lines up with the delayed audio. Applies to every video the viewer plays; the sound is untouched. Set it to Off when you're not on CarPlay.")
                 }
 
                 Section {

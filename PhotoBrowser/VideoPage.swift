@@ -41,6 +41,18 @@ struct VideoPage: View {
     }
 }
 
+/// Playback preferences (Settings → Playback).
+enum PlaybackSettings {
+    static let videoDelayKey = "photoBrowser.videoDelay"
+    /// Seconds the **picture** is held back behind the sound — 0 (off), 1, 2 or 3. For CarPlay and
+    /// Bluetooth, where the audio path adds latency the phone can't see: with the video shifted
+    /// later by the same amount, lips and sound line up again. The audio itself is never altered.
+    static var videoDelay: Double {
+        get { UserDefaults.standard.double(forKey: videoDelayKey) }
+        set { UserDefaults.standard.set(newValue, forKey: videoDelayKey) }
+    }
+}
+
 private struct ZoomableVideo: UIViewControllerRepresentable {
     let url: URL
     var coverSource: CoverFrameSource? = nil
@@ -135,7 +147,9 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
 
     init(url: URL) {
         self.url = url
-        player = AVPlayer(url: url)
+        // With a video delay set (Settings → Playback, for CarPlay's late audio) the item is a
+        // composition built asynchronously in viewDidLoad; otherwise the plain file plays at once.
+        player = PlaybackSettings.videoDelay > 0 ? AVPlayer() : AVPlayer(url: url)
         playerLayer = AVPlayerLayer(player: player)
         super.init(nibName: nil, bundle: nil)
     }
@@ -159,6 +173,33 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         contentView.layer.addSublayer(playerLayer)
 
         player.actionAtItemEnd = .none      // loop instead of stopping at the end
+        if player.currentItem != nil {
+            attachItem()
+        } else {
+            // Delayed playback: build the composition off the main thread, then wire it in.
+            let url = self.url, delay = PlaybackSettings.videoDelay
+            Task { [weak self] in
+                let item = await Self.delayedItem(url: url, delay: delay)
+                guard let self else { return }
+                self.player.replaceCurrentItem(with: item)
+                self.attachItem()
+            }
+        }
+
+        setupControls()
+        setupGestures()
+
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] t in
+            self?.updateProgress(t)
+        }
+    }
+
+    /// Wires everything that hangs off the current item: end-of-item looping, the frame-capture
+    /// output, pitch preservation, orientation, and the ready-to-play observation. Called as soon
+    /// as the item exists — immediately for a plain file, after the composition is built when a
+    /// video delay is set.
+    private func attachItem() {
         NotificationCenter.default.addObserver(
             self, selector: #selector(playerDidReachEnd),
             name: .AVPlayerItemDidPlayToEndTime, object: player.currentItem)
@@ -187,14 +228,31 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
                 self.playIfNeeded()
             }
         }
+    }
 
-        setupControls()
-        setupGestures()
-
-        timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] t in
-            self?.updateProgress(t)
+    /// The player item for `url` with its **picture held back by `delay` seconds**: a composition
+    /// whose audio tracks start at 0 and whose video track is inserted at `delay`, so at any
+    /// moment the sound is `delay` ahead of the frame on screen — exactly what cancels the latency
+    /// a CarPlay / Bluetooth audio path adds. No re-encode; orientation is carried over. The first
+    /// `delay` seconds show black. Falls back to the plain file if the asset can't be read.
+    nonisolated private static func delayedItem(url: URL, delay: Double) async -> AVPlayerItem {
+        let asset = AVURLAsset(url: url)
+        guard delay > 0,
+              let duration = try? await asset.load(.duration),
+              let tracks = try? await asset.load(.tracks) else { return AVPlayerItem(asset: asset) }
+        let composition = AVMutableComposition()
+        let shift = CMTime(seconds: delay, preferredTimescale: 600)
+        let whole = CMTimeRange(start: .zero, duration: duration)
+        var inserted = false
+        for track in tracks where track.mediaType == .video || track.mediaType == .audio {
+            guard let target = composition.addMutableTrack(withMediaType: track.mediaType,
+                                                           preferredTrackID: kCMPersistentTrackID_Invalid) else { continue }
+            let at: CMTime = track.mediaType == .video ? shift : .zero
+            guard (try? target.insertTimeRange(whole, of: track, at: at)) != nil else { continue }
+            if track.mediaType == .video, let t = try? await track.load(.preferredTransform) { target.preferredTransform = t }
+            inserted = true
         }
+        return inserted ? AVPlayerItem(asset: composition) : AVPlayerItem(asset: asset)
     }
 
     override func viewDidLayoutSubviews() {
