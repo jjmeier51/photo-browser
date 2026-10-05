@@ -820,3 +820,72 @@ image behind a thumbnail; captures the blog post **date** and keeps it with the 
 | Move/copy duplicate detection | `DuplicateDetection.swift`, `FileActions.moveItems/copyItems`, `PhotoBrowserTests/` |
 | Pure File Transfer mode | `Library.pureTransferMode`, `ContentView.swift` (`PureTransferToggle`), `Thumbnailer.diskCacheEnabled` |
 | Downloaders | `LinkDownloadService.swift`, `BunkrWebDownloader.swift`, `MegaDownloader.swift`, `InstagramService.swift`, `FacebookService.swift`, `WebBrowserView.swift` |
+
+## 11. Video editor — `PhotoBrowser/VideoEditor/` (CapCut-parity module, Phase 1)
+
+A non-destructive, drive-resident video editor built to the "Video Editor Module PRD (CapCut
+parity)". Phase 1 delivers the storage model and a complete cut-and-export loop: import → main-track
+timeline (split / trim / delete / copy / reorder / speed / volume / opacity / crop / rotate / mirror /
+canvas transform / ratio / background) → AVPlayer preview → `AVAssetWriter` export into
+`VideoEditor/Exports/`. Later phases add transitions, overlays, the audio stack, text/stickers,
+keyframes, masks, chroma key and effects — all as **additive** schema fields.
+
+### 11.1 Where things live (one type per responsibility, ARC-1)
+
+| File | Role |
+| --- | --- |
+| `VEModel.swift` | `project.json` document (`VEProject`, `VEClip`, `VEMediaSource`, …), `VETime` (integer **microseconds**), `JSONValue` + `VEDynamicKey` for unknown-key preservation, `VECanvas` maths, `VENames` sanitising, `VEError` (the only user-facing error model). |
+| `VEDriveStore.swift` | `VEDriveLayout` (every path under `<DriveRoot>/VideoEditor/`), `VEDriveStore` (coordinated reads/writes, atomic document save with `.bak`, free space / read-only / FAT32 queries, `drive://` ↔ absolute resolution), `VEDriveMonitor` (2 s reachability poll + error-driven loss), `VEEditorSettings` (`settings.json`, replaces UserDefaults), `VELog`. |
+| `VEDocument.swift` | `VEDocument` (undo stack of 200 state snapshots, transactions for gestures, 500 ms/2 s autosave, lock heartbeat, `.bak` recovery, "Rebuild from media"), `VEProjectCatalog` (list/rename/duplicate/delete/sizes/clear caches). |
+| `VEMediaService.swift` | Probe by format descriptions (unsupported codecs named), identity (size + mtime + SHA-256 of first/last MiB), import by reference or chunked copy with progress, relink search, throughput measurement, thumbnails (poster + 1 fps strips of 60 frames), waveforms (`.pk`, 10 ms Int16 min/max), 720p proxies. |
+| `VECompositionBuilder.swift` | Project → `AVMutableComposition` (A/B main video tracks, A/B embedded-audio tracks, one track per audio lane), `AVMutableVideoComposition` with `VEInstruction`s, `AVMutableAudioMix`; `VELayerMath` (crop → fit → scale → rotate → flip → position, shared with the on-canvas gizmo). |
+| `VECompositor.swift` | The one `AVVideoCompositing` renderer (Core Image on a Metal `CIContext`) for preview, export and covers; `VEImageCache` for stills/GIF frames; `VEFrameRenderer`. |
+| `VEExportService.swift` | EXP-3 tiers, pre-flight (missing media, 1.5× space, FAT32 4 GiB, read-only), reader → writer pipeline on a dedicated queue, `renders/` → `Exports/` rename, background task + "export interrupted" notification, optional Photos copy. |
+| `VEPlayback.swift` | `VEPlayback` (item swap keeps the playhead, coalesced zero-tolerance seeks ≤ 60/s, frame step, stall → proxy), `VEPreviewView` (player layer + pinch/drag/twist gizmo with centre-line and right-angle snapping). |
+| `VETimelineView.swift` | UIKit timeline: fixed centre playhead, pinch zoom (1 min/screen … 20 pt/frame), ruler, filmstrips + waveform overlay, badges, trim handles with ripple and snapping, long-press reorder, cover/add tiles, cut handles. |
+| `VEEditorSession.swift` | All edit commands, timeline delegate, import flow, derived-asset queue (2-wide, thermal-aware), relink, cover regeneration, drive-loss wiring; `VEThumbStore`. |
+| `VEEditorView.swift` | The screen, tool bars, tool sheets (✓/✕ = one undo step), project settings, cover sheet, drive-lost sheet. |
+| `VECropScreen.swift`, `VEImportPicker.swift`, `VEExportSheet.swift`, `VEProjectsView.swift`, `VEHost.swift` | Crop UI, Drive/Files/Photos picker, export sheet + progress + completion, Projects screen, host adapter and entry points. |
+
+### 11.2 Rules that must survive future changes
+
+- **Nothing in the sandbox.** Every write goes through `VEDriveLayout` paths and `VEDriveStore`
+  (`assertUnderDrive` fires in Debug). Preferences live in `settings.json` on the drive. The only
+  sandbox state is the host's bookmark. The Photos picker copies its temp file onto the drive
+  *inside* the `loadFileRepresentation` handler (iOS deletes it when the handler returns).
+- **Sources are never touched.** Drive-native files are referenced as `drive://…` with an identity
+  record; moved files relink by identity on open. Files from outside the drive are copied into
+  the package's `media/`.
+- **Document saves are atomic** (`project.json.tmp` → replace, previous kept as `project.json.bak`)
+  and never in place. Unknown JSON keys round-trip untouched (`extra`).
+- **One compositor.** Preview, export and covers all render the same `VEInstruction` graph; export
+  never consults any live UI state. Stills occupy *empty* time on video track A and are drawn by the
+  compositor from the file (`VELayerSpec.imageURL`) — no bundled blank video. If a device ever
+  refuses to call the compositor for an instruction with no source tracks, the fallback is a
+  one-frame placeholder insert; nothing else needs to change.
+- **SDR working space.** The video composition sets BT.709 colour properties so AVFoundation
+  converts HDR sources before compositing; HDR projects are a Phase 3 item.
+- **Tool sheets are transactions.** `beginTool` → live `updateTransaction`s → `confirmTool` pushes
+  one undo entry; `cancelTool` restores the pre-sheet state. Gestures (trim, canvas moves) use the
+  same transaction API, so every PRD "one undo step" rule holds.
+- **Drive loss.** `VEDriveMonitor` pauses playback and shows the blocking sheet; the document stays
+  in memory and saves on reconnect. Any I/O error that is `ENODEV`/`EIO`/`ENXIO` counts as loss.
+- **Concurrency.** `VEDriveStore`, `VEMediaService`, `VECompositionBuilder`, `VECompositor` and
+  `VEExportService` are `nonisolated`; the document, session and views are `@MainActor`. The
+  export pump runs on its own `DispatchQueue` so blocking on the writer never starves the
+  cooperative pool.
+
+### 11.3 Not yet built (by PRD phase)
+
+Phase 2: transitions (the cut handles are drawn but tell the user they're coming), overlays, the
+audio menu (music/SFX/voiceover/extract audio/fades UI), text, EXP-9 audio-only export. Phase 3:
+keyframes, masks, chroma key, filters/adjust/LUTs, effects, canvas images/eyedropper, HDR,
+replace, GIF export. Phase 4: frame blending, iPad two-pane, loop, beat detection. The schema
+already carries placeholders for all of these (`tracks.overlays/audio/text/…`, `filter`, `adjust`,
+`mask`, `chromaKey`, `animation`, `keyframes`, `transitions`, `beats`).
+
+### 11.4 Tests
+
+`PhotoBrowserTests/VideoEditorTests.swift` covers the document round-trip, time mapping, canvas
+sizes, placement maths, names/paths, the sandbox audit, undo/redo and recovery. Render and
+performance tests need a device (custom compositors don't run in the Simulator).

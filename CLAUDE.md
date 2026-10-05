@@ -14,6 +14,14 @@ Guidance for AI assistants working in this repository.
 > touching `AIExtend.swift`, the AI views, `DuplicatesView.swift`,
 > `coordinatedContents`/`listing` in `Library.swift`, or the downloaders.
 
+> **Video editor (`PhotoBrowser/VideoEditor/`, all `VE*` types):** the CapCut-style
+> non-destructive editor that keeps every byte under `<DriveRoot>/VideoEditor/`.
+> See `docs/feature-notes.md` §11 for the architecture (document → composition builder →
+> one Core Image compositor shared by preview, export and covers), the storage rules
+> (nothing in the sandbox, atomic saves, drive-loss handling) and the phase plan before
+> changing it. Entry points live in `FolderView` ("Edit in Video Editor", "New Video
+> Project", "Add to Video Project…", Library ▸ Video Projects).
+
 ## What this is
 
 **Photo Browser** is a native iOS/iPadOS app (SwiftUI) for browsing and managing

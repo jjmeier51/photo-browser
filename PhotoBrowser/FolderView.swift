@@ -112,6 +112,8 @@ struct FolderView: View {
     @State private var tsLabelEntries: [Entry] = []
     @State private var showDuplicates = false
     @State private var showPNGMatches = false
+    @State private var videoEditorLaunch: VEEditorLaunch?     // New video project / Edit in video editor / Add to project…
+    @State private var showVideoProjects = false
     @State private var showCleanup = false
     @State private var showRandomCleanup = false
     @State private var bubbleItems: [Entry] = []       // live order while dragging highlight bubbles
@@ -766,6 +768,12 @@ struct FolderView: View {
                     Button { editEntry = entry } label: {
                         Label("Crop & Rotate", systemImage: "crop.rotate")
                     }
+                    Button {
+                        let e = entry
+                        DispatchQueue.main.async { videoEditorLaunch = .new(items: [e.url]) }   // defer past the menu dismissal
+                    } label: {
+                        Label("Edit in Video Editor", systemImage: "film.stack")
+                    }
                     if entry.kind == .image {
                         Button { studioEntry = entry } label: {
                             Label("Edit Photo", systemImage: "slider.horizontal.3")
@@ -1145,6 +1153,12 @@ struct FolderView: View {
             }
             .fullScreenCover(isPresented: $showPNGMatches) {
                 PNGMatchesView(folder: url)
+            }
+            .fullScreenCover(item: $videoEditorLaunch, onDismiss: { Task { await reload() } }) { launch in
+                VEEditorHostView(launch: launch)
+            }
+            .fullScreenCover(isPresented: $showVideoProjects, onDismiss: { Task { await reload() } }) {
+                VEProjectsView()
             }
             .fullScreenCover(isPresented: $showCleanup, onDismiss: { Task { await reload() } }) {
                 FrameCleanupView(folder: url, items: cleanupItems)
@@ -2270,6 +2284,7 @@ struct FolderView: View {
                             Button { showPeople = true } label: { Label("People", systemImage: "person.2.crop.square.stack") }
                             Button { showPlaces = true } label: { Label("Places", systemImage: "map") }
                             Button { showMemories = true } label: { Label("On This Day", systemImage: "calendar") }
+                            Button { showVideoProjects = true } label: { Label("Video Projects", systemImage: "film.stack") }
                         }
                         Button { showTrash = true } label: {
                             Label(library.trash.isEmpty ? "Recently Deleted" : "Recently Deleted (\(library.trash.count))",
@@ -2534,6 +2549,16 @@ struct FolderView: View {
                 }
                 if selectedEntries().filter({ $0.kind == .video }).count >= 2 {
                     Button { startCombine() } label: { Label("Combine Videos", systemImage: "film.stack") }
+                }
+                if selectedEntries().contains(where: VideoEditorModule.isEditable) {
+                    // Video editor entry points (§2): selection order is timeline order.
+                    let items = selectedEntries().filter(VideoEditorModule.isEditable).map(\.url)
+                    Button {
+                        DispatchQueue.main.async { videoEditorLaunch = .new(items: items); selecting = false; selection.removeAll() }
+                    } label: { Label("New Video Project", systemImage: "film.stack.fill") }
+                    Button {
+                        DispatchQueue.main.async { videoEditorLaunch = .addTo(items: items); selecting = false; selection.removeAll() }
+                    } label: { Label("Add to Video Project…", systemImage: "rectangle.stack.badge.plus") }
                 }
                 }   // !pureTransferMode
                 if selectedEntries().contains(where: { extraVideoExtensions.contains($0.url.pathExtension.lowercased()) }) {

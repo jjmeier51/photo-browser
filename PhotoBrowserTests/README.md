@@ -21,3 +21,11 @@ Files:
   stripping, Rule A both branches, Rule B (every matching PNG), Rule A then B, incoming PNG
   diversion, `_1`/`_2` naming in `DUPLICATES/`, and one end-to-end move through
   `FileActions.moveItems` on a temp folder.
+
+- `VideoEditorTests.swift` — the video editor's Phase 1 core: `project.json` round-trip with unknown
+  keys preserved and deterministic encoding, clip time mapping with speed, main-track starts and
+  transition overlaps, frame snapping and timecode formatting, canvas sizes for every ratio, layer
+  placement maths, name sanitising and `(n)` uniqueness, `drive://` / package / `Library/` path
+  resolution, the sandbox audit (every layout path is under the drive root; atomic save leaves a
+  `.bak`), undo/redo round trips including coalesced transactions, recovery from a corrupt save,
+  and the export bitrate table.
