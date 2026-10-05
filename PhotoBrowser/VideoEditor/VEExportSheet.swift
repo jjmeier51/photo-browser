@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import Combine
 
 /// EXP-1 export sheet → EXP-6 progress modal → EXP-10 completion. Defaults come from `settings.json`
 /// on the drive and are written back on Export.

@@ -108,7 +108,7 @@ nonisolated final class VEMediaService: @unchecked Sendable {
                 p.audioSampleRate = asbd.mSampleRate
             }
         }
-        if let created = try? await asset.load(.creationDate), let date = try? await created?.load(.dateValue) {
+        if let created = try? await asset.load(.creationDate), let date = try? await created.load(.dateValue) {
             p.createdAt = date
         }
         return p
