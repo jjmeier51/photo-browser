@@ -383,19 +383,19 @@ nonisolated struct VEEditorSettings: Codable, Equatable, Sendable {
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
-        defaultPhotoDuration = c.get("defaultPhotoDuration", 3 * VETimeUtil.second)
-        snapping = c.get("snapping", true); haptics = c.get("haptics", true)
-        proxyPlayback = c.get("proxyPlayback", VEProxyMode.auto); diagnostics = c.get("diagnostics", false)
-        recentProjects = c.get("recentProjects", []); favorites = c.get("favorites", [])
-        lastExport = c.get("lastExport", VEExportPreferences())
-        extra = c.extras(known: Self.known)
+        defaultPhotoDuration = VECoding.get(c, "defaultPhotoDuration", 3 * VETimeUtil.second)
+        snapping = VECoding.get(c, "snapping", true); haptics = VECoding.get(c, "haptics", true)
+        proxyPlayback = VECoding.get(c, "proxyPlayback", VEProxyMode.auto); diagnostics = VECoding.get(c, "diagnostics", false)
+        recentProjects = VECoding.get(c, "recentProjects", []); favorites = VECoding.get(c, "favorites", [])
+        lastExport = VECoding.get(c, "lastExport", VEExportPreferences())
+        extra = VECoding.extras(c, known: Self.known)
     }
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: VEDynamicKey.self)
-        try c.put("defaultPhotoDuration", defaultPhotoDuration); try c.put("snapping", snapping); try c.put("haptics", haptics)
-        try c.put("proxyPlayback", proxyPlayback); try c.put("diagnostics", diagnostics)
-        try c.put("recentProjects", recentProjects); try c.put("favorites", favorites); try c.put("lastExport", lastExport)
-        try c.putExtras(extra)
+        try VECoding.put(&c, "defaultPhotoDuration", defaultPhotoDuration); try VECoding.put(&c, "snapping", snapping); try VECoding.put(&c, "haptics", haptics)
+        try VECoding.put(&c, "proxyPlayback", proxyPlayback); try VECoding.put(&c, "diagnostics", diagnostics)
+        try VECoding.put(&c, "recentProjects", recentProjects); try VECoding.put(&c, "favorites", favorites); try VECoding.put(&c, "lastExport", lastExport)
+        try VECoding.putExtras(&c, extra)
     }
 }
 
@@ -409,9 +409,9 @@ nonisolated struct VEExportPreferences: Codable, Equatable, Sendable {
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
-        resolution = c.get("resolution", VEResolution.p1080); frameRate = c.opt("frameRate")
-        quality = c.get("quality", "recommended"); customBitrateMbps = c.get("customBitrateMbps", 12.0)
-        codec = c.get("codec", "auto"); saveToPhotos = c.get("saveToPhotos", false)
+        resolution = VECoding.get(c, "resolution", VEResolution.p1080); frameRate = VECoding.opt(c, "frameRate")
+        quality = VECoding.get(c, "quality", "recommended"); customBitrateMbps = VECoding.get(c, "customBitrateMbps", 12.0)
+        codec = VECoding.get(c, "codec", "auto"); saveToPhotos = VECoding.get(c, "saveToPhotos", false)
     }
 }
 

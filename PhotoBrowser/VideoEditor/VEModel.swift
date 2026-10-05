@@ -86,33 +86,36 @@ nonisolated struct VEDynamicKey: CodingKey, Hashable {
     init?(intValue: Int) { nil }
 }
 
-nonisolated extension KeyedDecodingContainer where K == VEDynamicKey {
-    func get<T: Decodable>(_ key: String, _ fallback: T) -> T {
-        (try? decodeIfPresent(T.self, forKey: VEDynamicKey(key))) ?? fallback
+/// Lenient keyed decoding/encoding over `VEDynamicKey` containers: defaults for missing keys, and
+/// the unknown-key capture/replay that keeps newer documents intact. Plain static functions (not
+/// extensions on the Foundation containers) so nothing picks up main-actor inference.
+nonisolated enum VECoding {
+    typealias Dec = KeyedDecodingContainer<VEDynamicKey>
+    typealias Enc = KeyedEncodingContainer<VEDynamicKey>
+
+    static func get<T: Decodable>(_ c: Dec, _ key: String, _ fallback: T) -> T {
+        (try? c.decodeIfPresent(T.self, forKey: VEDynamicKey(key))) ?? fallback
     }
-    func opt<T: Decodable>(_ key: String) -> T? {
-        try? decodeIfPresent(T.self, forKey: VEDynamicKey(key))
+    static func opt<T: Decodable>(_ c: Dec, _ key: String) -> T? {
+        try? c.decodeIfPresent(T.self, forKey: VEDynamicKey(key))
     }
-    func req<T: Decodable>(_ key: String) throws -> T {
-        try decode(T.self, forKey: VEDynamicKey(key))
+    static func req<T: Decodable>(_ c: Dec, _ key: String) throws -> T {
+        try c.decode(T.self, forKey: VEDynamicKey(key))
     }
     /// Every key not in `known`, as raw JSON.
-    func extras(known: Set<String>) -> [String: JSONValue] {
+    static func extras(_ c: Dec, known: Set<String>) -> [String: JSONValue] {
         var out: [String: JSONValue] = [:]
-        for k in allKeys where !known.contains(k.stringValue) {
-            if let v = try? decode(JSONValue.self, forKey: k) { out[k.stringValue] = v }
+        for k in c.allKeys where !known.contains(k.stringValue) {
+            if let v = try? c.decode(JSONValue.self, forKey: k) { out[k.stringValue] = v }
         }
         return out
     }
-}
-
-nonisolated extension KeyedEncodingContainer where K == VEDynamicKey {
-    mutating func put<T: Encodable>(_ key: String, _ value: T) throws { try encode(value, forKey: VEDynamicKey(key)) }
-    mutating func putIfPresent<T: Encodable>(_ key: String, _ value: T?) throws {
-        if let value { try encode(value, forKey: VEDynamicKey(key)) }
+    static func put<T: Encodable>(_ c: inout Enc, _ key: String, _ value: T) throws { try c.encode(value, forKey: VEDynamicKey(key)) }
+    static func putIfPresent<T: Encodable>(_ c: inout Enc, _ key: String, _ value: T?) throws {
+        if let value { try c.encode(value, forKey: VEDynamicKey(key)) }
     }
-    mutating func putExtras(_ extras: [String: JSONValue]) throws {
-        for (k, v) in extras.sorted(by: { $0.key < $1.key }) { try encode(v, forKey: VEDynamicKey(k)) }
+    static func putExtras(_ c: inout Enc, _ extras: [String: JSONValue]) throws {
+        for (k, v) in extras.sorted(by: { $0.key < $1.key }) { try c.encode(v, forKey: VEDynamicKey(k)) }
     }
 }
 
@@ -234,15 +237,15 @@ nonisolated struct VEProjectSettings: Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
-        frameRate = c.get("frameRate", 30)
-        resolution = c.get("resolution", VEResolution.p1080)
-        canvas = c.get("canvas", VECanvas(ratio: .r9x16, width: 1080, height: 1920))
-        hdr = c.get("hdr", false)
-        muteOriginalAudio = c.get("muteOriginalAudio", false)
-        defaultPhotoDuration = c.get("defaultPhotoDuration", 3 * VETimeUtil.second)
-        defaultFreezeDuration = c.get("defaultFreezeDuration", 3 * VETimeUtil.second)
-        defaultLayerDuration = c.get("defaultLayerDuration", 3 * VETimeUtil.second)
-        proxyPlayback = c.get("proxyPlayback", VEProxyMode.auto)
+        frameRate = VECoding.get(c, "frameRate", 30)
+        resolution = VECoding.get(c, "resolution", VEResolution.p1080)
+        canvas = VECoding.get(c, "canvas", VECanvas(ratio: .r9x16, width: 1080, height: 1920))
+        hdr = VECoding.get(c, "hdr", false)
+        muteOriginalAudio = VECoding.get(c, "muteOriginalAudio", false)
+        defaultPhotoDuration = VECoding.get(c, "defaultPhotoDuration", 3 * VETimeUtil.second)
+        defaultFreezeDuration = VECoding.get(c, "defaultFreezeDuration", 3 * VETimeUtil.second)
+        defaultLayerDuration = VECoding.get(c, "defaultLayerDuration", 3 * VETimeUtil.second)
+        proxyPlayback = VECoding.get(c, "proxyPlayback", VEProxyMode.auto)
     }
 }
 
@@ -306,39 +309,39 @@ nonisolated struct VEMediaSource: Codable, Equatable, Sendable, Identifiable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
-        id = try c.req("id")
-        kind = c.get("kind", VEMediaKind.video)
-        path = try c.req("path")
-        identity = c.get("identity", VEIdentity(size: 0, mtime: Date(timeIntervalSince1970: 0), hash: ""))
-        duration = c.get("duration", 0)
-        width = c.get("width", 0)
-        height = c.get("height", 0)
-        transform = c.get("transform", VERotation.none)
-        fps = c.get("fps", 0)
-        vfr = c.get("vfr", false)
-        codec = c.opt("codec")
-        bitDepth = c.opt("bitDepth")
-        colorTransfer = c.opt("colorTransfer")
-        hasAudio = c.get("hasAudio", false)
-        hasAlpha = c.get("hasAlpha", false)
-        audioChannels = c.opt("audioChannels")
-        audioSampleRate = c.opt("audioSampleRate")
-        createdAt = c.opt("createdAt")
-        originalName = c.get("originalName", "")
-        derived = c.get("derived", VEDerived())
-        extra = c.extras(known: Self.known)
+        id = try VECoding.req(c, "id")
+        kind = VECoding.get(c, "kind", VEMediaKind.video)
+        path = try VECoding.req(c, "path")
+        identity = VECoding.get(c, "identity", VEIdentity(size: 0, mtime: Date(timeIntervalSince1970: 0), hash: ""))
+        duration = VECoding.get(c, "duration", 0)
+        width = VECoding.get(c, "width", 0)
+        height = VECoding.get(c, "height", 0)
+        transform = VECoding.get(c, "transform", VERotation.none)
+        fps = VECoding.get(c, "fps", 0)
+        vfr = VECoding.get(c, "vfr", false)
+        codec = VECoding.opt(c, "codec")
+        bitDepth = VECoding.opt(c, "bitDepth")
+        colorTransfer = VECoding.opt(c, "colorTransfer")
+        hasAudio = VECoding.get(c, "hasAudio", false)
+        hasAlpha = VECoding.get(c, "hasAlpha", false)
+        audioChannels = VECoding.opt(c, "audioChannels")
+        audioSampleRate = VECoding.opt(c, "audioSampleRate")
+        createdAt = VECoding.opt(c, "createdAt")
+        originalName = VECoding.get(c, "originalName", "")
+        derived = VECoding.get(c, "derived", VEDerived())
+        extra = VECoding.extras(c, known: Self.known)
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: VEDynamicKey.self)
-        try c.put("id", id); try c.put("kind", kind); try c.put("path", path); try c.put("identity", identity)
-        try c.put("duration", duration); try c.put("width", width); try c.put("height", height)
-        try c.put("transform", transform); try c.put("fps", fps); try c.put("vfr", vfr)
-        try c.putIfPresent("codec", codec); try c.putIfPresent("bitDepth", bitDepth); try c.putIfPresent("colorTransfer", colorTransfer)
-        try c.put("hasAudio", hasAudio); try c.put("hasAlpha", hasAlpha)
-        try c.putIfPresent("audioChannels", audioChannels); try c.putIfPresent("audioSampleRate", audioSampleRate)
-        try c.putIfPresent("createdAt", createdAt); try c.put("originalName", originalName); try c.put("derived", derived)
-        try c.putExtras(extra)
+        try VECoding.put(&c, "id", id); try VECoding.put(&c, "kind", kind); try VECoding.put(&c, "path", path); try VECoding.put(&c, "identity", identity)
+        try VECoding.put(&c, "duration", duration); try VECoding.put(&c, "width", width); try VECoding.put(&c, "height", height)
+        try VECoding.put(&c, "transform", transform); try VECoding.put(&c, "fps", fps); try VECoding.put(&c, "vfr", vfr)
+        try VECoding.putIfPresent(&c, "codec", codec); try VECoding.putIfPresent(&c, "bitDepth", bitDepth); try VECoding.putIfPresent(&c, "colorTransfer", colorTransfer)
+        try VECoding.put(&c, "hasAudio", hasAudio); try VECoding.put(&c, "hasAlpha", hasAlpha)
+        try VECoding.putIfPresent(&c, "audioChannels", audioChannels); try VECoding.putIfPresent(&c, "audioSampleRate", audioSampleRate)
+        try VECoding.putIfPresent(&c, "createdAt", createdAt); try VECoding.put(&c, "originalName", originalName); try VECoding.put(&c, "derived", derived)
+        try VECoding.putExtras(&c, extra)
     }
 }
 
@@ -362,8 +365,8 @@ nonisolated struct VESpeed: Codable, Equatable, Sendable {
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
-        mode = c.get("mode", "constant"); rate = c.get("rate", 1.0); points = c.get("points", [])
-        keepPitch = c.get("keepPitch", true); frameBlending = c.get("frameBlending", false)
+        mode = VECoding.get(c, "mode", "constant"); rate = VECoding.get(c, "rate", 1.0); points = VECoding.get(c, "points", [])
+        keepPitch = VECoding.get(c, "keepPitch", true); frameBlending = VECoding.get(c, "frameBlending", false)
     }
     /// Effective constant rate (curve speeds average over the curve for duration purposes).
     var effectiveRate: Double {
@@ -384,7 +387,7 @@ nonisolated struct VECrop: Codable, Equatable, Sendable {
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
-        preset = c.get("preset", "free"); rect = c.get("rect", VERect.full); straighten = c.get("straighten", 0.0)
+        preset = VECoding.get(c, "preset", "free"); rect = VECoding.get(c, "rect", VERect.full); straighten = VECoding.get(c, "straighten", 0.0)
     }
     var isIdentity: Bool { rect == .full && straighten == 0 }
 }
@@ -397,8 +400,8 @@ nonisolated struct VETransform: Codable, Equatable, Sendable {
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
-        x = c.get("x", 0.0); y = c.get("y", 0.0); scale = c.get("scale", 1.0); rotation = c.get("rotation", 0.0)
-        flipH = c.get("flipH", false); flipV = c.get("flipV", false)
+        x = VECoding.get(c, "x", 0.0); y = VECoding.get(c, "y", 0.0); scale = VECoding.get(c, "scale", 1.0); rotation = VECoding.get(c, "rotation", 0.0)
+        flipH = VECoding.get(c, "flipH", false); flipV = VECoding.get(c, "flipV", false)
     }
     var isIdentity: Bool { x == 0 && y == 0 && scale == 1 && rotation == 0 && !flipH && !flipV }
 }
@@ -411,7 +414,7 @@ nonisolated struct VEBackground: Codable, Equatable, Sendable {
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
-        kind = c.get("kind", "color"); color = c.get("color", "#000000"); blurLevel = c.get("blurLevel", 2); path = c.opt("path")
+        kind = VECoding.get(c, "kind", "color"); color = VECoding.get(c, "color", "#000000"); blurLevel = VECoding.get(c, "blurLevel", 2); path = VECoding.opt(c, "path")
     }
 }
 
@@ -453,39 +456,39 @@ nonisolated struct VEClip: Codable, Equatable, Sendable, Identifiable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
-        id = try c.req("id"); mediaId = try c.req("mediaId")
-        kind = c.get("kind", VEClipKind.video)
-        sourceRange = try c.req("sourceRange")
-        timelineStart = c.get("timelineStart", 0)
-        speed = c.get("speed", VESpeed())
-        reversed = c.get("reversed", false)
-        freezeSourceTime = c.opt("freezeSourceTime")
-        crop = c.get("crop", VECrop())
-        transform = c.get("transform", VETransform())
-        opacity = c.get("opacity", 1.0)
-        blend = c.get("blend", "normal")
-        volume = c.get("volume", 1.0)
-        fadeIn = c.get("fadeIn", 0); fadeOut = c.get("fadeOut", 0)
-        audioMuted = c.get("audioMuted", false); audioExtracted = c.get("audioExtracted", false)
-        filter = c.opt("filter"); adjust = c.opt("adjust"); lut = c.opt("lut"); mask = c.opt("mask")
-        chromaKey = c.opt("chromaKey"); animation = c.opt("animation")
-        background = c.get("background", VEBackground())
-        keyframes = c.get("keyframes", [])
-        extra = c.extras(known: Self.known)
+        id = try VECoding.req(c, "id"); mediaId = try VECoding.req(c, "mediaId")
+        kind = VECoding.get(c, "kind", VEClipKind.video)
+        sourceRange = try VECoding.req(c, "sourceRange")
+        timelineStart = VECoding.get(c, "timelineStart", 0)
+        speed = VECoding.get(c, "speed", VESpeed())
+        reversed = VECoding.get(c, "reversed", false)
+        freezeSourceTime = VECoding.opt(c, "freezeSourceTime")
+        crop = VECoding.get(c, "crop", VECrop())
+        transform = VECoding.get(c, "transform", VETransform())
+        opacity = VECoding.get(c, "opacity", 1.0)
+        blend = VECoding.get(c, "blend", "normal")
+        volume = VECoding.get(c, "volume", 1.0)
+        fadeIn = VECoding.get(c, "fadeIn", 0); fadeOut = VECoding.get(c, "fadeOut", 0)
+        audioMuted = VECoding.get(c, "audioMuted", false); audioExtracted = VECoding.get(c, "audioExtracted", false)
+        filter = VECoding.opt(c, "filter"); adjust = VECoding.opt(c, "adjust"); lut = VECoding.opt(c, "lut"); mask = VECoding.opt(c, "mask")
+        chromaKey = VECoding.opt(c, "chromaKey"); animation = VECoding.opt(c, "animation")
+        background = VECoding.get(c, "background", VEBackground())
+        keyframes = VECoding.get(c, "keyframes", [])
+        extra = VECoding.extras(c, known: Self.known)
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: VEDynamicKey.self)
-        try c.put("id", id); try c.put("mediaId", mediaId); try c.put("kind", kind); try c.put("sourceRange", sourceRange)
-        try c.put("timelineStart", timelineStart); try c.put("speed", speed); try c.put("reversed", reversed)
-        try c.putIfPresent("freezeSourceTime", freezeSourceTime)
-        try c.put("crop", crop); try c.put("transform", transform); try c.put("opacity", opacity); try c.put("blend", blend)
-        try c.put("volume", volume); try c.put("fadeIn", fadeIn); try c.put("fadeOut", fadeOut)
-        try c.put("audioMuted", audioMuted); try c.put("audioExtracted", audioExtracted)
-        try c.putIfPresent("filter", filter); try c.putIfPresent("adjust", adjust); try c.putIfPresent("lut", lut)
-        try c.putIfPresent("mask", mask); try c.putIfPresent("chromaKey", chromaKey); try c.putIfPresent("animation", animation)
-        try c.put("background", background); try c.put("keyframes", keyframes)
-        try c.putExtras(extra)
+        try VECoding.put(&c, "id", id); try VECoding.put(&c, "mediaId", mediaId); try VECoding.put(&c, "kind", kind); try VECoding.put(&c, "sourceRange", sourceRange)
+        try VECoding.put(&c, "timelineStart", timelineStart); try VECoding.put(&c, "speed", speed); try VECoding.put(&c, "reversed", reversed)
+        try VECoding.putIfPresent(&c, "freezeSourceTime", freezeSourceTime)
+        try VECoding.put(&c, "crop", crop); try VECoding.put(&c, "transform", transform); try VECoding.put(&c, "opacity", opacity); try VECoding.put(&c, "blend", blend)
+        try VECoding.put(&c, "volume", volume); try VECoding.put(&c, "fadeIn", fadeIn); try VECoding.put(&c, "fadeOut", fadeOut)
+        try VECoding.put(&c, "audioMuted", audioMuted); try VECoding.put(&c, "audioExtracted", audioExtracted)
+        try VECoding.putIfPresent(&c, "filter", filter); try VECoding.putIfPresent(&c, "adjust", adjust); try VECoding.putIfPresent(&c, "lut", lut)
+        try VECoding.putIfPresent(&c, "mask", mask); try VECoding.putIfPresent(&c, "chromaKey", chromaKey); try VECoding.putIfPresent(&c, "animation", animation)
+        try VECoding.put(&c, "background", background); try VECoding.put(&c, "keyframes", keyframes)
+        try VECoding.putExtras(&c, extra)
     }
 
     /// Stills and freezes have no speed; their source range *is* their timeline length.
@@ -523,17 +526,17 @@ nonisolated struct VEAudioClip: Codable, Equatable, Sendable, Identifiable {
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
-        id = try c.req("id"); mediaId = try c.req("mediaId"); sourceRange = try c.req("sourceRange")
-        timelineStart = c.get("timelineStart", 0); rate = c.get("rate", 1.0); keepPitch = c.get("keepPitch", true)
-        volume = c.get("volume", 1.0); fadeIn = c.get("fadeIn", 0); fadeOut = c.get("fadeOut", 0); muted = c.get("muted", false)
-        extra = c.extras(known: Self.known)
+        id = try VECoding.req(c, "id"); mediaId = try VECoding.req(c, "mediaId"); sourceRange = try VECoding.req(c, "sourceRange")
+        timelineStart = VECoding.get(c, "timelineStart", 0); rate = VECoding.get(c, "rate", 1.0); keepPitch = VECoding.get(c, "keepPitch", true)
+        volume = VECoding.get(c, "volume", 1.0); fadeIn = VECoding.get(c, "fadeIn", 0); fadeOut = VECoding.get(c, "fadeOut", 0); muted = VECoding.get(c, "muted", false)
+        extra = VECoding.extras(c, known: Self.known)
     }
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: VEDynamicKey.self)
-        try c.put("id", id); try c.put("mediaId", mediaId); try c.put("sourceRange", sourceRange); try c.put("timelineStart", timelineStart)
-        try c.put("rate", rate); try c.put("keepPitch", keepPitch); try c.put("volume", volume)
-        try c.put("fadeIn", fadeIn); try c.put("fadeOut", fadeOut); try c.put("muted", muted)
-        try c.putExtras(extra)
+        try VECoding.put(&c, "id", id); try VECoding.put(&c, "mediaId", mediaId); try VECoding.put(&c, "sourceRange", sourceRange); try VECoding.put(&c, "timelineStart", timelineStart)
+        try VECoding.put(&c, "rate", rate); try VECoding.put(&c, "keepPitch", keepPitch); try VECoding.put(&c, "volume", volume)
+        try VECoding.put(&c, "fadeIn", fadeIn); try VECoding.put(&c, "fadeOut", fadeOut); try VECoding.put(&c, "muted", muted)
+        try VECoding.putExtras(&c, extra)
     }
     var timelineDuration: VETime { max(1, VETime((Double(sourceRange.duration) / max(0.01, rate)).rounded())) }
     var timelineEnd: VETime { timelineStart + timelineDuration }
@@ -553,9 +556,9 @@ nonisolated struct VETracks: Codable, Equatable, Sendable {
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
-        main = c.get("main", []); overlays = c.get("overlays", []); audio = c.get("audio", [])
-        text = c.get("text", []); stickers = c.get("stickers", []); effects = c.get("effects", [])
-        filters = c.get("filters", []); adjust = c.get("adjust", [])
+        main = VECoding.get(c, "main", []); overlays = VECoding.get(c, "overlays", []); audio = VECoding.get(c, "audio", [])
+        text = VECoding.get(c, "text", []); stickers = VECoding.get(c, "stickers", []); effects = VECoding.get(c, "effects", [])
+        filters = VECoding.get(c, "filters", []); adjust = VECoding.get(c, "adjust", [])
     }
 }
 
@@ -572,7 +575,7 @@ nonisolated struct VECover: Codable, Equatable, Sendable {
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
-        kind = c.get("kind", "frame"); time = c.opt("time"); path = c.opt("path")
+        kind = VECoding.get(c, "kind", "frame"); time = VECoding.opt(c, "time"); path = VECoding.opt(c, "path")
     }
 }
 
@@ -603,27 +606,36 @@ nonisolated struct VEProject: Codable, Equatable, Sendable, Identifiable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: VEDynamicKey.self)
-        schemaVersion = c.get("schemaVersion", 1)
-        id = c.get("id", UUID())
-        name = c.get("name", "Project")
-        createdAt = c.get("createdAt", Date())
-        modifiedAt = c.get("modifiedAt", createdAt)
-        settings = c.get("settings", VEProjectSettings())
-        cover = c.get("cover", VECover())
-        media = c.get("media", [])
-        tracks = c.get("tracks", VETracks())
-        transitions = c.get("transitions", [])
-        beats = c.get("beats", [:])
-        extra = c.extras(known: Self.known)
+        schemaVersion = VECoding.get(c, "schemaVersion", 1)
+        id = VECoding.get(c, "id", UUID())
+        name = VECoding.get(c, "name", "Project")
+        createdAt = VECoding.get(c, "createdAt", Date())
+        modifiedAt = VECoding.get(c, "modifiedAt", createdAt)
+        settings = VECoding.get(c, "settings", VEProjectSettings())
+        cover = VECoding.get(c, "cover", VECover())
+        media = VECoding.get(c, "media", [])
+        tracks = VECoding.get(c, "tracks", VETracks())
+        transitions = VECoding.get(c, "transitions", [])
+        beats = VECoding.get(c, "beats", [:])
+        extra = VECoding.extras(c, known: Self.known)
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: VEDynamicKey.self)
-        try c.put("schemaVersion", schemaVersion); try c.put("id", id); try c.put("name", name)
-        try c.put("createdAt", createdAt); try c.put("modifiedAt", modifiedAt)
-        try c.put("settings", settings); try c.put("cover", cover); try c.put("media", media)
-        try c.put("tracks", tracks); try c.put("transitions", transitions); try c.put("beats", beats)
-        try c.putExtras(extra)
+        try VECoding.put(&c, "schemaVersion", schemaVersion); try VECoding.put(&c, "id", id); try VECoding.put(&c, "name", name)
+        try VECoding.put(&c, "createdAt", createdAt); try VECoding.put(&c, "modifiedAt", modifiedAt)
+        try VECoding.put(&c, "settings", settings); try VECoding.put(&c, "cover", cover); try VECoding.put(&c, "media", media)
+        try VECoding.put(&c, "tracks", tracks); try VECoding.put(&c, "transitions", transitions); try VECoding.put(&c, "beats", beats)
+        try VECoding.putExtras(&c, extra)
+    }
+
+    /// The part of the project that edits change — snapshotted by every undoable command.
+    var editableState: VEEditableState {
+        get { VEEditableState(name: name, settings: settings, cover: cover, media: media, tracks: tracks, transitions: transitions, beats: beats) }
+        set {
+            name = newValue.name; settings = newValue.settings; cover = newValue.cover; media = newValue.media
+            tracks = newValue.tracks; transitions = newValue.transitions; beats = newValue.beats
+        }
     }
 
     // MARK: Queries
@@ -703,15 +715,6 @@ nonisolated struct VEEditableState: Equatable, Sendable {
     var beats: [String: [VETime]]
 }
 
-nonisolated extension VEProject {
-    var editableState: VEEditableState {
-        get { VEEditableState(name: name, settings: settings, cover: cover, media: media, tracks: tracks, transitions: transitions, beats: beats) }
-        set {
-            name = newValue.name; settings = newValue.settings; cover = newValue.cover; media = newValue.media
-            tracks = newValue.tracks; transitions = newValue.transitions; beats = newValue.beats
-        }
-    }
-}
 
 // MARK: - IDs, names, paths, errors
 
