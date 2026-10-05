@@ -193,7 +193,7 @@ struct VEProjectRow: View {
                     Text("·"); Text("\(summary.clipCount) clip\(summary.clipCount == 1 ? "" : "s")")
                 }
                 .font(.caption).foregroundStyle(.secondary)
-                Text("Edited \(summary.modifiedAt.formatted(.relative(presentation: .named)))\(summary.lastSavedAt.map { " · saved \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "")")
+                Text("Edited \(summary.modifiedAt.formatted(.relative(presentation: .named)))" + savedSuffix)
                     .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 if let s = sizes {
                     Text("Media \(bytes(s.media)) · Caches \(bytes(s.caches)) · Exports \(bytes(s.exports))")
@@ -209,6 +209,11 @@ struct VEProjectRow: View {
     }
 
     private func bytes(_ b: Int64) -> String { ByteCountFormatter.string(fromByteCount: b, countStyle: .file) }
+
+    private var savedSuffix: String {
+        guard let saved = summary.lastSavedAt else { return "" }
+        return " · saved " + saved.formatted(date: .abbreviated, time: .shortened)
+    }
 }
 
 struct VECoverThumb: View {

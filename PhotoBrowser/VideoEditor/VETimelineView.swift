@@ -472,7 +472,7 @@ final class VETimelineView: UIView, UIScrollViewDelegate, UIGestureRecognizerDel
         g is UIPinchGestureRecognizer || other is UIPinchGestureRecognizer
     }
 
-    func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+    override func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
         if let pan = g as? UIPanGestureRecognizer, let v = pan.view as? VEClipView {
             // Only a handle drag on the selected clip is a trim; everything else scrolls.
             guard v.isSelected, v.handle(at: pan.location(in: v)) != nil else { return false }

@@ -242,8 +242,10 @@ struct VEDriveFolderList: View {
                 }
                 out.append(Entry(url: u, name: name, kind: kind, size: Int64(rv?.fileSize ?? 0), modified: rv?.contentModificationDate ?? .distantPast))
             }
+            // Stored `kind`, not the main-actor computed `isFolder`: this runs off-main.
             return out.sorted { a, b in
-                if a.isFolder != b.isFolder { return a.isFolder }
+                let af = a.kind == .folder, bf = b.kind == .folder
+                if af != bf { return af }
                 return a.name.localizedStandardCompare(b.name) == .orderedAscending
             }
         }.value

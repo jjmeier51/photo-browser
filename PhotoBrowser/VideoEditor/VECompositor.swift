@@ -173,7 +173,7 @@ nonisolated final class VECompositor: NSObject, AVVideoCompositing, @unchecked S
 nonisolated final class VEImageCache: @unchecked Sendable {
     static let shared = VEImageCache()
 
-    private final class Entry {
+    private nonisolated final class Entry {
         let frames: [CIImage]
         let cumulative: [Double]      // seconds at the end of each frame
         let cost: Int

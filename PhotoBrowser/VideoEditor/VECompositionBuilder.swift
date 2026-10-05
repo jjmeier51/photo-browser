@@ -149,7 +149,8 @@ nonisolated enum VECompositionBuilder {
                         }
                         if let asset = try? await VEAssetCache.shared.asset(for: url),
                            let srcVideo = try? await asset.loadTracks(withMediaType: .video).first {
-                            let assetDur = VETimeUtil.us(try await asset.load(.duration))
+                            let assetDurationCM = try await asset.load(.duration)
+                            let assetDur = VETimeUtil.us(assetDurationCM)
                             let srcStart = min(clip.sourceRange.start, max(0, assetDur - 1))
                             let srcDur = max(1, min(clip.sourceRange.duration, assetDur - srcStart))
                             let srcRange = CMTimeRange(start: VETimeUtil.cm(srcStart), duration: VETimeUtil.cm(srcDur))

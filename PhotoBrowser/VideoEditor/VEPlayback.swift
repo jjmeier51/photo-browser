@@ -401,9 +401,12 @@ final class VEPreviewUIView: UIView {
         default: break
         }
     }
+
+    // UIView already declares `gestureRecognizerShouldBegin`, hence the override (kept in the class
+    // body rather than the delegate extension, where overrides aren't allowed).
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool { gizmo != nil }
 }
 
 extension VEPreviewUIView: UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
-    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool { gizmo != nil }
 }

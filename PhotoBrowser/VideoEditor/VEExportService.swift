@@ -440,7 +440,7 @@ nonisolated enum VEExportService {
     }
 
     /// Mutable progress shared by the two writer callbacks.
-    private final class ExportProgressState: @unchecked Sendable {
+    private nonisolated final class ExportProgressState: @unchecked Sendable {
         private let lock = NSLock()
         private(set) var frames = 0
         private(set) var failure: String?
