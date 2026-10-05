@@ -83,14 +83,14 @@ nonisolated struct VELockInfo: Codable, Sendable {
     var canRedo: Bool { undoStack.canRedo }
 
     /// Reported drive-loss errors go here (the editor wires it to its `VEDriveMonitor`).
-    var onIOError: ((Error) -> Void)?
+    @ObservationIgnored var onIOError: ((Error) -> Void)?
 
-    private var txnBefore: VEEditableState?
-    private var txnLabel = ""
-    private var autosaveTask: Task<Void, Never>?
-    private var firstDirtyAt: Date?
-    private var heartbeatTask: Task<Void, Never>?
-    private var closed = false
+    @ObservationIgnored private var txnBefore: VEEditableState?
+    @ObservationIgnored private var txnLabel = ""
+    @ObservationIgnored private var autosaveTask: Task<Void, Never>?
+    @ObservationIgnored private var firstDirtyAt: Date?
+    @ObservationIgnored private var heartbeatTask: Task<Void, Never>?
+    @ObservationIgnored private var closed = false
 
     private init(store: VEDriveStore, packageURL: URL, project: VEProject, readOnly: Bool, reason: String?, recovered: Bool) {
         self.store = store

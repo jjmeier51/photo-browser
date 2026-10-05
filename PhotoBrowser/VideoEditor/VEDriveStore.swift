@@ -420,10 +420,10 @@ nonisolated struct VEExportPreferences: Codable, Equatable, Sendable {
 @MainActor @Observable final class VEDriveMonitor {
     private(set) var isConnected = true
     private(set) var lastSavedAt: Date?
-    var onLost: (() -> Void)?
-    var onRestored: (() -> Void)?
+    @ObservationIgnored var onLost: (() -> Void)?
+    @ObservationIgnored var onRestored: (() -> Void)?
 
-    private var task: Task<Void, Never>?
+    @ObservationIgnored private var task: Task<Void, Never>?
     private let store: VEDriveStore
 
     init(store: VEDriveStore) { self.store = store }

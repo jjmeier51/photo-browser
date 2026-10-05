@@ -128,8 +128,8 @@ nonisolated enum VEExportPreflight {
     private(set) var outputBytes: Int64 = 0
     let settings: VEExportSettings
     let duration: VETime
-    private var cancelFlag = VECancelFlag()
-    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    @ObservationIgnored private let cancelFlag = VECancelFlag()
+    @ObservationIgnored private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     init(settings: VEExportSettings, duration: VETime) {
         self.settings = settings

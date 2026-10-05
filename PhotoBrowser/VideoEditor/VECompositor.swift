@@ -173,27 +173,15 @@ nonisolated final class VECompositor: NSObject, AVVideoCompositing, @unchecked S
 nonisolated final class VEImageCache: @unchecked Sendable {
     static let shared = VEImageCache()
 
-    private nonisolated final class Entry {
-        let frames: [CIImage]
-        let cumulative: [Double]      // seconds at the end of each frame
-        let cost: Int
-        init(frames: [CIImage], delays: [Double]) {
-            self.frames = frames
-            var acc = 0.0
-            cumulative = delays.map { acc += $0; return acc }
-            cost = frames.reduce(0) { $0 + Int($1.extent.width * $1.extent.height * 4) }
-        }
-    }
-
-    private let cache: NSCache<NSString, Entry> = {
-        let c = NSCache<NSString, Entry>()
+    private let cache: NSCache<NSString, VEImageCacheEntry> = {
+        let c = NSCache<NSString, VEImageCacheEntry>()
         c.totalCostLimit = 64 * 1024 * 1024
         return c
     }()
 
     func image(_ url: URL, maxPixel: Int, kind: VEClipKind, sourceTime: VETime, loopDuration: VETime) -> CIImage? {
         let key = "\(url.path)|\(maxPixel)" as NSString
-        let entry: Entry
+        let entry: VEImageCacheEntry
         if let e = cache.object(forKey: key) {
             entry = e
         } else {
@@ -209,7 +197,7 @@ nonisolated final class VEImageCache: @unchecked Sendable {
 
     func removeAll() { cache.removeAllObjects() }
 
-    private static func load(_ url: URL, maxPixel: Int, animated: Bool) -> Entry? {
+    private static func load(_ url: URL, maxPixel: Int, animated: Bool) -> VEImageCacheEntry? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
         let count = animated ? min(CGImageSourceGetCount(src), 600) : 1
         // GIF frame sets are capped smaller so a long animation doesn't swallow the cache.
@@ -232,7 +220,20 @@ nonisolated final class VEImageCache: @unchecked Sendable {
             delays.append(max(0.02, d))
         }
         guard !frames.isEmpty else { return nil }
-        return Entry(frames: frames, delays: delays)
+        return VEImageCacheEntry(frames: frames, delays: delays)
+    }
+}
+
+/// A decoded still or GIF frame set held by `VEImageCache`.
+nonisolated final class VEImageCacheEntry: @unchecked Sendable {
+    let frames: [CIImage]
+    let cumulative: [Double]      // seconds at the end of each frame
+    let cost: Int
+    init(frames: [CIImage], delays: [Double]) {
+        self.frames = frames
+        var acc = 0.0
+        cumulative = delays.map { acc += $0; return acc }
+        cost = frames.reduce(0) { $0 + Int($1.extent.width * $1.extent.height * 4) }
     }
 }
 

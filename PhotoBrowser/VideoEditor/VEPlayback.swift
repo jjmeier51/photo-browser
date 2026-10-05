@@ -18,13 +18,13 @@ import Combine
     /// Pixel size of the preview view; the composition renders at this size, capped at 1920 (PRV-3).
     var previewPixelSize: CGSize = .zero
     /// Called when original-media playback stalled twice within 10 s (PRV-7).
-    var onStall: (() -> Void)?
+    @ObservationIgnored var onStall: (() -> Void)?
 
-    private var timeObserver: Any?
-    private var endObserver: NSObjectProtocol?
-    private var keepUpObservation: NSKeyValueObservation?
+    @ObservationIgnored private var timeObserver: Any?
+    @ObservationIgnored private var endObserver: NSObjectProtocol?
+    @ObservationIgnored private var keepUpObservation: NSKeyValueObservation?
     private var stallTimes: [Date] = []
-    private var buildTask: Task<Void, Never>?
+    @ObservationIgnored private var buildTask: Task<Void, Never>?
     private var pendingSeek: VETime?
     private var seekInFlight = false
     private var lastSeekAt = Date.distantPast

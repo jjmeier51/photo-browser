@@ -18,19 +18,19 @@ import AVFoundation
     var driveLost = false
     var toast: String?
     var error: VEError?
-    var importProgress: (fraction: Double, name: String)?
+    var importProgress: VEImportProgress?
     var importSkipped: [VEMediaService.ImportSkip] = []
     var relinkSearching = false
 
-    private var derivedJobs: [(key: String, run: () async -> Void)] = []
-    private var derivedRunning: Set<String> = []
-    private var derivedActive = 0
-    private var coverDirty = false
-    private var rebuildTask: Task<Void, Never>?
-    private var trimOriginal: VEClip?
-    private var transformOriginal: VETransform?
-    private var lifecycleObservers: [NSObjectProtocol] = []
-    private var closed = false
+    @ObservationIgnored private var derivedJobs: [VEDerivedJob] = []
+    @ObservationIgnored private var derivedRunning: Set<String> = []
+    @ObservationIgnored private var derivedActive = 0
+    @ObservationIgnored private var coverDirty = false
+    @ObservationIgnored private var rebuildTask: Task<Void, Never>?
+    @ObservationIgnored private var trimOriginal: VEClip?
+    @ObservationIgnored private var lifecycleObservers: [NSObjectProtocol] = []
+    @ObservationIgnored private var closed = false
+    @ObservationIgnored private var started = false
 
     var project: VEProject { document.project }
     var selectedClip: VEClip? { selectedClipID.flatMap { document.project.mainClip($0) } }
@@ -47,8 +47,6 @@ import AVFoundation
     }
 
     // MARK: Lifecycle
-
-    private var started = false
 
     func start() {
         guard !started else { return }
@@ -440,10 +438,10 @@ import AVFoundation
         let package = document.packageURL
         let store = self.store
         let existing = project.media
-        importProgress = (0, "")
+        importProgress = VEImportProgress(fraction: 0, name: "")
         Task {
             let result = await VEMediaService.shared.importFiles(urls, into: package, existing: existing, store: store) { f, name in
-                Task { @MainActor [weak self] in self?.importProgress = (f, name) }
+                Task { @MainActor [weak self] in self?.importProgress = VEImportProgress(fraction: f, name: name) }
             }
             importProgress = nil
             if result.driveLost { driveLost = true; monitor.report(NSError(domain: NSPOSIXErrorDomain, code: Int(ENODEV))) }
@@ -552,7 +550,7 @@ import AVFoundation
 
     private func enqueue(_ key: String, _ run: @escaping () async -> Void) {
         guard !derivedRunning.contains(key), !derivedJobs.contains(where: { $0.key == key }) else { return }
-        derivedJobs.append((key, run))
+        derivedJobs.append(VEDerivedJob(key: key, run: run))
         pumpDerived()
     }
 
@@ -664,6 +662,17 @@ import AVFoundation
 struct VEImportRequest: Identifiable {
     var insertAtPlayhead: Bool
     var id: String { insertAtPlayhead ? "playhead" : "end" }
+}
+
+struct VEImportProgress {
+    var fraction: Double
+    var name: String
+}
+
+/// One queued derived-asset job (thumbnails, waveform or proxy for a source).
+struct VEDerivedJob {
+    let key: String
+    let run: () async -> Void
 }
 
 // MARK: - Thumbnail store (PRV-9)
