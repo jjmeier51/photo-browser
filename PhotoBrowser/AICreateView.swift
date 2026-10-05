@@ -13,6 +13,7 @@ struct AICreateView: View {
     @State private var prompt: String
     @State private var negativeEnabled: Bool
     @State private var negativePrompt: String
+    @State private var referenceURLs: [URL]
     @State private var count: Int
     @State private var model: AIExtend.AIModel
     @State private var selectedTunes: [AIExtend.AstriaTune] = []
@@ -33,6 +34,9 @@ struct AICreateView: View {
         _prompt = State(initialValue: s.prompt)
         _negativeEnabled = State(initialValue: s.negativeEnabled)
         _negativePrompt = State(initialValue: s.negativePrompt)
+        // Last run's references, minus any that have since moved or gone.
+        _referenceURLs = State(initialValue: s.referencePaths.map { URL(fileURLWithPath: $0) }
+                                .filter { FileManager.default.fileExists(atPath: $0.path) })
         _count = State(initialValue: [1, 2, 3, 4, 8].contains(s.count) ? s.count : 1)
         _model = State(initialValue: AIExtend.AIModel(rawValue: s.model) ?? AIExtend.defaultModel)
         _pendingTuneIDs = State(initialValue: s.tuneIDs)
@@ -64,6 +68,7 @@ struct AICreateView: View {
                 } footer: {
                     Text(comboNote)
                 }
+                referenceSection
                 Section("Output") {
                     Picker("Resolution", selection: $resolution) {
                         ForEach(AIExtend.OutputResolution.allCases) { Text($0.rawValue).tag($0) }
@@ -92,6 +97,10 @@ struct AICreateView: View {
                 }
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
+            // A model with a smaller reference limit keeps the first N picked.
+            .onChange(of: model) { _, m in
+                if referenceURLs.count > m.maxReferenceImages { referenceURLs = Array(referenceURLs.prefix(m.maxReferenceImages)) }
+            }
             .task {
                 tunes = await library.loadAITunes()
                 if !pendingTuneIDs.isEmpty {
@@ -106,6 +115,30 @@ struct AICreateView: View {
                     pendingTuneIDs = []
                 }
             }
+        }
+    }
+
+    /// Up to the model's limit of extra photos from this folder for the model to draw on.
+    private var referenceSection: some View {
+        Section {
+            NavigationLink {
+                ReferenceImagesPicker(folder: folder, limit: model.maxReferenceImages, selected: $referenceURLs)
+            } label: {
+                HStack {
+                    Text("Reference images")
+                    Spacer()
+                    Text(referenceURLs.isEmpty ? "None" : "\(referenceURLs.count) of \(model.maxReferenceImages)")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(model.maxReferenceImages == 0)
+            if !referenceURLs.isEmpty { ReferenceImagesStrip(selected: $referenceURLs) }
+        } header: {
+            Text("References")
+        } footer: {
+            Text(model.maxReferenceImages == 0
+                 ? "Flux takes no reference images here — pick a Seedream or Nano Banana model to use them."
+                 : "Up to \(model.maxReferenceImages) photos from “\(folder.lastPathComponent)” for \(model.rawValue) to draw on — a person, an outfit, a product, a style. Refer to them in the prompt (“the woman in the reference”, “the dress from image 2”); they're sent in the order you picked them.")
         }
     }
 
@@ -129,10 +162,12 @@ struct AICreateView: View {
                                                       tuneIDs: selectedTunes.map(\.id),
                                                       resolution: resolution.rawValue,
                                                       aspect: aspect.rawValue, count: count,
-                                                      negativeEnabled: negativeEnabled, negativePrompt: negativePrompt),
+                                                      negativeEnabled: negativeEnabled, negativePrompt: negativePrompt,
+                                                      referencePaths: referenceURLs.map(\.path)),
                                  create: true)
         let gen = AIExtend.resolveGeneration(model: model, tunes: selectedTunes)
         library.startAICreate(folder: folder, prompt: prompt, negativePrompt: negativeEnabled ? negativePrompt : nil,
+                              referenceURLs: Array(referenceURLs.prefix(model.maxReferenceImages)),
                               promptPrefix: gen.promptPrefix, count: count,
                               tune: gen.tuneID, modelLabel: gen.label, token: gen.token,
                               supportsResolution: gen.supportsResolution, resolution: resolution, aspect: aspect)

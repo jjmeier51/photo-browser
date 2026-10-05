@@ -47,13 +47,19 @@ enum AIExtend {
     /// default that the user can override in Settings.
     enum AIModel: String, CaseIterable, Identifiable, Sendable {
         case seedream5Pro = "Seedream 5.0 Pro"
+        case seedream5Lite = "Seedream 5.0 Lite"
+        case seedream45 = "Seedream 4.5"
         case nanoBanana2 = "Nano Banana 2"
         case flux = "Flux"           // the LoRA-composable base — pick it to run one of your own tunes on top
         var id: String { rawValue }
-        /// Known Astria gallery tune ids (override in Settings).
+        /// Known Astria gallery tune ids (override in Settings). 5.0 Lite's id comes from its public
+        /// gallery page (astria.ai/gallery/tunes/4160332); 4.5's is the id this app shipped with before
+        /// the model was dropped from the picker.
         var fallbackTune: Int {
             switch self {
             case .seedream5Pro:  return 5236038
+            case .seedream5Lite: return 4160332
+            case .seedream45:    return 3691308
             case .nanoBanana2:   return 4180298
             case .flux:          return AIExtend.defaultFluxTune
             }
@@ -62,11 +68,28 @@ enum AIExtend {
         /// Flux composes LoRAs; the partner models (Seedream / Nano Banana) can't.
         var composesLoRA: Bool { self == .flux }
         var maxLongSide: CGFloat { 2048 }
+        /// How many extra reference images the model accepts alongside the prompt (and, for Edit,
+        /// the source photo): Seedream 4.5 / 5.0 Lite and Nano Banana 2 take up to 14, Seedream 5.0
+        /// Pro up to 10. Flux takes none here (its img2img path is the single input image).
+        var maxReferenceImages: Int {
+            switch self {
+            case .seedream5Pro:                             return 10
+            case .seedream5Lite, .seedream45, .nanoBanana2: return 14
+            case .flux:                                     return 0
+            }
+        }
         fileprivate var tuneKey: String { "photoBrowser.astriaTune.\(rawValue)" }
         /// The partner models offered as the built-in default / Settings overrides (Flux is offered
         /// only in the Edit/Create pickers, and shares the separate Flux tune setting).
-        static var partnerModels: [AIModel] { [.seedream5Pro, .nanoBanana2] }
+        static var partnerModels: [AIModel] { [.seedream5Pro, .seedream5Lite, .seedream45, .nanoBanana2] }
     }
+
+    /// Multipart field each extra reference image is sent as. Astria documents this field for its
+    /// video models ("repeat `prompt[image_references][]` for each image; model-specific limits
+    /// apply") and lists the image models' reference limits in its changelog without naming the
+    /// field, so this is the best-supported guess; a validation error naming it would mean the
+    /// image models want a different one — change it here.
+    static let referenceImageField = "prompt[image_references][]"
 
     /// Output resolution the user picks. Sent as Astria's `prompt[resolution]` size **tier**
     /// (1K / 2K / 4K) — the documented way to control output size on the gallery tunes. (The old
@@ -241,17 +264,19 @@ enum AIExtend {
         var count = 1
         var negativeEnabled = false     // the "Negative Prompt" switch under the prompt
         var negativePrompt = ""         // its text (kept even while the switch is off)
+        var referencePaths: [String] = []   // reference images picked last time (paths; missing files are dropped on restore)
 
         init() {}
         init(prompt: String, model: String, tuneIDs: [Int], resolution: String, aspect: String, count: Int,
-             negativeEnabled: Bool = false, negativePrompt: String = "") {
+             negativeEnabled: Bool = false, negativePrompt: String = "", referencePaths: [String] = []) {
             self.prompt = prompt; self.model = model; self.tuneIDs = tuneIDs
             self.resolution = resolution; self.aspect = aspect; self.count = count
             self.negativeEnabled = negativeEnabled; self.negativePrompt = negativePrompt
+            self.referencePaths = referencePaths
         }
         // Lenient decoding so an older saved blob (a single `tuneID`, or any missing key) still
         // restores the rest of the settings instead of resetting them all.
-        enum CodingKeys: String, CodingKey { case prompt, model, tuneIDs, tuneID, resolution, aspect, count, negativeEnabled, negativePrompt }
+        enum CodingKeys: String, CodingKey { case prompt, model, tuneIDs, tuneID, resolution, aspect, count, negativeEnabled, negativePrompt, referencePaths }
         init(from d: Decoder) throws {
             let c = try d.container(keyedBy: CodingKeys.self)
             prompt = (try? c.decode(String.self, forKey: .prompt)) ?? ""
@@ -263,6 +288,7 @@ enum AIExtend {
             count = (try? c.decode(Int.self, forKey: .count)) ?? 1
             negativeEnabled = (try? c.decode(Bool.self, forKey: .negativeEnabled)) ?? false
             negativePrompt = (try? c.decode(String.self, forKey: .negativePrompt)) ?? ""
+            referencePaths = (try? c.decode([String].self, forKey: .referencePaths)) ?? []
         }
         func encode(to e: Encoder) throws {
             var c = e.container(keyedBy: CodingKeys.self)
@@ -274,6 +300,7 @@ enum AIExtend {
             try c.encode(count, forKey: .count)
             try c.encode(negativeEnabled, forKey: .negativeEnabled)
             try c.encode(negativePrompt, forKey: .negativePrompt)
+            try c.encode(referencePaths, forKey: .referencePaths)
         }
     }
     private static func runSettingsKey(create: Bool) -> String {
@@ -307,7 +334,11 @@ enum AIExtend {
     /// `heartbeat(ready, expected)` fires on every poll tick while this process is still waiting on
     /// Astria (how many images exist so far, and how many are expected when known) — the caller
     /// uses it to update progress and keep the "app was suspended mid-generation" alert pushed out.
+    /// `referenceImages` are extra JPEGs the model should draw on (people, products, styles) —
+    /// sent as repeated `referenceImageField` parts after the input image; the caller caps the
+    /// count at `AIModel.maxReferenceImages`.
     nonisolated static func generate(tune: Int, token: String? = nil, prompt: String, imageData: Data?,
+                                     referenceImages: [Data] = [],
                                      count: Int, width: Int?, height: Int?,
                                      aspect: String?, resolutionTier: String?,
                                      onPrompt: (@Sendable (Int) -> Void)? = nil,
@@ -345,6 +376,9 @@ enum AIExtend {
         var files: [(name: String, filename: String, mime: String, data: Data)] = []
         if let imageData {
             files.append(("prompt[input_image]", "input.jpg", "image/jpeg", imageData))
+        }
+        for (i, d) in referenceImages.enumerated() {
+            files.append((referenceImageField, "reference\(i + 1).jpg", "image/jpeg", d))
         }
         return await submit(tune: tune, url: url, fields: fields, files: files, expected: expected,
                             onPrompt: onPrompt, heartbeat: heartbeat)

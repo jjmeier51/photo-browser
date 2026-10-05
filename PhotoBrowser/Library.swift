@@ -1495,7 +1495,10 @@ final class Library {
     /// `negativePrompt`, when given, is appended to the prompt as free text ("Negative Prompt: …",
     /// see `AIExtend.composePrompt`). The history keeps the bare prompt; the job (and the saved
     /// files' provenance) carry the full text Astria saw.
-    func startAIEdit(entry: Entry, prompt: String, negativePrompt: String? = nil, promptPrefix: String = "",
+    /// `referenceURLs` are extra photos (from the drive) the model should draw on — encoded to
+    /// JPEG off the main actor like the source and sent as reference images.
+    func startAIEdit(entry: Entry, prompt: String, negativePrompt: String? = nil, referenceURLs: [URL] = [],
+                     promptPrefix: String = "",
                      count: Int, tune: Int, modelLabel: String, token: String?, supportsResolution: Bool = true,
                      resolution: AIExtend.OutputResolution, aspect: AIExtend.OutputAspect) {
         recordAIPrompt(prompt)      // history, newest first (the raw prompt, not any <lora:…> prefix)
@@ -1517,8 +1520,10 @@ final class Library {
                                 activityID: activityID, bg: bg, live: live, label: "AI edit")
                 return
             }
+            let references = await Self.encodeReferences(referenceURLs)
             setActivity(activityID, status: "Uploading the photo to Astria…")
             let result = await AIExtend.generate(tune: tune, token: token, prompt: composedPrompt, imageData: prep.data,
+                                                 referenceImages: references,
                                                  count: count, width: prep.width, height: prep.height,
                                                  aspect: aspect.ratio,
                                                  resolutionTier: supportsResolution ? resolution.tier : nil,
@@ -1531,7 +1536,8 @@ final class Library {
     /// Creates a brand-new image from a text prompt (no source photo) — "Create with AI". Runs
     /// app-wide like Edit; kept results save into an "AI" subfolder of `folder`. Persisted for
     /// recovery exactly like Edit (it used not to be — a Create job killed mid-generation was lost).
-    func startAICreate(folder: URL, prompt: String, negativePrompt: String? = nil, promptPrefix: String = "",
+    func startAICreate(folder: URL, prompt: String, negativePrompt: String? = nil, referenceURLs: [URL] = [],
+                       promptPrefix: String = "",
                        count: Int, tune: Int, modelLabel: String, token: String?, supportsResolution: Bool = true,
                        resolution: AIExtend.OutputResolution, aspect: AIExtend.OutputAspect) {
         recordAIPrompt(prompt)
@@ -1543,7 +1549,10 @@ final class Library {
         // Text2img needs a concrete shape (there's no source to keep) — "Original"/nil defaults to 1:1.
         let ratio = aspect.ratio ?? "1:1"
         Task {
+            let references = await Self.encodeReferences(referenceURLs)
+            if !references.isEmpty { setActivity(activityID, status: "Uploading \(references.count) reference image\(references.count == 1 ? "" : "s")…") }
             let result = await AIExtend.generate(tune: tune, token: token, prompt: composedPrompt, imageData: nil,
+                                                 referenceImages: references,
                                                  count: count, width: nil, height: nil,
                                                  aspect: ratio,
                                                  resolutionTier: supportsResolution ? resolution.tier : nil,
@@ -1551,6 +1560,24 @@ final class Library {
                                                  heartbeat: heartbeatRelay(live, activityID: activityID, count: count))
             deliverAIResult(result, job: job, count: count, activityID: activityID, bg: bg, live: live, label: "AI create")
         }
+    }
+
+    /// Reference photos → upload JPEGs (≤ 2048 px, EXIF orientation baked in), off the main actor,
+    /// a few at a time. A file that can't be read is simply left out.
+    private static func encodeReferences(_ urls: [URL]) async -> [Data] {
+        guard !urls.isEmpty else { return [] }
+        return await Task.detached(priority: .utility) { () -> [Data] in
+            var out = [Data?](repeating: nil, count: urls.count)
+            await withTaskGroup(of: (Int, Data?).self) { group in
+                var it = urls.enumerated().makeIterator()
+                for _ in 0..<4 { if let (i, u) = it.next() { group.addTask { (i, AIExtend.uploadJPEG(of: u, maxPixel: 2048)?.data) } } }
+                for await (i, d) in group {
+                    out[i] = d
+                    if let (j, u) = it.next() { group.addTask { (j, AIExtend.uploadJPEG(of: u, maxPixel: 2048)?.data) } }
+                }
+            }
+            return out.compactMap { $0 }
+        }.value
     }
 
     /// Trains a new Astria LoRA tune from `imageURLs` (drive photos), app-wide. The tune shows up in

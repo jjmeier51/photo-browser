@@ -13,6 +13,7 @@ struct AIEditView: View {
     @State private var prompt: String
     @State private var negativeEnabled: Bool
     @State private var negativePrompt: String
+    @State private var referenceURLs: [URL]
     @State private var count: Int
     @State private var model: AIExtend.AIModel
     @State private var selectedTunes: [AIExtend.AstriaTune] = []
@@ -32,6 +33,9 @@ struct AIEditView: View {
         _prompt = State(initialValue: s.prompt)
         _negativeEnabled = State(initialValue: s.negativeEnabled)
         _negativePrompt = State(initialValue: s.negativePrompt)
+        // Last run's references, minus any that have since moved or gone — and never the source itself.
+        _referenceURLs = State(initialValue: s.referencePaths.map { URL(fileURLWithPath: $0) }
+                                .filter { $0 != entry.url && FileManager.default.fileExists(atPath: $0.path) })
         _count = State(initialValue: [1, 2, 3, 4, 8].contains(s.count) ? s.count : 1)
         _model = State(initialValue: AIExtend.AIModel(rawValue: s.model) ?? AIExtend.defaultModel)
         _pendingTuneIDs = State(initialValue: s.tuneIDs)
@@ -61,6 +65,7 @@ struct AIEditView: View {
                 } footer: {
                     Text(comboNote)
                 }
+                referenceSection
                 Section("Output") {
                     Picker("Resolution", selection: $resolution) {
                         ForEach(AIExtend.OutputResolution.allCases) { Text($0.rawValue).tag($0) }
@@ -89,6 +94,10 @@ struct AIEditView: View {
                 }
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
+            // A model with a smaller reference limit keeps the first N picked.
+            .onChange(of: model) { _, m in
+                if referenceURLs.count > m.maxReferenceImages { referenceURLs = Array(referenceURLs.prefix(m.maxReferenceImages)) }
+            }
             .task {
                 tunes = await library.loadAITunes()
                 if !pendingTuneIDs.isEmpty {
@@ -103,6 +112,32 @@ struct AIEditView: View {
                     pendingTuneIDs = []
                 }
             }
+        }
+    }
+
+    /// Up to the model's limit of extra photos (from the same folder, never the source itself) for
+    /// the model to draw on alongside the photo being edited.
+    private var referenceSection: some View {
+        let folder = entry.url.deletingLastPathComponent()
+        return Section {
+            NavigationLink {
+                ReferenceImagesPicker(folder: folder, exclude: entry.url, limit: model.maxReferenceImages, selected: $referenceURLs)
+            } label: {
+                HStack {
+                    Text("Reference images")
+                    Spacer()
+                    Text(referenceURLs.isEmpty ? "None" : "\(referenceURLs.count) of \(model.maxReferenceImages)")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(model.maxReferenceImages == 0)
+            if !referenceURLs.isEmpty { ReferenceImagesStrip(selected: $referenceURLs) }
+        } header: {
+            Text("References")
+        } footer: {
+            Text(model.maxReferenceImages == 0
+                 ? "Flux takes no reference images here — pick a Seedream or Nano Banana model to use them."
+                 : "Besides the photo you're editing, up to \(model.maxReferenceImages) more from “\(folder.lastPathComponent)” for \(model.rawValue) to draw on — a face to keep, an outfit, a product, a style. Refer to them in the prompt (“the jacket from the reference”); they're sent in the order you picked them.")
         }
     }
 
@@ -127,10 +162,12 @@ struct AIEditView: View {
                                                       tuneIDs: selectedTunes.map(\.id),
                                                       resolution: resolution.rawValue,
                                                       aspect: aspect.rawValue, count: count,
-                                                      negativeEnabled: negativeEnabled, negativePrompt: negativePrompt),
+                                                      negativeEnabled: negativeEnabled, negativePrompt: negativePrompt,
+                                                      referencePaths: referenceURLs.map(\.path)),
                                  create: false)
         let gen = AIExtend.resolveGeneration(model: model, tunes: selectedTunes)
         library.startAIEdit(entry: entry, prompt: prompt, negativePrompt: negativeEnabled ? negativePrompt : nil,
+                            referenceURLs: Array(referenceURLs.prefix(model.maxReferenceImages)),
                             promptPrefix: gen.promptPrefix, count: count,
                             tune: gen.tuneID, modelLabel: gen.label, token: gen.token,
                             supportsResolution: gen.supportsResolution, resolution: resolution, aspect: aspect)

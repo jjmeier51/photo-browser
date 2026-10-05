@@ -20,16 +20,30 @@ is `nonisolated` and off the main actor.
 
 `enum AIExtend` is the whole Astria client + config. Key pieces:
 
-- **`AIModel`** (`seedream5Pro`, `nanoBanana2`, `flux`):
-  - `partnerModels` = `[.seedream5Pro, .nanoBanana2]` — the closed gallery models. Used in
-    Settings (default-model picker, tune-id overrides) which must **exclude Flux** (Flux has
-    its own "Flux (extend)" tune field).
+- **`AIModel`** (`seedream5Pro`, `seedream5Lite`, `seedream45`, `nanoBanana2`, `flux`):
+  - `partnerModels` = the four closed gallery models. Used in Settings (default-model picker,
+    tune-id overrides) which must **exclude Flux** (Flux has its own "Flux (extend)" tune field).
   - `composesLoRA` is true only for `.flux` — Flux is the only base that can run a user LoRA
     composed into the prompt via `<lora:id:weight>`.
   - `tuneID(for:)` maps a model to its Astria gallery tune id (editable in Settings; Flux
-    shares the single editable Flux tune).
-  - We deliberately **removed** the older "Nano Banana Pro" and "Seedream 4.5" options and
-    kept only Nano Banana 2 and Seedream 5.0 Pro.
+    shares the single editable Flux tune). Fallbacks: 5.0 Pro 5236038, **5.0 Lite 4160332**
+    (from its public gallery URL), **4.5 3691308** (the id the app shipped with before 4.5 was
+    dropped — now back), Nano Banana 2 4180298. "Nano Banana Pro" stays removed.
+  - **`maxReferenceImages`**: 14 for Seedream 4.5 / 5.0 Lite / Nano Banana 2, 10 for Seedream
+    5.0 Pro, 0 for Flux. Extra photos the model draws on, sent as repeated
+    **`AIExtend.referenceImageField`** (`prompt[image_references][]`) multipart parts after
+    `prompt[input_image]`. Astria documents that field (and "model-specific limits apply") for
+    its video models and lists the image models' reference counts in its changelog without
+    naming the field, so this is a best-supported guess — if Astria answers with a validation
+    error naming it, change the constant.
+  - **Reference picker UI** (`AIGenerators.swift`): `ReferenceImagesPicker` (grid of the
+    current folder's photos, numbered in pick order, capped at the model's limit; the Edit flow
+    excludes its source photo), `ReferenceImagesStrip` (chosen thumbnails with ✕) and
+    `ReferenceThumb`. Both Create and Edit show a "References" section under Model & Tunes;
+    switching to a model with a smaller limit keeps the first N. `RunSettings.referencePaths`
+    remembers them (missing files dropped on restore). `Library.encodeReferences` JPEG-encodes
+    them off-main (≤ 2048 px, 4 at a time) and `startAIEdit`/`startAICreate` pass them to
+    `generate(referenceImages:)`. `TuneBaseModel` offers the two new Seedreams as FaceID bases.
 
 - **`OutputResolution`** (`k1`/`k2`/`k4` → "1K"/"2K"/"4K"): sent as Astria's
   `prompt[resolution]` **size tier**. This is the documented way to actually reach 4K on the
