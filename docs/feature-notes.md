@@ -492,6 +492,21 @@ Files app (lazy) opens it instantly.
 The grid `listing` retries once (400 ms) when a coordinated read returns empty but the folder
 exists (the provider can still be materializing right after a remount).
 
+### 3.4 Force Refresh from Drive — `Library.thoroughContents`, `FolderView.forceRefresh`
+
+Folders created on the SSD in Finder (Mac) could still fail to appear even after a normal
+re-listing: the coordinated read returned a non-empty but **stale** enumeration, and because
+`coordinatedContents` stops at the first strategy that returns anything, no other path was asked.
+Pull-to-refresh and ⋯ ▸ This Folder ▸ "Force Refresh from Drive" now:
+- re-check the drive / re-resolve the bookmark (`prepareForceRefresh` → `reconnectIfNeeded`, a
+  fresh security-scoped open) and drop the folder's cached listings so nothing stale paints first;
+- list with `thorough: true`: drop cached URL resource values, `F_FULLFSYNC` the directory on a
+  read-only fd (**nothing is written** — no probe files on the exFAT drive), then **union** the
+  coordinated, URL, path-based, shallow-enumerator and POSIX listings by name;
+- alert "Found N folders the drive hadn't shown yet" when the merge surfaced anything, so we learn
+  whether this path is what fixed it. The normal (non-forced) listing is unchanged — the merge
+  costs several directory reads.
+
 ---
 
 ## 4. Drive Health — `DriveHealthView.swift`, `DriveRepair.swift`, `MetadataSnapshot.swift` (Settings → Maintenance)

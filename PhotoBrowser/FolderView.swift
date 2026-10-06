@@ -179,6 +179,7 @@ struct FolderView: View {
     @State private var audioEntry: Entry?          // a tapped audio file → full-screen player
     @State private var reloading = false           // single-flight guard for reload()
     @State private var reloadPending = false
+    @State private var thoroughNextReload = false  // the next reload() merges every directory read (Force Refresh)
     @State private var showRotatePreview = false   // bulk photo-rotate preview sheet
     @State private var rotateTargets: [Entry] = []
     @State private var audioExtractSources: [URL] = []   // videos queued for "Extract Audio"
@@ -544,7 +545,7 @@ struct FolderView: View {
                 .padding(4)
             }
             .scrollDisabled(scrollLocked)        // freeze the page while a select-drag is active
-            .refreshable { Haptics.light(); await reload() }   // pull down to force a fresh disk re-listing
+            .refreshable { Haptics.light(); await forceRefresh() }   // pull down to force a fresh disk re-listing
             .coordinateSpace(name: "grid")
             .background(
                 GeometryReader { g in
@@ -1833,7 +1834,7 @@ struct FolderView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .refreshable { Haptics.light(); await reload() }
+        .refreshable { Haptics.light(); await forceRefresh() }
     }
 
     /// One highlight bubble. Long-press initiates a drag to rearrange (the Instagram
@@ -2216,6 +2217,9 @@ struct FolderView: View {
                             }
                         }
                         Toggle(isOn: $showHiddenFolders) { Label("Show Hidden Items", systemImage: "eye.slash") }
+                        Button { Task { await forceRefresh() } } label: {
+                            Label("Force Refresh from Drive", systemImage: "arrow.clockwise.circle")
+                        }
                         Button {
                             if case .rerun = cleanupAction { library.resetCleanup(url) }   // fresh pass over what's left
                             showCleanup = true
@@ -3101,6 +3105,25 @@ struct FolderView: View {
         }
     }
 
+    /// Pull-to-refresh / "Force Refresh from Drive": for folders made outside the app (Finder on a
+    /// Mac) that a normal re-listing doesn't show because iOS's external-drive layer serves a stale
+    /// cached directory. Re-checks the drive and bookmark, drops cached listings, and re-lists with
+    /// every reading strategy merged (`Library.thoroughContents`). Says so when that surfaced
+    /// items the normal read was missing.
+    private func forceRefresh() async {
+        let before = Set(entries.map(\.name))
+        library.prepareForceRefresh(of: url)
+        thoroughNextReload = true
+        await reload()
+        let found = entries.filter { !before.contains($0.name) }
+        if !found.isEmpty, !before.isEmpty {
+            let folders = found.filter(\.isFolder).count
+            resultMessage = folders == found.count
+                ? "Found \(folders) folder\(folders == 1 ? "" : "s") the drive hadn't shown yet."
+                : "Found \(found.count) item\(found.count == 1 ? "" : "s") the drive hadn't shown yet."
+        }
+    }
+
     private func reload() async {
         // Single-flight: `changeToken` can churn (e.g. every file a download commits), and this
         // handler spawns an unstructured Task per bump — without a guard the same folder ran
@@ -3125,7 +3148,9 @@ struct FolderView: View {
             loaded = false
         }
         fileSpecs = [:]; folderYears = [:]
-        let list = await library.listing(of: url, sort: library.sort)
+        let thorough = thoroughNextReload
+        thoroughNextReload = false
+        let list = await library.listing(of: url, sort: library.sort, thorough: thorough)
         if list.isEmpty, !FileManager.default.fileExists(atPath: url.path) {
             // The folder vanished under us — most likely the drive was unplugged (or
             // came back under a new mount path). Let the library re-resolve its

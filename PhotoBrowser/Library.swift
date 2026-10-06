@@ -3688,6 +3688,54 @@ final class Library {
         return result
     }
 
+    /// Every way of reading `folder`, **merged** — for "Force Refresh from Drive". The normal
+    /// reader stops at the first strategy that returns anything, so when iOS's external-drive layer
+    /// hands the coordinated read a stale cached enumeration (folders made in Finder on a Mac never
+    /// appear), the fresher answer another path might give is never consulted. Here each URL's
+    /// cached resource values are dropped, the directory is flushed (`F_FULLFSYNC` on a read-only
+    /// descriptor — nothing is written), and the coordinated, URL, path-based, enumerator and POSIX
+    /// listings are unioned by name. Returns the merged URLs and how many names only the extra
+    /// reads saw. Slower than `coordinatedContents`; only for the explicit refresh.
+    nonisolated static func thoroughContents(of folder: URL) -> (urls: [URL], extra: Int) {
+        let fm = FileManager.default
+        var dir = URL(fileURLWithPath: folder.path, isDirectory: true)
+        dir.removeAllCachedResourceValues()
+        DriveWriter.fullSync(dir)
+        let primary = coordinatedContents(of: dir, keys: [.isDirectoryKey])
+        var byName: [String: URL] = [:]
+        for u in primary { byName[u.lastPathComponent] = u }
+        let baseline = byName.count
+        func add(_ urls: [URL]) { for u in urls where byName[u.lastPathComponent] == nil { byName[u.lastPathComponent] = u } }
+        add((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [])) ?? [])
+        add(((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).map { dir.appendingPathComponent($0) })
+        if let en = fm.enumerator(at: dir, includingPropertiesForKeys: nil,
+                                  options: [.skipsSubdirectoryDescendants, .skipsPackageDescendants]) {
+            var urls: [URL] = []
+            for case let u as URL in en { urls.append(u) }
+            add(urls)
+        }
+        add(posixContents(of: dir) ?? [])
+        let urls = Array(byName.values)
+        for var u in urls { u.removeAllCachedResourceValues() }
+        return (urls, byName.count - baseline)
+    }
+
+    /// Prepares an explicit "Force Refresh from Drive": re-checks the drive (it may have come back
+    /// under a new mount path after a trip to the Mac), re-opens the security-scoped bookmark so the
+    /// file provider re-materializes it, and drops this folder's cached listings so nothing stale is
+    /// painted first. The caller then lists with `thorough: true`.
+    func prepareForceRefresh(of folder: URL) {
+        reconnectIfNeeded()
+        if let data = UserDefaults.standard.data(forKey: bookmarkKey) {
+            var stale = false
+            if let fresh = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale),
+               fresh.startAccessingSecurityScopedResource() {
+                fresh.stopAccessingSecurityScopedResource()   // balanced: the root's own access stays open
+            }
+        }
+        contentDidChange(under: folder)
+    }
+
     /// Raw POSIX `opendir`/`readdir` listing (non-recursive), skipping dot-files. Returns nil only if
     /// the directory can't be opened at all. This succeeds on some large/awkward exFAT directories
     /// that `FileManager.contentsOfDirectory` fails on, because it neither prefetches attributes nor
@@ -3708,7 +3756,7 @@ final class Library {
         return urls
     }
 
-    nonisolated func listing(of folder: URL, sort: SortKey) async -> [Entry] {
+    nonisolated func listing(of folder: URL, sort: SortKey, thorough: Bool = false) async -> [Entry] {
         // Enumerate names only (fast), then read each file's size/date/type concurrently.
         // On a slow external/file-provider drive each stat blocks, so overlapping them is
         // the difference between a folder opening instantly and taking 5–30s; on a local
@@ -3722,7 +3770,9 @@ final class Library {
             // Prefetch `.isDirectoryKey` so the returned URLs already know folder-vs-file (and carry a
             // trailing slash) — that lets the huge-folder path below classify each entry with zero
             // extra stats.
-            var all = Self.coordinatedContents(of: folder, keys: [.isDirectoryKey])
+            // `thorough` (Force Refresh): merge every reading strategy instead of trusting the first.
+            var all = thorough ? Self.thoroughContents(of: folder).urls
+                               : Self.coordinatedContents(of: folder, keys: [.isDirectoryKey])
             if all.isEmpty, fm.fileExists(atPath: folder.path) {
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 all = Self.coordinatedContents(of: folder, keys: [.isDirectoryKey])
