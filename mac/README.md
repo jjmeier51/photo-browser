@@ -19,6 +19,23 @@ edited inline in the right-hand inspector (filename, capture date, every field) 
 
 Works on JPEG, HEIC, PNG, TIFF, RAW (DNG/CR2/CR3/NEF/ARW…) and MOV/MP4 video.
 
+## PornPics gallery downloader (`pornpics_downloader.py`)
+
+A separate, single-file desktop tool (tkinter, no third-party packages). Paste a gallery URL
+such as `https://www.pornpics.com/galleries/beautiful-woman-posing-48115884/` and every
+full-size photo is saved into a folder named after the gallery ("Beautiful Woman Posing")
+inside the destination you pick (default `~/Pictures/PornPics`). Existing files are skipped, so a
+re-run only fetches what's missing; Stop ends the batch cleanly.
+
+```sh
+python3 mac/pornpics_downloader.py                 # window
+python3 mac/pornpics_downloader.py <gallery URL>   # window, URL pre-filled
+python3 mac/pornpics_downloader.py --cli <gallery URL> [destination]
+```
+
+It needs a Python with Tk: the python.org installer and Apple's `/usr/bin/python3` have it;
+Homebrew's needs `brew install python-tk`. `--cli` works without Tk.
+
 ## Requirements
 
 - macOS 12+ (it also runs on Linux for development)
