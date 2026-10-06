@@ -13,7 +13,9 @@ What it does beyond the single-gallery tool:
   rest load as you scroll. It walks the scroll endpoint `<star page>?limit=20&offset=N` (JSON or
   HTML) and, if that doesn't reach the total the page advertises, numbered pages (`<star>/2/`,
   `?page=2`), scanning each for `/galleries/<slug>-<id>/` links until two pages in a row add
-  nothing. A warning is printed if it still finds fewer than the site's count. Galleries whose
+  nothing. If that still falls short of the site's count, it opens the star page in a real browser
+  engine (QtWebEngine, from PySide6) and scrolls it until no more galleries load — the site's own
+  JavaScript does the paging, so this works whatever its endpoint is. `--browser always|never`. Galleries whose
   model list doesn't include the star (e.g. "related" thumbnails) are skipped.
 * **Most recent first.** Gallery ids grow over time, so galleries are downloaded newest-first and
   each gallery folder's modification date is set so that sorting by Date Modified (Finder, the
@@ -90,6 +92,7 @@ def request(url: str, referer: str | None = None, xhr: bool = False, timeout: in
                "Accept": "application/json, text/javascript, */*; q=0.01" if xhr else "*/*"}
     if xhr:
         headers["X-Requested-With"] = "XMLHttpRequest"
+        headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
     if referer:
         headers["Referer"] = referer
     for attempt in range(3):
@@ -159,12 +162,17 @@ def _paginate(found: dict[int, str], label: str, urls, xhr: bool, referer: str) 
     url = next(gen)
     for _ in range(MAX_PAGES):
         try:
-            batch = gallery_links(text(url, referer=referer, xhr=xhr))
+            body, headers = request(url, referer=referer, xhr=xhr)
         except urllib.error.HTTPError as e:
-            if e.code not in (404, 410):
-                log(f"  {label}: HTTP {e.code}")
+            log(f"  {label}: {url} → HTTP {e.code}")
             break
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            log(f"  {label}: {url} → {e}")
+            break
+        batch = gallery_links(body.decode("utf-8", errors="replace"))
         if not batch:
+            ctype = next((v for k, v in headers.items() if k.lower() == "content-type"), "?")
+            log(f"  {label}: {url} → no galleries ({ctype}, {len(body)} bytes)")
             break
         new = [(gid, u) for gid, u in batch if gid not in found]
         found.update(new)
@@ -180,7 +188,74 @@ def _paginate(found: dict[int, str], label: str, urls, xhr: bool, referer: str) 
     return added
 
 
-def star_galleries(star_url: str) -> dict[int, str]:
+def browser_galleries(star_url: str, expected: int | None, timeout: float = 900) -> dict[int, str]:
+    """Load the star page in a real browser engine (QtWebEngine) and keep scrolling — and clicking
+    any "load more" button — until no new gallery links appear, then return every one.
+
+    This is the reliable path: the site's own JavaScript does the paging, whatever endpoint or
+    parameters it uses today. Needs PySide6 (mac/.venv has it); returns {} without it.
+    """
+    try:
+        from PySide6.QtCore import QTimer, QUrl
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+        from PySide6.QtWidgets import QApplication
+    except ModuleNotFoundError:
+        log("  (PySide6 isn't installed in this Python, so the page can't be scrolled in a browser.\n"
+            "   Run mac/run.sh once, then use mac/.venv/bin/python to run this script.)")
+        return {}
+
+    js = r"""(() => {
+        // Only in-page "load more" controls — never a link that would navigate away from the star.
+        const more = [...document.querySelectorAll('button, [role=button], a[href="#"], a[href^="javascript"], a:not([href])')]
+            .find(e => e.offsetParent && /^\s*(load|show|view|see)\s+more|more\s+galleries/i.test(e.textContent || ''));
+        if (more) more.click();
+        window.scrollTo(0, document.documentElement.scrollHeight || document.body.scrollHeight);
+        return [...document.querySelectorAll('a[href*="/galleries/"]')].map(a => a.href).join('\n');
+    })()"""
+    app = QApplication.instance() or QApplication([sys.argv[0]])
+    view = QWebEngineView()
+    view.setWindowTitle("Collecting galleries… (this window closes by itself)")
+    view.resize(1100, 850)
+    view.show()
+    found: dict[int, str] = {}
+    state = {"last": -1, "idle": 0, "started": time.time(), "ticking": False}
+
+    def done() -> None:
+        view.close()
+        app.quit()
+
+    def on_result(result) -> None:
+        for gid, u in gallery_links(result or ""):
+            found.setdefault(gid, u)
+        n = len(found)
+        if n != state["last"]:
+            if n > max(state["last"], 0):
+                log(f"  browser: {n} galleries" + (f" of {expected}" if expected else ""))
+            state["last"], state["idle"] = n, 0
+        else:
+            state["idle"] += 1
+        # Done when the site's count is reached, nothing new has appeared for ~12 s, or time is up.
+        if (expected and n >= expected and state["idle"] >= 1) or state["idle"] >= 8 \
+                or time.time() - state["started"] > timeout:
+            done()
+        else:
+            QTimer.singleShot(1500, tick)
+
+    def tick() -> None:
+        view.page().runJavaScript(js, 0, on_result)
+
+    def loaded(_ok: bool) -> None:
+        if not state["ticking"]:
+            state["ticking"] = True
+            QTimer.singleShot(2000, tick)
+
+    view.loadFinished.connect(loaded)
+    view.load(QUrl(star_url))
+    app.exec()
+    return found
+
+
+def star_galleries(star_url: str, use_browser: str = "auto") -> dict[int, str]:
     """Every gallery id → url for a star. The page itself only carries the first ~20; the rest
     load on scroll. Tried in order, each until it stops adding galleries:
       1. the infinite-scroll endpoint  <star>/?limit=20&offset=N  (JSON, XHR headers)
@@ -212,6 +287,12 @@ def star_galleries(star_url: str) -> dict[int, str]:
         for fmt in (base + "{n}/", base + "?page={n}"):
             if _paginate(found, "page", numbered(fmt), xhr=False, referer=base):
                 break
+    if use_browser == "always" or (use_browser == "auto" and (not expected or len(found) < expected)):
+        log("Scrolling the star page in a browser to load the rest…")
+        before = len(found)
+        found.update({gid: u for gid, u in browser_galleries(base, expected).items() if gid not in found})
+        if len(found) > before:
+            log(f"  browser: +{len(found) - before} (total {len(found)})")
     if expected and len(found) < expected:
         log(f"  warning: found {len(found)} of the {expected} galleries the site lists")
     return found
@@ -462,6 +543,9 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=4, help="photos downloaded in parallel per gallery (default 4)")
     ap.add_argument("--limit", type=int, default=0, help="only the N most recent galleries")
     ap.add_argument("--no-exif", action="store_true", help="don't write EXIF into JPEGs that have none")
+    ap.add_argument("--browser", choices=("auto", "always", "never"), default="auto",
+                    help="scroll the star page in a browser window to find every gallery: when the "
+                         "plain requests come up short (auto, default), always, or never")
     args = ap.parse_args()
 
     url = args.url.strip()
@@ -475,7 +559,7 @@ def main() -> None:
     star_dir.mkdir(parents=True, exist_ok=True)
     log(f"{star_name} → {star_dir}")
 
-    galleries = sorted(star_galleries(url).items(), reverse=True)  # newest (highest id) first
+    galleries = sorted(star_galleries(url, args.browser).items(), reverse=True)  # newest (highest id) first
     if args.limit:
         galleries = galleries[:args.limit]
     if not galleries:

@@ -57,9 +57,16 @@ mac/.venv/bin/python mac/pornpics_browser.py <gallery URL>
 Give it a pornstar page and it downloads all of their galleries in one go (stdlib only):
 
 ```sh
-python3 mac/pornpics_star_downloader.py https://www.pornpics.com/pornstars/lucie-wilde/ [destination]
-python3 mac/pornpics_star_downloader.py lucie-wilde --limit 10     # just the 10 newest
+./mac/run.sh     # once, to create mac/.venv with PySide6 (used to scroll the star page)
+mac/.venv/bin/python mac/pornpics_star_downloader.py https://www.pornpics.com/pornstars/lucie-wilde/ [destination]
+mac/.venv/bin/python mac/pornpics_star_downloader.py lucie-wilde --limit 10     # just the 10 newest
 ```
+
+A star page only shows its first ~16–20 galleries; the rest load as you scroll. The downloader
+first tries plain requests for the further pages, and if those fall short of the star's gallery
+count it opens the star page in a small browser window (QtWebEngine) and scrolls it until
+everything has loaded, then closes it and downloads. That needs PySide6, hence `mac/.venv/bin/python`
+(`--browser always` forces it, `--browser never` skips it).
 
 It creates `<destination>/Lucie Wilde/` with one folder per gallery, named exactly like the
 single-gallery tool (so they share folders and re-runs only fetch what's missing). Galleries are
