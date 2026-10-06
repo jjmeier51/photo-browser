@@ -52,6 +52,26 @@ mac/.venv/bin/python mac/pornpics_browser.py   # opens pornpics.com
 mac/.venv/bin/python mac/pornpics_browser.py <gallery URL>
 ```
 
+### Every gallery of one star (`pornpics_star_downloader.py`)
+
+Give it a pornstar page and it downloads all of their galleries in one go (stdlib only):
+
+```sh
+python3 mac/pornpics_star_downloader.py https://www.pornpics.com/pornstars/lucie-wilde/ [destination]
+python3 mac/pornpics_star_downloader.py lucie-wilde --limit 10     # just the 10 newest
+```
+
+It creates `<destination>/Lucie Wilde/` with one folder per gallery, named exactly like the
+single-gallery tool (so they share folders and re-runs only fetch what's missing). Galleries are
+found on the star page plus its infinite-scroll pages, downloaded newest-first, and each gallery
+folder's date is set so sorting by Date Modified lists the newest first. Photos are the full-size
+files the site serves, saved byte-for-byte (existing EXIF kept). Each photo's file date is set to
+the gallery date, and JPEGs with no EXIF get capture dates, the gallery title (shown as the caption
+in the iOS app) and the model names written in (`--no-exif` to skip). Each gallery folder gets a
+`gallery.json` (title, date, models, channel, categories, tags, photo list) and the star folder a
+`pornstar.json` index. `--workers N` sets parallel downloads per gallery (default 4); Ctrl-C stops
+cleanly.
+
 ## Requirements
 
 - macOS 12+ (it also runs on Linux for development)
