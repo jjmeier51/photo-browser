@@ -110,6 +110,8 @@ struct FolderView: View {
     @State private var tsLabelFilter: Set<String> = []
     @State private var tsNoLabel = false
     @State private var tsLabelEntries: [Entry] = []
+    @State private var galleryCategories: [URL: [String]] = [:]   // subfolder → its gallery.json categories
+    @State private var categoryFilter: Set<String> = []            // selected categories (folder must have all)
     @State private var showDuplicates = false
     @State private var showPNGMatches = false
     @State private var videoEditorLaunch: VEEditorLaunch?     // New video project / Edit in video editor / Add to project…
@@ -239,6 +241,32 @@ struct FolderView: View {
     private var customLabelMenuTitle: String { inKardashian ? "Category" : "Taylor Swift Label" }
 
     private var tsLabelMode: Bool { !tsLabelFilter.isEmpty || tsNoLabel }
+
+    /// Whether `folder`'s gallery.json carries every selected category.
+    private func matchesCategories(_ folder: Entry) -> Bool {
+        guard let cats = galleryCategories[folder.url] else { return false }
+        return categoryFilter.isSubset(of: Set(cats))
+    }
+
+    /// The Categories menu: every category of this folder's galleries, with how many of the
+    /// galleries still shown (given the current selection) carry it. Selected ones always stay
+    /// listed so they can be unticked.
+    private struct CategoryOption: Identifiable {
+        let name: String
+        let count: Int
+        var id: String { name }
+    }
+
+    private var categoryOptions: [CategoryOption] {
+        var counts: [String: Int] = [:]
+        for (folder, cats) in galleryCategories where categoryFilter.isSubset(of: Set(cats)) {
+            if library.isUnderHiddenFolder(folder.path) && !showHiddenFolders { continue }
+            for c in cats { counts[c, default: 0] += 1 }
+        }
+        for c in categoryFilter where counts[c] == nil { counts[c] = 0 }
+        return counts.map { CategoryOption(name: $0.key, count: $0.value) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
     private var availableAges: [Int] { Array(Set(agedList.map { $0.age })).sorted() }
     /// Whether anything on screen actually needs per-file ages right now.
     private var agesNeeded: Bool {
@@ -367,6 +395,8 @@ struct FolderView: View {
                                : year(of: entry) == yearFilter
             }
         }
+        // Categories (pornpics galleries): only gallery folders carrying every selected category.
+        if !categoryFilter.isEmpty { list = list.filter { $0.isFolder && matchesCategories($0) } }
         list = applyType(list)
         list = applyEdited(list)
         if advancedActive { list = list.filter { passesAdvanced($0) } }
@@ -378,6 +408,8 @@ struct FolderView: View {
     /// usually a broken/failed download; it's hidden like a manually-hidden file (revealable, so it
     /// can still be found and deleted).
     private func applyHidden(_ list: [Entry]) -> [Entry] {
+        // Downloader sidecars never show (a listing cached before they were filtered may hold them).
+        let list = list.filter { !GalleryCategories.isSidecar($0.url) }
         guard !showHiddenFolders else { return list }
         let anyHiddenFolders = !library.hiddenFolders.isEmpty
         let anyHiddenFiles = !library.hiddenFiles.isEmpty
@@ -1545,6 +1577,16 @@ struct FolderView: View {
                     folderYears[folder.url] = await library.folderYears(of: folder.url)
                 }
             }
+            // Gallery categories: subfolders holding a pornpics gallery.json (a star's folder of
+            // galleries) feed the Categories filter. Folders without one cost a cached miss.
+            .task(id: "gallerycats-\(entries.count)-\(library.changeToken)-\(url.path)") {
+                let cats = await GalleryCategories.load(for: entries)
+                if Task.isCancelled { return }
+                galleryCategories = cats
+                // Drop selections no gallery here carries any more (e.g. after a re-download).
+                let known = Set(cats.values.flatMap { $0 })
+                if !categoryFilter.isSubset(of: known) { categoryFilter.formIntersection(known) }
+            }
         )
     }
 
@@ -1575,13 +1617,15 @@ struct FolderView: View {
                              : tsLabelMode ? "No items match these labels"
                              : showFavoritesOnly ? "No favorites here yet"
                              : showAIOnly ? "Nothing marked To AI yet"
+                             : !categoryFilter.isEmpty ? "No galleries have all of these categories"
                              : (advancedActive || typeFilter != .all || formatFilter != .all || yearFilter != nil || ageFilter != nil) ? "No matches for this filter"
                              : "This folder is empty")
                             .foregroundStyle(.secondary)
                         // A genuinely empty folder (no filter hiding things) gets the two ways to
                         // fill it, instead of a dead end.
                         if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !showEditedOnly
-                            && !advancedActive && yearFilter == nil && typeFilter == .all && formatFilter == .all && ageFilter == nil {
+                            && !advancedActive && yearFilter == nil && typeFilter == .all && formatFilter == .all && ageFilter == nil
+                            && categoryFilter.isEmpty {
                             HStack(spacing: 12) {
                                 Button { showPhotosPicker = true } label: {
                                     Label("Add from Photos", systemImage: "photo.badge.plus")
@@ -2022,6 +2066,27 @@ struct FolderView: View {
                         }
                     }
 
+                    if !galleryCategories.isEmpty {
+                        Menu {
+                            if !categoryFilter.isEmpty {
+                                Button(role: .destructive) { categoryFilter.removeAll() } label: {
+                                    Label("Clear Categories", systemImage: "xmark.circle")
+                                }
+                                Divider()
+                            }
+                            ForEach(categoryOptions) { option in
+                                Button { toggleCategory(option.name) } label: {
+                                    check("\(option.name) (\(option.count))", categoryFilter.contains(option.name))
+                                }
+                            }
+                        } label: {
+                            chip(categoryFilter.isEmpty ? "Categories"
+                                 : categoryFilter.count == 1 ? categoryFilter.first!
+                                 : "Categories (\(categoryFilter.count))")
+                                .foregroundStyle(categoryFilter.isEmpty ? Color.primary : Color.accentColor)
+                        }
+                    }
+
                     Menu {
                         Button { yearFilter = nil } label: { check("All Years", yearFilter == nil) }
                         ForEach(availableYears, id: \.self) { year in
@@ -2051,10 +2116,11 @@ struct FolderView: View {
                     }
 
                     // One tap back to an unfiltered view once any menu-driven filter is active.
-                    if yearFilter != nil || typeFilter != .all || formatFilter != .all || ageFilter != nil || advancedActive {
+                    if yearFilter != nil || typeFilter != .all || formatFilter != .all || ageFilter != nil || advancedActive
+                        || !categoryFilter.isEmpty {
                         Button {
                             yearFilter = nil; typeFilter = .all; formatFilter = .all; ageFilter = nil
-                            videoRes = .all; imageRes = .all; hdrOnly = false
+                            videoRes = .all; imageRes = .all; hdrOnly = false; categoryFilter.removeAll()
                         } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: "xmark.circle.fill")
@@ -2946,6 +3012,11 @@ struct FolderView: View {
     private func toggleTSLabelFilter(_ name: String) {
         if tsLabelFilter.contains(name) { tsLabelFilter.remove(name) }
         else { tsLabelFilter.insert(name); tsNoLabel = false; showFavoritesOnly = false; showAIOnly = false; showEditedOnly = false }
+    }
+
+    /// Toggles a gallery category in the Categories filter (galleries must carry all selected).
+    private func toggleCategory(_ name: String) {
+        if categoryFilter.contains(name) { categoryFilter.remove(name) } else { categoryFilter.insert(name) }
     }
 
     /// Toggles the "No Label" filter (unlabeled photos/videos), clearing the others.

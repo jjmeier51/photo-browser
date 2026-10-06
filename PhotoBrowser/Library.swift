@@ -3743,6 +3743,9 @@ final class Library {
                     }
                     continue
                 }
+                // pornpics downloader sidecars (gallery.json / pornstar.json) are data for the
+                // Categories filter, not something to browse.
+                if GalleryCategories.isSidecar(u) { continue }
                 visible.append(u)
             }
             return visible

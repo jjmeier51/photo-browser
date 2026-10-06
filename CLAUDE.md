@@ -59,7 +59,10 @@ actions the app makes no network calls.
 - **Browsing** — pick a folder → recursively scans it; square thumbnails for
   photos/videos; New Folder / rename / move; name search; sort by
   name/date/size/age; filters for type, year (EXIF date), resolution/HDR, age;
-  Favorites / "To AI" modes. (`FolderView`)
+  Favorites / "To AI" modes; a **Categories** filter on folders whose subfolders hold pornpics
+  `gallery.json` sidecars (from `mac/pornpics_*.py`) — galleries must carry every selected
+  category; the sidecars (`gallery.json`, `pornstar.json`) are hidden from listings.
+  (`FolderView`, `GalleryCategories`)
 - **Viewer** — photo pinch + double-tap zoom; custom `AVPlayer` video page with
   zoom, ms-precision scrubber, looping, HDR/res badge. Gestures: swipe L/R =
   prev/next, down = exit, up = info. Video double-tap zones: left/right third =
