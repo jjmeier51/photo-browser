@@ -84,12 +84,16 @@ enum AIExtend {
         static var partnerModels: [AIModel] { [.seedream5Pro, .seedream5Lite, .seedream45, .nanoBanana2] }
     }
 
-    /// Multipart field each extra reference image is sent as. Astria documents this field for its
-    /// video models ("repeat `prompt[image_references][]` for each image; model-specific limits
-    /// apply") and lists the image models' reference limits in its changelog without naming the
-    /// field, so this is the best-supported guess; a validation error naming it would mean the
-    /// image models want a different one — change it here.
-    static let referenceImageField = "prompt[image_references][]"
+    /// Multipart field each extra reference image is sent as. NOT `prompt[image_references][]`:
+    /// that's Astria's *video* field, and image prompts reject it outright ("video_first_frame,
+    /// video_last_frame, audio_reference and image_references can only be used with a video
+    /// prompt"). Astria lists the image models' reference limits without naming their field, so
+    /// this is the multi-image input field by its documented naming pattern. `generate` guards the
+    /// guess both ways: a validation error naming the field resends **without** references (and
+    /// remembers the rejection), and an accepted prompt whose JSON doesn't echo the images gets a
+    /// review note — so a wrong field degrades to "generated without references", never a failure.
+    static let referenceImageField = "prompt[input_images][]"
+    private static let rejectedReferenceFieldKey = "photoBrowser.astriaRejectedReferenceField"
 
     /// Output resolution the user picks. Sent as Astria's `prompt[resolution]` size **tier**
     /// (1K / 2K / 4K) — the documented way to control output size on the gallery tunes. (The old
@@ -336,9 +340,11 @@ enum AIExtend {
     /// uses it to update progress and keep the "app was suspended mid-generation" alert pushed out.
     /// `referenceImages` are extra JPEGs the model should draw on (people, products, styles) —
     /// sent as repeated `referenceImageField` parts after the input image; the caller caps the
-    /// count at `AIModel.maxReferenceImages`.
+    /// count at `AIModel.maxReferenceImages`. `referenceNote` receives a short user-facing note when
+    /// the references were left out (Astria rejected the field) or Astria didn't confirm them.
     nonisolated static func generate(tune: Int, token: String? = nil, prompt: String, imageData: Data?,
                                      referenceImages: [Data] = [],
+                                     referenceNote: (@Sendable (String) -> Void)? = nil,
                                      count: Int, width: Int?, height: Int?,
                                      aspect: String?, resolutionTier: String?,
                                      onPrompt: (@Sendable (Int) -> Void)? = nil,
@@ -377,11 +383,55 @@ enum AIExtend {
         if let imageData {
             files.append(("prompt[input_image]", "input.jpg", "image/jpeg", imageData))
         }
-        for (i, d) in referenceImages.enumerated() {
-            files.append((referenceImageField, "reference\(i + 1).jpg", "image/jpeg", d))
+        let refs = referenceImages.count
+        let fieldRejected = UserDefaults.standard.string(forKey: rejectedReferenceFieldKey) == referenceImageField
+        guard refs > 0, !fieldRejected else {
+            if refs > 0 {
+                referenceNote?("Astria doesn’t accept reference images for image prompts yet, so the \(refs) reference\(refs == 1 ? "" : "s") were left out.")
+            }
+            return await submit(tune: tune, url: url, fields: fields, files: files, expected: expected,
+                                onPrompt: onPrompt, heartbeat: heartbeat)
         }
-        return await submit(tune: tune, url: url, fields: fields, files: files, expected: expected,
-                            onPrompt: onPrompt, heartbeat: heartbeat)
+        var withRefs = files
+        for (i, d) in referenceImages.enumerated() {
+            withRefs.append((referenceImageField, "reference\(i + 1).jpg", "image/jpeg", d))
+        }
+        let result = await submit(tune: tune, url: url, fields: fields, files: withRefs, expected: expected,
+                                  onPrompt: onPrompt, heartbeat: heartbeat,
+                                  onCreated: { echoed in
+                                      if echoed == 0 {
+                                          referenceNote?("Astria accepted the request but didn’t confirm the \(refs) reference image\(refs == 1 ? "" : "s") — check whether the results used them.")
+                                      }
+                                  })
+        // A validation error about the reference field means no prompt was created (nothing was
+        // charged): remember the rejection and resend without the references.
+        if case .failure(.server(let msg)) = result, rejectsReferences(msg) {
+            UserDefaults.standard.set(referenceImageField, forKey: rejectedReferenceFieldKey)
+            referenceNote?("Astria rejected reference images for this model (“\(msg)”), so this was generated without the \(refs) reference\(refs == 1 ? "" : "s").")
+            return await submit(tune: tune, url: url, fields: fields, files: files, expected: expected,
+                                onPrompt: onPrompt, heartbeat: heartbeat)
+        }
+        return result
+    }
+
+    /// Whether a validation message is Astria objecting to the reference-image field.
+    private nonisolated static func rejectsReferences(_ message: String) -> Bool {
+        let m = message.lowercased()
+        let fieldName = referenceImageField.replacingOccurrences(of: "prompt[", with: "")
+            .replacingOccurrences(of: "][]", with: "").replacingOccurrences(of: "]", with: "")
+        return m.contains(fieldName) || m.contains("image_references") || m.contains("reference")
+    }
+
+    /// How many URLs an accepted prompt's JSON lists under an input-images / references key
+    /// (0 when it lists none — Astria didn't echo the references back).
+    private nonisolated static func echoedReferenceCount(_ json: [String: Any]) -> Int {
+        var n = 0
+        for (key, value) in json {
+            let k = key.lowercased()
+            guard k.contains("input_images") || k.contains("reference") else { continue }
+            if let arr = value as? [Any] { n += arr.count }
+        }
+        return n
     }
 
     /// Masked outpaint via Flux (the "Extend" feature). `imageData` is the original
@@ -418,11 +468,14 @@ enum AIExtend {
                                            files: [(name: String, filename: String, mime: String, data: Data)],
                                            expected: Int,
                                            onPrompt: (@Sendable (Int) -> Void)? = nil,
-                                           heartbeat: (@Sendable (Int, Int?) -> Void)? = nil) async -> Result<[Data], AIError> {
+                                           heartbeat: (@Sendable (Int, Int?) -> Void)? = nil,
+                                           onCreated: (@Sendable (Int?) -> Void)? = nil) async -> Result<[Data], AIError> {
         switch await createPrompt(tune: tune, url: url, fields: fields, files: files) {
         case .failure(let err):
             return .failure(err)
-        case .success(let id):
+        case .success(let created):
+            let id = created.id
+            onCreated?(created.echoedReferences)
             onPrompt?(id)
             return await downloadPromptImages(promptID: id, tune: tune, expected: expected, heartbeat: heartbeat)
         }
@@ -438,7 +491,7 @@ enum AIExtend {
     ///   and adopting the one with our exact text created since we started; only a *definitive*
     ///   "not there" allows a re-POST, so a job is never created twice.
     private nonisolated static func createPrompt(tune: Int, url: URL, fields: [String: String],
-                                                 files: [(name: String, filename: String, mime: String, data: Data)]) async -> Result<Int, AIError> {
+                                                 files: [(name: String, filename: String, mime: String, data: Data)]) async -> Result<(id: Int, echoedReferences: Int?), AIError> {
         let text = fields["prompt[text]"] ?? ""
         let boundary = "PB-\(UUID().uuidString)"
         let body = multipart(fields: fields, files: files, boundary: boundary)
@@ -464,7 +517,7 @@ enum AIExtend {
                 }
                 // Ambiguous: the upload may have completed. Look for the prompt before re-posting.
                 switch await findRecentPrompt(tune: tune, text: text, since: startedAt.addingTimeInterval(-30)) {
-                case .found(let id): return .success(id)
+                case .found(let id): return .success((id, nil))     // adopted from the listing: no echo to check
                 case .unavailable:   return .failure(.network)        // can't tell → don't risk a duplicate
                 case .notFound:
                     guard attempt < maxAttempts else { return .failure(.network) }
@@ -477,7 +530,7 @@ enum AIExtend {
             if (200...299).contains(http.statusCode) {
                 guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let id = intValue(json["id"]) else { return .failure(.badResult) }
-                return .success(id)
+                return .success((id, echoedReferenceCount(json)))
             }
             if isTransientStatus(http.statusCode), attempt < maxAttempts {
                 await backoff(attempt: attempt, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))

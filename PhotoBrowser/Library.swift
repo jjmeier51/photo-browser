@@ -1527,14 +1527,17 @@ final class Library {
             }
             let references = await Self.encodeReferences(referenceURLs)
             setActivity(activityID, status: "Uploading the photo to Astria…")
+            let notes = AINoteBox()
             let result = await AIExtend.generate(tune: tune, token: token, prompt: composedPrompt, imageData: prep.data,
                                                  referenceImages: references,
+                                                 referenceNote: { notes.text = $0 },
                                                  count: count, width: prep.width, height: prep.height,
                                                  aspect: aspect.ratio,
                                                  resolutionTier: supportsResolution ? resolution.tier : nil,
                                                  onPrompt: pendingRecorder(for: job, tune: tune, count: count),
                                                  heartbeat: heartbeatRelay(live, activityID: activityID, count: count))
-            deliverAIResult(result, job: job, count: count, activityID: activityID, bg: bg, live: live, label: "AI edit")
+            deliverAIResult(result, job: job, count: count, activityID: activityID, bg: bg, live: live,
+                            label: "AI edit", extraNote: notes.text)
         }
     }
 
@@ -1556,14 +1559,28 @@ final class Library {
         Task {
             let references = await Self.encodeReferences(referenceURLs)
             if !references.isEmpty { setActivity(activityID, status: "Uploading \(references.count) reference image\(references.count == 1 ? "" : "s")…") }
+            let notes = AINoteBox()
             let result = await AIExtend.generate(tune: tune, token: token, prompt: composedPrompt, imageData: nil,
                                                  referenceImages: references,
+                                                 referenceNote: { notes.text = $0 },
                                                  count: count, width: nil, height: nil,
                                                  aspect: ratio,
                                                  resolutionTier: supportsResolution ? resolution.tier : nil,
                                                  onPrompt: pendingRecorder(for: job, tune: tune, count: count),
                                                  heartbeat: heartbeatRelay(live, activityID: activityID, count: count))
-            deliverAIResult(result, job: job, count: count, activityID: activityID, bg: bg, live: live, label: "AI create")
+            deliverAIResult(result, job: job, count: count, activityID: activityID, bg: bg, live: live,
+                            label: "AI create", extraNote: notes.text)
+        }
+    }
+
+    /// Carries a note out of `AIExtend.generate`'s background callback (e.g. "references were left
+    /// out") to the results screen.
+    nonisolated final class AINoteBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: String?
+        var text: String? {
+            get { lock.withLock { value } }
+            set { lock.withLock { value = newValue } }
         }
     }
 
@@ -1635,7 +1652,8 @@ final class Library {
     /// notification), or surface the failure. A wait that gave up while Astria may still finish keeps
     /// the recovery record and hands the job to `resumePendingAIEdits`, so the images still arrive.
     private func deliverAIResult(_ result: Result<[Data], AIExtend.AIError>, job: AIEditJob, count: Int,
-                                 activityID: UUID, bg: BackgroundTaskHolder, live: AIProgressActivity, label: String) {
+                                 activityID: UUID, bg: BackgroundTaskHolder, live: AIProgressActivity, label: String,
+                                 extraNote: String? = nil) {
         let jobID = job.id.uuidString
         endActivity(activityID); bg.end()
         switch result {
@@ -1648,8 +1666,9 @@ final class Library {
                         message: "\(data.count) AI image\(data.count == 1 ? "" : "s") ready to review. Tap to see them.",
                         jobID: jobID, folderPath: job.folder.path)
             // Surface the results in-app immediately — never depend on the notification banner.
-            let note = data.count < count ? "Astria returned \(data.count) of \(count) images." : nil
-            showAIResults(done, note: note)
+            let shortfall = data.count < count ? "Astria returned \(data.count) of \(count) images." : nil
+            let note = [shortfall, extraNote].compactMap { $0 }.joined(separator: " ")
+            showAIResults(done, note: note.isEmpty ? nil : note)
         case .failure(let err):
             activeAIJobIDs.remove(jobID)
             let msg = aiErrorMessage(err)
