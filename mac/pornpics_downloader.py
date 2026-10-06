@@ -111,11 +111,18 @@ def fetch(url: str, referer: str | None = None, timeout: int = 30) -> bytes:
         return resp.read()
 
 
-def download_gallery(url: str, dest_root: Path, folder_name: str, log, progress, stop: threading.Event) -> tuple[int, int, int]:
-    """Download every photo of `url` into `dest_root/folder_name`. Returns (saved, skipped, failed)."""
-    log(f"Fetching gallery page…")
-    page = fetch(url).decode("utf-8", errors="replace")
-    urls = photo_urls(page)
+def download_gallery(url: str, dest_root: Path, folder_name: str, log, progress, stop: threading.Event,
+                     page: str | None = None) -> tuple[int, int, int]:
+    """Download every photo of `url` into `dest_root/folder_name`. Returns (saved, skipped, failed).
+
+    `page` is the gallery HTML when the caller already has it (the browser passes its live DOM);
+    if it's missing or yields no photos the page is fetched fresh.
+    """
+    urls = photo_urls(page) if page else []
+    if not urls:
+        log("Fetching gallery page…")
+        page = fetch(url).decode("utf-8", errors="replace")
+        urls = photo_urls(page)
     if not urls:
         raise RuntimeError("No photos were found on that page. Is it a gallery URL?")
     title = page_title(page)

@@ -36,6 +36,22 @@ python3 mac/pornpics_downloader.py --cli <gallery URL> [destination]
 It needs a Python with Tk: the python.org installer and Apple's `/usr/bin/python3` have it;
 Homebrew's needs `brew install python-tk`. `--cli` works without Tk.
 
+### With a built-in browser (`pornpics_browser.py`)
+
+Same downloader, but inside a web browser window so there's no copy-pasting: browse the site,
+and whenever you're on a gallery the **Download Gallery** button (⌘D) lights up with the photo
+count — click it and keep browsing while it downloads. Galleries queue up and download one at a
+time; you can also right-click any gallery link → **Download Linked Gallery** without opening it.
+The panel at the bottom shows the queue (double-click a row to open its folder), the log, the
+destination, and Stop All. It saves into the same folders as `pornpics_downloader.py`, and the
+button shows "Downloaded ✓" for galleries you already have. Cookies persist between runs.
+
+```sh
+./mac/run.sh                                   # once, to create mac/.venv with PySide6
+mac/.venv/bin/python mac/pornpics_browser.py   # opens pornpics.com
+mac/.venv/bin/python mac/pornpics_browser.py <gallery URL>
+```
+
 ## Requirements
 
 - macOS 12+ (it also runs on Linux for development)
