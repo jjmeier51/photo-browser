@@ -83,6 +83,23 @@ in the iOS app) and the model names written in (`--no-exif` to skip). Each galle
 `pornstar.json` index. `--workers N` sets parallel downloads per gallery (default 4); Ctrl-C stops
 cleanly.
 
+## Fix folders that look empty on the iPhone (`rebuild_exfat_folders.py`)
+
+Folders created or filled in Finder on the exFAT SSD sometimes show up on iOS — in Files and in
+Photo Browser — but open **empty**, while the Mac shows their contents. The iOS exFAT driver
+can't read those directory entries; re-copying the folder in place on the Mac rewrites them
+cleanly. This script does that safely (dry run by default; copies, verifies every file's size,
+moves the original to the Trash, puts the copy under the same name — so in-app Favorites,
+captions and covers stay attached):
+
+```sh
+python3 mac/rebuild_exfat_folders.py "/Volumes/SSD/Porn/Briana Banks"        # list what it would do
+python3 mac/rebuild_exfat_folders.py "/Volumes/SSD/Porn/Briana Banks" --apply
+python3 mac/rebuild_exfat_folders.py /Volumes/SSD --since 7 --apply         # every folder created this week
+```
+
+Eject the SSD in Finder before unplugging it. It needs free space for one copy of the folder.
+
 ## Requirements
 
 - macOS 12+ (it also runs on Linux for development)

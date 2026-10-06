@@ -583,7 +583,15 @@ leaves the original exactly as it was.
 - Bad files can be deleted in place; unreadable folders get Rebuild or the re-copy guidance
   (same name, same place, clean eject).
 
-### 4.1 Companion Mac scripts (not in the repo — delivered to the user)
+### 4.1 Companion Mac scripts
+
+- **`mac/rebuild_exfat_folders.py`** (in the repo) — the fix for folders iOS lists but shows as
+  **empty** (Files app too) while Finder shows their contents: the iOS exFAT driver can't read
+  directory entries macOS wrote. Nothing on the iOS side can read past that (Force Refresh, 3.4,
+  doesn't help — the folder *is* listed, its contents read as empty). The script copies the
+  folder to a hidden sibling, verifies sizes, Trashes the original via Finder (or parks it as
+  hidden `.<name>.original`), and swaps the copy in under the same name/path — metadata stays
+  attached. `--since DAYS` finds recently created folders; dry run unless `--apply`.
 
 - `fix-exfat-folders.sh` — rebuilds folders iOS can't open by re-copying them in place (rewrites
   clean exFAT directory entries). v2 counts only **real** files (ignores `._` AppleDouble
