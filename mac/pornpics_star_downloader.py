@@ -9,10 +9,12 @@ the two tools share folders and a re-run only fetches what's missing.
 
 What it does beyond the single-gallery tool:
 
-* **Finds every gallery.** The star page shows the first batch; the rest load as you scroll from
-  `<star page>?limit=N&offset=M` (JSON or HTML). Both are scanned for `/galleries/<slug>-<id>/`
-  links until a page brings nothing new. Galleries whose model list doesn't include the star
-  (e.g. "related" thumbnails) are skipped.
+* **Finds every gallery, not just the first page.** The star page only carries the first ~20; the
+  rest load as you scroll. It walks the scroll endpoint `<star page>?limit=20&offset=N` (JSON or
+  HTML) and, if that doesn't reach the total the page advertises, numbered pages (`<star>/2/`,
+  `?page=2`), scanning each for `/galleries/<slug>-<id>/` links until two pages in a row add
+  nothing. A warning is printed if it still finds fewer than the site's count. Galleries whose
+  model list doesn't include the star (e.g. "related" thumbnails) are skipped.
 * **Most recent first.** Gallery ids grow over time, so galleries are downloaded newest-first and
   each gallery folder's modification date is set so that sorting by Date Modified (Finder, the
   iOS app) lists them newest-first — the folder dates are nudged where needed to keep that order.
@@ -139,27 +141,79 @@ def gallery_links(blob: str) -> list[tuple[int, str]]:
     return list(out.items())
 
 
-def star_galleries(star_url: str) -> dict[int, str]:
-    """Every gallery id → url on the star page, following the infinite-scroll pages."""
-    base = star_url.split("?")[0].split("#")[0]
-    base = base if base.endswith("/") else base + "/"
-    found: dict[int, str] = dict(gallery_links(text(base)))
-    log(f"Star page: {len(found)} galleries")
-    offset = 0
+def advertised_count(page: str) -> int | None:
+    """The "123 galleries" figure a star page shows, when it shows one."""
+    m = re.search(r"([\d][\d,.]*)\s*(?:<[^>]+>\s*)*(?:photo\s+)?galleries\b", page, re.I)
+    try:
+        return int(re.sub(r"[,.]", "", m.group(1))) if m else None
+    except ValueError:
+        return None
+
+
+def _paginate(found: dict[int, str], label: str, urls, xhr: bool, referer: str) -> int:
+    """Fetch pages from `urls` (an iterator of (url, batch_size_hint)) until they stop adding
+    galleries. A page that adds nothing is tolerated once — the first "more" page usually repeats
+    what the star page already showed — but two in a row (or an empty/missing page) ends it."""
+    added = misses = 0
+    gen = urls()
+    url = next(gen)
     for _ in range(MAX_PAGES):
-        url = f"{base}?{urllib.parse.urlencode({'limit': PAGE_LIMIT, 'offset': offset})}"
         try:
-            batch = gallery_links(text(url, referer=base, xhr=True))
+            batch = gallery_links(text(url, referer=referer, xhr=xhr))
         except urllib.error.HTTPError as e:
-            log(f"  more galleries: stopped at offset {offset} (HTTP {e.code})")
+            if e.code not in (404, 410):
+                log(f"  {label}: HTTP {e.code}")
+            break
+        if not batch:
             break
         new = [(gid, u) for gid, u in batch if gid not in found]
         found.update(new)
+        added += len(new)
         if new:
-            log(f"  offset {offset}: +{len(new)} (total {len(found)})")
-        if not new or len(batch) < PAGE_LIMIT:
-            break
-        offset += PAGE_LIMIT
+            misses = 0
+            log(f"  {label}: +{len(new)} (total {len(found)})")
+        else:
+            misses += 1
+            if misses >= 2:
+                break
+        url = gen.send(len(batch))
+    return added
+
+
+def star_galleries(star_url: str) -> dict[int, str]:
+    """Every gallery id → url for a star. The page itself only carries the first ~20; the rest
+    load on scroll. Tried in order, each until it stops adding galleries:
+      1. the infinite-scroll endpoint  <star>/?limit=20&offset=N  (JSON, XHR headers)
+      2. numbered HTML pages           <star>/N/  and  <star>/?page=N
+    """
+    base = star_url.split("?")[0].split("#")[0]
+    base = base if base.endswith("/") else base + "/"
+    first = text(base)
+    found: dict[int, str] = dict(gallery_links(first))
+    expected = advertised_count(first)
+    log(f"Star page: {len(found)} galleries" + (f" (site says {expected})" if expected else ""))
+
+    def offsets():
+        offset = 0
+        while True:
+            got = yield f"{base}?{urllib.parse.urlencode({'limit': PAGE_LIMIT, 'offset': offset})}"
+            offset += max(got or 0, 1)
+
+    def numbered(fmt: str):
+        def pages():
+            n = 2
+            while True:
+                yield fmt.format(n=n)
+                n += 1
+        return pages
+
+    _paginate(found, "scroll", offsets, xhr=True, referer=base)
+    if not expected or len(found) < expected:
+        for fmt in (base + "{n}/", base + "?page={n}"):
+            if _paginate(found, "page", numbered(fmt), xhr=False, referer=base):
+                break
+    if expected and len(found) < expected:
+        log(f"  warning: found {len(found)} of the {expected} galleries the site lists")
     return found
 
 

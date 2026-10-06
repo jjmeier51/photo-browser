@@ -63,7 +63,9 @@ python3 mac/pornpics_star_downloader.py lucie-wilde --limit 10     # just the 10
 
 It creates `<destination>/Lucie Wilde/` with one folder per gallery, named exactly like the
 single-gallery tool (so they share folders and re-runs only fetch what's missing). Galleries are
-found on the star page plus its infinite-scroll pages, downloaded newest-first, and each gallery
+found on the star page plus all of its further pages (the page itself only shows ~20; it follows
+the infinite-scroll/page links until no new galleries appear and warns if it falls short of the
+site's own count), downloaded newest-first, and each gallery
 folder's date is set so sorting by Date Modified lists the newest first. Photos are the full-size
 files the site serves, saved byte-for-byte (existing EXIF kept). Each photo's file date is set to
 the gallery date, and JPEGs with no EXIF get capture dates, the gallery title (shown as the caption
