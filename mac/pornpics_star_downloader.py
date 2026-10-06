@@ -15,7 +15,10 @@ What it does beyond the single-gallery tool:
   `?page=2`), scanning each for `/galleries/<slug>-<id>/` links until two pages in a row add
   nothing. If that still falls short of the site's count, it opens the star page in a real browser
   engine (QtWebEngine, from PySide6) and scrolls it until no more galleries load — the site's own
-  JavaScript does the paging, so this works whatever its endpoint is. `--browser always|never`. Galleries whose
+  JavaScript does the paging, so this works whatever its endpoint is. Run from a Python without
+  PySide6, it uses mac/.venv/bin/python for that step (offering to create mac/.venv if missing).
+  `--browser always|never`. Last resort: the site search API for the star's name, whose results
+  are filtered by each gallery's model list. Galleries whose
   model list doesn't include the star (e.g. "related" thumbnails) are skipped.
 * **Most recent first.** Gallery ids grow over time, so galleries are downloaded newest-first and
   each gallery folder's modification date is set so that sorting by Date Modified (Finder, the
@@ -78,9 +81,12 @@ IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 print_lock = threading.Lock()
 
 
+LOG_STREAM = sys.stdout  # stderr in the --_collect helper, whose stdout carries the result
+
+
 def log(msg: str = "") -> None:
     with print_lock:
-        print(msg, flush=True)
+        print(msg, file=LOG_STREAM, flush=True)
 
 
 # ----------------------------------------------------------------------------- network
@@ -153,14 +159,14 @@ def advertised_count(page: str) -> int | None:
         return None
 
 
-def _paginate(found: dict[int, str], label: str, urls, xhr: bool, referer: str) -> int:
+def _paginate(found: dict[int, str], label: str, urls, xhr: bool, referer: str, max_pages: int = MAX_PAGES) -> int:
     """Fetch pages from `urls` (an iterator of (url, batch_size_hint)) until they stop adding
     galleries. A page that adds nothing is tolerated once — the first "more" page usually repeats
     what the star page already showed — but two in a row (or an empty/missing page) ends it."""
     added = misses = 0
     gen = urls()
     url = next(gen)
-    for _ in range(MAX_PAGES):
+    for _ in range(max_pages):
         try:
             body, headers = request(url, referer=referer, xhr=xhr)
         except urllib.error.HTTPError as e:
@@ -182,6 +188,8 @@ def _paginate(found: dict[int, str], label: str, urls, xhr: bool, referer: str) 
             log(f"  {label}: +{len(new)} (total {len(found)})")
         else:
             misses += 1
+            ctype = next((v for k, v in headers.items() if k.lower() == "content-type"), "?")
+            log(f"  {label}: {url} → nothing new ({len(batch)} known galleries, {ctype}, {len(body)} bytes)")
             if misses >= 2:
                 break
         url = gen.send(len(batch))
@@ -255,6 +263,45 @@ def browser_galleries(star_url: str, expected: int | None, timeout: float = 900)
     return found
 
 
+def collect_with_browser(star_url: str, expected: int | None) -> dict[int, str]:
+    """browser_galleries in this Python if it has PySide6; otherwise re-run this script under
+    mac/.venv/bin/python (created by mac/run.sh) just for the scrolling, and read its result."""
+    try:
+        import PySide6.QtWebEngineWidgets  # noqa: F401
+        return browser_galleries(star_url, expected)
+    except ModuleNotFoundError:
+        pass
+    here = Path(__file__).resolve().parent
+    venv_py = next((p for p in (here / ".venv" / "bin" / "python", here / ".venv" / "Scripts" / "python.exe")
+                    if p.exists()), None)
+    if not venv_py and sys.stdin.isatty():
+        answer = input("  The browser window needs PySide6. Install it into mac/.venv now (~1 GB, a few minutes)? [Y/n] ")
+        if answer.strip().lower() in ("", "y", "yes"):
+            import subprocess
+            venv = here / ".venv"
+            try:
+                subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+                subprocess.run([str(venv / "bin" / "python"), "-m", "pip", "install", "--upgrade", "pip"], check=True)
+                subprocess.run([str(venv / "bin" / "python"), "-m", "pip", "install", "-r",
+                                str(here / "requirements.txt")], check=True)
+                venv_py = venv / "bin" / "python"
+            except (subprocess.SubprocessError, OSError) as e:
+                log(f"  setting up mac/.venv failed: {e}")
+    if not venv_py:
+        log("  PySide6 isn't available, so the page can't be scrolled in a browser.\n"
+            f"  Run {here / 'run.sh'} once (it creates mac/.venv with PySide6), then run this again.")
+        return {}
+    log(f"  (using {venv_py} for the browser window)")
+    import subprocess
+    try:
+        out = subprocess.run([str(venv_py), str(Path(__file__).resolve()), "--_collect", star_url, str(expected or 0)],
+                             stdout=subprocess.PIPE, text=True, timeout=1200).stdout
+        return {int(k): v for k, v in json.loads(out.strip().splitlines()[-1]).items()}
+    except (subprocess.SubprocessError, ValueError, IndexError, OSError) as e:
+        log(f"  browser helper failed: {e}")
+        return {}
+
+
 def star_galleries(star_url: str, use_browser: str = "auto") -> dict[int, str]:
     """Every gallery id → url for a star. The page itself only carries the first ~20; the rest
     load on scroll. Tried in order, each until it stops adding galleries:
@@ -287,12 +334,35 @@ def star_galleries(star_url: str, use_browser: str = "auto") -> dict[int, str]:
         for fmt in (base + "{n}/", base + "?page={n}"):
             if _paginate(found, "page", numbered(fmt), xhr=False, referer=base):
                 break
-    if use_browser == "always" or (use_browser == "auto" and (not expected or len(found) < expected)):
+    def short() -> bool:
+        return not expected or len(found) < expected
+
+    if use_browser == "always" or (use_browser == "auto" and short()):
         log("Scrolling the star page in a browser to load the rest…")
         before = len(found)
-        found.update({gid: u for gid, u in browser_galleries(base, expected).items() if gid not in found})
+        found.update({gid: u for gid, u in collect_with_browser(base, expected).items() if gid not in found})
         if len(found) > before:
             log(f"  browser: +{len(found) - before} (total {len(found)})")
+    if short():
+        # Last resort: the site search API (limit/offset, JSON) for the star's name. It also returns
+        # other stars' galleries, so they don't count toward the total above, and each is checked
+        # against the gallery's model list before anything is downloaded.
+        name = title_case(star_slug(base) or "")
+
+        def search():
+            offset = 0
+            while True:
+                got = yield f"{ROOT}/search/srch.php?" + urllib.parse.urlencode(
+                    {"q": name, "lang": "en", "limit": PAGE_LIMIT, "offset": offset})
+                offset += max(got or 0, 1)
+
+        extra: dict[int, str] = dict(found)
+        pages = ((expected or 400) // PAGE_LIMIT) * 3 + 3  # common names match other stars too
+        _paginate(extra, "search", search, xhr=True, referer=base, max_pages=pages)
+        if len(extra) > len(found):
+            log(f"  search: {len(extra) - len(found)} candidate galleries — each is checked against its model list")
+            found.update(extra)
+            return found
     if expected and len(found) < expected:
         log(f"  warning: found {len(found)} of the {expected} galleries the site lists")
     return found
@@ -536,6 +606,12 @@ def order_folder_dates(records: list[dict]) -> None:
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["--_collect"]:  # helper mode for collect_with_browser
+        global LOG_STREAM
+        LOG_STREAM = sys.stderr
+        found = browser_galleries(sys.argv[2], int(sys.argv[3]) or None)
+        print(json.dumps({str(k): v for k, v in found.items()}))
+        return
     ap = argparse.ArgumentParser(description="Download every gallery of a pornpics.com pornstar.")
     ap.add_argument("url", help="e.g. https://www.pornpics.com/pornstars/lucie-wilde/ (or just lucie-wilde)")
     ap.add_argument("dest", nargs="?", default=str(Path.home() / "Pictures" / "PornPics"),

@@ -65,8 +65,10 @@ mac/.venv/bin/python mac/pornpics_star_downloader.py lucie-wilde --limit 10     
 A star page only shows its first ~16–20 galleries; the rest load as you scroll. The downloader
 first tries plain requests for the further pages, and if those fall short of the star's gallery
 count it opens the star page in a small browser window (QtWebEngine) and scrolls it until
-everything has loaded, then closes it and downloads. That needs PySide6, hence `mac/.venv/bin/python`
-(`--browser always` forces it, `--browser never` skips it).
+everything has loaded, then closes it and downloads. That needs PySide6: run with
+`mac/.venv/bin/python`, or with plain `python3` and it borrows `mac/.venv` for that one step
+(offering to create it if it doesn't exist). `--browser always` forces the window, `--browser never`
+skips it. Every page request is logged, so a short count shows exactly what the site returned.
 
 It creates `<destination>/Lucie Wilde/` with one folder per gallery, named exactly like the
 single-gallery tool (so they share folders and re-runs only fetch what's missing). Galleries are
