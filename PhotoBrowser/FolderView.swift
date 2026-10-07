@@ -415,12 +415,20 @@ struct FolderView: View {
         guard !showHiddenFolders else { return list }
         let anyHiddenFolders = !library.hiddenFolders.isEmpty
         let anyHiddenFiles = !library.hiddenFiles.isEmpty
+        // Opened a hidden folder on purpose (via Show Hidden Items in its parent)? Then its contents
+        // must not all vanish for being "inside a hidden folder" — "Show Hidden Items" resets per
+        // folder, so that rule made every hidden folder look empty once opened. Only hidden folders
+        // *below* this one stay hidden.
+        let insideHidden = anyHiddenFolders && library.isUnderHiddenFolder(url.path)
         return list.filter { e in
             // A real 0 KB file (a failed download) — but not an entry whose size was never read: the
             // huge-folder path defers size/date (`modified == .distantPast`, size 0), which hid
             // EVERY file in folders over 8000 items; nor one iOS couldn't stat (`isUnreadable`).
             if !e.isFolder && e.size == 0 && !e.isUnreadable && e.modified != .distantPast { return false }
-            if anyHiddenFolders && library.isUnderHiddenFolder(e.url.path) { return false }    // hidden folder / inside one
+            if anyHiddenFolders {
+                let hidden = insideHidden ? library.isHiddenFolder(e.url) : library.isUnderHiddenFolder(e.url.path)
+                if hidden { return false }                                                     // hidden folder / inside one
+            }
             if anyHiddenFiles && !e.isFolder && library.isHiddenFile(e.url) { return false }   // hidden file
             return true
         }
@@ -1818,7 +1826,22 @@ struct FolderView: View {
         let rows: [[Entry]] = stride(from: 0, to: highlights.count, by: 4).map {
             Array(highlights[$0 ..< min($0 + 4, highlights.count)])
         }
-        return ScrollView {
+        // A Reviews folder shows only its highlight subfolders — loose photos/videos in it were simply
+        // invisible (and there was no way to turn the layout off), so a folder that inherited the
+        // Reviews mark by path, or got photos dropped in, looked empty. Say so and offer the way out.
+        let looseFiles = entries.filter { !$0.isFolder }.count
+        return ScrollView { VStack(spacing: 0) {
+            if looseFiles > 0 {
+                VStack(spacing: 8) {
+                    Text("\(looseFiles) file\(looseFiles == 1 ? "" : "s") in this folder \(looseFiles == 1 ? "isn’t" : "aren’t") shown in the Reviews layout.")
+                        .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    Button { library.setReviewsFolder(false, for: url) } label: {
+                        Label("Show as Normal Folder", systemImage: "square.grid.3x3")
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(.horizontal, 24).padding(.top, 16)
+            }
             Group {
                 if highlights.isEmpty {
                     VStack(spacing: 12) {
@@ -1844,7 +1867,7 @@ struct FolderView: View {
                     .padding(.horizontal, 14).padding(.vertical, 16)
                 }
             }
-        }
+        } }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .refreshable { Haptics.light(); await forceRefresh() }
     }
@@ -2231,6 +2254,10 @@ struct FolderView: View {
                         Toggle(isOn: $showHiddenFolders) { Label("Show Hidden Items", systemImage: "eye.slash") }
                         Button { Task { await forceRefresh() } } label: {
                             Label("Force Refresh from Drive", systemImage: "arrow.clockwise.circle")
+                        }
+                        Button { library.setReviewsFolder(!isReviews, for: url) } label: {
+                            isReviews ? Label("Show as Normal Folder", systemImage: "square.grid.3x3")
+                                      : Label("Show as Reviews Folder", systemImage: "star.square.on.square")
                         }
                         Button {
                             if case .rerun = cleanupAction { library.resetCleanup(url) }   // fresh pass over what's left
