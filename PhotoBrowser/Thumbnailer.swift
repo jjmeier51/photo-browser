@@ -182,6 +182,10 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
             let maxPixel = max(size.width, size.height) * scale
             if let img = imageThumbnail(url: url, maxPixel: maxPixel) { return img }
         }
+        if kind == .video, isWebVideo(url) {
+            // QuickLook can't poster WebM; WebKit draws a frame instead (one at a time, time-boxed).
+            return await WebMPoster.poster(for: url, maxPixel: max(size.width, size.height) * scale)
+        }
         return await quickLook(url: url, size: size, scale: scale)   // videos, PDFs, and image fallback
     }
 

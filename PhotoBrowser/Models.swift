@@ -200,7 +200,7 @@ let extraVideoExtensions: Set<String> = ["ts", "mts", "m2ts"]
 func classify(url: URL, isDirectory: Bool) -> FileKind {
     if isDirectory { return .folder }
     let ext = url.pathExtension.lowercased()
-    if extraVideoExtensions.contains(ext) { return .video }
+    if extraVideoExtensions.contains(ext) || webVideoExtensions.contains(ext) { return .video }   // webm: played via WebKit
     guard let type = UTType(filenameExtension: ext) else { return .other }
     if type.conforms(to: .image) { return .image }
     if type.conforms(to: .movie) || type.conforms(to: .video) { return .video }

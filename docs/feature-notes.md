@@ -720,6 +720,25 @@ action, the "filters active" checks, and the empty-state ("No matches for this f
 
 ---
 
+## 6a. WebM playback — `WebMPlayer.swift`
+
+AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,
+iOS 17+). `.webm` is classified as video (`webVideoExtensions`) and:
+- **Viewer:** `PageView` routes it to `WebMPage` — a `WKWebView` with WebKit's own controls
+  (autoplay, loop, inline) plus the viewer's swipes (L/R next/prev, down close, up info) added as
+  simultaneous `UISwipeGestureRecognizer`s. The AVPlayer-only extras (frame step, slo-mo, zoom,
+  frame capture) don't apply to WebM.
+- **Bytes:** served by `WebMMediaSchemeHandler` (`pbmedia://media/<name>`), not `file://` — the
+  web-content process can't be relied on to read a security-scoped file on the external drive,
+  and copying a big video into the sandbox first is slow. It answers Range requests with bounded
+  206 slices (8 MB) and plain requests with a chunked 200, all file I/O on a background queue.
+- **Posters:** `Thumbnailer.generate` → `WebMPoster.poster` (nonisolated entry, hops to main):
+  one offscreen `WKWebView` at a time, parked invisibly in the key window (WebKit may not load
+  media outside a window), autoplays muted, seeks ~1 s (10 % of short clips), draws the frame to a
+  canvas → JPEG data URL; 15 s timeout. Cached like every other thumbnail.
+- Other AVFoundation features (Video Editor import, trim, bulk rotate, frame export, duration
+  badge) don't support WebM.
+
 ## 7. Downloaders (from the broader project + this session)
 
 The app has several **download-only, opt-in** importers. All are best-effort, `nonisolated`,

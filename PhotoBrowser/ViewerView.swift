@@ -368,7 +368,11 @@ private struct PageView: View {
     let onNext: () -> Void
 
     var body: some View {
-        if item.kind == .video {
+        if item.kind == .video, isWebVideo(item.url) {
+            // AVPlayer can't open WebM; WebKit can (see WebMPlayer.swift).
+            WebMPage(url: item.url, onDismiss: onDismiss, onInfo: onInfo, onPrev: onPrev, onNext: onNext)
+                .ignoresSafeArea()
+        } else if item.kind == .video {
             VideoPage(url: item.url, coverSource: coverSource, infoShown: infoShown,
                       onDismiss: onDismiss, onInfo: onInfo,
                       onZoomChanged: onZoomChanged, onControlsHidden: onControlsHidden,

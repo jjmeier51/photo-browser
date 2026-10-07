@@ -69,8 +69,10 @@ actions the app makes no network calls.
   ∓15s, center = zoom, lower-third left/right corners = step one frame
   back/forward (via `AVPlayerItem.step(byCount:)`; the lower-middle is excluded).
   Long-press the video center = Slo-Mo mode (4×/8× slower via `player.rate`;
-  long-press again to turn off). Slideshow mode. (`ViewerView`,
-  `ZoomableImageView`, `VideoPage`)
+  long-press again to turn off). Slideshow mode. **WebM** (`.webm`) — which AVFoundation can't
+  open — plays in a `WKWebView` `<video>` fed by a Range-capable `pbmedia://` scheme handler,
+  and gets WebKit-drawn grid posters. (`ViewerView`, `ZoomableImageView`, `VideoPage`,
+  `WebMPlayer`)
 - **Info panel** (swipe-up) — date, device, dimensions, size, GPS →
   reverse-geocoded place, "Saved from" (xattrs), Age, inline caption edit.
 - **Editing** — crop/rotate saved **in place** over the original (no duplicate),
