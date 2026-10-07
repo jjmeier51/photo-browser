@@ -30,18 +30,20 @@ is `nonisolated` and off the main actor.
     (from its public gallery URL), **4.5 3691308** (the id the app shipped with before 4.5 was
     dropped — now back), Nano Banana 2 4180298. "Nano Banana Pro" stays removed.
   - **`maxReferenceImages`**: 14 for Seedream 4.5 / 5.0 Lite / Nano Banana 2, 10 for Seedream
-    5.0 Pro, 0 for Flux. Extra photos the model draws on, sent as repeated
-    **`AIExtend.referenceImageField`** multipart parts after `prompt[input_image]`.
-    **Confirmed in the field:** `prompt[image_references][]` is video-only — image prompts fail
-    with "video_first_frame, video_last_frame, audio_reference and image_references can only be
-    used with a video prompt". The field is now `prompt[input_images][]` (Astria's multi-image
-    input naming; still unverified against its docs, which list image-model reference limits
-    without naming the field). `generate` guards the guess: a validation error mentioning the
-    field resends **without** references (no prompt was created, nothing charged), remembers the
-    rejection (`photoBrowser.astriaRejectedReferenceField`, so later runs skip straight to that),
-    and the results screen says so; an accepted prompt whose JSON echoes no input-images /
-    reference URLs gets a "didn't confirm the references" note. If those notes appear, the field
-    name is still wrong — change the constant (and clear the rejected-field default).
+    5.0 Pro, 0 for Flux. **How references actually work on Astria (verified against
+    docs.astria.ai and Astria's own CLI, astria-claude-skills `bin/astria --reference`):** image
+    prompts take *no* raw reference images — `prompt[image_references][]` is video-only and image
+    prompts fail with "video_first_frame, video_last_frame, audio_reference and image_references
+    can only be used with a video prompt" (field-confirmed); `prompt[input_images][]` doesn't
+    exist. A reference is an instant **faceid tune**: `POST /tunes` with `tune[model_type]=faceid`,
+    `tune[base_tune_id]=<generating model>`, `tune[name]=image`, `tune[images][]=<jpeg>`, then
+    `<faceid:ID:1> image` at the start of the prompt text. `AIExtend.referenceMentions` does this,
+    caching `base|path|mtime|size → id|name` (`photoBrowser.astriaReferenceTunes`) so a photo is
+    turned into a tune once per model; waits ≤ 2 min if `trained_at` isn't set; a reference that
+    can't be made is left out with a note on the results screen (never fails the job); a rejected
+    prompt that reused cached tunes forgets them. Reference tunes are titled
+    `AIExtend.referenceTitlePrefix` ("Photo Browser reference · …") and filtered out of
+    `Library.loadAITunes`, so they never show in the tune pickers.
   - **Reference picker UI** (`AIGenerators.swift`): `ReferenceImagesPicker` (grid of the
     current folder's photos, numbered in pick order, capped at the model's limit; the Edit flow
     excludes its source photo), `ReferenceImagesStrip` (chosen thumbnails with ✕) and

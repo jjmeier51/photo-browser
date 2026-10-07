@@ -84,16 +84,26 @@ enum AIExtend {
         static var partnerModels: [AIModel] { [.seedream5Pro, .seedream5Lite, .seedream45, .nanoBanana2] }
     }
 
-    /// Multipart field each extra reference image is sent as. NOT `prompt[image_references][]`:
-    /// that's Astria's *video* field, and image prompts reject it outright ("video_first_frame,
-    /// video_last_frame, audio_reference and image_references can only be used with a video
-    /// prompt"). Astria lists the image models' reference limits without naming their field, so
-    /// this is the multi-image input field by its documented naming pattern. `generate` guards the
-    /// guess both ways: a validation error naming the field resends **without** references (and
-    /// remembers the rejection), and an accepted prompt whose JSON doesn't echo the images gets a
-    /// review note — so a wrong field degrades to "generated without references", never a failure.
-    static let referenceImageField = "prompt[input_images][]"
-    private static let rejectedReferenceFieldKey = "photoBrowser.astriaRejectedReferenceField"
+    /// One reference photo for Edit/Create: its upload JPEG, a stable identity (`path|mtime|size`)
+    /// so the reference tune made from it is reused instead of re-created, and a title.
+    struct ReferenceImage: Sendable {
+        let data: Data
+        let key: String
+        let title: String
+    }
+
+    /// Astria image prompts take **no raw reference images** — `prompt[image_references][]` is
+    /// video-only (image prompts fail with "… image_references can only be used with a video
+    /// prompt"). Per Astria's own CLI (astria-claude-skills `bin/astria`, `--reference`), a reference
+    /// is an instant **faceid tune** — `POST /tunes` with `tune[model_type]=faceid`,
+    /// `tune[base_tune_id]=<the generating model>` and the image — mentioned in the prompt text as
+    /// `<faceid:ID:1> NAME`. These tunes are titled with this prefix so the tune pickers hide them.
+    static let referenceTitlePrefix = "Photo Browser reference · "
+    /// Class name given to reference tunes (Astria's CLI falls back to "image" when it can't
+    /// classify one); the prompt mentions each as `<faceid:ID:1> image`.
+    private static let referenceClassName = "image"
+    /// `"<base tune>|<path|mtime|size>"` → `"<tune id>|<name>"`: reference tunes already created.
+    private static let referenceTunesKey = "photoBrowser.astriaReferenceTunes"
 
     /// Output resolution the user picks. Sent as Astria's `prompt[resolution]` size **tier**
     /// (1K / 2K / 4K) — the documented way to control output size on the gallery tunes. (The old
@@ -338,12 +348,13 @@ enum AIExtend {
     /// `heartbeat(ready, expected)` fires on every poll tick while this process is still waiting on
     /// Astria (how many images exist so far, and how many are expected when known) — the caller
     /// uses it to update progress and keep the "app was suspended mid-generation" alert pushed out.
-    /// `referenceImages` are extra JPEGs the model should draw on (people, products, styles) —
-    /// sent as repeated `referenceImageField` parts after the input image; the caller caps the
-    /// count at `AIModel.maxReferenceImages`. `referenceNote` receives a short user-facing note when
-    /// the references were left out (Astria rejected the field) or Astria didn't confirm them.
+    /// `references` are extra photos the model should draw on (people, products, styles). Each
+    /// becomes (or reuses) an instant faceid reference tune on `tune` and is mentioned at the start
+    /// of the prompt as `<faceid:ID:1> image`; the caller caps the count at
+    /// `AIModel.maxReferenceImages`. `referenceNote` receives a short user-facing note when any
+    /// reference couldn't be prepared (the job then runs without it rather than failing).
     nonisolated static func generate(tune: Int, token: String? = nil, prompt: String, imageData: Data?,
-                                     referenceImages: [Data] = [],
+                                     references: [ReferenceImage] = [],
                                      referenceNote: (@Sendable (String) -> Void)? = nil,
                                      count: Int, width: Int?, height: Int?,
                                      aspect: String?, resolutionTier: String?,
@@ -359,6 +370,17 @@ enum AIExtend {
         if let token, !token.isEmpty {
             let key = token.split(separator: " ").first.map(String.init) ?? token
             if !text.localizedCaseInsensitiveContains(key) { text = "\(token) \(text)" }
+        }
+        var usedCachedReferences: [String] = []
+        if !references.isEmpty {
+            let prepared = await referenceMentions(for: references, baseTune: tune)
+            if !prepared.mentions.isEmpty { text = prepared.mentions.joined(separator: " ") + " " + text }
+            usedCachedReferences = prepared.cachedKeys
+            if prepared.failed > 0 {
+                let n = prepared.failed
+                referenceNote?("\(n) reference image\(n == 1 ? "" : "s") couldn’t be prepared on Astria and \(n == 1 ? "was" : "were") left out" +
+                               (prepared.error.map { " (\($0))." } ?? "."))
+            }
         }
         let expected = min(max(count, 1), 8)
         var fields: [String: String] = [
@@ -383,55 +405,104 @@ enum AIExtend {
         if let imageData {
             files.append(("prompt[input_image]", "input.jpg", "image/jpeg", imageData))
         }
-        let refs = referenceImages.count
-        let fieldRejected = UserDefaults.standard.string(forKey: rejectedReferenceFieldKey) == referenceImageField
-        guard refs > 0, !fieldRejected else {
-            if refs > 0 {
-                referenceNote?("Astria doesn’t accept reference images for image prompts yet, so the \(refs) reference\(refs == 1 ? "" : "s") were left out.")
-            }
-            return await submit(tune: tune, url: url, fields: fields, files: files, expected: expected,
-                                onPrompt: onPrompt, heartbeat: heartbeat)
-        }
-        var withRefs = files
-        for (i, d) in referenceImages.enumerated() {
-            withRefs.append((referenceImageField, "reference\(i + 1).jpg", "image/jpeg", d))
-        }
-        let result = await submit(tune: tune, url: url, fields: fields, files: withRefs, expected: expected,
-                                  onPrompt: onPrompt, heartbeat: heartbeat,
-                                  onCreated: { echoed in
-                                      if echoed == 0 {
-                                          referenceNote?("Astria accepted the request but didn’t confirm the \(refs) reference image\(refs == 1 ? "" : "s") — check whether the results used them.")
-                                      }
-                                  })
-        // A validation error about the reference field means no prompt was created (nothing was
-        // charged): remember the rejection and resend without the references.
-        if case .failure(.server(let msg)) = result, rejectsReferences(msg) {
-            UserDefaults.standard.set(referenceImageField, forKey: rejectedReferenceFieldKey)
-            referenceNote?("Astria rejected reference images for this model (“\(msg)”), so this was generated without the \(refs) reference\(refs == 1 ? "" : "s").")
-            return await submit(tune: tune, url: url, fields: fields, files: files, expected: expected,
-                                onPrompt: onPrompt, heartbeat: heartbeat)
+        let result = await submit(tune: tune, url: url, fields: fields, files: files, expected: expected,
+                                  onPrompt: onPrompt, heartbeat: heartbeat)
+        // A rejected prompt that used remembered reference tunes may mean one was deleted on
+        // Astria — forget them so the next run creates fresh ones.
+        if case .failure(.server) = result, !usedCachedReferences.isEmpty {
+            forgetReferenceTunes(keys: usedCachedReferences)
         }
         return result
     }
 
-    /// Whether a validation message is Astria objecting to the reference-image field.
-    private nonisolated static func rejectsReferences(_ message: String) -> Bool {
-        let m = message.lowercased()
-        let fieldName = referenceImageField.replacingOccurrences(of: "prompt[", with: "")
-            .replacingOccurrences(of: "][]", with: "").replacingOccurrences(of: "]", with: "")
-        return m.contains(fieldName) || m.contains("image_references") || m.contains("reference")
+    // MARK: - Reference tunes
+
+    /// `<faceid:ID:1> NAME` mentions for `refs` on `baseTune`, creating the instant reference tunes
+    /// that don't exist yet (cached per photo + base model). A reference that can't be created is
+    /// counted in `failed` and left out. `cachedKeys` are the cache entries reused this time.
+    private nonisolated static func referenceMentions(for refs: [ReferenceImage], baseTune: Int)
+        async -> (mentions: [String], cachedKeys: [String], failed: Int, error: String?) {
+        var mentions: [String] = [], cachedKeys: [String] = []
+        var failed = 0
+        var lastError: String?
+        for ref in refs {
+            let cacheKey = "\(baseTune)|\(ref.key)"
+            if let hit = referenceTuneCache()[cacheKey] {
+                let parts = hit.split(separator: "|", maxSplits: 1).map(String.init)
+                if parts.count == 2 {
+                    mentions.append("<faceid:\(parts[0]):1> \(parts[1])")
+                    cachedKeys.append(cacheKey)
+                    continue
+                }
+            }
+            switch await createReferenceTune(ref, baseTune: baseTune) {
+            case .success(let made):
+                mentions.append("<faceid:\(made.id):1> \(made.name)")
+                var cache = referenceTuneCache()
+                cache[cacheKey] = "\(made.id)|\(made.name)"
+                UserDefaults.standard.set(cache, forKey: referenceTunesKey)
+            case .failure(let err):
+                failed += 1
+                if case .server(let m) = err { lastError = m }
+            }
+        }
+        return (mentions, cachedKeys, failed, lastError)
     }
 
-    /// How many URLs an accepted prompt's JSON lists under an input-images / references key
-    /// (0 when it lists none — Astria didn't echo the references back).
-    private nonisolated static func echoedReferenceCount(_ json: [String: Any]) -> Int {
-        var n = 0
-        for (key, value) in json {
-            let k = key.lowercased()
-            guard k.contains("input_images") || k.contains("reference") else { continue }
-            if let arr = value as? [Any] { n += arr.count }
+    private nonisolated static func referenceTuneCache() -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: referenceTunesKey) as? [String: String] ?? [:]
+    }
+
+    private nonisolated static func forgetReferenceTunes(keys: [String]) {
+        var cache = referenceTuneCache()
+        for k in keys { cache.removeValue(forKey: k) }
+        UserDefaults.standard.set(cache, forKey: referenceTunesKey)
+    }
+
+    /// Creates one instant faceid reference tune from `ref` on `baseTune` (the request Astria's CLI
+    /// makes for `--reference`). Gallery/partner bases are ready at once; if `trained_at` isn't set
+    /// yet, waits briefly (≤ 2 min) so the prompt doesn't reference an unready tune.
+    private nonisolated static func createReferenceTune(_ ref: ReferenceImage, baseTune: Int)
+        async -> Result<(id: Int, name: String), AIError> {
+        guard let url = URL(string: "\(base)/tunes") else { return .failure(.server("Bad endpoint URL.")) }
+        let fields: [String: String] = [
+            "tune[title]": referenceTitlePrefix + ref.title,
+            "tune[name]": referenceClassName,
+            "tune[model_type]": "faceid",
+            "tune[base_tune_id]": String(baseTune)
+        ]
+        let files = [(name: "tune[images][]", filename: "reference.jpg", mime: "image/jpeg", data: ref.data)]
+        let boundary = "PB-\(UUID().uuidString)"
+        var req = URLRequest(url: url); req.httpMethod = "POST"; req.timeoutInterval = 120
+        applyAPIHeaders(&req)
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        req.httpBody = multipart(fields: fields, files: files, boundary: boundary)
+        guard let (data, resp) = try? await apiSession.data(for: req) else { return .failure(.network) }
+        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            return .failure(.server(message(from: data)))
         }
-        return n
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = intValue(json["id"]) else { return .failure(.badResult) }
+        let name = (json["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? referenceClassName
+        if ((json["trained_at"] as? String) ?? "").isEmpty, !(await waitForReferenceTune(id: id)) {
+            return .failure(.server("reference \(id) is still being prepared"))
+        }
+        return .success((id, name))
+    }
+
+    /// Polls a just-created reference tune every 4 s for up to 2 minutes until `trained_at` is set.
+    private nonisolated static func waitForReferenceTune(id: Int) async -> Bool {
+        guard let url = URL(string: "\(base)/tunes/\(id)") else { return false }
+        for _ in 0..<30 {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            var req = URLRequest(url: url); applyAPIHeaders(&req)
+            if let (data, _) = try? await apiSession.data(for: req),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let trained = json["trained_at"] as? String, !trained.isEmpty {
+                return true
+            }
+        }
+        return false
     }
 
     /// Masked outpaint via Flux (the "Extend" feature). `imageData` is the original
@@ -468,14 +539,11 @@ enum AIExtend {
                                            files: [(name: String, filename: String, mime: String, data: Data)],
                                            expected: Int,
                                            onPrompt: (@Sendable (Int) -> Void)? = nil,
-                                           heartbeat: (@Sendable (Int, Int?) -> Void)? = nil,
-                                           onCreated: (@Sendable (Int?) -> Void)? = nil) async -> Result<[Data], AIError> {
+                                           heartbeat: (@Sendable (Int, Int?) -> Void)? = nil) async -> Result<[Data], AIError> {
         switch await createPrompt(tune: tune, url: url, fields: fields, files: files) {
         case .failure(let err):
             return .failure(err)
-        case .success(let created):
-            let id = created.id
-            onCreated?(created.echoedReferences)
+        case .success(let id):
             onPrompt?(id)
             return await downloadPromptImages(promptID: id, tune: tune, expected: expected, heartbeat: heartbeat)
         }
@@ -491,7 +559,7 @@ enum AIExtend {
     ///   and adopting the one with our exact text created since we started; only a *definitive*
     ///   "not there" allows a re-POST, so a job is never created twice.
     private nonisolated static func createPrompt(tune: Int, url: URL, fields: [String: String],
-                                                 files: [(name: String, filename: String, mime: String, data: Data)]) async -> Result<(id: Int, echoedReferences: Int?), AIError> {
+                                                 files: [(name: String, filename: String, mime: String, data: Data)]) async -> Result<Int, AIError> {
         let text = fields["prompt[text]"] ?? ""
         let boundary = "PB-\(UUID().uuidString)"
         let body = multipart(fields: fields, files: files, boundary: boundary)
@@ -517,7 +585,7 @@ enum AIExtend {
                 }
                 // Ambiguous: the upload may have completed. Look for the prompt before re-posting.
                 switch await findRecentPrompt(tune: tune, text: text, since: startedAt.addingTimeInterval(-30)) {
-                case .found(let id): return .success((id, nil))     // adopted from the listing: no echo to check
+                case .found(let id): return .success(id)
                 case .unavailable:   return .failure(.network)        // can't tell → don't risk a duplicate
                 case .notFound:
                     guard attempt < maxAttempts else { return .failure(.network) }
@@ -530,7 +598,7 @@ enum AIExtend {
             if (200...299).contains(http.statusCode) {
                 guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let id = intValue(json["id"]) else { return .failure(.badResult) }
-                return .success((id, echoedReferenceCount(json)))
+                return .success(id)
             }
             if isTransientStatus(http.statusCode), attempt < maxAttempts {
                 await backoff(attempt: attempt, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))

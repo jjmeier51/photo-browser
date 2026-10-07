@@ -1198,7 +1198,8 @@ final class Library {
         if !force, let cache = aiTunesCache, let at = aiTunesFetchedAt, Date().timeIntervalSince(at) < 120 {
             return cache
         }
-        let tunes = await AIExtend.listTunes()
+        // Instant reference tunes the app makes for Edit/Create references aren't subjects to pick.
+        let tunes = await AIExtend.listTunes().filter { !$0.title.hasPrefix(AIExtend.referenceTitlePrefix) }
         aiTunesCache = tunes; aiTunesFetchedAt = Date()
         return tunes
     }
@@ -1529,7 +1530,7 @@ final class Library {
             setActivity(activityID, status: "Uploading the photo to Astria…")
             let notes = AINoteBox()
             let result = await AIExtend.generate(tune: tune, token: token, prompt: composedPrompt, imageData: prep.data,
-                                                 referenceImages: references,
+                                                 references: references,
                                                  referenceNote: { notes.text = $0 },
                                                  count: count, width: prep.width, height: prep.height,
                                                  aspect: aspect.ratio,
@@ -1558,10 +1559,10 @@ final class Library {
         let ratio = aspect.ratio ?? "1:1"
         Task {
             let references = await Self.encodeReferences(referenceURLs)
-            if !references.isEmpty { setActivity(activityID, status: "Uploading \(references.count) reference image\(references.count == 1 ? "" : "s")…") }
+            if !references.isEmpty { setActivity(activityID, status: "Preparing \(references.count) reference image\(references.count == 1 ? "" : "s") on Astria…") }
             let notes = AINoteBox()
             let result = await AIExtend.generate(tune: tune, token: token, prompt: composedPrompt, imageData: nil,
-                                                 referenceImages: references,
+                                                 references: references,
                                                  referenceNote: { notes.text = $0 },
                                                  count: count, width: nil, height: nil,
                                                  aspect: ratio,
@@ -1585,17 +1586,25 @@ final class Library {
     }
 
     /// Reference photos → upload JPEGs (≤ 2048 px, EXIF orientation baked in), off the main actor,
-    /// a few at a time. A file that can't be read is simply left out.
-    private static func encodeReferences(_ urls: [URL]) async -> [Data] {
+    /// a few at a time, each keyed by `path|mtime|size` so the Astria reference tune made from it is
+    /// reused next time (an edited photo gets a fresh one). A file that can't be read is left out.
+    private static func encodeReferences(_ urls: [URL]) async -> [AIExtend.ReferenceImage] {
         guard !urls.isEmpty else { return [] }
-        return await Task.detached(priority: .utility) { () -> [Data] in
-            var out = [Data?](repeating: nil, count: urls.count)
-            await withTaskGroup(of: (Int, Data?).self) { group in
+        return await Task.detached(priority: .utility) { () -> [AIExtend.ReferenceImage] in
+            @Sendable func encode(_ u: URL) -> AIExtend.ReferenceImage? {
+                guard let data = AIExtend.uploadJPEG(of: u, maxPixel: 2048)?.data else { return nil }
+                let rv = try? u.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+                let mtime = Int(rv?.contentModificationDate?.timeIntervalSince1970 ?? 0)
+                return AIExtend.ReferenceImage(data: data, key: "\(u.path)|\(mtime)|\(rv?.fileSize ?? 0)",
+                                               title: u.lastPathComponent)
+            }
+            var out = [AIExtend.ReferenceImage?](repeating: nil, count: urls.count)
+            await withTaskGroup(of: (Int, AIExtend.ReferenceImage?).self) { group in
                 var it = urls.enumerated().makeIterator()
-                for _ in 0..<4 { if let (i, u) = it.next() { group.addTask { (i, AIExtend.uploadJPEG(of: u, maxPixel: 2048)?.data) } } }
-                for await (i, d) in group {
-                    out[i] = d
-                    if let (j, u) = it.next() { group.addTask { (j, AIExtend.uploadJPEG(of: u, maxPixel: 2048)?.data) } }
+                for _ in 0..<4 { if let (i, u) = it.next() { group.addTask { (i, encode(u)) } } }
+                for await (i, r) in group {
+                    out[i] = r
+                    if let (j, u) = it.next() { group.addTask { (j, encode(u)) } }
                 }
             }
             return out.compactMap { $0 }
