@@ -289,12 +289,21 @@ actor DriveWriter {
             }
             do {
                 try createDirectory(at: dir)
-                return dir
             } catch {
                 lastError = error
                 if Self.isNameTaken(error) { continue }   // held by an entry iOS can't stat — try the next name
                 throw error
             }
+            // Field case (Oct 2026): iOS's exFAT driver sometimes can't open a folder it has itself just
+            // created — the empty "AI" / "Screenshots" folders that Drive Health lists with
+            // "opendir errno 22". Never hand such a folder back (every write into it fails), and never
+            // move on to create "AI 2", "AI 3"… — they'd be just as unreadable and litter the drive.
+            // Remove the empty folder we made and report the failure instead.
+            if isListable(dir) { return dir }
+            rmdir(dir.path)
+            throw CocoaError(.fileWriteUnknown, userInfo: [
+                NSFilePathErrorKey: dir.path,
+                NSLocalizedDescriptionKey: "iOS created “\(dir.lastPathComponent)” but then couldn't open it — the drive needs attention on a Mac (see Drive Health)."])
         }
         throw lastError ?? CocoaError(.fileWriteUnknown)
     }
