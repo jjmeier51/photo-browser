@@ -94,7 +94,15 @@ thing Disk Utility ▸ First Aid runs) — read-only check first, then the repai
 sh mac/repair_drive.sh "/Volumes/<SSD name>"
 ```
 
-Eject the SSD in Finder afterwards, then reconnect it to the iPhone/iPad. The app now also shows
+Eject the SSD in Finder afterwards, then reconnect it to the iPhone/iPad.
+
+If folders **still** can't be opened on iOS after a clean repair ("opendir errno 22 — Invalid
+argument" in Drive Health), Apple's exFAT driver is rejecting something inside them. Find out what
+(read-only; compares file names in the failing folders with healthy ones):
+
+```sh
+python3 mac/diagnose_ios_unreadable.py --list unreadable.txt --root "/Volumes/<SSD name>"
+``` The app now also shows
 such folders (orange "Can't read on iOS") instead of hiding them, and saves into "AI 2" /
 "Screenshots 2" when the existing folder can't be read.
 
