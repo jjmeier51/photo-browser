@@ -537,8 +537,10 @@ struct DriveHealthView: View {
         switch DriveRepair.probeHeader(u) {
         case .blank?:
             return DriveIssue(url: u, kind: .blankFile, detail: "Size looks right but the data is all zeros — the copy never finished")
-        case .mismatch(let expected)?:
-            return DriveIssue(url: u, kind: .headerMismatch, detail: "Doesn't start like a \(expected) file")
+        case .mismatch(let expected, let actual)?:
+            let detail = actual.map { "Named \(expected) but it's really a \($0) — it still opens fine" }
+                ?? "Doesn't start like a \(expected) file (unrecognised contents)"
+            return DriveIssue(url: u, kind: .headerMismatch, detail: detail)
         case nil:
             return nil
         }

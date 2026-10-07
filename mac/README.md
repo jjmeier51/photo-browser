@@ -108,6 +108,9 @@ moves the original to the Trash, puts the copy under the same name — so in-app
 captions and covers stay attached):
 
 ```sh
+# the folders Drive Health lists as unreadable — export the list with its Share button:
+python3 mac/rebuild_exfat_folders.py --list unreadable.txt --root "/Volumes/SSD"           # dry run
+python3 mac/rebuild_exfat_folders.py --list unreadable.txt --root "/Volumes/SSD" --apply
 python3 mac/rebuild_exfat_folders.py "/Volumes/SSD/Porn/Briana Banks"        # list what it would do
 python3 mac/rebuild_exfat_folders.py "/Volumes/SSD/Porn/Briana Banks" --apply
 python3 mac/rebuild_exfat_folders.py /Volumes/SSD --since 7 --apply         # every folder created this week

@@ -154,15 +154,44 @@ def rebuild(folder: Path, apply: bool) -> bool:
     return True
 
 
+def from_list(list_file: Path, root: Path) -> list[Path]:
+    """Folders from Drive Health's exported list (one drive-relative path per line), under `root`.
+    Shallowest first; a folder inside one already listed is dropped — rebuilding the parent rewrites
+    it too."""
+    rels = [line.strip().strip("/") for line in list_file.read_text("utf-8").splitlines() if line.strip()]
+    rels.sort(key=lambda r: (r.count("/"), r))
+    chosen: list[str] = []
+    for r in rels:
+        if any(r == c or r.startswith(c + "/") for c in chosen):
+            continue
+        chosen.append(r)
+    out = []
+    for r in chosen:
+        p = root / r
+        if p.is_dir():
+            out.append(p)
+        else:
+            print(f"  not found on the Mac, skipped: {r}")
+    return out
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Rebuild exFAT folders that iOS shows as empty.")
-    ap.add_argument("paths", nargs="+", type=Path, help="folders to rebuild, or a drive/folder to search with --since")
+    ap = argparse.ArgumentParser(description="Rebuild exFAT folders that iOS shows as empty or can't open.")
+    ap.add_argument("paths", nargs="*", type=Path, help="folders to rebuild, or a drive/folder to search with --since")
     ap.add_argument("--since", type=float, metavar="DAYS",
                     help="instead of rebuilding PATHS, rebuild every folder under them created in the last DAYS days")
+    ap.add_argument("--list", type=Path, metavar="FILE",
+                    help="rebuild the folders in FILE — the list Photo Browser's Drive Health exports "
+                         "(Share button; drive-relative paths) — under --root")
+    ap.add_argument("--root", type=Path, metavar="DRIVE", help="the SSD for --list, e.g. \"/Volumes/Extreme SSD\"")
     ap.add_argument("--apply", action="store_true", help="actually rebuild (default: dry run, just list)")
     args = ap.parse_args()
 
     targets: list[Path] = []
+    if args.list:
+        if not args.root or not args.root.is_dir():
+            sys.exit("--list needs --root \"/Volumes/<SSD name>\"")
+        targets += from_list(args.list, args.root)
     for p in args.paths:
         if not p.is_dir():
             sys.exit(f"Not a folder: {p}")
@@ -170,6 +199,13 @@ def main() -> None:
     if not targets:
         print("No folders to rebuild.")
         return
+    # A ":" in a name is how macOS stores a "/" typed in Finder; exFAT can't hold either, and iOS can't
+    # open such folders whatever their contents. Rename those (in Photo Browser if possible, so its
+    # labels follow) — rebuilding keeps the name, so it can't fix them.
+    for t in targets:
+        if ":" in t.name or "/" in t.name:
+            print(f"  NOTE: “{t.name}” has a “/” (shown as “:”) in its name — rename it without one; "
+                  "a rebuild alone won't make it readable on iOS.")
     if not args.apply:
         print(f"DRY RUN — {len(targets)} folder(s); add --apply to rebuild:")
     ok = sum(rebuild(t, args.apply) for t in targets)

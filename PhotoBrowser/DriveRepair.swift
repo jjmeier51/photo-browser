@@ -150,8 +150,9 @@ nonisolated enum DriveRepair {
         /// the exFAT "interrupted copy" that a size check can't see.
         case blank
         /// The first bytes don't match what the extension promises (e.g. a .jpg that isn't a JPEG).
-        /// Often a mislabelled-but-fine file; sometimes garbage.
-        case mismatch(expected: String)
+        /// `actual` names what the bytes really are when recognisable — usually a JPEG saved under a
+        /// .HEIC/.PNG name, which opens fine; nil means unrecognised (possibly garbage).
+        case mismatch(expected: String, actual: String?)
     }
 
     /// Reads the first 16 bytes of `url` and judges them. nil = fine, unknown type, or too small to say.
@@ -164,23 +165,50 @@ nonisolated enum DriveRepair {
         let ext = url.pathExtension.lowercased()
         func ascii(_ range: Range<Int>) -> String { String(bytes: b[range], encoding: .ascii) ?? "" }
         let isFtyp = ascii(4..<8) == "ftyp"
+        // Older QuickTime .mov files often open with a `moov`/`mdat`/`wide`/`free` atom, not `ftyp`.
+        let isQuickTimeAtom = ["ftyp", "moov", "mdat", "wide", "free", "skip", "pnot"].contains(ascii(4..<8))
+        let actual = sniff(b)
+        func mismatch(_ expected: String) -> HeaderProblem { .mismatch(expected: expected, actual: actual) }
         switch ext {
         case "jpg", "jpeg":
-            return (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) ? nil : .mismatch(expected: "JPEG")
+            return (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) ? nil : mismatch("JPEG")
         case "png":
-            return (b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) ? nil : .mismatch(expected: "PNG")
+            return (b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) ? nil : mismatch("PNG")
         case "gif":
-            return ascii(0..<4) == "GIF8" ? nil : .mismatch(expected: "GIF")
-        case "heic", "heif", "avif", "mp4", "m4v", "mov", "3gp", "cr3":
-            return isFtyp ? nil : .mismatch(expected: ext == "mov" ? "QuickTime" : ext.uppercased())
+            return ascii(0..<4) == "GIF8" ? nil : mismatch("GIF")
+        case "mov":
+            return isQuickTimeAtom ? nil : mismatch("QuickTime")
+        case "heic", "heif", "avif", "mp4", "m4v", "3gp", "cr3":
+            return isFtyp ? nil : mismatch(ext.uppercased())
         case "webp":
-            return (ascii(0..<4) == "RIFF" && ascii(8..<12) == "WEBP") ? nil : .mismatch(expected: "WebP")
+            return (ascii(0..<4) == "RIFF" && ascii(8..<12) == "WEBP") ? nil : mismatch("WebP")
         case "tif", "tiff", "dng", "nef", "arw", "cr2":
             let le = b[0] == 0x49 && b[1] == 0x49 && b[2] == 0x2A && b[3] == 0x00
             let be = b[0] == 0x4D && b[1] == 0x4D && b[2] == 0x00 && b[3] == 0x2A
-            return (le || be) ? nil : .mismatch(expected: ext == "tif" || ext == "tiff" ? "TIFF" : ext.uppercased())
+            return (le || be) ? nil : mismatch(ext == "tif" || ext == "tiff" ? "TIFF" : ext.uppercased())
         default:
             return nil
         }
+    }
+
+    /// What the first bytes actually are, when recognisable (JPEG / PNG / GIF / WebP / TIFF / HEIC /
+    /// AVIF / MP4 / QuickTime), else nil.
+    nonisolated private static func sniff(_ b: [UInt8]) -> String? {
+        func ascii(_ range: Range<Int>) -> String { String(bytes: b[range], encoding: .ascii) ?? "" }
+        if b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF { return "JPEG" }
+        if b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 { return "PNG" }
+        if ascii(0..<4) == "GIF8" { return "GIF" }
+        if ascii(0..<4) == "RIFF" && ascii(8..<12) == "WEBP" { return "WebP" }
+        if (b[0] == 0x49 && b[1] == 0x49 && b[2] == 0x2A) || (b[0] == 0x4D && b[1] == 0x4D && b[3] == 0x2A) { return "TIFF" }
+        if ascii(4..<8) == "ftyp" {
+            switch ascii(8..<12) {
+            case "heic", "heix", "heim", "heis", "mif1", "msf1", "hevc": return "HEIC"
+            case "avif", "avis":                                         return "AVIF"
+            case "qt  ":                                                 return "QuickTime"
+            default:                                                     return "MP4"
+            }
+        }
+        if ["moov", "mdat", "wide", "free"].contains(ascii(4..<8)) { return "QuickTime" }
+        return nil
     }
 }

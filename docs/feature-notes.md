@@ -565,6 +565,17 @@ shows them, but iOS can't stat them. Three code paths turned that into silent fa
   path). A source already in an "AI" folder saves beside itself (no AI/AI); result names are capped
   for exFAT's 255-unit limit; `sanitizeName` strips control characters. `applyRemap` (moves, renames,
   remounts) now re-keys pending Astria jobs and the Astria browser's save folder.
+- **Field result after a clean `fsck_exfat` (Oct 2026):** 24 folders still failed on iOS with
+  `NSCocoaErrorDomain 256` + `opendir errno 22 (EINVAL)` although fsck found nothing. This matches a
+  known bug in Apple's FSKit-based exFAT driver (macOS 15+/iOS): it returns "Invalid argument" for
+  some valid directories that other exFAT drivers (Windows, exfat-fuse) read fine. Common thread in
+  the list: heavily churned folders (AI, Screenshots, Duplicate PNGs, NO EXIF DATA, Today's Instagram
+  Stories — files repeatedly moved in/out, leaving deleted entries). Writing the directory fresh is
+  the fix available to us: `rebuild_exfat_folders.py --list <Drive Health export> --root <drive>`.
+  A name with "/" (stored by macOS as ":") can never be opened on iOS — rename it.
+- Drive Health's "contents don't match the extension" now says what the bytes really are ("Named
+  HEIC but it's really a JPEG — it still opens fine"); `.mov` accepts classic QuickTime atoms
+  (`moov`/`mdat`/`wide`/`free`), which were false alarms.
 - The real repair is on the Mac: `mac/repair_drive.sh` (`diskutil verifyVolume` → confirm →
   `diskutil repairVolume`, i.e. fsck_exfat / Disk Utility First Aid). Copying folders can't mend a
   damaged parent directory or a cross-linked FAT.
