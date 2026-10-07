@@ -1218,13 +1218,11 @@ enum FileActions {
         return data
     }
 
-    /// The "Screenshots" folder beside `fileURL`, created on first use (nil on failure).
-    static func screenshotsFolder(beside fileURL: URL) -> URL? {
-        let dir = fileURL.deletingLastPathComponent().appendingPathComponent("Screenshots", isDirectory: true)
-        if !FileManager.default.fileExists(atPath: dir.path) {
-            guard (try? DriveWriter.createDirectory(at: dir)) != nil else { return nil }
-        }
-        return dir
+    /// The "Screenshots" folder beside `fileURL`, created on first use (nil on failure). If an
+    /// existing "Screenshots" entry is one iOS can't read (a damaged exFAT folder), the next usable
+    /// "Screenshots 2"… is used so captures still land somewhere visible (`DriveWriter.usableDirectory`).
+    nonisolated static func screenshotsFolder(beside fileURL: URL) -> URL? {
+        try? DriveWriter.usableDirectory(named: "Screenshots", in: fileURL.deletingLastPathComponent())
     }
 
     /// Encodes a captured frame and writes it into `folder` as a timestamped HEIC

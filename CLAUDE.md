@@ -328,6 +328,14 @@ These were discovered the painful way; the current code already respects them.
     Mark heavy async entry points `@concurrent` (or call them from `Task.detached`);
     synchronous `nonisolated` work still needs `Task.detached`.
 
+14. **A listed item iOS can't stat is not a 0-byte file.** Damaged exFAT folder entries (old
+    "zero length" AI folders) are listed by their parent but fail every stat on iOS. Classify with
+    `Library.directoryStatus` and keep them flagged (`Entry.unreadable`) — never let them fall into
+    the "hide 0 KB files" rule. Create named save folders ("AI", "Screenshots", …) with
+    `DriveWriter.usableDirectory(named:in:)`, not `fileExists` + `createDirectory` with the error
+    swallowed: an unreadable entry holding the name makes that combination fail every save
+    (see `docs/feature-notes.md` §3.5).
+
 ## Git workflow
 
 - **Commit changes directly to `main`.** This is the repo owner's standing

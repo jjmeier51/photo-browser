@@ -2705,6 +2705,21 @@ final class Library {
 
     /// Applies `remap` to every path-keyed collection, then persists once.
     private func applyRemap(_ remap: (String) -> String) {
+        // AI jobs still awaiting recovery, and the Astria browser's save folder, hold absolute paths
+        // too. Left un-remapped, a drive replug (new mount UUID) or a folder rename mid-generation made
+        // recovery skip the job forever ("folder gone") and its images never reached an AI folder.
+        var pending = loadPendingAstria()
+        var pendingChanged = false
+        for i in pending.indices {
+            let o = remap(pending[i].originalPath), f = remap(pending[i].folderPath)
+            if o != pending[i].originalPath || f != pending[i].folderPath {
+                pending[i].originalPath = o; pending[i].folderPath = f; pendingChanged = true
+            }
+        }
+        if pendingChanged { savePendingAstria(pending) }
+        if let saveFolder = astriaSaveFolder, remap(saveFolder.path) != saveFolder.path {
+            setAstriaSaveFolder(URL(fileURLWithPath: remap(saveFolder.path), isDirectory: true))
+        }
         favorites = Set(favorites.map(remap))
         aiLabels = Set(aiLabels.map(remap))
         editedInAppPaths = Set(editedInAppPaths.map(remap))
@@ -3071,11 +3086,12 @@ final class Library {
             var result: [Entry] = []
             for case let url as URL in walker {
                 let rv = try? url.resourceValues(forKeys: keys)
-                let isDir = rv?.isDirectory ?? false
+                let (isDir, unreadable) = Library.directoryStatus(of: url, statted: rv?.isDirectory)
                 let entry = Entry(url: url, name: url.lastPathComponent,
                                   kind: classify(url: url, isDirectory: isDir),
                                   size: Int64(rv?.fileSize ?? 0),
-                                  modified: rv?.contentModificationDate ?? .distantPast)
+                                  modified: rv?.contentModificationDate ?? .distantPast,
+                                  unreadable: unreadable ? true : nil)
                 let nameMatch = entry.name.lowercased().contains(q)
                 let capMatch = captions[url.path]?.lowercased().contains(q) ?? false
                 let ocrMatch = !nameMatch && !capMatch && (MetadataLoader.ocrTextCached(for: entry)?.contains(q) ?? false)
@@ -3336,10 +3352,14 @@ final class Library {
                 // root that itself lives under a dot-path isn't wholesale excluded.
                 if url.pathComponents.dropFirst(rootDepth).contains(where: { $0.hasPrefix(".") }) { continue }
                 let rv = try? url.resourceValues(forKeys: keys)
+                // Same classification as the grid (`directoryStatus`): an entry iOS can't stat is not
+                // a 0 KB file to be hidden, it's usually a damaged folder.
+                let (isDir, unreadable) = Library.directoryStatus(of: url, statted: rv?.isDirectory)
                 result.append(Entry(url: url, name: url.lastPathComponent,
-                                    kind: classify(url: url, isDirectory: rv?.isDirectory ?? false),
+                                    kind: classify(url: url, isDirectory: isDir),
                                     size: Int64(rv?.fileSize ?? 0),
-                                    modified: rv?.contentModificationDate ?? .distantPast))
+                                    modified: rv?.contentModificationDate ?? .distantPast,
+                                    unreadable: unreadable ? true : nil))
             }
             return result
         }.value
@@ -3733,7 +3753,12 @@ final class Library {
         var byName: [String: URL] = [:]
         for u in primary { byName[u.lastPathComponent] = u }
         let baseline = byName.count
-        func add(_ urls: [URL]) { for u in urls where byName[u.lastPathComponent] == nil { byName[u.lastPathComponent] = u } }
+        // Names only the extra reads report must not be stale-cache ghosts (see `existsOrDamaged`).
+        func add(_ urls: [URL]) {
+            for u in urls where byName[u.lastPathComponent] == nil && existsOrDamaged(u) {
+                byName[u.lastPathComponent] = u
+            }
+        }
         add((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [])) ?? [])
         add(((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).map { dir.appendingPathComponent($0) })
         if let en = fm.enumerator(at: dir, includingPropertiesForKeys: nil,
@@ -3761,7 +3786,17 @@ final class Library {
                 fresh.stopAccessingSecurityScopedResource()   // balanced: the root's own access stays open
             }
         }
-        contentDidChange(under: folder)
+        // Drop the cached listing WITHOUT bumping `changeToken`: a bump makes every FolderView queue a
+        // normal reload behind the thorough one, and that stale re-list then overwrote the merged
+        // result — which is why Force Refresh appeared to do nothing.
+        evictListing(of: folder)
+    }
+
+    /// Forgets the in-memory listing of `folder` (and its year set) without signalling a change.
+    func evictListing(of folder: URL) {
+        listingCache.removeValue(forKey: folder.path)
+        listingOrder.removeAll { $0 == folder.path }
+        folderYearsCache.removeValue(forKey: folder.path)
     }
 
     /// Raw POSIX `opendir`/`readdir` listing (non-recursive), skipping dot-files. Returns nil only if
@@ -3800,7 +3835,7 @@ final class Library {
             // extra stats.
             // `thorough` (Force Refresh): merge every reading strategy instead of trusting the first.
             var all = thorough ? Self.thoroughContents(of: folder).urls
-                               : Self.coordinatedContents(of: folder, keys: [.isDirectoryKey])
+                               : Self.mergedContents(of: folder)
             if all.isEmpty, fm.fileExists(atPath: folder.path) {
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 all = Self.coordinatedContents(of: folder, keys: [.isDirectoryKey])
@@ -3854,26 +3889,117 @@ final class Library {
                 guard index < urls.count else { return }
                 let i = index; let url = urls[i]; index += 1
                 group.addTask {
-                    let rv = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey])
-                    var isDirectory = rv?.isDirectory ?? false
-                    if rv?.isDirectory == nil {
-                        // A stat that transiently fails on a busy external drive must not
-                        // turn a folder into an extension-less "data" file tile — re-check
-                        // the cheap way before classifying.
-                        var d: ObjCBool = false
-                        if FileManager.default.fileExists(atPath: url.path, isDirectory: &d) { isDirectory = d.boolValue }
+                    let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
+                    var url = url
+                    var rv = try? url.resourceValues(forKeys: keys)
+                    if rv?.isDirectory == nil {       // one retry: a busy external drive can fail a stat transiently
+                        var fresh = url; fresh.removeAllCachedResourceValues()
+                        rv = try? fresh.resourceValues(forKeys: keys)
                     }
+                    // A name listed by the directory but not found when looked up is usually a Unicode
+                    // normalization mismatch (Finder can write accented names decomposed); the other
+                    // form often resolves.
+                    if rv?.isDirectory == nil, let alt = Self.normalizationVariant(of: url) {
+                        url = alt
+                        rv = try? alt.resourceValues(forKeys: keys)
+                    }
+                    let (isDirectory, unreadable) = Self.directoryStatus(of: url, statted: rv?.isDirectory)
                     return (i, Entry(url: url,
                                      name: url.lastPathComponent,
                                      kind: classify(url: url, isDirectory: isDirectory),
                                      size: Int64(rv?.fileSize ?? 0),
-                                     modified: rv?.contentModificationDate ?? .distantPast))
+                                     modified: rv?.contentModificationDate ?? .distantPast,
+                                     unreadable: unreadable ? true : nil))
                 }
             }
             for _ in 0..<min(maxConcurrent, urls.count) { addNext() }
             while let (i, e) = await group.next() { slots[i] = e; addNext() }
         }
         return Self.sortEntries(slots.compactMap { $0 }, by: sort)
+    }
+
+    /// The normal grid read: the coordinated listing **plus** one plain uncoordinated read, merged by
+    /// name. Each can be stale in its own way on the external-drive file provider — the coordinated
+    /// read could miss a folder the app itself just created with a plain `createDirectory` (a new
+    /// "AI" / "Screenshots" folder didn't show), the plain one misses things another app (Finder)
+    /// added. A name only the plain read reports is kept only if it really exists, so a stale cache
+    /// can't add ghosts. Huge folders (> 8000) skip the second read — it's the expensive case and the
+    /// coordinated read is authoritative there (`listing`'s lazy path).
+    nonisolated static func mergedContents(of folder: URL) -> [URL] {
+        let primary = coordinatedContents(of: folder, keys: [.isDirectoryKey])
+        guard primary.count <= 8000 else { return primary }
+        let fm = FileManager.default
+        let secondary = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey],
+                                                     options: [.skipsHiddenFiles])) ?? []
+        var names = Set(primary.map(\.lastPathComponent))
+        var merged = primary
+        for u in secondary where !names.contains(u.lastPathComponent) && existsOrDamaged(u) {
+            names.insert(u.lastPathComponent)
+            merged.append(u)
+        }
+        return merged
+    }
+
+    /// Whether a name only a secondary read reported is real: it exists, or it's there but iOS can't
+    /// stat it (a damaged entry — kept so it can be shown flagged). Only "no such file" (ENOENT) — a
+    /// stale cache remembering something deleted — is dropped.
+    nonisolated static func existsOrDamaged(_ url: URL) -> Bool {
+        if FileManager.default.fileExists(atPath: url.path) { return true }
+        var st = stat()
+        if lstat(url.path, &st) == 0 { return true }
+        return errno != ENOENT
+    }
+
+    /// The same item under the other Unicode normalization of its name (precomposed ↔ decomposed),
+    /// if only that one can be looked up — nil otherwise.
+    nonisolated static func normalizationVariant(of url: URL) -> URL? {
+        let name = url.lastPathComponent
+        let parent = url.deletingLastPathComponent()
+        // Swift's `==` treats canonically-equivalent strings as equal, so compare the actual bytes.
+        for variant in [name.precomposedStringWithCanonicalMapping, name.decomposedStringWithCanonicalMapping]
+        where !variant.utf8.elementsEqual(name.utf8) {
+            let candidate = parent.appendingPathComponent(variant)
+            var st = stat()
+            if lstat(candidate.path, &st) == 0 { return candidate }
+        }
+        return nil
+    }
+
+    /// Why iOS can't read `folder`, or nil if it reads fine (an empty folder is fine). Used to tell a
+    /// genuinely empty folder from one iOS's exFAT driver rejects. Off-main (it touches the drive).
+    nonisolated static func unreadableReason(for folder: URL) -> String? {
+        var dir = folder; dir.removeAllCachedResourceValues()
+        if (try? dir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == nil {
+            var st = stat()
+            if lstat(dir.path, &st) != 0 { return "stat failed: \(String(cString: strerror(errno)))" }
+        }
+        do {
+            _ = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            return nil
+        } catch {
+            let ns = error as NSError
+            if ns.domain == NSCocoaErrorDomain, ns.code == NSFileReadNoSuchFileError { return nil }   // gone (unplugged) — handled elsewhere
+            let underlying = (ns.userInfo[NSUnderlyingErrorKey] as? NSError).map { " (\($0.domain) \($0.code))" } ?? ""
+            return "\(ns.domain) \(ns.code)\(underlying)"
+        }
+    }
+
+    /// Folder-or-file for a listed item, from every signal available — and whether iOS could read
+    /// it at all. Previously a failed stat fell through to "file", and a "file" of 0 bytes is hidden
+    /// as a broken download: so a **folder iOS can't stat** (a damaged exFAT directory entry that
+    /// macOS still shows) silently vanished from the grid, and saving into a same-named folder then
+    /// failed too. Order: the resource-value stat → `fileExists` (both mean "readable") → POSIX
+    /// `lstat` → the enumeration's own directory flag (trailing-slash URL). If nothing can tell, an
+    /// extension-less name (or one that isn't a known file type) is taken to be a folder. Anything
+    /// past the first two is flagged `unreadable`.
+    nonisolated static func directoryStatus(of url: URL, statted: Bool?) -> (isDirectory: Bool, unreadable: Bool) {
+        if let statted { return (statted, false) }
+        var d: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &d) { return (d.boolValue, false) }
+        var st = stat()
+        if lstat(url.path, &st) == 0 { return ((st.st_mode & S_IFMT) == S_IFDIR, true) }
+        if url.hasDirectoryPath { return (true, true) }
+        return (classify(url: url, isDirectory: false) == .other, true)
     }
 
     nonisolated static func sortEntries(_ entries: [Entry], by sort: SortKey) -> [Entry] {

@@ -31,9 +31,15 @@ struct AIResultsView: View {
     var note: String? = nil        // e.g. "Astria returned 3 of 4 images" — shown above the results
     var jobID: String? = nil       // the app-wide job under review; reported back to Library when done
 
-    private enum Decision { case kept, deleted }
+    /// `kept` carries the folder the image actually landed in ("AI", or "AI 2" when the existing AI
+    /// folder can't be read on iOS); `failed` means the write didn't happen — shown with a retry, never
+    /// as saved (the old optimistic "Saved" hid every failure and the job's recovery record was
+    /// dropped regardless, so a failed save just looked like "no AI folder was created").
+    private enum Decision: Equatable { case saving, kept(String), failed, deleted }
     @State private var decided: [Int: Decision] = [:]
     @State private var savedAny = false
+    @State private var finished = false
+    @State private var confirmLeave = false
     /// Decoded once (not per body pass): re-decoding every full-res result on each Keep/Delete tap —
     /// every one re-renders this body — is what made the review feel laggy.
     @State private var images: [UIImage?] = []
@@ -59,8 +65,17 @@ struct AIResultsView: View {
                                     .overlay { ProgressView() }
                             }
                             switch decided[i] {
-                            case .kept:
-                                Label("Saved to “AI” folder", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                            case .saving:
+                                HStack(spacing: 8) { ProgressView(); Text("Saving…").foregroundStyle(.secondary) }
+                            case .kept(let folder):
+                                Label("Saved to “\(folder)”", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                            case .failed:
+                                VStack(spacing: 6) {
+                                    Label("Couldn’t save to the drive", systemImage: "exclamationmark.triangle.fill")
+                                        .foregroundStyle(.orange)
+                                    Button { keep(i) } label: { Label("Try Again", systemImage: "arrow.clockwise") }
+                                        .buttonStyle(.bordered)
+                                }
                             case .deleted:
                                 Label("Discarded", systemImage: "trash").foregroundStyle(.secondary)
                             case nil:
@@ -81,7 +96,7 @@ struct AIResultsView: View {
                             Label("Keep All", systemImage: "square.and.arrow.down.on.square").frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
-                        .disabled(decided.count >= results.count)
+                        .disabled(!results.indices.contains { decided[$0] == nil })
                     }
                 }
                 .padding()
@@ -90,11 +105,19 @@ struct AIResultsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { finish() }
+                    Button("Done") {
+                        if results.indices.contains(where: { decided[$0] == .failed }) { confirmLeave = true } else { finish() }
+                    }
                 }
             }
+            .alert("Some images weren’t saved", isPresented: $confirmLeave) {
+                Button("Stay", role: .cancel) {}
+                Button("Leave Anyway", role: .destructive) { finish() }
+            } message: {
+                Text("They couldn’t be written to the drive. You can still download them later from the Astria.ai Browser.")
+            }
         }
-        .interactiveDismissDisabled(decided.count < results.count)
+        .interactiveDismissDisabled(!results.indices.allSatisfy { settled(decided[$0]) })
         .task {
             guard images.isEmpty else { return }
             images = Array(repeating: nil, count: results.count)   // show placeholders while decoding
@@ -130,8 +153,8 @@ struct AIResultsView: View {
     @State private var savesInFlight = 0
 
     private func keep(_ i: Int) {
-        guard decided[i] == nil else { return }
-        decided[i] = .kept                       // optimistic — avoids a double-tap re-saving
+        guard decided[i] == nil || decided[i] == .failed else { return }
+        decided[i] = .saving                     // blocks a double-tap re-saving
         let data = results[i], tgt = target, m = model, p = prompt
         savesInFlight += 1
         if savesInFlight == 1 { saveWindow.begin(name: "AI Save") }
@@ -143,10 +166,26 @@ struct AIResultsView: View {
                 case .create(let folder): return await AIExtend.saveGeneratedToFolder(data, in: folder, model: m, prompt: p)
                 }
             }.value
-            if let url { savedAny = true; library.markAIGenerated(url, model: m, prompt: p) }
+            if let url {
+                savedAny = true
+                decided[i] = .kept(url.deletingLastPathComponent().lastPathComponent)
+                library.markAIGenerated(url, model: m, prompt: p)
+                // Refresh now, per save: the review may already be closed when the write lands.
+                library.contentDidChange(under: url.deletingLastPathComponent().deletingLastPathComponent())
+            } else {
+                decided[i] = .failed
+            }
             savesInFlight -= 1
             if savesInFlight == 0 { saveWindow.end() }
             finishIfDone()
+        }
+    }
+
+    /// Kept (actually written) or discarded — nothing left to do for that result.
+    private func settled(_ d: Decision?) -> Bool {
+        switch d {
+        case .some(.kept), .some(.deleted): return true
+        default:                            return false
         }
     }
 
@@ -154,9 +193,10 @@ struct AIResultsView: View {
         for i in results.indices where decided[i] == nil { keep(i) }
     }
 
-    /// Once every result is kept or discarded, return automatically.
+    /// Once every result is really saved or discarded, return automatically (a failed save keeps the
+    /// review open so it can be retried).
     private func finishIfDone() {
-        guard decided.count >= results.count else { return }
+        guard results.indices.allSatisfy({ settled(decided[$0]) }) else { return }
         finish()
     }
 
@@ -164,6 +204,8 @@ struct AIResultsView: View {
     /// settings, so the user can immediately run again. The reopen is deferred a moment so SwiftUI
     /// finishes dismissing this sheet before presenting the next.
     private func finish() {
+        guard !finished else { return }          // "Keep all" completions each call finishIfDone
+        finished = true
         if savedAny { library.contentDidChange() }
         if let jobID { library.aiReviewFinished(jobID: jobID) }   // the job's recovery record can go now
         let tgt = target, lib = library

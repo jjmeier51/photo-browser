@@ -153,6 +153,19 @@ struct EntryCell: View {
                         .padding(.horizontal, 4)
                         .padding(.bottom, 5)
                 }
+            } else if entry.isUnreadable {
+                // A folder iOS's exFAT driver can't read (see `Entry.unreadable`): shown, flagged,
+                // rather than silently missing — opening it explains the Mac-side repair.
+                VStack(spacing: 6) {
+                    Image(systemName: "folder.badge.questionmark").font(.system(size: 30))
+                        .foregroundStyle(.orange)
+                    Text(entry.name)
+                        .font(.caption2).lineLimit(2)
+                        .multilineTextAlignment(.center).padding(.horizontal, 4)
+                        .foregroundStyle(.white)
+                    Text("Can’t read on iOS")
+                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(.orange)
+                }
             } else {
                 VStack(spacing: 6) {
                     Image(systemName: "folder.fill").font(.system(size: 34))

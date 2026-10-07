@@ -259,6 +259,70 @@ actor DriveWriter {
         fullSync(cursor)                                // the parent that gained an entry
     }
 
+    /// The folder named `name` inside `parent`, guaranteed to exist and be **readable on iOS** —
+    /// created (flushed, via `createDirectory`) if missing.
+    ///
+    /// Why not just `createDirectory`: an old, damaged exFAT folder entry (e.g. a "zero length"
+    /// `AI` directory from before `DriveWriter` existed) is listed by macOS but can't be stat'd by
+    /// iOS. `fileExists` then says "no", the create fails with "file exists", and every save into
+    /// that folder failed — which read as "new AI images / screenshots don't create their folder".
+    /// Here such a name is skipped and the first usable "`name` 2", "`name` 3"… is used instead, so
+    /// the files land somewhere visible; the damaged original still shows (flagged) in the grid.
+    ///
+    /// Only the leaf is ever created: `parent` must already exist. Creating missing ancestors (as
+    /// `createDirectory` does) silently rebuilt a phantom copy of a folder that had been renamed or
+    /// moved — or one under a previous mount path after the drive was replugged — so results landed
+    /// somewhere the user would never look.
+    nonisolated static func usableDirectory(named name: String, in parent: URL) throws -> URL {
+        let fm = FileManager.default
+        var parentIsDir: ObjCBool = false
+        guard fm.fileExists(atPath: parent.path, isDirectory: &parentIsDir), parentIsDir.boolValue else {
+            throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: parent.path])
+        }
+        var lastError: Error?
+        for n in 1...30 {
+            let dir = parent.appendingPathComponent(n == 1 ? name : "\(name) \(n)", isDirectory: true)
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: dir.path, isDirectory: &isDir) {
+                if isDir.boolValue, isListable(dir) { return dir }
+                continue                                   // a file of that name, or a folder iOS can't list
+            }
+            do {
+                try createDirectory(at: dir)
+                return dir
+            } catch {
+                lastError = error
+                if Self.isNameTaken(error) { continue }   // held by an entry iOS can't stat — try the next name
+                throw error
+            }
+        }
+        throw lastError ?? CocoaError(.fileWriteUnknown)
+    }
+
+    /// Whether iOS can list `dir` — remembered once true, so repeated saves into a big folder don't
+    /// re-list it every time.
+    nonisolated private static func isListable(_ dir: URL) -> Bool {
+        listableLock.lock()
+        let known = listable.contains(dir.path)
+        listableLock.unlock()
+        if known { return true }
+        guard (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) != nil else { return false }
+        listableLock.lock(); listable.insert(dir.path); listableLock.unlock()
+        return true
+    }
+    nonisolated(unsafe) private static var listable = Set<String>()
+    nonisolated private static let listableLock = NSLock()
+
+    /// "Something already has that name" — Cocoa's file-exists, or POSIX EEXIST underneath.
+    nonisolated static func isNameTaken(_ error: Error) -> Bool {
+        let ns = error as NSError
+        if ns.domain == NSCocoaErrorDomain, ns.code == NSFileWriteFileExistsError { return true }
+        if ns.domain == NSPOSIXErrorDomain, ns.code == Int(EEXIST) { return true }
+        if let under = ns.userInfo[NSUnderlyingErrorKey] as? NSError,
+           under.domain == NSPOSIXErrorDomain, under.code == Int(EEXIST) { return true }
+        return false
+    }
+
     /// Synchronous durable write for callers that can't `await` the actor: controlled `.pbtmp_` temp
     /// in the destination folder → payload flushed → same-volume rename → file + directory flushed.
     /// Not serialized against other commits (prefer the actor's `writeData` where possible), but the

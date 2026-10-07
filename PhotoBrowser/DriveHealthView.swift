@@ -490,6 +490,13 @@ struct DriveHealthView: View {
                             continue                                     // don't walk or audit inside it
                         }
                         stack.append(u)
+                    } else if rv == nil, Library.directoryStatus(of: u, statted: nil).isDirectory {
+                        // Listed by its parent but not stat-able, and folder-shaped: a damaged folder
+                        // entry (macOS still shows it; iOS can't open it). Report it as the folder it
+                        // is — it used to be filed under "unreadable files" and never offered Rebuild.
+                        r.issues.append(DriveIssue(url: u, kind: .unreadableFolder,
+                                                   detail: "iOS can't read this folder's attributes — repair the drive on a Mac (Disk Utility ▸ First Aid, or mac/repair_drive.sh)"))
+                        r.unreadable.append(u.path)
                     } else {
                         r.files += 1
                         if rv == nil {

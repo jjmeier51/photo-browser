@@ -515,6 +515,60 @@ Pull-to-refresh and ⋯ ▸ This Folder ▸ "Force Refresh from Drive" now:
   whether this path is what fixed it. The normal (non-forced) listing is unchanged — the merge
   costs several directory reads.
 
+### 3.5 Folders iOS can't stat — `Entry.unreadable`, `Library.directoryStatus`, `DriveWriter.usableDirectory`
+
+**Symptoms (Oct 2026):** some folders visible in Finder never appeared in the grid (small ones
+too); new video-frame captures didn't create a "Screenshots" folder and new AI results didn't
+create an "AI" folder — "in certain folders" only. `rebuild_exfat_folders.py` didn't help.
+
+**Cause (ours, on top of drive damage).** Old damaged exFAT folder entries (§12: "Directory
+/X/AI has zero length", cross-linked clusters) are still listed by the parent directory, and macOS
+shows them, but iOS can't stat them. Three code paths turned that into silent failure:
+1. `listing` classified an item whose stat failed as a **file**; with size 0 it was then hidden by
+   `applyHidden`'s "0 KB file = broken download" rule → the folder vanished. (Drive Health filed it
+   under "unreadable files" and never offered Rebuild.)
+2. `DriveWriter.createDirectory` / `FileActions.screenshotsFolder` asked `fileExists` → "no" for
+   the damaged `AI`/`Screenshots` entry → `createDirectory` failed with "file exists" → the error
+   was swallowed (`try?`) → every save into that folder failed ("Couldn't save" / no AI folder).
+3. The grid read stopped at the first strategy that returned anything; the coordinated read can be
+   stale (§3.4), so even a folder the app itself had just created could be missing.
+
+**Fix.**
+- `Library.directoryStatus`: stat → `fileExists` → `lstat` → the enumeration's directory flag →
+  "extension-less ⇒ folder"; anything past the first two is flagged `Entry.unreadable` (optional,
+  so old listing snapshots decode). `applyHidden` never hides an unreadable entry; `ThumbCell` draws
+  it as an orange "Can't read on iOS" folder; opening it shows an explanation with the Mac repair
+  (`Library.unreadableReason`). Names that only resolve under the other Unicode normalization
+  (Finder can write decomposed accents) are retried via `normalizationVariant`.
+- `Library.mergedContents`: the normal listing = coordinated read ∪ one plain read (names only the
+  plain read sees must `fileExists`; skipped above 8000 entries). Force Refresh's union applies the
+  same existence rule, so stale caches can't add ghosts.
+- `DriveWriter.usableDirectory(named:in:)`: returns a readable existing folder or creates it; a name
+  held by an unreadable entry falls through to "AI 2" / "Screenshots 2"…, so saves land somewhere
+  visible. Used by `AIExtend.aiFolder` (both AI save paths; last resort = the source folder) and
+  `FileActions.screenshotsFolder`.
+- Drive Health reports a folder-shaped unreadable entry as an **unreadable folder**; the search walks
+  (`search`, `enumerateAll` → the index) classify with `directoryStatus` too.
+- **Force Refresh no longer undoes itself:** `prepareForceRefresh` used `contentDidChange`, whose
+  `changeToken` bump queued a *normal* reload behind the thorough one; that stale re-list then
+  overwrote the merged result. It now only evicts the cached listing (`evictListing`).
+- **Huge folders:** the > 8000 path defers size/date (size 0, `modified == .distantPast`), and the
+  0 KB rule was hiding *every file* there. `applyHidden` now only hides 0 KB files that were actually
+  stat'd. Extra-read entries are dropped only on ENOENT (`existsOrDamaged`), so a damaged folder
+  only one read reports is kept (flagged), while a stale cache can't add deleted items.
+- **AI saves:** `AIResultsView` used to mark a result "Saved" before writing, never checked the
+  outcome and then dropped the job's recovery record — so every failure above looked like "no AI
+  folder". It now shows Saving… → "Saved to “<folder>”" or "Couldn't save" + Try Again, only
+  auto-closes when everything is really saved/discarded, asks before leaving with failures, refreshes
+  the grid per save, and `finish()` runs once. `usableDirectory` creates only the leaf (missing
+  parent ⇒ fail visibly; it used to rebuild a phantom copy of a renamed folder or of the old mount
+  path). A source already in an "AI" folder saves beside itself (no AI/AI); result names are capped
+  for exFAT's 255-unit limit; `sanitizeName` strips control characters. `applyRemap` (moves, renames,
+  remounts) now re-keys pending Astria jobs and the Astria browser's save folder.
+- The real repair is on the Mac: `mac/repair_drive.sh` (`diskutil verifyVolume` → confirm →
+  `diskutil repairVolume`, i.e. fsck_exfat / Disk Utility First Aid). Copying folders can't mend a
+  damaged parent directory or a cross-linked FAT.
+
 ---
 
 ## 4. Drive Health — `DriveHealthView.swift`, `DriveRepair.swift`, `MetadataSnapshot.swift` (Settings → Maintenance)

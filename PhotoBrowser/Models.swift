@@ -35,8 +35,15 @@ struct Entry: Identifiable, Hashable, Sendable, Codable {
     let kind: FileKind
     let size: Int64
     let modified: Date
+    /// iOS couldn't read this item's attributes at all (stat failed) even though it's listed in
+    /// its folder — the signature of an exFAT directory entry iOS's driver can't parse (e.g. an
+    /// old "zero length directory" / cross-linked folder that macOS still tolerates). Such items
+    /// are shown, flagged, instead of being mistaken for empty files and hidden. Optional so
+    /// listing snapshots saved before this field existed still decode.
+    var unreadable: Bool? = nil
     var id: URL { url }
     var isFolder: Bool { kind == .folder }
+    var isUnreadable: Bool { unreadable == true }
     var isViewable: Bool { kind == .image || kind == .video }
     /// Heuristic: iPhone screenshots are PNGs (or named "Screenshot…").
     var isScreenshot: Bool {

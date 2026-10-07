@@ -1135,7 +1135,7 @@ enum AIExtend {
             let ci = CIImage(cgImage: resultCG).oriented(forExifOrientation: resultOrientation)
             if let baked = PhotoEditorIO.context.createCGImage(ci, from: ci.extent) { resultCG = baked }
         }
-        let aiDir = original.deletingLastPathComponent().appendingPathComponent("AI", isDirectory: true)
+        guard let aiDir = aiFolder(in: original.deletingLastPathComponent()) else { return nil }
 
         var props: [CFString: Any] = [:]
         if let src = CGImageSourceCreateWithURL(original as CFURL, nil) {
@@ -1177,9 +1177,24 @@ enum AIExtend {
         // freshly created "AI" folder whenever the app was suspended or the drive pulled mid-write —
         // the exFAT "unexpected directory entry" / "zero-length directory" repairs.
         guard let jpeg = encodeJPEG(resultCG, properties: props) else { return nil }
-        let name = "\(original.deletingPathExtension().lastPathComponent) AI.jpg"
+        // exFAT names max out at 255 UTF-16 units; leave room for " AI", " 12" and ".jpg".
+        let name = "\(String(original.deletingPathExtension().lastPathComponent.prefix(200))) AI.jpg"
         let dates: (created: Date?, modified: Date?)? = captureDate.map { (created: Optional($0), modified: Optional($0)) }
         return try? await DriveWriter.shared.writeDataUnique(jpeg, named: name, in: aiDir, dates: dates)
+    }
+
+    /// The "AI" subfolder of `folder` to save into. Goes through `DriveWriter.usableDirectory`, so an
+    /// existing "AI" entry iOS can't read (the old damaged AI folders — feature-notes §12) no longer
+    /// makes every save fail: the first usable "AI 2"… is used instead. A source that already lives
+    /// in an AI folder saves beside itself (no "AI/AI"). If no AI folder can be made in an existing
+    /// `folder`, results go into `folder` itself rather than being lost; nil only when `folder` itself
+    /// is gone (renamed/moved, or the drive was replugged) — the caller reports that as a failure.
+    nonisolated static func aiFolder(in folder: URL) -> URL? {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDir), isDir.boolValue else { return nil }
+        let name = folder.lastPathComponent
+        if name == "AI" || name.range(of: #"^AI \d+$"#, options: .regularExpression) != nil { return folder }
+        return (try? DriveWriter.usableDirectory(named: "AI", in: folder)) ?? folder
     }
 
     /// JPEG bytes for `cg` with `properties` as the image metadata.
@@ -1200,7 +1215,7 @@ enum AIExtend {
                                                   date: Date? = nil, intoAISubfolder: Bool = true) async -> URL? {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil),
               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
-        let aiDir = intoAISubfolder ? folder.appendingPathComponent("AI", isDirectory: true) : folder
+        guard let aiDir = intoAISubfolder ? aiFolder(in: folder) : folder else { return nil }
         let now = date ?? Date()
         let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy:MM:dd HH:mm:ss"; f.timeZone = .current
@@ -1225,7 +1240,7 @@ enum AIExtend {
     }
 
     private nonisolated static func sanitizeName(_ s: String) -> String {
-        let cleaned = s.components(separatedBy: CharacterSet(charactersIn: "/\\:?%*|\"<>\n\r"))
+        let cleaned = s.components(separatedBy: CharacterSet(charactersIn: "/\\:?%*|\"<>").union(.controlCharacters))
             .joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? "AI Creation" : cleaned
     }

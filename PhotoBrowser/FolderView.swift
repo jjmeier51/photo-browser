@@ -180,6 +180,7 @@ struct FolderView: View {
     @State private var reloading = false           // single-flight guard for reload()
     @State private var reloadPending = false
     @State private var thoroughNextReload = false  // the next reload() merges every directory read (Force Refresh)
+    @State private var unreadableReason: String?   // set when iOS can't read this folder at all (see emptyOverlay)
     @State private var showRotatePreview = false   // bulk photo-rotate preview sheet
     @State private var rotateTargets: [Entry] = []
     @State private var audioExtractSources: [URL] = []   // videos queued for "Extract Audio"
@@ -415,7 +416,10 @@ struct FolderView: View {
         let anyHiddenFolders = !library.hiddenFolders.isEmpty
         let anyHiddenFiles = !library.hiddenFiles.isEmpty
         return list.filter { e in
-            if !e.isFolder && e.size == 0 { return false }                                    // empty file
+            // A real 0 KB file (a failed download) — but not an entry whose size was never read: the
+            // huge-folder path defers size/date (`modified == .distantPast`, size 0), which hid
+            // EVERY file in folders over 8000 items; nor one iOS couldn't stat (`isUnreadable`).
+            if !e.isFolder && e.size == 0 && !e.isUnreadable && e.modified != .distantPast { return false }
             if anyHiddenFolders && library.isUnderHiddenFolder(e.url.path) { return false }    // hidden folder / inside one
             if anyHiddenFiles && !e.isFolder && library.isHiddenFile(e.url) { return false }   // hidden file
             return true
@@ -1596,7 +1600,15 @@ struct FolderView: View {
         // A Reviews folder draws its own centered empty state in `reviewsGrid`.
         if filtered.isEmpty && !isReviews {
             VStack(spacing: 8) {
-                if loadingAges && (ageFilter != nil || Int(submittedQuery.trimmingCharacters(in: .whitespaces)) != nil) {
+                if let unreadableReason, loaded {
+                    Image(systemName: "folder.badge.questionmark").font(.largeTitle).foregroundStyle(.orange)
+                    Text("iOS can’t read this folder").font(.headline)
+                    Text("The drive’s entry for this folder is damaged in a way macOS tolerates but iOS doesn’t, so it looks empty here even if Finder shows files. Fix it on the Mac: plug the SSD in, open Disk Utility, select the drive and run First Aid (or run mac/repair_drive.sh). Then eject it properly and reconnect.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center).padding(.horizontal, 28)
+                    Text(unreadableReason).font(.caption2).foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center).padding(.horizontal, 28)
+                } else if loadingAges && (ageFilter != nil || Int(submittedQuery.trimmingCharacters(in: .whitespaces)) != nil) {
                     // Only block on ages for an actual age filter / numeric (age) query — a text search must
                     // not get stuck behind the age computation.
                     ProgressView()
@@ -3162,6 +3174,14 @@ struct FolderView: View {
         library.cacheListing(list, for: url)
         entries = list
         liveImageURLs = Self.detectLivePairs(in: list)
+        // An empty listing is either a genuinely empty folder or one iOS's exFAT driver can't read
+        // (macOS shows its contents). Tell them apart so the empty state can say which.
+        if list.isEmpty {
+            let folder = url
+            unreadableReason = await Task.detached(priority: .utility) { Library.unreadableReason(for: folder) }.value
+        } else {
+            unreadableReason = nil
+        }
         loaded = true
         // Warm the whole folder's thumbnails ahead of scroll so tiles pop in instantly.
         Thumbnailer.shared.prefetch(list, size: CGSize(width: 110, height: 110), scale: UIScreen.main.scale)

@@ -83,6 +83,21 @@ in the iOS app) and the model names written in (`--no-exif` to skip). Each galle
 `pornstar.json` index. `--workers N` sets parallel downloads per gallery (default 4); Ctrl-C stops
 cleanly.
 
+## Repair the SSD when iOS can't see or open folders (`repair_drive.sh`) — try this first
+
+If folders that Finder shows are missing in Photo Browser, look empty on iOS, or new "AI" /
+"Screenshots" folders can't be created inside them, the exFAT file system on the SSD has damaged
+folder entries that macOS tolerates and iOS doesn't. Repair it with Apple's own checker (the same
+thing Disk Utility ▸ First Aid runs) — read-only check first, then the repair after you confirm:
+
+```sh
+sh mac/repair_drive.sh "/Volumes/<SSD name>"
+```
+
+Eject the SSD in Finder afterwards, then reconnect it to the iPhone/iPad. The app now also shows
+such folders (orange "Can't read on iOS") instead of hiding them, and saves into "AI 2" /
+"Screenshots 2" when the existing folder can't be read.
+
 ## Fix folders that look empty on the iPhone (`rebuild_exfat_folders.py`)
 
 Folders created or filled in Finder on the exFAT SSD sometimes show up on iOS — in Files and in
