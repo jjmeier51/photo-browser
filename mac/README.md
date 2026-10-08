@@ -117,34 +117,58 @@ sh mac/repair_drive.sh "/Volumes/<SSD name>"
 Eject the SSD in Finder afterwards, then reconnect it to the iPhone/iPad.
 
 If folders **still** can't be opened on iOS after a clean repair ("opendir errno 22 — Invalid
-argument" in Drive Health), Apple's exFAT driver is rejecting something inside them. Find out what
-(read-only; compares file names in the failing folders with healthy ones):
+argument" in Drive Health), Apple's exFAT driver on iOS is rejecting something about them that
+macOS tolerates. Export the list with Drive Health's Share button, then:
 
-```sh
-python3 mac/diagnose_ios_unreadable.py --list unreadable.txt --root "/Volumes/<SSD name>"
-``` The app now also shows
-such folders (orange "Can't read on iOS") instead of hiding them, and saves into "AI 2" /
-"Screenshots 2" when the existing folder can't be read.
+1. **Find out why** — read-only, reads the folders' directory entries straight off the disk and
+   compares them with healthy folders (checksums, name hashes, names, timestamps, sizes, cluster
+   chains, deleted entries, fragmentation). Run it *before* rebuilding — a rebuild erases the
+   evidence. Paste the output to Claude.
 
-## Fix folders that look empty on the iPhone (`rebuild_exfat_folders.py`)
+   ```sh
+   sudo python3 mac/exfat_inspect.py --list unreadable.txt --root "/Volumes/<SSD name>"
+   sudo python3 mac/exfat_inspect.py "/Volumes/<SSD name>/Kardashians/Kylie Jenner"
+   ```
+
+   (`sudo` is needed to read the disk device; nothing is written. If macOS still refuses, give
+   Terminal Full Disk Access in System Settings ▸ Privacy & Security.)
+
+2. **Rebuild them** with `rebuild_exfat_folders.py` (below) — `--move` for big folders.
+
+The app shows such folders as orange "Can't read on iOS" tiles instead of hiding them, and saves
+into "AI 2" / "Screenshots 2" when the existing folder can't be read.
+
+`diagnose_ios_unreadable.py` is the older, name-only version of step 1 (it sees names the way macOS
+presents them, which can hide what's really stored).
+
+## Fix folders iOS can't open or shows as empty (`rebuild_exfat_folders.py`)
 
 Folders created or filled in Finder on the exFAT SSD sometimes show up on iOS — in Files and in
-Photo Browser — but open **empty**, while the Mac shows their contents. The iOS exFAT driver
-can't read those directory entries; re-copying the folder in place on the Mac rewrites them
-cleanly. This script does that safely (dry run by default; copies, verifies every file's size,
-moves the original to the Trash, puts the copy under the same name — so in-app Favorites,
-captions and covers stay attached):
+Photo Browser — but open **empty** or not at all, while the Mac shows their contents. Rewriting the
+folder's directory fresh fixes it. Two ways, both keep the folder's exact name and place, so in-app
+Favorites, captions, covers etc. stay attached (dry run by default):
+
+- **Copy** (default): copies everything into a fresh folder, verifies every file's size, moves the
+  original to the Trash and puts the copy under the same name. Rebuilds subfolders too. Needs free
+  space for one copy of the folder.
+- **`--move`**: no copying — `._*` / `.DS_Store` are deleted and every item is *renamed* into a fresh
+  folder on the same drive (only the directory entries are written; the photos never move), then the
+  fresh folder takes the original's name. No free space needed and fast, so it's the one for huge
+  folders (the Kardashians folders). Rebuilds only that folder, not its subfolders. If it stops
+  (unplugged, an error), run the same command again and it picks up where it left off.
+  `--drop-leftovers` also deletes `<name>.sb-…` files (interrupted saves) whose finished file is
+  there.
 
 ```sh
 # the folders Drive Health lists as unreadable — export the list with its Share button:
-python3 mac/rebuild_exfat_folders.py --list unreadable.txt --root "/Volumes/SSD"           # dry run
-python3 mac/rebuild_exfat_folders.py --list unreadable.txt --root "/Volumes/SSD" --apply
-python3 mac/rebuild_exfat_folders.py "/Volumes/SSD/Porn/Briana Banks"        # list what it would do
-python3 mac/rebuild_exfat_folders.py "/Volumes/SSD/Porn/Briana Banks" --apply
+python3 mac/rebuild_exfat_folders.py --list unreadable.txt --root "/Volumes/SSD" --move           # dry run
+python3 mac/rebuild_exfat_folders.py --list unreadable.txt --root "/Volumes/SSD" --move --apply
+python3 mac/rebuild_exfat_folders.py "/Volumes/SSD/Kardashians/Kylie Jenner" --move --apply
+python3 mac/rebuild_exfat_folders.py "/Volumes/SSD/Porn/Briana Banks" --apply                    # copy mode
 python3 mac/rebuild_exfat_folders.py /Volumes/SSD --since 7 --apply         # every folder created this week
 ```
 
-Eject the SSD in Finder before unplugging it. It needs free space for one copy of the folder.
+Eject the SSD in Finder before unplugging it.
 
 ## Requirements
 
