@@ -83,6 +83,26 @@ in the iOS app) and the model names written in (`--no-exif` to skip). Each galle
 `pornstar.json` index. `--workers N` sets parallel downloads per gallery (default 4); Ctrl-C stops
 cleanly.
 
+## Copy or move folders onto the SSD safely (`safe_copy_to_ssd.py`)
+
+Use this instead of dragging folders in Finder. A small window (standard library only):
+- **No half-written files.** Each file is copied to a hidden temp file, flushed all the way to
+  the disk, then renamed into place.
+- **Verified copies.** Each file is re-read from the drive and checked against the original.
+- **No macOS junk.** `._` and `.DS_Store` files are never copied or created.
+- **iOS-safe names.** Names exFAT/iOS can't handle (`:` `?` etc., decomposed accents) are fixed.
+- **Dates and duplicates.** Modification dates are kept, and an identical file already there is
+  skipped, so re-running is safe.
+- **Size warning.** It warns before a folder would grow past ~8,000 items, which iOS may fail to
+  open.
+- **Move mode.** Originals go to the Trash only after the whole folder copied and verified.
+- **Pause, Stop and Eject.** Pause/Stop work between files, and *Eject SSD* unmounts it properly.
+
+```sh
+python3 mac/safe_copy_to_ssd.py                                   # the window
+python3 mac/safe_copy_to_ssd.py --cli ~/Downloads/Folder --to "/Volumes/Extreme SSD/Porn" [--move]
+```
+
 ## Repair the SSD when iOS can't see or open folders (`repair_drive.sh`) — try this first
 
 If folders that Finder shows are missing in Photo Browser, look empty on iOS, or new "AI" /
