@@ -78,7 +78,11 @@ def main() -> None:
                       + (f", {l} of existing files" if args.all else f"; {l} sidecars of existing files kept") + ")")
             total_o += o
             total_l += l
-    print(f"\nOrphaned sidecars: {total_o}" + ("" if args.apply else "  (dry run — add --apply)"))
+    removed = total_o + (total_l if args.all else 0)
+    verb = "Removed" if args.apply else "Would remove"
+    print(f"\n{verb} {removed} ._ file(s) ({total_o} orphaned"
+          + (f", {total_l} of existing files" if args.all else "") + ")"
+          + ("" if args.apply else "  — dry run, add --apply"))
     if args.apply:
         print("Eject the SSD in Finder before unplugging it.")
 
