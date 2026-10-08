@@ -580,6 +580,51 @@ shows them, but iOS can't stat them. Three code paths turned that into silent fa
   `diskutil repairVolume`, i.e. fsck_exfat / Disk Utility First Aid). Copying folders can't mend a
   damaged parent directory or a cross-linked FAT.
 
+### 3.6 Huge folders iOS stopped opening (Kardashians, Oct 2026)
+
+**State after rebuilding:** Drive Health went from 24 unreadable folders to 5 — `Kardashians/Kendall
+Jenner` (46,435 photos + 46,435 `._` sidecars), `Kardashians/Kylie Jenner` (32,807 + 32,807), one
+`Duplicate PNGs` and two star folders downloaded on the Mac since (`…/Nina Hartley/Nina Hartley`,
+`…/Sasha Grey/Kelly Wells`). Same error as the rest: `NSCocoaErrorDomain 256` + `opendir errno 22`.
+
+**Not a size limit.** The Kardashian folders opened fine before (and §3.2's lazy listing was built
+on a ~90k-entry folder that the Files app opened instantly), and iOS itself wrote both the photos
+and their `._` sidecars. The copy rebuild that fixed the other folders was simply never run on them
+— it needs free space for a second copy of 46k photos.
+
+**What we know about them:** Access Kardashian wrote every photo straight to its final path — `Data
+.write(options: .atomic)` or `CGImageDestinationCreateWithURL` on the drive — from 22 concurrent
+download slots, i.e. tens of thousands of uncoordinated directory updates to one exFAT folder
+(CLAUDE.md #12's exact failure mode). Kendall's folder still holds `<name>.jpg.sb-xxxxxxxx-XXXXXX`
+leftovers of interrupted atomic writes, each with its own `._` sidecar.
+
+**Fixes:**
+- `AccessKardashian.saveImage` now embeds date/GPS in memory (`CGImageDestinationCreateWithData`)
+  and places every file through `DriveWriter.shared.writeData` (controlled temp → flushed → renamed,
+  one commit at a time; downloads stay concurrent). Its log file is created with
+  `DriveWriter.writeDataSync`.
+- `mac/rebuild_exfat_folders.py --move`: rebuilds a folder **without copying** — deletes `._*` /
+  `.DS_Store`, renames every item into a fresh hidden sibling `.<name>.moving` (same volume: only
+  directory entries are written), removes the emptied original and renames the fresh folder into
+  place, re-setting each item's modified/accessed dates so those fields are freshly encoded. Same
+  path, so all metadata stays attached; resumable (a re-run continues, or finishes the final swap);
+  `--drop-leftovers` deletes `.sb-` temps whose finished file is present and at least as large.
+  Only the folder's own directory is rebuilt (not subfolders), so with `--list` nested entries are
+  kept.
+- `mac/exfat_inspect.py`: the evidence step — reads a folder's directory entries **off the raw
+  device** (read-only, `sudo`) and checks every exFAT field: set checksums, NameHash (with the
+  volume's up-case table), SecondaryCount vs name length (incl. stale name entries — the
+  "rename to a shorter name" bug class a 2026 Linux exfat patch addresses), names (forbidden chars, invalid
+  UTF-16, private-use stand-ins), timestamps / 10 ms / UTC-offset bytes, attributes and reserved
+  bytes, ValidDataLength / allocation flags / first cluster vs the bitmap, the folder's own cluster
+  chain, entries after the end marker, duplicate up-cased names, and the folder's *own* entry in its
+  parent; plus layout facts (deleted entries, pieces on disk, entry sets split across clusters).
+  Compares the listed folders with a breadth-first sample of the rest and names any finding that
+  separates them. `diagnose_ios_unreadable.py` only saw names as macOS's driver presents them.
+  Tested against a synthetic image with each defect planted.
+- Drive Health's unreadable-folder detail now appends the whole `NSUnderlyingError` chain, so the
+  next report says whether iOS answered EINVAL, a timeout, or a file-provider error.
+
 ---
 
 ## 4. Drive Health — `DriveHealthView.swift`, `DriveRepair.swift`, `MetadataSnapshot.swift` (Settings → Maintenance)
@@ -635,10 +680,23 @@ nothing, and a fix that doesn't needs help. Three layers now guarantee it:
 3. **Orphan audit + Re-link by Filename.** After a scan, `Library.metadataPaths(under:)` is
    checked against the paths seen; entries whose item is gone are listed by `MetadataCategory`
    ("Metadata pointing at missing items"). Paths under unreadable folders are *unknown*, not
-   orphaned. **Re-link by Filename** finds each missing name elsewhere on the drive and, for a
-   unique match (preferring the same parent-folder name), re-keys it through
-   `Library.itemsMoved` — the exact machinery an in-app move uses, so all stores follow. Nothing
-   is ever deleted; ambiguous and unmatched names are counted and left alone.
+   orphaned, and so are the original paths of items in **Recently Deleted** (their entries stay
+   under the original path on purpose so a restore reconnects them — they used to be counted).
+   **Re-link by Filename** ranks every same-named item elsewhere on the drive
+   (`DriveHealthView.rankedCandidates`: most parent-folder names in common counted up from the
+   item, then longest shared leading path) and re-keys through `Library.itemsMoved` — the exact
+   machinery an in-app move uses — when there's a single candidate or the best one shares strictly
+   more parent folders than the next. Tapping a category opens `OrphanListSheet`: every missing
+   entry with its ranked matches to re-link by hand, or **Forget** (also "Forget All" per category
+   and for everything). Forget = `Library.forgetMetadata(where:)`, which removes the entry from every
+   audited store (plus Clean Up progress / Not-Duplicates pairs / FaceStore) and deletes cover and
+   custom-thumbnail images no other entry names; Drive Health takes one automatic container
+   backup per visit before the first Forget, so Restore undoes it.
+4. **Purged trash forgets its metadata.** Deleting from Recently Deleted (one item, Empty, or the
+   30-day expiry) used to leave every entry under the original path forever — one source of the
+   35 "folder covers pointing at missing items" (Oct 2026). `Library.forgetPurgedMetadata` now
+   forgets the purged originals' entries (subtree for folders), unless something new has since
+   taken the original path.
 
 ### 4.2 Rebuild Folder in place — `DriveRepair.rebuildFolder`
 
@@ -656,15 +714,18 @@ leaves the original exactly as it was.
 - Bad files can be deleted in place; unreadable folders get Rebuild or the re-copy guidance
   (same name, same place, clean eject).
 
-### 4.1 Companion Mac scripts
+### 4.3 Companion Mac scripts
 
 - **`mac/rebuild_exfat_folders.py`** (in the repo) — the fix for folders iOS lists but shows as
-  **empty** (Files app too) while Finder shows their contents: the iOS exFAT driver can't read
-  directory entries macOS wrote. Nothing on the iOS side can read past that (Force Refresh, 3.4,
-  doesn't help — the folder *is* listed, its contents read as empty). The script copies the
-  folder to a hidden sibling, verifies sizes, Trashes the original via Finder (or parks it as
-  hidden `.<name>.original`), and swaps the copy in under the same name/path — metadata stays
-  attached. `--since DAYS` finds recently created folders; dry run unless `--apply`.
+  **empty** or can't open (Files app too) while Finder shows their contents: the iOS exFAT driver
+  can't read directory entries macOS tolerates. Nothing on the iOS side can read past that (Force
+  Refresh, 3.4, doesn't help — the folder *is* listed, its contents read as empty). The script
+  copies the folder to a hidden sibling, verifies sizes, Trashes the original via Finder (or parks
+  it as hidden `.<name>.original`), and swaps the copy in under the same name/path — metadata stays
+  attached. `--move` does it without copying (3.6). `--since DAYS` finds recently created folders;
+  `--list` takes Drive Health's export; dry run unless `--apply`.
+- **`mac/exfat_inspect.py`** — read-only raw-device check of what's actually stored (3.6). Run it
+  before a rebuild; the rebuild erases the evidence.
 
 - `fix-exfat-folders.sh` — rebuilds folders iOS can't open by re-copying them in place (rewrites
   clean exFAT directory entries). v2 counts only **real** files (ignores `._` AppleDouble

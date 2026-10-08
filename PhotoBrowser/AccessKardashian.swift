@@ -702,7 +702,7 @@ enum AccessKardashian {
                     stats.fetchSecs = Date().timeIntervalSince(t0)
                     // Bytes arrived — if the drive write fails, retrying the network won't help.
                     let s0 = Date()
-                    stats.saveError = saveImage(data, to: dest, albumDate: date, coord: coord)
+                    stats.saveError = await saveImage(data, to: dest, albumDate: date, coord: coord)
                     stats.saveSecs = Date().timeIntervalSince(s0)
                     return (stats.saveError == nil, stats)
                 case .hardMiss:
@@ -737,15 +737,19 @@ enum AccessKardashian {
         return data.count >= 512 ? .ok(data) : .transient
     }
 
-    /// Write the downloaded bytes in a *single pass*: if the image lacks a capture
-    /// date (or GPS, when the album names a place), embed the album's date/location
-    /// straight from the in-memory bytes while writing — no decode/temp-file/replace
-    /// round-trip. Files that already carry EXIF are written verbatim. This is the
-    /// hot path (tens of thousands of images), so it does exactly one disk write.
-    /// Returns nil on success, else the write's actual error — swallowing it made a
-    /// drive-side failure (full / corrupt / dying) look like a slow network.
-    nonisolated private static func saveImage(_ data: Data, to dest: URL, albumDate: Date?, coord: Coord?) -> String? {
-        try? FileManager.default.removeItem(at: dest)            // overwrite / re-run safety
+    /// Write the downloaded bytes: if the image lacks a capture date (or GPS, when the album names a
+    /// place), embed the album's date/location into the in-memory bytes first (no pixel re-encode),
+    /// then place the file through `DriveWriter` — controlled temp → flushed → renamed into place,
+    /// **one commit at a time**. This used to write straight to the final path (`.atomic`, which
+    /// leaves `<name>.sb-…` temps behind when interrupted, or `CGImageDestination` onto the drive)
+    /// from up to 22 download slots at once — tens of thousands of uncoordinated directory updates
+    /// to one exFAT folder, the pattern `DriveWriter` exists to prevent (CLAUDE.md #12). The
+    /// Kendall/Kylie folders it filled carry such `.sb-` leftovers and are folders iOS later
+    /// refused to open. Downloads stay concurrent; only the placement is serialized.
+    /// Returns nil on success, else the write's actual error — swallowing it made a drive-side
+    /// failure (full / corrupt / dying) look like a slow network.
+    nonisolated private static func saveImage(_ data: Data, to dest: URL, albumDate: Date?, coord: Coord?) async -> String? {
+        var bytes = data
         var effectiveDate = albumDate
         if let src = CGImageSourceCreateWithData(data as CFData, nil), let type = CGImageSourceGetType(src) {
             let have = existingMetadata(src)
@@ -753,23 +757,25 @@ enum AccessKardashian {
             let needDate = have.hasDate ? nil : albumDate
             let needCoord: Coord? = have.hasGPS ? nil : coord
             if needDate != nil || needCoord != nil,
-               writeImage(src: src, type: type, to: dest, date: needDate, coord: needCoord) {
-                setFileDate(dest, effectiveDate); DriveWriter.fullSyncFileAndParent(dest); return nil
+               let embedded = embedMetadata(src: src, type: type, date: needDate, coord: needCoord) {
+                bytes = embedded
             }
         }
-        // Nothing to embed (or embedding failed) — write the bytes as-is. This raw
-        // write's error is the authoritative reason when both paths fail.
-        do { try data.write(to: dest, options: .atomic) }
-        catch { return error.localizedDescription }
-        setFileDate(dest, effectiveDate)
-        DriveWriter.fullSyncFileAndParent(dest)
-        return nil
+        var dates: (created: Date?, modified: Date?)?
+        if let d = effectiveDate { dates = (created: d, modified: d) }
+        do {
+            try await DriveWriter.shared.writeData(bytes, to: dest, dates: dates)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
-    /// Lossless metadata-embedding write: copies the encoded image (no pixel
-    /// re-encode, via `AddImageFromSource`) with the capture date and/or GPS set.
-    nonisolated private static func writeImage(src: CGImageSource, type: CFString, to dest: URL,
-                                               date: Date?, coord: Coord?) -> Bool {
+    /// Lossless metadata embed, in memory: copies the encoded image (no pixel re-encode, via
+    /// `AddImageFromSource`) with the capture date and/or GPS set. nil if ImageIO can't write it —
+    /// the caller then saves the downloaded bytes as they are.
+    nonisolated private static func embedMetadata(src: CGImageSource, type: CFString,
+                                                  date: Date?, coord: Coord?) -> Data? {
         var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
         if let date {
             let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
@@ -791,14 +797,10 @@ enum AccessKardashian {
                 kCGImagePropertyGPSLongitudeRef: coord.lng >= 0 ? "E" : "W"
             ] as [CFString: Any]
         }
-        guard let dst = CGImageDestinationCreateWithURL(dest as CFURL, type, 1, nil) else { return false }
+        let out = NSMutableData()
+        guard let dst = CGImageDestinationCreateWithData(out as CFMutableData, type, 1, nil) else { return nil }
         CGImageDestinationAddImageFromSource(dst, src, 0, props as CFDictionary)
-        return CGImageDestinationFinalize(dst)
-    }
-
-    nonisolated private static func setFileDate(_ url: URL, _ date: Date?) {
-        guard let date else { return }
-        try? FileManager.default.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: url.path)
+        return CGImageDestinationFinalize(dst) ? out as Data : nil
     }
 
     /// EXIF/TIFF capture date + GPS presence, read from an in-memory image source.
@@ -942,7 +944,7 @@ final class AKLog: @unchecked Sendable {
             _ = try? handle.seekToEnd()
             try? handle.write(contentsOf: data)
         } else {
-            try? data.write(to: fileURL)
+            try? DriveWriter.writeDataSync(data, to: fileURL)   // first chunk: flushed temp → rename
         }
     }
 }

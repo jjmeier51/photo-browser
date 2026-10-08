@@ -38,6 +38,9 @@ struct DriveHealthView: View {
     @State private var driveBackupDate: Date?
     @State private var containerBackup: URL?
     @State private var containerBackupDate: Date?
+    @State private var orphanSheet: MetadataCategory?
+    @State private var confirmForgetAll = false
+    @State private var forgetBackupTaken = false              // one automatic backup before the first Forget
     @AppStorage("photoBrowser.driveHealthDeepCheck") private var deepCheck = false
 
     private struct RebuildProgress { var name: String; var files: Int; var bytes: Int64 }
@@ -130,6 +133,25 @@ struct DriveHealthView: View {
         } message: { issue in
             Text("This is the damaged original that a rebuild replaced. Open the rebuilt folder first and make sure everything is there; then this copy can go.")
         }
+        .confirmationDialog("Forget every missing entry?",
+                            isPresented: $confirmForgetAll, titleVisibility: .visible) {
+            Button("Forget \(orphanTotal) Entr\(orphanTotal == 1 ? "y" : "ies")", role: .destructive) {
+                Task { await forget(Array(Set(orphans.values.flatMap { $0 })), announce: true) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The app stops keeping covers, labels, captions and the rest for items that are no longer on the drive. Nothing on the drive is touched, and a metadata backup is saved to this phone first, so Restore can bring them back.")
+        }
+        .sheet(item: $orphanSheet) { c in
+            OrphanListSheet(category: c, paths: orphans[c] ?? [],
+                            relative: { [root = library.rootURL] u in
+                                u.standardizedFileURL.path == root?.standardizedFileURL.path
+                                    ? "the drive's top level" : Self.relativePath(u, root: root)
+                            },
+                            candidates: { [byName] in Self.rankedCandidates(for: $0, in: byName).map { $0.path } },
+                            onRelink: { old, new in relink([(from: URL(fileURLWithPath: old), to: URL(fileURLWithPath: new))]) },
+                            onForget: { paths in Task { await forget(paths, announce: false) } })
+        }
         .task {
             await refreshBackups()
             if scanning { await runScan() }
@@ -209,21 +231,28 @@ struct DriveHealthView: View {
     private var orphanSection: some View {
         Section {
             ForEach(MetadataCategory.allCases.filter { (orphans[$0]?.count ?? 0) > 0 }) { c in
-                HStack {
-                    Text(c.title)
-                    Spacer()
-                    Text("\(orphans[c]?.count ?? 0)").foregroundStyle(.secondary).monospacedDigit()
+                Button { orphanSheet = c } label: {
+                    HStack {
+                        Text(c.title).foregroundStyle(.primary)
+                        Spacer()
+                        Text("\(orphans[c]?.count ?? 0)").foregroundStyle(.secondary).monospacedDigit()
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                    }
                 }
             }
             Button { Task { await relinkOrphans() } } label: {
                 Label("Re-link by Filename", systemImage: "link")
             }
             .disabled(working)
+            Button(role: .destructive) { confirmForgetAll = true } label: {
+                Label("Forget All Missing Entries…", systemImage: "trash")
+            }
+            .disabled(working)
         } header: {
             Label("Metadata pointing at missing items (\(orphanTotal))", systemImage: "link.badge.plus")
                 .foregroundStyle(.orange)
         } footer: {
-            Text("These entries refer to files or folders that aren't on the drive any more — usually something renamed or moved outside the app, for example while fixing the drive on the Mac. Re-link looks for each missing name elsewhere on the drive and, when there's exactly one match (same name, preferring the same parent folder), moves the entry there. Nothing is deleted; what can't be matched is left alone, and a Restore from backup can fill in the rest. Items inside unreadable folders aren't counted.")
+            Text("These entries refer to files or folders that aren't on the drive any more — renamed or moved outside the app (for example while fixing the drive on the Mac), or deleted. Re-link looks for each missing name elsewhere on the drive and moves the entry there when one match is clearly right (same name, then the same parent folders). Tap a category to see each entry, pick a match yourself, or Forget it — that's for things deleted for good; a backup is saved first. Items inside unreadable folders and items in Recently Deleted aren't counted.")
         }
     }
 
@@ -275,8 +304,10 @@ struct DriveHealthView: View {
     }
     private var exportText: String { unreadableFolderPaths.joined(separator: "\n") }
 
-    private func relativePath(_ url: URL) -> String {
-        guard let root = library.rootURL else { return url.path }
+    private func relativePath(_ url: URL) -> String { Self.relativePath(url, root: library.rootURL) }
+
+    nonisolated static func relativePath(_ url: URL, root: URL?) -> String {
+        guard let root else { return url.path }
         let base = root.path.hasSuffix("/") ? root.path : root.path + "/"
         return url.path.hasPrefix(base) ? String(url.path.dropFirst(base.count)) : url.path
     }
@@ -362,7 +393,14 @@ struct DriveHealthView: View {
         guard complete, let root = library.rootURL else { orphans = [:]; return }
         let all = library.metadataPaths(under: root)
         let unknownPrefixes = unreadable.map { $0 + "/" }
-        func unknown(_ p: String) -> Bool { unreadable.contains(p) || unknownPrefixes.contains { p.hasPrefix($0) } }
+        // Items in Recently Deleted keep their entries under the original path on purpose, so a
+        // restore reconnects them — they aren't missing.
+        let trashed = Set(library.trash.map(\.originalPath))
+        let trashedPrefixes = library.trash.filter(\.isFolder).map { $0.originalPath + "/" }
+        func unknown(_ p: String) -> Bool {
+            unreadable.contains(p) || unknownPrefixes.contains { p.hasPrefix($0) }
+                || trashed.contains(p) || trashedPrefixes.contains { p.hasPrefix($0) }
+        }
         var out: [MetadataCategory: [String]] = [:]
         for (c, paths) in all {
             let missing = paths.filter { !existing.contains($0) && !unknown($0) }
@@ -371,8 +409,8 @@ struct DriveHealthView: View {
         orphans = out
     }
 
-    /// Re-keys every orphaned entry whose filename exists exactly once elsewhere on the drive
-    /// (preferring a candidate under a parent folder of the same name) via `Library.itemsMoved`.
+    /// Re-keys every orphaned entry whose filename has one clearly-right match elsewhere on the drive
+    /// (see `rankedCandidates`) via `Library.itemsMoved`.
     private func relinkOrphans() async {
         working = true
         defer { working = false }
@@ -380,28 +418,66 @@ struct DriveHealthView: View {
         var moves: [(from: URL, to: URL)] = []
         var ambiguous = 0, unmatched = 0
         for old in all.sorted() {
-            let oldURL = URL(fileURLWithPath: old)
-            let name = oldURL.lastPathComponent
-            let parentName = oldURL.deletingLastPathComponent().lastPathComponent
-            var candidates = (byName[name] ?? []).filter { $0 != old }
-            if candidates.count > 1 {
-                let sameParent = candidates.filter { URL(fileURLWithPath: $0).deletingLastPathComponent().lastPathComponent == parentName }
-                if sameParent.count == 1 { candidates = sameParent }
-            }
-            if candidates.count == 1 { moves.append((from: oldURL, to: URL(fileURLWithPath: candidates[0]))) }
-            else if candidates.isEmpty { unmatched += 1 } else { ambiguous += 1 }
+            let ranked = Self.rankedCandidates(for: old, in: byName)
+            if ranked.count == 1 || (ranked.count > 1 && ranked[0].tail >= 1 && ranked[0].tail > ranked[1].tail) {
+                moves.append((from: URL(fileURLWithPath: old), to: URL(fileURLWithPath: ranked[0].path)))
+            } else if ranked.isEmpty { unmatched += 1 } else { ambiguous += 1 }
         }
         guard !moves.isEmpty else {
             message = "Nothing could be re-linked: \(unmatched) name\(unmatched == 1 ? " isn't" : "s aren't") on the drive at all"
-                + (ambiguous > 0 ? ", and \(ambiguous) appear\(ambiguous == 1 ? "s" : "") in more than one place" : "") + ". A Restore from backup may help."
+                + (ambiguous > 0 ? ", and \(ambiguous) appear\(ambiguous == 1 ? "s" : "") in more than one place" : "")
+                + ". Tap a category to pick matches yourself, or Forget entries for things that were deleted."
             return
         }
+        relink(moves)
+        message = "Re-linked \(moves.count) item\(moves.count == 1 ? "" : "s")."
+            + (unmatched > 0 ? " \(unmatched) couldn't be found on the drive." : "")
+            + (ambiguous > 0 ? " \(ambiguous) appear in more than one place — tap a category to pick." : "")
+    }
+
+    private func relink(_ moves: [(from: URL, to: URL)]) {
         library.itemsMoved(moves)
         library.contentDidChange()
         computeOrphans()
-        message = "Re-linked \(moves.count) item\(moves.count == 1 ? "" : "s")."
-            + (unmatched > 0 ? " \(unmatched) couldn't be found on the drive." : "")
-            + (ambiguous > 0 ? " \(ambiguous) appear in more than one place and were left alone." : "")
+    }
+
+    /// Forgets every entry for `paths` (all categories — the item is gone), after one automatic
+    /// metadata backup into the app per visit, so a Restore can undo it. `announce` is off from the
+    /// per-category sheet (an alert can't show behind it; its rows just disappear).
+    private func forget(_ paths: [String], announce: Bool) async {
+        guard !paths.isEmpty else { return }
+        working = true
+        if !forgetBackupTaken {
+            _ = await library.backUpMetadata(toDrive: false)
+            forgetBackupTaken = true
+            await refreshBackups()
+        }
+        let set = Set(paths)
+        let n = library.forgetMetadata { set.contains($0) }
+        working = false
+        computeOrphans()
+        if announce {
+            message = "Forgot \(n) entr\(n == 1 ? "y" : "ies") for \(paths.count) missing items. A backup was saved to this phone first."
+        }
+    }
+
+    /// Same-named items elsewhere on the drive for a missing `old` path, best match first: the most
+    /// parent-folder names in common (counted up from the item), then the longest shared leading path.
+    /// `tail == 0` means only the name matches.
+    nonisolated static func rankedCandidates(for old: String, in byName: [String: [String]])
+        -> [(path: String, tail: Int, head: Int)] {
+        let a = old.split(separator: "/")
+        guard let name = a.last else { return [] }
+        let found = (byName[String(name)] ?? []).filter { $0 != old }
+        return found.map { cand -> (path: String, tail: Int, head: Int) in
+            let b = cand.split(separator: "/")
+            var tail = 0
+            while tail + 1 < min(a.count, b.count), a[a.count - 2 - tail] == b[b.count - 2 - tail] { tail += 1 }
+            var head = 0
+            while head < min(a.count, b.count) - 1, a[head] == b[head] { head += 1 }
+            return (cand, tail, head)
+        }
+        .sorted { ($0.tail, $0.head, $1.path) > ($1.tail, $1.head, $0.path) }
     }
 
     // MARK: - Scan
@@ -455,6 +531,12 @@ struct DriveHealthView: View {
                         let ns = error as NSError
                         if attempt == 2 {
                             var detail = "\(ns.domain) \(ns.code) — \(ns.localizedDescription)"
+                            // The underlying error says *why* (EINVAL from the exFAT driver vs a timeout…).
+                            var under = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+                            while let u = under {
+                                detail += " · \(u.domain) \(u.code)"
+                                under = u.userInfo[NSUnderlyingErrorKey] as? NSError
+                            }
                             errno = 0
                             if let dirp = opendir(dir.path) { closedir(dirp) }
                             else { let e = errno; detail += " · opendir errno \(e) (\(String(cString: strerror(e))))" }
@@ -592,7 +674,7 @@ enum DriveIssueKind: Int, Sendable, Comparable {
     var advice: String {
         switch self {
         case .unreadableFolder:
-            return "These folders kept failing to read even after retries. On a slow external drive that's often heavy throttling, not damage — Rescan when the drive is idle and most should clear. If one still fails, swipe it to Rebuild in place (the folder keeps its name and path, so everything attached to it stays), or re-copy it from the Mac to the same place and eject the drive properly (Finder ⏏ or `diskutil eject`) before unplugging."
+            return "These folders kept failing to read even after retries. On a slow external drive that can be throttling — Rescan when the drive is idle. If one still fails, iOS's exFAT driver is rejecting the folder itself (macOS still reads it). Fix it on the Mac: Share this list, then run mac/exfat_inspect.py on it first (read-only — shows what iOS objects to) and mac/rebuild_exfat_folders.py --move, which rebuilds each folder in place without copying, keeping its name and path so everything attached to it stays. Eject the drive in Finder before unplugging."
         case .blankFile:
             return "The file has a size but its data is all zeros — exFAT allocated the space and the copy was interrupted before the bytes landed. These can't be recovered here: delete and re-copy the real file to the same place, and its Favorites, captions and labels will pick up again."
         case .unreadableFile:
@@ -607,4 +689,97 @@ enum DriveIssueKind: Int, Sendable, Comparable {
     }
     /// Folders aren't deleted from here (the fix is a rebuild or a clean re-copy); bad files can be removed.
     var deletable: Bool { self != .unreadableFolder && self != .damagedLeftover }
+}
+
+/// The missing entries of one metadata category: each with the same-named items found elsewhere on
+/// the drive (best match first) to re-link it to, or Forget for things deleted for good. Keeps its
+/// own list so rows disappear as they're handled; the parent re-audits after each action.
+private struct OrphanListSheet: View {
+    let category: MetadataCategory
+    let relative: (URL) -> String
+    let candidates: (String) -> [String]
+    let onRelink: (String, String) -> Void
+    let onForget: ([String]) -> Void
+    @State private var remaining: [String]
+    @State private var confirmForgetAll = false
+    @Environment(\.dismiss) private var dismiss
+
+    init(category: MetadataCategory, paths: [String], relative: @escaping (URL) -> String,
+         candidates: @escaping (String) -> [String], onRelink: @escaping (String, String) -> Void,
+         onForget: @escaping ([String]) -> Void) {
+        self.category = category
+        self.relative = relative
+        self.candidates = candidates
+        self.onRelink = onRelink
+        self.onForget = onForget
+        _remaining = State(initialValue: paths)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(remaining, id: \.self) { path in row(path) }
+                } footer: {
+                    Text("Re-link moves the entry to the item you pick. Forget removes everything the app kept for that missing item (a backup is saved to this phone first).")
+                }
+            }
+            .overlay {
+                if remaining.isEmpty {
+                    ContentUnavailableView("All Handled", systemImage: "checkmark.circle")
+                }
+            }
+            .navigationTitle(category.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                if remaining.count > 1 {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Forget All", role: .destructive) { confirmForgetAll = true }
+                    }
+                }
+            }
+            .confirmationDialog("Forget all \(remaining.count) missing \(category.title.lowercased())?",
+                                isPresented: $confirmForgetAll, titleVisibility: .visible) {
+                Button("Forget All", role: .destructive) {
+                    onForget(remaining)
+                    remaining.removeAll()
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+        }
+    }
+
+    private func row(_ path: String) -> some View {
+        let url = URL(fileURLWithPath: path)
+        let found = candidates(path)
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(url.lastPathComponent).font(.subheadline)
+            Text("was in " + relative(url.deletingLastPathComponent())).font(.caption).foregroundStyle(.secondary)
+            if found.isEmpty {
+                Text("Not found anywhere on the drive").font(.caption2).foregroundStyle(.tertiary)
+            } else {
+                ForEach(found.prefix(4), id: \.self) { match in
+                    Button {
+                        onRelink(path, match)
+                        remaining.removeAll { $0 == path }
+                    } label: {
+                        Label("Re-link to " + relative(URL(fileURLWithPath: match).deletingLastPathComponent()),
+                              systemImage: "link")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                }
+                if found.count > 4 {
+                    Text("+\(found.count - 4) more with the same name").font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+                onForget([path])
+                remaining.removeAll { $0 == path }
+            } label: { Label("Forget", systemImage: "trash") }
+        }
+    }
 }

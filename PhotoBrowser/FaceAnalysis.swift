@@ -124,6 +124,17 @@ final class FaceStore: @unchecked Sendable {
         if !adds.isEmpty { Task.detached(priority: .utility) { [self] in flush() } }
     }
 
+    /// Drops the detections of every path `drop` selects (their files are gone for good).
+    func remove(where drop: (String) -> Bool) {
+        lock.lock()
+        let before = map.count
+        map = map.filter { !drop($0.key) }
+        let changed = map.count != before
+        if changed { dirty = true }
+        lock.unlock()
+        if changed { Task.detached(priority: .utility) { [self] in flush() } }
+    }
+
     /// Rewrites every stored path through `transform` — used when files move/rename
     /// in-app and when the drive remounts under a new mount UUID, so detections
     /// (and the People groupings that reference them) stay attached.

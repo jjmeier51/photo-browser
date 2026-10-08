@@ -809,6 +809,25 @@ final class Library {
             for p in paths { try? FileManager.default.removeItem(atPath: p) }
         }
         removeTrashRecords(expired.map(\.id))
+        forgetPurgedMetadata(expired)
+    }
+
+    /// Forgets the metadata of trashed items that are now gone for good. Their entries were kept under
+    /// the original path so a restore could reconnect them (see `recordTrashed`); once purged, nothing
+    /// ever will — they were piling up as Drive Health's "metadata pointing at missing items". Skipped
+    /// for an original place something new has since taken (those entries belong to the new item).
+    func forgetPurgedMetadata(_ items: [TrashEntry]) {
+        let originals = items.map { (path: $0.originalPath, isFolder: $0.isFolder) }
+        guard !originals.isEmpty else { return }
+        Task {
+            let free = await Task.detached(priority: .utility) {
+                originals.filter { !FileManager.default.fileExists(atPath: $0.path) }
+            }.value
+            guard !free.isEmpty else { return }
+            let exact = Set(free.map { $0.path })
+            let prefixes = free.filter { $0.isFolder }.map { $0.path + "/" }
+            forgetMetadata { p in exact.contains(p) || prefixes.contains { p.hasPrefix($0) } }
+        }
     }
 
     // MARK: - On This Day (Memories)
@@ -3027,6 +3046,79 @@ final class Library {
         persistAllPathKeyed()
         labelsVersion += 1
         return added
+    }
+
+    /// Removes every path-keyed entry whose path `drop` selects — for metadata whose file or folder is
+    /// gone for good: Drive Health's "Forget" and items purged from Recently Deleted (whose entries were
+    /// deliberately kept under their original path so a restore could reconnect them, and then were
+    /// never cleaned up — the bulk of the "metadata pointing at missing items" Drive Health reported).
+    /// Covers every store `metadataPaths(under:)` audits, plus Clean Up progress and Not-Duplicates
+    /// pairs; cover and custom-thumbnail images are deleted with their last entry. Returns the number
+    /// of entries removed.
+    @discardableResult
+    func forgetMetadata(where drop: @escaping (String) -> Bool) -> Int {
+        var removed = 0
+        func prune(_ set: inout Set<String>) {
+            let kept = set.filter { !drop($0) }
+            removed += set.count - kept.count
+            set = kept
+        }
+        func pruneKeys<V>(_ dict: inout [String: V]) {
+            let kept = dict.filter { !drop($0.key) }
+            removed += dict.count - kept.count
+            dict = kept
+        }
+        prune(&favorites); prune(&aiLabels); prune(&editedInAppPaths); prune(&aiGeneratedPaths)
+        prune(&framesFolders); prune(&kardashianFolders); prune(&instagramHighlights); prune(&albumHighlights)
+        prune(&reviewsFolders); prune(&hiddenFolders); prune(&hiddenFiles)
+        customLabels = customLabels.mapValues { paths in var s = paths; prune(&s); return s }
+        pruneKeys(&captions); pruneKeys(&photoOrigins); pruneKeys(&igPostedBy); pruneKeys(&igLastHandle)
+        pruneKeys(&lastTikTokHandleByFolder); pruneKeys(&tiktokLikes); pruneKeys(&folderBirthdays)
+        pruneKeys(&instagramFolders); pruneKeys(&facebookFolders); pruneKeys(&tiktokFolders)
+        pruneKeys(&vscoFolders); pruneKeys(&lastVSCOUsernameByFolder)
+        pruneKeys(&ofFolders); pruneKeys(&lastOFUsernameByFolder); pruneKeys(&lastFacebookURLByFolder)
+        pruneKeys(&textMessageArchives); pruneKeys(&aiGenerations); pruneKeys(&cleanupReviewed)
+        pruneKeys(&bubbleOrders); pruneKeys(&storyLinks)
+        notDuplicatePairs = notDuplicatePairs.filter { pair in
+            !pair.split(separator: "\n", maxSplits: 1).contains { drop(String($0)) }
+        }
+        for (name, state) in accessKardashian where drop(state.folderPath) {
+            accessKardashian.removeValue(forKey: name); removed += 1
+        }
+        people = people.mapValues { ids in
+            let kept = ids.filter { !drop(Self.pathOfFaceID($0)) }
+            removed += ids.count - kept.count
+            return kept
+        }
+        FaceStore.shared.remove(where: drop)
+        // Cover / custom-thumbnail images: each entry owns its file (see `transferMetadata`), but only
+        // delete a file no remaining entry still names.
+        func pruneImages(_ table: inout [String: String], in dir: URL) {
+            let gone = table.filter { drop($0.key) }
+            guard !gone.isEmpty else { return }
+            table = table.filter { !drop($0.key) }
+            removed += gone.count
+            let stillUsed = Set(table.values)
+            for filename in Set(gone.values) where !stillUsed.contains(filename) {
+                try? FileManager.default.removeItem(at: dir.appendingPathComponent(filename))
+            }
+        }
+        pruneImages(&folderCovers, in: coversDirectory)
+        pruneImages(&itemThumbnails, in: itemThumbsDirectory)
+
+        guard removed > 0 else { return 0 }
+        persistCustomLabels()
+        persistPeople()
+        persistAIGenerations()
+        persistInstagramFolders()
+        persistFacebookFolders()
+        persistOFFolders()
+        persistTikTokFolders()
+        persistTikTokLikes()
+        persistVSCOFolders()
+        persistAllPathKeyed()
+        labelsVersion += 1
+        return removed
     }
 
     /// Labeled items (favorites / To AI / custom labels) at or below `folder`,

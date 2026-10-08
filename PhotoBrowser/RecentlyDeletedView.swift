@@ -86,12 +86,14 @@ struct RecentlyDeletedView: View {
         Haptics.warning()
         FileActions.purgeTrash([item])
         library.removeTrashRecords([item.id])
+        library.forgetPurgedMetadata([item])
     }
     private func emptyAll() {
         Haptics.warning()
         let all = library.trash
         FileActions.purgeTrash(all)
         library.removeTrashRecords(all.map(\.id))
+        library.forgetPurgedMetadata(all)
     }
 }
 
