@@ -83,6 +83,40 @@ in the iOS app) and the model names written in (`--no-exif` to skip). Each galle
 `pornstar.json` index. `--workers N` sets parallel downloads per gallery (default 4); Ctrl-C stops
 cleanly.
 
+## Safe Finder — a Finder window that moves files onto the SSD safely (`safe_finder.py`)
+
+Looks and works like Finder: a sidebar (Favorites, and Locations with an eject button for the
+SSD), and two panes side by side — **From** (your Mac) and **To** (the SSD) — each with icon view
+(photo and video thumbnails, size slider) or list view, back/forward and a path bar. Select files
+or folders on the left and press **Move to “Extreme SSD”** (or Copy), or drag them onto the right
+pane — onto a folder there to put them inside it. Drags from the real Finder work too.
+
+Before anything happens a sheet shows exactly what will: how many files and how much space, names
+that will be adjusted for iOS, macOS junk left behind, folders that would get very large, and
+whether there's room. Then:
+
+- **Nothing half-written ever appears on the SSD.** Each file is written into a hidden staging
+  folder at the top of the drive, flushed to the disk, checked, and only then moved into its
+  folder under its real name. If the copy is interrupted, the half-written file is cleared up the
+  next time you run a transfer.
+- **Every copy is verified.** It's read back from the drive (not the Mac's memory) and compared
+  with the original.
+- **Move only trashes what's safe.** An original goes to the Trash only after its copy (for a
+  folder, every file in it) was verified. On the same drive, a move is just a rename.
+- **No `._` files, iOS-safe names, never overwrites.** An identical file already there is
+  skipped, so running the same transfer again is safe. A different file with the same name is
+  saved as "name (1)".
+- **One file at a time.** You can Pause and Stop: the file in progress is cleaned up, finished
+  files stay, and nothing is trashed. The Mac is kept from sleeping while it runs, and the transfer
+  stops cleanly if the drive is unplugged.
+- **Eject** (sidebar ⏏ or the button after a transfer) flushes everything and unmounts the SSD
+  properly.
+
+```sh
+open "mac/Safe Finder.command"                     # or double-click it in Finder; the first run installs PySide6
+mac/.venv/bin/python mac/safe_finder.py --from ~/Downloads --to "/Volumes/Extreme SSD"
+```
+
 ## Copy or move folders onto the SSD safely (`safe_copy_to_ssd.py`)
 
 Use this instead of dragging folders in Finder. A small window (standard library only):

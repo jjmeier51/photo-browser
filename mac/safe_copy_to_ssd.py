@@ -247,11 +247,11 @@ class Copier:
                 try:
                     result = self._copy_one(fj)
                     stats[result] += 1
+                    if fj.renamed and result == "copied":
+                        self.log(f"   renamed for exFAT/iOS: {rename_note(fj.src.name, fj.dst.name)}")
                 except InterruptedError:
                     self.log(f"   stopped during {fj.src.name} — its partial copy was removed")
                     break
-                    if fj.renamed and result == "copied":
-                        self.log(f"   renamed for exFAT/iOS: {rename_note(fj.src.name, fj.dst.name)}")
                 except Exception as e:  # noqa: BLE001 — one bad file must not stop the rest
                     stats["failed"] += 1
                     failed_here += 1
