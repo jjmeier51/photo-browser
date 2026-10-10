@@ -95,10 +95,16 @@ Before anything happens a sheet shows exactly what will: how many files and how 
 that will be adjusted for iOS, macOS junk left behind, folders that would get very large, and
 whether there's room. Then:
 
-- **Nothing half-written ever appears on the SSD.** Each file is written into a hidden staging
-  folder at the top of the drive, flushed to the disk, checked, and only then moved into its
-  folder under its real name. If the copy is interrupted, the half-written file is cleared up the
-  next time you run a transfer.
+- **Folders are never flushed.** Flushing a folder on this exFAT drive is what made folders
+  unreadable on the iPhone, including folders made by the first version of Safe Finder. Only the
+  files' data is flushed, and the whole drive is synced between items.
+- **A new folder arrives whole.** It's built as a hidden ".<name>.incoming" folder, written the same
+  way as the rebuild script (whose folders the iPhone reads), and renamed to its real name only
+  once every file is in and checked. If a transfer is cut off, the hidden folder is picked up
+  again next time.
+- **Nothing half-written appears in an existing folder.** Files added to a folder that's already
+  there go through a hidden staging folder at the top of the drive and are moved in only when
+  complete and checked.
 - **Every copy is verified.** It's read back from the drive (not the Mac's memory) and compared
   with the original.
 - **Move only trashes what's safe.** An original goes to the Trash only after its copy (for a

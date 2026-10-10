@@ -118,7 +118,6 @@ enum Archiver {
         let entries = try centralDirectory(data)
         do { try retrying { try DriveWriter.createDirectory(at: destDir) } }
         catch { throw ArchiveError.driveWrite(writeFailureReason(error)) }
-        DriveWriter.fullSync(destDir)
         let total = max(entries.count, 1)
         for (i, e) in entries.enumerated() {
             // Skip macOS resource-fork sidecars that clutter every Finder-made zip.
@@ -228,7 +227,6 @@ enum Archiver {
         var lastErr: Error?
         do {
             try retrying { try DriveWriter.createDirectory(at: parent) }
-            DriveWriter.fullSync(parent)                                // commit the new dir before writing into it
         } catch { throw ArchiveError.driveWrite(writeFailureReason(error)) }
         // Write each entry through the temp→fsync→rename path: the final name only appears once the
         // file is complete, so an interrupted/refused write leaves a hidden `.pbtmp_` (swept away) —

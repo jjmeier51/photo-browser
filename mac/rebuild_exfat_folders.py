@@ -170,24 +170,6 @@ def rebuild(folder: Path, apply: bool) -> bool:
     return True
 
 
-def full_sync(path: Path) -> None:
-    """Flush `path` (file or folder) all the way to the disk — exFAT has no journal."""
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        import fcntl
-        fcntl.fcntl(fd, getattr(fcntl, "F_FULLFSYNC", 51))
-    except (OSError, ImportError):
-        try:
-            os.fsync(fd)
-        except OSError:
-            pass
-    finally:
-        os.close(fd)
-
-
 def moving_temp(folder: Path) -> Path:
     return folder.parent / f".{folder.name}.moving"
 
@@ -212,7 +194,6 @@ def rebuild_by_moving(folder: Path, apply: bool, drop_leftovers: bool) -> bool:
             print(f"  would finish an interrupted rebuild of {folder}")
             return True
         temp.rename(folder)
-        full_sync(folder.parent)
         os.sync()
         print(f"Finished the interrupted rebuild of {folder}")
         return True
@@ -305,15 +286,13 @@ def rebuild_by_moving(folder: Path, apply: bool, drop_leftovers: bool) -> bool:
         return False
 
     st = folder.stat()
-    full_sync(temp)
+    os.sync()                    # whole volume — never fsync a folder itself (that's what breaks them on iOS)
     os.rmdir(folder)
     temp.rename(folder)
     try:
         os.utime(folder, (st.st_atime, st.st_mtime))
     except OSError:
         pass
-    full_sync(folder)
-    full_sync(folder.parent)
     os.sync()
     print(f"  done — {moved} items in a fresh folder"
           + (f", {dropped} leftover .sb- temps deleted" if dropped else "")

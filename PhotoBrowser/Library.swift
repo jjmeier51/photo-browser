@@ -3832,15 +3832,14 @@ final class Library {
     /// reader stops at the first strategy that returns anything, so when iOS's external-drive layer
     /// hands the coordinated read a stale cached enumeration (folders made in Finder on a Mac never
     /// appear), the fresher answer another path might give is never consulted. Here each URL's
-    /// cached resource values are dropped, the directory is flushed (`F_FULLFSYNC` on a read-only
-    /// descriptor — nothing is written), and the coordinated, URL, path-based, enumerator and POSIX
-    /// listings are unioned by name. Returns the merged URLs and how many names only the extra
+    /// cached resource values are dropped and the coordinated, URL, path-based, enumerator and POSIX
+    /// listings are unioned by name. (It used to `F_FULLFSYNC` the folder first — flushing a folder is
+    /// what makes iOS unable to open it, see `DriveWriter.fullSync`.) Returns the merged URLs and how many names only the extra
     /// reads saw. Slower than `coordinatedContents`; only for the explicit refresh.
     nonisolated static func thoroughContents(of folder: URL) -> (urls: [URL], extra: Int) {
         let fm = FileManager.default
         var dir = URL(fileURLWithPath: folder.path, isDirectory: true)
         dir.removeAllCachedResourceValues()
-        DriveWriter.fullSync(dir)
         let primary = coordinatedContents(of: dir, keys: [.isDirectoryKey])
         var byName: [String: URL] = [:]
         for u in primary { byName[u.lastPathComponent] = u }

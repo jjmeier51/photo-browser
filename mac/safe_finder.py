@@ -54,7 +54,7 @@ except ModuleNotFoundError:
              "  python3 -m venv mac/.venv && mac/.venv/bin/pip install -r mac/requirements.txt")
 
 import safe_transfer as engine
-from safe_copy_to_ssd import human, safe_name, sync_dir
+from safe_copy_to_ssd import human, safe_name
 
 try:
     from PIL import Image, ImageOps
@@ -984,9 +984,7 @@ class Pane(QWidget):
             QMessageBox.information(self, "New Folder", f"“{target.name}” already exists here.")
             return
         try:
-            os.mkdir(target)
-            sync_dir(target)                       # flushed, like every folder Safe Finder makes
-            sync_dir(target.parent)
+            os.mkdir(target)                       # never flushed — flushing a folder breaks it on iOS
         except OSError as e:
             QMessageBox.warning(self, "New Folder", f"Couldn't create the folder: {e}")
 

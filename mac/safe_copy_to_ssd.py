@@ -7,8 +7,9 @@ macOS's. Folders filled by Finder ended up with thousands of "._" AppleDouble fi
 directories. This tool:
 
   * copies one file at a time into a hidden temp file, flushes it all the way to the disk
-    (F_FULLFSYNC), then renames it into place and flushes the folder — a file is either complete or
-    absent, never half-written;
+    (F_FULLFSYNC), then renames it into place — a file is either complete or absent, never
+    half-written. Folders themselves are never flushed (on Apple's exFAT driver that leaves a folder
+    iOS can't open); the volume is synced after each folder;
   * verifies every file by re-reading it from the drive (bypassing the Mac's cache) and comparing a
     checksum with the original — optional, on by default;
   * never copies macOS junk (._ AppleDouble files, .DS_Store) and never creates new ._ files;
@@ -93,19 +94,6 @@ def full_sync(fd: int) -> None:
         except OSError:
             pass
     os.fsync(fd)
-
-
-def sync_dir(path: Path) -> None:
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        full_sync(fd)
-    except OSError:
-        pass
-    finally:
-        os.close(fd)
 
 
 def hash_file(path: Path, no_cache: bool = False) -> str:
@@ -234,10 +222,9 @@ class Copier:
             self.log(f"\n▶ {job.src}  →  {job.dst}")
             failed_here = 0
             for d in job.dirs:
-                if not d.exists():
-                    d.mkdir(parents=True, exist_ok=True)
-                    sync_dir(d)
-                    sync_dir(d.parent)
+                # Never flush a folder (fsync on a directory): on Apple's exFAT driver that leaves a
+                # record iOS can't open. File data is flushed; the volume is synced after each folder.
+                d.mkdir(parents=True, exist_ok=True)
             for fj in job.files:
                 self.unpaused.wait()
                 if self.stop.is_set():
@@ -257,7 +244,7 @@ class Copier:
                     failed_here += 1
                     self.log(f"   FAILED {fj.src.name}: {e}")
                 done_bytes += fj.size
-            sync_dir(job.dst)
+            os.sync()
             if self.move and not self.stop.is_set():
                 if failed_here:
                     self.log(f"   kept the original folder — {failed_here} file(s) failed")
@@ -303,7 +290,6 @@ class Copier:
                 raise IOError("checksum mismatch — the drive returned different bytes")
             os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
             os.rename(tmp, dst)
-            sync_dir(dst.parent)
             return "copied"
         except BaseException:
             try:

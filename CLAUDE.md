@@ -314,12 +314,20 @@ These were discovered the painful way; the current code already respects them.
     to its final path, or a write still in flight when iOS suspends the app leaves a
     torn directory that `fsck_exfat` later reports as "zero length directory",
     "cluster chain overlaps" or "unexpected critical primary directory entry" (the
-    AI-folder corruption). Rules: create folders with `DriveWriter.createDirectory`
-    (flushes each new level), place files with `DriveWriter.shared.writeData` /
-    `writeDataUnique` / `commit` (temp → fsync → rename → flush, serialized) or the
-    sync `writeDataSync`, never `Data.write`/`CGImageDestinationCreateWithURL` to a
-    final drive path, and hold a `BackgroundTaskHolder` across the write when the
-    user may have left the app (see `docs/feature-notes.md` §12).
+    AI-folder corruption). Rules: create folders with `DriveWriter.createDirectory`,
+    place files with `DriveWriter.shared.writeData` / `writeDataUnique` / `commit`
+    (temp → fsync the file → rename, serialized) or the sync `writeDataSync`, never
+    `Data.write`/`CGImageDestinationCreateWithURL` to a final drive path, and hold a
+    `BackgroundTaskHolder` across the write when the user may have left the app (see
+    `docs/feature-notes.md` §12).
+    **Never fsync / `F_FULLFSYNC` a directory** on the drive — not after creating it, not
+    after adding a file to it, not "to refresh" it. Apple's exFAT driver (iOS and macOS)
+    then writes a stale copy of that folder's own record into its parent, and iOS can't
+    open the folder again ("opendir errno 22"; fsck: "Directory … has zero length"). Every
+    folder Drive Health listed as unreadable had been flushed that way; the copy rebuild,
+    which never flushes a folder, produced folders iOS reads. `DriveWriter.fullSync` refuses
+    directories, so `fullSyncFileAndParent` and every other flush only touch files; a
+    whole-volume `sync()` (quiesce) is fine. Same rule for the Mac tools in `mac/`.
 13. **`nonisolated async` is not "off the main thread".** The target builds with
     `SWIFT_APPROACHABLE_CONCURRENCY` (NonisolatedNonsendingByDefault), so a plain
     `nonisolated async func` runs on whatever actor *awaited* it — awaited from a

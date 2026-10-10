@@ -80,10 +80,7 @@ actor DriveWriter {
         } else {
             try fm.moveItem(at: temp, to: dest)
         }
-        flush(dest)                                   // file contents durable…
-        // …and, on exFAT/FAT, the directory entry that names it. APFS/HFS+ journal the rename with
-        // its metadata, so the separate directory flush is redundant there.
-        if Self.syncMode == .full { flush(dest.deletingLastPathComponent()) }
+        flush(dest)                                   // file contents durable (the folder is never flushed — see `fullSync`)
     }
 
     /// Durable, serialized write of in-memory `data` to `dest` on the drive.
@@ -147,24 +144,23 @@ actor DriveWriter {
             if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
             try fm.moveItem(at: tmp, to: dest)            // same-volume rename = atomic
             flush(dest)
-            if Self.syncMode == .full { flush(dest.deletingLastPathComponent()) }
         } catch {
             try? fm.removeItem(at: tmp)
             throw error
         }
     }
 
-    /// Flushes the drive root at an inter-commit boundary. Because the actor runs one job at
+    /// Syncs the whole volume at an inter-commit boundary. Because the actor runs one job at
     /// a time and this method has no interior `await`, it can only execute *between* commits —
     /// never mid-write — so when it runs, whatever committed last has already finished its
-    /// `fsync`. This adds a final flush of the volume root on top.
+    /// `fsync`. This adds a whole-volume `sync()` on top (never a per-folder flush — see `fullSync`).
     ///
     /// Called on app-background as the lightweight "arm the safe state" step: it does NOT
     /// pause, so any active download window keeps committing at full speed; it just guarantees
     /// a flushed baseline the instant we background, in case the user then unplugs while
     /// suspended. The full drain (for a deliberate eject) is `pause()` + `waitUntilIdle()`.
     func quiesce(root: URL? = nil) {
-        if let root { flush(root) }
+        if root != nil { sync() }      // whole-volume sync — never a per-folder flush (see `fullSync`)
     }
 
     /// Awaits until no commit is in flight. After `pause()` no *new* commit can start
@@ -200,7 +196,20 @@ actor DriveWriter {
     /// alone still prevents overlapping directory writes.
     private func flush(_ url: URL) { Self.fullSync(url) }
 
-    /// Force a file (or directory) durable, using the strategy `syncMode` selected for this drive.
+    /// Force a **file** durable, using the strategy `syncMode` selected for this drive. Directories are
+    /// deliberately skipped — never `fsync`/`F_FULLFSYNC` a folder on these drives:
+    ///
+    /// Field finding (Oct 2026): every folder iOS refused to open ("opendir errno 22", Drive Health's
+    /// unreadable list) had been flushed as a *directory* right after it was created or while it was
+    /// growing — the AI / Screenshots / Duplicate PNGs helper folders (`createDirectory` flushed each new
+    /// level and every commit flushed the parent), the Kardashian member folders (a parent flush after
+    /// each of 46k photos), Force Refresh (flushed the folder it re-read), and Mac tools that did the
+    /// same (Safe Finder). The one Mac writer whose folders iOS always read — the copy rebuild — never
+    /// flushes a folder. The drive root, flushed on every backgrounding, stayed fine: it has no record
+    /// in a parent. This matches Apple's exFAT driver writing a stale copy of a folder's own record
+    /// (size / cluster chain) into its parent when that folder is flushed (fsck: "Directory /X/AI has
+    /// zero length"). So: file data is flushed; directory metadata is left to the driver, and the whole
+    /// volume is synced with `sync()` at `quiesce` (backgrounding / eject).
     ///
     /// On exFAT/FAT (`.full`) this uses `F_FULLFSYNC`, **not** plain `fsync`: on Apple platforms
     /// `fsync` only pushes data to the drive's own write cache and returns — the drive may still hold
@@ -212,6 +221,8 @@ actor DriveWriter {
     /// fcntl. `nonisolated static` so any write path (in-place edits, unzip, downloads) can flush
     /// without hopping onto the actor.
     nonisolated static func fullSync(_ url: URL) {
+        var st = stat()
+        guard stat(url.path, &st) == 0, (st.st_mode & S_IFMT) != S_IFDIR else { return }   // never a folder — see above
         let fd = open(url.path, O_RDONLY)
         guard fd >= 0 else { return }
         let cmd: Int32 = (syncMode == .full) ? F_FULLFSYNC : F_BARRIERFSYNC
@@ -230,15 +241,9 @@ actor DriveWriter {
         try FileManager.default.copyItem(at: src, to: dest)
     }
 
-    /// Create `dir` (and any missing parents) **durably**: on exFAT/FAT every directory this call
-    /// creates, plus the parent that gained the entry, is flushed to media before returning.
-    ///
-    /// A plain `createDirectory` is the other half of the corruption story: exFAT allocates the new
-    /// directory's cluster and writes the entry into the parent, but both sit in the drive's cache. An
-    /// unplug (or a jetsam kill followed by an unplug) in that window is exactly what `fsck_exfat`
-    /// later reports as "Directory /X/AI has zero length" and "cluster chain … overlaps a previously
-    /// allocated cluster" — the folder was half-born. Flushing per level closes the window. A
-    /// directory that already exists costs one `stat` and no flush, so this is safe on hot paths.
+    /// Create `dir` (and any missing parents). An existing directory costs one `stat`, so this is safe
+    /// on hot paths. The new folders are **not** flushed: flushing a just-created folder is what left
+    /// "zero length" AI folders iOS couldn't open (see `fullSync`).
     nonisolated static func createDirectory(at dir: URL) throws {
         let fm = FileManager.default
         var isDir: ObjCBool = false
@@ -246,17 +251,7 @@ actor DriveWriter {
             if isDir.boolValue { return }
             throw CocoaError(.fileWriteFileExists)
         }
-        // Walk up to the deepest existing ancestor so every level we create gets flushed.
-        var created: [URL] = []
-        var cursor = dir.standardizedFileURL
-        while !fm.fileExists(atPath: cursor.path), cursor.pathComponents.count > 1 {
-            created.append(cursor)
-            cursor = cursor.deletingLastPathComponent()
-        }
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        guard syncMode == .full else { return }
-        for d in created.reversed() { fullSync(d) }   // new directories, top-down
-        fullSync(cursor)                                // the parent that gained an entry
     }
 
     /// The folder named `name` inside `parent`, guaranteed to exist and be **readable on iOS** —
@@ -359,12 +354,10 @@ actor DriveWriter {
         }
     }
 
-    /// Flush a just-written file, plus (on exFAT/FAT) the directory entry that names it — the pair
-    /// that must agree for a no-journal volume to stay consistent. On APFS/HFS+ the rename is
-    /// journaled with its metadata, so only the file is flushed. Use from non-`commit` write paths
-    /// (edits, unzip, service downloads, copies).
+    /// Flush a just-written file. (It used to flush the parent folder too; that is what made folders
+    /// unreadable on iOS — see `fullSync` — so the name is historical.) Use from non-`commit` write
+    /// paths (edits, unzip, service downloads, copies).
     nonisolated static func fullSyncFileAndParent(_ url: URL) {
         fullSync(url)
-        if syncMode == .full { fullSync(url.deletingLastPathComponent()) }
     }
 }

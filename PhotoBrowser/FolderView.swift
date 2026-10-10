@@ -2563,7 +2563,6 @@ struct FolderView: View {
                 // Extraction fully succeeded → remove the now-redundant archive and drop its labels.
                 await Task.detached {
                     try? FileManager.default.removeItem(at: archive)
-                    DriveWriter.fullSync(folder)
                 }.value
                 resultMessage = "Extracted to “\(dest.lastPathComponent)” and removed the .zip."
                 library.contentDidChange(under: folder)

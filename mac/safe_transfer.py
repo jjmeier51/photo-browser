@@ -4,12 +4,17 @@ worker thread and reports through callbacks), so it can be tested on its own.
 
 What it does differently from Finder:
 
-* **Nothing half-written ever appears in a destination folder.** Each file is written to a temp
-  file in one hidden staging folder at the top of the drive, flushed all the way to the disk
-  (F_FULLFSYNC), verified, and only then moved into its folder under its final name. A
-  destination folder only ever gains complete files with their real names — no temp names
-  renamed in place, no leftovers after a crash (they stay in the staging folder and are cleared
-  on the next run).
+* **Folders are never flushed** (no fsync / F_FULLFSYNC on a directory). On Apple's exFAT driver that
+  writes a stale copy of the folder's own record into its parent, and iOS then can't open the
+  folder — the cause of every "unreadable on iOS" folder we traced, including the first version of
+  this tool. Only file data is flushed; the volume is synced with `sync()` between items.
+* **A new folder arrives whole** — the same way `rebuild_exfat_folders.py` writes, the one method
+  whose folders iOS always read: it's built as a hidden ".<name>.incoming" folder, files written
+  straight into it, and renamed to its real name only once every file is in and checked. If a run
+  is cut off, the hidden folder is picked up again next time.
+* **Nothing half-written appears in an existing folder.** Files added to a folder that's already
+  there are written to a temp file in a hidden staging folder at the top of the drive, flushed,
+  verified, and only then moved in under their final name.
 * **Every copy is checked** — re-read from the drive bypassing the Mac's cache and compared
   with a checksum of the original (on by default).
 * **No macOS junk**: `._*` AppleDouble files and `.DS_Store` are never copied, and if macOS
@@ -39,9 +44,10 @@ from pathlib import Path
 from typing import Callable
 
 from safe_copy_to_ssd import (CHUNK, IOS_FOLDER_LIMIT, full_sync, hash_file, human, is_junk,
-                              rename_note, safe_name, sync_dir)
+                              rename_note, safe_name)
 
 STAGING_NAME = ".Safe Finder Staging"
+INCOMING_SUFFIX = ".incoming"              # a new folder is built as hidden ".<name>.incoming", then renamed
 
 
 def volume_root(path: Path) -> Path:
@@ -245,6 +251,7 @@ class Transfer:
         self.total_files = plan.total_files
         self.done_bytes = 0
         self.done_files = 0
+        self._last_sync = time.time()
 
     # -- control
     def start(self) -> threading.Thread:
@@ -266,8 +273,6 @@ class Transfer:
               "stopped": False, "error": None, "seconds": 0.0}
         t0 = time.time()
         try:
-            if any(not (self.move and t.same_drive) for t in self.plan.tops):
-                self._prepare_staging()
             for index, top in enumerate(self.plan.tops):
                 if self.stop.is_set():
                     break
@@ -277,17 +282,24 @@ class Transfer:
                 verb = "Moving" if self.move else "Copying"
                 self.log(f"{verb} “{top.src.name}” → {top.dst.parent}")
                 failed_here = 0
-                for d in top.dirs:                       # the whole folder structure first, each flushed
-                    self._check_drive()
-                    self._make_dirs(d)
+                # A brand-new folder is built hidden and revealed whole (see the module doc).
+                building = top.is_dir and not os.path.lexists(top.dst)
+                root = top.dst.parent / f".{top.dst.name}{INCOMING_SUFFIX}" if building else top.dst
+
+                def where(p: Path) -> Path:
+                    return root / p.relative_to(top.dst) if building else p
+
+                if building and root.is_dir():
+                    self.log(f"   picking up the unfinished copy from last time (“{root.name}”)")
                 for c in (c for c in self.plan.copies if c.top == index):
                     self.unpaused.wait()
                     if self.stop.is_set():
                         break
                     self._check_drive()
                     try:
-                        self._make_dirs(c.dst.parent)
-                        result = self._copy_one(c)
+                        dst = where(c.dst)
+                        self._make_dirs(dst.parent)
+                        result = self._copy_one(c, dst, direct=building)
                         st[result] += 1
                         if result == "skipped":
                             self.log(f"   already there, identical: {c.dst.name}")
@@ -305,8 +317,23 @@ class Transfer:
                     self.done_bytes += c.size
                     self.done_files += 1
                     self._tick(c.src.name, "Copying", force=True)
-                if top.is_dir and top.dst.is_dir():
-                    sync_dir(top.dst)
+                    self._sync_now_and_then()
+                if top.is_dir and not self.stop.is_set():
+                    for d in top.dirs:                   # empty folders too, after the files (like copytree)
+                        self._make_dirs(where(d))
+                if building:
+                    if failed_here or self.stop.is_set():
+                        self.log(f"   the unfinished copy is kept hidden as “{root.name}” — run the same "
+                                 "transfer again to finish it")
+                    else:
+                        os.sync()
+                        final = top.dst if not os.path.lexists(top.dst) else self._free_name(top.dst, True)
+                        os.rename(root, final)
+                        os.sync()
+                        if final != top.dst:
+                            self.log(f"   “{top.dst.name}” appeared meanwhile — this one is “{final.name}”")
+                else:
+                    os.sync()
                 if self.move and not self.stop.is_set():
                     if failed_here:
                         st["kept"] += 1
@@ -325,8 +352,6 @@ class Transfer:
             st["error"] = str(e)
             self.log(f"STOPPED: {e}")
         finally:
-            if self.staging is not None:
-                sync_dir(self.staging)
             try:
                 os.sync()
             except OSError:
@@ -344,7 +369,6 @@ class Transfer:
             try:
                 if not staging.is_dir():
                     os.mkdir(staging)
-                    sync_dir(base)
                 probe = staging / f"{uuid.uuid4().hex}.probe"
                 fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
                 os.close(fd)
@@ -367,16 +391,15 @@ class Transfer:
             raise DriveGone()
 
     def _make_dirs(self, d: Path) -> None:
-        """Create `d` level by level, flushing each new folder and its parent."""
-        missing = []
-        p = d
-        while not p.exists():
-            missing.append(p)
-            p = p.parent
-        for level in reversed(missing):
-            os.mkdir(level)
-            sync_dir(level)
-            sync_dir(level.parent)
+        """Create `d` and any missing parents — never flushed (flushing a folder is what breaks it on iOS)."""
+        os.makedirs(d, exist_ok=True)
+
+    def _sync_now_and_then(self) -> None:
+        """Whole-volume sync every few seconds, so a long run doesn't leave much in the Mac's cache."""
+        now = time.time()
+        if now - self._last_sync > 5:
+            self._last_sync = now
+            os.sync()
 
     def _tick(self, name: str, phase: str, force: bool = False, extra: int = 0) -> None:
         now = time.time()
@@ -396,59 +419,76 @@ class Transfer:
             i += 1
         return cand
 
-    def _copy_one(self, c: Copy) -> str:
-        """'copied' | 'skipped' (an identical file is already there). Raises on failure."""
-        dst = c.dst
+    def _copy_one(self, c: Copy, dst: Path, direct: bool) -> str:
+        """'copied' | 'skipped' (an identical file is already there). Raises on failure.
+
+        `direct`: `dst` is inside a hidden ".incoming" folder this tool is building, so the file is
+        written straight to its final name there (a leftover from an interrupted run is replaced).
+        Otherwise it goes through the staging folder and is moved in only when complete."""
         if os.path.lexists(dst):
             src_hash = hash_file(c.src)
-            stem, ext = dst.stem, dst.suffix
-            i, cand = 0, dst
-            while os.path.lexists(cand):
-                if cand.is_file() and cand.stat().st_size == c.size and hash_file(cand) == src_hash:
+            if direct:
+                if dst.is_file() and dst.stat().st_size == c.size and hash_file(dst) == src_hash:
                     return "skipped"
-                i += 1
-                cand = dst.with_name(f"{stem} ({i}){ext}")
-            self.log(f"   a different “{dst.name}” is already there — saving this one as “{cand.name}”")
-            dst = cand
-        assert self.staging is not None
-        tmp = self.staging / f"{uuid.uuid4().hex}.part"
-        h = hashlib.blake2b(digest_size=20)
-        st = c.src.stat()
-        written = 0
+                os.remove(dst)                                    # our own partial copy from last time
+            else:
+                stem, ext = dst.stem, dst.suffix
+                i, cand = 0, dst
+                while os.path.lexists(cand):
+                    if cand.is_file() and cand.stat().st_size == c.size and hash_file(cand) == src_hash:
+                        return "skipped"
+                    i += 1
+                    cand = dst.with_name(f"{stem} ({i}){ext}")
+                self.log(f"   a different “{dst.name}” is already there — saving this one as “{cand.name}”")
+                dst = cand
+        if direct:
+            out = dst
+        else:
+            if self.staging is None:
+                self._prepare_staging()
+            assert self.staging is not None
+            out = self.staging / f"{uuid.uuid4().hex}.part"
         try:
-            with open(c.src, "rb") as fin, open(tmp, "wb") as fout:
-                while chunk := fin.read(CHUNK):
-                    h.update(chunk)
-                    fout.write(chunk)
-                    written += len(chunk)
-                    self._tick(c.src.name, "Copying", extra=written // 2 if self.verify else written)
-                    if self.stop.is_set():
-                        raise InterruptedError("stopped")
-                    if not self.unpaused.is_set():
-                        self.unpaused.wait()
-                fout.flush()
-                full_sync(fout.fileno())
-            if tmp.stat().st_size != c.size:
-                raise IOError(f"size mismatch after copying ({tmp.stat().st_size:,} vs {c.size:,} bytes)")
-            if self.verify:
-                self._tick(c.src.name, "Verifying", force=True, extra=written // 2)
-                if hash_file(tmp, no_cache=True) != h.hexdigest():
-                    raise IOError("verification failed — the drive returned different bytes")
-            sidecar = tmp.with_name("._" + tmp.name)              # macOS's xattr stand-in on exFAT
-            if os.path.lexists(sidecar):
-                os.remove(sidecar)
-            os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
-            if os.path.lexists(dst):                              # appeared meanwhile — never overwrite
-                dst = self._free_name(dst)
-            os.rename(tmp, dst)                                   # same drive: places the finished file
-            sync_dir(dst.parent)
+            self._write_verified(c, out)
+            if not direct:
+                if os.path.lexists(dst):                          # appeared meanwhile — never overwrite
+                    dst = self._free_name(dst)
+                os.rename(out, dst)                               # same drive: places the finished file
             return "copied"
         except BaseException:
             try:
-                os.remove(tmp)
+                os.remove(out)
             except OSError:
                 pass
             raise
+
+    def _write_verified(self, c: Copy, out: Path) -> None:
+        """Copy `c.src` to `out`, flush the file (never its folder), verify by re-reading, keep dates."""
+        h = hashlib.blake2b(digest_size=20)
+        st = c.src.stat()
+        written = 0
+        with open(c.src, "rb") as fin, open(out, "wb") as fout:
+            while chunk := fin.read(CHUNK):
+                h.update(chunk)
+                fout.write(chunk)
+                written += len(chunk)
+                self._tick(c.src.name, "Copying", extra=written // 2 if self.verify else written)
+                if self.stop.is_set():
+                    raise InterruptedError("stopped")
+                if not self.unpaused.is_set():
+                    self.unpaused.wait()
+            fout.flush()
+            full_sync(fout.fileno())                              # a regular file — safe to flush
+        if out.stat().st_size != c.size:
+            raise IOError(f"size mismatch after copying ({out.stat().st_size:,} vs {c.size:,} bytes)")
+        if self.verify:
+            self._tick(c.src.name, "Verifying", force=True, extra=written // 2)
+            if hash_file(out, no_cache=True) != h.hexdigest():
+                raise IOError("verification failed — the drive returned different bytes")
+        sidecar = out.with_name("._" + out.name)                  # macOS's xattr stand-in on exFAT
+        if os.path.lexists(sidecar):
+            os.remove(sidecar)
+        os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns))
 
     def _rename_top(self, top: Top, st: dict) -> None:
         dst = top.dst
@@ -457,8 +497,7 @@ class Transfer:
             self.log(f"   “{top.dst.name}” is already there — moving as “{dst.name}”")
         try:
             os.rename(top.src, dst)
-            sync_dir(dst.parent)
-            sync_dir(top.src.parent)
+            os.sync()
             st["moved"] += 1
             self.done_files += top.files
             self.log(f"Moved “{top.src.name}” → {dst.parent} (same drive, renamed)")

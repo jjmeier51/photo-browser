@@ -1116,8 +1116,8 @@ plus the occasional download folder.
 
 **Fix.**
 
-- `DriveWriter.createDirectory(at:)` — creates the missing levels and, on exFAT/FAT, flushes each
-  new directory plus the parent that gained the entry. Every drive-folder creation in the app
+- `DriveWriter.createDirectory(at:)` — creates the missing levels (it used to flush each new
+  directory and its parent; that turned out to be the cause, see "Correction" below). Every drive-folder creation in the app
   (download services, import views, FileActions, Library, the video editor) now uses it; only
   container-side caches (Thumbnailer, DownloadLog, BackgroundDownloader inbox, dup-scan caches)
   keep the plain call. `FileActions.createFolder` (the user's New Folder) uses it too.
@@ -1125,12 +1125,29 @@ plus the occasional download folder.
   stamps creation/modification dates on the temp, so the final entry is written exactly once.
   `writeDataUnique(_:named:in:dates:)` picks the non-colliding name **and** writes in one actor
   turn (no suspension between) — concurrent savers can't collide. `writeDataSync` is the same
-  temp → fsync → rename → flush recipe for callers that can't await (screenshots).
+  temp → fsync → rename recipe for callers that can't await (screenshots).
 - The AI saves encode to `Data` in memory and go through `writeDataUnique`; both save functions
   are `async`. `AIResultsView` holds one background window while any save is in flight; the
   recovery pass keeps its window open until the images are on the drive (`defer { bg.end() }`).
 - TikTok inbox filing flushes each placed file; the video editor's chunked import copy and the
   Photos-picker staging copy write into a hidden `.pbtmp_` sibling and rename.
+
+**Correction (Oct 10, 2026): never flush a folder.** Folder flushes (`F_FULLFSYNC` on a
+directory fd) were themselves breaking folders. Every folder iOS refused to open had been flushed
+as a directory right after it was created or while it grew: the AI / Screenshots / Duplicate PNGs
+helper folders (flushed at creation and after every commit), the Kardashian member folders (a parent
+flush after each of 46k photos), Force Refresh (`thoroughContents` flushed the folder it re-read),
+and Safe Finder v1 on the Mac (flushed each new folder and after every file). The copy rebuild,
+which never flushes a folder, produced folders iOS reads. The drive root, flushed on every
+backgrounding, stayed fine because, unlike other folders, it has no record inside a parent folder.
+Taken together, this points to Apple's exFAT driver writing a stale copy of a flushed folder's own
+record into its parent (fsck: "Directory /X/AI has zero length"). `DriveWriter.fullSync` now refuses directories (so
+`fullSyncFileAndParent`, `commit`, `createDirectory`, `thoroughContents`, the unzip paths and every
+other caller only flush files), and `quiesce` uses a whole-volume `sync()`. The Mac tools
+(`safe_transfer.py`, `safe_copy_to_ssd.py`, `rebuild_exfat_folders.py --move`) dropped their
+folder flushes too. To confirm on a broken folder: `sudo python3 mac/exfat_inspect.py <folder>`
+before rebuilding it (look for `own-entry:` findings: dir-length, valid-length, alloc-flags,
+chain).
 
 **What this does not cover.** A cable pulled during an active write can still tear the FAT —
 exFAT has no journal, which is why "Prepare Drive for Removal…" exists. The fixes shrink the
