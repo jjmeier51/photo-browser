@@ -18,20 +18,23 @@ For each folder (default, "copy" mode):
 Any failure before step 3 removes the copy and leaves the original exactly as it was.
 Needs free space for a second copy of the folder.
 
-`--move` rebuilds a folder without copying anything — for folders too big to copy (the
-Kardashians folders: 46k photos): `._*` and `.DS_Store` are deleted, every other item is *renamed*
-into a fresh hidden sibling `.<name>.moving` (same volume, so only the directory entry is written —
-the photo data never moves), the emptied original is removed and the fresh folder takes its name.
-Only that one folder's directory is rebuilt (subfolders move along as they are). No free space
-needed; interrupted runs resume where they stopped (run the same command again). Files that are
-leftovers of interrupted macOS/iOS atomic saves (`<name>.sb-xxxxxxxx-XXXXXX`) are listed;
-`--drop-leftovers` deletes the ones whose finished file is there and at least as large.
+`--low-space` (also `--move`) is the same fresh copy for folders too big to copy whole (the
+Kardashians folders: 46k photos): every file is copied fresh into a hidden `.<name>.fresh` sibling
+and its original deleted as soon as the copy checks out (in batches, after the drive has been
+synced), so it needs free space for only about one batch. The whole folder, subfolders included, is
+rebuilt; when every file is across, the emptied original goes to the Trash and the fresh folder
+takes its name. Interrupted runs resume (run the same command again). It never moves or renames a
+file — an earlier version did, and moving files out of a broken folder carried the breakage into
+the new one (Oct 10). Leftovers of interrupted atomic saves (`<name>.sb-xxxxxxxx-XXXXXX`) are
+listed; `--drop-leftovers` deletes the ones whose finished file is there and at least as large.
+
+Nothing here flushes a folder (fsync on a directory) — the volume is synced with `sync()`.
 
 Usage (DRY RUN unless --apply):
   python3 rebuild_exfat_folders.py "/Volumes/SSD/Porn/Briana Banks"            # one folder (+ everything in it)
   python3 rebuild_exfat_folders.py /Volumes/SSD --since 7                         # folders created in the last 7 days
   python3 rebuild_exfat_folders.py /Volumes/SSD --since 7 --apply
-  python3 rebuild_exfat_folders.py "/Volumes/SSD/Kardashians/Kylie Jenner" --move --apply
+  python3 rebuild_exfat_folders.py "/Volumes/SSD/Kardashians/Kylie Jenner" --low-space --apply
 
 Then eject the SSD from Finder before unplugging it.
 """
@@ -39,6 +42,7 @@ Then eject the SSD from Finder before unplugging it.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -171,28 +175,60 @@ def rebuild(folder: Path, apply: bool) -> bool:
 
 
 def moving_temp(folder: Path) -> Path:
+    """Where the old rename-based --move parked items (its contents are originals)."""
     return folder.parent / f".{folder.name}.moving"
 
 
+def fresh_temp(folder: Path) -> Path:
+    return folder.parent / f".{folder.name}.fresh"
+
+
 def is_sidecar(name: str) -> bool:
-    """macOS bookkeeping that is deleted rather than moved (it only holds Finder/xattr data)."""
+    """macOS bookkeeping that is never copied (it only holds Finder/xattr data)."""
     return name.startswith("._") or name == ".DS_Store"
 
 
-def rebuild_by_moving(folder: Path, apply: bool, drop_leftovers: bool) -> bool:
-    """Rebuild `folder`'s directory without copying: rename every item into a fresh sibling, then
-    swap the fresh folder in under the original name. Resumable — a re-run continues a stopped one."""
+def file_hash(p: Path) -> str:
+    h = hashlib.blake2b(digest_size=20)
+    with open(p, "rb") as f:
+        while chunk := f.read(8 * 1024 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def flush_to_disk(probe: Path) -> None:
+    """Sync the whole volume, then make the drive commit its own cache (F_FULLFSYNC on a small
+    regular file) — before any original is deleted. Never fsyncs a folder."""
+    os.sync()
+    try:
+        import fcntl
+        fd = os.open(probe, os.O_RDONLY)
+        try:
+            fcntl.fcntl(fd, getattr(fcntl, "F_FULLFSYNC", 51))
+        finally:
+            os.close(fd)
+    except (OSError, ImportError):
+        pass
+
+
+def rebuild_low_space(folder: Path, apply: bool, drop_leftovers: bool) -> bool:
+    """The copy rebuild, deleting each original as soon as its fresh copy checks out — see the module
+    doc. Resumable: the journal names the file being copied, so a cut-off copy is redone, not trusted."""
     folder = Path(os.path.abspath(folder))
-    temp = moving_temp(folder)
-    resuming = temp.is_dir()
+    temp = fresh_temp(folder)
+    old_moving = moving_temp(folder)
+    journal = temp / ".rebuild-in-progress"
     if not folder.is_dir():
-        if not resuming:
+        if not temp.is_dir() or old_moving.is_dir():
             print(f"  not found: {folder}")
             return False
-        # Stopped between removing the emptied original and renaming the fresh folder.
+        # Stopped between trashing the emptied original and renaming the fresh folder.
         if not apply:
             print(f"  would finish an interrupted rebuild of {folder}")
             return True
+        if journal.exists():
+            journal.unlink()
+        os.sync()
         temp.rename(folder)
         os.sync()
         print(f"Finished the interrupted rebuild of {folder}")
@@ -201,120 +237,163 @@ def rebuild_by_moving(folder: Path, apply: bool, drop_leftovers: bool) -> bool:
         print(f"  skipped: {folder} is a whole drive — rebuild the folders inside it instead")
         return False
 
-    names = os.listdir(folder)
-    junk = [n for n in names if is_sidecar(n)]
-    items = sorted((n for n in names if not is_sidecar(n)), key=str.lower)
-    subfolders = sum(1 for n in items if (folder / n).is_dir())
-    leftovers: list[str] = []
+    sources = [folder] + ([old_moving] if old_moving.is_dir() else [])
+    files: list[tuple[Path, Path]] = []                  # (original, path relative to the folder)
+    for base in sources:
+        for root, dirnames, filenames in os.walk(base):
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+            for n in sorted(filenames, key=str.lower):
+                if not is_junk(n):
+                    p = Path(root) / n
+                    files.append((p, p.relative_to(base)))
+    dirs = sorted({rel.parent for _, rel in files} | {Path(r).relative_to(folder) for r, d, _ in os.walk(folder)
+                                                      if not any(part.startswith(".") for part in Path(r).relative_to(folder).parts)})
+    present = {str(p) for p, _ in files}
     droppable: set[str] = set()
-    for n in items:
-        m = SB_LEFTOVER.match(n)
+    leftovers = 0
+    for p, rel in files:
+        m = SB_LEFTOVER.match(p.name)
         if not m:
             continue
-        leftovers.append(n)
-        for home in (folder, temp):
-            final = home / m["base"]
+        leftovers += 1
+        for final in (p.with_name(m["base"]), (temp / rel).with_name(m["base"])):
             try:
-                if final.is_file() and final.stat().st_size >= (folder / n).stat().st_size:
-                    droppable.add(n)
+                if (str(final) in present or final.is_file()) and final.stat().st_size >= p.stat().st_size:
+                    droppable.add(str(p))
                     break
             except OSError:
                 pass
-    label = (f"{folder}  ({len(items)} items, {subfolders} subfolders; {len(junk)} ._/.DS_Store to delete"
-             + (f"; {len(leftovers)} leftover .sb- temp files, {len(droppable)} with their finished file present"
+    sizes = {str(p): p.stat().st_size for p, _ in files}
+    total, largest = sum(sizes.values()), max(sizes.values(), default=0)
+    label = (f"{folder}  ({len(files):,} files, {human(total)}"
+             + (f"; {leftovers} leftover .sb- temp files, {len(droppable)} with their finished file present"
                 if leftovers else "") + ")")
     if not apply:
-        print(f"  would rebuild by moving {label}" + ("  [resumes an interrupted run]" if resuming else ""))
+        print(f"  would rebuild with fresh copies (low space) {label}"
+              + ("  [resumes an interrupted run]" if temp.is_dir() else ""))
         if leftovers and not drop_leftovers:
             print("    (add --drop-leftovers to delete the .sb- temps whose finished file is there)")
         return True
 
-    print(f"Rebuilding by moving {label}" + ("  — resuming" if resuming else ""))
-    if not resuming:
-        os.mkdir(temp)
-    for n in junk:
-        try:
-            os.remove(folder / n)
-        except FileNotFoundError:
-            pass
-        except OSError as e:
-            print(f"  couldn't delete {n}: {e}")
+    batch_bytes = max(largest, 2 * 1024 ** 3)
+    free = shutil.disk_usage(folder.parent).free
+    if free < min(batch_bytes, total) + 200 * 1024 * 1024:
+        print(f"  skipped: needs about {human(min(batch_bytes, total))} free for a batch of copies, "
+              f"only {human(free)} available")
+        return False
+    print(f"Rebuilding with fresh copies {label}" + ("  — resuming" if temp.is_dir() else ""))
+    os.makedirs(temp, exist_ok=True)
+    if journal.is_file():                                # a copy that was cut off: redo it
+        cut = journal.read_text("utf-8").strip()
+        if cut and (temp / cut).is_file():
+            (temp / cut).unlink()
+    journal.write_text("", "utf-8")
 
+    pending: list[Path] = []                             # originals whose copies are done, not yet deleted
+    pending_bytes = 0
+    copied = skipped = dropped = 0
     problems: list[str] = []
-    moved = dropped = 0
-    for i, n in enumerate(items, 1):
-        src, dst = folder / n, temp / n
+
+    def release() -> None:
+        nonlocal pending_bytes
+        flush_to_disk(journal)
+        for orig in pending:
+            for victim in (orig, orig.with_name("._" + orig.name)):
+                try:
+                    os.remove(victim)
+                except FileNotFoundError:
+                    pass
+                except OSError as e:
+                    problems.append(f"{victim.name}: couldn't delete the original: {e}")
+        pending.clear()
+        pending_bytes = 0
+        os.sync()
+
+    for i, (src, rel) in enumerate(files, 1):
         try:
-            if drop_leftovers and n in droppable:
-                os.remove(src)
+            if drop_leftovers and str(src) in droppable:
+                pending.append(src)
                 dropped += 1
                 continue
+            dst = temp / rel
+            os.makedirs(dst.parent, exist_ok=True)
             if os.path.lexists(dst):
-                problems.append(f"{n}: something with this name is already in the fresh folder — left in place")
-                continue
-            st = src.lstat()
-            os.rename(src, dst)
-            moved += 1
-            # Re-set the dates so the moved entry's modified/accessed stamps are freshly encoded.
-            try:
-                os.utime(dst, (st.st_atime, st.st_mtime))
-            except OSError:
-                pass
+                if dst.is_file() and dst.stat().st_size == sizes[str(src)] and file_hash(dst) == file_hash(src):
+                    skipped += 1                         # copied by an earlier, interrupted run
+                    pending.append(src)
+                    continue
+                stem, ext = dst.stem, dst.suffix        # same name from the old .moving folder
+                n = 1
+                while os.path.lexists(dst):
+                    dst = dst.with_name(f"{stem} ({n}){ext}")
+                    n += 1
+            journal.write_text(str(dst.relative_to(temp)), "utf-8")
+            shutil.copy2(src, dst)                       # a fresh file, data + dates — like the copy rebuild
+            if dst.stat().st_size != sizes[str(src)] or file_hash(dst) != file_hash(src):
+                os.remove(dst)
+                raise IOError("the copy doesn't match the original")
+            journal.write_text("", "utf-8")
+            copied += 1
+            pending.append(src)
+            pending_bytes += sizes[str(src)]
         except OSError as e:
-            problems.append(f"{n}: {e}")
-        if i % 2000 == 0:
-            print(f"  {i}/{len(items)}…", flush=True)
+            problems.append(f"{rel}: {e}")
+        if pending_bytes >= batch_bytes or len(pending) >= 500:
+            release()
+        if i % 1000 == 0:
+            print(f"  {i:,}/{len(files):,}…", flush=True)
+    for d in dirs:                                        # empty subfolders too
+        os.makedirs(temp / d, exist_ok=True)
+    release()
 
-    # macOS may have dropped a fresh .DS_Store/._ in the meantime (a Finder window on the folder).
-    rest = []
-    for n in os.listdir(folder):
-        if is_sidecar(n):
-            try:
-                os.remove(folder / n)
-            except OSError:
-                rest.append(n)
-        else:
-            rest.append(n)
-    if problems or rest:
+    if problems:
         for p in problems[:20]:
             print(f"  ! {p}")
         if len(problems) > 20:
             print(f"  … and {len(problems) - 20} more")
-        print(f"  STOPPED: {len(rest)} item(s) are still in the original folder. Everything already moved is in "
-              f"the hidden “{temp.name}” next to it — nothing is lost. Fix the above, then run the same "
-              "command again to finish.")
+        print(f"  STOPPED: {len(problems)} problem(s). Everything copied so far is in the hidden “{temp.name}” "
+              "next to the folder; originals of files that weren't copied are untouched. Fix the above, then "
+              "run the same command again to finish.")
         return False
 
     st = folder.stat()
-    os.sync()                    # whole volume — never fsync a folder itself (that's what breaks them on iOS)
-    os.rmdir(folder)
+    journal.unlink()
+    os.sync()
+    for leftover_src in sources:                          # now only folders, junk and hidden items
+        if not to_trash(leftover_src):
+            parked = leftover_src.parent / f".{leftover_src.name}.original"
+            n = 1
+            while parked.exists():
+                parked = leftover_src.parent / f".{leftover_src.name}.original {n}"
+                n += 1
+            leftover_src.rename(parked)
     temp.rename(folder)
     try:
         os.utime(folder, (st.st_atime, st.st_mtime))
     except OSError:
         pass
     os.sync()
-    print(f"  done — {moved} items in a fresh folder"
-          + (f", {dropped} leftover .sb- temps deleted" if dropped else "")
-          + f", {len(junk)} ._/.DS_Store files deleted")
+    print(f"  done — {copied:,} files copied fresh"
+          + (f", {skipped:,} already copied by an earlier run" if skipped else "")
+          + (f", {dropped} leftover .sb- temps deleted" if dropped else ""))
     return True
 
 
-def from_list(list_file: Path, root: Path, keep_nested: bool = False) -> list[Path]:
+def from_list(list_file: Path, root: Path) -> list[Path]:
     """Folders from Drive Health's exported list (one drive-relative path per line), under `root`.
-    Shallowest first; a folder inside one already listed is dropped — a copy rebuild of the parent
-    rewrites it too (`keep_nested` for --move, which rebuilds only the folder itself)."""
+    Shallowest first; a folder inside one already listed is dropped — rebuilding the parent rewrites
+    it too."""
     rels = [line.strip().strip("/") for line in list_file.read_text("utf-8").splitlines() if line.strip()]
     rels.sort(key=lambda r: (r.count("/"), r))
     chosen: list[str] = []
     for r in rels:
-        if r in chosen or (not keep_nested and any(r.startswith(c + "/") for c in chosen)):
+        if r in chosen or any(r.startswith(c + "/") for c in chosen):
             continue
         chosen.append(r)
     out = []
     for r in chosen:
         p = root / r
-        if p.is_dir() or moving_temp(p).is_dir():
+        if p.is_dir() or fresh_temp(p).is_dir():
             out.append(p)
         else:
             print(f"  not found on the Mac, skipped: {r}")
@@ -330,11 +409,11 @@ def main() -> None:
                     help="rebuild the folders in FILE — the list Photo Browser's Drive Health exports "
                          "(Share button; drive-relative paths) — under --root")
     ap.add_argument("--root", type=Path, metavar="DRIVE", help="the SSD for --list, e.g. \"/Volumes/Extreme SSD\"")
-    ap.add_argument("--move", action="store_true",
-                    help="rebuild by moving items into a fresh folder instead of copying — no free space needed, "
-                         "for very large folders; only the folder itself is rebuilt, not its subfolders")
+    ap.add_argument("--low-space", "--move", dest="low_space", action="store_true",
+                    help="for folders too big to copy whole: copy every file fresh and delete each original as "
+                         "soon as its copy checks out (needs room for about one 2 GB batch)")
     ap.add_argument("--drop-leftovers", action="store_true",
-                    help="with --move: delete leftover '<name>.sb-…' atomic-save temps whose finished file is present")
+                    help="with --low-space: delete leftover '<name>.sb-…' atomic-save temps whose finished file is present")
     ap.add_argument("--apply", action="store_true", help="actually rebuild (default: dry run, just list)")
     args = ap.parse_args()
 
@@ -342,9 +421,9 @@ def main() -> None:
     if args.list:
         if not args.root or not args.root.is_dir():
             sys.exit("--list needs --root \"/Volumes/<SSD name>\"")
-        targets += from_list(args.list, args.root, keep_nested=args.move)
+        targets += from_list(args.list, args.root)
     for p in args.paths:
-        if not p.is_dir() and not (args.move and moving_temp(Path(os.path.abspath(p))).is_dir()):
+        if not p.is_dir() and not (args.low_space and fresh_temp(Path(os.path.abspath(p))).is_dir()):
             sys.exit(f"Not a folder: {p}")
         targets += recent_folders(p, args.since) if args.since is not None else [p]
     if not targets:
@@ -359,8 +438,8 @@ def main() -> None:
                   "a rebuild alone won't make it readable on iOS.")
     if not args.apply:
         print(f"DRY RUN — {len(targets)} folder(s); add --apply to rebuild:")
-    if args.move:
-        ok = sum(rebuild_by_moving(t, args.apply, args.drop_leftovers) for t in targets)
+    if args.low_space:
+        ok = sum(rebuild_low_space(t, args.apply, args.drop_leftovers) for t in targets)
     else:
         ok = sum(rebuild(t, args.apply) for t in targets)
     if args.apply:

@@ -95,20 +95,21 @@ Before anything happens a sheet shows exactly what will: how many files and how 
 that will be adjusted for iOS, macOS junk left behind, folders that would get very large, and
 whether there's room. Then:
 
-- **Folders are never flushed.** Flushing a folder on this exFAT drive is what made folders
-  unreadable on the iPhone, including folders made by the first version of Safe Finder. Only the
-  files' data is flushed, and the whole drive is synced between items.
-- **A new folder arrives whole.** It's built as a hidden ".<name>.incoming" folder, written the same
-  way as the rebuild script (whose folders the iPhone reads), and renamed to its real name only
-  once every file is in and checked. If a transfer is cut off, the hidden folder is picked up
-  again next time.
-- **Nothing half-written appears in an existing folder.** Files added to a folder that's already
-  there go through a hidden staging folder at the top of the drive and are moved in only when
-  complete and checked.
+- **It writes exactly like the rebuild script** — the one method whose folders the iPhone has
+  always read: every file is created fresh under its final name, nothing is moved or renamed into
+  place, nothing is flushed folder by folder, and the whole drive is synced between items. (Moving
+  files out of a broken folder carried the breakage into the new folder, so even a "move" within
+  the SSD makes fresh copies and sends the originals to the Trash.)
+- **A new folder arrives whole.** It's built as a hidden ".<name>.incoming" folder and renamed to its
+  real name only once every file is in and checked. If a transfer is cut off, the hidden folder is
+  picked up again next time.
+- **A file cut off mid-copy is cleaned up.** The file being written is noted in a hidden
+  `.Safe Finder Staging` folder at the top of the drive; if the Mac or the drive goes away, the next
+  transfer deletes the half-written file before starting.
 - **Every copy is verified.** It's read back from the drive (not the Mac's memory) and compared
   with the original.
 - **Move only trashes what's safe.** An original goes to the Trash only after its copy (for a
-  folder, every file in it) was verified. On the same drive, a move is just a rename.
+  folder, every file in it) was verified.
 - **No `._` files, iOS-safe names, never overwrites.** An identical file already there is
   skipped, so running the same transfer again is safe. A different file with the same name is
   saved as "name (1)".
@@ -173,7 +174,7 @@ macOS tolerates. Export the list with Drive Health's Share button, then:
    (`sudo` is needed to read the disk device; nothing is written. If macOS still refuses, give
    Terminal Full Disk Access in System Settings ▸ Privacy & Security.)
 
-2. **Rebuild them** with `rebuild_exfat_folders.py` (below) — `--move` for big folders.
+2. **Rebuild them** with `rebuild_exfat_folders.py` (below) — `--low-space` for big folders.
 
 The app shows such folders as orange "Can't read on iOS" tiles instead of hiding them, and saves
 into "AI 2" / "Screenshots 2" when the existing folder can't be read.
@@ -191,19 +192,19 @@ Favorites, captions, covers etc. stay attached (dry run by default):
 - **Copy** (default): copies everything into a fresh folder, verifies every file's size, moves the
   original to the Trash and puts the copy under the same name. Rebuilds subfolders too. Needs free
   space for one copy of the folder.
-- **`--move`**: no copying — `._*` / `.DS_Store` are deleted and every item is *renamed* into a fresh
-  folder on the same drive (only the directory entries are written; the photos never move), then the
-  fresh folder takes the original's name. No free space needed and fast, so it's the one for huge
-  folders (the Kardashians folders). Rebuilds only that folder, not its subfolders. If it stops
-  (unplugged, an error), run the same command again and it picks up where it left off.
-  `--drop-leftovers` also deletes `<name>.sb-…` files (interrupted saves) whose finished file is
-  there.
+- **`--low-space`**: the same fresh copies for folders too big to copy whole (the Kardashians
+  folders). Each original is deleted as soon as its copy checks out (in batches, after the drive
+  has been synced), so it only needs room for about 2 GB. Rebuilds subfolders too. If it stops,
+  run the same command again and it picks up where it left off. `--drop-leftovers` also deletes
+  `<name>.sb-…` files (interrupted saves) whose finished file is there. (It used to *move* files
+  into the fresh folder; moving files out of a broken folder carries the breakage along, so it
+  doesn't any more.)
 
 ```sh
 # the folders Drive Health lists as unreadable — export the list with its Share button:
-python3 mac/rebuild_exfat_folders.py --list unreadable.txt --root "/Volumes/SSD" --move           # dry run
-python3 mac/rebuild_exfat_folders.py --list unreadable.txt --root "/Volumes/SSD" --move --apply
-python3 mac/rebuild_exfat_folders.py "/Volumes/SSD/Kardashians/Kylie Jenner" --move --apply
+python3 mac/rebuild_exfat_folders.py --list unreadable.txt --root "/Volumes/SSD"                 # dry run
+python3 mac/rebuild_exfat_folders.py --list unreadable.txt --root "/Volumes/SSD" --apply
+python3 mac/rebuild_exfat_folders.py "/Volumes/SSD/Kardashians/Kylie Jenner" --low-space --apply
 python3 mac/rebuild_exfat_folders.py "/Volumes/SSD/Porn/Briana Banks" --apply                    # copy mode
 python3 mac/rebuild_exfat_folders.py /Volumes/SSD --since 7 --apply         # every folder created this week
 ```

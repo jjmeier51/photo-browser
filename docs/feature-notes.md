@@ -603,14 +603,10 @@ leftovers of interrupted atomic writes, each with its own `._` sidecar.
   and places every file through `DriveWriter.shared.writeData` (controlled temp → flushed → renamed,
   one commit at a time; downloads stay concurrent). Its log file is created with
   `DriveWriter.writeDataSync`.
-- `mac/rebuild_exfat_folders.py --move`: rebuilds a folder **without copying** — deletes `._*` /
-  `.DS_Store`, renames every item into a fresh hidden sibling `.<name>.moving` (same volume: only
-  directory entries are written), removes the emptied original and renames the fresh folder into
-  place, re-setting each item's modified/accessed dates so those fields are freshly encoded. Same
-  path, so all metadata stays attached; resumable (a re-run continues, or finishes the final swap);
-  `--drop-leftovers` deletes `.sb-` temps whose finished file is present and at least as large.
-  Only the folder's own directory is rebuilt (not subfolders), so with `--list` nested entries are
-  kept.
+- `mac/rebuild_exfat_folders.py --move` (first version, Oct 8) renamed every item into a fresh
+  hidden sibling instead of copying. **Superseded on Oct 10 by `--low-space`** (fresh copies, each
+  original deleted once its copy checks out — see "Same day, contradicting test" in §12): moving
+  files out of a broken folder carried the breakage into the new folder.
 - `mac/exfat_inspect.py`: the evidence step — reads a folder's directory entries **off the raw
   device** (read-only, `sudo`) and checks every exFAT field: set checksums, NameHash (with the
   volume's up-case table), SecondaryCount vs name length (incl. stale name entries — the
@@ -722,7 +718,7 @@ leaves the original exactly as it was.
   Refresh, 3.4, doesn't help — the folder *is* listed, its contents read as empty). The script
   copies the folder to a hidden sibling, verifies sizes, Trashes the original via Finder (or parks
   it as hidden `.<name>.original`), and swaps the copy in under the same name/path — metadata stays
-  attached. `--move` does it without copying (3.6). `--since DAYS` finds recently created folders;
+  attached. `--low-space` does it with almost no free space (3.6). `--since DAYS` finds recently created folders;
   `--list` takes Drive Health's export; dry run unless `--apply`.
 - **`mac/exfat_inspect.py`** — read-only raw-device check of what's actually stored (3.6). Run it
   before a rebuild; the rebuild erases the evidence.
@@ -1148,6 +1144,19 @@ other caller only flush files), and `quiesce` uses a whole-volume `sync()`. The 
 folder flushes too. To confirm on a broken folder: `sudo python3 mac/exfat_inspect.py <folder>`
 before rebuilding it (look for `own-entry:` findings: dir-length, valid-length, alloc-flags,
 chain).
+
+**Same day, contradicting test:** the user moved (same-drive rename, via the fixed Safe Finder) the
+files of a broken folder into a brand-new, never-flushed folder, and the new folder became
+unreadable too. So the folder flush is at most part of it — the damage can travel with the moved
+items' own records (or renaming into a folder triggers it). Response, pending inspector output:
+the Mac tools now write exactly like the copy rebuild, the one proven method — `safe_transfer.py`
+creates every file fresh under its final name (no staging rename, no same-drive rename: a "move" on
+the SSD is a fresh copy + Trash), with no fsync at all, `sync()` between items, and a journal in
+`.Safe Finder Staging/in-progress.txt` so a file cut off by a crash is deleted on the next run;
+`rebuild_exfat_folders.py --move` became `--low-space` (fresh `copy2` copies into hidden
+`.<name>.fresh`, each original deleted only after its copy hashes equal and the batch was synced +
+`F_FULLFSYNC`'d via a small journal file). The iOS app is unchanged beyond the directory-flush rule
+until the inspector shows which record is bad.
 
 **What this does not cover.** A cable pulled during an active write can still tear the FAT —
 exFAT has no journal, which is why "Prepare Drive for Removal…" exists. The fixes shrink the
