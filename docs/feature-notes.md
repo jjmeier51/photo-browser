@@ -1185,6 +1185,13 @@ the old code). The checker now adds the places a flush could leave a mark that i
 FAT entries of each folder's clusters (contiguous folders shouldn't need any), clusters shared with
 a file (cross-links), and the writer fingerprint of each folder's own record (attributes, 10 ms
 fields, UTC offsets, timestamp pattern), compared against folders made in the same days.
+Result (Oct 10): no cross-links, and the folders' FAT entries look like everyone else's. The one
+difference is the record's dates: 8 of the 9 were modified after they were created, versus 9% of
+the 508 folders made in the same days (87% of those carry an older modified date — copies that
+keep the source's date, like the copy rebuild). That is the signature of a folder a tool kept
+writing into over time (the app's downloads/rebuilds, Safe Finder's copies), consistent with the
+flush explanation but not proof of it. Kendall and Kylie are also the drive's only folders over
+one cluster (~10,000 items), so their straddling entry sets can't be compared with anything.
 Also a controlled test: `mac/ios_folder_test.py` makes five tiny folders at the drive root that differ only
 in how they were written (empty mkdir; fresh file; file moved in; hidden-then-renamed like the
 rebuild; macOS `cp` with xattrs, so a `._` file). The iPhone's Drive Health says which fail, and
