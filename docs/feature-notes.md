@@ -1170,7 +1170,13 @@ numbers: a read past 2.20 TB lands 2.20 TB earlier, and what happens to be there
 outcome — other files' bytes → EINVAL, zeros → an *empty* folder (Drive Health never flags empty
 folders; the Oct 6 "new Finder folders show empty in Files" report fits), another folder's
 contents → wrong items. `exfat_inspect.py` now reads those exact spots and predicts each folder's
-iPhone view, so the prediction can be checked on the phone. Also a controlled test: `mac/ios_folder_test.py` makes five tiny folders at the drive root that differ only
+iPhone view, so the prediction can be checked on the phone. Result: all 9 predicted to fail, but
+so were 129 of the 163 other folders past the line that Drive Health reads fine — a plain read
+wrap is out. Two refinements are now reported: a **same-ID test** (if iOS derives an item's ID
+from a 32-bit block number, a folder past the line shares its ID with whatever item's data starts
+exactly 2.20 TB earlier, and only folders with such a twin would break) and a **recency** check
+(all 9 were created Oct 5–10, the days directory-flushing writers were in use: is any other folder
+that new and past the line readable?). Also a controlled test: `mac/ios_folder_test.py` makes five tiny folders at the drive root that differ only
 in how they were written (empty mkdir; fresh file; file moved in; hidden-then-renamed like the
 rebuild; macOS `cp` with xattrs, so a `._` file). The iPhone's Drive Health says which fail, and
 `exfat_inspect.py --dump` prints each one's raw records field by field for a byte-level diff. The

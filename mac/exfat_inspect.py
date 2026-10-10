@@ -37,6 +37,7 @@ from collections import Counter, defaultdict, deque
 
 FORBIDDEN = set('"*/:<>?\\|')
 DIR_OWNER: dict[int, str] = {}   # cluster → the folder whose contents it holds (every folder read so far)
+FIRST_OWNER: dict[int, tuple[str, str, bool]] = {}   # first cluster → (folder, name, is_dir) of every item read
 KEEP_RAW = False            # --dump: keep each entry set's bytes (off by default — a full-drive walk holds ~1M items)
 MAX_DIR_BYTES = 256 * 1024 * 1024
 
@@ -505,6 +506,8 @@ def parse_directory(vol: Volume, first: int, length: int, no_fat_chain: bool, la
         ci = i // per_cluster
         entry_off = vol.offset(clusters[ci]) + (i % per_cluster) * 32 if ci < len(clusters) else None
         r.items.append(Item(name, is_dir, first_c, dlen, nfc, i, entry_off, raw if KEEP_RAW else None, u32(e, 8)))
+        if first_c and dlen:
+            FIRST_OWNER.setdefault(first_c, (label, name, is_dir))
         if not is_dir and dlen and vol.valid_cluster(first_c):
             fo = vol.offset(first_c)
             r.file_lo = fo if r.file_lo is None else min(r.file_lo, fo)
@@ -704,11 +707,54 @@ def wrap_report(vol: Volume, bad: list[Report], good: list[Report], shift: int |
             return k, a, where, verdict, sets
         return None
 
+    wrap_c = shift // vol.cluster_size
+
+    def twin(r: Report):
+        """The item whose ID a 32-bit block-based ID would share with this folder: the one whose data
+        starts exactly `shift` bytes before this folder's first cluster."""
+        if not r.dir_clusters or vol.offset(r.dir_clusters[0]) < limit:
+            return None
+        hit = FIRST_OWNER.get(r.dir_clusters[0] - wrap_c)
+        if hit is None:
+            return None
+        folder, name, is_dir = hit
+        folder = "" if folder == "(drive root)" else folder + "/"
+        return f"{'folder' if is_dir else 'file'} {folder}{printable(name)}"
+
     b_pred = [(r, predict(r)) for r in bad]
     g_pred = [(r, predict(r)) for r in good if r.under is None]
     g_past = [(r, p) for r, p in g_pred if p]
     if not g_past and not any(p for _, p in b_pred):
         return None                                        # nothing on this drive is stored past the line
+    b_twin = [(r, twin(r)) for r in bad]
+    g_twin = [(r, twin(r)) for r, _ in g_past]
+    print(f"\n== Same-ID test: does an item start exactly {tb(shift)} before each folder? ==")
+    print("If iOS builds an item's ID from a 32-bit block number, a folder past the line shares its ID with that\n"
+          "item, and the two get confused. Only folders with such a twin would break.\n")
+    for r, t in b_twin:
+        print(f"   {r.label[:60]:60} " + (f"twin: {t}" if t else ("no twin" if r.dir_lo and r.dir_lo >= limit
+                                                                   else "(not past the line)")))
+    with_twin = [r.label for r, t in g_twin if t]
+    print(f"\n   other folders past the line with a twin: {len(with_twin)} of {len(g_twin)}"
+          + (" — e.g. " + "; ".join(with_twin[:6]) if with_twin else ""))
+    # Recency is the other thing all the failing folders share — see whether new folders past the line open.
+    since = min((r.created for r in bad if r.created), default=0)
+    if since:
+        day = exfat_time(since, None, 0)[:10]
+        recent = [r for r in good if r.under is None and r.created >= since]
+        past = [r for r in recent if r.dir_lo is not None and r.dir_lo >= limit]
+        print(f"\n   other folders created since {day} (when the oldest checked one was): {len(recent)} — "
+              f"{len(past)} stored past the line, {len(recent) - len(past)} below it")
+        if past:
+            print("   new AND past the line, yet not on your list: "
+                  + "; ".join(f"{r.label} ({exfat_time(r.created, None, 0)[:10]})" for r in past[:8]))
+    nb_twin = sum(1 for _, t in b_twin if t)
+    twin_verdict = None
+    if bad and nb_twin == len(bad) and len(with_twin) <= max(1, len(g_twin) // 20):
+        twin_verdict = (f"SAME-ID: every checked folder has an item starting exactly {tb(shift)} before it, and only "
+                        f"{len(with_twin)} of {len(g_twin)} other folders past the line do.")
+    elif bad:
+        print(f"   checked folders with a twin: {nb_twin} of {len(bad)}")
     print(f"\n== If the iPhone's reader wraps at 2^32 blocks ({tb(limit)}) ==")
     print(f"A folder stored past that point would be read from {tb(shift)} earlier. What is there, per folder:\n")
     print(f"{'checked folder':44} {'stored at':>10}  {'NoFatChain':>10}  {'created':10}  wrapped read lands on → prediction")
@@ -740,10 +786,11 @@ def wrap_report(vol: Volume, bad: list[Report], good: list[Report], shift: int |
     fails_b = sum(1 for _, p in b_pred if p and p[3] == "fails")
     fails_g = counts.get("fails", 0)
     if bad and fails_b == len(bad) and fails_g <= max(1, len(g_past) // 20):
-        return (f"WRAP: every checked folder is stored past {tb(limit)} and a wrapped read of it lands on bytes a "
-                f"strict reader rejects; only {fails_g} of the {len(g_past)} other folders past the line would. "
-                f"Check the 'look EMPTY' examples on the iPhone to confirm.")
-    return None
+        return "\n".join(x for x in (twin_verdict, (
+            f"WRAP: every checked folder is stored past {tb(limit)} and a wrapped read of it lands on bytes a "
+            f"strict reader rejects; only {fails_g} of the {len(g_past)} other folders past the line would. "
+            f"Check the 'look EMPTY' examples on the iPhone to confirm.")) if x)
+    return twin_verdict
 
 
 def describe(kind: str) -> str:

@@ -333,10 +333,11 @@ These were discovered the painful way; the current code already respects them.
     drive, no fsync at all. Also ruled out (Oct 10): visibly bad records (a fresh failing folder
     inspects clean). **Leading lead (Oct 10): location.** All 9 folders Drive Health currently lists
     store their contents past 2.20 TB = 2^32 × 512-byte blocks (the SSD is 8 TB), and every folder
-    the copy rebuild fixed landed below it; ~200 readable folders also sit past it. Under test: a
-    reader that wraps 32-bit block numbers, so what sits 2.20 TB earlier decides fail / empty /
-    wrong items (`exfat_inspect.py`'s wrap report predicts each). `mac/ios_folder_test.py` is the
-    controlled write-method test.
+    the copy rebuild fixed landed below it; ~200 readable folders also sit past it. A plain 32-bit
+    read wrap predicted 129 more failures that don't happen, so it's out. Under test: a 32-bit
+    block-based item *ID* (a folder past the line shares its ID with the item starting exactly
+    2.20 TB earlier), and recency (all 9 were created Oct 5–10) — `exfat_inspect.py` reports both.
+    `mac/ios_folder_test.py` is the controlled write-method test.
 13. **`nonisolated async` is not "off the main thread".** The target builds with
     `SWIFT_APPROACHABLE_CONCURRENCY` (NonisolatedNonsendingByDefault), so a plain
     `nonisolated async func` runs on whatever actor *awaited* it — awaited from a
