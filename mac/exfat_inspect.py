@@ -36,6 +36,7 @@ import unicodedata
 from collections import Counter, defaultdict, deque
 
 FORBIDDEN = set('"*/:<>?\\|')
+DIR_OWNER: dict[int, str] = {}   # cluster → the folder whose contents it holds (every folder read so far)
 KEEP_RAW = False            # --dump: keep each entry set's bytes (off by default — a full-drive walk holds ~1M items)
 MAX_DIR_BYTES = 256 * 1024 * 1024
 
@@ -294,13 +295,14 @@ class Volume:
 
 
 class Item:
-    __slots__ = ("name", "is_dir", "first", "length", "no_fat_chain", "index", "entry_off", "raw")
+    __slots__ = ("name", "is_dir", "first", "length", "no_fat_chain", "index", "entry_off", "raw", "created")
 
-    def __init__(self, name, is_dir, first, length, no_fat_chain, index, entry_off=None, raw=None):
+    def __init__(self, name, is_dir, first, length, no_fat_chain, index, entry_off=None, raw=None, created=0):
         self.name, self.is_dir, self.first = name, is_dir, first
         self.length, self.no_fat_chain, self.index = length, no_fat_chain, index
         self.entry_off = entry_off              # byte offset of its record (inside the parent folder's data)
         self.raw = raw                          # its entry set's bytes (only with --dump)
+        self.created = created                  # its exFAT creation timestamp
 
 
 class Report:
@@ -315,6 +317,10 @@ class Report:
         self.dir_lo = self.dir_hi = None           # where this folder's own contents sit (byte offsets)
         self.entry_off = None                      # where its record sits, inside the parent folder
         self.own_raw = None                        # its record's bytes (only with --dump)
+        self.dir_clusters: list[int] = []          # its contents' clusters, in reading order
+        self.nfc = None                            # its record's NoFatChain flag
+        self.created = 0                           # its record's creation timestamp
+        self.under: str | None = None              # a checked folder it sits inside (iOS never got to it)
         self.file_lo = self.file_hi = None         # where its files' data starts (lowest / highest)
 
     def add(self, kind: str, example: str) -> None:
@@ -330,6 +336,9 @@ def parse_directory(vol: Volume, first: int, length: int, no_fat_chain: bool, la
         r.unreadable = "no clusters"
         return r
     r.clusters = len(clusters)
+    r.dir_clusters = clusters
+    for c in clusters:
+        DIR_OWNER.setdefault(c, label or "(drive root)")
     r.dir_lo = vol.offset(min(clusters))
     r.dir_hi = vol.offset(max(clusters)) + vol.cluster_size
     r.extents = 1 + sum(1 for a, b in zip(clusters, clusters[1:]) if b != a + 1)
@@ -495,7 +504,7 @@ def parse_directory(vol: Volume, first: int, length: int, no_fat_chain: bool, la
         names[key].append(shown)
         ci = i // per_cluster
         entry_off = vol.offset(clusters[ci]) + (i % per_cluster) * 32 if ci < len(clusters) else None
-        r.items.append(Item(name, is_dir, first_c, dlen, nfc, i, entry_off, raw if KEEP_RAW else None))
+        r.items.append(Item(name, is_dir, first_c, dlen, nfc, i, entry_off, raw if KEEP_RAW else None, u32(e, 8)))
         if not is_dir and dlen and vol.valid_cluster(first_c):
             fo = vol.offset(first_c)
             r.file_lo = fo if r.file_lo is None else min(r.file_lo, fo)
@@ -533,12 +542,13 @@ def resolve(vol: Volume, rel: str) -> tuple[Report | None, str]:
             return None, f"“{part}” is a file, not a folder"
         first, length, nfc = it.first, it.length, it.no_fat_chain
         own = here.by_name.get(norm(it.name), [])
-        own_entry, own_raw = it.entry_off, it.raw
+        own_entry, own_raw, own_item = it.entry_off, it.raw, it
     if length is None:
         return root_report(vol), ""
     rep = parse_directory(vol, first, length, nfc, rel)
     add_own(rep, own)
     rep.entry_off, rep.own_raw = own_entry, own_raw
+    rep.nfc, rep.created = own_item.no_fat_chain, own_item.created
     return rep, ""
 
 
@@ -572,7 +582,8 @@ def healthy_sample(vol: Volume, skip: set[str], want: int) -> list[Report]:
             continue
         rel = f"{parent}/{it.name}".strip("/")
         rep = parse_directory(vol, it.first, it.length, it.no_fat_chain, rel)
-        rep.entry_off = it.entry_off
+        rep.entry_off, rep.nfc, rep.created = it.entry_off, it.no_fat_chain, it.created
+        rep.under = next((k for k in skip if norm(rel).startswith(k + "/")), None)
         if norm(rel) not in skip:
             add_own(rep, own)
             out.append(rep)
@@ -631,6 +642,108 @@ def location_report(vol: Volume, bad: list[Report], good: list[Report]) -> str |
                 print(f"   {beyond} of {len(g)} other folders' {label} as far as or beyond the nearest checked one "
                       f"({tb(min(b))}).")
     return "\n".join(verdicts) or None
+
+
+def strict_listing(data: bytes) -> tuple[str, int]:
+    """Read `data` the way a strict exFAT driver reads a folder's contents: ("empty" | "lists" | "fails", sets)."""
+    sets, i, n = 0, 0, len(data) // 32
+    while i < n:
+        t = data[i * 32]
+        if t == 0x00:
+            return ("lists" if sets else "empty"), sets
+        if t < 0x80 or 0xA0 <= t <= 0xBF or t >= 0xE0:      # unused / benign entries are skipped
+            i += 1
+            continue
+        if t != 0x85:
+            return "fails", sets
+        sc = data[i * 32 + 1]
+        if i + 1 + sc > n:                                  # runs on into the next cluster
+            return "lists", sets
+        raw = data[i * 32:(i + 1 + sc) * 32]
+        if not 2 <= sc <= 18 or raw[32] != 0xC0 or set_checksum(raw) != u16(raw, 2):
+            return "fails", sets
+        sets += 1
+        i += 1 + sc
+    return "lists", sets
+
+
+def wrap_report(vol: Volume, bad: list[Report], good: list[Report], shift: int | None = None) -> str | None:
+    """Test one specific reader bug: block numbers kept in 32 bits. With 512-byte blocks they run out
+    2^32 blocks (2.20 TB) into the disk, and a read past that point silently lands 2.20 TB earlier.
+    A folder stored there is then read from the wrong spot, and what happens to sit there decides
+    the result: other files' bytes → "Invalid argument"; zeros → an empty folder; another folder's
+    contents → that folder's items. This reads those exact spots and predicts the iPhone's view."""
+    shift = shift or (2 ** 32) * vol.bps                  # (overridable so a small test image can exercise it)
+    limit = shift - vol.partition_offset
+
+    def predict(r: Report):
+        for k, c in enumerate(r.dir_clusters):
+            off = vol.offset(c)
+            if off < limit:
+                continue
+            a = off - shift
+            if a < 0:
+                return k, a, "before this volume", "fails", 0
+            ac = (a - vol.heap_offset) // vol.cluster_size + 2
+            if a < vol.heap_offset:
+                where = "the volume's own tables"
+            elif ac in DIR_OWNER:
+                where = f"the contents of “{DIR_OWNER[ac]}”"
+            elif vol.allocated(ac):
+                where = "file data"
+            else:
+                where = "free space"
+            data = vol._read(a, vol.cluster_size)
+            if k:                                          # the first pieces read fine; only the rest wraps
+                verdict, sets = strict_listing(data)
+                verdict = "fails" if verdict == "fails" else f"partly lists ({verdict})"
+                return k, a, where, verdict, sets
+            if not any(data):
+                return k, a, where + " (all zeros)", "empty", 0
+            verdict, sets = strict_listing(data)
+            return k, a, where, verdict, sets
+        return None
+
+    b_pred = [(r, predict(r)) for r in bad]
+    g_pred = [(r, predict(r)) for r in good if r.under is None]
+    g_past = [(r, p) for r, p in g_pred if p]
+    if not g_past and not any(p for _, p in b_pred):
+        return None                                        # nothing on this drive is stored past the line
+    print(f"\n== If the iPhone's reader wraps at 2^32 blocks ({tb(limit)}) ==")
+    print(f"A folder stored past that point would be read from {tb(shift)} earlier. What is there, per folder:\n")
+    print(f"{'checked folder':44} {'stored at':>10}  {'NoFatChain':>10}  {'created':10}  wrapped read lands on → prediction")
+    for r, pr in b_pred:
+        made = exfat_time(r.created, None, 0)[:10] if r.created else "?"
+        if pr is None:
+            print(f"{r.label[:44]:44} {tb(r.dir_lo):>10}  {str(r.nfc):>10}  {made:10}  (not past {tb(limit)})")
+            continue
+        k, a, where, verdict, sets = pr
+        tail = f" ({sets} sets first)" if sets else ""
+        print(f"{r.label[:44]:44} {tb(r.dir_lo):>10}  {str(r.nfc):>10}  {made:10}  "
+              + (f"after {k} good cluster(s), " if k else "") + f"{tb(a) if a >= 0 else '—'}, {where} → {verdict}{tail}")
+    counts = Counter(p[3].split(" (")[0] for _, p in g_past)
+    print(f"\nOther folders stored past {tb(limit)}: {len(g_past)} of {len(g_pred)}"
+          + (" — predicted: " + ", ".join(f"{v} {n}" for v, n in counts.most_common()) if g_past else ""))
+    nfc_b = Counter(r.nfc for r, p in b_pred if p)
+    nfc_g = Counter(r.nfc for r, p in g_past)
+    print(f"   NoFatChain on the folder's record — checked: {dict(nfc_b)} · others past the line: {dict(nfc_g)}")
+    for verdict in ("empty", "lists", "fails"):
+        ex = [r.label for r, p in g_past if p[3] == verdict][:6]
+        if ex:
+            print(f"   predicted to {'look EMPTY' if verdict == 'empty' else 'show the WRONG items' if verdict == 'lists' else 'fail'} "
+                  f"on the iPhone, e.g.: " + "; ".join(ex))
+    files_past = [r.label for r, _ in g_pred if r.dir_hi is not None and r.dir_hi <= limit
+                  and r.file_lo is not None and r.file_lo >= limit][:4]
+    if files_past:
+        print("   folders stored below the line whose photos all sit past it (if these photos show fine on the "
+              "iPhone, file reads don't wrap): " + "; ".join(files_past))
+    fails_b = sum(1 for _, p in b_pred if p and p[3] == "fails")
+    fails_g = counts.get("fails", 0)
+    if bad and fails_b == len(bad) and fails_g <= max(1, len(g_past) // 20):
+        return (f"WRAP: every checked folder is stored past {tb(limit)} and a wrapped read of it lands on bytes a "
+                f"strict reader rejects; only {fails_g} of the {len(g_past)} other folders past the line would. "
+                f"Check the 'look EMPTY' examples on the iPhone to confirm.")
+    return None
 
 
 def describe(kind: str) -> str:
@@ -784,6 +897,9 @@ def main() -> None:
     print(f"{'avg deleted items':24} {avg(bad, lambda r: r.deleted):8.0f} {avg(good, lambda r: r.deleted):8.0f}")
     print(f"{'avg pieces on disk':24} {avg(bad, lambda r: r.extents):8.1f} {avg(good, lambda r: r.extents):8.1f}")
     located = location_report(vol, bad, good)
+    wrapped = wrap_report(vol, bad, good)
+    if wrapped:
+        located = "\n".join(x for x in (located, wrapped) if x)
     suspects = [k for k in rows if bad_flags[k] / nb >= 0.6 and good_flags[k] / ng <= 0.15]
     rare = [k for k in rows if k not in suspects and not is_info(k) and bad_flags[k] and good_flags[k] / ng <= 0.15]
     print()

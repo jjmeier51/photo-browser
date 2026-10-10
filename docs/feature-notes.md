@@ -1160,10 +1160,17 @@ until the inspector shows which record is bad.
 
 **Inspector results (Oct 10) rule out two more theories.** The new unreadable folder (37 items, one
 cluster) is structurally clean, its own record and every item's record included — so neither the
-flush nor the moved files' records are visibly bad. Location is out too: the checker now reports
-where each folder sits, and readable folders sit everywhere the drive has data (0–3.9 TB on the
-8 TB SSD, ~190 of them past 2.5 TB), so it isn't a 2 TiB / 32-bit-block limit. Next step is a
-controlled test: `mac/ios_folder_test.py` makes five tiny folders at the drive root that differ only
+flush nor the moved files' records are visibly bad. Location first looked ruled out — but that
+run used an outdated list of folders the rebuild had already fixed. With Drive Health's current
+list, **all 9 unreadable folders store their contents past 2.20 TB** (2^32 × 512-byte blocks; the
+8 TB SSD has data out to 3.94 TB), while every folder the copy rebuild fixed landed below it — and
+the one listed folder still broken after a rebuild (Porn/Japanese) is at 2.29 TB. ~200 readable
+folders also sit past the line, so the theory under test is a reader that wraps 32-bit block
+numbers: a read past 2.20 TB lands 2.20 TB earlier, and what happens to be there decides the
+outcome — other files' bytes → EINVAL, zeros → an *empty* folder (Drive Health never flags empty
+folders; the Oct 6 "new Finder folders show empty in Files" report fits), another folder's
+contents → wrong items. `exfat_inspect.py` now reads those exact spots and predicts each folder's
+iPhone view, so the prediction can be checked on the phone. Also a controlled test: `mac/ios_folder_test.py` makes five tiny folders at the drive root that differ only
 in how they were written (empty mkdir; fresh file; file moved in; hidden-then-renamed like the
 rebuild; macOS `cp` with xattrs, so a `._` file). The iPhone's Drive Health says which fail, and
 `exfat_inspect.py --dump` prints each one's raw records field by field for a byte-level diff. The
