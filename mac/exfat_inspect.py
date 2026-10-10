@@ -27,6 +27,7 @@ For a disk image: python3 exfat_inspect.py --device image.img "Folder/Sub"
 from __future__ import annotations
 
 import argparse
+import bisect
 import os
 import random
 import struct
@@ -38,6 +39,7 @@ from collections import Counter, defaultdict, deque
 FORBIDDEN = set('"*/:<>?\\|')
 DIR_OWNER: dict[int, str] = {}   # cluster → the folder whose contents it holds (every folder read so far)
 FIRST_OWNER: dict[int, tuple[str, str, bool]] = {}   # first cluster → (folder, name, is_dir) of every item read
+FILES: list[tuple[int, int, bool, str, str]] = []      # (first cluster, clusters, NoFatChain, folder, name) of every file
 KEEP_RAW = False            # --dump: keep each entry set's bytes (off by default — a full-drive walk holds ~1M items)
 MAX_DIR_BYTES = 256 * 1024 * 1024
 
@@ -51,6 +53,11 @@ HELP = {
     "orphan-secondary": "in-use secondary entry with no file entry in front of it",
     "unknown-critical": "an entry type this exFAT version doesn't define, marked critical",
     "after-end": "in-use entries after the end-of-directory marker",
+    "dir-crosslinked": "part of the folder's contents is ALSO inside a file's data (cross-linked clusters)",
+    "dir-fat:zero": "contiguous folder; its clusters' FAT entries are empty (the usual way)",
+    "dir-fat:chain": "contiguous folder; its clusters' FAT entries ALSO hold a proper chain",
+    "dir-fat:other": "contiguous folder; its clusters' FAT entries hold something else (stale or odd values)",
+    "dir-fat:followed": "folder's contents are found by following the FAT (not marked contiguous)",
     "after-end-bytes": "leftover bytes after the end-of-directory marker (should be all zero; a strict reader may object)",
     "name-forbidden": "characters exFAT forbids in names (\" * / : < > ? \\ | or control characters)",
     "name-invalid-utf16": "invalid UTF-16 in a name (unpaired surrogate or U+FFFE/U+FFFF)",
@@ -82,7 +89,7 @@ INFO_ONLY = {"split-set", "fragmented", "churn", "large", "no-fat-chain-dir", "v
 
 
 def is_info(kind: str) -> bool:
-    return kind.split(":")[-1] in INFO_ONLY
+    return kind.startswith(("dir-fat:", "rec:")) or kind.split(":")[-1] in INFO_ONLY
 
 
 def u16(b: bytes, o: int) -> int:
@@ -296,7 +303,7 @@ class Volume:
 
 
 class Item:
-    __slots__ = ("name", "is_dir", "first", "length", "no_fat_chain", "index", "entry_off", "raw", "created")
+    __slots__ = ("name", "is_dir", "first", "length", "no_fat_chain", "index", "entry_off", "raw", "created", "rec")
 
     def __init__(self, name, is_dir, first, length, no_fat_chain, index, entry_off=None, raw=None, created=0):
         self.name, self.is_dir, self.first = name, is_dir, first
@@ -304,6 +311,7 @@ class Item:
         self.entry_off = entry_off              # byte offset of its record (inside the parent folder's data)
         self.raw = raw                          # its entry set's bytes (only with --dump)
         self.created = created                  # its exFAT creation timestamp
+        self.rec = None                         # a folder's file entry (32 bytes): its writer's fingerprint
 
 
 class Report:
@@ -321,6 +329,7 @@ class Report:
         self.dir_clusters: list[int] = []          # its contents' clusters, in reading order
         self.nfc = None                            # its record's NoFatChain flag
         self.created = 0                           # its record's creation timestamp
+        self.rec = None                            # its record's file entry (32 bytes)
         self.under: str | None = None              # a checked folder it sits inside (iOS never got to it)
         self.file_lo = self.file_hi = None         # where its files' data starts (lowest / highest)
 
@@ -347,6 +356,16 @@ def parse_directory(vol: Volume, first: int, length: int, no_fat_chain: bool, la
         r.add("fragmented", f"{r.extents} pieces")
     if no_fat_chain and len(clusters) > 1:
         r.add("no-fat-chain-dir", f"{len(clusters)} clusters")
+    if no_fat_chain:
+        vals = [vol.fat(c) for c in clusters]
+        if not any(vals):
+            r.add("dir-fat:zero", "")
+        elif vals == [c + 1 for c in clusters[:-1]] + [0xFFFFFFFF]:
+            r.add("dir-fat:chain", "")
+        else:
+            r.add("dir-fat:other", " ".join(f"{v:#x}" for v in vals[:4]))
+    else:
+        r.add("dir-fat:followed", "")
     data = vol.read_clusters(clusters, length)
     r.size = len(data)
     n = len(data) // 32
@@ -508,6 +527,10 @@ def parse_directory(vol: Volume, first: int, length: int, no_fat_chain: bool, la
         r.items.append(Item(name, is_dir, first_c, dlen, nfc, i, entry_off, raw if KEEP_RAW else None, u32(e, 8)))
         if first_c and dlen:
             FIRST_OWNER.setdefault(first_c, (label, name, is_dir))
+            if not is_dir:
+                FILES.append((first_c, -(-dlen // vol.cluster_size), nfc, label, name))
+        if is_dir:
+            r.items[-1].rec = bytes(e)
         if not is_dir and dlen and vol.valid_cluster(first_c):
             fo = vol.offset(first_c)
             r.file_lo = fo if r.file_lo is None else min(r.file_lo, fo)
@@ -545,14 +568,53 @@ def resolve(vol: Volume, rel: str) -> tuple[Report | None, str]:
             return None, f"“{part}” is a file, not a folder"
         first, length, nfc = it.first, it.length, it.no_fat_chain
         own = here.by_name.get(norm(it.name), [])
-        own_entry, own_raw, own_item = it.entry_off, it.raw, it
+        own_raw, own_item = it.raw, it
     if length is None:
         return root_report(vol), ""
     rep = parse_directory(vol, first, length, nfc, rel)
     add_own(rep, own)
-    rep.entry_off, rep.own_raw = own_entry, own_raw
-    rep.nfc, rep.created = own_item.no_fat_chain, own_item.created
+    rep.own_raw = own_raw
+    add_record(rep, own_item)
     return rep, ""
+
+
+def add_record(rep: Report, it: Item) -> None:
+    """The folder's own record in its parent: where it is, its flags, and how its writer filled it in."""
+    rep.entry_off, rep.nfc, rep.created, rep.rec = it.entry_off, it.no_fat_chain, it.created, it.rec
+    e = it.rec
+    if e is None:
+        return
+    c, m, a = u32(e, 8), u32(e, 12), u32(e, 16)
+    rep.add(f"rec:attributes {u16(e, 4):#06x}", "")
+    rep.add(f"rec:10ms {'zero' if not e[20] and not e[21] else 'set'}", "")
+    rep.add(f"rec:UTC offset {'set' if e[22] & 0x80 else 'none'}", "")
+    rep.add("rec:modified " + ("= created" if m == c else "> created" if m > c else "< created"), "")
+    rep.add("rec:accessed " + ("= modified" if a == m else "≠ modified"), "")
+
+
+def crosslinks(vol: Volume, reports: list[Report]) -> None:
+    """Flag folders whose contents' clusters also lie inside some file's data."""
+    dirc = sorted(DIR_OWNER)
+    dset = set(dirc)
+    hit: dict[int, str] = {}
+    walked = 0
+    for first, n, nfc, folder, name in FILES:
+        where = f"{folder}/{name}".strip("/")
+        if nfc:
+            j = bisect.bisect_left(dirc, first)
+            while j < len(dirc) and dirc[j] < first + n:
+                hit.setdefault(dirc[j], where)
+                j += 1
+        elif walked < 30_000_000:
+            cl, _ = vol.chain(first, n * vol.cluster_size, False)
+            walked += len(cl)
+            for c in cl:
+                if c in dset:
+                    hit.setdefault(c, where)
+    for r in reports:
+        shared = [c for c in r.dir_clusters if c in hit]
+        if shared:
+            r.add("dir-crosslinked", f"cluster {shared[0]} is also in file “{printable(hit[shared[0]])}”")
 
 
 def add_own(rep: Report, own: list[str]) -> None:
@@ -585,7 +647,7 @@ def healthy_sample(vol: Volume, skip: set[str], want: int) -> list[Report]:
             continue
         rel = f"{parent}/{it.name}".strip("/")
         rep = parse_directory(vol, it.first, it.length, it.no_fat_chain, rel)
-        rep.entry_off, rep.nfc, rep.created = it.entry_off, it.no_fat_chain, it.created
+        add_record(rep, it)
         rep.under = next((k for k in skip if norm(rel).startswith(k + "/")), None)
         if norm(rel) not in skip:
             add_own(rep, own)
@@ -757,15 +819,17 @@ def wrap_report(vol: Volume, bad: list[Report], good: list[Report], shift: int |
         print(f"   checked folders with a twin: {nb_twin} of {len(bad)}")
     print(f"\n== If the iPhone's reader wraps at 2^32 blocks ({tb(limit)}) ==")
     print(f"A folder stored past that point would be read from {tb(shift)} earlier. What is there, per folder:\n")
-    print(f"{'checked folder':44} {'stored at':>10}  {'NoFatChain':>10}  {'created':10}  wrapped read lands on → prediction")
+    print(f"{'checked folder':44} {'stored at':>10}  {'NoFatChain':>10}  {'created':29}  wrapped read lands on → prediction")
     for r, pr in b_pred:
         made = exfat_time(r.created, None, 0)[:10] if r.created else "?"
+        if r.rec is not None:
+            made = exfat_time(u32(r.rec, 8), r.rec[20], r.rec[22])
         if pr is None:
-            print(f"{r.label[:44]:44} {tb(r.dir_lo):>10}  {str(r.nfc):>10}  {made:10}  (not past {tb(limit)})")
+            print(f"{r.label[:44]:44} {tb(r.dir_lo):>10}  {str(r.nfc):>10}  {made:29}  (not past {tb(limit)})")
             continue
         k, a, where, verdict, sets = pr
         tail = f" ({sets} sets first)" if sets else ""
-        print(f"{r.label[:44]:44} {tb(r.dir_lo):>10}  {str(r.nfc):>10}  {made:10}  "
+        print(f"{r.label[:44]:44} {tb(r.dir_lo):>10}  {str(r.nfc):>10}  {made:29}  "
               + (f"after {k} good cluster(s), " if k else "") + f"{tb(a) if a >= 0 else '—'}, {where} → {verdict}{tail}")
     counts = Counter(p[3].split(" (")[0] for _, p in g_past)
     print(f"\nOther folders stored past {tb(limit)}: {len(g_past)} of {len(g_pred)}"
@@ -854,13 +918,16 @@ def print_report(r: Report) -> None:
           + (f" · its files' data from {tb(r.file_lo)} to {tb(r.file_hi)}" if r.file_lo is not None else ""))
     if r.unreadable:
         print(f"   can't read: {r.unreadable}")
-    if not r.found:
+    if not any(not k.startswith(("rec:", "dir-fat:")) for k in r.found):
         print("   (no problems)")
-    for kind in sorted(r.found, key=lambda k: (is_info(k), k)):
+    facts = sorted(k for k in r.found if k.startswith(("rec:", "dir-fat:")))
+    for kind in sorted((k for k in r.found if k not in facts), key=lambda k: (is_info(k), k)):
         ex = r.found[kind]
         more = f" (+{len(ex) - 3} more)" if len(ex) > 3 else ""
         tag = "info " if is_info(kind) else "PROBLEM"
         print(f"   {tag:7} {kind:22} {len(ex):6}  e.g. {'; '.join(ex[:3])}{more}")
+    if facts:
+        print("   facts   " + " · ".join(k + (f" ({r.found[k][0]})" if r.found[k][0] else "") for k in facts))
 
 
 def main() -> None:
@@ -931,13 +998,21 @@ def main() -> None:
 
     print(f"\n== Comparing with up to {args.sample} other folders on the drive… ==")
     good = healthy_sample(vol, {norm(r.label) for r in bad}, args.sample)
+    crosslinks(vol, bad + good)
     good_flags = Counter(k for r in good for k in r.found)
     bad_flags = Counter(k for r in bad for k in r.found)
     nb, ng = len(bad), max(1, len(good))
-    print(f"{'finding':24} {'checked':>8} {'others':>8}")
+    # Folders made in the same days as the checked ones: same tools and OS versions, so the fairest comparison.
+    since = min((r.created for r in bad if r.created), default=0)
+    new = [r for r in good if since and r.created >= since]
+    new_flags = Counter(k for r in new for k in r.found)
+    nn = max(1, len(new))
+    print(f"{'finding':32} {'checked':>8} {'others':>8} {'new':>8}   (new = the {len(new)} others created since "
+          f"{exfat_time(since, None, 0)[:10] if since else '—'})")
     rows = sorted(set(bad_flags) | set(good_flags), key=lambda k: -(bad_flags[k] / nb - good_flags[k] / ng))
     for k in rows:
-        print(f"{k:24} {100 * bad_flags[k] / nb:7.0f}% {100 * good_flags[k] / ng:7.0f}%   {describe(k)}")
+        print(f"{k:32} {100 * bad_flags[k] / nb:7.0f}% {100 * good_flags[k] / ng:7.0f}% "
+              f"{100 * new_flags[k] / nn:7.0f}%   {describe(k)}")
     avg = lambda rs, f: sum(f(r) for r in rs) / max(1, len(rs))
     print(f"\n{'':24} {'checked':>8} {'others':>8}")
     print(f"{'avg items':24} {avg(bad, lambda r: r.live):8.0f} {avg(good, lambda r: r.live):8.0f}")

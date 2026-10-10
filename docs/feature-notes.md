@@ -1176,7 +1176,16 @@ wrap is out. Two refinements are now reported: a **same-ID test** (if iOS derive
 from a 32-bit block number, a folder past the line shares its ID with whatever item's data starts
 exactly 2.20 TB earlier, and only folders with such a twin would break) and a **recency** check
 (all 9 were created Oct 5–10, the days directory-flushing writers were in use: is any other folder
-that new and past the line readable?). Also a controlled test: `mac/ios_folder_test.py` makes five tiny folders at the drive root that differ only
+that new and past the line readable?). Results: no twins (0 of 9), and 102 folders created since
+Oct 5 sit past the line and open fine — so neither explains it. What the 9 do share: every one was
+written by a tool that flushed folders at the time (the iOS app from Oct 5 — Kendall, Kylie, Kari
+Diviney/Duplicate PNGs; `safe_copy_to_ssd.py` / Safe Finder Oct 8–10 — the Porn folders; Japanese
+is the "NewFolder" of the move test, made by a Safe Finder window that may still have been running
+the old code). The checker now adds the places a flush could leave a mark that it hadn't read: the
+FAT entries of each folder's clusters (contiguous folders shouldn't need any), clusters shared with
+a file (cross-links), and the writer fingerprint of each folder's own record (attributes, 10 ms
+fields, UTC offsets, timestamp pattern), compared against folders made in the same days.
+Also a controlled test: `mac/ios_folder_test.py` makes five tiny folders at the drive root that differ only
 in how they were written (empty mkdir; fresh file; file moved in; hidden-then-renamed like the
 rebuild; macOS `cp` with xattrs, so a `._` file). The iPhone's Drive Health says which fail, and
 `exfat_inspect.py --dump` prints each one's raw records field by field for a byte-level diff. The
