@@ -9,14 +9,17 @@ checks every field the exFAT specification defines: entry-set checksums, name ha
 names (forbidden / invalid UTF-16 / private-use characters), timestamps and UTC offsets, attributes,
 reserved bytes, sizes and cluster chains — plus layout facts (deleted entries, fragmentation, entry
 sets split across clusters). It compares the failing folders against healthy ones, so whatever
-separates them shows up as "in (nearly) every failing folder, (nearly) no healthy one".
+separates them shows up as "in (nearly) every failing folder, (nearly) no healthy one". It also
+reports WHERE on the drive each folder's contents physically sit: a structurally clean folder that
+iOS still rejects points at the reader (e.g. one that can't reach past some offset on a large drive),
+and comparing locations across hundreds of folders shows whether that's the dividing line.
 
 Read-only: it opens the disk device for reading and never writes. Run it BEFORE rebuilding a
 folder — a rebuild rewrites the entries and erases the evidence.
 
 Usage (needs sudo to read the disk device):
   sudo python3 mac/exfat_inspect.py "/Volumes/Extreme SSD/Kardashians/Kylie Jenner"
-  sudo python3 mac/exfat_inspect.py --list unreadable.txt --root "/Volumes/Extreme SSD"
+  sudo python3 mac/exfat_inspect.py --list unreadable.txt --root "/Volumes/Extreme SSD" --sample 5000
   (unreadable.txt = the list Drive Health's Share button exports)
 For a disk image: python3 exfat_inspect.py --device image.img "Folder/Sub"
 """
@@ -156,6 +159,7 @@ class Volume:
         self.cluster_count = u32(boot, 92)
         self.root_cluster = u32(boot, 96)
         self.volume_flags = u16(boot, 106)
+        self.partition_offset = u64(boot, 64) * self.bps      # where the volume starts on the disk (0 = unknown)
         self.revision = u16(boot, 104)
         self._fat_cache: dict[int, bytes] = {}
         self.bitmap: bytes | None = None
@@ -169,6 +173,10 @@ class Volume:
         end += (-end) % self.ALIGN
         data = os.pread(self.fd, end - start, start)
         return data[off - start: off - start + n]
+
+    def offset(self, c: int) -> int:
+        """Byte offset of cluster `c` from the start of the volume."""
+        return self.heap_offset + (c - 2) * self.cluster_size
 
     def valid_cluster(self, c: int) -> bool:
         return 2 <= c <= self.cluster_count + 1
@@ -284,11 +292,12 @@ class Volume:
 
 
 class Item:
-    __slots__ = ("name", "is_dir", "first", "length", "no_fat_chain", "index")
+    __slots__ = ("name", "is_dir", "first", "length", "no_fat_chain", "index", "entry_off")
 
-    def __init__(self, name, is_dir, first, length, no_fat_chain, index):
+    def __init__(self, name, is_dir, first, length, no_fat_chain, index, entry_off=None):
         self.name, self.is_dir, self.first = name, is_dir, first
         self.length, self.no_fat_chain, self.index = length, no_fat_chain, index
+        self.entry_off = entry_off              # byte offset of its record (inside the parent folder's data)
 
 
 class Report:
@@ -300,6 +309,9 @@ class Report:
         self.size = 0
         self.unreadable: str | None = None
         self.by_name: dict[str, list[str]] = {}     # item name → problems in its own entry set
+        self.dir_lo = self.dir_hi = None           # where this folder's own contents sit (byte offsets)
+        self.entry_off = None                      # where its record sits, inside the parent folder
+        self.file_lo = self.file_hi = None         # where its files' data starts (lowest / highest)
 
     def add(self, kind: str, example: str) -> None:
         self.found[kind].append(example)
@@ -314,6 +326,8 @@ def parse_directory(vol: Volume, first: int, length: int, no_fat_chain: bool, la
         r.unreadable = "no clusters"
         return r
     r.clusters = len(clusters)
+    r.dir_lo = vol.offset(min(clusters))
+    r.dir_hi = vol.offset(max(clusters)) + vol.cluster_size
     r.extents = 1 + sum(1 for a, b in zip(clusters, clusters[1:]) if b != a + 1)
     if r.extents > 1:
         r.add("fragmented", f"{r.extents} pieces")
@@ -472,7 +486,13 @@ def parse_directory(vol: Volume, first: int, length: int, no_fat_chain: bool, la
                 flag("split-set-fragmented", shown)
         key = tuple(vol.upcase[u] for u in name_units)
         names[key].append(shown)
-        r.items.append(Item(name, is_dir, first_c, dlen, nfc, i))
+        ci = i // per_cluster
+        entry_off = vol.offset(clusters[ci]) + (i % per_cluster) * 32 if ci < len(clusters) else None
+        r.items.append(Item(name, is_dir, first_c, dlen, nfc, i, entry_off))
+        if not is_dir and dlen and vol.valid_cluster(first_c):
+            fo = vol.offset(first_c)
+            r.file_lo = fo if r.file_lo is None else min(r.file_lo, fo)
+            r.file_hi = fo if r.file_hi is None else max(r.file_hi, fo)
         r.by_name[norm(name)] = mine
         r.live += 1
         i += 1 + sc
@@ -506,10 +526,12 @@ def resolve(vol: Volume, rel: str) -> tuple[Report | None, str]:
             return None, f"“{part}” is a file, not a folder"
         first, length, nfc = it.first, it.length, it.no_fat_chain
         own = here.by_name.get(norm(it.name), [])
+        own_entry = it.entry_off
     if length is None:
         return root_report(vol), ""
     rep = parse_directory(vol, first, length, nfc, rel)
     add_own(rep, own)
+    rep.entry_off = own_entry
     return rep, ""
 
 
@@ -543,6 +565,7 @@ def healthy_sample(vol: Volume, skip: set[str], want: int) -> list[Report]:
             continue
         rel = f"{parent}/{it.name}".strip("/")
         rep = parse_directory(vol, it.first, it.length, it.no_fat_chain, rel)
+        rep.entry_off = it.entry_off
         if norm(rel) not in skip:
             add_own(rep, own)
             out.append(rep)
@@ -561,15 +584,66 @@ def device_for(path: str) -> tuple[str, str]:
     return dev, mount
 
 
+def location_report(vol: Volume, bad: list[Report], good: list[Report]) -> str | None:
+    """Where the checked folders sit on the drive compared with the others — a reader that can't reach
+    part of a large drive (a 32-bit block number tops out at 2 TiB with 512-byte blocks) fails exactly
+    for the folders stored past that point, whatever their contents. Returns a verdict if location
+    separates the two groups."""
+    size = vol.heap_offset + vol.cluster_count * vol.cluster_size
+    limit = (2 ** 32) * vol.bps - vol.partition_offset          # 2^32 blocks from the start of the disk
+    print(f"\n== Where things sit on the drive ({size / 1e12:.2f} TB; "
+          f"2^32 {vol.bps}-byte blocks end at {limit / 1e12:.2f} TB into this volume) ==")
+
+    def span(rs: list[Report], key) -> str:
+        vals = [key(r) for r in rs if key(r) is not None]
+        return f"{tb(min(vals))} – {tb(max(vals))}" if vals else "—"
+
+    print(f"{'':26} {'checked':>22} {'others':>22}")
+    for label, key in (("folder contents (start)", lambda r: r.dir_lo), ("folder contents (end)", lambda r: r.dir_hi),
+                       ("record in the parent", lambda r: r.entry_off),
+                       ("files' data (lowest)", lambda r: r.file_lo), ("files' data (highest)", lambda r: r.file_hi)):
+        print(f"{label:26} {span(bad, key):>22} {span(good, key):>22}")
+    edges = [0.5e12 * k for k in range(0, int(size / 0.5e12) + 2)]
+    # A folder that grew got its new pieces wherever there was free space, so bucket by its farthest piece.
+    print(f"\n{'folder contents reach':26} {'checked':>8} {'others':>8}")
+    for lo, hi in zip(edges, edges[1:]):
+        nb_ = sum(1 for r in bad if r.dir_hi is not None and lo < r.dir_hi <= hi)
+        ng_ = sum(1 for r in good if r.dir_hi is not None and lo < r.dir_hi <= hi)
+        if nb_ or ng_:
+            print(f"{tb(int(lo)) + ' – ' + tb(int(hi)):26} {nb_:8} {ng_:8}")
+    verdicts = []
+    for label, key in (("contents reach", lambda r: r.dir_hi), ("record sits", lambda r: r.entry_off)):
+        b = [key(r) for r in bad if key(r) is not None]
+        g = [key(r) for r in good if key(r) is not None]
+        if b and g:
+            if min(b) > max(g):
+                verdicts.append(f"LOCATION: every checked folder's {label} beyond {tb(min(b))}, and no other "
+                                f"folder's does (farthest: {tb(max(g))}). The 2^32-block mark is {tb(limit)}.")
+            else:
+                beyond = sum(1 for x in g if x >= min(b))
+                print(f"   {beyond} of {len(g)} other folders' {label} as far as or beyond the nearest checked one "
+                      f"({tb(min(b))}).")
+    return "\n".join(verdicts) or None
+
+
 def describe(kind: str) -> str:
     if kind.startswith("own-entry:"):
         return "the folder's own entry in its parent: " + HELP.get(kind[len("own-entry:"):], "")
     return HELP.get(kind, "")
 
 
+def tb(n: int | None) -> str:
+    if n is None:
+        return "—"
+    return f"{n / 1e12:.2f} TB" if n >= 1e11 else f"{n / 1e9:.1f} GB"
+
+
 def print_report(r: Report) -> None:
     print(f"\n{r.label or '(drive root)'}  — {r.live} items, {r.deleted} deleted, "
           f"{r.size // 1024} KB in {r.clusters} cluster(s), {r.extents} piece(s)")
+    print(f"   on the drive: contents at {tb(r.dir_lo)}" + (f"–{tb(r.dir_hi)}" if r.clusters > 1 else "")
+          + f" · its record (in the parent) at {tb(r.entry_off)}"
+          + (f" · its files' data from {tb(r.file_lo)} to {tb(r.file_hi)}" if r.file_lo is not None else ""))
     if r.unreadable:
         print(f"   can't read: {r.unreadable}")
     if not r.found:
@@ -655,9 +729,12 @@ def main() -> None:
     print(f"{'avg items':24} {avg(bad, lambda r: r.live):8.0f} {avg(good, lambda r: r.live):8.0f}")
     print(f"{'avg deleted items':24} {avg(bad, lambda r: r.deleted):8.0f} {avg(good, lambda r: r.deleted):8.0f}")
     print(f"{'avg pieces on disk':24} {avg(bad, lambda r: r.extents):8.1f} {avg(good, lambda r: r.extents):8.1f}")
+    located = location_report(vol, bad, good)
     suspects = [k for k in rows if bad_flags[k] / nb >= 0.6 and good_flags[k] / ng <= 0.15]
     rare = [k for k in rows if k not in suspects and not is_info(k) and bad_flags[k] and good_flags[k] / ng <= 0.15]
     print()
+    if located:
+        print(located)
     if suspects:
         print("Likely trigger(s): " + ", ".join(suspects))
     if rare:
@@ -666,7 +743,7 @@ def main() -> None:
     if not suspects and not rare:
         if any(not is_info(k) for r in bad for k in r.found):
             print("Problems found, but just as common in the other folders.")
-        else:
+        elif not located:
             print("The checked folders are structurally clean — what iOS rejects isn't in their directory entries.")
     print("\nPaste this whole output back to Claude.")
 

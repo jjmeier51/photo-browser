@@ -163,11 +163,13 @@ macOS tolerates. Export the list with Drive Health's Share button, then:
 
 1. **Find out why** — read-only, reads the folders' directory entries straight off the disk and
    compares them with healthy folders (checksums, name hashes, names, timestamps, sizes, cluster
-   chains, deleted entries, fragmentation). Run it *before* rebuilding — a rebuild erases the
-   evidence. Paste the output to Claude.
+   chains, deleted entries, fragmentation) — and where on the drive each folder physically sits,
+   since a structurally clean folder iOS still rejects points at the reader rather than the folder.
+   Run it *before* rebuilding — a rebuild erases the evidence. Paste the output to Claude.
+   `--sample 5000` compares against every folder on the drive instead of 150.
 
    ```sh
-   sudo python3 mac/exfat_inspect.py --list unreadable.txt --root "/Volumes/<SSD name>"
+   sudo python3 mac/exfat_inspect.py --list unreadable.txt --root "/Volumes/<SSD name>" --sample 5000
    sudo python3 mac/exfat_inspect.py "/Volumes/<SSD name>/Kardashians/Kylie Jenner"
    ```
 
