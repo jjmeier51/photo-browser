@@ -1158,6 +1158,17 @@ the SSD is a fresh copy + Trash), with no fsync at all, `sync()` between items, 
 `F_FULLFSYNC`'d via a small journal file). The iOS app is unchanged beyond the directory-flush rule
 until the inspector shows which record is bad.
 
+**Inspector results (Oct 10) rule out two more theories.** The new unreadable folder (37 items, one
+cluster) is structurally clean, its own record and every item's record included — so neither the
+flush nor the moved files' records are visibly bad. Location is out too: the checker now reports
+where each folder sits, and readable folders sit everywhere the drive has data (0–3.9 TB on the
+8 TB SSD, ~190 of them past 2.5 TB), so it isn't a 2 TiB / 32-bit-block limit. Next step is a
+controlled test: `mac/ios_folder_test.py` makes five tiny folders at the drive root that differ only
+in how they were written (empty mkdir; fresh file; file moved in; hidden-then-renamed like the
+rebuild; macOS `cp` with xattrs, so a `._` file). The iPhone's Drive Health says which fail, and
+`exfat_inspect.py --dump` prints each one's raw records field by field for a byte-level diff. The
+checker also now flags non-zero bytes after a folder's end-of-directory marker (`after-end-bytes`).
+
 **What this does not cover.** A cable pulled during an active write can still tear the FAT —
 exFAT has no journal, which is why "Prepare Drive for Removal…" exists. The fixes shrink the
 window to a single in-flight, fsync'd entry and make every folder/file either fully present or

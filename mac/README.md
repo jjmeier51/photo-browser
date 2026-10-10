@@ -176,6 +176,16 @@ macOS tolerates. Export the list with Drive Health's Share button, then:
    (`sudo` is needed to read the disk device; nothing is written. If macOS still refuses, give
    Terminal Full Disk Access in System Settings ▸ Privacy & Security.)
 
+   **Controlled test** — when the checker finds nothing, find out which way of writing breaks a
+   folder: `ios_folder_test.py` makes five tiny "iOS Test …" folders at the top of the drive, each
+   holding the same photo but written a different way. Dump their raw records, eject, run Drive
+   Health on the iPhone, and paste both to Claude:
+
+   ```sh
+   python3 mac/ios_folder_test.py "/Volumes/<SSD name>"            # prints the --dump command to run next
+   python3 mac/ios_folder_test.py "/Volumes/<SSD name>" --remove   # afterwards
+   ```
+
 2. **Rebuild them** with `rebuild_exfat_folders.py` (below) — `--low-space` for big folders.
 
 The app shows such folders as orange "Can't read on iOS" tiles instead of hiding them, and saves

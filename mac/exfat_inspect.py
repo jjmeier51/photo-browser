@@ -36,6 +36,7 @@ import unicodedata
 from collections import Counter, defaultdict, deque
 
 FORBIDDEN = set('"*/:<>?\\|')
+KEEP_RAW = False            # --dump: keep each entry set's bytes (off by default — a full-drive walk holds ~1M items)
 MAX_DIR_BYTES = 256 * 1024 * 1024
 
 HELP = {
@@ -48,6 +49,7 @@ HELP = {
     "orphan-secondary": "in-use secondary entry with no file entry in front of it",
     "unknown-critical": "an entry type this exFAT version doesn't define, marked critical",
     "after-end": "in-use entries after the end-of-directory marker",
+    "after-end-bytes": "leftover bytes after the end-of-directory marker (should be all zero; a strict reader may object)",
     "name-forbidden": "characters exFAT forbids in names (\" * / : < > ? \\ | or control characters)",
     "name-invalid-utf16": "invalid UTF-16 in a name (unpaired surrogate or U+FFFE/U+FFFF)",
     "name-private-use": "private-use characters (how macOS stores : / * ? etc.)",
@@ -292,12 +294,13 @@ class Volume:
 
 
 class Item:
-    __slots__ = ("name", "is_dir", "first", "length", "no_fat_chain", "index", "entry_off")
+    __slots__ = ("name", "is_dir", "first", "length", "no_fat_chain", "index", "entry_off", "raw")
 
-    def __init__(self, name, is_dir, first, length, no_fat_chain, index, entry_off=None):
+    def __init__(self, name, is_dir, first, length, no_fat_chain, index, entry_off=None, raw=None):
         self.name, self.is_dir, self.first = name, is_dir, first
         self.length, self.no_fat_chain, self.index = length, no_fat_chain, index
         self.entry_off = entry_off              # byte offset of its record (inside the parent folder's data)
+        self.raw = raw                          # its entry set's bytes (only with --dump)
 
 
 class Report:
@@ -311,6 +314,7 @@ class Report:
         self.by_name: dict[str, list[str]] = {}     # item name → problems in its own entry set
         self.dir_lo = self.dir_hi = None           # where this folder's own contents sit (byte offsets)
         self.entry_off = None                      # where its record sits, inside the parent folder
+        self.own_raw = None                        # its record's bytes (only with --dump)
         self.file_lo = self.file_hi = None         # where its files' data starts (lowest / highest)
 
     def add(self, kind: str, example: str) -> None:
@@ -346,6 +350,9 @@ def parse_directory(vol: Volume, first: int, length: int, no_fat_chain: bool, la
             after = [j for j in range(i + 1, n) if data[j * 32] & 0x80]
             if after:
                 r.add("after-end", f"{len(after)} in-use entries after the end marker at #{i}")
+            elif data[i * 32:].count(0) != len(data) - i * 32:
+                stale = sum(1 for j in range(i, n) if any(data[j * 32:(j + 1) * 32]))
+                r.add("after-end-bytes", f"{stale} non-zero slots after the end marker at #{i}")
             break
         if not t & 0x80:
             if t == 0x05:                                # a deleted file's primary entry
@@ -488,7 +495,7 @@ def parse_directory(vol: Volume, first: int, length: int, no_fat_chain: bool, la
         names[key].append(shown)
         ci = i // per_cluster
         entry_off = vol.offset(clusters[ci]) + (i % per_cluster) * 32 if ci < len(clusters) else None
-        r.items.append(Item(name, is_dir, first_c, dlen, nfc, i, entry_off))
+        r.items.append(Item(name, is_dir, first_c, dlen, nfc, i, entry_off, raw if KEEP_RAW else None))
         if not is_dir and dlen and vol.valid_cluster(first_c):
             fo = vol.offset(first_c)
             r.file_lo = fo if r.file_lo is None else min(r.file_lo, fo)
@@ -526,12 +533,12 @@ def resolve(vol: Volume, rel: str) -> tuple[Report | None, str]:
             return None, f"“{part}” is a file, not a folder"
         first, length, nfc = it.first, it.length, it.no_fat_chain
         own = here.by_name.get(norm(it.name), [])
-        own_entry = it.entry_off
+        own_entry, own_raw = it.entry_off, it.raw
     if length is None:
         return root_report(vol), ""
     rep = parse_directory(vol, first, length, nfc, rel)
     add_own(rep, own)
-    rep.entry_off = own_entry
+    rep.entry_off, rep.own_raw = own_entry, own_raw
     return rep, ""
 
 
@@ -632,6 +639,47 @@ def describe(kind: str) -> str:
     return HELP.get(kind, "")
 
 
+def exfat_time(ts: int, ms: int | None, utc: int) -> str:
+    sec = (ts & 0x1F) * 2 + (ms or 0) // 100
+    t = (f"{1980 + (ts >> 25):04}-{(ts >> 21) & 0xF:02}-{(ts >> 16) & 0x1F:02} "
+         f"{(ts >> 11) & 0x1F:02}:{(ts >> 5) & 0x3F:02}:{sec:02}")
+    if utc & 0x80:
+        v = utc & 0x7F
+        v = v - 0x80 if v & 0x40 else v
+        t += f" UTC{'+' if v >= 0 else '-'}{abs(v) * 15 // 60:02}:{abs(v) * 15 % 60:02}"
+    else:
+        t += " (no UTC offset)"
+    return t
+
+
+def dump_set(title: str, raw: bytes | None) -> None:
+    """One entry set: every field decoded, then the bytes, so two sets can be compared exactly."""
+    print(f"   {title}")
+    if raw is None:
+        print("      (not available)")
+        return
+    e, s = raw[:32], raw[32:64]
+    print(f"      file entry:  secondaries {e[1]}, checksum {u16(e, 2):04x}, attributes {u16(e, 4):#06x}, "
+          f"reserved {u16(e, 6):#06x}")
+    print(f"      created  {exfat_time(u32(e, 8), e[20], e[22])}")
+    print(f"      modified {exfat_time(u32(e, 12), e[21], e[23])}")
+    print(f"      accessed {exfat_time(u32(e, 16), None, e[24])}, reserved tail {e[25:32].hex()}")
+    print(f"      stream:      flags {s[1]:#04x} (AllocationPossible {s[1] & 1}, NoFatChain {(s[1] >> 1) & 1}), "
+          f"reserved {s[2]:#04x}, name length {s[3]}, name hash {u16(s, 4):04x}, reserved {u16(s, 6):#06x}")
+    print(f"                   valid length {u64(s, 8)}, reserved {u32(s, 16):#x}, first cluster {u32(s, 20)}, "
+          f"size {u64(s, 24)}")
+    for k in range(0, len(raw), 32):
+        print(f"      {raw[k]:02x}: {raw[k:k + 32].hex(' ')}")
+
+
+def print_dump(r: Report, limit: int = 6) -> None:
+    dump_set("its own record (in the parent folder):", r.own_raw)
+    for it in r.items[:limit]:
+        dump_set(f"item “{printable(it.name)}”:", it.raw)
+    if len(r.items) > limit:
+        print(f"   … and {len(r.items) - limit} more items")
+
+
 def tb(n: int | None) -> str:
     if n is None:
         return "—"
@@ -662,7 +710,11 @@ def main() -> None:
     ap.add_argument("--root", help='the SSD for --list, e.g. "/Volumes/Extreme SSD"')
     ap.add_argument("--device", help="read this device / image instead of the one df reports")
     ap.add_argument("--sample", type=int, default=150, help="healthy folders to compare against (default 150)")
+    ap.add_argument("--dump", action="store_true",
+                    help="also print each checked folder's raw records (its own and its first items') field by field")
     args = ap.parse_args()
+    global KEEP_RAW
+    KEEP_RAW = args.dump
 
     rels: list[str] = []
     mount = None
@@ -711,6 +763,8 @@ def main() -> None:
             print(f"\n{rel}: {why}")
             continue
         print_report(rep)
+        if args.dump:
+            print_dump(rep)
         bad.append(rep)
     if not bad or args.sample <= 0:
         return

@@ -330,7 +330,9 @@ These were discovered the painful way; the current code already respects them.
     broken folder settles it: **never fsync a directory** (`DriveWriter.fullSync` refuses them,
     so `fullSyncFileAndParent` etc. only flush files; `quiesce` uses `sync()`), and the Mac
     tools in `mac/` write exactly like the copy rebuild — no moves or renames of files on the
-    drive, no fsync at all.
+    drive, no fsync at all. Also ruled out (Oct 10): visibly bad records (a fresh failing folder
+    inspects clean) and location on the drive (readable folders sit everywhere, past 2.2 TB too).
+    `mac/ios_folder_test.py` is the controlled test meant to settle it.
 13. **`nonisolated async` is not "off the main thread".** The target builds with
     `SWIFT_APPROACHABLE_CONCURRENCY` (NonisolatedNonsendingByDefault), so a plain
     `nonisolated async func` runs on whatever actor *awaited* it — awaited from a
