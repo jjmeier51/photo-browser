@@ -1224,6 +1224,14 @@ byte-identical, nested moves inside a compacted parent, `--only`, and refusals (
 (dot) folders are left alone unless `--include-hidden`; the drive's top-level list isn't moved.
 Because nearly all free space is past the line, new folders (from the Mac or the iPhone) keep
 landing there, so rerun it after adding folders; the lasting fix is partitions under 2.2 TB or APFS.
+First real run (Oct 11) stopped while planning — nothing written — with "not enough free space"
+for a 7-cluster list: the free space below the line is mostly gaps left by deleted photos, and the
+tool insisted on one unbroken stretch. Now lists are placed biggest first, contiguous when a stretch
+exists and otherwise gathered from the gaps and chained in the FAT (NoFatChain cleared); compacted
+lists shrink to what their live entries need plus one cluster (Kendall 14 → ~7); the dry run reports
+the free space below the line and its largest gap and refuses up front if the total isn't enough.
+A folder path (rather than the SSD's root) limits the run to that folder and its subfolders — the
+user ran it on one folder expecting exactly that, and it had planned the whole drive.
 Also a controlled test: `mac/ios_folder_test.py` makes five tiny folders at the drive root that differ only
 in how they were written (empty mkdir; fresh file; file moved in; hidden-then-renamed like the
 rebuild; macOS `cp` with xattrs, so a `._` file). The iPhone's Drive Health says which fail, and

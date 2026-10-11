@@ -95,7 +95,7 @@ class Node:
         self.path, self.parent, self.item, self.rep = path, parent, item, rep
         self.clusters: list[int] = rep.dir_clusters
         self.length, self.hidden = length, hidden
-        self.new_first: int | None = None
+        self.new: list[int] = []                    # where its list goes (in order; contiguous when possible)
         self.buf: bytearray | None = None           # its list, as it will be written (patched / compacted)
         self.index_map: dict[int, int] | None = None  # entry index before → after compaction
 
@@ -168,20 +168,48 @@ def free_runs(vol: "xi.Volume", last_ok: int) -> list[list[int]]:
     return runs
 
 
-def take(runs: list[list[int]], n: int) -> int | None:
-    """First fit: `n` contiguous free clusters, removed from `runs`."""
+def take(runs: list[list[int]], n: int) -> list[int] | None:
+    """`n` free clusters, removed from `runs`: one contiguous stretch if there is one (first fit),
+    otherwise gathered from the largest gaps — a folder's list may legally sit in pieces, chained in
+    the FAT, and the free space below the line is mostly small gaps left by deleted files."""
     for r in runs:
         if r[1] >= n:
             first = r[0]
             r[0] += n
             r[1] -= n
-            return first
-    return None
+            return list(range(first, first + n))
+    if sum(r[1] for r in runs) < n:
+        return None
+    out: list[int] = []
+    for r in sorted(runs, key=lambda r: -r[1]):
+        while r[1] and len(out) < n:
+            out.append(r[0])
+            r[0] += 1
+            r[1] -= 1
+        if len(out) == n:
+            break
+    return out
 
 
-def compact(buf: bytes) -> tuple[bytearray, dict[int, int]] | None:
-    """The list with every deleted entry dropped (live entry sets kept byte for byte, in order), and
-    the old → new index of each set; None unless the result checks out as whole, well-formed sets."""
+def contiguous(clusters: list[int]) -> bool:
+    return all(b == a + 1 for a, b in zip(clusters, clusters[1:]))
+
+
+def segments(clusters: list[int]) -> list[tuple[int, int]]:
+    """(first cluster, count) of each contiguous piece, in order."""
+    out: list[tuple[int, int]] = []
+    for c in clusters:
+        if out and c == out[-1][0] + out[-1][1]:
+            out[-1] = (out[-1][0], out[-1][1] + 1)
+        else:
+            out.append((c, 1))
+    return out
+
+
+def compact(buf: bytes) -> tuple[bytearray, dict[int, int], int] | None:
+    """The list with every deleted entry dropped (live entry sets kept byte for byte, in order), the
+    old → new index of each set, and the bytes in use; None unless it checks out as whole, well-formed
+    sets."""
     out = bytearray()
     mapping: dict[int, int] = {}
     n = len(buf) // 32
@@ -212,8 +240,9 @@ def compact(buf: bytes) -> tuple[bytearray, dict[int, int]] | None:
             j += 1
     if len(out) > len(buf):
         return None
+    used = len(out)
     out += bytes(len(buf) - len(out))
-    return out, mapping
+    return out, mapping, used
 
 
 def live_sets(buf: bytes) -> list[bytes]:
@@ -231,15 +260,19 @@ def live_sets(buf: bytes) -> list[bytes]:
     return sets
 
 
-def repoint(buf: bytearray, index: int, expect: bytes, new_first: int) -> None:
-    """Point the folder record at entry `index` of a parent's list at `new_first`, marked contiguous."""
+def repoint(buf: bytearray, index: int, expect: bytes, clusters: list[int], cluster_size: int) -> None:
+    """Point the folder record at entry `index` of a parent's list at its new `clusters` — marked
+    contiguous (NoFatChain) when they are, otherwise found through the FAT chain written for them."""
     sc = buf[index * 32 + 1]
     a, b = index * 32, (index + 1 + sc) * 32
     if bytes(buf[a:b]) != expect:
         raise SystemExit("A folder's record changed between reading and planning — nothing was written.")
     s = a + 32
-    buf[s + 1] |= 0x03                                  # AllocationPossible + NoFatChain
-    buf[s + 20:s + 24] = struct.pack("<I", new_first)
+    size = len(clusters) * cluster_size
+    buf[s + 1] = (buf[s + 1] & ~0x03) | 0x01 | (0x02 if contiguous(clusters) else 0)   # AllocationPossible, NoFatChain
+    buf[s + 8:s + 16] = struct.pack("<Q", size)         # ValidDataLength = DataLength for a folder
+    buf[s + 20:s + 24] = struct.pack("<I", clusters[0])
+    buf[s + 24:s + 32] = struct.pack("<Q", size)
     buf[a + 2:a + 4] = struct.pack("<H", xi.set_checksum(bytes(buf[a:b])))
 
 
@@ -275,7 +308,9 @@ def human(n: int) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("drive", nargs="?", help='the SSD, e.g. "/Volumes/Extreme SSD"')
+    ap.add_argument("drive", nargs="?",
+                    help='the SSD, e.g. "/Volumes/Extreme SSD" — or a folder on it, to fix just that folder and '
+                         "the folders inside it")
     ap.add_argument("--device", help="the raw device or a disk image (instead of finding it from the drive)")
     ap.add_argument("--apply", action="store_true", help="really move them (default: dry run)")
     ap.add_argument("--only", nargs="+", metavar="FOLDER", help="just these folders (drive-relative paths)")
@@ -291,6 +326,11 @@ def main() -> None:
         if not args.drive:
             ap.error("pass the SSD (or --device)")
         device, mount = xi.device_for(os.path.abspath(args.drive))
+    scope = None
+    if args.drive and mount and os.path.realpath(args.drive) != os.path.realpath(mount):
+        scope = os.path.relpath(os.path.realpath(args.drive), os.path.realpath(mount))
+    elif args.drive and args.device:
+        scope = args.drive.strip("/") or None          # with --device: a folder path inside that volume
     is_image = os.path.isfile(device)
     if not is_image and os.geteuid() != 0:
         sys.exit("Run it with sudo — it reads the disk device directly.")
@@ -307,17 +347,17 @@ def main() -> None:
                      f"Photo Browser for Mac) and try again.\n{out}")
         print(f"Unmounted {mount} (it is remounted at the end).")
         try:
-            plan_and_move(args, device, mount)
+            plan_and_move(args, device, mount, scope)
         finally:
             code, out = run(["diskutil", "mount", device.replace("/dev/rdisk", "/dev/disk")])
             print("Remounted the SSD." if code == 0 else f"Couldn't remount the SSD — unplug and replug it.\n{out}")
         return
     if mount:
         os.sync()
-    plan_and_move(args, device, mount)
+    plan_and_move(args, device, mount, scope)
 
 
-def plan_and_move(args: argparse.Namespace, device: str, mount: str | None) -> None:
+def plan_and_move(args: argparse.Namespace, device: str, mount: str | None, scope: str | None) -> None:
     xi.KEEP_RAW = "dirs"
     vol = xi.Volume(device)
     cs = vol.cluster_size
@@ -350,7 +390,12 @@ def plan_and_move(args: argparse.Namespace, device: str, mount: str | None) -> N
     movers: list[Node] = []
     skipped: list[str] = []
     hidden_left = 0
+    within = xi.norm(scope) if scope else None
+    if scope:
+        print(f"Only “{scope}” and the folders inside it.")
     for nd in nodes:
+        if within is not None and not (xi.norm(nd.path) == within or xi.norm(nd.path).startswith(within + "/")):
+            continue
         if nd.parent is None or not any(vol.offset(c) + cs > safe for c in nd.clusters):
             continue
         if only is not None and xi.norm(nd.path) not in only:
@@ -374,26 +419,41 @@ def plan_and_move(args: argparse.Namespace, device: str, mount: str | None) -> N
         print("Nothing to move.")
         return
 
-    # Plan: a destination for each list, compacted when it's mostly deleted entries.
-    runs = free_runs(vol, last_ok)
-    free_total = sum(r[1] for r in runs) * cs
+    # Plan: compact lists that are full of deleted entries (which can shrink them), then find room for
+    # each below the line, biggest first so they get the longest unbroken stretches.
+    need: dict[int, int] = {}
     for nd in movers:
         data = bytearray(vol.read_clusters(nd.clusters, nd.length))
         nd.buf = data
+        n = len(nd.clusters)
         if not args.no_compact and nd.rep.deleted:
             res = compact(data)
             if res and live_sets(res[0]) == live_sets(data):
-                nd.buf, nd.index_map = res
-        nd.new_first = take(runs, len(nd.clusters))
-        if nd.new_first is None:
-            sys.exit(f"Not enough free space below the line for “{nd.path}” ({len(nd.clusters)} clusters).")
-    print(f"Free space below the line: {human(free_total)}; using {human(sum(len(n.clusters) for n in movers) * cs)}.\n")
+                buf, nd.index_map, used = res
+                n = min(n, -(-used // cs) + 1)          # what the live entries need, plus a cluster to grow
+                nd.buf = buf[:n * cs]
+        need[id(nd)] = n
+    runs = free_runs(vol, last_ok)
+    free_total = sum(r[1] for r in runs)
+    largest = max((r[1] for r in runs), default=0)
+    wanted = sum(need.values())
+    print(f"Free space below the line: {human(free_total * cs)} in {len(runs)} gap(s), the largest "
+          f"{human(largest * cs)}; these lists need {human(wanted * cs)}.")
+    if wanted > free_total:
+        sys.exit("Not enough free space below the line for all of them — nothing was written. Move some of "
+                 "them at a time with --only, or free up space on the drive first.")
+    for nd in sorted(movers, key=lambda n: -need[id(n)]):
+        nd.new = take(runs, need[id(nd)])
+    print()
     for nd in sorted(movers, key=lambda n: n.path):
         where = xi.tb(vol.offset(min(nd.clusters)))
-        pieces = 1 + sum(1 for a, b in zip(nd.clusters, nd.clusters[1:]) if b != a + 1)
+        pieces, new_pieces = len(segments(nd.clusters)), len(segments(nd.new))
         extra = f", {nd.rep.deleted} deleted entries dropped" if nd.index_map is not None else ""
+        if len(nd.new) != len(nd.clusters):
+            extra += f", {len(nd.clusters)} → {len(nd.new)} clusters"
         print(f"  {nd.path}\n      {nd.rep.live} items; list at {where}"
-              + (f" in {pieces} pieces" if pieces > 1 else "") + f" → {xi.tb(vol.offset(nd.new_first))}{extra}")
+              + (f" in {pieces} pieces" if pieces > 1 else "")
+              + f" → {xi.tb(vol.offset(nd.new[0]))}" + (f" in {new_pieces} pieces" if new_pieces > 1 else "") + extra)
     for s in skipped:
         print(f"  skipped: {s}")
     if hidden_left:
@@ -414,7 +474,7 @@ def plan_and_move(args: argparse.Namespace, device: str, mount: str | None) -> N
                 parent_bufs[id(par)] = (par, bytearray(vol.read_clusters(par.clusters, par.length)))
             buf = parent_bufs[id(par)][1]
             index = nd.item.index
-        repoint(buf, index, nd.item.raw, nd.new_first)
+        repoint(buf, index, nd.item.raw, nd.new, cs)
 
     if not args.apply:
         print("\nDry run — nothing was written. To do it: add --apply (the SSD gets unmounted while it runs).")
@@ -434,7 +494,7 @@ def apply(vol: "xi.Volume", device: str, movers: list[Node], parent_bufs: dict) 
                  f"(sh mac/repair_drive.sh), then run this again.\n{out}")
     cs = vol.cluster_size
     bm_clusters, bm_len, sys_used = system_clusters(vol)
-    dest = sorted(c for n in movers for c in range(n.new_first, n.new_first + len(n.clusters)))
+    dest = sorted(c for n in movers for c in n.new)
     dest_set = set(dest)
 
     # The bitmap says these clusters are free — make sure no folder or file actually uses them.
@@ -476,11 +536,13 @@ def apply(vol: "xi.Volume", device: str, movers: list[Node], parent_bufs: dict) 
     was_dirty = bool(xi.u16(boot, 106) & 2)
     plan.append(("mark the drive in use", 106, struct.pack("<H", xi.u16(boot, 106) | 2)))
     for nd in movers:                                   # 1. copy each list into free space
-        plan.append(("copy", vol.offset(nd.new_first), bytes(nd.buf)))
-    for nd in movers:                                   # 2. chain the new clusters (harmless: marked contiguous)
-        for k in range(len(nd.clusters)):
-            c = nd.new_first + k
-            fat_write("chain the copies", c, c + 1 if k < len(nd.clusters) - 1 else EOC)
+        pos = 0
+        for first, count in segments(nd.new):
+            plan.append(("copy", vol.offset(first), bytes(nd.buf[pos:pos + count * cs])))
+            pos += count * cs
+    for nd in movers:                                   # 2. chain the new clusters (the only way to a list in
+        for a, b in zip(nd.new, nd.new[1:] + [None]):   #    pieces; harmless for one marked contiguous)
+            fat_write("chain the copies", a, b if b is not None else EOC)
     bitmap = bytearray(vol.bitmap[:bm_len])
     bitmap_writes("mark the copies used", {c: True for c in dest}, bitmap)        # 3.
     for par, buf in parent_bufs.values():               # 4. repoint the records (the switch-over)
@@ -530,15 +592,17 @@ def apply(vol: "xi.Volume", device: str, movers: list[Node], parent_bufs: dict) 
     xi.KEEP_RAW = False
     check = xi.Volume(device)
     bad = []
-    moved_first = {(n.parent.path, n.item.name): n.new_first for n in movers}
+    moved_first = {(n.parent.path, n.item.name): n.new[0] for n in movers}
+    moved_len = {(n.parent.path, n.item.name): len(n.new) * cs for n in movers}
     for nd in movers:
         rep, why = xi.resolve(check, nd.path)
         if rep is None:
             bad.append(f"{nd.path}: {why}")
             continue
-        want = [(i.name, moved_first.get((nd.path, i.name), i.first), i.length) for i in nd.rep.items]
+        want = [(i.name, moved_first.get((nd.path, i.name), i.first), moved_len.get((nd.path, i.name), i.length))
+                for i in nd.rep.items]
         got = [(i.name, i.first, i.length) for i in rep.items]
-        if rep.dir_clusters[0] != nd.new_first or got != want:
+        if rep.dir_clusters != nd.new or got != want:
             bad.append(f"{nd.path}: reads back differently")
     ok, out = fsck(device)
     print(f"\nMoved {len(movers) - len(bad)} of {len(movers)} folder lists below the line.")

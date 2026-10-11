@@ -190,7 +190,8 @@ macOS tolerates. Export the list with Drive Health's Share button, then:
    sudo python3 mac/relocate_folders.py "/Volumes/<SSD name>" --undo relocate-undo-….json
    ```
 
-   Run it again after adding folders: nearly all the free space is past the line.
+   Give it a folder on the SSD instead of the SSD itself to fix just that folder and the ones inside
+   it. Run it again after adding folders: nearly all the free space is past the line.
 
    **Controlled test** — when the checker finds nothing, find out which way of writing breaks a
    folder: `ios_folder_test.py` makes five tiny "iOS Test …" folders at the top of the drive, each
