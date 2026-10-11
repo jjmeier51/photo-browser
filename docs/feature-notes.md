@@ -1238,6 +1238,13 @@ gaps (largest 3 MB), 209 MB needed — so the multi-cluster lists land in 3–5 
 also keeps every entry set inside one cluster (unused 0x05 filler entries before a set that wouldn't
 fit), since sets split across non-adjacent pieces were among the few oddities of Kendall and Kylie
 and no readable folder on the drive has one.
+
+**Confirmed (Oct 11).** A trial on the 7 lists under `_CCC SafetyNet/…/Leaks Old`, then the whole
+drive (179 lists): macOS's `fsck_exfat` clean before and after, and on the iPhone every folder
+loads — Kendall, Kylie, Kim, iMessage, all of `Leaks`, the Porn folders. The location of a folder's
+list was the whole story. Keep doing: after adding folders, a dry run of `relocate_folders.py`
+(read-only) and `--apply` when it lists anything; new lists grow into free space that is almost
+all past the line.
 Also a controlled test: `mac/ios_folder_test.py` makes five tiny folders at the drive root that differ only
 in how they were written (empty mkdir; fresh file; file moved in; hidden-then-renamed like the
 rebuild; macOS `cp` with xattrs, so a `._` file). The iPhone's Drive Health says which fail, and

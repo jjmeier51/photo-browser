@@ -176,7 +176,7 @@ macOS tolerates. Export the list with Drive Health's Share button, then:
    (`sudo` is needed to read the disk device; nothing is written. If macOS still refuses, give
    Terminal Full Disk Access in System Settings ▸ Privacy & Security.)
 
-   **Folders stored past 2.2 TB (the usual cause, Oct 2026).** The iPhone misreads a folder whose
+   **Folders stored past 2.2 TB — the cause, confirmed Oct 11, 2026.** The iPhone misreads a folder whose
    list of contents sits more than 2.20 TB into the drive: it errors, shows nothing, or shows old
    items. Drive Health only catches the errors. `relocate_folders.py` moves those lists (a few MB in
    all) below the line without touching photos, names or paths. Dry run first, then one folder, then

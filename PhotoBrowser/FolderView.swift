@@ -1611,7 +1611,7 @@ struct FolderView: View {
                 if let unreadableReason, loaded {
                     Image(systemName: "folder.badge.questionmark").font(.largeTitle).foregroundStyle(.orange)
                     Text("iOS can’t read this folder").font(.headline)
-                    Text("The drive’s entry for this folder is damaged in a way macOS tolerates but iOS doesn’t, so it looks empty here even if Finder shows files. Fix it on the Mac: plug the SSD in, open Disk Utility, select the drive and run First Aid (or run mac/repair_drive.sh). Then eject it properly and reconnect.")
+                    Text("This folder’s list of contents is stored more than 2.2 TB into the drive, where iOS’s exFAT driver misreads it (macOS reads it fine). Fix it on the Mac: run mac/relocate_folders.py on the SSD, which moves the list below that point without touching the files. Then eject the drive properly and reconnect.")
                         .font(.footnote).foregroundStyle(.secondary)
                         .multilineTextAlignment(.center).padding(.horizontal, 28)
                     Text(unreadableReason).font(.caption2).foregroundStyle(.tertiary)
@@ -1642,6 +1642,14 @@ struct FolderView: View {
                              : (advancedActive || typeFilter != .all || formatFilter != .all || yearFilter != nil || ageFilter != nil) ? "No matches for this filter"
                              : "This folder is empty")
                             .foregroundStyle(.secondary)
+                        if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !advancedActive
+                            && yearFilter == nil && typeFilter == .all && formatFilter == .all && ageFilter == nil
+                            && categoryFilter.isEmpty && submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty {
+                            // A folder stored past 2.2 TB on a big exFAT drive can read as empty with no
+                            // error at all — so say what to do if Finder disagrees.
+                            Text("Finder shows files here? Run mac/relocate_folders.py on the Mac.")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                        }
                         // A genuinely empty folder (no filter hiding things) gets the two ways to
                         // fill it, instead of a dead end.
                         if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !showEditedOnly

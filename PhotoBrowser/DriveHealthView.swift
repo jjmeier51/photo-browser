@@ -674,7 +674,7 @@ enum DriveIssueKind: Int, Sendable, Comparable {
     var advice: String {
         switch self {
         case .unreadableFolder:
-            return "These folders kept failing to read even after retries. On a slow external drive that can be throttling — Rescan when the drive is idle. If one still fails, iOS's exFAT driver is rejecting the folder itself (macOS still reads it). Fix it on the Mac: Share this list, then run mac/exfat_inspect.py on it first (read-only — shows what iOS objects to) and mac/rebuild_exfat_folders.py --move, which rebuilds each folder in place without copying, keeping its name and path so everything attached to it stays. Eject the drive in Finder before unplugging."
+            return "These folders kept failing to read even after retries. On a slow external drive that can be throttling — Rescan when the drive is idle. If one still fails, its list of contents is almost certainly stored more than 2.2 TB into the drive, where iOS's exFAT driver misreads it (macOS reads it fine). Fix it on the Mac: sudo python3 mac/relocate_folders.py \"/Volumes/<SSD>\" shows every such folder, and --apply moves their lists below that point — files, names and paths stay as they are, so everything attached to them stays. Folders stored there can also just look empty, which this scan can't spot, so the Mac's list is the complete one. Eject the drive in Finder before unplugging."
         case .blankFile:
             return "The file has a size but its data is all zeros — exFAT allocated the space and the copy was interrupted before the bytes landed. These can't be recovered here: delete and re-copy the real file to the same place, and its Favorites, captions and labels will pick up again."
         case .unreadableFile:
