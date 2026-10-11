@@ -333,7 +333,17 @@ These were discovered the painful way; the current code already respects them.
     only) and `--apply` if it lists anything. **Drive Health only flags errors**: a folder that reads
     as empty (and everything under it) never appears there — the Mac dry run is the complete list;
     `mac/exfat_inspect.py` shows where any folder sits. The app's "can't read this folder" and
-    "empty folder" states and Drive Health's advice point to the tool. Lasting fix if it keeps
+    "empty folder" states and Drive Health's advice point to the tool.
+    **New folders come from spares (Oct 11).** Neither iOS nor macOS lets a program choose where a new
+    folder's list goes, but renaming/moving a folder never moves its list. `relocate_folders.py
+    --spares N` keeps N empty folders in `<drive>/.Spare Folders` with their lists below the line;
+    `DriveWriter.createDirectory` (via `SpareFolders`) and Safe Finder (`mac/spare_folders.py`) make
+    each new folder by renaming a spare into place (POSIX `rename`), falling back to a plain mkdir —
+    counted, shown in Drive Health ▸ New folders — when none are left. So: **create every folder on the
+    drive with `DriveWriter.createDirectory`** (never `FileManager.createDirectory`, and never
+    `copyItem` a folder onto the drive — `DriveWriter.copyItem` builds folders from spares, and
+    `DriveWriter.moveItem` does cross-volume moves through it). The pool sits at the root the app
+    browses, which must be the drive itself. Lasting fix if it keeps
     recurring: partitions under 2.2 TB, or APFS. Dead ends on the way (don't revisit): directory
     fsync, moved files' records, renames, write method, 32-bit ID twins, "cache issue" — and copy
     rebuilds only "worked" when the copy happened to land below the line. Hygiene rules that stay:

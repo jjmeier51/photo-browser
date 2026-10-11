@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+import spare_folders
 from safe_copy_to_ssd import CHUNK, IOS_FOLDER_LIMIT, hash_file, human, is_junk, rename_note, safe_name
 
 STAGING_NAME = ".Safe Finder Staging"
@@ -103,6 +104,9 @@ class Plan:
     errors: list[str] = field(default_factory=list)         # blocking
     notes: list[str] = field(default_factory=list)          # informational
     free_bytes: int = 0
+    new_folders: int = 0                                     # folders this creates (each takes a spare)
+    spares_ready: int = 0                                    # spare folders on the destination drive
+    on_exfat: bool = False
 
     @property
     def total_files(self) -> int:
@@ -160,6 +164,8 @@ def build_plan(sources: list[Path], dest: Path) -> Plan:
                         plan.renames.append((p, s))
                 out_dir = top.dst.joinpath(*parts)
                 top.dirs.append(out_dir)
+                if not out_dir.exists():
+                    plan.new_folders += 1
                 real = [f for f in sorted(filenames) if not is_junk(f) and not f.startswith(".")]
                 plan.junk += len(filenames) - len(real)
                 existing = len(os.listdir(out_dir)) if out_dir.is_dir() else 0
@@ -180,7 +186,32 @@ def build_plan(sources: list[Path], dest: Path) -> Plan:
     existing = len(os.listdir(dest))
     if existing + incoming_here > IOS_FOLDER_LIMIT:
         plan.big_folders.insert(0, (dest, existing + incoming_here))
+    plan.on_exfat = spare_folders.on_exfat(str(dest))
+    plan.spares_ready = spare_folders.count(str(dest))
     return plan
+
+
+def spares_command(volume: Path) -> str:
+    tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relocate_folders.py")
+    return f'sudo python3 "{tool}" "{volume}" --apply --spares 100'
+
+
+def spares_note(plan: Plan) -> tuple[str, str] | None:
+    """What the confirmation says about the new folders a transfer makes on the exFAT SSD, where a
+    folder made the usual way usually lands past 2.2 TB and won't open on the iPhone."""
+    if not plan.on_exfat or not plan.new_folders:
+        return None
+    n, have = plan.new_folders, plan.spares_ready
+    folders = f"{n:,} new folder{'s' if n != 1 else ''}"
+    if have >= n:
+        return ("ok", f"{folders} made from spare folders, so {'they open' if n != 1 else 'it opens'} on the "
+                      f"iPhone ({have - n:,} spares left afterwards).")
+    if have:
+        return ("warn", f"{folders}, but only {have:,} spare folder{'s' if have != 1 else ''} left — the rest are "
+                        f"made the usual way and may not open on the iPhone. Top the spares up first: "
+                        f"{spares_command(volume_root(plan.dest))}")
+    return ("warn", f"{folders} and no spare folders on this drive — they're made the usual way and may not "
+                    f"open on the iPhone. Make spares first: {spares_command(volume_root(plan.dest))}")
 
 
 def describe(plan: Plan, move: bool) -> list[tuple[str, str]]:
@@ -204,6 +235,9 @@ def describe(plan: Plan, move: bool) -> list[tuple[str, str]]:
                             "iPhone to open — consider splitting it."))
     for note in plan.notes[:5]:
         out.append(("info", note))
+    sn = spares_note(plan)
+    if sn:
+        out.append(sn)
     if to_copy > plan.free_bytes:
         out.append(("error", f"Not enough space: needs {human(to_copy)}, only {human(plan.free_bytes)} free."))
     for e in plan.errors:
@@ -251,6 +285,8 @@ class Transfer:
         self.done_bytes = 0
         self.done_files = 0
         self._last_sync = time.time()
+        self.spare_dirs = 0                      # new folders made from spares (their lists sit below 2.2 TB)
+        self.plain_dirs = 0                      # new folders made the usual way (no spare left)
 
     # -- control
     def start(self) -> threading.Thread:
@@ -355,6 +391,8 @@ class Transfer:
                 pass
         st["stopped"] = self.stop.is_set()
         st["seconds"] = time.time() - t0
+        st["spare_dirs"] = self.spare_dirs
+        st["plain_dirs"] = self.plain_dirs if self.plan.on_exfat else 0      # only matters on the exFAT SSD
         self._tick("", "Done", force=True)
         self.finished(st)
 
@@ -403,8 +441,11 @@ class Transfer:
             raise DriveGone()
 
     def _make_dirs(self, d: Path) -> None:
-        """Create `d` and any missing parents — never flushed (flushing a folder is what breaks it on iOS)."""
-        os.makedirs(d, exist_ok=True)
+        """Create `d` and any missing parents — each from a spare folder when the drive has one, so its
+        list of contents sits below 2.2 TB and the iPhone can read it (see spare_folders.py). Never flushed."""
+        used, plain = spare_folders.make_dirs(str(d))
+        self.spare_dirs += used
+        self.plain_dirs += len(plain)
 
     def _sync_now_and_then(self) -> None:
         """Whole-volume sync every few seconds, so a long run doesn't leave much in the Mac's cache."""

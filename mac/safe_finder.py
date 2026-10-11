@@ -54,6 +54,7 @@ except ModuleNotFoundError:
              "  python3 -m venv mac/.venv && mac/.venv/bin/pip install -r mac/requirements.txt")
 
 import safe_transfer as engine
+import spare_folders
 from safe_copy_to_ssd import human, safe_name
 
 try:
@@ -984,9 +985,17 @@ class Pane(QWidget):
             QMessageBox.information(self, "New Folder", f"“{target.name}” already exists here.")
             return
         try:
-            os.mkdir(target)                       # never flushed — flushing a folder breaks it on iOS
+            # From a spare folder when the drive has one, so it opens on the iPhone (see spare_folders.py).
+            from_spare = spare_folders.make_dir(str(target))
         except OSError as e:
             QMessageBox.warning(self, "New Folder", f"Couldn't create the folder: {e}")
+            return
+        if not from_spare and spare_folders.on_exfat(str(target)):
+            QMessageBox.information(
+                self, "New Folder",
+                f"“{target.name}” was made the usual way — there are no spare folders left on this drive — so it "
+                "may not open on the iPhone. Make spares (this also fixes it) in Terminal:\n\n"
+                + engine.spares_command(engine.volume_root(target)))
 
     def set_drop_target(self, path: str | None) -> None:
         if path != self.drop_target:
@@ -1648,8 +1657,16 @@ class MainWindow(QMainWindow):
                 bits.append(f"{st['moved']} moved within the drive")
             if st["trashed"]:
                 bits.append(f"{st['trashed']} original{'s' if st['trashed'] != 1 else ''} moved to the Trash")
+            if st.get("spare_dirs"):
+                bits.append(f"{st['spare_dirs']} new folder{'s' if st['spare_dirs'] != 1 else ''} made from spares")
             bits.append(f"{secs:.0f} s")
             detail = "  ·  ".join(bits)
+            if st.get("plain_dirs"):
+                ok = False
+                n = st["plain_dirs"]
+                detail += (f"\n{n} new folder{'s were' if n != 1 else ' was'} made without a spare (none left), so "
+                           f"{'they' if n != 1 else 'it'} may not open on the iPhone. Fix in Terminal: "
+                           + engine.spares_command(engine.volume_root(self._dest)))
         self.panel.log.appendPlainText(f"— {title}. {detail}")
         eject = str(engine.volume_root(self._dest)) if is_external(self._dest) else ""
         self._batch.append((ok, title, detail))

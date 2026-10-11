@@ -193,6 +193,16 @@ macOS tolerates. Export the list with Drive Health's Share button, then:
    Give it a folder on the SSD instead of the SSD itself to fix just that folder and the ones inside
    it. Run it again after adding folders: nearly all the free space is past the line.
 
+   **Spare folders keep new folders below the line.** `--spares 100` keeps 100 ready-made empty
+   folders in a hidden `.Spare Folders` folder with their lists below the line. Safe Finder and the
+   iPhone app make every new folder by renaming one of those into place, so new folders open on the
+   iPhone straight away. Top them up now and then (Drive Health ▸ New folders shows how many are left;
+   Safe Finder warns before a transfer that needs more than there are):
+
+   ```sh
+   sudo python3 mac/relocate_folders.py "/Volumes/<SSD name>" --apply --spares 100
+   ```
+
    **Controlled test** — when the checker finds nothing, find out which way of writing breaks a
    folder: `ios_folder_test.py` makes five tiny "iOS Test …" folders at the top of the drive, each
    holding the same photo but written a different way. Dump their raw records, eject, run Drive

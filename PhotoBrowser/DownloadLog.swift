@@ -72,7 +72,7 @@ actor DownloadLog {
         let text = ([header] + lines).filter { !$0.isEmpty }.joined(separator: "\n") + "\n"
         guard let data = text.data(using: .utf8) else { return }
         let fm = FileManager.default
-        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? DriveWriter.createDirectory(at: folder)       // on the drive: from a spare (see SpareFolders)
         let dest = folder.appendingPathComponent("\(kind)-log.txt")
         do {
             // Write and fsync on ONE file handle, then close. An earlier version used

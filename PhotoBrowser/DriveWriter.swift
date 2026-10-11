@@ -44,6 +44,7 @@ actor DriveWriter {
     /// Pick the flush strategy from the filesystem hosting `url`. Call whenever the root drive is
     /// set or reconnects. Defaults to the safe `.full` when the type can't be determined.
     nonisolated static func configureForVolume(at url: URL) {
+        SpareFolders.configure(root: url)           // new folders on this drive come from its spare pool
         var s = statfs()
         guard statfs(url.path, &s) == 0 else { syncMode = .full; return }
         let fsType = withUnsafeBytes(of: &s.f_fstypename) { raw -> String in
@@ -237,13 +238,49 @@ actor DriveWriter {
     /// bytes + metadata/xattrs exactly like `copyItem`, so provenance rides along; the app's
     /// path-keyed labels live in UserDefaults and are unaffected either way. Caller flushes.
     nonisolated static func copyItem(at src: URL, to dest: URL) throws {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: src.path, isDirectory: &isDir), isDir.boolValue, SpareFolders.pool(for: dest) != nil {
+            // A folder copied onto the drive: build every folder in it with `createDirectory`, so each comes
+            // from a spare whose list sits below 2.2 TB (see SpareFolders) — `copyItem` would make them anew.
+            if fm.fileExists(atPath: dest.path) { throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: dest.path]) }
+            try createDirectory(at: dest)
+            for name in try fm.contentsOfDirectory(atPath: src.path) where name != ".DS_Store" && !name.hasPrefix("._") {
+                try copyItem(at: src.appendingPathComponent(name), to: dest.appendingPathComponent(name))
+            }
+            return
+        }
         if clonefile(src.path, dest.path, 0) == 0 { return }
-        try FileManager.default.copyItem(at: src, to: dest)
+        try fm.copyItem(at: src, to: dest)
+    }
+
+    /// Move `src` to `dest`. On one volume it's a rename — a folder keeps its list of contents where it
+    /// is. Across volumes it's `copyItem` (folders built from spares) and then the original is removed;
+    /// a copy that fails part-way is cleaned up and the original kept.
+    nonisolated static func moveItem(at src: URL, to dest: URL) throws {
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: dest.path) else {     // like a plain move: never replace what's there
+            throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: dest.path])
+        }
+        var a = stat(), b = stat()
+        if stat(src.path, &a) == 0, stat(dest.deletingLastPathComponent().path, &b) == 0, a.st_dev == b.st_dev {
+            try fm.moveItem(at: src, to: dest)
+            return
+        }
+        do { try copyItem(at: src, to: dest) } catch {
+            try? fm.removeItem(at: dest)
+            throw error
+        }
+        try fm.removeItem(at: src)
     }
 
     /// Create `dir` (and any missing parents). An existing directory costs one `stat`, so this is safe
-    /// on hot paths. The new folders are **not** flushed: flushing a just-created folder is what left
-    /// "zero length" AI folders iOS couldn't open (see `fullSync`).
+    /// on hot paths. The new folders are **not** flushed (see `fullSync`).
+    ///
+    /// On the browsed drive each missing level is made from a **spare folder** whose list of contents
+    /// sits below 2.2 TB, so iOS can read it — a folder made the usual way usually lands past that point
+    /// on this SSD, where iOS shows it empty or can't open it (see `SpareFolders`). Elsewhere, or with
+    /// no spare left, it's made the usual way (and counted for Drive Health).
     nonisolated static func createDirectory(at dir: URL) throws {
         let fm = FileManager.default
         var isDir: ObjCBool = false
@@ -251,7 +288,15 @@ actor DriveWriter {
             if isDir.boolValue { return }
             throw CocoaError(.fileWriteFileExists)
         }
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard SpareFolders.isOnDrive(dir) else {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            return
+        }
+        let parent = dir.deletingLastPathComponent()
+        if !fm.fileExists(atPath: parent.path) { try createDirectory(at: parent) }
+        if SpareFolders.take(as: dir) { return }
+        try fm.createDirectory(at: dir, withIntermediateDirectories: false)
+        SpareFolders.notePlain(dir)
     }
 
     /// The folder named `name` inside `parent`, guaranteed to exist and be **readable on iOS** —

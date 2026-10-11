@@ -41,6 +41,8 @@ struct DriveHealthView: View {
     @State private var orphanSheet: MetadataCategory?
     @State private var confirmForgetAll = false
     @State private var forgetBackupTaken = false              // one automatic backup before the first Forget
+    @State private var sparesLeft: Int?                       // spare folders on the drive (nil = it has none)
+    @State private var madeWithoutSpare = 0                   // new folders that had to be made the usual way
     @AppStorage("photoBrowser.driveHealthDeepCheck") private var deepCheck = false
 
     private struct RebuildProgress { var name: String; var files: Int; var bytes: Int64 }
@@ -61,6 +63,7 @@ struct DriveHealthView: View {
             } else {
                 List {
                     scanSection
+                    if DriveWriter.syncMode == .full { sparesSection }
                     metadataSection
                     if !scanning {
                         if complete && orphanTotal > 0 { orphanSection }
@@ -154,6 +157,7 @@ struct DriveHealthView: View {
         }
         .task {
             await refreshBackups()
+            await refreshSpares()
             if scanning { await runScan() }
         }
     }
@@ -193,6 +197,44 @@ struct DriveHealthView: View {
         } footer: {
             Text("Reads every folder and the size of every file. “Check file contents” also reads the first bytes of each photo and video to catch files whose size looks right but whose data never landed (all zeros), and files whose contents don't match their extension — slower on a big drive. Change it, then Rescan.")
         }
+    }
+
+    /// New folders on this exFAT drive are made from spare folders whose list of contents sits below
+    /// 2.2 TB (see `SpareFolders`); this shows how many are left and how many folders had to be made
+    /// without one.
+    private var sparesSection: some View {
+        Section {
+            HStack {
+                Label("Spare folders left", systemImage: "folder.badge.plus")
+                Spacer()
+                Text(sparesLeft.map { "\($0)" } ?? "None on this drive").monospacedDigit()
+                    .foregroundStyle((sparesLeft ?? 0) < 10 ? Color.orange : Color.secondary)
+            }
+            if madeWithoutSpare > 0 {
+                HStack {
+                    Label("Folders made without a spare", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Text("\(madeWithoutSpare)").monospacedDigit().foregroundStyle(.secondary)
+                }
+                Button("I’ve Run the Fix on the Mac") {
+                    SpareFolders.clearMadeWithoutSpare()
+                    madeWithoutSpare = 0
+                }
+            }
+        } header: {
+            Text("New folders")
+        } footer: {
+            Text("iOS misreads a folder whose list of contents is stored more than 2.2 TB into this drive, and most of its free space is past that point — so every folder the app creates is made from a ready-made spare folder stored below it. When they run low (or a folder had to be made without one), plug the drive into the Mac and run: sudo python3 mac/relocate_folders.py \"/Volumes/<SSD>\" --apply --spares 100 — it tops the spares up and fixes any folder that landed past the line.")
+        }
+    }
+
+    private func refreshSpares() async {
+        let (left, plain) = await Task.detached(priority: .utility) {
+            (SpareFolders.remaining(), SpareFolders.madeWithoutSpare)
+        }.value
+        sparesLeft = left
+        madeWithoutSpare = plain
     }
 
     private var metadataSection: some View {
@@ -494,6 +536,7 @@ struct DriveHealthView: View {
         lastScan = Date()
         scanning = false
         computeOrphans()
+        await refreshSpares()
     }
 
     struct ScanResult: Sendable {

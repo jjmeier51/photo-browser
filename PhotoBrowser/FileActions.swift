@@ -400,9 +400,8 @@ enum FileActions {
     }
 
     private nonisolated static func moveOne(_ url: URL, to dest: URL) -> Bool {
-        let fm = FileManager.default
-        if (try? fm.moveItem(at: url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); return true }
-        if (try? fm.copyItem(at: url, to: dest)) != nil { try? fm.removeItem(at: url); DriveWriter.fullSyncFileAndParent(dest); return true }
+        // A rename on one volume; across volumes a copy (folders from spares) then delete — see DriveWriter.
+        if (try? DriveWriter.moveItem(at: url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); return true }
         return false
     }
 
@@ -455,9 +454,8 @@ enum FileActions {
 
     /// Moves one item, falling back to copy-then-delete across volumes.
     private static func moveItem(_ url: URL, to dest: URL) -> Bool {
-        let fm = FileManager.default
-        if (try? fm.moveItem(at: url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); return true }
-        if (try? fm.copyItem(at: url, to: dest)) != nil { try? fm.removeItem(at: url); DriveWriter.fullSyncFileAndParent(dest); return true }
+        // A rename on one volume; across volumes a copy (folders from spares) then delete — see DriveWriter.
+        if (try? DriveWriter.moveItem(at: url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); return true }
         return false
     }
 

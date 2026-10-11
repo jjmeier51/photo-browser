@@ -1245,6 +1245,24 @@ loads — Kendall, Kylie, Kim, iMessage, all of `Leaks`, the Porn folders. The l
 list was the whole story. Keep doing: after adding folders, a dry run of `relocate_folders.py`
 (read-only) and `--apply` when it lists anything; new lists grow into free space that is almost
 all past the line.
+
+**New folders from spares (Oct 11).** To keep new folders below the line without the Mac tool every
+time: neither macOS nor iOS lets a program pick where a new folder's list goes, but a rename or move
+within the volume never moves it. `relocate_folders.py --spares N` (mounted: makes the shortfall of
+empty folders in `<drive>/.Spare Folders`; then unmounted: moves their lists — and the pool's — below
+the line like any other) keeps a stock of ready folders. Every folder the iOS app creates on the drive
+goes through `DriveWriter.createDirectory`, which now renames a spare into place (`SpareFolders`,
+POSIX `rename` so it can never become a copy; creation/modification dates reset to now); with none
+left it makes the folder the usual way and bumps `photoBrowser.foldersWithoutSpare`, which Drive
+Health ▸ New folders shows next to the spares left (orange under 10) with "I've Run the Fix on the
+Mac" to clear it. `DriveWriter.copyItem` of a folder onto the drive builds it folder by folder with
+`createDirectory`, and `DriveWriter.moveItem` (used by FileActions' move fallbacks) does cross-volume
+moves through that copy — `FileManager.moveItem` across volumes would make the folders anew. Safe
+Finder does the same through `mac/spare_folders.py`: New Folder and every folder of a copied tree
+(including the hidden ".incoming" build folder, which is then renamed into place) take a spare; the
+confirmation says how many new folders a transfer makes and whether the spares cover them, and the
+result says how many were made without one plus the command that fixes them. Each spare costs one
+cluster (1 MB) of the limited free space below the line (~390 MB after the first relocation).
 Also a controlled test: `mac/ios_folder_test.py` makes five tiny folders at the drive root that differ only
 in how they were written (empty mkdir; fresh file; file moved in; hidden-then-renamed like the
 rebuild; macOS `cp` with xattrs, so a `._` file). The iPhone's Drive Health says which fail, and

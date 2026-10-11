@@ -26,6 +26,11 @@ It then re-reads every moved folder, has fsck_exfat check the drive again, and r
   sudo python3 mac/relocate_folders.py "/Volumes/Extreme SSD" --apply --only "Porn & Onlyfans/Porn/Lexi Star"
   sudo python3 mac/relocate_folders.py "/Volumes/Extreme SSD" --apply
   sudo python3 mac/relocate_folders.py "/Volumes/Extreme SSD" --undo relocate-undo-20261011-120000.json
+  sudo python3 mac/relocate_folders.py "/Volumes/Extreme SSD" --apply --spares 100
+
+--spares N also keeps N ready-made empty folders in "<drive>/.Spare Folders" with their lists below the
+line: Safe Finder and the iPhone app make every new folder by moving one of those into place (moving
+a folder never moves its list), so new folders start out readable on the iPhone. See spare_folders.py.
 """
 
 from __future__ import annotations
@@ -42,6 +47,7 @@ from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import exfat_inspect as xi  # noqa: E402
+import spare_folders  # noqa: E402
 
 EOC = 0xFFFFFFFF
 ALIGN = 4096
@@ -320,6 +326,8 @@ def main() -> None:
     ap.add_argument("--include-hidden", action="store_true", help="also move lists inside hidden (dot) folders")
     ap.add_argument("--no-compact", action="store_true", help="copy lists as they are, deleted entries included")
     ap.add_argument("--undo", metavar="FILE", help="put back every byte a previous --apply changed")
+    ap.add_argument("--spares", type=int, metavar="N",
+                    help=f"keep N empty folders ready in “{spare_folders.POOL}” for new folders (see above)")
     ap.add_argument("--limit-bytes", type=int, help=argparse.SUPPRESS)    # tests: a small image's "line"
     args = ap.parse_args()
 
@@ -342,6 +350,15 @@ def main() -> None:
         undo(args.undo, device, mount)
         return
 
+    if args.spares is not None and mount:
+        pool = os.path.join(mount, spare_folders.POOL)
+        have = len(spare_folders.spares(pool)) if os.path.isdir(pool) else 0
+        short = max(0, args.spares - have)
+        if not args.apply:
+            print(f"Spare folders: {have} ready; --apply would make {short} more and move their lists below the line.")
+        elif short:
+            made = spare_folders.make_spares(mount, args.spares)
+            print(f"Made {made} spare folder(s) in “{spare_folders.POOL}”; their lists move below the line now.")
     if mount and args.apply:
         # Unmount before reading: macOS may still write its cached changes while unmounting.
         code, out = run(["diskutil", "unmount", mount])
@@ -396,7 +413,18 @@ def plan_and_move(args: argparse.Namespace, device: str, mount: str | None, scop
     within = xi.norm(scope) if scope else None
     if scope:
         print(f"Only “{scope}” and the folders inside it.")
+    pool = xi.norm(spare_folders.POOL)
+    pool_wanted = args.spares is not None or (within is None and only is None)
     for nd in nodes:
+        in_pool = xi.norm(nd.path) == pool or xi.norm(nd.path).startswith(pool + "/")
+        if in_pool:
+            if not pool_wanted or not any(vol.offset(c) + cs > safe for c in nd.clusters):
+                continue
+            if nd.rep.unreadable or nd.rep.found.get("chain") or nd.length % cs or nd.item.raw is None:
+                skipped.append(f"{nd.path} (its list has problems)")
+                continue
+            movers.append(nd)                         # the spares are hidden, but their lists matter
+            continue
         if within is not None and not (xi.norm(nd.path) == within or xi.norm(nd.path).startswith(within + "/")):
             continue
         if nd.parent is None or not any(vol.offset(c) + cs > safe for c in nd.clusters):
@@ -411,6 +439,11 @@ def plan_and_move(args: argparse.Namespace, device: str, mount: str | None, scop
             continue
         movers.append(nd)
     root_high = [c for c in nodes[0].clusters if vol.offset(c) + cs > safe]
+    spare_nodes = [n for n in nodes if n.parent is not None and xi.norm(n.parent.path) == pool and n.rep.live == 0]
+    if spare_nodes:
+        high = sum(1 for n in spare_nodes if any(vol.offset(c) + cs > safe for c in n.clusters))
+        print(f"Spare folders: {len(spare_nodes)} in “{spare_folders.POOL}”"
+              + (f", {high} of them still past the line" if high else ", all below the line"))
     print(f"{len(nodes) - 1} folders; {len(movers)} to move" + (f" ({len(skipped)} skipped)" if skipped else ""))
     if root_high:
         print("  note: part of the drive's top-level list is past the line too — this tool can't move that one.")
