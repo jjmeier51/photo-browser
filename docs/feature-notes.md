@@ -1192,6 +1192,38 @@ keep the source's date, like the copy rebuild). That is the signature of a folde
 writing into over time (the app's downloads/rebuilds, Safe Finder's copies), consistent with the
 flush explanation but not proof of it. Kendall and Kylie are also the drive's only folders over
 one cluster (~10,000 items), so their straddling entry sets can't be compared with anything.
+
+**Oct 11 — the rebuild test points back to location.** The copy rebuild (fresh files, no fsync) of
+the 7 small folders fixed none of the 5 whose copies landed past 2.20 TB (2.97–3.83 TB) and stopped
+the errors for the 2 that landed below it (1.08, 1.19 TB) — which also kills the flush explanation.
+On the phone: `Porn/Sasha Grey/Sasha Grey` (past the line, predicted "wrong items") shows *older*
+content; `Leaks` and its subfolders (past the line) show nothing; `JRG` (list below, photos past)
+displays fine. And the earlier objection — "~160 other folders past the line aren't in Drive
+Health" — was Drive Health's blind spot: it only flags folders whose read *errors*; one that reads
+as empty passes, and its subfolders are never reached. Another user reports the same pair of
+symptoms ("Invalid argument" or an empty folder under Apple's exFAT driver, fine under exfat-fuse)
+on a 24 TB drive. Working model: the iPhone's driver reads directory clusters past 2^32 × 512 bytes
+from the wrong place; file data is read correctly.
+
+The fix is `mac/relocate_folders.py`: for every folder whose list reaches past the line (minus a
+1 GB margin), copy the list into free clusters below it (first fit, at least 1 GB under the line),
+mark the copy contiguous (NoFatChain, plus a valid FAT chain for readers that follow the FAT anyway),
+repoint the folder's stream extension and recompute its entry-set checksum, then free the old
+clusters. Lists with deleted entries are compacted (live sets byte-identical, verified) — Kendall's
+46k live + 46k deleted sets fit in half the space, leaving room to grow. Dry run by default;
+`--apply` unmounts first (so macOS can't write cached changes afterwards), refuses unless
+`fsck_exfat -n` is clean and no folder has a broken chain, checks the chosen clusters against every
+file's and folder's clusters (not just the bitmap), writes an undo file of every byte it changes
+(except the copies, which land in free space), writes in a crash-safe order (copy → FAT → mark used
+→ repoint → free old, with F_FULLFSYNC between phases and VolumeDirty set meanwhile), re-reads every
+moved folder, runs `fsck_exfat -n` again and remounts. Tested on mkfs.exfat images built with a
+test writer that places folders at chosen clusters — including a sparse 2.5 TB image with 1 MB
+clusters and the real line — with exfatprogs' `fsck.exfat` clean before and after, every file
+byte-identical, nested moves inside a compacted parent, `--only`, and refusals (damaged drive,
+"free" cluster in use) leaving the image untouched; `--undo` restores the original tree. Hidden
+(dot) folders are left alone unless `--include-hidden`; the drive's top-level list isn't moved.
+Because nearly all free space is past the line, new folders (from the Mac or the iPhone) keep
+landing there, so rerun it after adding folders; the lasting fix is partitions under 2.2 TB or APFS.
 Also a controlled test: `mac/ios_folder_test.py` makes five tiny folders at the drive root that differ only
 in how they were written (empty mkdir; fresh file; file moved in; hidden-then-renamed like the
 rebuild; macOS `cp` with xattrs, so a `._` file). The iPhone's Drive Health says which fail, and

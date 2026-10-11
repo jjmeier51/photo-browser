@@ -320,25 +320,22 @@ These were discovered the painful way; the current code already respects them.
     `Data.write`/`CGImageDestinationCreateWithURL` to a final drive path, and hold a
     `BackgroundTaskHolder` across the write when the user may have left the app (see
     `docs/feature-notes.md` §12).
-    **Folders iOS can't open ("opendir errno 22") — cause not yet pinned down (Oct 2026).**
-    Every folder Drive Health listed as unreadable had been flushed as a directory (fsync /
-    `F_FULLFSYNC`) and/or filled by renaming or moving finished files into it. The only Mac
-    writer whose folders iOS has always read is the copy rebuild: fresh files written straight
-    to their final names, no fsync, no renames, one whole-volume `sync()`. Moving the files of a
-    broken folder into a fresh, never-flushed folder broke the fresh one too (Oct 10), so the
-    damage can travel with the items' own records. Until `mac/exfat_inspect.py` output on a
-    broken folder settles it: **never fsync a directory** (`DriveWriter.fullSync` refuses them,
-    so `fullSyncFileAndParent` etc. only flush files; `quiesce` uses `sync()`), and the Mac
-    tools in `mac/` write exactly like the copy rebuild — no moves or renames of files on the
-    drive, no fsync at all. Also ruled out (Oct 10): visibly bad records (a fresh failing folder
-    inspects clean). **Leading lead (Oct 10): location.** All 9 folders Drive Health currently lists
-    store their contents past 2.20 TB = 2^32 × 512-byte blocks (the SSD is 8 TB), and every folder
-    the copy rebuild fixed landed below it; ~200 readable folders also sit past it. Ruled out since:
-    a 32-bit read wrap (predicted 129 failures that don't happen), a 32-bit ID twin (0 of 9), and
-    location alone (102 folders created since Oct 5 sit past the line and open fine). What all 9
-    share: each was written by a tool that was flushing folders then — the iOS app (Oct 5 on) or
-    `safe_copy_to_ssd.py` / Safe Finder (Oct 8–10). The checker now also reports each folder's FAT
-    entries, cross-links and its record's writer fingerprint, compared with same-era folders.
+    **Folders iOS can't open ("opendir errno 22") or that look empty — location (Oct 11; being
+    confirmed by relocating a first folder).**
+    The iPhone's exFAT driver misreads a folder's *list of contents* (its directory clusters) when
+    it lies past 2^32 × 512 bytes = 2.20 TB into the volume (the SSD is 8 TB, ~4 TB used): depending
+    on what sits 2.20 TB earlier it fails with EINVAL, lists nothing, or lists stale/other items. File
+    data past the line reads fine, and macOS reads everything. Evidence: every unreadable folder's
+    list is past the line; copy rebuilds stop failing exactly when the copy lands below it (Oct 11: 2
+    landed below → no longer error, 5 landed past → still fail); a folder predicted to show stale
+    items showed "older content", and folders past the line show nothing. **Drive Health only flags errors** — a folder that reads as empty (and
+    everything under it, e.g. all of `Leaks`) never appears there; `mac/exfat_inspect.py`'s wrap
+    report lists every folder past the line. Fix: `mac/relocate_folders.py` copies those lists below
+    the line and repoints the folders (raw device, unmounted, undo file, fsck before and after).
+    Nearly all free space is past the line, so new folders keep landing there — rerun it after
+    adding folders. Ruled out on the way: directory fsync, moved files' records, 32-bit ID twins.
+    The hygiene rules stay anyway: never fsync a directory (`DriveWriter.fullSync` refuses them;
+    `quiesce` uses `sync()`), and the Mac tools write like the copy rebuild (no renames, no fsync).
 13. **`nonisolated async` is not "off the main thread".** The target builds with
     `SWIFT_APPROACHABLE_CONCURRENCY` (NonisolatedNonsendingByDefault), so a plain
     `nonisolated async func` runs on whatever actor *awaited* it — awaited from a

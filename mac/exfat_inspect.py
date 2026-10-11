@@ -40,7 +40,7 @@ FORBIDDEN = set('"*/:<>?\\|')
 DIR_OWNER: dict[int, str] = {}   # cluster → the folder whose contents it holds (every folder read so far)
 FIRST_OWNER: dict[int, tuple[str, str, bool]] = {}   # first cluster → (folder, name, is_dir) of every item read
 FILES: list[tuple[int, int, bool, str, str]] = []      # (first cluster, clusters, NoFatChain, folder, name) of every file
-KEEP_RAW = False            # --dump: keep each entry set's bytes (off by default — a full-drive walk holds ~1M items)
+KEEP_RAW: bool | str = False   # keep entry-set bytes: True for --dump, "dirs" for folders only (relocate_folders.py); off by default — a full-drive walk holds ~1M items
 MAX_DIR_BYTES = 256 * 1024 * 1024
 
 HELP = {
@@ -524,7 +524,8 @@ def parse_directory(vol: Volume, first: int, length: int, no_fat_chain: bool, la
         names[key].append(shown)
         ci = i // per_cluster
         entry_off = vol.offset(clusters[ci]) + (i % per_cluster) * 32 if ci < len(clusters) else None
-        r.items.append(Item(name, is_dir, first_c, dlen, nfc, i, entry_off, raw if KEEP_RAW else None, u32(e, 8)))
+        keep = KEEP_RAW is True or (KEEP_RAW == "dirs" and is_dir)
+        r.items.append(Item(name, is_dir, first_c, dlen, nfc, i, entry_off, raw if keep else None, u32(e, 8)))
         if first_c and dlen:
             FIRST_OWNER.setdefault(first_c, (label, name, is_dir))
             if not is_dir:

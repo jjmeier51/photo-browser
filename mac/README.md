@@ -176,6 +176,22 @@ macOS tolerates. Export the list with Drive Health's Share button, then:
    (`sudo` is needed to read the disk device; nothing is written. If macOS still refuses, give
    Terminal Full Disk Access in System Settings ▸ Privacy & Security.)
 
+   **Folders stored past 2.2 TB (the usual cause, Oct 2026).** The iPhone misreads a folder whose
+   list of contents sits more than 2.20 TB into the drive: it errors, shows nothing, or shows old
+   items. Drive Health only catches the errors. `relocate_folders.py` moves those lists (a few MB in
+   all) below the line without touching photos, names or paths. Dry run first, then one folder, then
+   everything; it unmounts the SSD while it works, keeps an undo file, and has macOS check the drive
+   before and after:
+
+   ```sh
+   sudo python3 mac/relocate_folders.py "/Volumes/<SSD name>"                       # dry run
+   sudo python3 mac/relocate_folders.py "/Volumes/<SSD name>" --apply --only "Some/Folder"
+   sudo python3 mac/relocate_folders.py "/Volumes/<SSD name>" --apply
+   sudo python3 mac/relocate_folders.py "/Volumes/<SSD name>" --undo relocate-undo-….json
+   ```
+
+   Run it again after adding folders: nearly all the free space is past the line.
+
    **Controlled test** — when the checker finds nothing, find out which way of writing breaks a
    folder: `ios_folder_test.py` makes five tiny "iOS Test …" folders at the top of the drive, each
    holding the same photo but written a different way. Dump their raw records, eject, run Drive
