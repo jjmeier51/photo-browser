@@ -206,10 +206,15 @@ def segments(clusters: list[int]) -> list[tuple[int, int]]:
     return out
 
 
-def compact(buf: bytes) -> tuple[bytearray, dict[int, int], int] | None:
+PAD = bytes([0x05]) + bytes(31)      # an unused ("deleted") entry — every reader skips it
+
+
+def compact(buf: bytes, per_cluster: int) -> tuple[bytearray, dict[int, int], int] | None:
     """The list with every deleted entry dropped (live entry sets kept byte for byte, in order), the
-    old → new index of each set, and the bytes in use; None unless it checks out as whole, well-formed
-    sets."""
+    old → new index of each set, and the bytes in use; None unless every set is whole and well formed.
+    No set is left straddling two clusters — the list may end up in pieces, and a set split across
+    two pieces was one of the few oddities of the folders iOS couldn't open — so a set that wouldn't
+    fit in the rest of a cluster starts the next one, after unused filler entries."""
     out = bytearray()
     mapping: dict[int, int] = {}
     n = len(buf) // 32
@@ -218,26 +223,24 @@ def compact(buf: bytes) -> tuple[bytearray, dict[int, int], int] | None:
         t = buf[i * 32]
         if t == 0x00:
             break
-        if t & 0x80:
-            if t == 0x85:
-                mapping[i] = len(out) // 32
-            out += buf[i * 32:(i + 1) * 32]
-        i += 1
-    # every primary must be followed by exactly its secondaries, and no secondary may stand alone
-    j, m = 0, len(out) // 32
-    while j < m:
-        t = out[j * 32]
-        if t == 0x85:
-            sc = out[j * 32 + 1]
-            if j + sc >= m:
-                return None
-            if any(not 0xC0 <= out[(j + k) * 32] for k in range(1, sc + 1)):
-                return None
-            j += 1 + sc
-        elif t >= 0xC0:
+        if not t & 0x80:                                 # deleted / unused
+            i += 1
+            continue
+        if t >= 0xC0 or (t != 0x85 and t < 0xA0):       # a lone secondary, or an unexpected critical primary
             return None
-        else:
-            j += 1
+        sc = buf[i * 32 + 1]
+        if i + sc >= n or 1 + sc > per_cluster:
+            return None
+        entry_set = buf[i * 32:(i + 1 + sc) * 32]
+        if any(entry_set[k * 32] < 0xC0 for k in range(1, sc + 1)):
+            return None
+        pos = len(out) // 32
+        if pos % per_cluster + 1 + sc > per_cluster:
+            out += PAD * (per_cluster - pos % per_cluster)
+        if t == 0x85:
+            mapping[i] = len(out) // 32
+        out += entry_set
+        i += 1 + sc
     if len(out) > len(buf):
         return None
     used = len(out)
@@ -427,7 +430,7 @@ def plan_and_move(args: argparse.Namespace, device: str, mount: str | None, scop
         nd.buf = data
         n = len(nd.clusters)
         if not args.no_compact and nd.rep.deleted:
-            res = compact(data)
+            res = compact(data, cs // 32)
             if res and live_sets(res[0]) == live_sets(data):
                 buf, nd.index_map, used = res
                 n = min(n, -(-used // cs) + 1)          # what the live entries need, plus a cluster to grow

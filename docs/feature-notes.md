@@ -1232,6 +1232,12 @@ lists shrink to what their live entries need plus one cluster (Kendall 14 → ~7
 the free space below the line and its largest gap and refuses up front if the total isn't enough.
 A folder path (rather than the SSD's root) limits the run to that folder and its subfolders — the
 user ran it on one folder expecting exactly that, and it had planned the whole drive.
+The first whole-drive dry run: 179 lists past the line (all of `Leaks`, Kendall, Kim, Kylie,
+iMessage, the rebuilt Porn folders, parts of `_CCC SafetyNet`), 598 MB free below the line in 562
+gaps (largest 3 MB), 209 MB needed — so the multi-cluster lists land in 3–5 pieces. Compaction now
+also keeps every entry set inside one cluster (unused 0x05 filler entries before a set that wouldn't
+fit), since sets split across non-adjacent pieces were among the few oddities of Kendall and Kylie
+and no readable folder on the drive has one.
 Also a controlled test: `mac/ios_folder_test.py` makes five tiny folders at the drive root that differ only
 in how they were written (empty mkdir; fresh file; file moved in; hidden-then-renamed like the
 rebuild; macOS `cp` with xattrs, so a `._` file). The iPhone's Drive Health says which fail, and
