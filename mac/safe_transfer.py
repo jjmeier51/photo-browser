@@ -287,6 +287,7 @@ class Transfer:
         self._last_sync = time.time()
         self.spare_dirs = 0                      # new folders made from spares (their lists sit below 2.2 TB)
         self.plain_dirs = 0                      # new folders made the usual way (no spare left)
+        self.spare_miss = ""                     # why (spare_folders.last_miss)
 
     # -- control
     def start(self) -> threading.Thread:
@@ -393,6 +394,7 @@ class Transfer:
         st["seconds"] = time.time() - t0
         st["spare_dirs"] = self.spare_dirs
         st["plain_dirs"] = self.plain_dirs if self.plan.on_exfat else 0      # only matters on the exFAT SSD
+        st["spare_miss"] = self.spare_miss
         self._tick("", "Done", force=True)
         self.finished(st)
 
@@ -446,6 +448,8 @@ class Transfer:
         used, plain = spare_folders.make_dirs(str(d))
         self.spare_dirs += used
         self.plain_dirs += len(plain)
+        if plain:
+            self.spare_miss = spare_folders.last_miss
 
     def _sync_now_and_then(self) -> None:
         """Whole-volume sync every few seconds, so a long run doesn't leave much in the Mac's cache."""

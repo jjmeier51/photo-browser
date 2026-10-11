@@ -993,8 +993,8 @@ class Pane(QWidget):
         if not from_spare and spare_folders.on_exfat(str(target)):
             QMessageBox.information(
                 self, "New Folder",
-                f"“{target.name}” was made the usual way — there are no spare folders left on this drive — so it "
-                "may not open on the iPhone. Make spares (this also fixes it) in Terminal:\n\n"
+                spare_folders.miss_message(spare_folders.last_miss, f"“{target.name}” was")
+                + ", so it may not open on the iPhone. In Terminal:\n\n"
                 + engine.spares_command(engine.volume_root(target)))
 
     def set_drop_target(self, path: str | None) -> None:
@@ -1664,8 +1664,9 @@ class MainWindow(QMainWindow):
             if st.get("plain_dirs"):
                 ok = False
                 n = st["plain_dirs"]
-                detail += (f"\n{n} new folder{'s were' if n != 1 else ' was'} made without a spare (none left), so "
-                           f"{'they' if n != 1 else 'it'} may not open on the iPhone. Fix in Terminal: "
+                detail += ("\n" + spare_folders.miss_message(
+                               st.get("spare_miss", ""), f"{n} new folder{'s were' if n != 1 else ' was'}")
+                           + f", so {'they' if n != 1 else 'it'} may not open on the iPhone. In Terminal: "
                            + engine.spares_command(engine.volume_root(self._dest)))
         self.panel.log.appendPlainText(f"— {title}. {detail}")
         eject = str(engine.volume_root(self._dest)) if is_external(self._dest) else ""
