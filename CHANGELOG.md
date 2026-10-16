@@ -4,6 +4,16 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-10-16
 
+- **Surprise Me in Edit / Create with AI.** A new section under the prompt box: pick a mood (Any,
+  Alluring, Sexy) and tap **Surprise Me** to send a random photo-shoot prompt of a woman posing —
+  outfit, setting, pose, light and camera drawn from banks of hundreds of options plus ~60
+  hand-written scenes, written in the wording Nano Banana 2 / 2.1 (one flowing paragraph) and
+  Seedream 5.0 Pro (subject-first labelled sentences) each answer best. Alluring keeps her dressed
+  and editorial; Sexy means swimwear, slips and lingerie-as-fashion, never nudity. The references,
+  size, shape, count, model and tunes you've set all apply exactly as for a typed prompt; with
+  references the prompt points at the woman in them, and in Edit it keeps the woman in the photo
+  and restyles everything around her. **Fill In a Random Prompt** only fills the box so you can read
+  or tweak it first. (`SurprisePrompts.swift`, `SurpriseMeSection`)
 - **Reconnect Profile Folders (Drive Health ▸ Metadata safety).** Instagram and TikTok download
   folders that had "forgotten" their profile — still full of posts and videos, but with no bubble,
   no "@handle" subtitle and no "Get New" — can be re-linked in one tap. The records went missing

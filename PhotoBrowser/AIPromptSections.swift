@@ -26,6 +26,35 @@ struct PromptingReminderSection: View {
     }
 }
 
+/// "Surprise Me": a mood picker and two buttons. **Surprise Me** fills the prompt field with a
+/// random photo-shoot prompt (`SurprisePrompts`) and sends it straight away with whatever
+/// references, size, aspect, model and tunes are set on the screen; **Fill In a Random Prompt**
+/// only fills the field, to read or tweak before generating. The mood is remembered.
+struct SurpriseMeSection: View {
+    @Binding var mood: SurprisePrompts.Mood
+    let onSurprise: () -> Void
+    let onFill: () -> Void
+
+    var body: some View {
+        Section {
+            Picker("Mood", selection: $mood) {
+                ForEach(SurprisePrompts.Mood.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            Button(action: onSurprise) {
+                Label("Surprise Me", systemImage: "dice")
+            }
+            Button(action: onFill) {
+                Label("Fill In a Random Prompt", systemImage: "text.badge.plus")
+            }
+        } header: {
+            Text("Surprise Me")
+        } footer: {
+            Text("A random photo-shoot prompt of a woman posing — outfit, setting, pose, light and camera drawn from hundreds of options and written for the chosen model (Nano Banana 2 / 2.1 and Seedream 5.0 Pro have their own wording). Alluring keeps her dressed and editorial; Sexy means swimwear, slips and lingerie-as-fashion, never nudity. Surprise Me sends it at once with the references, size and shape set below; Fill In only puts it in the box.")
+        }
+    }
+}
+
 /// The compact Use / Copy pair under a prompt: two small capsules, centred. Explicit plain-style
 /// buttons with their own padding, so a Form row can't inflate one of them into a tall, off-centre
 /// block the way the stock bordered styles did.

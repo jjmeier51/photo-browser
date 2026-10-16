@@ -22,6 +22,7 @@ struct AIEditView: View {
     @State private var resolution: AIExtend.OutputResolution
     @State private var aspect: AIExtend.OutputAspect
     @State private var showSettings = false
+    @AppStorage("photoBrowser.surpriseMood") private var surpriseMood: SurprisePrompts.Mood = .any
 
     private let counts = [1, 2, 3, 4, 8]
 
@@ -55,6 +56,7 @@ struct AIEditView: View {
                 } footer: {
                     if negativeEnabled { Text(NegativePromptField.footer) }
                 }
+                SurpriseMeSection(mood: $surpriseMood, onSurprise: { surprise(send: true) }, onFill: { surprise(send: false) })
                 PromptingReminderSection()
                 ReusablePromptsSection(prompt: $prompt)
                 if !library.aiPromptHistory.isEmpty { PromptHistorySection(prompt: $prompt) }
@@ -152,6 +154,14 @@ struct AIEditView: View {
         default:
             return "Combining \(selectedTunes.count) tunes on \(model.rawValue)\(model.composesLoRA ? " (stacked as LoRAs)" : " (stacked as FaceIDs)")."
         }
+    }
+
+    /// A random restyle of the woman in this photo — new outfit, scene, pose and light, her identity
+    /// kept — written for the chosen model; sent at once when `send`, else just placed in the field.
+    private func surprise(send: Bool) {
+        prompt = SurprisePrompts.random(mood: surpriseMood, flow: .edit, model: model,
+                                        references: min(referenceURLs.count, model.maxReferenceImages))
+        if send { generate() }
     }
 
     /// Kicks off generation app-wide (it keeps running while you browse) and closes this sheet.

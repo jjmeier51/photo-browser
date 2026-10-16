@@ -22,6 +22,7 @@ struct AICreateView: View {
     @State private var resolution: AIExtend.OutputResolution
     @State private var aspect: AIExtend.OutputAspect
     @State private var showSettings = false
+    @AppStorage("photoBrowser.surpriseMood") private var surpriseMood: SurprisePrompts.Mood = .any
 
     private let counts = [1, 2, 3, 4, 8]
     // Create has no source photo, so "Original" doesn't apply — offer the fixed shapes only.
@@ -58,6 +59,7 @@ struct AICreateView: View {
                 } footer: {
                     if negativeEnabled { Text(NegativePromptField.footer) }
                 }
+                SurpriseMeSection(mood: $surpriseMood, onSurprise: { surprise(send: true) }, onFill: { surprise(send: false) })
                 PromptingReminderSection()
                 ReusablePromptsSection(prompt: $prompt)
                 if !library.aiPromptHistory.isEmpty { PromptHistorySection(prompt: $prompt) }
@@ -153,6 +155,14 @@ struct AICreateView: View {
         default:
             return "Combining \(selectedTunes.count) tunes on \(model.rawValue)\(model.composesLoRA ? " (stacked as LoRAs)" : " (stacked as FaceIDs)")."
         }
+    }
+
+    /// A random photo-shoot prompt for the chosen model (and the picked references); sent at once
+    /// with the screen's current settings when `send`, else just placed in the field.
+    private func surprise(send: Bool) {
+        prompt = SurprisePrompts.random(mood: surpriseMood, flow: .create, model: model,
+                                        references: min(referenceURLs.count, model.maxReferenceImages))
+        if send { generate() }
     }
 
     private func generate() {

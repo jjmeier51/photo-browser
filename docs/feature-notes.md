@@ -328,6 +328,32 @@ The prompt-helper sections are shared views (one file) used by both `AICreateVie
   **never evicted** by the 50-prompt cap (`recordAIPrompt` drops the oldest unhearted ones), a
   re-run under different casing keeps its heart, and "Remove from History" also unhearts.
 
+### 1.11b Surprise Me — `SurprisePrompts.swift`, `SurpriseMeSection`
+
+A section under the prompt box in both Edit and Create: a **mood** picker (Any / Alluring / Sexy,
+remembered in `photoBrowser.surpriseMood`) and two buttons. **Surprise Me** fills the prompt with
+`SurprisePrompts.random(mood:flow:model:references:)` and calls the screen's normal `generate()`
+at once — so the user's references, resolution, aspect, count, model and tunes all apply exactly
+as for a typed prompt (the FaceID reference mentions are prepended by `AIExtend` as usual).
+**Fill In a Random Prompt** only fills the field.
+- **Banks** (all a woman posing for a photo): ~30 subjects (used only for Create with no
+  references), ~120 looks tagged alluring / sexy (alluring = dressed, editorial; sexy = swimwear,
+  slips, lingerie-as-fashion, high slits — glamour-shoot, never nudity), ~70 settings, ~60 poses
+  (sexy poses only for the sexy mood; alluring poses for both), 30 lights, 20 cameras, 12
+  finishes, 12 hair notes, and ~60 hand-written **signature** scenes (`{subject}` placeholder, one
+  draw in four). Composed combinations run into the millions; the signatures add shots a recipe
+  can't make.
+- **Per-model voice** (`voice(for:)`): Nano Banana 2 / 2.1 get one flowing paragraph — a described
+  moment with the light and camera in sentences (what Gemini-family image models answer best);
+  Seedream 5.0 Pro (and Lite / 4.5 / Flux) get subject-first labelled sentences
+  (`Subject / Outfit / Scene / Pose / Lighting / Camera / Style`) with explicit style words. Both
+  end with the realism tail (real skin texture, no beauty-filter smoothing, grain, no text or
+  watermark) matching `PromptingReminderSection`.
+- **Flow**: Create with references → "the woman from the reference image(s), her face and features
+  exactly as shown"; Create without → a random subject description; Edit → an edit lead-in that
+  keeps the woman's identity (face, features, hair colour, skin, body) and restyles everything else.
+- Astria's moderation still applies to whatever is sent; a refused prompt surfaces like any other.
+
 ### 1.11a Negative Prompt
 
 - A **"Negative Prompt" switch** (`NegativePromptField`, in `AIEditView.swift`) sits directly
