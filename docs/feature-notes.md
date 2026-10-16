@@ -34,7 +34,10 @@ is `nonisolated` and off the main actor.
     `tuneID(for:)` clears a stored "Nano Banana 2" override that still names 4180298, once, so it
     doesn't silently run 2.1; 2.1 supports the 1K/2K/4K `resolution` tiers like the others.)
   - **`maxReferenceImages`**: 14 for Seedream 4.5 / 5.0 Lite / Nano Banana 2 / 2.1 (2.1's limit per
-    Astria's launch banner), 10 for Seedream 5.0 Pro, 0 for Flux. **How references actually work on Astria (verified against
+    Astria's launch banner), 10 for Seedream 5.0 Pro, 0 for Flux.
+  - **`fixedResolution`**: Seedream 5.0 Pro → `.k2` (2K is the most Astria supports for it), else
+    nil. Edit and Create pin the Resolution picker to it (disabled, with a footer) whenever that
+    model is selected and send it regardless of what the picker last held. **How references actually work on Astria (verified against
     docs.astria.ai and Astria's own CLI, astria-claude-skills `bin/astria --reference`):** image
     prompts take *no* raw reference images — `prompt[image_references][]` is video-only and image
     prompts fail with "video_first_frame, video_last_frame, audio_reference and image_references

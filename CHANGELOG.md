@@ -4,6 +4,9 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-10-16
 
+- **Seedream 5.0 Pro always generates at 2K.** That's the most Astria supports for it, so Edit and
+  Create with AI pin the Resolution picker to 2K while it's selected (with a note) and send 2K
+  regardless of what the picker last held. Other models keep the 1K / 2K / 4K choice.
 - **Surprise Me prompts now live on the drive.** The first Surprise Me tap writes
   `Surprise Prompts.json` at the top of the drive with every built-in prompt; from then on that file
   is the bank, so you can add, change or delete prompts in any text editor without a code change.

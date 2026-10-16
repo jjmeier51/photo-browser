@@ -83,6 +83,10 @@ enum AIExtend {
             case .flux:                                                    return 0
             }
         }
+        /// The output tier a model is pinned to, or nil for the user's choice. Seedream 5.0 Pro tops out
+        /// at 2K on Astria, so it always generates at 2K whatever the picker held (the picker is
+        /// disabled and shows 2K while it's selected).
+        var fixedResolution: OutputResolution? { self == .seedream5Pro ? .k2 : nil }
         fileprivate var tuneKey: String { "photoBrowser.astriaTune.\(rawValue)" }
         /// The partner models offered as the built-in default / Settings overrides (Flux is offered
         /// only in the Edit/Create pickers, and shares the separate Flux tune setting).
