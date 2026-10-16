@@ -20,17 +20,21 @@ is `nonisolated` and off the main actor.
 
 `enum AIExtend` is the whole Astria client + config. Key pieces:
 
-- **`AIModel`** (`seedream5Pro`, `seedream5Lite`, `seedream45`, `nanoBanana2`, `flux`):
-  - `partnerModels` = the four closed gallery models. Used in Settings (default-model picker,
+- **`AIModel`** (`seedream5Pro`, `seedream5Lite`, `seedream45`, `nanoBanana21`, `nanoBanana2`, `flux`):
+  - `partnerModels` = the five closed gallery models. Used in Settings (default-model picker,
     tune-id overrides) which must **exclude Flux** (Flux has its own "Flux (extend)" tune field).
   - `composesLoRA` is true only for `.flux` — Flux is the only base that can run a user LoRA
     composed into the prompt via `<lora:id:weight>`.
   - `tuneID(for:)` maps a model to its Astria gallery tune id (editable in Settings; Flux
     shares the single editable Flux tune). Fallbacks: 5.0 Pro 5236038, **5.0 Lite 4160332**
     (from its public gallery URL), **4.5 3691308** (the id the app shipped with before 4.5 was
-    dropped — now back), Nano Banana 2 4180298. "Nano Banana Pro" stays removed.
-  - **`maxReferenceImages`**: 14 for Seedream 4.5 / 5.0 Lite / Nano Banana 2, 10 for Seedream
-    5.0 Pro, 0 for Flux. **How references actually work on Astria (verified against
+    dropped — now back), **Nano Banana 2.1 4180298, Nano Banana 2 5850983**. "Nano Banana Pro"
+    stays removed. (Oct 2026: Astria upgraded gallery tune 4180298 — until then this app's "Nano
+    Banana 2" — to **2.1 in place** and gave the "Nano Banana 2.0" card its own id, 5850983.
+    `tuneID(for:)` clears a stored "Nano Banana 2" override that still names 4180298, once, so it
+    doesn't silently run 2.1; 2.1 supports the 1K/2K/4K `resolution` tiers like the others.)
+  - **`maxReferenceImages`**: 14 for Seedream 4.5 / 5.0 Lite / Nano Banana 2 / 2.1 (2.1's limit per
+    Astria's launch banner), 10 for Seedream 5.0 Pro, 0 for Flux. **How references actually work on Astria (verified against
     docs.astria.ai and Astria's own CLI, astria-claude-skills `bin/astria --reference`):** image
     prompts take *no* raw reference images — `prompt[image_references][]` is video-only and image
     prompts fail with "video_first_frame, video_last_frame, audio_reference and image_references
@@ -115,7 +119,7 @@ is `nonisolated` and off the main actor.
 
 ### 1.5 Creating tunes: `CreateTuneView.swift`, `TuneBaseModel`, `startCreateTune`, `createTune`
 
-- **`TuneBaseModel`** (in `AIGenerators.swift`): `nanoBanana2, seedream5Pro, flux, sdxl, sd15`.
+- **`TuneBaseModel`** (in `AIGenerators.swift`): `nanoBanana21, nanoBanana2, seedream5Pro, seedream5Lite, seedream45, flux, sdxl, sd15`.
   - `branch`: `flux1`/`sdxl1`/`sd15`, or **nil** for partner models (branch inherited from the
     base gallery tune).
   - `baseTuneID`: Flux → `trainingBaseTune`; partner → `tuneID(for:)`; SDXL/SD1.5 → nil.
@@ -128,7 +132,7 @@ is `nonisolated` and off the main actor.
 
 ### 1.6 Critical conceptual point (documented for the user, must persist)
 
-- Partner models (Seedream 5.0 Pro, Nano Banana 2) are **closed** models. You **cannot** LoRA-
+- Partner models (Seedream 5.0 Pro, Nano Banana 2 / 2.1) are **closed** models. You **cannot** LoRA-
   train them; the only personalization is **FaceID**, which is embedding-based and uses only
   ~3 reference faces regardless of how many you upload. To train on *all* of many photos you
   must use a **Flux LoRA** (or SDXL/SD1.5). This is why `TuneBaseModel.note` and
@@ -693,6 +697,24 @@ nothing, and a fix that doesn't needs help. Three layers now guarantee it:
    35 "folder covers pointing at missing items" (Oct 2026). `Library.forgetPurgedMetadata` now
    forgets the purged originals' entries (subtree for folders), unless something new has since
    taken the original path.
+5. **Reconnect Profile Folders — `Library.reconnectProfileFolders` (`ProfileReconnect.swift`).**
+   The Instagram / TikTok records (`instagramFolders` / `tiktokFolders`) are what give a download
+   folder its bubble, "@handle" subtitle, "Get New Posts / Videos" and the stories sweep; they are
+   pruned with everything else by Forget while their folders are unreadable (a list past the 2.2 TB
+   line reads as missing), and a partial restore can lose them too — the folders stay full, the app
+   just no longer knows whose they are. The button (Metadata safety) re-attaches them without
+   touching the drive: first from the backups, newest first (the drive's `.Photo Browser Metadata`
+   and the phone's snapshots), merging only a **profile slice** — `profileSlice(of:)` keeps the
+   records whose folder exists today and what belongs to those folders (highlights, posted-by,
+   likes, handle prefills, covers, bubble order) and hands it to the normal `restoreMetadata`
+   merge; then, for folders no backup knows, from the **files themselves** (`scanProfileFolders`: a
+   bounded coordinated walk, 8 levels / 60k folders, hidden folders skipped; TikTok = an `@handle`
+   folder with `<15–20 digit id>(.mp4|_n.jpg)` files; Instagram = posted-by entries, the handle
+   remembered on the parent, a highlight already marked inside, or a handle-shaped name over
+   shortcode / story-pk-named files). A rebuilt record carries the ids on disk (so "Get New" dedups
+   and backfills), `lastUpdated` = newest file date, blank user id / secUid (resolved by the next
+   run), subfolders re-marked as highlights, the handle prefilled on the parent. Known profile,
+   highlight, Facebook / OF / VSCO folders are never re-classified or entered.
 
 ### 4.2 Rebuild Folder in place — `DriveRepair.rebuildFolder`
 
