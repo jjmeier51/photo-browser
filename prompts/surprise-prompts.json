@@ -1,0 +1,2469 @@
+{
+  "subjects": [
+    "a woman in her late twenties with long dark wavy hair and olive skin",
+    "a tall woman in her early thirties with a sharp blonde bob and freckles",
+    "a woman in her mid-twenties with natural curly black hair and deep brown skin",
+    "a woman around thirty with auburn hair in loose waves and pale skin",
+    "an East Asian woman in her late twenties with sleek shoulder-length black hair",
+    "a South Asian woman in her thirties with long thick black hair and warm brown skin",
+    "a Latina woman in her mid-twenties with dark brown hair pulled into a low bun",
+    "a woman in her thirties with a platinum pixie cut and strong cheekbones",
+    "a curvy woman in her late twenties with honey-blonde beach waves",
+    "a petite woman in her twenties with a jet-black blunt fringe and porcelain skin",
+    "an athletic woman in her thirties with light brown hair in a high ponytail",
+    "a woman in her forties with silver-streaked dark hair and an easy confident face",
+    "a Black woman in her early thirties with a close-cropped natural cut and gold hoops",
+    "a Middle Eastern woman in her late twenties with long glossy dark hair and strong brows",
+    "a redhead in her mid-twenties with shoulder-length waves and a dusting of freckles",
+    "a mixed-race woman in her thirties with chestnut curls and a wide bright smile",
+    "a Scandinavian woman in her twenties with ash-blonde hair and grey-blue eyes",
+    "a woman around thirty-five with a dark glossy lob and a slow knowing smile",
+    "a woman in her late twenties with box braids gathered over one shoulder",
+    "a tall woman in her early thirties with wavy caramel hair and sun-kissed skin",
+    "a woman in her twenties with a sleek dark ponytail and dramatic winged liner",
+    "a woman in her thirties with soft brown curls and a gap-toothed grin",
+    "an Afro-Latina woman in her late twenties with voluminous dark curls",
+    "a woman in her early thirties with a copper-red shag cut and green eyes",
+    "a woman in her mid-thirties with long straight black hair and a serene face",
+    "a woman in her twenties with a honey-brown balayage and a small nose stud",
+    "a woman around thirty with a dark bob tucked behind one ear and bare, glowing skin",
+    "a woman in her late twenties with strawberry-blonde hair in a loose plait",
+    "a woman in her thirties with dark hair slicked back wet-look and a bold red lip",
+    "a woman in her early thirties with a soft brunette shag and minimal makeup",
+    "a woman in her early twenties with a bleach-blonde bob and freckled pale skin, slender and athletic",
+    "a woman in her late thirties with a jet-black blunt fringe and olive skin, tall with strong shoulders",
+    "a woman in her mid forties with silver-streaked chestnut curls and warm brown skin, soft and curvy",
+    "a woman in her mid twenties with waist-length box braids and deep ebony skin, lean and long-limbed",
+    "a woman in her late twenties with a dark messy bun and honey-toned skin, compact dancer's build",
+    "a woman in her fifties with a sharp grey pixie cut and freckled porcelain skin, elegant and slim",
+    "a woman in her thirties with wet-look auburn waves and sun-tanned skin, full-figured hourglass",
+    "a woman in her early forties with long raven hair and golden-brown skin, sculpted and statuesque",
+    "a woman in her mid thirties with platinum pin curls and pale skin, tattooed and soft-bellied",
+    "a woman in her twenties with short curly black hair and cool dark skin, small-busted and compact",
+    "a woman in her late forties with a long grey braid and weathered olive skin, rangy and strong",
+    "a woman in her thirties with strawberry-blonde waves and freckled shoulders, pear-shaped and soft",
+    "a woman in her twenties with a blunt black chin-length bob and porcelain skin, tall and willowy",
+    "a woman in her sixties with a white updo and lined mahogany skin, graceful and slender"
+  ],
+  "looks": [
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing an oversized ivory cashmere sweater that slips off one shoulder, bare legs, no jewellery"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a tailored black tuxedo jacket with nothing but a thin gold chain visible at the neckline and wide-leg trousers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a bias-cut emerald silk midi dress with thin straps and strappy heels"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a crisp white oversized men's shirt, sleeves rolled, tucked into high-waisted vintage jeans"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a camel wool trench coat belted at the waist over a black turtleneck, knee boots"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a slinky champagne satin slip dress under a chunky charcoal cardigan"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a red off-the-shoulder knit dress that hugs her shape, hair down"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a black leather biker jacket over a white ribbed tank and faded denim"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a floral chiffon maxi dress with a deep V neckline and a wide-brim straw hat"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a fitted ribbed cream knit co-ord — long skirt and cropped sweater — and gold hoops"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a structured navy blazer dress with a cinched waist and pointed pumps"
+    },
+    {
+      "heat": "alluring",
+      "tier": "intimate",
+      "text": "in a sheer black blouse over a simple black bralette, high-waisted cigarette trousers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a soft grey linen jumpsuit, belted, sleeves pushed up, barefoot"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a vintage band tee knotted at the waist with leather trousers and combat boots"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a backless black evening gown with a draped cowl at the spine"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a cropped white tennis dress with a pleated skirt and a visor pushed into her hair"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a cosy oatmeal cable-knit sweater and tiny shorts, thick socks"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a dusty-pink silk blouse half-unbuttoned, tucked into a pencil skirt"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a fitted black turtleneck, a mini skirt and sheer black tights"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a loose white cotton sundress with thin straps, hair windswept"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a bronze sequinned cocktail dress that catches every light"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in black yoga leggings and a matching sports bra under an open hoodie"
+    },
+    {
+      "heat": "alluring",
+      "tier": "intimate",
+      "text": "wearing a pinstripe waistcoat with nothing underneath and matching trousers, hair pinned up"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a lilac tulle midi skirt with a plain white bodysuit"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a cream silk pyjama set, top loosely buttoned, hair tousled"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a form-fitting burgundy velvet dress with long sleeves and a thigh-high slit"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a denim jacket over a black slip dress and white sneakers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a sage-green wrap dress tied at the hip, espadrille wedges"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a black halter-neck jumpsuit with a plunging front and a thin gold belt"
+    },
+    {
+      "heat": "alluring",
+      "tier": "intimate",
+      "text": "in a white ribbed tank, no bra, and loose grey sweatpants, hair in a messy bun"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a fur-collared black coat open over a simple black dress"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a corseted floral cotton dress with puff sleeves, cottagecore"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a long camel knit dress with a side slit and a wide leather belt"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a cropped leather jacket over a lace-trimmed camisole and a satin midi skirt"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a black one-shoulder cocktail dress with a single statement earring"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a slouchy beige trench worn as a dress, cinched, bare legs, pointed mules"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a crisp pale-blue shirt dress, top buttons undone, sleeves rolled"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a fitted houndstooth skirt suit with a cropped jacket, retro sixties"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing an oversized vintage denim shirt, bare legs, cowboy boots"
+    },
+    {
+      "heat": "alluring",
+      "tier": "intimate",
+      "text": "in a sheer polka-dot blouse over a nude slip, pleated trousers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a gold lamé column gown with a high neck and open back"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a cropped cream cardigan buttoned low and a flowing floral skirt"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a black turtleneck bodysuit and high-waisted wide-leg white trousers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a slip dress in liquid silver with a cropped faux-fur jacket"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a soft pink mohair sweater that falls off one shoulder, bare legs"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a tailored khaki safari shirt dress, belted, sleeves rolled"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a strapless black satin column dress with elbow-length gloves"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a loose linen shirt tied at the waist over a black bikini top and linen trousers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a dark green silk blouse tucked into tan leather trousers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a 1950s-style polka-dot halter dress with a full skirt and red lips"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing an open-knit crochet dress over a nude slip, beachy"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a slim black pantsuit with a lace camisole under the jacket"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a white tank top and low-rise cargo trousers, Y2K"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a cropped grey sweatshirt and bike shorts, fresh from a run"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a red silk scarf top tied at the back and high-waisted black trousers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a long sheer-sleeved black lace dress with a modest neckline"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a boxy men's overcoat over a slip dress and sneakers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in an ivory bridal-style satin gown with a draped neckline, no veil"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a chocolate-brown leather midi skirt and a thin ribbed knit"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a sheer white embroidered kaftan over a swimsuit, beach-club"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a black string bikini, wet hair slicked back, droplets on her skin"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a plunging red one-piece swimsuit cut high on the hip"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a lace-trimmed black satin slip, one strap fallen off her shoulder"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a sheer black lace bodysuit under an open oversized blazer, bare legs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a white crochet bikini and a sheer sarong knotted low on the hip"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a boned black corset top with low-rise leather trousers"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a tiny ivory silk cami and matching shorts, hair messy, bare feet"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a bronze metallic bikini with gold body chains"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a backless black mini dress cut down to the base of the spine, heels"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a cropped white shirt knotted under the bust and high-cut bikini bottoms"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a nude-toned strapless bodycon dress that fits like a second skin"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a wet white tank top that clings, and black bikini bottoms"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a red lace bralette and a sheer black chiffon robe slipping off her shoulders"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing an oversized men's white shirt unbuttoned to the navel and nothing else visible, bare legs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a leopard-print bikini and oversized sunglasses"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a black velvet mini dress with a corseted bodice and a high slit"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a cut-out black swimsuit with side straps and a gold chain belt"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a cropped grey hoodie and black lace underwear, bare legs, thigh-high socks"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a glossy black latex-look mini skirt and a sheer mesh top over a black bralette"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a champagne silk slip dress cut on the bias with a thigh-high slit, no bra"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a pale pink lace lingerie set under an unbuttoned pastel cardigan"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a halter-neck emerald bikini and a stack of thin gold bangles"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a sheer black mesh maxi dress over a black bandeau and high-waist briefs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a micro mini denim skirt and a tied-up gingham crop top"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a white one-piece swimsuit with a plunging neckline and cut-out waist"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a strappy black bodysuit with a deep V and sheer stockings"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a silk kimono robe open over a matching lace bralette and shorts"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a crystal-mesh mini dress over a nude bodysuit, party-ready"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a red string bikini top and loose unbuttoned denim cut-offs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a lace-up black mini dress with a corset back, bare shoulders"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a knit bralette and a long sheer skirt that shows the bikini beneath"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a sheer white sundress backlit so her silhouette shows through"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a black bandeau bikini with a sheer long-sleeved mesh cover-up"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing an oversized sports jersey as a dress, bare legs, sneakers"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a satin corset mini dress in deep plum with a sweetheart neckline"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a cropped leather jacket over a black bikini top and cut-offs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a tiny ribbed white tank and striped cotton pyjama shorts, bed-head hair"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a cowl-neck metallic halter dress with a bare back, heels"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a monokini with a deep front cut and a wide-brim black hat"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a cropped cashmere cardigan buttoned once and matching mini shorts"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a sheer black blouse worn open over a black bra and a leather pencil skirt"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a wet-look black one-piece and dripping hair, just out of the pool"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a red bodycon midi dress with a square neckline and strappy sandals"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a gold chainmail halter top and black trousers"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a white lace bralette and high-waisted linen trousers, open blouse over the top"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a cheeky-cut tangerine bikini and a towel over one shoulder"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a black slip dress with lace trim, sheer at the hem, barefoot"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a cropped turtleneck sweater and lace briefs, long bare legs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a sheer sequin mini dress over a nude slip, nightclub"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a bikini top under a sheer, soaked white shirt, hair dripping"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a satin bustier and high-waisted wide trousers, red lipstick"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a backless halter mini dress in liquid black satin"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a cropped pink mohair sweater, a mini skirt and knee-high boots"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a plunging black swimsuit with a sheer black sarong"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a lace bodysuit under an oversized unbuttoned flannel shirt"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a bandage-style white mini dress with a cut-out midriff"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a cherry-red lingerie set under a sheer black mesh dress"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a strapless gold bikini and a sheer white beach shirt"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a black mini dress with a lace-up front and a deep V"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a thin ribbed cami, no bra, and low-slung silk pyjama trousers"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a matching black seamless workout set — high-waisted leggings and a scoop sports bra — that shows every line"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a tight white ribbed crop top and skin-tight light-wash jeans, belly bare"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a fitted satin wedding dress with a plunging back and a long train, veil off"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a thin-strapped cotton sundress that clings in the breeze, no shoes"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a cropped grey tank and tiny pink running shorts, ponytail swinging"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a skin-tight black mock-neck bodycon dress to mid-thigh and heels"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a short silk pyjama set, shirt tied at the waist, bare legs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing tight black leather trousers and a cropped white tank, barefoot"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in an off-the-shoulder lace-trimmed wedding gown with a corseted bodice, hair up"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a cropped lilac workout top and matching bike shorts, glowing after a run"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a tight denim mini skirt and a tied white blouse showing her midriff"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing an oversized men's pyjama shirt as a dress, top buttons undone, bare legs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a backless ivory slip-style wedding dress, bias cut, pearl earrings"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a cropped tennis polo and a very short pleated skirt, white sneakers"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a tight red bodycon midi dress with cut-out sides"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a sleeveless ribbed knit mini dress that hugs every curve"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a cropped yoga top and high-waisted flared leggings, mid-stretch"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing skin-tight dark jeans and a tiny black halter top, heels"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a short satin nightdress-style sundress in pale blue, straps thin"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a cropped hoodie and tight bike shorts, socks pulled up"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a long-sleeved black bodycon gown with a leg slit to the hip"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a white tank top tucked into tight cut-off denim shorts, cowboy boots"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a satin wrap mini dress in emerald that slips off one shoulder"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing flannel pyjama bottoms and a tight white baby tee, hair messy"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a strapless tight cream bandage dress to the knee"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a matching black lace bra and thong set, nothing else, bare feet"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a white cotton bralette and high-cut white briefs, an open cardigan"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a red satin bra and matching briefs with a thin garter belt and sheer stockings"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a sheer black lace teddy, one strap fallen"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a pale pink babydoll nightie with lace trim and matching briefs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a black thong and a cropped white tank, seen from behind"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a sheer burgundy lace bodysuit with a plunging neckline"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a nude mesh bra and briefs set, barely there"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in an emerald silk bra and tap shorts, a loose robe sliding off"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a black satin push-up bra under a sheer white blouse, tight jeans"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a lace-up black corset with matching briefs and sheer thigh-highs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a strappy black bra and thong under an open oversized shirt"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a white lace bridal bra and briefs set with a sheer robe, wedding morning"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a cheeky cotton underwear set and knee socks, sleepy"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a sheer black mesh bodysuit with a bra beneath, heels"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a black wool turtleneck, wide charcoal trousers and gold hoops"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a cream silk shirt buttoned to the throat, tucked into high-waist navy trousers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a camel double-breasted coat over a burgundy slip of a dress"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a knitted oatmeal cardigan and pleated midi skirt with brogues"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a boxy tweed blazer, dark denim and loafers, hair tucked behind one ear"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a rust corduroy pinafore over a striped cotton tee"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a navy silk blouse and grey pencil skirt with a thin leather belt"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a long olive trench, belted, over knee-high boots"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a white broderie-anglaise sundress and woven straw wedges"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a charcoal turtleneck dress, opaque tights and ankle boots"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a cropped denim jacket over a floral prairie dress"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a lavender linen co-ord, boxy shirt and shorts, flat sandals"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a black polo neck under a sleeveless rust suede vest, dark jeans"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a cream blazer dress cinched with a gold chain belt"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a forest-green velvet blazer and black silk trousers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a beige linen shirt dress, sleeves rolled, tan sandals"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a tailored ivory jumpsuit with a wide leather belt"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a red cable-knit sweater and straight-leg blue jeans"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a mustard raincoat and wellington boots on a wet street"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a navy sailor top and white sailor trousers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a tweed hacking jacket, jodhpurs and tall brown boots"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a burgundy leather biker jacket over a grey slip dress"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a pale blue oxford shirt knotted at the waist over chinos"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a black silk wrap dress and pearl studs"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a wool cape coat and leather gloves with riding boots"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a chunky knit half-zip and tailored shorts, canvas sneakers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a scarf-printed silk blouse and corduroy trousers"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a terracotta linen suit, sleeves pushed up"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in a lace-trimmed white cotton blouse and long dark skirt"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a vintage grey flannel suit with a loosened tie"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "in an emerald satin blouse and black leather midi skirt"
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "wearing a quilted olive gilet over a cream roll-neck and jeans"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a high-cut black one-piece swimsuit and oversized sunglasses"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a tiny red string bikini with a gold body chain"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a ribbed grey gym set, sports bra and leggings, trainers"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a bodycon black bandage dress and strappy heels"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a cropped tank and low-slung baggy jeans, midriff bare"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a satin slip dress with a thigh slit and ankle-strap sandals"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in tight white jeans and a knotted checked shirt"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a leopard-print mini dress with bare legs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a fitted white shirt, black mini skirt and sheer tights"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a bandeau top and high-waist denim shorts"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a pale pink tennis dress, pleated and short, with sweatbands"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a lacy white wedding dress with a deep V back"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a ruched coral off-shoulder midi dress"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a black halter swimsuit with a cut-out waist"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a tiny denim skirt, white crop top and cowboy boots"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a sheer mesh top over a nude camisole and leather trousers"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a green satin slip dress and a fur stole"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a cream chunky knit sweater dress and bare legs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a long silk gown with a plunging back and split"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a black leather pencil skirt and a cropped turtleneck"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing a polka-dot bikini with a knotted shirt over it"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a strapless blue bodycon mini dress and clear heels"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a pale yellow sundress with thin straps and no bra"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a matching lilac knit set, cropped top and high-waist shorts"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing tight black riding trousers and a white shirt tied at the waist"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "in a sheer white shirt open over a black bikini and linen shorts"
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "wearing an ivory lace bridal corset top and satin mini skirt"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a black lace bra and matching high-waist briefs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a red lace balconette bra and a tiny thong"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a nude seamless thong and a cropped white vest, no bra"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing black leather harness straps over a lace bralette"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a satin chemise with lace at the hem and bare legs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a pale pink cotton bra, frilly knickers and ankle socks"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a fishnet body stocking over a black bra and briefs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a white lace corset, matching thong and stockings"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a silky black slip dress with nothing beneath it"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a cropped mesh bra and lace-up briefs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a velvet bodysuit with the zip front pulled low"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a sheer chiffon babydoll and thong"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a lace basque, suspenders and stockings"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a wet white t-shirt and black briefs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a black leather bra, leather skirt and thigh-high boots"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing an open satin shirt and a lace thong"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a satin bralette and boxer shorts, barefoot"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a latex bra and high-waist latex briefs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a lace teddy with a low back and thigh-high stockings"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a plain grey cotton thong and a chunky knit cardigan"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "in a strappy cage bra and briefs"
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "wearing a dripping wet black bikini with a sheer cover-up"
+    }
+  ],
+  "settings": [
+    {
+      "text": "in a sunlit loft apartment with tall windows, bare floorboards and a linen sofa"
+    },
+    {
+      "text": "on a white-sand beach at the water's edge, turquoise shallows behind her"
+    },
+    {
+      "text": "in a seamless grey studio with nothing but a single stool"
+    },
+    {
+      "text": "on a Paris balcony with wrought-iron railings and zinc rooftops behind"
+    },
+    {
+      "text": "by an infinity pool at a hillside villa overlooking the sea"
+    },
+    {
+      "text": "in the back seat of a vintage black Mercedes at night, city lights sliding past"
+    },
+    {
+      "text": "on a rooftop at dusk with the skyline glittering behind her"
+    },
+    {
+      "text": "in a neon-lit Tokyo alley slick with rain"
+    },
+    {
+      "text": "in a hotel bathroom with a marble tub, steam on the mirror"
+    },
+    {
+      "text": "on a wooden dock at a still lake at dawn, mist on the water"
+    },
+    {
+      "text": "in an overgrown summer garden among tall grass and wildflowers"
+    },
+    {
+      "text": "in an unmade bed with white linen, morning light through gauze curtains"
+    },
+    {
+      "text": "in a dim jazz bar, red leather booth, a cocktail on the table"
+    },
+    {
+      "text": "on a cobblestone street in Rome beside a Vespa"
+    },
+    {
+      "text": "in a greenhouse full of ferns and condensation-fogged glass"
+    },
+    {
+      "text": "on a yacht deck under full sun, open water behind her"
+    },
+    {
+      "text": "in a dusty desert at golden hour with distant mesas"
+    },
+    {
+      "text": "in a kitchen with open shelves and a bowl of citrus on the counter"
+    },
+    {
+      "text": "on a fire escape above a brick street, laundry lines and pigeons"
+    },
+    {
+      "text": "in a wood-panelled library with a rolling ladder and green lamps"
+    },
+    {
+      "text": "by a hotel-room window with sheer curtains and a city view at night"
+    },
+    {
+      "text": "on a cliff path above the sea, wind pulling at her hair"
+    },
+    {
+      "text": "in a vintage diner booth with chrome trim and a milkshake"
+    },
+    {
+      "text": "in a cabin by a wood stove with a sheepskin rug"
+    },
+    {
+      "text": "in a pink-tiled 1970s bathroom with a round mirror"
+    },
+    {
+      "text": "on a tennis court in late afternoon, long shadows across the clay"
+    },
+    {
+      "text": "in the surf at sunset, waves breaking around her knees"
+    },
+    {
+      "text": "at a white marble bar in a grand hotel lobby"
+    },
+    {
+      "text": "on the steps of a Georgian townhouse with a black door"
+    },
+    {
+      "text": "in a Mediterranean courtyard with lemon trees and terracotta"
+    },
+    {
+      "text": "on a nightclub dance floor under a mirror ball"
+    },
+    {
+      "text": "in a convertible parked on a coastal highway, top down"
+    },
+    {
+      "text": "in a photographer's studio with a dark painted canvas backdrop"
+    },
+    {
+      "text": "in a penthouse living room with floor-to-ceiling glass and a grand piano"
+    },
+    {
+      "text": "on a velvet chaise in a Victorian drawing room"
+    },
+    {
+      "text": "in a boxing gym, heavy bags and chalk dust in the air"
+    },
+    {
+      "text": "on a snowy Alpine terrace wrapped in a blanket, mountains behind"
+    },
+    {
+      "text": "in a laundromat at night, rows of washers humming"
+    },
+    {
+      "text": "in a sun-bleached beach hut doorway, sand on the floor"
+    },
+    {
+      "text": "on a motel balcony with a flickering sign and a palm tree"
+    },
+    {
+      "text": "in a Moroccan riad with zellige tiles and a plunge pool"
+    },
+    {
+      "text": "at a kitchen island at midnight, fridge light the only lamp"
+    },
+    {
+      "text": "on a London street in the rain under a black umbrella"
+    },
+    {
+      "text": "in a field of lavender in Provence, afternoon haze"
+    },
+    {
+      "text": "in a dressing room with a bulb-lined mirror and racks of clothes"
+    },
+    {
+      "text": "on a Brooklyn stoop with a coffee, trees in leaf"
+    },
+    {
+      "text": "in a Scandinavian apartment, pale wood and a single monstera"
+    },
+    {
+      "text": "on a hotel pool lounger with a striped towel and a paperback"
+    },
+    {
+      "text": "in a vineyard at harvest, rows of vines running to the hills"
+    },
+    {
+      "text": "in a vintage elevator with brass doors and a mirrored wall"
+    },
+    {
+      "text": "on a rocky cove at low tide with tide pools shining"
+    },
+    {
+      "text": "in a dark hotel corridor with a long red carpet"
+    },
+    {
+      "text": "in a tropical outdoor shower surrounded by banana leaves"
+    },
+    {
+      "text": "backstage at a fashion show amid rails and steam"
+    },
+    {
+      "text": "on a 1970s shag carpet in front of a wall of vinyl records"
+    },
+    {
+      "text": "at a rooftop pool party, string lights and a DJ booth"
+    },
+    {
+      "text": "on a country road beside a red pickup truck at sunset"
+    },
+    {
+      "text": "in an art gallery, white walls and one enormous canvas"
+    },
+    {
+      "text": "in a sauna doorway with cedar walls and soft steam"
+    },
+    {
+      "text": "on a sailing boat's bow, sea spray and bright sky"
+    },
+    {
+      "text": "in a Lisbon tram with wooden seats and open windows"
+    },
+    {
+      "text": "in a dim bedroom lit by a single string of fairy lights"
+    },
+    {
+      "text": "on a city crosswalk mid-stride, taxis blurred behind her"
+    },
+    {
+      "text": "in a hammock between palms, white sand below"
+    },
+    {
+      "text": "on a hotel bed scattered with room-service trays and champagne"
+    },
+    {
+      "text": "in a florist's shop among buckets of peonies and eucalyptus"
+    },
+    {
+      "text": "in a backyard pool at night, underwater lights glowing"
+    },
+    {
+      "text": "on a marble staircase in a grand villa"
+    },
+    {
+      "text": "at a Miami beach wall painted in pastel stripes"
+    },
+    {
+      "text": "in a cosy bookshop corner with an armchair and a reading lamp"
+    },
+    {
+      "text": "at a neon-lit karaoke bar, red vinyl booths, late night"
+    },
+    {
+      "text": "in a steamy tiled bathroom with a clawfoot tub"
+    },
+    {
+      "text": "on a rooftop terrace above a hot city, string lights overhead"
+    },
+    {
+      "text": "by a mossy stone wall in an overgrown English garden"
+    },
+    {
+      "text": "on a fishing boat deck, nets coiled, grey North Sea light"
+    },
+    {
+      "text": "on a black sand beach under a cliff, wind-blown"
+    },
+    {
+      "text": "in a hotel room with heavy curtains and a gilt mirror"
+    },
+    {
+      "text": "by the pool of a faded Miami art-deco motel"
+    },
+    {
+      "text": "in a green room backstage with mirrors and costume rails"
+    },
+    {
+      "text": "on a wheat-coloured field track at the edge of harvest"
+    },
+    {
+      "text": "in a chintzy country-house drawing room with chipped gilding"
+    },
+    {
+      "text": "at a night market of paper lanterns and steam"
+    },
+    {
+      "text": "in a concrete parking garage, painted arrows and sodium light"
+    },
+    {
+      "text": "on a lava-rock shore with surf breaking behind"
+    },
+    {
+      "text": "in a paper-strewn artist's studio with easels and turpentine"
+    },
+    {
+      "text": "at a temple courtyard with stone lions and incense smoke"
+    },
+    {
+      "text": "in a nightclub cloakroom, mirrored and dim"
+    },
+    {
+      "text": "on a desert highway shoulder beside a dented car"
+    },
+    {
+      "text": "in a vintage train carriage with brass fittings and green velvet seats"
+    },
+    {
+      "text": "by a canal in a low European city, moored barges"
+    },
+    {
+      "text": "in a gym with rubber mats and iron plates"
+    },
+    {
+      "text": "on a balcony in a dense old town, laundry lines above"
+    },
+    {
+      "text": "at a fairground at dusk, ferris wheel lights blurring"
+    },
+    {
+      "text": "in a Japanese ryokan room with tatami and paper screens"
+    },
+    {
+      "text": "on a sailboat heeled over, spray across the deck"
+    },
+    {
+      "text": "in a purple-lit photo booth and arcade"
+    },
+    {
+      "text": "by a frozen waterfall, ice columns and blue shadow"
+    },
+    {
+      "text": "in a whitewashed Greek alley of bougainvillea and blue doors"
+    },
+    {
+      "text": "at a racetrack paddock with hay bales and clipped hedges"
+    },
+    {
+      "text": "on a stone stair in a rainy Sicilian courtyard"
+    }
+  ],
+  "poses": [
+    {
+      "heat": "alluring",
+      "text": "she leans back on her hands and laughs at something off-camera"
+    },
+    {
+      "heat": "alluring",
+      "text": "she stands with one hand in her hair, looking straight into the lens"
+    },
+    {
+      "heat": "alluring",
+      "text": "she walks toward the camera mid-stride, hair moving"
+    },
+    {
+      "heat": "alluring",
+      "text": "she sits on the floor, knees drawn up, chin resting on them"
+    },
+    {
+      "heat": "alluring",
+      "text": "she glances back over her shoulder, half a smile"
+    },
+    {
+      "heat": "alluring",
+      "text": "she leans against the wall, arms loosely crossed, weight on one hip"
+    },
+    {
+      "heat": "alluring",
+      "text": "she holds a coffee with both hands and looks out of frame"
+    },
+    {
+      "heat": "alluring",
+      "text": "she sits sideways on a chair, one arm draped over its back"
+    },
+    {
+      "heat": "alluring",
+      "text": "she stretches her arms overhead, eyes closed, soft smile"
+    },
+    {
+      "heat": "alluring",
+      "text": "she twirls so the skirt flares, caught mid-spin"
+    },
+    {
+      "heat": "alluring",
+      "text": "she perches on the edge of a table, legs crossed at the ankle"
+    },
+    {
+      "heat": "alluring",
+      "text": "she lies on her stomach reading, feet kicked up behind her"
+    },
+    {
+      "heat": "alluring",
+      "text": "she stands in profile, looking down, hair falling across her face"
+    },
+    {
+      "heat": "alluring",
+      "text": "she tucks her hair behind her ear and looks up at the camera"
+    },
+    {
+      "heat": "alluring",
+      "text": "she sits cross-legged, elbows on knees, direct gaze"
+    },
+    {
+      "heat": "alluring",
+      "text": "she leans in the doorway, one shoulder on the frame"
+    },
+    {
+      "heat": "alluring",
+      "text": "she rests her chin on her hand, elbow on the table, amused"
+    },
+    {
+      "heat": "alluring",
+      "text": "she shields her eyes from the sun with one hand, squinting and smiling"
+    },
+    {
+      "heat": "alluring",
+      "text": "she lies back in the grass, arms behind her head"
+    },
+    {
+      "heat": "alluring",
+      "text": "she stands tall with hands in her pockets, chin slightly raised"
+    },
+    {
+      "heat": "alluring",
+      "text": "she caught mid-laugh, hand half-covering her mouth"
+    },
+    {
+      "heat": "alluring",
+      "text": "she sits on the steps, elbows on her knees, hands clasped"
+    },
+    {
+      "heat": "alluring",
+      "text": "she dances alone, eyes closed, lost in it"
+    },
+    {
+      "heat": "alluring",
+      "text": "she leans over a railing looking out, seen from behind and the side"
+    },
+    {
+      "heat": "alluring",
+      "text": "she kneels on the bed, hands on her thighs, calm gaze"
+    },
+    {
+      "heat": "alluring",
+      "text": "she stands with her back to the camera and turns her head to look back"
+    },
+    {
+      "heat": "alluring",
+      "text": "she sits with legs stretched out, ankles crossed, leaning on one arm"
+    },
+    {
+      "heat": "alluring",
+      "text": "she adjusts an earring, eyes on the lens"
+    },
+    {
+      "heat": "alluring",
+      "text": "she lies on her side propped on one elbow"
+    },
+    {
+      "heat": "alluring",
+      "text": "she stands at the window with a hand on the glass, lost in thought"
+    },
+    {
+      "heat": "sexy",
+      "text": "she arches her back slightly, one hand on her hip, chin down, eyes up at the lens"
+    },
+    {
+      "heat": "sexy",
+      "text": "she lies across the bed on her back, head tipped toward the camera, hair spilling"
+    },
+    {
+      "heat": "sexy",
+      "text": "she kneels up tall, hands sliding up through her hair, a slow gaze"
+    },
+    {
+      "heat": "sexy",
+      "text": "she sits with one knee up and the other leg stretched, leaning back on her palms"
+    },
+    {
+      "heat": "sexy",
+      "text": "she walks out of the water toward the camera, hands wringing out her hair"
+    },
+    {
+      "heat": "sexy",
+      "text": "she lies on her front propped on her elbows, legs crossed behind her in the air"
+    },
+    {
+      "heat": "sexy",
+      "text": "she stands with her back arched against the wall, one knee bent, foot on the wall"
+    },
+    {
+      "heat": "sexy",
+      "text": "she looks over her bare shoulder at the camera, lips parted"
+    },
+    {
+      "heat": "sexy",
+      "text": "she sits on the pool edge, legs in the water, leaning back and laughing"
+    },
+    {
+      "heat": "sexy",
+      "text": "she straddles a chair backwards, arms folded on the backrest, chin on her arms"
+    },
+    {
+      "heat": "sexy",
+      "text": "she lets the strap slide off her shoulder and holds the camera's gaze"
+    },
+    {
+      "heat": "sexy",
+      "text": "she stretches like a cat on the bed, mid-yawn, playful"
+    },
+    {
+      "heat": "sexy",
+      "text": "she crouches at the shoreline, hands on her knees, wet hair pushed back"
+    },
+    {
+      "heat": "sexy",
+      "text": "she lies in the shallows, propped on one elbow, waves washing over her legs"
+    },
+    {
+      "heat": "sexy",
+      "text": "she stands hip-cocked with a hand grazing her collarbone, direct gaze"
+    },
+    {
+      "heat": "sexy",
+      "text": "she sits on the counter, legs crossed high, leaning forward toward the lens"
+    },
+    {
+      "heat": "sexy",
+      "text": "she bites her lip softly and looks up from under her lashes"
+    },
+    {
+      "heat": "sexy",
+      "text": "she lies on a lounger, one arm thrown over her head, sunglasses pushed up"
+    },
+    {
+      "heat": "sexy",
+      "text": "she leans forward on all fours on the bed, eyes locked on the camera"
+    },
+    {
+      "heat": "sexy",
+      "text": "she stands in the doorway holding the frame, weight on one hip, a slow smile"
+    },
+    {
+      "heat": "sexy",
+      "text": "she sits on the floor against the bed, knees apart, elbows on knees"
+    },
+    {
+      "heat": "sexy",
+      "text": "she tips her head back, throat exposed, eyes half closed"
+    },
+    {
+      "heat": "sexy",
+      "text": "she runs a hand down her side, looking away, caught in the moment"
+    },
+    {
+      "heat": "sexy",
+      "text": "she lies on her back on the lounger with one knee raised, looking at the lens upside down"
+    },
+    {
+      "heat": "sexy",
+      "text": "she sits sideways in the car seat with the door open, legs out, head tilted"
+    },
+    {
+      "heat": "sexy",
+      "text": "she walks away from the camera and looks back, hips swaying"
+    },
+    {
+      "heat": "sexy",
+      "text": "she rests back on her elbows at the water's edge, chin tilted to the sun"
+    },
+    {
+      "heat": "sexy",
+      "text": "she stands in the shower doorway, hair dripping, a towel held loosely"
+    },
+    {
+      "heat": "sexy",
+      "text": "she lies diagonally across white sheets, one leg bent, the sheet pulled up to her waist"
+    },
+    {
+      "heat": "sexy",
+      "text": "she perches on the arm of the sofa, one foot on the cushion, leaning in"
+    },
+    {
+      "heat": "alluring",
+      "text": "she sits on a low wall, ankles crossed, looking off frame"
+    },
+    {
+      "heat": "alluring",
+      "text": "she perches on a stool, one heel hooked on the rung"
+    },
+    {
+      "heat": "alluring",
+      "text": "she lifts a cup to her lips, gaze over the rim"
+    },
+    {
+      "heat": "alluring",
+      "text": "she leans on a railing, elbows wide, laughing softly"
+    },
+    {
+      "heat": "alluring",
+      "text": "she adjusts a cufflink, head turned, profile to camera"
+    },
+    {
+      "heat": "alluring",
+      "text": "she sits cross-legged on the floor, back straight, hands on knees"
+    },
+    {
+      "heat": "alluring",
+      "text": "she stands in a doorway with light behind her, a silhouette"
+    },
+    {
+      "heat": "alluring",
+      "text": "she crouches to tie a shoelace, hair falling forward"
+    },
+    {
+      "heat": "alluring",
+      "text": "she holds a book half-closed, thumb marking the page"
+    },
+    {
+      "heat": "alluring",
+      "text": "she turns mid-conversation, one hand raised"
+    },
+    {
+      "heat": "alluring",
+      "text": "she stands with one hand on a chair back, weight shifted"
+    },
+    {
+      "heat": "alluring",
+      "text": "she looks up from under her brow, still and direct"
+    },
+    {
+      "heat": "alluring",
+      "text": "she steps from a car, one leg swinging out, hand on the frame"
+    },
+    {
+      "heat": "alluring",
+      "text": "she leans out of an open window, forearms on the sill"
+    },
+    {
+      "heat": "alluring",
+      "text": "she walks past a wall, one palm trailing along it"
+    },
+    {
+      "heat": "alluring",
+      "text": "she stands with her hands behind her head, elbows out"
+    },
+    {
+      "heat": "alluring",
+      "text": "she kneels to pet a dog, looking up at camera"
+    },
+    {
+      "heat": "sexy",
+      "text": "she pulls her hair up off her neck with both hands, chest lifted"
+    },
+    {
+      "heat": "sexy",
+      "text": "she bends at the waist toward camera, cleavage and thighs in frame"
+    },
+    {
+      "heat": "sexy",
+      "text": "she sits on her heels, knees apart, hands flat on her thighs"
+    },
+    {
+      "heat": "sexy",
+      "text": "she stretches both arms overhead, top riding up"
+    },
+    {
+      "heat": "sexy",
+      "text": "she leans forward onto a table, chest low, hips high"
+    },
+    {
+      "heat": "sexy",
+      "text": "she pulls a shirt off one shoulder, mouth open"
+    },
+    {
+      "heat": "sexy",
+      "text": "she looks back from all fours, hair falling across her face"
+    },
+    {
+      "heat": "sexy",
+      "text": "she rises onto her toes, reaching up, body stretched long"
+    },
+    {
+      "heat": "sexy",
+      "text": "she kneels upright with thighs parted, shoulders rolled back"
+    },
+    {
+      "heat": "sexy",
+      "text": "she turns away and arches, hands pressed to her lower back"
+    },
+    {
+      "heat": "sexy",
+      "text": "she sits on the floor with knees drawn up and apart, arms wrapped round them"
+    }
+  ],
+  "lights": [
+    "soft window light from the left, gentle falloff into shadow",
+    "golden-hour sun low behind her, rim-lit hair, a warm flare in the corner of the frame",
+    "overcast daylight, even and flattering, no hard shadows",
+    "a single tungsten lamp, warm and dim, deep shadows elsewhere",
+    "harsh midday sun with crisp shadows and squinting brightness",
+    "neon reflections in magenta and cyan from signs out of frame",
+    "candlelight from a cluster of candles on the table, flickering warmth",
+    "blue hour after sunset, cool ambient light and a warm interior glow",
+    "a large softbox from above and to the right, beauty-dish catchlights",
+    "dappled sunlight through leaves moving across her skin",
+    "backlight through sheer curtains, a soft halo around her",
+    "the glow of a laptop screen in a dark room",
+    "hard direct on-camera flash, paparazzi style, slightly blown highlights",
+    "a ring light's circular catchlight in her eyes, even and clean",
+    "moonlight and a single streetlamp, cool and grainy",
+    "fire glow from a wood stove, orange and shifting",
+    "fluorescent tube light, slightly green, unglamorous and real",
+    "late-afternoon sun through blinds, striped shadows across her",
+    "underwater pool lights from below, rippling on her skin",
+    "a red darkroom safelight bathing everything in one colour",
+    "bright bounced beach light, sand acting as a huge reflector",
+    "the headlights of a parked car behind the camera",
+    "a dim bar's pendant lamps, pools of amber light",
+    "morning fog diffusing the sun into a pale glow",
+    "mixed light: cool daylight from the window, warm lamp on her face",
+    "sunset bouncing off water, orange glitter in the background",
+    "a bare bulb overhead, dramatic downward shadows",
+    "stage light from one side, the other side falling into black",
+    "a photographer's strobe with a gelled blue background light",
+    "soft pink dawn light through an east window",
+    "soft north-facing window light, shadow falling across one eye",
+    "neon pink and blue sign spill across her face",
+    "candlelight from below, flickering amber",
+    "light through lace curtains, dappled and soft",
+    "car headlights raking past, long streaks",
+    "backlit doorway, blown highlights and lens haze",
+    "sodium streetlamp amber, deep night behind",
+    "pool water reflected light, caustics rippling up the wall",
+    "rain-washed dawn light, silvery and low contrast"
+  ],
+  "cameras": [
+    "shot on a 35mm film camera with an 85mm lens at f/1.8, shallow depth of field",
+    "shot on a Leica with a 50mm lens, wide open, slight vignette",
+    "shot on a medium-format digital camera, 80mm lens, razor-sharp eyes",
+    "shot on an iPhone in portrait mode, natural and casual",
+    "shot on a Contax T2 point-and-shoot with flash, 90s snapshot feel",
+    "shot on Kodak Portra 400 film, 35mm, soft grain and warm tones",
+    "shot on a 24mm lens from low angle, slight wide-angle stretch, full body",
+    "shot at 135mm from across the room, compressed background",
+    "shot on a Polaroid 600 instant camera, soft and square",
+    "shot on a Hasselblad with a 110mm lens, tight waist-up framing",
+    "shot handheld with a 35mm lens, slight motion blur in the background",
+    "shot from a high angle looking down, 50mm lens",
+    "shot through a doorway with the frame edges soft in the foreground",
+    "shot on Cinestill 800T film, halation on the lights",
+    "shot on a 70-200mm at 200mm, creamy out-of-focus background",
+    "shot on a Fuji X100 with a 23mm lens, close and intimate",
+    "shot on a disposable camera with flash, grainy and candid",
+    "shot on a Canon 5D with a 50mm f/1.2, dreamy bokeh",
+    "shot from ground level with a 28mm lens, legs long in the frame",
+    "shot as a three-quarter-length portrait at 85mm, eye level",
+    "shot on Fuji Pro 400H, medium format, airy pastel palette",
+    "shot on Ilford HP5 black and white, 50mm, coarse grain",
+    "shot on a 105mm macro, shallow focus on the eyes",
+    "shot on a Hasselblad, square crop, 80mm",
+    "shot at 50mm, eye level, natural perspective",
+    "shot on expired film with light leaks and colour shift",
+    "shot from behind at 70mm, over-the-shoulder framing"
+  ],
+  "finishes": [
+    "a high-end fashion-editorial look",
+    "a candid, caught-in-the-moment feel",
+    "a glossy magazine-cover polish",
+    "a lo-fi personal-snapshot feel",
+    "a cinematic film-still mood",
+    "a sun-drenched lifestyle-campaign look",
+    "a moody, intimate, late-night atmosphere",
+    "a crisp, clean commercial beauty look",
+    "a nostalgic early-2000s print feel",
+    "a timeless black-and-white silver-gelatin print",
+    "a vivid, saturated summer-travel look",
+    "a soft, romantic, slightly hazy look",
+    "a warm editorial gloss",
+    "a gritty documentary feel",
+    "a faded 70s magazine look",
+    "a high-fashion matte look",
+    "a soft dreamy pastel look",
+    "a harsh flash paparazzi feel",
+    "a creamy mid-century studio look",
+    "a cold Nordic moody look",
+    "a sunburnt holiday-snapshot feel",
+    "a moody chiaroscuro look",
+    "a grainy black-and-white reportage feel",
+    "a lush saturated tropical look",
+    "a faded Polaroid instant feel",
+    "a smoky nightclub look",
+    "a clean minimal studio look",
+    "a rustic earthy film look",
+    "a delicate blown-out high-key feel"
+  ],
+  "hair": [
+    "hair loose and a little windswept",
+    "hair in a sleek low bun",
+    "hair pulled into a high ponytail",
+    "hair wet and combed straight back",
+    "hair in soft old-Hollywood waves",
+    "hair half up with loose strands around her face",
+    "hair in a messy bun with pieces falling",
+    "hair tucked under a baseball cap",
+    "hair in two loose braids",
+    "hair tied with a silk scarf",
+    "hair freshly blow-dried and glossy",
+    "hair piled up and held with a claw clip",
+    "hair loose and damp, pushed back off the face",
+    "hair tucked behind both ears with a slight wave",
+    "hair in a side part, glossy and straight",
+    "hair in a braided crown with wisps at the temples",
+    "hair wind-tangled and unstyled",
+    "hair in a half-up style tied with a silk ribbon"
+  ],
+  "signatures": [
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} on a rainy Paris evening, hurrying under the awning of a café in a camel trench and red lipstick, laughing as she shakes the rain from her umbrella; wet pavement reflecting café light; 50mm, wide open, street-photography feel."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} sitting on the floor of a record shop in a vintage band tee and jeans, sleeves of LPs around her, holding one up to the camera with a grin; warm tungsten light, Portra 400 grain."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} on a dawn beach wrapped in an oversized cream knit, hair tangled by the wind, holding a paper cup of coffee with both hands, looking out to sea; pale pink light, 85mm."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} mid-twirl in a long floral skirt in a lavender field, skirt flaring, eyes closed, afternoon haze, shot from low with a 35mm lens."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} leaning on the open window of a vintage Fiat on a Tuscan road in a white sundress and sunglasses, one arm resting on the door, cypress trees behind; golden hour."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a black tuxedo jacket and nothing visible beneath, sitting on a grand piano stool with one elbow on the keys, a champagne coupe beside her; a single warm spotlight, black background."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} at a kitchen island in an oversized white shirt, barefoot, cutting a grapefruit, morning sun across the counter, a candid half-smile; iPhone portrait mode."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} on a fire escape at dusk in a silk slip and a leather jacket, sitting with her legs dangling through the rails, city lights coming on; 35mm, slight grain."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a sheer black blouse and tailored trousers at a jazz bar, lit by a red pendant lamp, leaning back in the booth with one arm along the leather; 50mm, moody."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} on a wooden dock at a misty lake in a grey hoodie and socks, legs pulled up, looking back over her shoulder at the camera; cool blue dawn, 85mm."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a bronze sequin dress on a rooftop at midnight, caught mid-laugh with a sparkler in hand, skyline soft behind; on-camera flash, paparazzi energy."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a ribbed cream knit co-ord sitting cross-legged on an unmade bed with a book, hair in a claw clip, gauze-curtain light; Polaroid feel."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} walking a cobbled Lisbon street in a red midi dress and white sneakers, looking back at the camera, yellow tram blurred behind; bright hard sun."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a cropped tennis dress on a clay court at golden hour, racket over her shoulder, squinting into the sun with a grin; long shadows, 135mm."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a backless black gown on a marble staircase, seen from behind as she turns her head, one hand on the banister; chandelier light, medium format."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} at a Moroccan riad in a white linen jumpsuit, sitting on the edge of the plunge pool with her feet in the water, zellige tiles everywhere; dappled light."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a camel coat on a London street in the rain, sharing her umbrella with no one, hair curling in the damp, red bus blurred behind; 50mm."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} on a yacht bow in a navy one-piece and a white linen shirt flying open, hair whipping, squinting and laughing into the wind; bright sun, wide lens."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a vintage pinstripe waistcoat and trousers in a wood-panelled library, one foot on the rolling ladder, reading with a slight frown; green lamp light."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a silk pyjama set on a hotel balcony at sunrise, holding the railing, hair down, city waking below; soft pink light, Portra."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a lilac tulle skirt and white bodysuit in a florist's, arms full of peonies, laughing; soft overcast window light."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a black turtleneck and mini skirt sitting in the back of a yellow cab at night, looking out of the window, neon sliding over her face; Cinestill 800T."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a sage wrap dress on a Mediterranean terrace, leaning on a whitewashed wall with the sea behind, hair tied with a scarf; midday light, 35mm."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a cropped sweatshirt and bike shorts stretching on a sunlit yoga mat by a big window, mid-laugh at the camera; natural light, candid."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a red velvet dress at a candle-lit dinner table, chin on her hand, holding the camera's eye over the rim of a wine glass; warm, dim, 85mm."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a white tank and cargo trousers on a Brooklyn stoop with an iced coffee, early-2000s print feel, flash in daylight."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in an oatmeal cable-knit and thick socks curled in an armchair by a wood stove, a mug steaming, looking at the lens over the rim; fire glow."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a gold lamé column gown in an empty art gallery, standing before an enormous canvas, seen from behind with her head turned; even gallery light."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a denim jacket over a slip dress on a coastal highway convertible, top down, hand out catching the wind, hair everywhere; sunset."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a 1950s polka-dot halter dress in a chrome diner booth, straw in her milkshake, mock-serious stare; Kodachrome colour."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a black string bikini walking out of turquoise water toward the camera, wringing out her hair, droplets catching the sun; hard midday light, 85mm."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a champagne satin slip lying across white hotel sheets, one strap off her shoulder, head tipped toward the lens, morning light through gauze; 50mm, soft."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a lace bodysuit under an open black blazer, sitting on a kitchen counter at midnight with the fridge door open, its light the only lamp; moody, grainy."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a red plunging one-piece on a hotel pool lounger, one arm over her head, sunglasses pushed up, shot from above; bright bounced light."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a wet white tank top and black bikini bottoms at the shoreline, crouched with hands on her knees, hair slicked back, laughing; golden hour."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a cropped grey hoodie and lace briefs sitting on the floor against the bed, knees apart, elbows on knees, a slow gaze; single warm lamp."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a backless black mini dress leaning over a hotel balcony rail at night, seen from behind and turning to look back, city glittering; flash plus ambient."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a white crochet bikini in a hammock between palms, one leg hanging down, arm over her eyes against the sun; dappled light, 35mm."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a black velvet corset mini dress in a dim red-lit bar, straddling a bar stool backwards with her arms on the backrest; Cinestill halation."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in an unbuttoned oversized white shirt and nothing else visible, standing at a window with sheer curtains, backlit silhouette, hand on the glass; soft morning haze."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a leopard bikini and oversized sunglasses lying on her front on a striped towel, propped on elbows, feet kicked up; hard sun, sand reflector."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a sheer black mesh dress over a bandeau and briefs on a nightclub floor under a mirror ball, mid-dance, eyes closed; strobe freeze."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a silk kimono robe falling off her shoulders over a lace set, kneeling up on a bed strewn with room-service trays, laughing; warm lamp light."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a wet black one-piece climbing out of a night pool lit from below, water streaming off her, looking straight up at the lens; underwater glow."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a tiny white tank and pyjama shorts stretching like a cat across the bed at sunrise, mid-yawn; pale pink light, candid."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a red lace bralette under a sheer chiffon robe sitting sideways in a vintage car with the door open, legs out, head tilted; headlight glow."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a cut-out black swimsuit on a yacht deck lying on her back with one knee raised, looking at the camera upside down; full sun, wide lens."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a glossy black mini skirt and mesh top in a rain-slick Tokyo alley, leaning back against the wall with one foot on it, neon pink and cyan on her skin."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a cropped cashmere cardigan buttoned once and matching shorts, lying on a shag carpet in front of a wall of records, one arm behind her head; tungsten warmth."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a bronze metallic bikini and gold body chains in the desert at golden hour, standing hip-cocked, hand at her collarbone, mesas behind; long shadows."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a sheer white sundress in the surf at sunset, backlit so her silhouette shows through, walking away and looking back; orange glitter on the water."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a lace-trimmed black slip in a steamy hotel bathroom, sitting on the edge of a marble tub with wet hair, towel in one hand; soft diffused light."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a cropped leather jacket over a bikini top and cut-offs on a motel balcony, leaning on the rail under a flickering sign; night, grainy."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a strappy black bodysuit and sheer stockings on a velvet chaise, lying on her side propped on an elbow, one knee drawn up; candlelight."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a halter emerald bikini on a rocky cove at low tide, sitting back on her elbows with her chin tilted to the sun; bright, crisp."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a plum satin corset dress in a mirrored vintage elevator, hands on the brass rail, reflections multiplying her; warm bulb light."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a knit bralette and a long sheer skirt walking a white-sand beach at dusk, skirt blowing, seen from a low wide angle; blue hour."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a thin ribbed cami and silk pyjama trousers at a hotel window at night, sheer curtain in one hand, city lights beyond; cool and warm mixed light."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a cheeky-cut tangerine bikini at an outdoor tropical shower, water running over her, banana leaves around, laughing with her eyes closed; dappled sun."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a crystal-mesh mini dress over a nude bodysuit on a penthouse sofa at 3 a.m., shoes kicked off, legs tucked under her, a tired smile; lamp light, flash fill."
+    },
+    {
+      "heat": "alluring",
+      "tier": "intimate",
+      "text": "{subject} in a pinstripe waistcoat and matching wide trousers with no shirt beneath, perched on the arm of a leather chesterfield with one bare foot dangling, mid-laugh at something off-frame; late window light raking across the room, 50mm, quiet editorial calm."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} crossing a wet cobbled street in a long olive trench and tall boots, collar up, shopping bag swinging, hair damp; flat overcast grey light, 35mm, focus on her turned profile as she passes a lamppost."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} on a sunlit greenhouse bench between ferns and tomato vines, in a linen shirt dress with the sleeves rolled, reading a seed packet; dappled green light through glass, 85mm, sweat at her hairline."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a boxy tweed blazer and dark denim, sitting on the hood of a dusty car on an empty desert highway, boots crossed at the ankle, chin tilted to the sun; hard midday light, 28mm from below."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a knitted oatmeal cardigan and pleated midi skirt, leaning over a library table under a green bankers lamp, one hand flat on an open page; warm pooled light, 50mm, dust drifting in the air."
+    },
+    {
+      "heat": "alluring",
+      "tier": "clothed",
+      "text": "{subject} in a navy sailor top and white trousers on a heeled sailboat, hair blown sideways, gripping the rail with both hands and squinting; bright overcast sea light, 35mm, spray across the deck."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a tiny red string bikini and gold body chain, stretched on black sand beneath a cliff, one knee bent, sunglasses pushed into her hair; hard low sun, 85mm, salt drying on her skin."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a bodycon black bandage dress and strappy heels, backed against a mirrored nightclub cloakroom wall, hips cocked, drink in one hand; pink neon spill, 35mm, flash-lit highlights on bare shoulders."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a wet white shirt over a black bikini, climbing out of a rooftop pool at dusk, water sheeting off her, fabric clinging transparent; city glow and blue hour, 50mm, hair slicked back."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a high-cut black one-piece lying on a hot concrete diving board, knees bent and toes pointed, arched off the surface; hard sun with deep blue water below, 24mm from the side."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in tight white jeans and a knotted checked shirt, bent over the open bonnet of a muscle car at a roadside motel, denim pulling across her arse; flickering vacancy sign light, 35mm, night."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a sheer white shirt open over a black bikini, straddling a backwards chair in a bare loft, elbows on the backrest, chin on her hands; tall window light, 85mm, dust and long shadows."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a tiny denim skirt and white crop top with cowboy boots, leaning back on her palms in the bed of a pickup at a fairground, legs long; blurred ferris wheel lights behind, 50mm, flash."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a pale pink tennis dress, pleated and short, crouched at the baseline of an empty court, racket across her thighs, flushed and breathless; hard late sun, 135mm, long shadows."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in a strapless blue bodycon mini dress, stepping out of a vintage car inside a paper-strewn studio, one hand on the door, thigh leading; tungsten lamps, 35mm, wide and close."
+    },
+    {
+      "heat": "sexy",
+      "tier": "clothed",
+      "text": "{subject} in an ivory lace bridal corset top and satin mini skirt, sitting on the floor of a chintzy drawing room, veil discarded beside her, garter showing; soft window light, 50mm, cool and posh."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a black lace bra and high-waist briefs, kneeling on a rumpled bed, tugging the waistband straight, looking down at herself; warm bedside lamp, 85mm, shadow falling across her breasts."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a red lace balconette bra and a tiny thong, face down on grey sheets with her feet crossed in the air, chin propped on her hands, arse raised; soft side light, 50mm, mid-laugh."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a sheer black bodysuit with a deep plunge, standing in a steamy tiled bathroom with one foot on the tub rim, hair dripping; fogged window light, 35mm, condensation on the lens."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a white lace corset, matching thong and stockings, sitting on a wooden stool with knees wide and back straight, hands gripping the seat behind her; hard flash, 50mm, deep shadow."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a satin chemise with lace at the hem, lying on her side on a velvet sofa, one arm folded under her head, strap off the shoulder; candlelight, 50mm, amber skin and slow breathing."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a latex bra and high-waist latex briefs, on all fours on a polished concrete floor, back arched, looking back between her arms; hard key light, 35mm, glossy stretched highlights."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a fishnet body stocking over a black bra and briefs, standing against a bare brick wall, hands above her head, hips pushed forward; blue-hour window light, 50mm, moody and dim."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a cropped mesh bra and lace-up briefs, straddling a chair with her arse barely on the seat, thighs spread, drink forgotten on the table; tungsten glow, 85mm, glossy and close."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a wet white t-shirt and black briefs, standing on a fire escape in the rain, fabric transparent and clinging, one hand pushing hair from her face; sodium streetlight, 35mm, dripping."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a nude seamless thong and cropped white vest with no bra, lying back on a laundromat bench, knees up, feet braced on a machine door; buzzing fluorescent light, 50mm."
+    },
+    {
+      "heat": "sexy",
+      "tier": "intimate",
+      "text": "{subject} in a lace teddy with a low back and thigh-high stockings, bent over a kitchen counter at midnight, weight on her forearms, hips high; fridge light and one warm bulb, 35mm."
+    }
+  ]
+}

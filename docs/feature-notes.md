@@ -369,7 +369,9 @@ as for a typed prompt (the FaceID reference mentions are prepended by `AIExtend`
   file → built-in bank plus a note under the section explaining why (`Loaded.note`). Reads happen off
   the main actor (`Task.detached` in the views' `surprise(send:)`) and are cached by the file's
   size + mtime (`LoadCache`), so a tap re-reads only after an edit. The file is hidden from the grid
-  via `GalleryCategories.sidecarNames`. No drive open → built-in bank.
+  via `GalleryCategories.sidecarNames`. No drive open → built-in bank. A copy of the built-in bank
+  in the file's exact shape is kept at `prompts/surprise-prompts.json` (exported from the Swift
+  banks; regenerate it whenever the banks change) — a seed to edit and copy to the drive by hand.
 - Astria's moderation still applies to whatever is sent; a refused prompt surfaces like any other.
 
 ### 1.11a Negative Prompt
