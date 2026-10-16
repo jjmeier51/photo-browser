@@ -691,6 +691,11 @@ nonisolated enum SurprisePrompts {
         // Added from the prompt-bank additions file (Oct 2026)
         "shot on Fuji Pro 400H, medium format, airy pastel palette",
         "shot on Ilford HP5 black and white, 50mm, coarse grain",
+        "shot on a 105mm macro, shallow focus on the eyes",
+        "shot on a Hasselblad, square crop, 80mm",
+        "shot at 50mm, eye level, natural perspective",
+        "shot on expired film with light leaks and colour shift",
+        "shot from behind at 70mm, over-the-shoulder framing",
     ]
 
     private static let finishes: [String] = [
@@ -706,6 +711,24 @@ nonisolated enum SurprisePrompts {
         "a timeless black-and-white silver-gelatin print",
         "a vivid, saturated summer-travel look",
         "a soft, romantic, slightly hazy look",
+        // Added from the prompt-bank additions file (Oct 2026)
+        "a warm editorial gloss",
+        "a gritty documentary feel",
+        "a faded 70s magazine look",
+        "a high-fashion matte look",
+        "a soft dreamy pastel look",
+        "a harsh flash paparazzi feel",
+        "a creamy mid-century studio look",
+        "a cold Nordic moody look",
+        "a sunburnt holiday-snapshot feel",
+        "a moody chiaroscuro look",
+        "a grainy black-and-white reportage feel",
+        "a lush saturated tropical look",
+        "a faded Polaroid instant feel",
+        "a smoky nightclub look",
+        "a clean minimal studio look",
+        "a rustic earthy film look",
+        "a delicate blown-out high-key feel",
     ]
 
     private static let hairNotes: [String] = [
@@ -721,6 +744,13 @@ nonisolated enum SurprisePrompts {
         "hair tied with a silk scarf",
         "hair freshly blow-dried and glossy",
         "hair piled up and held with a claw clip",
+        // Added from the prompt-bank additions file (Oct 2026)
+        "hair loose and damp, pushed back off the face",
+        "hair tucked behind both ears with a slight wave",
+        "hair in a side part, glossy and straight",
+        "hair in a braided crown with wisps at the temples",
+        "hair wind-tangled and unstyled",
+        "hair in a half-up style tied with a silk ribbon",
     ]
 
     /// Hand-written scenes, `{subject}` is replaced with the subject phrase.
@@ -785,5 +815,33 @@ nonisolated enum SurprisePrompts {
         .init(heat: .sexy, text: "{subject} in a thin ribbed cami and silk pyjama trousers at a hotel window at night, sheer curtain in one hand, city lights beyond; cool and warm mixed light."),
         .init(heat: .sexy, text: "{subject} in a cheeky-cut tangerine bikini at an outdoor tropical shower, water running over her, banana leaves around, laughing with her eyes closed; dappled sun."),
         .init(heat: .sexy, text: "{subject} in a crystal-mesh mini dress over a nude bodysuit on a penthouse sofa at 3 a.m., shoes kicked off, legs tucked under her, a tired smile; lamp light, flash fill."),
+        // Added from the prompt-bank additions file (Oct 2026)
+        .init(heat: .alluring, tier: .intimate, text: "{subject} in a pinstripe waistcoat and matching wide trousers with no shirt beneath, perched on the arm of a leather chesterfield with one bare foot dangling, mid-laugh at something off-frame; late window light raking across the room, 50mm, quiet editorial calm."),
+        .init(heat: .alluring, text: "{subject} crossing a wet cobbled street in a long olive trench and tall boots, collar up, shopping bag swinging, hair damp; flat overcast grey light, 35mm, focus on her turned profile as she passes a lamppost."),
+        .init(heat: .alluring, text: "{subject} on a sunlit greenhouse bench between ferns and tomato vines, in a linen shirt dress with the sleeves rolled, reading a seed packet; dappled green light through glass, 85mm, sweat at her hairline."),
+        .init(heat: .alluring, text: "{subject} in a boxy tweed blazer and dark denim, sitting on the hood of a dusty car on an empty desert highway, boots crossed at the ankle, chin tilted to the sun; hard midday light, 28mm from below."),
+        .init(heat: .alluring, text: "{subject} in a knitted oatmeal cardigan and pleated midi skirt, leaning over a library table under a green bankers lamp, one hand flat on an open page; warm pooled light, 50mm, dust drifting in the air."),
+        .init(heat: .alluring, text: "{subject} in a navy sailor top and white trousers on a heeled sailboat, hair blown sideways, gripping the rail with both hands and squinting; bright overcast sea light, 35mm, spray across the deck."),
+        .init(heat: .sexy, text: "{subject} in a tiny red string bikini and gold body chain, stretched on black sand beneath a cliff, one knee bent, sunglasses pushed into her hair; hard low sun, 85mm, salt drying on her skin."),
+        .init(heat: .sexy, text: "{subject} in a bodycon black bandage dress and strappy heels, backed against a mirrored nightclub cloakroom wall, hips cocked, drink in one hand; pink neon spill, 35mm, flash-lit highlights on bare shoulders."),
+        .init(heat: .sexy, text: "{subject} in a wet white shirt over a black bikini, climbing out of a rooftop pool at dusk, water sheeting off her, fabric clinging transparent; city glow and blue hour, 50mm, hair slicked back."),
+        .init(heat: .sexy, text: "{subject} in a high-cut black one-piece lying on a hot concrete diving board, knees bent and toes pointed, arched off the surface; hard sun with deep blue water below, 24mm from the side."),
+        .init(heat: .sexy, text: "{subject} in tight white jeans and a knotted checked shirt, bent over the open bonnet of a muscle car at a roadside motel, denim pulling across her arse; flickering vacancy sign light, 35mm, night."),
+        .init(heat: .sexy, text: "{subject} in a sheer white shirt open over a black bikini, straddling a backwards chair in a bare loft, elbows on the backrest, chin on her hands; tall window light, 85mm, dust and long shadows."),
+        .init(heat: .sexy, text: "{subject} in a tiny denim skirt and white crop top with cowboy boots, leaning back on her palms in the bed of a pickup at a fairground, legs long; blurred ferris wheel lights behind, 50mm, flash."),
+        .init(heat: .sexy, text: "{subject} in a pale pink tennis dress, pleated and short, crouched at the baseline of an empty court, racket across her thighs, flushed and breathless; hard late sun, 135mm, long shadows."),
+        .init(heat: .sexy, text: "{subject} in a strapless blue bodycon mini dress, stepping out of a vintage car inside a paper-strewn studio, one hand on the door, thigh leading; tungsten lamps, 35mm, wide and close."),
+        .init(heat: .sexy, text: "{subject} in an ivory lace bridal corset top and satin mini skirt, sitting on the floor of a chintzy drawing room, veil discarded beside her, garter showing; soft window light, 50mm, cool and posh."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a black lace bra and high-waist briefs, kneeling on a rumpled bed, tugging the waistband straight, looking down at herself; warm bedside lamp, 85mm, shadow falling across her breasts."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a red lace balconette bra and a tiny thong, face down on grey sheets with her feet crossed in the air, chin propped on her hands, arse raised; soft side light, 50mm, mid-laugh."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a sheer black bodysuit with a deep plunge, standing in a steamy tiled bathroom with one foot on the tub rim, hair dripping; fogged window light, 35mm, condensation on the lens."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a white lace corset, matching thong and stockings, sitting on a wooden stool with knees wide and back straight, hands gripping the seat behind her; hard flash, 50mm, deep shadow."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a satin chemise with lace at the hem, lying on her side on a velvet sofa, one arm folded under her head, strap off the shoulder; candlelight, 50mm, amber skin and slow breathing."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a latex bra and high-waist latex briefs, on all fours on a polished concrete floor, back arched, looking back between her arms; hard key light, 35mm, glossy stretched highlights."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a fishnet body stocking over a black bra and briefs, standing against a bare brick wall, hands above her head, hips pushed forward; blue-hour window light, 50mm, moody and dim."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a cropped mesh bra and lace-up briefs, straddling a chair with her arse barely on the seat, thighs spread, drink forgotten on the table; tungsten glow, 85mm, glossy and close."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a wet white t-shirt and black briefs, standing on a fire escape in the rain, fabric transparent and clinging, one hand pushing hair from her face; sodium streetlight, 35mm, dripping."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a nude seamless thong and cropped white vest with no bra, lying back on a laundromat bench, knees up, feet braced on a machine door; buzzing fluorescent light, 50mm."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a lace teddy with a low back and thigh-high stockings, bent over a kitchen counter at midnight, weight on her forearms, hips high; fridge light and one warm bulb, 35mm."),
     ]
 }
