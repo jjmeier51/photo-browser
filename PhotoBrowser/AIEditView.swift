@@ -23,6 +23,7 @@ struct AIEditView: View {
     @State private var aspect: AIExtend.OutputAspect
     @State private var showSettings = false
     @AppStorage("photoBrowser.surpriseMood") private var surpriseMood: SurprisePrompts.Mood = .any
+    @State private var surpriseNote: String?       // the drive's prompt file couldn't be used: why
 
     private let counts = [1, 2, 3, 4, 8]
 
@@ -56,7 +57,8 @@ struct AIEditView: View {
                 } footer: {
                     if negativeEnabled { Text(NegativePromptField.footer) }
                 }
-                SurpriseMeSection(mood: $surpriseMood, onSurprise: { surprise(send: true) }, onFill: { surprise(send: false) })
+                SurpriseMeSection(mood: $surpriseMood, onSurprise: { surprise(send: true) }, onFill: { surprise(send: false) },
+                                  note: surpriseNote)
                 PromptingReminderSection()
                 ReusablePromptsSection(prompt: $prompt)
                 if !library.aiPromptHistory.isEmpty { PromptHistorySection(prompt: $prompt) }
@@ -159,9 +161,14 @@ struct AIEditView: View {
     /// A random restyle of the woman in this photo — new outfit, scene, pose and light, her identity
     /// kept — written for the chosen model; sent at once when `send`, else just placed in the field.
     private func surprise(send: Bool) {
-        prompt = SurprisePrompts.random(mood: surpriseMood, flow: .edit, model: model,
-                                        references: min(referenceURLs.count, model.maxReferenceImages))
-        if send { generate() }
+        let mood = surpriseMood, m = model, refs = min(referenceURLs.count, m.maxReferenceImages), root = library.rootURL
+        Task {
+            // The drive's prompt file is read (or first written) off the main actor.
+            let loaded = await Task.detached(priority: .userInitiated) { SurprisePrompts.load(root: root) }.value
+            surpriseNote = loaded.note
+            prompt = SurprisePrompts.random(mood: mood, flow: .edit, model: m, references: refs, bank: loaded.bank)
+            if send { generate() }
+        }
     }
 
     /// Kicks off generation app-wide (it keeps running while you browse) and closes this sheet.

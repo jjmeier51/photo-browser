@@ -4,6 +4,12 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
 
 ## 2026-10-16
 
+- **Surprise Me prompts now live on the drive.** The first Surprise Me tap writes
+  `Surprise Prompts.json` at the top of the drive with every built-in prompt; from then on that file
+  is the bank, so you can add, change or delete prompts in any text editor without a code change.
+  Same shape as the built-in lists (subjects, looks, settings, poses, lights, cameras, finishes,
+  hair, signatures); a list left empty falls back to the built-in one, and a file that can't be read
+  is reported under the section while the built-in prompts carry on. Hidden from the grid.
 - **Surprise Me in Edit / Create with AI.** A new section under the prompt box: pick a mood (Any,
   Alluring, Sexy) and tap **Surprise Me** to send a random photo-shoot prompt of a woman posing —
   outfit, setting, pose, light and camera drawn from banks of hundreds of options plus ~60

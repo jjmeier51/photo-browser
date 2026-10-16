@@ -12,6 +12,10 @@ import Foundation
 /// a recipe wouldn't produce. The user's references, size and aspect are untouched — the prompt
 /// just lands in the field (and is sent) exactly as a typed one would be.
 ///
+/// The banks below are the **built-in** set. With a drive open they are written once to
+/// `Surprise Prompts.json` at the drive root, and from then on that file is the bank the user edits
+/// (`Bank`, `load(root:)`); the built-in lists only fill whatever the file leaves empty.
+///
 /// Model voices: **Nano Banana 2 / 2.1** want one flowing, concrete paragraph (a scene described,
 /// not a keyword list, with the camera and light stated in sentences); **Seedream 5.0 Pro** does
 /// best subject-first in short labelled sentences with explicit style words. Edit prompts keep the
@@ -23,39 +27,188 @@ nonisolated enum SurprisePrompts {
         var id: String { rawValue }
     }
     enum Flow: Sendable { case create, edit }
-    enum Heat: Sendable { case alluring, sexy }
+    enum Heat: String, Codable, Sendable { case alluring, sexy }
     /// What a model will accept. Nano Banana (Gemini) refuses underwear / lingerie / see-through, so
     /// its sexy looks stay **clothed** (tight workout sets, bodycon, swimwear, tight jeans, pyjamas…);
     /// Seedream also takes the **intimate** tier (bra-and-brief sets, thongs, slips, sheer layers).
-    enum Tier: Sendable { case clothed, intimate }
+    enum Tier: String, Codable, Sendable { case clothed, intimate }
+
+    // MARK: - The bank: built in, or the drive's "Surprise Prompts.json"
+
+    /// Every list a prompt is drawn from. `Bank.builtIn` is the one compiled into the app; the drive's
+    /// file (`fileName` at the drive root) holds exactly the same shape, so the user can edit, add to
+    /// or trim it in any text editor. A list left empty in the file falls back to the built-in list
+    /// (`filled()`), so a file holding only `signatures` still works. Decoding is lenient: a missing
+    /// key is an empty list, a missing `heat` is alluring, a missing `tier` is clothed.
+    nonisolated struct Bank: Codable, Sendable {
+        var subjects: [String] = []
+        var looks: [Look] = []
+        var settings: [Setting] = []
+        var poses: [Pose] = []
+        var lights: [String] = []
+        var cameras: [String] = []
+        var finishes: [String] = []
+        var hair: [String] = []
+        var signatures: [Signature] = []
+
+        init() {}
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            subjects = try c.decodeIfPresent([String].self, forKey: .subjects) ?? []
+            looks = try c.decodeIfPresent([Look].self, forKey: .looks) ?? []
+            settings = try c.decodeIfPresent([Setting].self, forKey: .settings) ?? []
+            poses = try c.decodeIfPresent([Pose].self, forKey: .poses) ?? []
+            lights = try c.decodeIfPresent([String].self, forKey: .lights) ?? []
+            cameras = try c.decodeIfPresent([String].self, forKey: .cameras) ?? []
+            finishes = try c.decodeIfPresent([String].self, forKey: .finishes) ?? []
+            hair = try c.decodeIfPresent([String].self, forKey: .hair) ?? []
+            signatures = try c.decodeIfPresent([Signature].self, forKey: .signatures) ?? []
+        }
+
+        static let builtIn: Bank = {
+            var b = Bank()
+            b.subjects = SurprisePrompts.subjects
+            b.looks = SurprisePrompts.looks
+            b.settings = SurprisePrompts.settings
+            b.poses = SurprisePrompts.poses
+            b.lights = SurprisePrompts.lights
+            b.cameras = SurprisePrompts.cameras
+            b.finishes = SurprisePrompts.finishes
+            b.hair = SurprisePrompts.hairNotes
+            b.signatures = SurprisePrompts.signatures
+            return b
+        }()
+
+        var isEmpty: Bool {
+            subjects.isEmpty && looks.isEmpty && settings.isEmpty && poses.isEmpty && lights.isEmpty
+                && cameras.isEmpty && finishes.isEmpty && hair.isEmpty && signatures.isEmpty
+        }
+        /// This bank with every empty list taken from the built-in one.
+        func filled() -> Bank {
+            var b = self
+            let d = Bank.builtIn
+            if b.subjects.isEmpty { b.subjects = d.subjects }
+            if b.looks.isEmpty { b.looks = d.looks }
+            if b.settings.isEmpty { b.settings = d.settings }
+            if b.poses.isEmpty { b.poses = d.poses }
+            if b.lights.isEmpty { b.lights = d.lights }
+            if b.cameras.isEmpty { b.cameras = d.cameras }
+            if b.finishes.isEmpty { b.finishes = d.finishes }
+            if b.hair.isEmpty { b.hair = d.hair }
+            if b.signatures.isEmpty { b.signatures = d.signatures }
+            return b
+        }
+    }
+
+    /// The prompt file at the top of the drive. Hidden from the grid like the gallery sidecars
+    /// (`GalleryCategories.sidecarNames`).
+    static let fileName = "Surprise Prompts.json"
+    static func driveFile(root: URL) -> URL { root.appendingPathComponent(fileName) }
+
+    nonisolated struct Loaded: Sendable {
+        let bank: Bank
+        let note: String?          // why the drive's file isn't in use, for the screen's footer
+        let fromDrive: Bool
+    }
+
+    /// The bank to draw from: the drive's file when a drive is open (written with the built-in bank the
+    /// first time, so there is always a complete file to edit), else the built-in. Blocking file I/O —
+    /// call off the main actor. Cached by the file's size and modification date, so a tap only
+    /// re-reads after the file changed.
+    static func load(root: URL?) -> Loaded {
+        guard let root else { return Loaded(bank: .builtIn, note: nil, fromDrive: false) }
+        let file = driveFile(root: root)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: file.path) else {
+            do {
+                let enc = JSONEncoder()
+                enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+                try DriveWriter.writeDataSync(try enc.encode(Bank.builtIn), to: file)
+                return Loaded(bank: .builtIn, note: nil, fromDrive: true)
+            } catch {
+                return Loaded(bank: .builtIn, note: "“\(fileName)” couldn't be written to the drive (\(error.localizedDescription)). Using the built-in prompts.", fromDrive: false)
+            }
+        }
+        let attrs = try? fm.attributesOfItem(atPath: file.path)
+        let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+        let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let stamp = "\(size)|\(modified)"
+        if let cached = cache.get(path: file.path, stamp: stamp) { return cached }
+        let loaded: Loaded
+        do {
+            let bank = try JSONDecoder().decode(Bank.self, from: try Data(contentsOf: file))
+            loaded = bank.isEmpty
+                ? Loaded(bank: .builtIn, note: "“\(fileName)” on the drive has no prompts in it. Using the built-in prompts.", fromDrive: false)
+                : Loaded(bank: bank.filled(), note: nil, fromDrive: true)
+        } catch {
+            loaded = Loaded(bank: .builtIn, note: "“\(fileName)” on the drive couldn't be read — \(describe(error)). Using the built-in prompts until it's fixed.", fromDrive: false)
+        }
+        cache.set(path: file.path, stamp: stamp, loaded)
+        return loaded
+    }
+
+    private static func describe(_ error: Error) -> String {
+        if let e = error as? DecodingError {
+            switch e {
+            case .dataCorrupted(let ctx): return "not valid JSON (\(ctx.debugDescription))"
+            case .keyNotFound(let key, _): return "an entry is missing “\(key.stringValue)”"
+            case .typeMismatch(_, let ctx), .valueNotFound(_, let ctx):
+                return "an entry has the wrong shape (\(ctx.debugDescription))"
+            @unknown default: return "\(e)"
+            }
+        }
+        return error.localizedDescription
+    }
+
+    private nonisolated final class LoadCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var path = "", stamp = ""
+        private var loaded: Loaded?
+        func get(path p: String, stamp s: String) -> Loaded? {
+            lock.lock(); defer { lock.unlock() }
+            return (p == path && s == stamp) ? loaded : nil
+        }
+        func set(path p: String, stamp s: String, _ l: Loaded) {
+            lock.lock(); defer { lock.unlock() }
+            path = p; stamp = s; loaded = l
+        }
+    }
+    private static let cache = LoadCache()
 
     // MARK: - Public
 
-    /// One random prompt. `references` is how many reference images the user picked (Create only).
-    static func random(mood: Mood, flow: Flow, model: AIExtend.AIModel, references: Int) -> String {
+    /// One random prompt from `bank`. `references` is how many reference images the user picked
+    /// (Create only).
+    static func random(mood: Mood, flow: Flow, model: AIExtend.AIModel, references: Int,
+                       bank: Bank = .builtIn) -> String {
         var g = SystemRandomNumberGenerator()
-        return random(mood: mood, flow: flow, model: model, references: references, using: &g)
+        return random(mood: mood, flow: flow, model: model, references: references, bank: bank, using: &g)
     }
 
     static func random<G: RandomNumberGenerator>(mood: Mood, flow: Flow, model: AIExtend.AIModel,
-                                                 references: Int, using g: inout G) -> String {
+                                                 references: Int, bank: Bank = .builtIn, using g: inout G) -> String {
+        let bank = bank.filled()
         let heat: Heat = mood == .any ? (Bool.random(using: &g) ? .alluring : .sexy)
                                       : (mood == .sexy ? .sexy : .alluring)
-        let subject = subjectPhrase(flow: flow, references: references, using: &g)
+        let subject = subjectPhrase(flow: flow, references: references, bank: bank, using: &g)
         let intimateOK = allowsIntimate(model)
         // One in four draws is a hand-written scene; the rest are composed from the banks.
         if Int.random(in: 0..<4, using: &g) == 0,
-           let sig = signatures.filter({ $0.heat == heat && (intimateOK || $0.tier == .clothed) }).randomElement(using: &g) {
+           let sig = bank.signatures.filter({ $0.heat == heat && (intimateOK || $0.tier == .clothed) }).randomElement(using: &g) {
             return finish(scene: sig.text.replacingOccurrences(of: "{subject}", with: subject),
                           flow: flow, model: model, composed: false)
         }
-        let look = looks.filter { $0.heat == heat && (intimateOK || $0.tier == .clothed) }.randomElement(using: &g)!
-        let setting = settings.randomElement(using: &g)!
-        let pose = poses.filter { $0.heat == heat || $0.heat == .alluring }.randomElement(using: &g)!
-        let light = lights.randomElement(using: &g)!
-        let camera = cameras.randomElement(using: &g)!
-        let finishNote = finishes.randomElement(using: &g)!
-        let hair = Bool.random(using: &g) ? hairNotes.randomElement(using: &g) : nil
+        // A user's list can have nothing for this mood and model (say, only intimate looks on Nano
+        // Banana); the built-in list then fills that slot rather than failing.
+        let look = bank.looks.filter { $0.heat == heat && (intimateOK || $0.tier == .clothed) }.randomElement(using: &g)
+            ?? Bank.builtIn.looks.filter { $0.heat == heat && (intimateOK || $0.tier == .clothed) }.randomElement(using: &g)!
+        let setting = bank.settings.randomElement(using: &g)!
+        let pose = bank.poses.filter { $0.heat == heat || $0.heat == .alluring }.randomElement(using: &g)
+            ?? Bank.builtIn.poses.filter { $0.heat == heat || $0.heat == .alluring }.randomElement(using: &g)!
+        let light = bank.lights.randomElement(using: &g)!
+        let camera = bank.cameras.randomElement(using: &g)!
+        let finishNote = bank.finishes.randomElement(using: &g)!
+        let hair = Bool.random(using: &g) ? bank.hair.randomElement(using: &g) : nil
 
         let scene: String
         switch voice(for: model) {
@@ -67,9 +220,6 @@ nonisolated enum SurprisePrompts {
         }
         return finish(scene: scene, flow: flow, model: model, composed: true)
     }
-
-    /// Roughly how many distinct composed prompts the banks can make (for the footer).
-    static var combinations: Int { looks.count * settings.count * poses.count * lights.count * cameras.count }
 
     // MARK: - Assembly
 
@@ -84,7 +234,7 @@ nonisolated enum SurprisePrompts {
         }
     }
 
-    private static func subjectPhrase<G: RandomNumberGenerator>(flow: Flow, references: Int, using g: inout G) -> String {
+    private static func subjectPhrase<G: RandomNumberGenerator>(flow: Flow, references: Int, bank: Bank, using g: inout G) -> String {
         switch flow {
         case .edit:
             return "the same woman as in this photo, her face, features, hair and body kept exactly as they are"
@@ -94,7 +244,7 @@ nonisolated enum SurprisePrompts {
                     ? "the woman from the reference image, her face and features exactly as shown"
                     : "the woman from the reference images, her face and features exactly as shown"
             }
-            return subjects.randomElement(using: &g)!
+            return bank.subjects.randomElement(using: &g) ?? Bank.builtIn.subjects.randomElement(using: &g)!
         }
     }
 
@@ -123,10 +273,41 @@ nonisolated enum SurprisePrompts {
 
     // MARK: - Banks
 
-    private struct Look: Sendable { let heat: Heat; var tier: Tier = .clothed; let text: String }
-    private struct Setting: Sendable { let text: String }
-    private struct Pose: Sendable { let heat: Heat; let text: String }
-    private struct Signature: Sendable { let heat: Heat; var tier: Tier = .clothed; let text: String }
+    /// The entry shapes, as they appear in the JSON file: `{"heat","tier","text"}`, `{"text"}`,
+    /// `{"heat","text"}`. Decoding tolerates a missing `heat` (alluring) and `tier` (clothed).
+    nonisolated struct Look: Codable, Sendable {
+        let heat: Heat; var tier: Tier; let text: String
+        init(heat: Heat, tier: Tier = .clothed, text: String) { self.heat = heat; self.tier = tier; self.text = text }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            heat = try c.decodeIfPresent(Heat.self, forKey: .heat) ?? .alluring
+            tier = try c.decodeIfPresent(Tier.self, forKey: .tier) ?? .clothed
+            text = try c.decode(String.self, forKey: .text)
+        }
+    }
+    nonisolated struct Setting: Codable, Sendable {
+        let text: String
+        init(text: String) { self.text = text }
+    }
+    nonisolated struct Pose: Codable, Sendable {
+        let heat: Heat; let text: String
+        init(heat: Heat, text: String) { self.heat = heat; self.text = text }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            heat = try c.decodeIfPresent(Heat.self, forKey: .heat) ?? .alluring
+            text = try c.decode(String.self, forKey: .text)
+        }
+    }
+    nonisolated struct Signature: Codable, Sendable {
+        let heat: Heat; var tier: Tier; let text: String
+        init(heat: Heat, tier: Tier = .clothed, text: String) { self.heat = heat; self.tier = tier; self.text = text }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            heat = try c.decodeIfPresent(Heat.self, forKey: .heat) ?? .alluring
+            tier = try c.decodeIfPresent(Tier.self, forKey: .tier) ?? .clothed
+            text = try c.decode(String.self, forKey: .text)
+        }
+    }
 
     /// Who she is when there's no reference to copy (Create only).
     private static let subjects: [String] = [

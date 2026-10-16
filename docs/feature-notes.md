@@ -357,6 +357,19 @@ as for a typed prompt (the FaceID reference mentions are prepended by `AIExtend`
 - **Flow**: Create with references → "the woman from the reference image(s), her face and features
   exactly as shown"; Create without → a random subject description; Edit → an edit lead-in that
   keeps the woman's identity (face, features, hair colour, skin, body) and restyles everything else.
+- **The banks live on the drive — `Surprise Prompts.json` at the drive root** (`SurprisePrompts.fileName`,
+  `load(root:)`). The first Surprise Me tap with a drive open writes the file with the whole built-in
+  bank (`Bank.builtIn`, pretty-printed, through `DriveWriter.writeDataSync`); from then on the file is
+  the bank: edit, add or delete freely in any text editor. Shape = `Bank` (`subjects`, `looks`
+  `{heat,tier,text}`, `settings` `{text}`, `poses` `{heat,text}`, `lights`, `cameras`, `finishes`,
+  `hair`, `signatures` `{heat,tier,text}` with `{subject}`), decoded leniently (missing key → empty
+  list, missing `heat` → alluring, missing `tier` → clothed); a list left empty falls back to the
+  built-in list (`filled()`), and a mood/model combination the user's list can't serve (only intimate
+  looks on Nano Banana) draws that slot from the built-in list rather than failing. Unreadable or empty
+  file → built-in bank plus a note under the section explaining why (`Loaded.note`). Reads happen off
+  the main actor (`Task.detached` in the views' `surprise(send:)`) and are cached by the file's
+  size + mtime (`LoadCache`), so a tap re-reads only after an edit. The file is hidden from the grid
+  via `GalleryCategories.sidecarNames`. No drive open → built-in bank.
 - Astria's moderation still applies to whatever is sent; a refused prompt surfaces like any other.
 
 ### 1.11a Negative Prompt

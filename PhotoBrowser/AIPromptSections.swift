@@ -34,6 +34,14 @@ struct SurpriseMeSection: View {
     @Binding var mood: SurprisePrompts.Mood
     let onSurprise: () -> Void
     let onFill: () -> Void
+    var note: String? = nil          // why the drive's prompt file isn't in use, if it isn't
+
+    private var footer: String {
+        var s = "A random photo-shoot prompt of a woman posing — outfit, setting, pose, light and camera drawn from hundreds of options and written for the chosen model. Alluring keeps her dressed and editorial. Sexy follows what the model allows: with Nano Banana 2 / 2.1 (which refuses underwear and see-through) it's tight workout sets, bodycon, swimwear, tight jeans, wedding dresses, sundresses and pyjamas; with Seedream 5.0 Pro it also draws bra-and-brief sets, thongs, slips, lace and sheer layers. Never nudity. Surprise Me sends it at once with the references, size and shape set below; Fill In only puts it in the box."
+        s += "\n\nThe lists live in “\(SurprisePrompts.fileName)” at the top of the drive. The app writes it the first time with every built-in prompt; whatever you add, change or delete there is used from then on (a list left empty falls back to the built-in one)."
+        if let note { s += "\n\n" + note }
+        return s
+    }
 
     var body: some View {
         Section {
@@ -50,7 +58,7 @@ struct SurpriseMeSection: View {
         } header: {
             Text("Surprise Me")
         } footer: {
-            Text("A random photo-shoot prompt of a woman posing — outfit, setting, pose, light and camera drawn from hundreds of options and written for the chosen model. Alluring keeps her dressed and editorial. Sexy follows what the model allows: with Nano Banana 2 / 2.1 (which refuses underwear and see-through) it's tight workout sets, bodycon, swimwear, tight jeans, wedding dresses, sundresses and pyjamas; with Seedream 5.0 Pro it also draws bra-and-brief sets, thongs, slips, lace and sheer layers. Never nudity. Surprise Me sends it at once with the references, size and shape set below; Fill In only puts it in the box.")
+            Text(footer)
         }
     }
 }
