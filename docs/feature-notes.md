@@ -337,11 +337,16 @@ at once — so the user's references, resolution, aspect, count, model and tunes
 as for a typed prompt (the FaceID reference mentions are prepended by `AIExtend` as usual).
 **Fill In a Random Prompt** only fills the field.
 - **Banks** (all a woman posing for a photo): ~30 subjects (used only for Create with no
-  references), ~120 looks tagged alluring / sexy (alluring = dressed, editorial; sexy = swimwear,
-  slips, lingerie-as-fashion, high slits — glamour-shoot, never nudity), ~70 settings, ~60 poses
+  references), ~160 looks tagged alluring / sexy **and by tier** — `clothed` (anything a model
+  will take: tight workout sets, bodycon, swimwear, tight jeans, wedding dresses, sundresses,
+  pyjamas, tailoring…) or `intimate` (bra-and-brief sets, thongs, slips, lace, sheer layers).
+  **`allowsIntimate(model)`** gates the intimate tier to the Seedream family (Flux too): Nano
+  Banana (Gemini) refuses underwear / see-through, so its sexy draws stay clothed. Glamour-shoot
+  wardrobe only — no nudity and no sexual acts (the app composes these with real people's
+  reference photos and FaceID tunes, which is why that line is fixed). ~70 settings, ~60 poses
   (sexy poses only for the sexy mood; alluring poses for both), 30 lights, 20 cameras, 12
   finishes, 12 hair notes, and ~60 hand-written **signature** scenes (`{subject}` placeholder, one
-  draw in four). Composed combinations run into the millions; the signatures add shots a recipe
+  draw in four; tiered the same way). Composed combinations run into the millions; the signatures add shots a recipe
   can't make.
 - **Per-model voice** (`voice(for:)`): Nano Banana 2 / 2.1 get one flowing paragraph — a described
   moment with the light and camera in sentences (what Gemini-family image models answer best);

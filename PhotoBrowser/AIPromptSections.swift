@@ -50,7 +50,7 @@ struct SurpriseMeSection: View {
         } header: {
             Text("Surprise Me")
         } footer: {
-            Text("A random photo-shoot prompt of a woman posing — outfit, setting, pose, light and camera drawn from hundreds of options and written for the chosen model (Nano Banana 2 / 2.1 and Seedream 5.0 Pro have their own wording). Alluring keeps her dressed and editorial; Sexy means swimwear, slips and lingerie-as-fashion, never nudity. Surprise Me sends it at once with the references, size and shape set below; Fill In only puts it in the box.")
+            Text("A random photo-shoot prompt of a woman posing — outfit, setting, pose, light and camera drawn from hundreds of options and written for the chosen model. Alluring keeps her dressed and editorial. Sexy follows what the model allows: with Nano Banana 2 / 2.1 (which refuses underwear and see-through) it's tight workout sets, bodycon, swimwear, tight jeans, wedding dresses, sundresses and pyjamas; with Seedream 5.0 Pro it also draws bra-and-brief sets, thongs, slips, lace and sheer layers. Never nudity. Surprise Me sends it at once with the references, size and shape set below; Fill In only puts it in the box.")
         }
     }
 }

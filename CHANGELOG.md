@@ -9,7 +9,10 @@ Major changes to Photo Browser. Dates are when the work landed on `main`.
   outfit, setting, pose, light and camera drawn from banks of hundreds of options plus ~60
   hand-written scenes, written in the wording Nano Banana 2 / 2.1 (one flowing paragraph) and
   Seedream 5.0 Pro (subject-first labelled sentences) each answer best. Alluring keeps her dressed
-  and editorial; Sexy means swimwear, slips and lingerie-as-fashion, never nudity. The references,
+  and editorial; Sexy follows what the model allows — Nano Banana refuses underwear and
+  see-through, so there it's tight workout sets, bodycon, swimwear, tight jeans, wedding dresses,
+  sundresses and pyjamas, while Seedream also draws bra-and-brief sets, thongs, slips, lace and
+  sheer layers. Never nudity. The references,
   size, shape, count, model and tunes you've set all apply exactly as for a typed prompt; with
   references the prompt points at the woman in them, and in Edit it keeps the woman in the photo
   and restyles everything around her. **Fill In a Random Prompt** only fills the box so you can read

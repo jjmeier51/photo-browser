@@ -3,8 +3,11 @@ import Foundation
 /// "Surprise Me" for Edit / Create with AI: a random photo-shoot prompt of a woman posing — a look,
 /// a setting, a pose, light and a camera, drawn from the banks below and written out in the voice
 /// each model answers best. Two moods: **alluring** (dressed, editorial, magnetic rather than
-/// revealing) and **sexy** (swimwear, slips, lace-under-tailoring, high slits — glamour-shoot
-/// territory, never nudity; Astria's own moderation still applies). The banks combine into far more
+/// revealing) and **sexy** — whose wardrobe depends on the model: Nano Banana (Gemini) refuses
+/// underwear and see-through, so there it stays **clothed** (tight workout sets, bodycon, swimwear,
+/// tight jeans, wedding dresses, sundresses, pyjamas); Seedream also draws the **intimate** tier
+/// (bra-and-brief sets, thongs, slips, lace, sheer layers). Glamour-shoot wardrobe only — no
+/// nudity or sexual acts — and Astria's own moderation still applies. The banks combine into far more
 /// than hundreds of distinct prompts, and ~60 hand-written "signature" scenes are mixed in for shots
 /// a recipe wouldn't produce. The user's references, size and aspect are untouched — the prompt
 /// just lands in the field (and is sent) exactly as a typed one would be.
@@ -21,6 +24,10 @@ nonisolated enum SurprisePrompts {
     }
     enum Flow: Sendable { case create, edit }
     enum Heat: Sendable { case alluring, sexy }
+    /// What a model will accept. Nano Banana (Gemini) refuses underwear / lingerie / see-through, so
+    /// its sexy looks stay **clothed** (tight workout sets, bodycon, swimwear, tight jeans, pyjamas…);
+    /// Seedream also takes the **intimate** tier (bra-and-brief sets, thongs, slips, sheer layers).
+    enum Tier: Sendable { case clothed, intimate }
 
     // MARK: - Public
 
@@ -35,12 +42,14 @@ nonisolated enum SurprisePrompts {
         let heat: Heat = mood == .any ? (Bool.random(using: &g) ? .alluring : .sexy)
                                       : (mood == .sexy ? .sexy : .alluring)
         let subject = subjectPhrase(flow: flow, references: references, using: &g)
+        let intimateOK = allowsIntimate(model)
         // One in four draws is a hand-written scene; the rest are composed from the banks.
-        if Int.random(in: 0..<4, using: &g) == 0, let sig = signatures.filter({ $0.heat == heat }).randomElement(using: &g) {
+        if Int.random(in: 0..<4, using: &g) == 0,
+           let sig = signatures.filter({ $0.heat == heat && (intimateOK || $0.tier == .clothed) }).randomElement(using: &g) {
             return finish(scene: sig.text.replacingOccurrences(of: "{subject}", with: subject),
                           flow: flow, model: model, composed: false)
         }
-        let look = looks.filter { $0.heat == heat }.randomElement(using: &g)!
+        let look = looks.filter { $0.heat == heat && (intimateOK || $0.tier == .clothed) }.randomElement(using: &g)!
         let setting = settings.randomElement(using: &g)!
         let pose = poses.filter { $0.heat == heat || $0.heat == .alluring }.randomElement(using: &g)!
         let light = lights.randomElement(using: &g)!
@@ -63,6 +72,9 @@ nonisolated enum SurprisePrompts {
     static var combinations: Int { looks.count * settings.count * poses.count * lights.count * cameras.count }
 
     // MARK: - Assembly
+
+    /// Nano Banana (Gemini) refuses lingerie / underwear / see-through; Seedream and Flux take it.
+    static func allowsIntimate(_ model: AIExtend.AIModel) -> Bool { voice(for: model) == .seedream }
 
     private enum Voice { case nanoBanana, seedream }
     private static func voice(for model: AIExtend.AIModel) -> Voice {
@@ -111,10 +123,10 @@ nonisolated enum SurprisePrompts {
 
     // MARK: - Banks
 
-    private struct Look: Sendable { let heat: Heat; let text: String }
+    private struct Look: Sendable { let heat: Heat; var tier: Tier = .clothed; let text: String }
     private struct Setting: Sendable { let text: String }
     private struct Pose: Sendable { let heat: Heat; let text: String }
-    private struct Signature: Sendable { let heat: Heat; let text: String }
+    private struct Signature: Sendable { let heat: Heat; var tier: Tier = .clothed; let text: String }
 
     /// Who she is when there's no reference to copy (Create only).
     private static let subjects: [String] = [
@@ -164,7 +176,7 @@ nonisolated enum SurprisePrompts {
         .init(heat: .alluring, text: "wearing a floral chiffon maxi dress with a deep V neckline and a wide-brim straw hat"),
         .init(heat: .alluring, text: "in a fitted ribbed cream knit co-ord — long skirt and cropped sweater — and gold hoops"),
         .init(heat: .alluring, text: "wearing a structured navy blazer dress with a cinched waist and pointed pumps"),
-        .init(heat: .alluring, text: "in a sheer black blouse over a simple black bralette, high-waisted cigarette trousers"),
+        .init(heat: .alluring, tier: .intimate, text: "in a sheer black blouse over a simple black bralette, high-waisted cigarette trousers"),
         .init(heat: .alluring, text: "wearing a soft grey linen jumpsuit, belted, sleeves pushed up, barefoot"),
         .init(heat: .alluring, text: "in a vintage band tee knotted at the waist with leather trousers and combat boots"),
         .init(heat: .alluring, text: "wearing a backless black evening gown with a draped cowl at the spine"),
@@ -175,14 +187,14 @@ nonisolated enum SurprisePrompts {
         .init(heat: .alluring, text: "in a loose white cotton sundress with thin straps, hair windswept"),
         .init(heat: .alluring, text: "wearing a bronze sequinned cocktail dress that catches every light"),
         .init(heat: .alluring, text: "in black yoga leggings and a matching sports bra under an open hoodie"),
-        .init(heat: .alluring, text: "wearing a pinstripe waistcoat with nothing underneath and matching trousers, hair pinned up"),
+        .init(heat: .alluring, tier: .intimate, text: "wearing a pinstripe waistcoat with nothing underneath and matching trousers, hair pinned up"),
         .init(heat: .alluring, text: "in a lilac tulle midi skirt with a plain white bodysuit"),
         .init(heat: .alluring, text: "wearing a cream silk pyjama set, top loosely buttoned, hair tousled"),
         .init(heat: .alluring, text: "in a form-fitting burgundy velvet dress with long sleeves and a thigh-high slit"),
         .init(heat: .alluring, text: "wearing a denim jacket over a black slip dress and white sneakers"),
         .init(heat: .alluring, text: "in a sage-green wrap dress tied at the hip, espadrille wedges"),
         .init(heat: .alluring, text: "wearing a black halter-neck jumpsuit with a plunging front and a thin gold belt"),
-        .init(heat: .alluring, text: "in a white ribbed tank, no bra, and loose grey sweatpants, hair in a messy bun"),
+        .init(heat: .alluring, tier: .intimate, text: "in a white ribbed tank, no bra, and loose grey sweatpants, hair in a messy bun"),
         .init(heat: .alluring, text: "wearing a fur-collared black coat open over a simple black dress"),
         .init(heat: .alluring, text: "in a corseted floral cotton dress with puff sleeves, cottagecore"),
         .init(heat: .alluring, text: "wearing a long camel knit dress with a side slit and a wide leather belt"),
@@ -192,7 +204,7 @@ nonisolated enum SurprisePrompts {
         .init(heat: .alluring, text: "wearing a crisp pale-blue shirt dress, top buttons undone, sleeves rolled"),
         .init(heat: .alluring, text: "in a fitted houndstooth skirt suit with a cropped jacket, retro sixties"),
         .init(heat: .alluring, text: "wearing an oversized vintage denim shirt, bare legs, cowboy boots"),
-        .init(heat: .alluring, text: "in a sheer polka-dot blouse over a nude slip, pleated trousers"),
+        .init(heat: .alluring, tier: .intimate, text: "in a sheer polka-dot blouse over a nude slip, pleated trousers"),
         .init(heat: .alluring, text: "wearing a gold lamé column gown with a high neck and open back"),
         .init(heat: .alluring, text: "in a cropped cream cardigan buttoned low and a flowing floral skirt"),
         .init(heat: .alluring, text: "wearing a black turtleneck bodysuit and high-waisted wide-leg white trousers"),
@@ -216,8 +228,8 @@ nonisolated enum SurprisePrompts {
         // Sexy
         .init(heat: .sexy, text: "in a black string bikini, wet hair slicked back, droplets on her skin"),
         .init(heat: .sexy, text: "wearing a plunging red one-piece swimsuit cut high on the hip"),
-        .init(heat: .sexy, text: "in a lace-trimmed black satin slip, one strap fallen off her shoulder"),
-        .init(heat: .sexy, text: "wearing a sheer black lace bodysuit under an open oversized blazer, bare legs"),
+        .init(heat: .sexy, tier: .intimate, text: "in a lace-trimmed black satin slip, one strap fallen off her shoulder"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a sheer black lace bodysuit under an open oversized blazer, bare legs"),
         .init(heat: .sexy, text: "in a white crochet bikini and a sheer sarong knotted low on the hip"),
         .init(heat: .sexy, text: "wearing a boned black corset top with low-rise leather trousers"),
         .init(heat: .sexy, text: "in a tiny ivory silk cami and matching shorts, hair messy, bare feet"),
@@ -225,27 +237,27 @@ nonisolated enum SurprisePrompts {
         .init(heat: .sexy, text: "in a backless black mini dress cut down to the base of the spine, heels"),
         .init(heat: .sexy, text: "wearing a cropped white shirt knotted under the bust and high-cut bikini bottoms"),
         .init(heat: .sexy, text: "in a nude-toned strapless bodycon dress that fits like a second skin"),
-        .init(heat: .sexy, text: "wearing a wet white tank top that clings, and black bikini bottoms"),
-        .init(heat: .sexy, text: "in a red lace bralette and a sheer black chiffon robe slipping off her shoulders"),
-        .init(heat: .sexy, text: "wearing an oversized men's white shirt unbuttoned to the navel and nothing else visible, bare legs"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a wet white tank top that clings, and black bikini bottoms"),
+        .init(heat: .sexy, tier: .intimate, text: "in a red lace bralette and a sheer black chiffon robe slipping off her shoulders"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing an oversized men's white shirt unbuttoned to the navel and nothing else visible, bare legs"),
         .init(heat: .sexy, text: "in a leopard-print bikini and oversized sunglasses"),
         .init(heat: .sexy, text: "wearing a black velvet mini dress with a corseted bodice and a high slit"),
         .init(heat: .sexy, text: "in a cut-out black swimsuit with side straps and a gold chain belt"),
-        .init(heat: .sexy, text: "wearing a cropped grey hoodie and black lace underwear, bare legs, thigh-high socks"),
-        .init(heat: .sexy, text: "in a glossy black latex-look mini skirt and a sheer mesh top over a black bralette"),
-        .init(heat: .sexy, text: "wearing a champagne silk slip dress cut on the bias with a thigh-high slit, no bra"),
-        .init(heat: .sexy, text: "in a pale pink lace lingerie set under an unbuttoned pastel cardigan"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a cropped grey hoodie and black lace underwear, bare legs, thigh-high socks"),
+        .init(heat: .sexy, tier: .intimate, text: "in a glossy black latex-look mini skirt and a sheer mesh top over a black bralette"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a champagne silk slip dress cut on the bias with a thigh-high slit, no bra"),
+        .init(heat: .sexy, tier: .intimate, text: "in a pale pink lace lingerie set under an unbuttoned pastel cardigan"),
         .init(heat: .sexy, text: "wearing a halter-neck emerald bikini and a stack of thin gold bangles"),
-        .init(heat: .sexy, text: "in a sheer black mesh maxi dress over a black bandeau and high-waist briefs"),
+        .init(heat: .sexy, tier: .intimate, text: "in a sheer black mesh maxi dress over a black bandeau and high-waist briefs"),
         .init(heat: .sexy, text: "wearing a micro mini denim skirt and a tied-up gingham crop top"),
         .init(heat: .sexy, text: "in a white one-piece swimsuit with a plunging neckline and cut-out waist"),
         .init(heat: .sexy, text: "wearing a strappy black bodysuit with a deep V and sheer stockings"),
-        .init(heat: .sexy, text: "in a silk kimono robe open over a matching lace bralette and shorts"),
+        .init(heat: .sexy, tier: .intimate, text: "in a silk kimono robe open over a matching lace bralette and shorts"),
         .init(heat: .sexy, text: "wearing a crystal-mesh mini dress over a nude bodysuit, party-ready"),
         .init(heat: .sexy, text: "in a red string bikini top and loose unbuttoned denim cut-offs"),
-        .init(heat: .sexy, text: "wearing a lace-up black mini dress with a corset back, bare shoulders"),
-        .init(heat: .sexy, text: "in a knit bralette and a long sheer skirt that shows the bikini beneath"),
-        .init(heat: .sexy, text: "wearing a sheer white sundress backlit so her silhouette shows through"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a lace-up black mini dress with a corset back, bare shoulders"),
+        .init(heat: .sexy, tier: .intimate, text: "in a knit bralette and a long sheer skirt that shows the bikini beneath"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a sheer white sundress backlit so her silhouette shows through"),
         .init(heat: .sexy, text: "in a black bandeau bikini with a sheer long-sleeved mesh cover-up"),
         .init(heat: .sexy, text: "wearing an oversized sports jersey as a dress, bare legs, sneakers"),
         .init(heat: .sexy, text: "in a satin corset mini dress in deep plum with a sweetheart neckline"),
@@ -254,26 +266,68 @@ nonisolated enum SurprisePrompts {
         .init(heat: .sexy, text: "wearing a cowl-neck metallic halter dress with a bare back, heels"),
         .init(heat: .sexy, text: "in a monokini with a deep front cut and a wide-brim black hat"),
         .init(heat: .sexy, text: "wearing a cropped cashmere cardigan buttoned once and matching mini shorts"),
-        .init(heat: .sexy, text: "in a sheer black blouse worn open over a black bra and a leather pencil skirt"),
-        .init(heat: .sexy, text: "wearing a wet-look black one-piece and dripping hair, just out of the pool"),
+        .init(heat: .sexy, tier: .intimate, text: "in a sheer black blouse worn open over a black bra and a leather pencil skirt"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a wet-look black one-piece and dripping hair, just out of the pool"),
         .init(heat: .sexy, text: "in a red bodycon midi dress with a square neckline and strappy sandals"),
         .init(heat: .sexy, text: "wearing a gold chainmail halter top and black trousers"),
-        .init(heat: .sexy, text: "in a white lace bralette and high-waisted linen trousers, open blouse over the top"),
+        .init(heat: .sexy, tier: .intimate, text: "in a white lace bralette and high-waisted linen trousers, open blouse over the top"),
         .init(heat: .sexy, text: "wearing a cheeky-cut tangerine bikini and a towel over one shoulder"),
-        .init(heat: .sexy, text: "in a black slip dress with lace trim, sheer at the hem, barefoot"),
-        .init(heat: .sexy, text: "wearing a cropped turtleneck sweater and lace briefs, long bare legs"),
+        .init(heat: .sexy, tier: .intimate, text: "in a black slip dress with lace trim, sheer at the hem, barefoot"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a cropped turtleneck sweater and lace briefs, long bare legs"),
         .init(heat: .sexy, text: "in a sheer sequin mini dress over a nude slip, nightclub"),
         .init(heat: .sexy, text: "wearing a bikini top under a sheer, soaked white shirt, hair dripping"),
         .init(heat: .sexy, text: "in a satin bustier and high-waisted wide trousers, red lipstick"),
         .init(heat: .sexy, text: "wearing a backless halter mini dress in liquid black satin"),
         .init(heat: .sexy, text: "in a cropped pink mohair sweater, a mini skirt and knee-high boots"),
         .init(heat: .sexy, text: "wearing a plunging black swimsuit with a sheer black sarong"),
-        .init(heat: .sexy, text: "in a lace bodysuit under an oversized unbuttoned flannel shirt"),
+        .init(heat: .sexy, tier: .intimate, text: "in a lace bodysuit under an oversized unbuttoned flannel shirt"),
         .init(heat: .sexy, text: "wearing a bandage-style white mini dress with a cut-out midriff"),
-        .init(heat: .sexy, text: "in a cherry-red lingerie set under a sheer black mesh dress"),
+        .init(heat: .sexy, tier: .intimate, text: "in a cherry-red lingerie set under a sheer black mesh dress"),
         .init(heat: .sexy, text: "wearing a strapless gold bikini and a sheer white beach shirt"),
-        .init(heat: .sexy, text: "in a black mini dress with a lace-up front and a deep V"),
-        .init(heat: .sexy, text: "wearing a thin ribbed cami, no bra, and low-slung silk pyjama trousers"),
+        .init(heat: .sexy, tier: .intimate, text: "in a black mini dress with a lace-up front and a deep V"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a thin ribbed cami, no bra, and low-slung silk pyjama trousers"),
+        // Sexy, clothed (what Nano Banana will accept)
+        .init(heat: .sexy, text: "in a matching black seamless workout set — high-waisted leggings and a scoop sports bra — that shows every line"),
+        .init(heat: .sexy, text: "wearing a tight white ribbed crop top and skin-tight light-wash jeans, belly bare"),
+        .init(heat: .sexy, text: "in a fitted satin wedding dress with a plunging back and a long train, veil off"),
+        .init(heat: .sexy, text: "wearing a thin-strapped cotton sundress that clings in the breeze, no shoes"),
+        .init(heat: .sexy, text: "in a cropped grey tank and tiny pink running shorts, ponytail swinging"),
+        .init(heat: .sexy, text: "wearing a skin-tight black mock-neck bodycon dress to mid-thigh and heels"),
+        .init(heat: .sexy, text: "in a short silk pyjama set, shirt tied at the waist, bare legs"),
+        .init(heat: .sexy, text: "wearing tight black leather trousers and a cropped white tank, barefoot"),
+        .init(heat: .sexy, text: "in an off-the-shoulder lace-trimmed wedding gown with a corseted bodice, hair up"),
+        .init(heat: .sexy, text: "wearing a cropped lilac workout top and matching bike shorts, glowing after a run"),
+        .init(heat: .sexy, text: "in a tight denim mini skirt and a tied white blouse showing her midriff"),
+        .init(heat: .sexy, text: "wearing an oversized men's pyjama shirt as a dress, top buttons undone, bare legs"),
+        .init(heat: .sexy, text: "in a backless ivory slip-style wedding dress, bias cut, pearl earrings"),
+        .init(heat: .sexy, text: "wearing a cropped tennis polo and a very short pleated skirt, white sneakers"),
+        .init(heat: .sexy, text: "in a tight red bodycon midi dress with cut-out sides"),
+        .init(heat: .sexy, text: "wearing a sleeveless ribbed knit mini dress that hugs every curve"),
+        .init(heat: .sexy, text: "in a cropped yoga top and high-waisted flared leggings, mid-stretch"),
+        .init(heat: .sexy, text: "wearing skin-tight dark jeans and a tiny black halter top, heels"),
+        .init(heat: .sexy, text: "in a short satin nightdress-style sundress in pale blue, straps thin"),
+        .init(heat: .sexy, text: "wearing a cropped hoodie and tight bike shorts, socks pulled up"),
+        .init(heat: .sexy, text: "in a long-sleeved black bodycon gown with a leg slit to the hip"),
+        .init(heat: .sexy, text: "wearing a white tank top tucked into tight cut-off denim shorts, cowboy boots"),
+        .init(heat: .sexy, text: "in a satin wrap mini dress in emerald that slips off one shoulder"),
+        .init(heat: .sexy, text: "wearing flannel pyjama bottoms and a tight white baby tee, hair messy"),
+        .init(heat: .sexy, text: "in a strapless tight cream bandage dress to the knee"),
+        // Sexy, intimate (Seedream only)
+        .init(heat: .sexy, tier: .intimate, text: "in a matching black lace bra and thong set, nothing else, bare feet"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a white cotton bralette and high-cut white briefs, an open cardigan"),
+        .init(heat: .sexy, tier: .intimate, text: "in a red satin bra and matching briefs with a thin garter belt and sheer stockings"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a sheer black lace teddy, one strap fallen"),
+        .init(heat: .sexy, tier: .intimate, text: "in a pale pink babydoll nightie with lace trim and matching briefs"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a black thong and a cropped white tank, seen from behind"),
+        .init(heat: .sexy, tier: .intimate, text: "in a sheer burgundy lace bodysuit with a plunging neckline"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a nude mesh bra and briefs set, barely there"),
+        .init(heat: .sexy, tier: .intimate, text: "in an emerald silk bra and tap shorts, a loose robe sliding off"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a black satin push-up bra under a sheer white blouse, tight jeans"),
+        .init(heat: .sexy, tier: .intimate, text: "in a lace-up black corset with matching briefs and sheer thigh-highs"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a strappy black bra and thong under an open oversized shirt"),
+        .init(heat: .sexy, tier: .intimate, text: "in a white lace bridal bra and briefs set with a sheer robe, wedding morning"),
+        .init(heat: .sexy, tier: .intimate, text: "wearing a cheeky cotton underwear set and knee socks, sleepy"),
+        .init(heat: .sexy, tier: .intimate, text: "in a sheer black mesh bodysuit with a bra beneath, heels"),
     ]
 
     /// Where. Each already carries its own ambience; the light bank adds the specific lighting.
@@ -533,31 +587,31 @@ nonisolated enum SurprisePrompts {
         .init(heat: .alluring, text: "{subject} in a 1950s polka-dot halter dress in a chrome diner booth, straw in her milkshake, mock-serious stare; Kodachrome colour."),
         .init(heat: .sexy, text: "{subject} in a black string bikini walking out of turquoise water toward the camera, wringing out her hair, droplets catching the sun; hard midday light, 85mm."),
         .init(heat: .sexy, text: "{subject} in a champagne satin slip lying across white hotel sheets, one strap off her shoulder, head tipped toward the lens, morning light through gauze; 50mm, soft."),
-        .init(heat: .sexy, text: "{subject} in a lace bodysuit under an open black blazer, sitting on a kitchen counter at midnight with the fridge door open, its light the only lamp; moody, grainy."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a lace bodysuit under an open black blazer, sitting on a kitchen counter at midnight with the fridge door open, its light the only lamp; moody, grainy."),
         .init(heat: .sexy, text: "{subject} in a red plunging one-piece on a hotel pool lounger, one arm over her head, sunglasses pushed up, shot from above; bright bounced light."),
-        .init(heat: .sexy, text: "{subject} in a wet white tank top and black bikini bottoms at the shoreline, crouched with hands on her knees, hair slicked back, laughing; golden hour."),
-        .init(heat: .sexy, text: "{subject} in a cropped grey hoodie and lace briefs sitting on the floor against the bed, knees apart, elbows on knees, a slow gaze; single warm lamp."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a wet white tank top and black bikini bottoms at the shoreline, crouched with hands on her knees, hair slicked back, laughing; golden hour."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a cropped grey hoodie and lace briefs sitting on the floor against the bed, knees apart, elbows on knees, a slow gaze; single warm lamp."),
         .init(heat: .sexy, text: "{subject} in a backless black mini dress leaning over a hotel balcony rail at night, seen from behind and turning to look back, city glittering; flash plus ambient."),
         .init(heat: .sexy, text: "{subject} in a white crochet bikini in a hammock between palms, one leg hanging down, arm over her eyes against the sun; dappled light, 35mm."),
         .init(heat: .sexy, text: "{subject} in a black velvet corset mini dress in a dim red-lit bar, straddling a bar stool backwards with her arms on the backrest; Cinestill halation."),
-        .init(heat: .sexy, text: "{subject} in an unbuttoned oversized white shirt and nothing else visible, standing at a window with sheer curtains, backlit silhouette, hand on the glass; soft morning haze."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in an unbuttoned oversized white shirt and nothing else visible, standing at a window with sheer curtains, backlit silhouette, hand on the glass; soft morning haze."),
         .init(heat: .sexy, text: "{subject} in a leopard bikini and oversized sunglasses lying on her front on a striped towel, propped on elbows, feet kicked up; hard sun, sand reflector."),
-        .init(heat: .sexy, text: "{subject} in a sheer black mesh dress over a bandeau and briefs on a nightclub floor under a mirror ball, mid-dance, eyes closed; strobe freeze."),
-        .init(heat: .sexy, text: "{subject} in a silk kimono robe falling off her shoulders over a lace set, kneeling up on a bed strewn with room-service trays, laughing; warm lamp light."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a sheer black mesh dress over a bandeau and briefs on a nightclub floor under a mirror ball, mid-dance, eyes closed; strobe freeze."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a silk kimono robe falling off her shoulders over a lace set, kneeling up on a bed strewn with room-service trays, laughing; warm lamp light."),
         .init(heat: .sexy, text: "{subject} in a wet black one-piece climbing out of a night pool lit from below, water streaming off her, looking straight up at the lens; underwater glow."),
         .init(heat: .sexy, text: "{subject} in a tiny white tank and pyjama shorts stretching like a cat across the bed at sunrise, mid-yawn; pale pink light, candid."),
-        .init(heat: .sexy, text: "{subject} in a red lace bralette under a sheer chiffon robe sitting sideways in a vintage car with the door open, legs out, head tilted; headlight glow."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a red lace bralette under a sheer chiffon robe sitting sideways in a vintage car with the door open, legs out, head tilted; headlight glow."),
         .init(heat: .sexy, text: "{subject} in a cut-out black swimsuit on a yacht deck lying on her back with one knee raised, looking at the camera upside down; full sun, wide lens."),
         .init(heat: .sexy, text: "{subject} in a glossy black mini skirt and mesh top in a rain-slick Tokyo alley, leaning back against the wall with one foot on it, neon pink and cyan on her skin."),
         .init(heat: .sexy, text: "{subject} in a cropped cashmere cardigan buttoned once and matching shorts, lying on a shag carpet in front of a wall of records, one arm behind her head; tungsten warmth."),
         .init(heat: .sexy, text: "{subject} in a bronze metallic bikini and gold body chains in the desert at golden hour, standing hip-cocked, hand at her collarbone, mesas behind; long shadows."),
-        .init(heat: .sexy, text: "{subject} in a sheer white sundress in the surf at sunset, backlit so her silhouette shows through, walking away and looking back; orange glitter on the water."),
-        .init(heat: .sexy, text: "{subject} in a lace-trimmed black slip in a steamy hotel bathroom, sitting on the edge of a marble tub with wet hair, towel in one hand; soft diffused light."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a sheer white sundress in the surf at sunset, backlit so her silhouette shows through, walking away and looking back; orange glitter on the water."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a lace-trimmed black slip in a steamy hotel bathroom, sitting on the edge of a marble tub with wet hair, towel in one hand; soft diffused light."),
         .init(heat: .sexy, text: "{subject} in a cropped leather jacket over a bikini top and cut-offs on a motel balcony, leaning on the rail under a flickering sign; night, grainy."),
         .init(heat: .sexy, text: "{subject} in a strappy black bodysuit and sheer stockings on a velvet chaise, lying on her side propped on an elbow, one knee drawn up; candlelight."),
         .init(heat: .sexy, text: "{subject} in a halter emerald bikini on a rocky cove at low tide, sitting back on her elbows with her chin tilted to the sun; bright, crisp."),
         .init(heat: .sexy, text: "{subject} in a plum satin corset dress in a mirrored vintage elevator, hands on the brass rail, reflections multiplying her; warm bulb light."),
-        .init(heat: .sexy, text: "{subject} in a knit bralette and a long sheer skirt walking a white-sand beach at dusk, skirt blowing, seen from a low wide angle; blue hour."),
+        .init(heat: .sexy, tier: .intimate, text: "{subject} in a knit bralette and a long sheer skirt walking a white-sand beach at dusk, skirt blowing, seen from a low wide angle; blue hour."),
         .init(heat: .sexy, text: "{subject} in a thin ribbed cami and silk pyjama trousers at a hotel window at night, sheer curtain in one hand, city lights beyond; cool and warm mixed light."),
         .init(heat: .sexy, text: "{subject} in a cheeky-cut tangerine bikini at an outdoor tropical shower, water running over her, banana leaves around, laughing with her eyes closed; dappled sun."),
         .init(heat: .sexy, text: "{subject} in a crystal-mesh mini dress over a nude bodysuit on a penthouse sofa at 3 a.m., shoes kicked off, legs tucked under her, a tired smile; lamp light, flash fill."),
