@@ -452,6 +452,9 @@ final class Library {
     var captions: [String: String] = Library.migrateBulk("captions", legacyKey: "photoBrowser.captions") {
         (UserDefaults.standard.dictionary(forKey: $0) as? [String: String]) ?? [:]
     }
+    /// User tags per file ("portrait", "beach", …), keyed by path — edited in the info panel below the
+    /// caption, filtered on in FolderView across a folder and its subfolders. Bulk-stored like captions.
+    var tags: [String: [String]] = Library.loadBulk("tags") ?? [:]
     /// Folder path → cover-image filename (stored under Application Support/folderCovers).
     var folderCovers: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.folderCovers") as? [String: String]) ?? [:]
     /// Item file path → custom-thumbnail filename (stored under Application Support/itemThumbs).
@@ -731,6 +734,74 @@ final class Library {
         guard !map.isEmpty else { return }
         for (k, v) in map { captions[k] = v.trimmingCharacters(in: .whitespacesAndNewlines) }
         Self.saveBulk(captions, "captions")
+    }
+
+    // MARK: - Tags
+
+    /// One tag of one file with how many files under a folder carry it (the Tags menu).
+    struct TagCount: Identifiable, Sendable {
+        let tag: String
+        let count: Int
+        var id: String { tag.lowercased() }
+    }
+
+    /// A tag as stored: trimmed, inner whitespace collapsed, no leading "#".
+    nonisolated static func normalizedTag(_ raw: String) -> String {
+        var t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while t.hasPrefix("#") { t.removeFirst() }
+        return t.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    func tags(for url: URL) -> [String] { tags[url.path] ?? [] }
+
+    /// Adds a tag to a file — once, whatever its case. Bumps `labelsVersion` so tag views re-query.
+    func addTag(_ raw: String, to url: URL) {
+        let tag = Self.normalizedTag(raw)
+        guard !tag.isEmpty else { return }
+        var list = tags[url.path] ?? []
+        guard !list.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) else { return }
+        list.append(tag)
+        tags[url.path] = list
+        Self.saveBulk(tags, "tags")
+        labelsVersion += 1
+    }
+
+    func removeTag(_ tag: String, from url: URL) {
+        var list = tags[url.path] ?? []
+        list.removeAll { $0.caseInsensitiveCompare(tag) == .orderedSame }
+        if list.isEmpty { tags.removeValue(forKey: url.path) } else { tags[url.path] = list }
+        Self.saveBulk(tags, "tags")
+        labelsVersion += 1
+    }
+
+    /// Every tag under `folder` (its files and its subfolders'), most used first. Spellings that
+    /// differ only in case count as one tag, shown as first written.
+    func tagCounts(under folder: URL) -> [TagCount] {
+        let root = folder.path, prefix = root + "/"
+        var counts: [String: Int] = [:], shown: [String: String] = [:]
+        for (path, list) in tags where path == root || path.hasPrefix(prefix) {
+            for tag in list {
+                let key = tag.lowercased()
+                counts[key, default: 0] += 1
+                if shown[key] == nil { shown[key] = tag }
+            }
+        }
+        return counts.map { TagCount(tag: shown[$0.key] ?? $0.key, count: $0.value) }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.tag.localizedStandardCompare($1.tag) == .orderedAscending }
+    }
+
+    /// Every tag in use anywhere, for the editor's suggestions.
+    var allTags: [String] {
+        var seen: [String: String] = [:]
+        for list in tags.values { for tag in list where seen[tag.lowercased()] == nil { seen[tag.lowercased()] = tag } }
+        return seen.values.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    /// Paths under `folder` whose files carry `tag` (any case) — feed `labeledEntries` for the grid.
+    func taggedPaths(under folder: URL, tag: String) -> Set<String> {
+        let root = folder.path, prefix = root + "/"
+        return Set(tags.filter { ($0.key == root || $0.key.hasPrefix(prefix))
+                                 && $0.value.contains { $0.caseInsensitiveCompare(tag) == .orderedSame } }.keys)
     }
 
     /// Reads existing captions embedded in the files (pull-in), bounded concurrency.
@@ -2751,6 +2822,7 @@ final class Library {
         hiddenFiles = Set(hiddenFiles.map(remap))
         customLabels = customLabels.mapValues { Set($0.map(remap)) }
         captions = remapKeys(captions, remap)
+        tags = remapKeys(tags, remap)
         folderCovers = remapKeys(folderCovers, remap)
         itemThumbnails = remapKeys(itemThumbnails, remap)
         photoOrigins = remapKeys(photoOrigins, remap)
@@ -2820,7 +2892,7 @@ final class Library {
         let reviewsFolders = self.reviewsFolders
         let hiddenFolders = self.hiddenFolders, hiddenFiles = self.hiddenFiles
         let captions = self.captions, folderCovers = self.folderCovers, photoOrigins = self.photoOrigins
-        let itemThumbnails = self.itemThumbnails
+        let itemThumbnails = self.itemThumbnails, tags = self.tags
         let igPostedBy = self.igPostedBy, igLastHandle = self.igLastHandle, storyLinks = self.storyLinks
         let folderBirthdays = self.folderBirthdays, bubbleOrders = self.bubbleOrders
         let lastTikTokHandleByFolder = self.lastTikTokHandleByFolder
@@ -2840,6 +2912,7 @@ final class Library {
             Self.saveBulk(notDuplicatePairs, "notDuplicates")
             Self.saveBulk(people, "people")
             Self.saveBulk(captions, "captions")
+            Self.saveBulk(tags, "tags")
             Self.saveBulk(photoOrigins, "photoOrigins")
             Self.saveBulk(igPostedBy, "igPostedBy")
             let ud = UserDefaults.standard
@@ -2968,7 +3041,7 @@ final class Library {
         moveSet(&framesFolders); moveSet(&kardashianFolders); moveSet(&instagramHighlights); moveSet(&albumHighlights)
         moveSet(&reviewsFolders); moveSet(&hiddenFolders); moveSet(&hiddenFiles)
         customLabels = customLabels.mapValues { paths in var s = paths; moveSet(&s); return s }
-        moveDict(&captions); moveDict(&photoOrigins); moveDict(&igPostedBy); moveDict(&igLastHandle)
+        moveDict(&captions); moveDict(&tags); moveDict(&photoOrigins); moveDict(&igPostedBy); moveDict(&igLastHandle)
         moveDict(&lastTikTokHandleByFolder); moveDict(&tiktokLikes); moveDict(&folderBirthdays)
         moveDict(&instagramFolders); moveDict(&facebookFolders); moveDict(&tiktokFolders)
         moveDict(&vscoFolders); moveDict(&lastVSCOUsernameByFolder)
@@ -3072,7 +3145,7 @@ final class Library {
         prune(&framesFolders); prune(&kardashianFolders); prune(&instagramHighlights); prune(&albumHighlights)
         prune(&reviewsFolders); prune(&hiddenFolders); prune(&hiddenFiles)
         customLabels = customLabels.mapValues { paths in var s = paths; prune(&s); return s }
-        pruneKeys(&captions); pruneKeys(&photoOrigins); pruneKeys(&igPostedBy); pruneKeys(&igLastHandle)
+        pruneKeys(&captions); pruneKeys(&tags); pruneKeys(&photoOrigins); pruneKeys(&igPostedBy); pruneKeys(&igLastHandle)
         pruneKeys(&lastTikTokHandleByFolder); pruneKeys(&tiktokLikes); pruneKeys(&folderBirthdays)
         pruneKeys(&instagramFolders); pruneKeys(&facebookFolders); pruneKeys(&tiktokFolders)
         pruneKeys(&vscoFolders); pruneKeys(&lastVSCOUsernameByFolder)
@@ -3471,6 +3544,7 @@ final class Library {
             let p = e.url.path
             guard p == base || p.hasPrefix(base + "/") else { continue }
             if e.name.lowercased().contains(q) || (captions[p]?.lowercased().contains(q) ?? false)
+                || (tags[p]?.contains { $0.lowercased().contains(q) } ?? false)
                 || (MetadataLoader.ocrTextCached(for: e)?.contains(q) ?? false)       // text inside photos
                 || (MetadataLoader.placeTextCached(for: e)?.contains(q) ?? false)     // indexed place names
                 || (aiGenerations[p].map { $0.model.lowercased().contains(q) || $0.prompt.lowercased().contains(q) } ?? false) {  // AI model / prompt

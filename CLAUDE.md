@@ -59,7 +59,8 @@ actions the app makes no network calls.
 - **Browsing** — pick a folder → recursively scans it; square thumbnails for
   photos/videos; New Folder / rename / move; name search; sort by
   name/date/size/age; filters for type, year (EXIF date), location (GPS reverse-geocoded to
-  "City, ST" / "City, Country" with counts, via the place index), resolution/HDR, age;
+  "City, ST" / "City, Country" with counts, via the place index), tags (recursive, with
+  counts), resolution/HDR, age; the chip bar runs Favorites, Type, Format, Sort, Year, then the rest;
   Favorites / "To AI" modes; a **Categories** filter on folders whose subfolders hold pornpics
   `gallery.json` sidecars (from `mac/pornpics_*.py`) — galleries must carry every selected
   category; the sidecars (`gallery.json`, `pornstar.json`) are hidden from listings.
@@ -75,7 +76,8 @@ actions the app makes no network calls.
   and gets WebKit-drawn grid posters. (`ViewerView`, `ZoomableImageView`, `VideoPage`,
   `WebMPlayer`)
 - **Info panel** (swipe-up) — date, device, dimensions, size, GPS →
-  reverse-geocoded place, "Saved from" (xattrs), Age, inline caption edit.
+  reverse-geocoded place, "Saved from" (xattrs), Age, inline caption edit, tags (one at a
+  time, with suggestions).
 - **Editing** — crop/rotate saved **in place** over the original (no duplicate),
   preserving EXIF/creation metadata, under a best-effort background-task window;
   bulk **rotate** (180°/left/right, mainly to fix upside-down videos) on a
@@ -154,6 +156,8 @@ Persistence is **`UserDefaults`-only**, keyed by absolute file path. Keys are al
 under the `photoBrowser.*` namespace:
 - `favorites`, `ai` — labeled item paths (Sets of path strings)
 - `captions` — app caption overrides (path → text)
+- `tags` — per-file tags (path → [tag]), bulk JSON store; the Tags chip filters a folder's
+  subtree by them
 - `folderCovers` — folder path → cover image filename (images stored in
   Application Support/`folderCovers`)
 - `photoOrigins` — imported file path → originating Photos asset id

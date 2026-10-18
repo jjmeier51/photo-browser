@@ -939,6 +939,33 @@ subtree); "Index Locations" (the search pass) now covers videos too.
 
 ---
 
+## 6c. Tags — `Library.tags`, `InfoPanel.tagsSection`, the Tags chip in `FolderView`
+
+Per-file tags, added one at a time in the info panel's "Tags" section just below the caption:
+the file's tags as chips (✕ removes one), a field + Add (Return adds too), and one-tap suggestions
+from tags already in use anywhere (prefix-matched to what's typed). `Library.tags` is
+`path → [tag]` in the bulk JSON store ("tags"), with `normalizedTag` (trimmed, inner whitespace
+collapsed, no leading "#") and case-insensitive uniqueness per file. It has full parity with
+captions: re-keyed by `applyRemap` / `itemsMoved` (`moveDict`) / `forgetMetadata` (`pruneKeys`),
+persisted in the remap block, in the metadata backup (`MetadataSnapshot.tags` — *optional* so
+backups made before tags existed still decode; `MetadataCategory.tags` for Drive Health's orphan
+list), and matched by the index search. Changes bump `labelsVersion`.
+
+The **Tags chip** (after Location) lists every tag under the folder *and its subfolders* with
+counts (`tagCounts(under:)`, case-insensitive merge, most used first), and picking one is a mode
+like Favorites: `taggedPaths(under:tag:)` → `labeledEntries` gathers the tagged files from the whole
+subtree (the "labels" task), honouring Type and the search box; the other modes step aside
+(`selectTag`), and Favorites / To AI / Edited clear it. Header subtitle "Tag: x"; empty state
+"Nothing tagged “x” here"; Clear resets it.
+
+**Chip bar order (Oct 18):** Favorites, Type, Format, Sort, Year, To AI, Edited, Labels, then
+Age / Categories / Location / Tags / Clear (or "Show:" in a label mode). Sort moved from the
+toolbar into the bar — on a phone the toolbar overflowed it into "…". Type now applies in the
+Favorites / To AI modes too (it's always visible); Year stays hidden in those modes, which don't
+apply it.
+
+---
+
 ## 6a. WebM playback — `WebMPlayer.swift`
 
 AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,

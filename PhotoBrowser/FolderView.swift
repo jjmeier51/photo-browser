@@ -83,6 +83,9 @@ struct FolderView: View {
     @State private var showHiddenFolders = false
     @State private var showFavoritesOnly = false
     @State private var favoriteEntries: [Entry] = []
+    /// Tags filter: files carrying this tag anywhere under the folder (recursive, like Favorites).
+    @State private var tagFilter: String?
+    @State private var tagEntries: [Entry] = []
     @State private var captureDates: [URL: Date] = [:]
     /// Years present under each subfolder — fills in while a year filter is active
     /// so folders with nothing from that year can be hidden.
@@ -368,7 +371,13 @@ struct FolderView: View {
 
         // Favorites / To AI mode: labeled items + folder/photo/video sub-filter.
         if labelMode {
-            let base = applyLabelKind(showAIOnly ? aiEntries : favoriteEntries)
+            let base = applyType(applyLabelKind(showAIOnly ? aiEntries : favoriteEntries))
+            return applyHidden(q.isEmpty ? base : base.filter { matches($0, q) })
+        }
+
+        // Tag mode: files carrying the tag, gathered recursively under this folder.
+        if tagFilter != nil {
+            let base = applyType(tagEntries)
             return applyHidden(q.isEmpty ? base : base.filter { matches($0, q) })
         }
 
@@ -1572,13 +1581,17 @@ struct FolderView: View {
                 if submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty { fileCaptions = [:] }
                 else if fileCaptions.isEmpty { fileCaptions = await library.fileCaptions(for: entries) }
             }
-            .task(id: "labels-\(showFavoritesOnly)-\(showAIOnly)-\(library.labelsVersion)-\(library.sort.rawValue)") {
-                // Favorites / To AI are scoped to *this* folder (and its subfolders).
+            .task(id: "labels-\(showFavoritesOnly)-\(showAIOnly)-\(tagFilter ?? "")-\(library.labelsVersion)-\(library.sort.rawValue)") {
+                // Favorites / To AI / a tag are scoped to *this* folder (and its subfolders).
                 if showFavoritesOnly {
                     favoriteEntries = await library.labeledEntries(under: url, paths: library.favorites, sort: library.sort)
                 }
                 if showAIOnly {
                     aiEntries = await library.labeledEntries(under: url, paths: library.aiLabels, sort: library.sort)
+                }
+                if let tagFilter {
+                    tagEntries = await library.labeledEntries(under: url, paths: library.taggedPaths(under: url, tag: tagFilter),
+                                                              sort: library.sort)
                 }
             }
         )
@@ -1684,11 +1697,12 @@ struct FolderView: View {
                              : tsLabelMode ? "No items match these labels"
                              : showFavoritesOnly ? "No favorites here yet"
                              : showAIOnly ? "Nothing marked To AI yet"
+                             : tagFilter != nil ? "Nothing tagged “\(tagFilter ?? "")” here"
                              : !categoryFilter.isEmpty ? "No galleries have all of these categories"
                              : (advancedActive || typeFilter != .all || formatFilter != .all || yearFilter != nil || ageFilter != nil || locationFilter != nil) ? "No matches for this filter"
                              : "This folder is empty")
                             .foregroundStyle(.secondary)
-                        if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !advancedActive
+                        if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !advancedActive && tagFilter == nil
                             && yearFilter == nil && locationFilter == nil && typeFilter == .all && formatFilter == .all && ageFilter == nil
                             && categoryFilter.isEmpty && submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty {
                             // A folder stored past 2.2 TB on a big exFAT drive can read as empty with no
@@ -1698,7 +1712,7 @@ struct FolderView: View {
                         }
                         // A genuinely empty folder (no filter hiding things) gets the two ways to
                         // fill it, instead of a dead end.
-                        if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !showEditedOnly
+                        if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !showEditedOnly && tagFilter == nil
                             && !advancedActive && yearFilter == nil && locationFilter == nil && typeFilter == .all && formatFilter == .all && ageFilter == nil
                             && categoryFilter.isEmpty {
                             HStack(spacing: 12) {
@@ -2041,6 +2055,7 @@ struct FolderView: View {
         if showFavoritesOnly { return "Favorites" }
         if showAIOnly { return "To AI" }
         if showEditedOnly { return "Edited" }
+        if let tagFilter { return "Tag: \(tagFilter)" }
         if let ig = library.instagramInfo(for: url) {
             let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
             let when = f.string(from: Date(timeIntervalSince1970: ig.lastUpdated))
@@ -2073,7 +2088,7 @@ struct FolderView: View {
             HStack(spacing: 10) {
                 Button {
                     showFavoritesOnly.toggle()
-                    if showFavoritesOnly { showAIOnly = false; showEditedOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false }
+                    if showFavoritesOnly { showAIOnly = false; showEditedOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false; tagFilter = nil }
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: showFavoritesOnly ? "heart.fill" : "heart")
@@ -2084,9 +2099,51 @@ struct FolderView: View {
                     .foregroundStyle(showFavoritesOnly ? Color.red : Color.primary)
                 }
 
+                Menu {
+                    ForEach(TypeFilter.allCases) { type in
+                        Button { typeFilter = type } label: { check(type.rawValue, typeFilter == type) }
+                    }
+                } label: {
+                    chip("Type: \(typeFilter.rawValue)")
+                        .foregroundStyle(typeFilter != .all ? Color.accentColor : Color.primary)
+                }
+
+                Menu {
+                    ForEach(FormatFilter.allCases) { fmt in
+                        Button { formatFilter = fmt } label: { check(fmt.rawValue, formatFilter == fmt) }
+                    }
+                } label: {
+                    chip("Format: \(formatFilter.rawValue)")
+                        .foregroundStyle(formatFilter != .all ? Color.accentColor : Color.primary)
+                }
+
+                // Sort lives here, not in the toolbar: on a phone the toolbar overflowed it into "…".
+                Menu {
+                    ForEach(SortKey.allCases) { key in
+                        // Age sorting only where a birthday is in context; "Most liked" only in TikTok folders.
+                        if (!key.isAge || library.hasBirthdayContext(url)) && (!key.isLikes || library.isTikTokFolder(url)) {
+                            Button { library.sort = key } label: { check(key.rawValue, key == library.sort) }
+                        }
+                    }
+                } label: {
+                    chip("Sort: \(library.sort.rawValue)")
+                }
+
+                if !labelMode {
+                    Menu {
+                        Button { yearFilter = nil } label: { check("All Years", yearFilter == nil) }
+                        ForEach(availableYears, id: \.self) { year in
+                            Button { yearFilter = year } label: { check(String(year), yearFilter == year) }
+                        }
+                    } label: {
+                        chip("Year: \(yearFilter.map(String.init) ?? "All")")
+                            .foregroundStyle(yearFilter != nil ? Color.accentColor : Color.primary)
+                    }
+                }
+
                 Button {
                     showAIOnly.toggle()
-                    if showAIOnly { showFavoritesOnly = false; showEditedOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false }
+                    if showAIOnly { showFavoritesOnly = false; showEditedOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false; tagFilter = nil }
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "sparkles")
@@ -2101,7 +2158,7 @@ struct FolderView: View {
                     showEditedOnly.toggle()
                     if showEditedOnly {
                         showFavoritesOnly = false; showAIOnly = false
-                        tsLabelFilter.removeAll(); tsNoLabel = false; ageFilter = nil
+                        tsLabelFilter.removeAll(); tsNoLabel = false; ageFilter = nil; tagFilter = nil
                     }
                 } label: {
                     HStack(spacing: 4) {
@@ -2178,16 +2235,6 @@ struct FolderView: View {
                     }
 
                     Menu {
-                        Button { yearFilter = nil } label: { check("All Years", yearFilter == nil) }
-                        ForEach(availableYears, id: \.self) { year in
-                            Button { yearFilter = year } label: { check(String(year), yearFilter == year) }
-                        }
-                    } label: {
-                        chip("Year: \(yearFilter.map(String.init) ?? "All")")
-                            .foregroundStyle(yearFilter != nil ? Color.accentColor : Color.primary)
-                    }
-
-                    Menu {
                         // Opening the menu is what triggers the lazy place pass.
                         Button { locationFilter = nil } label: { check("All Locations", locationFilter == nil) }
                             .onAppear { placesRequested = true }
@@ -2209,29 +2256,25 @@ struct FolderView: View {
                             .foregroundStyle(locationFilter != nil ? Color.accentColor : Color.primary)
                     }
 
-                    Menu {
-                        ForEach(TypeFilter.allCases) { type in
-                            Button { typeFilter = type } label: { check(type.rawValue, typeFilter == type) }
+                    if !tagOptions.isEmpty || tagFilter != nil {
+                        Menu {
+                            Button { tagFilter = nil } label: { check("All Tags", tagFilter == nil) }
+                            ForEach(tagOptions) { t in
+                                Button { selectTag(t.tag) } label: {
+                                    check("\(t.tag) (\(t.count))", tagFilter?.caseInsensitiveCompare(t.tag) == .orderedSame)
+                                }
+                            }
+                        } label: {
+                            chip(tagFilter.map { "Tag: \($0)" } ?? "Tags")
+                                .foregroundStyle(tagFilter != nil ? Color.accentColor : Color.primary)
                         }
-                    } label: {
-                        chip("Type: \(typeFilter.rawValue)")
-                            .foregroundStyle(typeFilter != .all ? Color.accentColor : Color.primary)
-                    }
-
-                    Menu {
-                        ForEach(FormatFilter.allCases) { fmt in
-                            Button { formatFilter = fmt } label: { check(fmt.rawValue, formatFilter == fmt) }
-                        }
-                    } label: {
-                        chip("Format: \(formatFilter.rawValue)")
-                            .foregroundStyle(formatFilter != .all ? Color.accentColor : Color.primary)
                     }
 
                     // One tap back to an unfiltered view once any menu-driven filter is active.
                     if yearFilter != nil || locationFilter != nil || typeFilter != .all || formatFilter != .all || ageFilter != nil
-                        || advancedActive || !categoryFilter.isEmpty {
+                        || advancedActive || !categoryFilter.isEmpty || tagFilter != nil {
                         Button {
-                            yearFilter = nil; locationFilter = nil; typeFilter = .all; formatFilter = .all; ageFilter = nil
+                            yearFilter = nil; locationFilter = nil; typeFilter = .all; formatFilter = .all; ageFilter = nil; tagFilter = nil
                             videoRes = .all; imageRes = .all; hdrOnly = false; categoryFilter.removeAll()
                         } label: {
                             HStack(spacing: 4) {
@@ -2250,6 +2293,17 @@ struct FolderView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
         }
+    }
+
+    /// Tags under this folder and its subfolders, with counts (recomputed as `library.tags` changes).
+    private var tagOptions: [Library.TagCount] { library.tagCounts(under: url) }
+
+    /// Picking a tag is a mode like Favorites: it shows tagged files from the whole subtree, so
+    /// the other modes step aside.
+    private func selectTag(_ tag: String) {
+        tagFilter = tag
+        showFavoritesOnly = false; showAIOnly = false; showEditedOnly = false
+        tsLabelFilter.removeAll(); tsNoLabel = false; ageFilter = nil
     }
 
     private func chip(_ text: String) -> some View {
@@ -2292,24 +2346,6 @@ struct FolderView: View {
                 }
                 if !labelMode {
                     filterMenu
-                }
-                Menu {
-                    ForEach(SortKey.allCases) { key in
-                        // Age sorting only where a birthday is in context; "Most liked" only in TikTok folders.
-                        if (!key.isAge || library.hasBirthdayContext(url)) && (!key.isLikes || library.isTikTokFolder(url)) {
-                            Button {
-                                library.sort = key
-                            } label: {
-                                if key == library.sort {
-                                    Label(key.rawValue, systemImage: "checkmark")
-                                } else {
-                                    Text(key.rawValue)
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    Image(systemName: "arrow.up.arrow.down")
                 }
                 Menu {
                     // Grouped into titled sections so the ~20 items scan as four short lists

@@ -22,6 +22,7 @@ struct MetadataSnapshot: Codable, Sendable {
     var aiLabels: [String] = []
     var customLabels: [String: [String]] = [:]
     var captions: [String: String] = [:]
+    var tags: [String: [String]]? = nil               // optional: backups made before tags existed still decode
     var folderCovers: [String: String] = [:]          // relative folder → cover filename (in covers/)
     var itemThumbnails: [String: String] = [:]        // relative file → thumbnail filename (in itemThumbs/)
     var photoOrigins: [String: String] = [:]
@@ -59,7 +60,7 @@ struct MetadataSnapshot: Codable, Sendable {
     /// How many entries the snapshot holds, for the UI.
     var entryCount: Int {
         favorites.count + aiLabels.count + customLabels.values.reduce(0) { $0 + $1.count } + captions.count
-            + folderCovers.count + itemThumbnails.count + photoOrigins.count + folderBirthdays.count
+            + (tags?.count ?? 0) + folderCovers.count + itemThumbnails.count + photoOrigins.count + folderBirthdays.count
             + hiddenFolders.count + hiddenFiles.count + framesFolders.count + kardashianFolders.count
             + instagramHighlights.count + albumHighlights.count + reviewsFolders.count + bubbleOrders.count
             + igPostedBy.count + igLastHandle.count + storyLinks.count + instagramFolders.count
@@ -73,7 +74,7 @@ struct MetadataSnapshot: Codable, Sendable {
 
 /// A kind of path-keyed metadata, for Drive Health's "pointing at missing items" breakdown.
 enum MetadataCategory: Int, CaseIterable, Identifiable, Sendable {
-    case favorites, toAI, labels, captions, covers, itemThumbnails, birthdays, hidden, profiles, folderRoles, people, aiProvenance, other
+    case favorites, toAI, labels, captions, tags, covers, itemThumbnails, birthdays, hidden, profiles, folderRoles, people, aiProvenance, other
     var id: Int { rawValue }
     var title: String {
         switch self {
@@ -81,6 +82,7 @@ enum MetadataCategory: Int, CaseIterable, Identifiable, Sendable {
         case .toAI:           return "To AI"
         case .labels:         return "Custom labels"
         case .captions:       return "Captions"
+        case .tags:           return "Tags"
         case .covers:         return "Folder covers"
         case .itemThumbnails: return "Custom thumbnails"
         case .birthdays:      return "Birthdays"
@@ -115,6 +117,7 @@ extension Library {
         s.aiLabels = relSet(aiLabels)
         s.customLabels = customLabels.mapValues(relSet).filter { !$0.value.isEmpty }
         s.captions = relDict(captions)
+        s.tags = relDict(tags)
         s.folderCovers = relDict(folderCovers)
         s.itemThumbnails = relDict(itemThumbnails)
         s.photoOrigins = relDict(photoOrigins)
@@ -189,6 +192,7 @@ extension Library {
             customLabels[name] = set
         }
         addDict(&captions, s.captions)
+        addDict(&tags, s.tags ?? [:])
         addDict(&photoOrigins, s.photoOrigins)
         addDict(&folderBirthdays, s.folderBirthdays)
         addSet(&hiddenFolders, s.hiddenFolders)
@@ -266,6 +270,7 @@ extension Library {
         add(.toAI, aiLabels)
         add(.labels, customLabels.values.flatMap { $0 })
         add(.captions, captions.keys)
+        add(.tags, tags.keys)
         add(.covers, folderCovers.keys)
         add(.itemThumbnails, itemThumbnails.keys)
         add(.birthdays, folderBirthdays.keys)
