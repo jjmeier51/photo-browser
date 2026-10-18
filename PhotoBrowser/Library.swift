@@ -3501,7 +3501,7 @@ final class Library {
     /// (CLGeocoder is rate-limited) — re-running continues where it left off.
     nonisolated func buildLocationIndex(under folder: URL,
                                         progress: @escaping @Sendable (Double) -> Void) async -> (photos: Int, places: Int) {
-        let images = await Self.enumerateAll(folder).filter { $0.kind == .image }
+        let images = await Self.enumerateAll(folder).filter { $0.kind == .image || $0.kind == .video }
         let total = images.count
         guard total > 0 else { return (0, 0) }
         var index = 0, done = 0
@@ -3665,6 +3665,48 @@ final class Library {
         }
         MetadataLoader.scheduleDateStoreFlush()    // persist any newly-read dates (debounced)
         return result
+    }
+
+    /// Place labels ("Hauppauge, NY") for the Location filter: each file's GPS bin is read (cached on
+    /// disk, like capture dates), then every distinct bin without a label is named through the
+    /// rate-limited geocoder — at most `geocodeLimit` per call, so a never-indexed, well-travelled
+    /// folder shows what it can now and names the rest next time. Files with no location map to "";
+    /// a file whose bin isn't named yet is left out. `progress` gets a short status line.
+    nonisolated func placeLabels(for entries: [Entry], geocodeLimit: Int = 60,
+                                 progress: @escaping @Sendable (String) -> Void) async -> [URL: String] {
+        let files = entries.filter { $0.kind == .image || $0.kind == .video }
+        guard !files.isEmpty else { return [:] }
+        var bins: [URL: String] = [:]
+        var index = 0, done = 0
+        let maxConcurrent = 12
+        await withTaskGroup(of: (URL, String).self) { group in
+            func addNext() {
+                guard index < files.count else { return }
+                let e = files[index]; index += 1
+                group.addTask { (e.url, await MetadataLoader.gpsBin(for: e)) }
+            }
+            for _ in 0..<min(maxConcurrent, files.count) { addNext() }
+            while let (url, bin) = await group.next() {
+                bins[url] = bin
+                done += 1
+                if done % 50 == 0 { progress("Reading locations… \(done) of \(files.count)") }
+                addNext()
+            }
+        }
+        let unnamed = Set(bins.values.filter { !$0.isEmpty && MetadataLoader.placeLabel(forBin: $0) == nil }).sorted()
+        if !unnamed.isEmpty {
+            progress("Naming places…")
+            _ = await MetadataLoader.geocodeBins(Array(unnamed.prefix(geocodeLimit))) { d, t in
+                progress("Naming places… \(d) of \(t)")
+            }
+        }
+        MetadataLoader.flushPlaceStore()
+        var labels: [URL: String] = [:]
+        for (url, bin) in bins {
+            if bin.isEmpty { labels[url] = "" }
+            else if let label = MetadataLoader.placeLabel(forBin: bin) { labels[url] = label.isEmpty ? "Unnamed place" : label }
+        }
+        return labels
     }
 
     /// Reads dimensions + HDR for media files (for resolution/HDR filters).

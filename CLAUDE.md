@@ -58,7 +58,8 @@ actions the app makes no network calls.
 ### Feature surface (so you know where things live)
 - **Browsing** — pick a folder → recursively scans it; square thumbnails for
   photos/videos; New Folder / rename / move; name search; sort by
-  name/date/size/age; filters for type, year (EXIF date), resolution/HDR, age;
+  name/date/size/age; filters for type, year (EXIF date), location (GPS reverse-geocoded to
+  "City, ST" / "City, Country" with counts, via the place index), resolution/HDR, age;
   Favorites / "To AI" modes; a **Categories** filter on folders whose subfolders hold pornpics
   `gallery.json` sidecars (from `mac/pornpics_*.py`) — galleries must carry every selected
   category; the sidecars (`gallery.json`, `pornstar.json`) are hidden from listings.

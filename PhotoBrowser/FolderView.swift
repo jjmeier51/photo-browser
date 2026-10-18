@@ -69,6 +69,14 @@ struct FolderView: View {
     @State private var folderPurpose: ImportPurpose = .open
     @State private var loaded = false
     @State private var yearFilter: Int?
+    /// Location filter: a place label ("Hauppauge, NY"), or "" for files with no location.
+    @State private var locationFilter: String?
+    /// Each file's place label (from its GPS, reverse-geocoded; "" = no location). Loaded only once
+    /// the Location menu is opened or a location filter is active — see the "places" task.
+    @State private var placeLabels: [URL: String] = [:]
+    @State private var placesRequested = false
+    @State private var loadingPlaces = false
+    @State private var placeProgress: String?
     @State private var typeFilter: TypeFilter = .all
     @State private var formatFilter: FormatFilter = .all
     @State private var showEditedOnly = false
@@ -397,6 +405,9 @@ struct FolderView: View {
                                : year(of: entry) == yearFilter
             }
         }
+        // Location: files whose place label matches ("" = no location). Folders stay — naming every
+        // place under every subfolder would mean geocoding the whole subtree.
+        if let locationFilter { list = list.filter { $0.isFolder || placeLabels[$0.url] == locationFilter } }
         // Categories (pornpics galleries): only gallery folders carrying every selected category.
         if !categoryFilter.isEmpty { list = list.filter { $0.isFolder && matchesCategories($0) } }
         list = applyType(list)
@@ -545,6 +556,29 @@ struct FolderView: View {
     private var availableYears: [Int] {
         Array(Set(entries.filter { !$0.isFolder }.map { year(of: $0) })).sorted(by: >)
     }
+
+    private struct LocationOption: Identifiable {
+        let label: String          // "" = no location
+        let count: Int
+        var id: String { label }
+    }
+
+    /// The Location menu: each place with how many files here are from it, most first; "No
+    /// Location" (label "") last.
+    private var locationOptions: [LocationOption] {
+        var counts: [String: Int] = [:]
+        for e in entries where !e.isFolder { if let label = placeLabels[e.url] { counts[label, default: 0] += 1 } }
+        let named = counts.filter { !$0.key.isEmpty }
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .map { LocationOption(label: $0.key, count: $0.value) }
+        return named + (counts[""].map { [LocationOption(label: "", count: $0)] } ?? [])
+    }
+
+    private var placesNeeded: Bool { locationFilter != nil || placesRequested }
+
+    /// Same ceiling as the capture-date pass: reading every file's GPS in a huge folder would stall
+    /// the drive just like reading every EXIF date did.
+    private var tooManyForPlaces: Bool { entries.filter { !$0.isFolder }.count > 8000 }
 
     private var grid: some View {
         ScrollViewReader { proxy in
@@ -1590,6 +1624,18 @@ struct FolderView: View {
                     folderYears[folder.url] = await library.folderYears(of: folder.url)
                 }
             }
+            // Place labels for the Location filter — lazy (the menu opening or an active filter asks
+            // for them): a GPS read per file, then one geocode per distinct place.
+            .task(id: "places-\(placesNeeded)-\(entries.count)-\(library.changeToken)-\(url.path)") {
+                guard placesNeeded, !tooManyForPlaces else { return }
+                loadingPlaces = true; placeProgress = nil
+                let labels = await library.placeLabels(for: entries) { text in
+                    Task { @MainActor in placeProgress = text }
+                }
+                if Task.isCancelled { return }
+                placeLabels = labels
+                loadingPlaces = false
+            }
             // Gallery categories: subfolders holding a pornpics gallery.json (a star's folder of
             // galleries) feed the Categories filter. Folders without one cost a cached miss.
             .task(id: "gallerycats-\(entries.count)-\(library.changeToken)-\(url.path)") {
@@ -1639,11 +1685,11 @@ struct FolderView: View {
                              : showFavoritesOnly ? "No favorites here yet"
                              : showAIOnly ? "Nothing marked To AI yet"
                              : !categoryFilter.isEmpty ? "No galleries have all of these categories"
-                             : (advancedActive || typeFilter != .all || formatFilter != .all || yearFilter != nil || ageFilter != nil) ? "No matches for this filter"
+                             : (advancedActive || typeFilter != .all || formatFilter != .all || yearFilter != nil || ageFilter != nil || locationFilter != nil) ? "No matches for this filter"
                              : "This folder is empty")
                             .foregroundStyle(.secondary)
                         if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !advancedActive
-                            && yearFilter == nil && typeFilter == .all && formatFilter == .all && ageFilter == nil
+                            && yearFilter == nil && locationFilter == nil && typeFilter == .all && formatFilter == .all && ageFilter == nil
                             && categoryFilter.isEmpty && submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty {
                             // A folder stored past 2.2 TB on a big exFAT drive can read as empty with no
                             // error at all — so say what to do if Finder disagrees.
@@ -1653,7 +1699,7 @@ struct FolderView: View {
                         // A genuinely empty folder (no filter hiding things) gets the two ways to
                         // fill it, instead of a dead end.
                         if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !showEditedOnly
-                            && !advancedActive && yearFilter == nil && typeFilter == .all && formatFilter == .all && ageFilter == nil
+                            && !advancedActive && yearFilter == nil && locationFilter == nil && typeFilter == .all && formatFilter == .all && ageFilter == nil
                             && categoryFilter.isEmpty {
                             HStack(spacing: 12) {
                                 Button { showPhotosPicker = true } label: {
@@ -2142,6 +2188,28 @@ struct FolderView: View {
                     }
 
                     Menu {
+                        // Opening the menu is what triggers the lazy place pass.
+                        Button { locationFilter = nil } label: { check("All Locations", locationFilter == nil) }
+                            .onAppear { placesRequested = true }
+                        if tooManyForPlaces {
+                            Text("Too many items here — open a subfolder")
+                        } else if loadingPlaces {
+                            Text(placeProgress ?? "Reading locations…")
+                        } else if placesRequested && locationOptions.isEmpty {
+                            Text("No locations in this folder")
+                        }
+                        ForEach(locationOptions) { option in
+                            Button { locationFilter = option.label } label: {
+                                check("\(option.label.isEmpty ? "No Location" : option.label) (\(option.count))",
+                                      locationFilter == option.label)
+                            }
+                        }
+                    } label: {
+                        chip("Location: \(locationFilter.map { $0.isEmpty ? "None" : $0 } ?? "All")")
+                            .foregroundStyle(locationFilter != nil ? Color.accentColor : Color.primary)
+                    }
+
+                    Menu {
                         ForEach(TypeFilter.allCases) { type in
                             Button { typeFilter = type } label: { check(type.rawValue, typeFilter == type) }
                         }
@@ -2160,10 +2228,10 @@ struct FolderView: View {
                     }
 
                     // One tap back to an unfiltered view once any menu-driven filter is active.
-                    if yearFilter != nil || typeFilter != .all || formatFilter != .all || ageFilter != nil || advancedActive
-                        || !categoryFilter.isEmpty {
+                    if yearFilter != nil || locationFilter != nil || typeFilter != .all || formatFilter != .all || ageFilter != nil
+                        || advancedActive || !categoryFilter.isEmpty {
                         Button {
-                            yearFilter = nil; typeFilter = .all; formatFilter = .all; ageFilter = nil
+                            yearFilter = nil; locationFilter = nil; typeFilter = .all; formatFilter = .all; ageFilter = nil
                             videoRes = .all; imageRes = .all; hdrOnly = false; categoryFilter.removeAll()
                         } label: {
                             HStack(spacing: 4) {

@@ -270,16 +270,29 @@ enum MetadataLoader {
 
     // MARK: - Location (place-name) index for search
 
-    /// Place names for search, in two persistent layers: each photo's GPS reduces
-    /// to a ~1km bin ("lat|lng" at 2 decimals), and each *bin* is reverse-geocoded
-    /// once. CLGeocoder is hard rate-limited, so binning is what makes indexing a
-    /// whole drive feasible — thousands of photos from one event collapse into a
-    /// single geocode. "" records "no GPS" / "couldn't name" so nothing re-reads.
-    private struct PlaceIndex: Codable { var fileBins: [String: String]; var binPlaces: [String: String] }
+    /// Place names for search and the Location filter, in two persistent layers: each photo's or
+    /// video's GPS reduces to a ~1km bin ("lat|lng" at 2 decimals), and each *bin* is
+    /// reverse-geocoded once — into lowercased text for search ("hauppauge, ny, united states")
+    /// and a short label for the filter ("Hauppauge, NY"). CLGeocoder is hard rate-limited, so
+    /// binning is what makes indexing a whole drive feasible — thousands of photos from one event
+    /// collapse into a single geocode. A bin of "" records "no GPS" so nothing re-reads; a label
+    /// of "" records "the geocoder had no name for this spot" (a geocoder *error* stores nothing,
+    /// so the bin is retried next time — the old index recorded errors as permanent blanks).
+    ///
+    /// Version 2 added videos and labels. Loading a v1 index drops the "no GPS" verdicts of video
+    /// files (v1 never read them), and bins named before labels existed are re-geocoded once for
+    /// their label by the next naming pass.
+    private struct PlaceIndex: Codable {
+        var version: Int?
+        var fileBins: [String: String]
+        var binPlaces: [String: String]
+        var binLabels: [String: String]?
+    }
     private final class PlaceStore: @unchecked Sendable {
         private let lock = NSLock()
         private var fileBins: [String: String]     // fileKey → bin ("" = no GPS)
         private var binPlaces: [String: String]    // bin → place, stored lowercased for matching
+        private var binLabels: [String: String]    // bin → "City, ST" / "City, Country" ("" = unnameable)
         private var dirty = false
         private let fileURL: URL
 
@@ -289,21 +302,40 @@ enum MetadataLoader {
             let idx = (try? Data(contentsOf: fileURL)).flatMap { try? JSONDecoder().decode(PlaceIndex.self, from: $0) }
             fileBins = idx?.fileBins ?? [:]
             binPlaces = idx?.binPlaces ?? [:]
+            binLabels = idx?.binLabels ?? [:]
+            if idx != nil, (idx?.version ?? 1) < 2 {
+                let stale = fileBins.filter { $0.value.isEmpty && Self.looksLikeVideo($0.key) }.keys
+                for key in stale { fileBins[key] = nil }
+                dirty = true
+            }
+        }
+
+        /// A file key is "<drive-relative path>|mtime|size" — the path part tells a video's verdict apart.
+        private static func looksLikeVideo(_ key: String) -> Bool {
+            guard let path = key.split(separator: "|").first else { return false }
+            let ext = URL(fileURLWithPath: String(path)).pathExtension.lowercased()
+            if ["mov", "mp4", "m4v", "webm", "mkv", "avi", "3gp", "mpg", "mpeg", "mts", "m2ts"].contains(ext) { return true }
+            return UTType(filenameExtension: ext)?.conforms(to: .movie) ?? false
         }
 
         func binIfKnown(_ key: String) -> String? { lock.lock(); defer { lock.unlock() }; return fileBins[key] }
         func setBin(_ key: String, _ bin: String) { lock.lock(); fileBins[key] = bin; dirty = true; lock.unlock() }
         func place(forBin bin: String) -> String? { lock.lock(); defer { lock.unlock() }; return binPlaces[bin] }
-        func setPlace(_ place: String, forBin bin: String) { lock.lock(); binPlaces[bin] = place; dirty = true; lock.unlock() }
+        func label(forBin bin: String) -> String? { lock.lock(); defer { lock.unlock() }; return binLabels[bin] }
+        func setPlace(_ place: String, label: String, forBin bin: String) {
+            lock.lock(); binPlaces[bin] = place; binLabels[bin] = label; dirty = true; lock.unlock()
+        }
+        /// Bins some file uses that have no label yet (bins named before labels existed count too).
         func unnamedBins() -> [String] {
             lock.lock(); defer { lock.unlock() }
-            return Array(Set(fileBins.values.filter { !$0.isEmpty }).subtracting(binPlaces.keys))
+            return Array(Set(fileBins.values.filter { !$0.isEmpty }).subtracting(binLabels.keys))
         }
 
         func flush() {
             lock.lock()
             guard dirty else { lock.unlock(); return }
-            let snapshot = PlaceIndex(fileBins: fileBins, binPlaces: binPlaces); dirty = false
+            let snapshot = PlaceIndex(version: 2, fileBins: fileBins, binPlaces: binPlaces, binLabels: binLabels)
+            dirty = false
             lock.unlock()
             if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: fileURL, options: .atomic) }
         }
@@ -334,47 +366,107 @@ enum MetadataLoader {
         return place
     }
 
-    /// Reads (and caches) the photo's GPS bin — ImageIO only, no geocoding.
+    /// The filter label for a bin ("Hauppauge, NY"), cache-only: nil until the bin has been named,
+    /// "" when the geocoder had no name for that spot.
+    nonisolated static func placeLabel(forBin bin: String) -> String? { placeStore.label(forBin: bin) }
+
+    /// Reads (and caches) the file's GPS bin — ImageIO for photos, the QuickTime location tag for
+    /// videos; no geocoding. Time-boxed like capture dates; a timeout isn't cached, so a file that
+    /// was merely slow is read again next time rather than recorded as "no GPS".
     static func gpsBin(for entry: Entry) async -> String {
         let key = storeKey(for: entry)
         if let known = placeStore.binIfKnown(key) { return known }
-        guard entry.kind == .image else { placeStore.setBin(key, ""); return "" }
-        let bin = await Task.detached(priority: .utility) { () -> String in
-            guard let src = CGImageSourceCreateWithURL(entry.url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
-                  let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
-                  let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any],
-                  let latRaw = (gps[kCGImagePropertyGPSLatitude] as? NSNumber)?.doubleValue,
-                  let lngRaw = (gps[kCGImagePropertyGPSLongitude] as? NSNumber)?.doubleValue else { return "" }
-            var lat = latRaw, lng = lngRaw
-            if (gps[kCGImagePropertyGPSLatitudeRef] as? String)?.uppercased() == "S" { lat = -lat }
-            if (gps[kCGImagePropertyGPSLongitudeRef] as? String)?.uppercased() == "W" { lng = -lng }
-            guard lat.isFinite, lng.isFinite, abs(lat) <= 90, abs(lng) <= 180, !(lat == 0 && lng == 0) else { return "" }
-            return String(format: "%.2f|%.2f", lat, lng)
-        }.value
+        let bin: String?
+        switch entry.kind {
+        case .image:
+            bin = await withTimeout(10) {
+                await Task.detached(priority: .utility) { () -> String in
+                    guard let src = CGImageSourceCreateWithURL(entry.url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+                          let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+                          let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any],
+                          let latRaw = (gps[kCGImagePropertyGPSLatitude] as? NSNumber)?.doubleValue,
+                          let lngRaw = (gps[kCGImagePropertyGPSLongitude] as? NSNumber)?.doubleValue else { return "" }
+                    var lat = latRaw, lng = lngRaw
+                    if (gps[kCGImagePropertyGPSLatitudeRef] as? String)?.uppercased() == "S" { lat = -lat }
+                    if (gps[kCGImagePropertyGPSLongitudeRef] as? String)?.uppercased() == "W" { lng = -lng }
+                    return binString(lat, lng)
+                }.value
+            }
+        case .video:
+            bin = await withTimeout(10) {
+                await Task.detached(priority: .utility) { () -> String in
+                    let asset = AVURLAsset(url: entry.url)
+                    guard let qt = try? await asset.loadMetadata(for: .quickTimeMetadata) else { return "" }
+                    for item in qt where (item.key as? String) == "com.apple.quicktime.location.ISO6709" {
+                        if let s = try? await item.load(.stringValue), let c = parseISO6709(s) {
+                            return binString(c.latitude, c.longitude)
+                        }
+                    }
+                    return ""
+                }.value
+            }
+        default:
+            bin = ""
+        }
+        guard let bin else { return "" }               // timed out: not recorded
         placeStore.setBin(key, bin)
         return bin
     }
 
-    /// Names every not-yet-geocoded bin, serially (CLGeocoder is rate-limited),
-    /// capped per run — re-running the index continues where it stopped. Returns
-    /// how many bins were attempted.
+    private nonisolated static func binString(_ lat: Double, _ lng: Double) -> String {
+        guard lat.isFinite, lng.isFinite, abs(lat) <= 90, abs(lng) <= 180, !(lat == 0 && lng == 0) else { return "" }
+        return String(format: "%.2f|%.2f", lat, lng)
+    }
+
+    /// Names every bin on the drive that has no label yet, serially (CLGeocoder is rate-limited),
+    /// capped per run — re-running the index continues where it stopped. Returns how many bins
+    /// were attempted.
     static func geocodeUnnamedBins(limit: Int = 200,
                                    progress: @escaping @Sendable (Int, Int) -> Void) async -> Int {
-        let bins = Array(placeStore.unnamedBins().prefix(limit))
+        await geocodeBins(Array(placeStore.unnamedBins().prefix(limit)), progress: progress)
+    }
+
+    /// Names the given bins, one every 1.2 s so a run never trips the geocoder's limit. A bin the
+    /// geocoder errors on (offline, throttled) is left unnamed and comes round again next time.
+    static func geocodeBins(_ bins: [String], progress: @escaping @Sendable (Int, Int) -> Void) async -> Int {
         for (i, bin) in bins.enumerated() {
             let parts = bin.split(separator: "|")
             if parts.count == 2, let lat = Double(parts[0]), let lng = Double(parts[1]) {
-                let place = await placeName(for: CLLocationCoordinate2D(latitude: lat, longitude: lng)) ?? ""
-                placeStore.setPlace(place.lowercased(), forBin: bin)
+                let c = CLLocationCoordinate2D(latitude: lat, longitude: lng)
+                if let result = await withTimeout(4, { await reverseNames(c) }), !result.failed {
+                    placeStore.setPlace(result.names?.search.lowercased() ?? "", label: result.names?.label ?? "",
+                                        forBin: bin)
+                }
             } else {
-                placeStore.setPlace("", forBin: bin)
+                placeStore.setPlace("", label: "", forBin: bin)
             }
             progress(i + 1, bins.count)
             if i % 20 == 19 { placeStore.flush() }               // survive an early exit
-            try? await Task.sleep(nanoseconds: 1_200_000_000)    // stay under the geocoder's limit
+            if i < bins.count - 1 { try? await Task.sleep(nanoseconds: 1_200_000_000) }   // stay under the limit
         }
         placeStore.flush()
         return bins.count
+    }
+
+    /// "City, ST" in the US ("Hauppauge, NY"), "City, UK", otherwise "City, Country" — the Location
+    /// filter's label. Falls back through county / region / country when there's no town.
+    nonisolated static func shortLabel(_ p: CLPlacemark) -> String {
+        let city = p.locality ?? p.subAdministrativeArea ?? p.administrativeArea ?? p.country ?? ""
+        let region: String
+        switch p.isoCountryCode {
+        case "US": region = p.administrativeArea ?? "USA"
+        case "GB": region = "UK"
+        case "AE": region = "UAE"
+        default:   region = p.country ?? ""
+        }
+        if city.isEmpty { return region }
+        if region.isEmpty || region == city { return city }
+        return "\(city), \(region)"
+    }
+
+    /// Everything the placemark names, for search matching ("hauppauge, ny, united states").
+    nonisolated static func searchText(_ p: CLPlacemark) -> String {
+        [p.locality, p.administrativeArea, p.country].compactMap { $0 }.joined(separator: ", ")
     }
 
     /// Recognizes (and caches) the text in a photo. Used by the indexing pass; runs
@@ -938,15 +1030,27 @@ enum MetadataLoader {
     // MARK: - Helpers
 
     private nonisolated static func reverseGeocode(_ c: CLLocationCoordinate2D) async -> String? {
+        await reverseNames(c).names?.search
+    }
+
+    /// The names of a coordinate — search text and the filter label — as plain strings (the
+    /// placemark itself never crosses a task boundary). `failed` tells a geocoder error (offline,
+    /// throttled — worth retrying later) from a spot the geocoder simply has no name for.
+    private nonisolated static func reverseNames(_ c: CLLocationCoordinate2D) async
+        -> (names: (search: String, label: String)?, failed: Bool) {
         // Reverse-geocoding (or building a CLLocation) with an invalid coordinate
         // can blow up, so bail out on anything out of range / NaN.
         guard CLLocationCoordinate2DIsValid(c),
               c.latitude.isFinite, c.longitude.isFinite,
-              !(c.latitude == 0 && c.longitude == 0) else { return nil }
-        let placemarks = try? await CLGeocoder().reverseGeocodeLocation(
-            CLLocation(latitude: c.latitude, longitude: c.longitude))
-        guard let p = placemarks?.first else { return nil }
-        return [p.locality, p.administrativeArea, p.country].compactMap { $0 }.joined(separator: ", ")
+              !(c.latitude == 0 && c.longitude == 0) else { return (nil, false) }
+        do {
+            let placemarks = try await CLGeocoder().reverseGeocodeLocation(
+                CLLocation(latitude: c.latitude, longitude: c.longitude))
+            guard let p = placemarks.first else { return (nil, false) }
+            return ((search: searchText(p), label: shortLabel(p)), false)
+        } catch {
+            return (nil, true)
+        }
     }
 
     private nonisolated static func parseExifDate(_ s: String) -> Date? {

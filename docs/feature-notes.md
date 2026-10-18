@@ -842,6 +842,30 @@ action, the "filters active" checks, and the empty-state ("No matches for this f
 
 ---
 
+## 6b. Location filter — `FolderView.swift`, `MetadataLoader.swift` (place index), `Library.placeLabels`
+
+A "Location" chip next to Year lists every place the folder's photos and videos were taken, with
+counts ("Hauppauge, NY (53)", "Limerick, Ireland (50)", "London, UK (40)"), most first, plus "No
+Location (n)". It rides on the **place index** search already used: each file's GPS (EXIF for
+photos, the QuickTime ISO-6709 tag for videos — v2 of the index; v1 never read videos, so loading
+it drops their "no GPS" verdicts) reduces to a ~1 km bin, cached on disk by `path|mtime|size`, and
+each *bin* is reverse-geocoded once. The index now stores a **label** per bin alongside the
+lowercased search text: `shortLabel` gives "City, ST" in the US (`administrativeArea` is the
+abbreviation), "City, UK" for GB, "City, UAE", else "City, Country", falling back through county /
+region / country when there's no town. Bins named before labels existed get re-geocoded once for
+their label; a geocoder *error* (offline, throttled) stores nothing so the bin is retried, while a
+spot the geocoder has no name for stores "" ("Unnamed place").
+
+Loading is lazy — opening the menu or an active filter runs `Library.placeLabels`: bounded GPS
+reads (12 concurrent, time-boxed, a timeout isn't cached), then the distinct unlabelled bins are
+geocoded serially at 1.2 s each (`geocodeBins`), at most 60 per load, so a never-indexed travelled
+folder shows what it can and names the rest next time; the menu shows "Reading locations… n of m" /
+"Naming places… d of t" meanwhile. Same 8000-file ceiling as the capture-date pass. The filter
+keeps subfolders visible (naming every place under every subfolder would geocode the whole
+subtree); "Index Locations" (the search pass) now covers videos too.
+
+---
+
 ## 6a. WebM playback — `WebMPlayer.swift`
 
 AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,
