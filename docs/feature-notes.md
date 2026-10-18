@@ -51,9 +51,11 @@ is `nonisolated` and off the main actor.
     prompt that reused cached tunes forgets them. Reference tunes are titled
     `AIExtend.referenceTitlePrefix` ("Photo Browser reference · …") and filtered out of
     `Library.loadAITunes`, so they never show in the tune pickers.
-  - **Reference picker UI** (`AIGenerators.swift`): `ReferenceImagesPicker` (grid of the
-    current folder's photos, numbered in pick order, capped at the model's limit; the Edit flow
-    excludes its source photo), `ReferenceImagesStrip` (chosen thumbnails with ✕) and
+  - **Reference picker UI** (`AIGenerators.swift`): `ReferenceImagesPicker` (a mini folder
+    browser: opens in the folder the sheet came from, lists subfolders above the photo grid, an
+    Up bar climbs to the drive's top, so references come from **any folder on the drive**; photos
+    numbered in pick order across folders, capped at the model's limit; the Edit flow excludes its
+    source photo), `ReferenceImagesStrip` (chosen thumbnails with ✕) and
     `ReferenceThumb`. Both Create and Edit show a "References" section under Model & Tunes;
     switching to a model with a smaller limit keeps the first N. `RunSettings.referencePaths`
     remembers them (missing files dropped on restore). `Library.encodeReferences` JPEG-encodes

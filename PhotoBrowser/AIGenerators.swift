@@ -84,46 +84,93 @@ struct TuneMultiSelectView: View {
     }
 }
 
-/// Picks the extra **reference images** for a generation from the photos in the current folder,
-/// in selection order (the number badge), up to the model's limit (`AIModel.maxReferenceImages`:
-/// 14 for Seedream 4.5 / 5.0 Lite / Nano Banana 2, 10 for Seedream 5.0 Pro). `exclude` is the
-/// Edit flow's source photo, which is already the input image.
+/// Picks the extra **reference images** for a generation — from any folder on the drive, in
+/// selection order (the number badge), up to the model's limit (`AIModel.maxReferenceImages`:
+/// 14 for Seedream 4.5 / 5.0 Lite / Nano Banana 2, 10 for Seedream 5.0 Pro). It opens in `folder`
+/// (where the sheet was opened from) and browses like a mini folder view: subfolders above the
+/// photos, Up to climb towards the drive's top. Picks survive moving between folders. `exclude` is
+/// the Edit flow's source photo, which is already the input image.
 struct ReferenceImagesPicker: View {
     @Environment(Library.self) private var library
     let folder: URL
     var exclude: URL? = nil
     let limit: Int
     @Binding var selected: [URL]
+    @State private var current: URL?
+    @State private var subfolders: [Entry] = []
     @State private var candidates: [Entry] = []
     @State private var loading = true
 
     private let columns = [GridItem(.adaptive(minimum: 92, maximum: 92), spacing: 6)]
 
+    private var here: URL { current ?? folder }
+    private var atTop: Bool {
+        guard let root = library.rootURL else { return true }
+        return here.standardizedFileURL.path == root.standardizedFileURL.path
+    }
+
     var body: some View {
         ScrollView {
             if loading {
                 ProgressView().padding(.top, 40)
-            } else if candidates.isEmpty {
-                ContentUnavailableView("No Photos Here", systemImage: "photo",
-                                       description: Text("Reference images come from the folder you opened this from."))
             } else {
-                LazyVGrid(columns: columns, spacing: 6) {
-                    ForEach(candidates) { e in tile(e) }
+                if !subfolders.isEmpty {
+                    VStack(spacing: 0) {
+                        ForEach(subfolders) { f in
+                            Button { current = f.url } label: {
+                                HStack {
+                                    Label(f.name, systemImage: "folder").foregroundStyle(.primary)
+                                    Spacer()
+                                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal, 12).padding(.vertical, 9)
+                            }
+                            Divider().padding(.leading, 12)
+                        }
+                    }
                 }
-                .padding(8)
-                Text("Tap to add in the order the model should weigh them. Up to \(limit) for this model.")
-                    .font(.caption).foregroundStyle(.secondary).padding()
+                if candidates.isEmpty {
+                    ContentUnavailableView("No Photos Here", systemImage: "photo",
+                                           description: Text(subfolders.isEmpty
+                                                             ? "Go Up to pick from another folder."
+                                                             : "Open a subfolder, or go Up to pick from elsewhere."))
+                } else {
+                    LazyVGrid(columns: columns, spacing: 6) {
+                        ForEach(candidates) { e in tile(e) }
+                    }
+                    .padding(8)
+                    Text("Tap to add in the order the model should weigh them. Up to \(limit) for this model — from any folder.")
+                        .font(.caption).foregroundStyle(.secondary).padding()
+                }
             }
         }
         .navigationTitle("References — \(selected.count) of \(limit)")
         .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            // Where we are, with the way up: the picker browses the whole drive, not just one folder.
+            HStack(spacing: 10) {
+                Button { current = here.deletingLastPathComponent() } label: {
+                    Label("Up", systemImage: "chevron.up")
+                }
+                .disabled(atTop)
+                Label(atTop ? (library.rootName.isEmpty ? "Drive" : library.rootName) : here.lastPathComponent, systemImage: "folder")
+                    .lineLimit(1).truncationMode(.middle)
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(.bar)
+        }
         .toolbar {
             if !selected.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) { Button("Clear") { selected.removeAll() } }
             }
         }
-        .task(id: folder) {
-            let all = await library.listing(of: folder, sort: .nameAsc)
+        .task(id: here) {
+            loading = true
+            let all = await library.listing(of: here, sort: .nameAsc)
+            if Task.isCancelled { return }
+            subfolders = all.filter { $0.isFolder && !library.isUnderHiddenFolder($0.url.path) }
             candidates = all.filter { $0.kind == .image && $0.url != exclude }
             loading = false
         }

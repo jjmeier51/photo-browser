@@ -150,7 +150,7 @@ struct AIEditView: View {
         } footer: {
             Text(model.maxReferenceImages == 0
                  ? "Flux takes no reference images here — pick a Seedream or Nano Banana model to use them."
-                 : "Besides the photo you're editing, up to \(model.maxReferenceImages) more from “\(folder.lastPathComponent)” for \(model.rawValue) to draw on — a face to keep, an outfit, a product, a style. Refer to them in the prompt (“the jacket from the reference”); they're sent in the order you picked them.")
+                 : "Besides the photo you're editing, up to \(model.maxReferenceImages) more from any folder on the drive (the picker starts in “\(folder.lastPathComponent)”) for \(model.rawValue) to draw on — a face to keep, an outfit, a product, a style. Refer to them in the prompt (“the jacket from the reference”); they're sent in the order you picked them.")
         }
     }
 
