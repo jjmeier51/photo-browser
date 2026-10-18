@@ -11,6 +11,9 @@ import SwiftUI
 /// * **Metadata pointing at missing items** — entries whose file or folder is gone, by category,
 ///   with **Re-link by Filename** (a unique same-name match elsewhere on the drive re-keys the
 ///   entry through `Library.itemsMoved`, the same path every in-app move uses).
+/// * **Reconnect Profile Folders** — Instagram / TikTok download folders that lost their profile
+///   record get it back, from the backups first and else rebuilt from the files on the drive
+///   (`Library.reconnectProfileFolders`, see `ProfileReconnect.swift`).
 /// * **Rebuild Folder** for an unreadable folder — copy, verify, swap in place (`DriveRepair`),
 ///   so the path never changes and nothing attached to it is lost; the original is parked as
 ///   `<name>.damaged` for the user to delete. A metadata backup is taken first, automatically.
@@ -263,10 +266,14 @@ struct DriveHealthView: View {
                 }
                 .disabled(working || scanning)
             }
+            Button { Task { await reconnectProfiles() } } label: {
+                Label("Reconnect Profile Folders", systemImage: "person.crop.circle.badge.checkmark")
+            }
+            .disabled(working)
         } header: {
             Text("Metadata safety")
         } footer: {
-            Text("Everything the app attaches to your files — Favorites, To AI, labels, captions, folder covers, custom thumbnails, birthdays, hidden items, linked Instagram / Facebook / TikTok / VSCO / OF profiles, highlights, People, AI provenance — is saved by each item's place on the drive into a hidden “.Photo Browser Metadata” folder on the drive and into the app (the last three are kept). Back up before fixing the drive on the Mac; afterwards Restore merges back anything that went missing. Restoring never overwrites what's already set.")
+            Text("Everything the app attaches to your files — Favorites, To AI, labels, captions, folder covers, custom thumbnails, birthdays, hidden items, linked Instagram / Facebook / TikTok / VSCO / OF profiles, highlights, People, AI provenance — is saved by each item's place on the drive into a hidden “.Photo Browser Metadata” folder on the drive and into the app (the last three are kept). Back up before fixing the drive on the Mac; afterwards Restore merges back anything that went missing. Restoring never overwrites what's already set.\n\nReconnect Profile Folders is for Instagram and TikTok folders that are still full of their downloads but have forgotten which profile they belong to (no bubble, no “Get New”). It puts the link back from the backups where it can, and otherwise rebuilds it from the files in the folder; nothing on the drive is changed.")
         }
     }
 
@@ -388,6 +395,15 @@ struct DriveHealthView: View {
         } else {
             message = "That backup couldn't be read."
         }
+    }
+
+    /// Re-attaches lost Instagram / TikTok profile records (see `ProfileReconnect.swift`).
+    private func reconnectProfiles() async {
+        working = true
+        let report = await library.reconnectProfileFolders()
+        working = false
+        if report.total > 0, !scanning { computeOrphans() }
+        message = report.summary
     }
 
     private func refreshBackups() async {

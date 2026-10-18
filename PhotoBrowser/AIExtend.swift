@@ -49,18 +49,22 @@ enum AIExtend {
         case seedream5Pro = "Seedream 5.0 Pro"
         case seedream5Lite = "Seedream 5.0 Lite"
         case seedream45 = "Seedream 4.5"
+        case nanoBanana21 = "Nano Banana 2.1"
         case nanoBanana2 = "Nano Banana 2"
         case flux = "Flux"           // the LoRA-composable base — pick it to run one of your own tunes on top
         var id: String { rawValue }
         /// Known Astria gallery tune ids (override in Settings). 5.0 Lite's id comes from its public
         /// gallery page (astria.ai/gallery/tunes/4160332); 4.5's is the id this app shipped with before
-        /// the model was dropped from the picker.
+        /// the model was dropped from the picker. Nano Banana 2.1 (Oct 2026): Astria upgraded the
+        /// gallery tune this app had been using for Nano Banana 2 (4180298) to 2.1 in place, and the
+        /// "Nano Banana 2.0" card moved to its own id (5850983) — so the old id now means 2.1.
         var fallbackTune: Int {
             switch self {
             case .seedream5Pro:  return 5236038
             case .seedream5Lite: return 4160332
             case .seedream45:    return 3691308
-            case .nanoBanana2:   return 4180298
+            case .nanoBanana21:  return 4180298
+            case .nanoBanana2:   return 5850983
             case .flux:          return AIExtend.defaultFluxTune
             }
         }
@@ -69,19 +73,24 @@ enum AIExtend {
         var composesLoRA: Bool { self == .flux }
         var maxLongSide: CGFloat { 2048 }
         /// How many extra reference images the model accepts alongside the prompt (and, for Edit,
-        /// the source photo): Seedream 4.5 / 5.0 Lite and Nano Banana 2 take up to 14, Seedream 5.0
-        /// Pro up to 10. Flux takes none here (its img2img path is the single input image).
+        /// the source photo): Seedream 4.5 / 5.0 Lite and Nano Banana 2 / 2.1 take up to 14 (2.1's
+        /// limit is from Astria's own launch note), Seedream 5.0 Pro up to 10. Flux takes none here
+        /// (its img2img path is the single input image).
         var maxReferenceImages: Int {
             switch self {
-            case .seedream5Pro:                             return 10
-            case .seedream5Lite, .seedream45, .nanoBanana2: return 14
-            case .flux:                                     return 0
+            case .seedream5Pro:                                            return 10
+            case .seedream5Lite, .seedream45, .nanoBanana21, .nanoBanana2: return 14
+            case .flux:                                                    return 0
             }
         }
+        /// The output tier a model is pinned to, or nil for the user's choice. Seedream 5.0 Pro tops out
+        /// at 2K on Astria, so it always generates at 2K whatever the picker held (the picker is
+        /// disabled and shows 2K while it's selected).
+        var fixedResolution: OutputResolution? { self == .seedream5Pro ? .k2 : nil }
         fileprivate var tuneKey: String { "photoBrowser.astriaTune.\(rawValue)" }
         /// The partner models offered as the built-in default / Settings overrides (Flux is offered
         /// only in the Edit/Create pickers, and shares the separate Flux tune setting).
-        static var partnerModels: [AIModel] { [.seedream5Pro, .seedream5Lite, .seedream45, .nanoBanana2] }
+        static var partnerModels: [AIModel] { [.seedream5Pro, .seedream5Lite, .seedream45, .nanoBanana21, .nanoBanana2] }
     }
 
     /// One reference photo for Edit/Create: its upload JPEG, a stable identity (`path|mtime|size`)
@@ -195,7 +204,14 @@ enum AIExtend {
 
     static func tuneID(for model: AIModel) -> Int {
         if model == .flux { return fluxTune }     // Flux shares the single editable Flux tune setting
-        let v = UserDefaults.standard.integer(forKey: model.tuneKey)
+        let d = UserDefaults.standard
+        // Astria turned gallery tune 4180298 into Nano Banana 2.1 in place (Oct 2026). A "Nano Banana 2"
+        // override that still names it would silently run 2.1, so it is cleared once; the model then
+        // falls back to the 2.0 card's own id. Any other override is the user's and stays.
+        if model == .nanoBanana2, d.integer(forKey: model.tuneKey) == AIModel.nanoBanana21.fallbackTune {
+            d.removeObject(forKey: model.tuneKey)
+        }
+        let v = d.integer(forKey: model.tuneKey)
         return v > 0 ? v : model.fallbackTune
     }
 

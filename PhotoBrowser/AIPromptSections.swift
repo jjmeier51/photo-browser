@@ -26,6 +26,43 @@ struct PromptingReminderSection: View {
     }
 }
 
+/// "Surprise Me": a mood picker and two buttons. **Surprise Me** fills the prompt field with a
+/// random photo-shoot prompt (`SurprisePrompts`) and sends it straight away with whatever
+/// references, size, aspect, model and tunes are set on the screen; **Fill In a Random Prompt**
+/// only fills the field, to read or tweak before generating. The mood is remembered.
+struct SurpriseMeSection: View {
+    @Binding var mood: SurprisePrompts.Mood
+    let onSurprise: () -> Void
+    let onFill: () -> Void
+    var note: String? = nil          // why the drive's prompt file isn't in use, if it isn't
+
+    private var footer: String {
+        var s = "A random photo-shoot prompt of a woman posing — outfit, setting, pose, light and camera drawn from hundreds of options and written for the chosen model. Alluring keeps her dressed and editorial. Sexy follows what the model allows: with Nano Banana 2 / 2.1 (which refuses underwear and see-through) it's tight workout sets, bodycon, swimwear, tight jeans, wedding dresses, sundresses and pyjamas; with Seedream 5.0 Pro it also draws bra-and-brief sets, thongs, slips, lace and sheer layers. Never nudity. Surprise Me sends it at once with the references, size and shape set below; Fill In only puts it in the box."
+        s += "\n\nThe lists live in “\(SurprisePrompts.fileName)” at the top of the drive. The app writes it the first time with every built-in prompt; whatever you add, change or delete there is used from then on (a list left empty falls back to the built-in one)."
+        if let note { s += "\n\n" + note }
+        return s
+    }
+
+    var body: some View {
+        Section {
+            Picker("Mood", selection: $mood) {
+                ForEach(SurprisePrompts.Mood.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            Button(action: onSurprise) {
+                Label("Surprise Me", systemImage: "dice")
+            }
+            Button(action: onFill) {
+                Label("Fill In a Random Prompt", systemImage: "text.badge.plus")
+            }
+        } header: {
+            Text("Surprise Me")
+        } footer: {
+            Text(footer)
+        }
+    }
+}
+
 /// The compact Use / Copy pair under a prompt: two small capsules, centred. Explicit plain-style
 /// buttons with their own padding, so a Form row can't inflate one of them into a tall, off-centre
 /// block the way the stock bordered styles did.

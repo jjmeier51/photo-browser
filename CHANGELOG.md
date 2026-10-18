@@ -2,6 +2,45 @@
 
 Major changes to Photo Browser. Dates are when the work landed on `main`.
 
+## 2026-10-16
+
+- **Seedream 5.0 Pro always generates at 2K.** That's the most Astria supports for it, so Edit and
+  Create with AI pin the Resolution picker to 2K while it's selected (with a note) and send 2K
+  regardless of what the picker last held. Other models keep the 1K / 2K / 4K choice.
+- **Surprise Me prompts now live on the drive.** The first Surprise Me tap writes
+  `Surprise Prompts.json` at the top of the drive with every built-in prompt; from then on that file
+  is the bank, so you can add, change or delete prompts in any text editor without a code change.
+  Same shape as the built-in lists (subjects, looks, settings, poses, lights, cameras, finishes,
+  hair, signatures); a list left empty falls back to the built-in one, and a file that can't be read
+  is reported under the section while the built-in prompts carry on. Hidden from the grid.
+- **Surprise Me in Edit / Create with AI.** A new section under the prompt box: pick a mood (Any,
+  Alluring, Sexy) and tap **Surprise Me** to send a random photo-shoot prompt of a woman posing —
+  outfit, setting, pose, light and camera drawn from banks of hundreds of options plus ~60
+  hand-written scenes, written in the wording Nano Banana 2 / 2.1 (one flowing paragraph) and
+  Seedream 5.0 Pro (subject-first labelled sentences) each answer best. Alluring keeps her dressed
+  and editorial; Sexy follows what the model allows — Nano Banana refuses underwear and
+  see-through, so there it's tight workout sets, bodycon, swimwear, tight jeans, wedding dresses,
+  sundresses and pyjamas, while Seedream also draws bra-and-brief sets, thongs, slips, lace and
+  sheer layers. Never nudity. The references,
+  size, shape, count, model and tunes you've set all apply exactly as for a typed prompt; with
+  references the prompt points at the woman in them, and in Edit it keeps the woman in the photo
+  and restyles everything around her. **Fill In a Random Prompt** only fills the box so you can read
+  or tweak it first. (`SurprisePrompts.swift`, `SurpriseMeSection`)
+- **Reconnect Profile Folders (Drive Health ▸ Metadata safety).** Instagram and TikTok download
+  folders that had "forgotten" their profile — still full of posts and videos, but with no bubble,
+  no "@handle" subtitle and no "Get New" — can be re-linked in one tap. The records went missing
+  with the rest of the pruned metadata while those folders were unreadable (their lists sat past
+  the 2.2 TB line). The button puts the link back from the metadata backups where a backup has it
+  (full fidelity: downloaded ids, counts, highlights, likes, covers), and otherwise rebuilds it from
+  the files in the folder (ids from the filenames, highlights from the subfolders, the handle from
+  the folder name / posted-by records); nothing on the drive is changed. (`ProfileReconnect.swift`)
+- **Nano Banana 2.1 in Edit / Create with AI and as a tune base.** Astria now serves Google's Nano
+  Banana 2.1 (1K–4K, up to 14 reference images) — on the very gallery tune this app had been
+  calling "Nano Banana 2" (4180298), which Astria upgraded in place. The picker now offers
+  **Nano Banana 2.1** (4180298) and **Nano Banana 2** (moved to the 2.0 card's own id, 5850983),
+  both with the usual Settings overrides, and either can be the base of a FaceID tune. A saved
+  "Nano Banana 2" tune override that still named 4180298 is cleared once so it doesn't quietly run 2.1.
+
 ## 2026-07-17
 
 - **OF: fixed the run stalling before it started (no downloads, no completion, empty log).** The

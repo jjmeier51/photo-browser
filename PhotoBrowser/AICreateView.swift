@@ -22,6 +22,8 @@ struct AICreateView: View {
     @State private var resolution: AIExtend.OutputResolution
     @State private var aspect: AIExtend.OutputAspect
     @State private var showSettings = false
+    @AppStorage("photoBrowser.surpriseMood") private var surpriseMood: SurprisePrompts.Mood = .any
+    @State private var surpriseNote: String?       // the drive's prompt file couldn't be used: why
 
     private let counts = [1, 2, 3, 4, 8]
     // Create has no source photo, so "Original" doesn't apply — offer the fixed shapes only.
@@ -58,6 +60,8 @@ struct AICreateView: View {
                 } footer: {
                     if negativeEnabled { Text(NegativePromptField.footer) }
                 }
+                SurpriseMeSection(mood: $surpriseMood, onSurprise: { surprise(send: true) }, onFill: { surprise(send: false) },
+                                  note: surpriseNote)
                 PromptingReminderSection()
                 ReusablePromptsSection(prompt: $prompt)
                 if !library.aiPromptHistory.isEmpty { PromptHistorySection(prompt: $prompt) }
@@ -69,15 +73,22 @@ struct AICreateView: View {
                     Text(comboNote)
                 }
                 referenceSection
-                Section("Output") {
+                Section {
                     Picker("Resolution", selection: $resolution) {
                         ForEach(AIExtend.OutputResolution.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.segmented)
+                    .disabled(model.fixedResolution != nil)
                     Picker("Dimensions", selection: $aspect) {
                         ForEach(aspects) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.segmented)
+                } header: {
+                    Text("Output")
+                } footer: {
+                    if let fixed = model.fixedResolution {
+                        Text("\(model.rawValue) always generates at \(fixed.rawValue) — the most Astria supports for it.")
+                    }
                 }
                 Section {
                     Picker("Images to generate", selection: $count) {
@@ -98,8 +109,10 @@ struct AICreateView: View {
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
             // A model with a smaller reference limit keeps the first N picked.
+            .onAppear { if let fixed = model.fixedResolution { resolution = fixed } }
             .onChange(of: model) { _, m in
                 if referenceURLs.count > m.maxReferenceImages { referenceURLs = Array(referenceURLs.prefix(m.maxReferenceImages)) }
+                if let fixed = m.fixedResolution { resolution = fixed }
             }
             .task {
                 tunes = await library.loadAITunes()
@@ -155,12 +168,26 @@ struct AICreateView: View {
         }
     }
 
+    /// A random photo-shoot prompt for the chosen model (and the picked references); sent at once
+    /// with the screen's current settings when `send`, else just placed in the field.
+    private func surprise(send: Bool) {
+        let mood = surpriseMood, m = model, refs = min(referenceURLs.count, m.maxReferenceImages), root = library.rootURL
+        Task {
+            // The drive's prompt file is read (or first written) off the main actor.
+            let loaded = await Task.detached(priority: .userInitiated) { SurprisePrompts.load(root: root) }.value
+            surpriseNote = loaded.note
+            prompt = SurprisePrompts.random(mood: mood, flow: .create, model: m, references: refs, bank: loaded.bank)
+            if send { generate() }
+        }
+    }
+
     private func generate() {
         guard AIExtend.isConfigured else { showSettings = true; return }
+        let res = model.fixedResolution ?? resolution      // Seedream 5.0 Pro is always 2K
         // Remember these settings so the sheet reopens pre-filled the same way after review.
         AIExtend.saveRunSettings(AIExtend.RunSettings(prompt: prompt, model: model.rawValue,
                                                       tuneIDs: selectedTunes.map(\.id),
-                                                      resolution: resolution.rawValue,
+                                                      resolution: res.rawValue,
                                                       aspect: aspect.rawValue, count: count,
                                                       negativeEnabled: negativeEnabled, negativePrompt: negativePrompt,
                                                       referencePaths: referenceURLs.map(\.path)),
@@ -170,7 +197,7 @@ struct AICreateView: View {
                               referenceURLs: Array(referenceURLs.prefix(model.maxReferenceImages)),
                               promptPrefix: gen.promptPrefix, count: count,
                               tune: gen.tuneID, modelLabel: gen.label, token: gen.token,
-                              supportsResolution: gen.supportsResolution, resolution: resolution, aspect: aspect)
+                              supportsResolution: gen.supportsResolution, resolution: res, aspect: aspect)
         dismiss()
     }
 }

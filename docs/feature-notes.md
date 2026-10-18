@@ -20,17 +20,24 @@ is `nonisolated` and off the main actor.
 
 `enum AIExtend` is the whole Astria client + config. Key pieces:
 
-- **`AIModel`** (`seedream5Pro`, `seedream5Lite`, `seedream45`, `nanoBanana2`, `flux`):
-  - `partnerModels` = the four closed gallery models. Used in Settings (default-model picker,
+- **`AIModel`** (`seedream5Pro`, `seedream5Lite`, `seedream45`, `nanoBanana21`, `nanoBanana2`, `flux`):
+  - `partnerModels` = the five closed gallery models. Used in Settings (default-model picker,
     tune-id overrides) which must **exclude Flux** (Flux has its own "Flux (extend)" tune field).
   - `composesLoRA` is true only for `.flux` — Flux is the only base that can run a user LoRA
     composed into the prompt via `<lora:id:weight>`.
   - `tuneID(for:)` maps a model to its Astria gallery tune id (editable in Settings; Flux
     shares the single editable Flux tune). Fallbacks: 5.0 Pro 5236038, **5.0 Lite 4160332**
     (from its public gallery URL), **4.5 3691308** (the id the app shipped with before 4.5 was
-    dropped — now back), Nano Banana 2 4180298. "Nano Banana Pro" stays removed.
-  - **`maxReferenceImages`**: 14 for Seedream 4.5 / 5.0 Lite / Nano Banana 2, 10 for Seedream
-    5.0 Pro, 0 for Flux. **How references actually work on Astria (verified against
+    dropped — now back), **Nano Banana 2.1 4180298, Nano Banana 2 5850983**. "Nano Banana Pro"
+    stays removed. (Oct 2026: Astria upgraded gallery tune 4180298 — until then this app's "Nano
+    Banana 2" — to **2.1 in place** and gave the "Nano Banana 2.0" card its own id, 5850983.
+    `tuneID(for:)` clears a stored "Nano Banana 2" override that still names 4180298, once, so it
+    doesn't silently run 2.1; 2.1 supports the 1K/2K/4K `resolution` tiers like the others.)
+  - **`maxReferenceImages`**: 14 for Seedream 4.5 / 5.0 Lite / Nano Banana 2 / 2.1 (2.1's limit per
+    Astria's launch banner), 10 for Seedream 5.0 Pro, 0 for Flux.
+  - **`fixedResolution`**: Seedream 5.0 Pro → `.k2` (2K is the most Astria supports for it), else
+    nil. Edit and Create pin the Resolution picker to it (disabled, with a footer) whenever that
+    model is selected and send it regardless of what the picker last held. **How references actually work on Astria (verified against
     docs.astria.ai and Astria's own CLI, astria-claude-skills `bin/astria --reference`):** image
     prompts take *no* raw reference images — `prompt[image_references][]` is video-only and image
     prompts fail with "video_first_frame, video_last_frame, audio_reference and image_references
@@ -115,7 +122,7 @@ is `nonisolated` and off the main actor.
 
 ### 1.5 Creating tunes: `CreateTuneView.swift`, `TuneBaseModel`, `startCreateTune`, `createTune`
 
-- **`TuneBaseModel`** (in `AIGenerators.swift`): `nanoBanana2, seedream5Pro, flux, sdxl, sd15`.
+- **`TuneBaseModel`** (in `AIGenerators.swift`): `nanoBanana21, nanoBanana2, seedream5Pro, seedream5Lite, seedream45, flux, sdxl, sd15`.
   - `branch`: `flux1`/`sdxl1`/`sd15`, or **nil** for partner models (branch inherited from the
     base gallery tune).
   - `baseTuneID`: Flux → `trainingBaseTune`; partner → `tuneID(for:)`; SDXL/SD1.5 → nil.
@@ -128,7 +135,7 @@ is `nonisolated` and off the main actor.
 
 ### 1.6 Critical conceptual point (documented for the user, must persist)
 
-- Partner models (Seedream 5.0 Pro, Nano Banana 2) are **closed** models. You **cannot** LoRA-
+- Partner models (Seedream 5.0 Pro, Nano Banana 2 / 2.1) are **closed** models. You **cannot** LoRA-
   train them; the only personalization is **FaceID**, which is embedding-based and uses only
   ~3 reference faces regardless of how many you upload. To train on *all* of many photos you
   must use a **Flux LoRA** (or SDXL/SD1.5). This is why `TuneBaseModel.note` and
@@ -323,6 +330,52 @@ The prompt-helper sections are shared views (one file) used by both `AICreateVie
   Favorites** filter at the top of the section shows only hearted prompts. Hearted prompts are
   **never evicted** by the 50-prompt cap (`recordAIPrompt` drops the oldest unhearted ones), a
   re-run under different casing keeps its heart, and "Remove from History" also unhearts.
+
+### 1.11b Surprise Me — `SurprisePrompts.swift`, `SurpriseMeSection`
+
+A section under the prompt box in both Edit and Create: a **mood** picker (Any / Alluring / Sexy,
+remembered in `photoBrowser.surpriseMood`) and two buttons. **Surprise Me** fills the prompt with
+`SurprisePrompts.random(mood:flow:model:references:)` and calls the screen's normal `generate()`
+at once — so the user's references, resolution, aspect, count, model and tunes all apply exactly
+as for a typed prompt (the FaceID reference mentions are prepended by `AIExtend` as usual).
+**Fill In a Random Prompt** only fills the field.
+- **Banks** (all a woman posing for a photo): ~30 subjects (used only for Create with no
+  references), ~160 looks tagged alluring / sexy **and by tier** — `clothed` (anything a model
+  will take: tight workout sets, bodycon, swimwear, tight jeans, wedding dresses, sundresses,
+  pyjamas, tailoring…) or `intimate` (bra-and-brief sets, thongs, slips, lace, sheer layers).
+  **`allowsIntimate(model)`** gates the intimate tier to the Seedream family (Flux too): Nano
+  Banana (Gemini) refuses underwear / see-through, so its sexy draws stay clothed. Glamour-shoot
+  wardrobe only — no nudity and no sexual acts (the app composes these with real people's
+  reference photos and FaceID tunes, which is why that line is fixed). ~70 settings, ~60 poses
+  (sexy poses only for the sexy mood; alluring poses for both), 30 lights, 20 cameras, 12
+  finishes, 12 hair notes, and ~60 hand-written **signature** scenes (`{subject}` placeholder, one
+  draw in four; tiered the same way). Composed combinations run into the millions; the signatures add shots a recipe
+  can't make.
+- **Per-model voice** (`voice(for:)`): Nano Banana 2 / 2.1 get one flowing paragraph — a described
+  moment with the light and camera in sentences (what Gemini-family image models answer best);
+  Seedream 5.0 Pro (and Lite / 4.5 / Flux) get subject-first labelled sentences
+  (`Subject / Outfit / Scene / Pose / Lighting / Camera / Style`) with explicit style words. Both
+  end with the realism tail (real skin texture, no beauty-filter smoothing, grain, no text or
+  watermark) matching `PromptingReminderSection`.
+- **Flow**: Create with references → "the woman from the reference image(s), her face and features
+  exactly as shown"; Create without → a random subject description; Edit → an edit lead-in that
+  keeps the woman's identity (face, features, hair colour, skin, body) and restyles everything else.
+- **The banks live on the drive — `Surprise Prompts.json` at the drive root** (`SurprisePrompts.fileName`,
+  `load(root:)`). The first Surprise Me tap with a drive open writes the file with the whole built-in
+  bank (`Bank.builtIn`, pretty-printed, through `DriveWriter.writeDataSync`); from then on the file is
+  the bank: edit, add or delete freely in any text editor. Shape = `Bank` (`subjects`, `looks`
+  `{heat,tier,text}`, `settings` `{text}`, `poses` `{heat,text}`, `lights`, `cameras`, `finishes`,
+  `hair`, `signatures` `{heat,tier,text}` with `{subject}`), decoded leniently (missing key → empty
+  list, missing `heat` → alluring, missing `tier` → clothed); a list left empty falls back to the
+  built-in list (`filled()`), and a mood/model combination the user's list can't serve (only intimate
+  looks on Nano Banana) draws that slot from the built-in list rather than failing. Unreadable or empty
+  file → built-in bank plus a note under the section explaining why (`Loaded.note`). Reads happen off
+  the main actor (`Task.detached` in the views' `surprise(send:)`) and are cached by the file's
+  size + mtime (`LoadCache`), so a tap re-reads only after an edit. The file is hidden from the grid
+  via `GalleryCategories.sidecarNames`. No drive open → built-in bank. A copy of the built-in bank
+  in the file's exact shape is kept at `prompts/surprise-prompts.json` (exported from the Swift
+  banks; regenerate it whenever the banks change) — a seed to edit and copy to the drive by hand.
+- Astria's moderation still applies to whatever is sent; a refused prompt surfaces like any other.
 
 ### 1.11a Negative Prompt
 
@@ -693,6 +746,24 @@ nothing, and a fix that doesn't needs help. Three layers now guarantee it:
    35 "folder covers pointing at missing items" (Oct 2026). `Library.forgetPurgedMetadata` now
    forgets the purged originals' entries (subtree for folders), unless something new has since
    taken the original path.
+5. **Reconnect Profile Folders — `Library.reconnectProfileFolders` (`ProfileReconnect.swift`).**
+   The Instagram / TikTok records (`instagramFolders` / `tiktokFolders`) are what give a download
+   folder its bubble, "@handle" subtitle, "Get New Posts / Videos" and the stories sweep; they are
+   pruned with everything else by Forget while their folders are unreadable (a list past the 2.2 TB
+   line reads as missing), and a partial restore can lose them too — the folders stay full, the app
+   just no longer knows whose they are. The button (Metadata safety) re-attaches them without
+   touching the drive: first from the backups, newest first (the drive's `.Photo Browser Metadata`
+   and the phone's snapshots), merging only a **profile slice** — `profileSlice(of:)` keeps the
+   records whose folder exists today and what belongs to those folders (highlights, posted-by,
+   likes, handle prefills, covers, bubble order) and hands it to the normal `restoreMetadata`
+   merge; then, for folders no backup knows, from the **files themselves** (`scanProfileFolders`: a
+   bounded coordinated walk, 8 levels / 60k folders, hidden folders skipped; TikTok = an `@handle`
+   folder with `<15–20 digit id>(.mp4|_n.jpg)` files; Instagram = posted-by entries, the handle
+   remembered on the parent, a highlight already marked inside, or a handle-shaped name over
+   shortcode / story-pk-named files). A rebuilt record carries the ids on disk (so "Get New" dedups
+   and backfills), `lastUpdated` = newest file date, blank user id / secUid (resolved by the next
+   run), subfolders re-marked as highlights, the handle prefilled on the parent. Known profile,
+   highlight, Facebook / OF / VSCO folders are never re-classified or entered.
 
 ### 4.2 Rebuild Folder in place — `DriveRepair.rebuildFolder`
 
