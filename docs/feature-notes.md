@@ -958,6 +958,12 @@ subtree (the "labels" task), honouring Type and the search box; the other modes 
 (`selectTag`), and Favorites / To AI / Edited clear it. Header subtitle "Tag: x"; empty state
 "Nothing tagged “x” here"; Clear resets it.
 
+**Bulk tagging:** in selection mode, More ▸ **Tags** has "Add Tag…" (an alert with a text field,
+presented deferred per constraint #4) that tags every selected item at once, plus the existing
+tags (`allTags`, first 30) as toggle rows — checked when every selected item carries one; tapping
+adds it to all, or removes it from all when they all have it. `Library.addTag(_:to:)` /
+`removeTag(_:from:)` take `[URL]` and save once per batch; folders can be tagged too.
+
 **Chip bar order (Oct 18):** Favorites, Type, Format, Sort, Year, To AI, Edited, Labels, then
 Age / Categories / Location / Tags / Clear (or "Show:" in a label mode). Sort moved from the
 toolbar into the bar — on a phone the toolbar overflowed it into "…". Type now applies in the

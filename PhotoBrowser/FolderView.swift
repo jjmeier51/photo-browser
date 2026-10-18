@@ -97,6 +97,8 @@ struct FolderView: View {
     @State private var showCaptionEditor = false
     @State private var captionDraft = ""
     @State private var showNewFolder = false
+    @State private var showBulkTag = false          // "Add Tag…" prompt for the selection
+    @State private var bulkTagDraft = ""
     @State private var newFolderName = ""
     @State private var showNewReviewsFolder = false   // "Create Reviews Folder" prompt
     @State private var newReviewsFolderName = ""
@@ -1117,6 +1119,15 @@ struct FolderView: View {
                 TextField("Name", text: $newFolderName)
                 Button("Create") { createFolder() }
                 Button("Cancel", role: .cancel) { newFolderName = "" }
+            }
+            .alert("Add Tag to \(selection.count) Item\(selection.count == 1 ? "" : "s")", isPresented: $showBulkTag) {
+                TextField("Tag", text: $bulkTagDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Add") { bulkAddTag(bulkTagDraft) }
+                Button("Cancel", role: .cancel) { bulkTagDraft = "" }
+            } message: {
+                Text("One tag at a time. Items that already have it are left as they are.")
             }
             .alert("Create Reviews Folder", isPresented: $showNewReviewsFolder) {
                 TextField("Name", text: $newReviewsFolderName)
@@ -2295,6 +2306,31 @@ struct FolderView: View {
         }
     }
 
+    /// Adds one tag to every selected item (the "Add Tag…" prompt); one save for the batch.
+    private func bulkAddTag(_ raw: String) {
+        let tag = Library.normalizedTag(raw)
+        bulkTagDraft = ""
+        guard !tag.isEmpty else { return }
+        let urls = selectedEntries().map(\.url)
+        let n = library.addTag(tag, to: urls)
+        resultMessage = n == 0 ? "Every selected item already has “\(tag)”."
+            : "Tagged \(n) item\(n == 1 ? "" : "s") “\(tag)”" + (n < urls.count ? " (\(urls.count - n) already had it)." : ".")
+    }
+
+    /// The Tags submenu's existing-tag rows: adds the tag to every selected item, or removes it from
+    /// all of them when they already all carry it.
+    private func bulkToggleTag(_ tag: String) {
+        let urls = selectedEntries().map(\.url)
+        guard !urls.isEmpty else { return }
+        if urls.allSatisfy({ library.hasTag(tag, $0) }) {
+            let n = library.removeTag(tag, from: urls)
+            resultMessage = "Removed “\(tag)” from \(n) item\(n == 1 ? "" : "s")."
+        } else {
+            let n = library.addTag(tag, to: urls)
+            resultMessage = "Tagged \(n) item\(n == 1 ? "" : "s") “\(tag)”."
+        }
+    }
+
     /// Tags under this folder and its subfolders, with counts (recomputed as `library.tags` changes).
     private var tagOptions: [Library.TagCount] { library.tagCounts(under: url) }
 
@@ -2726,6 +2762,23 @@ struct FolderView: View {
                         }
                     } label: { Label(customLabelMenuTitle, systemImage: "tag") }
                 }
+                Menu {
+                    Button {
+                        bulkTagDraft = ""
+                        // Defer so the Menu's dismissal doesn't swallow the alert (constraint #4).
+                        DispatchQueue.main.async { showBulkTag = true }
+                    } label: { Label("Add Tag…", systemImage: "plus") }
+                    if !library.allTags.isEmpty {
+                        Divider()
+                        // Existing tags: a check when every selected item has it; tap adds it to all,
+                        // or takes it off all when they all have it already.
+                        ForEach(library.allTags.prefix(30), id: \.self) { tag in
+                            Button { bulkToggleTag(tag) } label: {
+                                check(tag, !selection.isEmpty && selectedEntries().allSatisfy { library.hasTag(tag, $0.url) })
+                            }
+                        }
+                    }
+                } label: { Label("Tags", systemImage: "number") }
                 if !library.pureTransferMode {   // pixel editing — not offered in Pure File Transfer
                 Menu {
                     Button { bulkRotate(2) } label: { Label("Rotate 180°", systemImage: "arrow.clockwise") }

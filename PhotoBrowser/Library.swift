@@ -774,6 +774,44 @@ final class Library {
         labelsVersion += 1
     }
 
+    /// Adds a tag to many items at once (a selection), skipping ones that already carry it; one
+    /// save for the whole batch. Returns how many gained it.
+    @discardableResult
+    func addTag(_ raw: String, to urls: [URL]) -> Int {
+        let tag = Self.normalizedTag(raw)
+        guard !tag.isEmpty, !urls.isEmpty else { return 0 }
+        var added = 0
+        for url in urls {
+            var list = tags[url.path] ?? []
+            if list.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) { continue }
+            list.append(tag)
+            tags[url.path] = list
+            added += 1
+        }
+        if added > 0 { Self.saveBulk(tags, "tags"); labelsVersion += 1 }
+        return added
+    }
+
+    /// Removes a tag from many items at once; one save. Returns how many lost it.
+    @discardableResult
+    func removeTag(_ tag: String, from urls: [URL]) -> Int {
+        var removed = 0
+        for url in urls {
+            guard var list = tags[url.path] else { continue }
+            let before = list.count
+            list.removeAll { $0.caseInsensitiveCompare(tag) == .orderedSame }
+            guard list.count != before else { continue }
+            if list.isEmpty { tags.removeValue(forKey: url.path) } else { tags[url.path] = list }
+            removed += 1
+        }
+        if removed > 0 { Self.saveBulk(tags, "tags"); labelsVersion += 1 }
+        return removed
+    }
+
+    func hasTag(_ tag: String, _ url: URL) -> Bool {
+        tags[url.path]?.contains { $0.caseInsensitiveCompare(tag) == .orderedSame } ?? false
+    }
+
     /// Every tag under `folder` (its files and its subfolders'), most used first. Spellings that
     /// differ only in case count as one tag, shown as first written.
     func tagCounts(under folder: URL) -> [TagCount] {
