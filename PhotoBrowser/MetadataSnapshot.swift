@@ -298,23 +298,34 @@ extension Library {
         let snapshot = makeMetadataSnapshot(root: root)
         let covers = coverImagesDirectory, thumbs = itemThumbnailImagesDirectory, messages = textMessageArchivesDirectory
         return await Task.detached(priority: .userInitiated) { () -> (Int, URL?, URL?) in
+            // Photo locations ride along as places.json: months of rate-limited geocoding otherwise
+            // live only in the app container. Flushed first so the file holds the newest names.
+            MetadataLoader.flushPlaceStore()
+            let places = MetadataLoader.placeIndexForBackup()
             let containerDir = MetadataBackup.newContainerDirectory()
-            let ok1 = MetadataBackup.write(snapshot, covers: covers, thumbs: thumbs, messages: messages, to: containerDir)
+            let ok1 = MetadataBackup.write(snapshot, places: places, covers: covers, thumbs: thumbs, messages: messages, to: containerDir)
             MetadataBackup.pruneContainerBackups(keep: 3)
             var driveDir: URL?
             if toDrive {
                 let d = MetadataBackup.driveBackupDirectory(root: root)
-                if MetadataBackup.write(snapshot, covers: covers, thumbs: thumbs, messages: messages, to: d) { driveDir = d }
+                if MetadataBackup.write(snapshot, places: places, covers: covers, thumbs: thumbs, messages: messages, to: d) { driveDir = d }
             }
-            return (snapshot.entryCount, ok1 ? containerDir : nil, driveDir)
+            return (snapshot.entryCount + places.fileBins.count, ok1 ? containerDir : nil, driveDir)
         }.value
     }
 
-    /// Restores (merges) the backup folder at `dir` under the current root. nil when it can't be read.
+    /// Restores (merges) the backup folder at `dir` under the current root — the metadata, and the
+    /// photo locations it carries (places.json) into the place index. nil when it can't be read.
     func restoreMetadata(fromBackupAt dir: URL) async -> Int? {
         guard let root = rootURL else { return nil }
-        guard let snapshot = await Task.detached(priority: .userInitiated, operation: { MetadataBackup.read(from: dir) }).value else { return nil }
-        return restoreMetadata(snapshot, root: root, imagesAt: dir)
+        let (snapshot, placesAdded) = await Task.detached(priority: .userInitiated) { () -> (MetadataSnapshot?, Int) in
+            let s = MetadataBackup.read(from: dir)
+            let n = MetadataBackup.readPlaces(from: dir).map { MetadataLoader.restorePlaceIndex($0) } ?? 0
+            return (s, n)
+        }.value
+        guard let snapshot else { return nil }
+        if placesAdded > 0 { contentDidChange() }          // folders re-read their Location menus
+        return restoreMetadata(snapshot, root: root, imagesAt: dir) + placesAdded
     }
 }
 
@@ -323,6 +334,7 @@ extension Library {
 nonisolated enum MetadataBackup {
     static let driveFolderName = ".Photo Browser Metadata"      // dot-prefixed: hidden from every listing and scan
     static let jsonName = "metadata.json"
+    static let placesName = "places.json"                       // the photo-location index (see MetadataLoader.PlaceIndex)
     static let coversSubfolder = "covers"
     static let thumbsSubfolder = "itemThumbs"
     static let messagesSubfolder = "messages"
@@ -360,12 +372,16 @@ nonisolated enum MetadataBackup {
 
     /// Writes the snapshot and copies every referenced image/archive file. Returns false if the
     /// JSON itself couldn't be written (a missing cover file is tolerated).
-    nonisolated static func write(_ s: MetadataSnapshot, covers: URL, thumbs: URL, messages: URL, to dir: URL) -> Bool {
+    nonisolated static func write(_ s: MetadataSnapshot, places: MetadataLoader.PlaceIndex? = nil,
+                                  covers: URL, thumbs: URL, messages: URL, to dir: URL) -> Bool {
         let fm = FileManager.default
         try? DriveWriter.createDirectory(at: dir)
         let enc = JSONEncoder(); enc.outputFormatting = [.sortedKeys]
         guard let data = try? enc.encode(s),
               (try? data.write(to: dir.appendingPathComponent(jsonName), options: .atomic)) != nil else { return false }
+        if let places, !places.fileBins.isEmpty, let pdata = try? JSONEncoder().encode(places) {
+            try? pdata.write(to: dir.appendingPathComponent(placesName), options: .atomic)
+        }
         func copyAll(_ names: some Sequence<String>, from src: URL, sub: String) {
             let d = dir.appendingPathComponent(sub, isDirectory: true)
             try? DriveWriter.createDirectory(at: d)
@@ -385,6 +401,12 @@ nonisolated enum MetadataBackup {
     nonisolated static func read(from dir: URL) -> MetadataSnapshot? {
         guard let data = try? Data(contentsOf: dir.appendingPathComponent(jsonName)) else { return nil }
         return try? JSONDecoder().decode(MetadataSnapshot.self, from: data)
+    }
+
+    /// The photo-location index a backup carries, if it has one (backups before Oct 2026 don't).
+    nonisolated static func readPlaces(from dir: URL) -> MetadataLoader.PlaceIndex? {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent(placesName)) else { return nil }
+        return try? JSONDecoder().decode(MetadataLoader.PlaceIndex.self, from: data)
     }
 
     /// The backup's own creation date, for the UI (falls back to the JSON's mtime).

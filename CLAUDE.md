@@ -158,6 +158,8 @@ under the `photoBrowser.*` namespace:
 - `captions` — app caption overrides (path → text)
 - `tags` — per-file tags (path → [tag]), bulk JSON store; the Tags chip filters a folder's
   subtree by them
+- (not UserDefaults) the place index `placeIndex.json` — per-file GPS bins + per-bin names for
+  search and the Location filter; backed up as `places.json` with every metadata backup
 - `folderCovers` — folder path → cover image filename (images stored in
   Application Support/`folderCovers`)
 - `photoOrigins` — imported file path → originating Photos asset id

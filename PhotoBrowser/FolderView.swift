@@ -1653,7 +1653,7 @@ struct FolderView: View {
             .task(id: "places-\(placesNeeded)-\(entries.count)-\(library.changeToken)-\(url.path)") {
                 guard placesNeeded, !tooManyForPlaces else { return }
                 loadingPlaces = true; placeProgress = nil
-                let labels = await library.placeLabels(for: entries) { text in
+                let labels = await library.placeLabels(in: url, for: entries) { text in
                     Task { @MainActor in placeProgress = text }
                 }
                 if Task.isCancelled { return }

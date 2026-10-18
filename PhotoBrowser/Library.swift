@@ -112,6 +112,7 @@ final class Library {
         ViewerPageCache.shared.clear()   // pages are path-keyed; an in-place edit must not re-show old pixels
         guard let folder else {
             folderYearsCache.removeAll()
+            placeLabelsCache.removeAll()
             listingCache.removeAll()
             listingOrder.removeAll()
             return
@@ -123,6 +124,7 @@ final class Library {
         for key in Array(listingCache.keys) where related(key) { listingCache.removeValue(forKey: key) }
         listingOrder.removeAll { listingCache[$0] == nil }
         for key in Array(folderYearsCache.keys) where related(key) { folderYearsCache.removeValue(forKey: key) }
+        for key in Array(placeLabelsCache.keys) where related(key) { placeLabelsCache.removeValue(forKey: key) }
     }
 
     // MARK: - Bulk store (file-backed)
@@ -3779,6 +3781,24 @@ final class Library {
         return result
     }
 
+    /// A folder's finished Location-menu result, so reopening the menu is instant: kept while the
+    /// folder holds the same files (cleared with the listing on any content change) and only once
+    /// every located file has a name — a partial result (offline, geocoder throttled) is recomputed
+    /// next time so the missing names get another go. The per-file GPS and per-place names are
+    /// persisted anyway (the place index); this just skips re-deriving the folder's view of them.
+    @ObservationIgnored private var placeLabelsCache: [String: (urls: Set<URL>, labels: [URL: String])] = [:]
+
+    /// `placeLabels(for:)` with the per-folder cache in front of it.
+    func placeLabels(in folder: URL, for entries: [Entry],
+                     progress: @escaping @Sendable (String) -> Void) async -> [URL: String] {
+        let urls = Set(entries.map(\.url))
+        if let hit = placeLabelsCache[folder.path], hit.urls == urls { return hit.labels }
+        let labels = await placeLabels(for: entries, progress: progress)
+        let media = entries.filter { $0.kind == .image || $0.kind == .video }.count
+        if labels.count == media { placeLabelsCache[folder.path] = (urls, labels) }   // complete: every file resolved
+        return labels
+    }
+
     /// Place labels ("Hauppauge, NY") for the Location filter: each file's GPS bin is read (cached on
     /// disk, like capture dates), then every distinct bin without a label is named through the
     /// rate-limited geocoder — at most `geocodeLimit` per call, so a never-indexed, well-travelled
@@ -4042,6 +4062,7 @@ final class Library {
         listingCache.removeValue(forKey: folder.path)
         listingOrder.removeAll { $0 == folder.path }
         folderYearsCache.removeValue(forKey: folder.path)
+        placeLabelsCache.removeValue(forKey: folder.path)
     }
 
     /// Raw POSIX `opendir`/`readdir` listing (non-recursive), skipping dot-files. Returns nil only if

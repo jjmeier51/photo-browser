@@ -937,6 +937,19 @@ folder shows what it can and names the rest next time; the menu shows "Reading l
 keeps subfolders visible (naming every place under every subfolder would geocode the whole
 subtree); "Index Locations" (the search pass) now covers videos too.
 
+**Caching and backup (Oct 18).** Three layers: the per-file GPS bins and per-bin names are the
+persisted place index (`placeIndex.json` in Application Support, keyed by drive-relative
+`path|mtime|size`, so they survive remounts and relaunches and never re-read or re-geocode); a
+folder's *finished* Location result is kept in `Library.placeLabelsCache` (memory, keyed by
+folder path + the exact file set, cleared with the listing cache on `contentDidChange` /
+`evictListing`, and only stored when every located file got a name, so a partial offline result
+is retried) — reopening the menu is instant; and every metadata backup now writes the whole index
+as **`places.json`** beside `metadata.json` (`MetadataLoader.placeIndexForBackup`), which Restore
+merges back (`restorePlaceIndex` — adds unknown files and unnamed bins, never overwrites, then
+`contentDidChange` so menus refresh). Backups without the file (pre-Oct 2026) restore as before.
+Tags need no extra cache: `Library.tags` is in memory and in the bulk store, and the Tags menu's
+counts are a scan of that dictionary; they're in `metadata.json` since the tags commit.
+
 ---
 
 ## 6c. Tags — `Library.tags`, `InfoPanel.tagsSection`, the Tags chip in `FolderView`

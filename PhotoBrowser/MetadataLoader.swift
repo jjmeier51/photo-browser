@@ -282,7 +282,9 @@ enum MetadataLoader {
     /// Version 2 added videos and labels. Loading a v1 index drops the "no GPS" verdicts of video
     /// files (v1 never read them), and bins named before labels existed are re-geocoded once for
     /// their label by the next naming pass.
-    private struct PlaceIndex: Codable {
+    /// The on-disk shape of the place index — also what a metadata backup carries (`places.json`),
+    /// so the geocoding done over months isn't lost with the app container.
+    struct PlaceIndex: Codable, Sendable {
         var version: Int?
         var fileBins: [String: String]
         var binPlaces: [String: String]
@@ -340,6 +342,28 @@ enum MetadataLoader {
             if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: fileURL, options: .atomic) }
         }
 
+        /// A copy of the whole index (for a backup).
+        func snapshot() -> PlaceIndex {
+            lock.lock(); defer { lock.unlock() }
+            return PlaceIndex(version: 2, fileBins: fileBins, binPlaces: binPlaces, binLabels: binLabels)
+        }
+
+        /// Adds what a backup knows and this index doesn't — file bins not seen here, and names for
+        /// bins without one. Never overwrites. Returns how many entries were added.
+        func merge(_ other: PlaceIndex) -> Int {
+            lock.lock(); defer { lock.unlock() }
+            var added = 0
+            for (k, v) in other.fileBins where fileBins[k] == nil { fileBins[k] = v; added += 1 }
+            for (b, place) in other.binPlaces where binPlaces[b] == nil { binPlaces[b] = place; added += 1 }
+            for (b, label) in other.binLabels ?? [:] where binLabels[b] == nil {
+                binLabels[b] = label
+                if binPlaces[b] == nil { binPlaces[b] = other.binPlaces[b] ?? label.lowercased() }
+                added += 1
+            }
+            if added > 0 { dirty = true }
+            return added
+        }
+
         /// Backup-drive duplication — file bins only; bin→place names are global.
         func duplicatePrefix(_ from: String, _ to: String) {
             lock.lock()
@@ -356,7 +380,18 @@ enum MetadataLoader {
     }
 
     private static let placeStore = PlaceStore()
-    static func flushPlaceStore() { placeStore.flush() }
+    nonisolated static func flushPlaceStore() { placeStore.flush() }   // lock-protected store: safe from any task
+
+    /// The place index for a metadata backup: every file's GPS bin (keyed by drive-relative path,
+    /// mtime and size, so it matches again wherever the drive is mounted) and every bin's names.
+    nonisolated static func placeIndexForBackup() -> PlaceIndex { placeStore.snapshot() }
+
+    /// Merges a backup's place index into this one (nothing here is overwritten) and saves.
+    nonisolated static func restorePlaceIndex(_ idx: PlaceIndex) -> Int {
+        let n = placeStore.merge(idx)
+        if n > 0 { placeStore.flush() }
+        return n
+    }
 
     /// Cache-only place text for search (lowercased) — nil until the photo's
     /// location has been indexed *and* its bin named. Never geocodes on the hot path.
