@@ -3,7 +3,7 @@
 
 Two Finder panes side by side — "From" (your Mac) and "To" (the SSD) — with a Finder sidebar
 (Favorites, Locations with eject buttons), icon view with photo/video thumbnails or list view,
-back/forward, a path bar and the icon-size slider. "All Videos" in the sidebar lists every video in
+back/forward, a path bar, and sliders for the thumbnail size and the space between tiles. "All Videos" in the sidebar lists every video in
 your home folder in the From pane (newest first) so they can be moved to the SSD from one place. Select files or folders on the left and press
 Move / Copy, or drag them anywhere onto the right pane (or onto a folder in it). Drops from the
 real Finder work too.
@@ -290,6 +290,18 @@ def glyph(name: str, color: str | None = None, size: int = 16) -> QIcon:
         else:
             p.drawLine(QPoint(int(s * 0.36), int(s * 0.36)), QPoint(int(s * 0.64), int(s * 0.64)))
             p.drawLine(QPoint(int(s * 0.64), int(s * 0.36)), QPoint(int(s * 0.36), int(s * 0.64)))
+    elif name == "size":                                   # a small and a large square: icon size
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        p.drawRoundedRect(QRectF(s * 0.08, s * 0.58, s * 0.28, s * 0.28), 1.5, 1.5)
+        p.drawRoundedRect(QRectF(s * 0.44, s * 0.14, s * 0.48, s * 0.72), 2, 2)
+    elif name == "spacing":                                # two squares and the gap between them
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        p.drawRoundedRect(QRectF(s * 0.08, s * 0.28, s * 0.3, s * 0.44), 1.5, 1.5)
+        p.drawRoundedRect(QRectF(s * 0.62, s * 0.28, s * 0.3, s * 0.44), 1.5, 1.5)
+        p.setPen(QPen(c, 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.drawLine(QPoint(int(s * 0.42), int(s * 0.5)), QPoint(int(s * 0.58), int(s * 0.5)))
     elif name == "film":
         p.setPen(QPen(c, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         p.drawRoundedRect(QRectF(s * 0.1, s * 0.2, s * 0.8, s * 0.6), 2, 2)
@@ -464,6 +476,7 @@ class Thumbnails(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._cache: OrderedDict[str, QPixmap | None] = OrderedDict()
+        self._bytes = 0                                    # what the cached pixmaps hold, roughly
         self._pending: set[str] = set()
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(4)
@@ -475,7 +488,7 @@ class Thumbnails(QObject):
         self._tick.timeout.connect(self.ready.emit)
 
     def get(self, path: str, mtime: float, px: int) -> QPixmap | None:
-        bucket = 128 if px <= 128 else 256
+        bucket = 128 if px <= 128 else 256 if px <= 256 else 384      # rendered at 2× for Retina
         key = f"{path}|{mtime}|{bucket}"
         if key in self._cache:
             self._cache.move_to_end(key)
@@ -487,10 +500,17 @@ class Thumbnails(QObject):
 
     def _done(self, key: str, img: QImage) -> None:
         self._pending.discard(key)
-        self._cache[key] = None if img.isNull() else QPixmap.fromImage(img)
-        while len(self._cache) > 1500:
-            self._cache.popitem(last=False)
+        pm = None if img.isNull() else QPixmap.fromImage(img)
+        self._cache[key] = pm
+        self._bytes += self._size(pm)
+        while self._cache and (len(self._cache) > 3000 or self._bytes > 600 * 1024 * 1024):
+            _k, old = self._cache.popitem(last=False)
+            self._bytes -= self._size(old)
         self._tick.start()
+
+    @staticmethod
+    def _size(pm: QPixmap | None) -> int:
+        return pm.width() * pm.height() * 4 if pm is not None else 0
 
 
 THUMBS: Thumbnails | None = None
@@ -516,20 +536,22 @@ class GridDelegate(QStyledItemDelegate):
         is_dir = model.isDir(index)
         r = option.rect
         s = self.pane.icon_px
-        icon_rect = QRect(r.x() + (r.width() - s) // 2, r.y() + 8, s, s)
+        pad, inset = self.pane.tile_pad(), self.pane.tile_inset()
+        icon_rect = QRect(r.x() + (r.width() - s) // 2, r.y() + pad, s, s)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         focused = self.pane.view_has_focus()
         p.save()
+        p.setClipRect(r)                                   # tight grids: never paint over the neighbours
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         if selected:
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(qc(THEME.select_bg))
-            p.drawRoundedRect(QRectF(icon_rect.adjusted(-5, -5, 5, 5)), 7, 7)
+            p.drawRoundedRect(QRectF(icon_rect.adjusted(-inset, -inset, inset, inset)), 7, 7)
         if self.pane.drop_target == path:
             p.setPen(QPen(QColor(THEME.accent), 2))
             p.setBrush(QColor(THEME.accent).lighter(170) if not THEME.dark else QColor(10, 132, 255, 50))
-            p.drawRoundedRect(QRectF(icon_rect.adjusted(-5, -5, 5, 5)), 7, 7)
+            p.drawRoundedRect(QRectF(icon_rect.adjusted(-inset, -inset, inset, inset)), 7, 7)
         thumb = None
         if not is_dir and kind_of(path) != "other" and THUMBS is not None:
             thumb = THUMBS.get(path, model.lastModified(index).toSecsSinceEpoch(), s)
@@ -540,10 +562,10 @@ class GridDelegate(QStyledItemDelegate):
             icon.paint(p, icon_rect.adjusted(2, 2, -2, -2))
         # name
         fm = QFontMetrics(option.font)
-        width = r.width() - 10
+        width = r.width() - 2 * inset
         lines = two_lines(fm, model.fileName(index), width)
         lh = fm.height()
-        top = icon_rect.bottom() + 8
+        top = icon_rect.bottom() + 6
         if selected:
             w = max(fm.horizontalAdvance(line) for line in lines) + 10
             pill = QRectF(r.x() + (r.width() - w) / 2, top - 1, w, lh * len(lines) + 2)
@@ -552,7 +574,7 @@ class GridDelegate(QStyledItemDelegate):
             p.drawRoundedRect(pill, 5, 5)
         p.setPen(QColor("white") if (selected and focused) else QColor(THEME.text))
         for i, line in enumerate(lines):
-            p.drawText(QRect(r.x() + 5, top + i * lh, width, lh), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, line)
+            p.drawText(QRect(r.x() + inset, top + i * lh, width, lh), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, line)
         p.restore()
 
     @staticmethod
@@ -911,6 +933,7 @@ class Pane(QWidget):
         self.future: list[str] = []
         self.drop_target: str | None = None
         self.icon_px = int(settings.value(f"{role}/icon", 84))
+        self.gap = int(settings.value(f"{role}/gap", 34))      # room around each tile; 2 packs them edge to edge
         self.active = False
 
         self.fs = QFileSystemModel(self)
@@ -1000,16 +1023,32 @@ class Pane(QWidget):
         sl.setSpacing(8)
         self.status = QLabel()
         self.fs_chip = QLabel(objectName="FsChip")
+        # Finder's View Options, inline: how big the tiles are, and how much room is around them.
+        self.gap_icon = QLabel()
+        self.gap_slider = QSlider(Qt.Orientation.Horizontal)
+        self.gap_slider.setRange(2, 48)
+        self.gap_slider.setValue(self.gap)
+        self.gap_slider.setFixedWidth(64)
+        self.gap_slider.setToolTip("Space between thumbnails")
+        self.gap_slider.valueChanged.connect(self.set_gap)
+        self.size_icon = QLabel()
         self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setRange(48, 176)
+        self.slider.setRange(48, 320)
         self.slider.setValue(self.icon_px)
         self.slider.setFixedWidth(90)
+        self.slider.setToolTip("Thumbnail size")
         self.slider.valueChanged.connect(self.set_icon_size)
+        self.view_controls = [self.gap_icon, self.gap_slider, self.size_icon, self.slider]
         sl.addStretch(1)
         sl.addWidget(self.status)
         sl.addWidget(self.fs_chip)
         sl.addStretch(1)
+        sl.addWidget(self.gap_icon)
+        sl.addWidget(self.gap_slider)
+        sl.addSpacing(6)
+        sl.addWidget(self.size_icon)
         sl.addWidget(self.slider)
+        self._slider_icons()
         root.addWidget(status)
 
         self._shortcuts()
@@ -1046,8 +1085,15 @@ class Pane(QWidget):
     def restyle(self) -> None:
         for b in (self.back_btn, self.fwd_btn, self.new_folder_btn, self.grid_btn, self.list_btn):
             b.setIcon(glyph(b.property("glyph"), THEME.secondary if b.objectName() == "Nav" else THEME.text, 16))
+        self._slider_icons()
         self.update_pathbar()
         self.grid.viewport().update()
+
+    def _slider_icons(self) -> None:
+        dpr = self.devicePixelRatioF() or 1.0
+        for label, name in ((self.gap_icon, "spacing"), (self.size_icon, "size")):
+            label.setPixmap(glyph(name, THEME.tertiary, 14).pixmap(QSize(14, 14), dpr))
+            label.setToolTip("Space between thumbnails" if name == "spacing" else "Thumbnail size")
 
     def _shortcuts(self) -> None:
         ctx = Qt.ShortcutContext.WidgetWithChildrenShortcut
@@ -1077,22 +1123,41 @@ class Pane(QWidget):
         self.chip.style().polish(self.chip)
         self.grid.viewport().update()
 
+    # Tile geometry, all from `gap`: the room around a tile. At the default (34) it's Finder's icon
+    # view; at 2 the thumbnails sit edge to edge, Photos-style, and a row holds as many as fit.
+    def tile_pad(self) -> int:
+        """Above the thumbnail and below the name."""
+        return max(2, self.gap // 4)
+
+    def tile_inset(self) -> int:
+        """How far the selection backdrop reaches past the thumbnail, and the name's side margin."""
+        return max(1, min(5, self.gap // 4))
+
     def cell_size(self) -> QSize:
         lh = QFontMetrics(self.grid.font()).height()
-        return QSize(max(self.icon_px + 34, 108), self.icon_px + 22 + lh * 2)
+        return QSize(max(self.icon_px + self.gap, 56), self.tile_pad() * 2 + self.icon_px + 6 + lh * 2)
+
+    def _relayout(self) -> None:
+        self.grid.setGridSize(self.cell_size())
+        self.grid.setIconSize(QSize(self.icon_px, self.icon_px))
+        self.grid.doItemsLayout()
 
     def set_icon_size(self, px: int) -> None:
         self.icon_px = px
-        self.grid.setGridSize(self.cell_size())
-        self.grid.setIconSize(QSize(px, px))
         self.settings.setValue(f"{self.role}/icon", px)
-        self.grid.doItemsLayout()
+        self._relayout()
+
+    def set_gap(self, px: int) -> None:
+        self.gap = px
+        self.settings.setValue(f"{self.role}/gap", px)
+        self._relayout()
 
     def set_mode(self, mode: str) -> None:
         self.stack.setCurrentIndex(0 if mode == "grid" else 1)
         self.grid_btn.setChecked(mode == "grid")
         self.list_btn.setChecked(mode != "grid")
-        self.slider.setVisible(mode == "grid")
+        for w in self.view_controls:
+            w.setVisible(mode == "grid")
         self.settings.setValue(f"{self.role}/mode", mode)
 
     # -- navigation

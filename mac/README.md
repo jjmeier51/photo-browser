@@ -87,7 +87,8 @@ cleanly.
 
 Looks and works like Finder: a sidebar (Favorites, and Locations with an eject button for the
 SSD), and two panes side by side — **From** (your Mac) and **To** (the SSD) — each with icon view
-(photo and video thumbnails, size slider) or list view, back/forward and a path bar. Select files
+(photo and video thumbnails, with a size slider up to 320 px and a spacing slider that packs the
+tiles edge to edge for more per row) or list view, back/forward and a path bar. Select files
 or folders on the left and press **Move to “Extreme SSD”** (or Copy), or drag them onto the right
 pane — onto a folder there to put them inside it. Drags from the real Finder work too.
 
