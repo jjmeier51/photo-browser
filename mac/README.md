@@ -119,10 +119,33 @@ whether there's room. Then:
 - **Eject** (sidebar ⏏ or the button after a transfer) flushes everything and unmounts the SSD
   properly.
 
+**All Videos** (top of the sidebar) lists every video in your home folder in the From pane,
+newest first, wherever it is — Movies, Downloads, Desktop, Documents, any subfolder — so they can
+be picked and moved to the SSD from one place. It looks afresh each time you open it (click it
+again to look again) and skips `~/Library`, app and library bundles (Photos, iMovie, Final Cut),
+hidden items and other drives. Select, drag, Move and Copy work as in any folder; moved videos
+drop off the list. (`SAFE_FINDER_VIDEO_ROOTS=/path:/other` makes it look elsewhere.)
+
 ```sh
 open "mac/Safe Finder.command"                     # or double-click it in Finder; the first run installs PySide6
 mac/.venv/bin/python mac/safe_finder.py --from ~/Downloads --to "/Volumes/Extreme SSD"
 ```
+
+### Install it as a Mac app
+
+```sh
+sh mac/build_safe_finder_app.sh                    # → /Applications/Safe Finder.app (or ~/Applications)
+```
+
+Builds `Safe Finder.app` with [PyInstaller](https://pyinstaller.org) (installed into `mac/.venv`),
+with its own icon, and copies it to `/Applications`, so it opens from Launchpad, Spotlight or the
+Dock like any app. The first time it opens, macOS asks whether it may use Desktop, Documents,
+Downloads and external drives — say yes (System Settings ▸ Privacy & Security ▸ Files and Folders
+later). The app is a snapshot of the code: run the script again after every `git pull`. It keeps
+the same settings, staging folder and journal as `Safe Finder.command`, and carries the drive
+tools (`relocate_folders.py`, `exfat_inspect.py`, `spare_folders.py`) inside, so the "make spare
+folders" command it shows works even without this folder. `--no-install` just builds into
+`mac/dist/`.
 
 ## Copy or move folders onto the SSD safely (`safe_copy_to_ssd.py`)
 

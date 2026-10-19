@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+# PyInstaller output of build_safe_finder_app.sh
+build/
+dist/
+*.spec

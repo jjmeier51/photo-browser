@@ -3,7 +3,8 @@
 
 Two Finder panes side by side — "From" (your Mac) and "To" (the SSD) — with a Finder sidebar
 (Favorites, Locations with eject buttons), icon view with photo/video thumbnails or list view,
-back/forward, a path bar and the icon-size slider. Select files or folders on the left and press
+back/forward, a path bar and the icon-size slider. "All Videos" in the sidebar lists every video in
+your home folder in the From pane (newest first) so they can be moved to the SSD from one place. Select files or folders on the left and press
 Move / Copy, or drag them anywhere onto the right pane (or onto a folder in it). Drops from the
 real Finder work too.
 
@@ -15,6 +16,7 @@ it runs, and "Eject" flushes and unmounts the SSD properly.
 
 Run:  double-click "Safe Finder.command" next to this file, or
       mac/.venv/bin/python mac/safe_finder.py [--from FOLDER] [--to FOLDER]
+      — or build it into /Applications with "sh mac/build_safe_finder_app.sh" (see mac/README.md).
 """
 
 from __future__ import annotations
@@ -35,10 +37,12 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 try:
-    from PySide6.QtCore import (QDir, QFileInfo, QFileSystemWatcher, QModelIndex, QObject, QPoint, QRect,
-                                QRectF, QRunnable, QSettings, QSize, Qt, QThreadPool, QTimer, QUrl, Signal)
+    from PySide6.QtCore import (QDateTime, QDir, QFileInfo, QFileSystemWatcher, QLocale, QMimeData, QModelIndex,
+                                QObject, QPoint, QRect, QRectF, QRunnable, QSettings, QSize, Qt, QThreadPool,
+                                QTimer, QUrl, Signal)
     from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage, QImageReader,
-                               QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap, QShortcut)
+                               QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap, QShortcut,
+                               QStandardItem, QStandardItemModel)
     from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QDialog,
                                    QFileIconProvider, QFileSystemModel, QFrame, QHBoxLayout, QHeaderView,
                                    QInputDialog, QLabel, QListView, QMainWindow, QMenu, QMessageBox,
@@ -286,6 +290,20 @@ def glyph(name: str, color: str | None = None, size: int = 16) -> QIcon:
         else:
             p.drawLine(QPoint(int(s * 0.36), int(s * 0.36)), QPoint(int(s * 0.64), int(s * 0.64)))
             p.drawLine(QPoint(int(s * 0.64), int(s * 0.36)), QPoint(int(s * 0.36), int(s * 0.64)))
+    elif name == "film":
+        p.setPen(QPen(c, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.drawRoundedRect(QRectF(s * 0.1, s * 0.2, s * 0.8, s * 0.6), 2, 2)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        for gy in (0.28, 0.46, 0.64):                      # the strip's sprocket holes
+            p.drawRect(QRectF(s * 0.16, s * gy, s * 0.09, s * 0.09))
+            p.drawRect(QRectF(s * 0.75, s * gy, s * 0.09, s * 0.09))
+        path = QPainterPath()
+        path.moveTo(s * 0.42, s * 0.36)
+        path.lineTo(s * 0.62, s * 0.5)
+        path.lineTo(s * 0.42, s * 0.64)
+        path.closeSubpath()
+        p.drawPath(path)
     elif name == "arrow":
         p.setPen(QPen(c, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         p.drawLine(QPoint(int(s * 0.15), int(s * 0.5)), QPoint(int(s * 0.82), int(s * 0.5)))
@@ -600,7 +618,7 @@ class DropMixin:
         return self.pane.location
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasUrls() and self.pane.location != VIDEOS:
             event.setDropAction(Qt.DropAction.CopyAction)
             event.accept()
             self.pane.set_drop_highlight(True)
@@ -608,7 +626,7 @@ class DropMixin:
             event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # noqa: N802
-        if not event.mimeData().hasUrls():
+        if not event.mimeData().hasUrls() or self.pane.location == VIDEOS:
             event.ignore()
             return
         super().dragMoveEvent(event)  # type: ignore[misc]   # keeps auto-scroll
@@ -623,6 +641,9 @@ class DropMixin:
         event.accept()
 
     def dropEvent(self, event) -> None:  # noqa: N802
+        if self.pane.location == VIDEOS:
+            event.ignore()
+            return
         target = self._target(event)
         paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
         self.pane.set_drop_target(None)
@@ -673,6 +694,202 @@ class ListView(DropMixin, QTreeView):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
 
+# ============================================================================ all videos
+
+
+VIDEOS = "safe-finder://videos"                 # the "All Videos" location — a collection, not a folder
+_VIDEO_PATH, _VIDEO_SORT, _VIDEO_MTIME = 258, 259, 260       # Qt.UserRole + 2… (256/257 are the sidebar's)
+_VIDEO_KINDS = {".mov": "QuickTime movie", ".mp4": "MPEG-4 movie", ".m4v": "MPEG-4 movie", ".avi": "AVI movie",
+                ".mkv": "Matroska video", ".webm": "WebM video", ".3gp": "3GPP movie", ".mts": "AVCHD video",
+                ".m2ts": "AVCHD video", ".wmv": "Windows Media video"}
+_SKIP_TOP = {"Library"}                           # directly under the home folder: caches, Mail, app data…
+_SKIP_ANYWHERE = {"node_modules"}
+_BUNDLE_EXT = {".app", ".photoslibrary", ".imovielibrary", ".fcpbundle", ".fcpcache", ".tvlibrary",
+               ".musiclibrary", ".bundle", ".framework", ".xcarchive", ".playground", ".pkg", ".lrlibrary"}
+
+
+def video_roots() -> list[Path]:
+    """Where "All Videos" looks: the home folder. SAFE_FINDER_VIDEO_ROOTS=a:b overrides it (tests)."""
+    env = os.environ.get("SAFE_FINDER_VIDEO_ROOTS")
+    return [Path(p) for p in env.split(":") if p] if env else [Path.home()]
+
+
+class _ScanSignals(QObject):
+    found = Signal(list)          # a batch of (path, size, mtime)
+    done = Signal(bool)           # True when it got to the end, False when cancelled
+
+
+class VideoScanner:
+    """Finds every video under `roots` on a background thread and streams them in batches.
+    Skips hidden items, ~/Library (caches, Mail, app data), node_modules, app and library
+    bundles (Photos, iMovie, Final Cut…), symlinks and anything mounted inside the tree; a folder
+    it may not read is skipped (macOS asks for Desktop/Documents/Downloads access the first
+    time). Cheap enough to run afresh every time the view is opened."""
+
+    def __init__(self, roots: list[Path]) -> None:
+        self.roots = roots
+        self.signals = _ScanSignals()
+        self._stop = threading.Event()
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, name="video-scan", daemon=True).start()
+
+    def cancel(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        batch: list[tuple[str, int, float]] = []
+        flushed = time.monotonic()
+        stack: list[tuple[str, int, bool]] = []            # folder, its volume, is it a root
+        for root in self.roots:
+            try:
+                stack.append((str(root), os.stat(root).st_dev, True))
+            except OSError:
+                continue
+        while stack and not self._stop.is_set():
+            folder, dev, top = stack.pop()
+            try:
+                with os.scandir(folder) as it:
+                    entries = list(it)
+            except OSError:
+                continue
+            for e in entries:
+                name = e.name
+                if name.startswith("."):
+                    continue
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        if (top and name in _SKIP_TOP) or name in _SKIP_ANYWHERE \
+                                or os.path.splitext(name)[1].lower() in _BUNDLE_EXT:
+                            continue
+                        if e.stat(follow_symlinks=False).st_dev != dev:     # another volume mounted here
+                            continue
+                        stack.append((e.path, dev, False))
+                    elif e.is_file(follow_symlinks=False) and os.path.splitext(name)[1].lower() in VIDEO_EXT:
+                        st = e.stat(follow_symlinks=False)
+                        batch.append((e.path, st.st_size, st.st_mtime))
+                except OSError:
+                    continue
+            if batch and (len(batch) >= 250 or time.monotonic() - flushed > 0.4):
+                self.signals.found.emit(batch)
+                batch, flushed = [], time.monotonic()
+        if self._stop.is_set():
+            self.signals.done.emit(False)
+            return
+        if batch:
+            self.signals.found.emit(batch)
+        self.signals.done.emit(True)
+
+
+class VideosModel(QStandardItemModel):
+    """The "All Videos" listing: a row per video the scanner found, in QFileSystemModel's four
+    columns (Name, Size, Kind, Date Modified) and answering its `filePath` / `isDir` / `fileIcon`
+    / `fileName` / `lastModified`, so the pane's views, delegates and drag-and-drop treat it like
+    any folder listing. Rows drag as file URLs; nothing can be dropped on it."""
+
+    def __init__(self, parent: QObject, icons: QFileIconProvider) -> None:
+        super().__init__(0, 4, parent)
+        self.setHorizontalHeaderLabels(["Name", "Size", "Kind", "Date Modified"])
+        self.setSortRole(_VIDEO_SORT)
+        self._icons = icons
+        self._icon_cache: dict[str, QIcon] = {}
+        self._paths: set[str] = set()
+
+    # -- what the pane expects of QFileSystemModel
+    def iconProvider(self) -> QFileIconProvider:  # noqa: N802
+        return self._icons
+
+    def filePath(self, index: QModelIndex) -> str:  # noqa: N802
+        return (self.data(index.siblingAtColumn(0), _VIDEO_PATH) or "") if index.isValid() else ""
+
+    def isDir(self, _index: QModelIndex) -> bool:  # noqa: N802
+        return False
+
+    def fileName(self, index: QModelIndex) -> str:  # noqa: N802
+        return os.path.basename(self.filePath(index))
+
+    def fileIcon(self, index: QModelIndex) -> QIcon:  # noqa: N802
+        return self._icon_for(self.filePath(index))
+
+    def lastModified(self, index: QModelIndex) -> QDateTime:  # noqa: N802
+        mtime = self.data(index.siblingAtColumn(0), _VIDEO_MTIME) if index.isValid() else None
+        return QDateTime.fromSecsSinceEpoch(int(mtime or 0))
+
+    def _icon_for(self, path: str) -> QIcon:
+        ext = os.path.splitext(path)[1].lower()        # one native icon per kind — asking per file is slow
+        icon = self._icon_cache.get(ext)
+        if icon is None:
+            icon = self._icon_cache[ext] = self._icons.icon(QFileInfo(path))
+        return icon
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DecorationRole and index.column() == 0:
+            return self._icon_for(self.filePath(index))
+        return super().data(index, role)
+
+    def flags(self, index: QModelIndex) -> Qt.ItemFlag:
+        f = super().flags(index) & ~Qt.ItemFlag.ItemIsEditable & ~Qt.ItemFlag.ItemIsDropEnabled
+        return (f | Qt.ItemFlag.ItemIsDragEnabled) if index.isValid() else f
+
+    def supportedDragActions(self) -> Qt.DropAction:  # noqa: N802
+        return Qt.DropAction.CopyAction
+
+    def supportedDropActions(self) -> Qt.DropAction:  # noqa: N802
+        return Qt.DropAction.IgnoreAction
+
+    def mimeTypes(self) -> list[str]:  # noqa: N802
+        return ["text/uri-list"]
+
+    def mimeData(self, indexes) -> QMimeData:  # noqa: N802
+        md = QMimeData()
+        seen: set[str] = set()
+        urls = []
+        for idx in indexes:
+            path = self.filePath(idx)
+            if path and path not in seen:
+                seen.add(path)
+                urls.append(QUrl.fromLocalFile(path))
+        md.setUrls(urls)
+        return md
+
+    # -- filling
+    def clear_all(self) -> None:
+        self.removeRows(0, self.rowCount())
+        self._paths.clear()
+
+    def add(self, found: list[tuple[str, int, float]]) -> None:
+        right = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        for path, size, mtime in found:
+            if path in self._paths:
+                continue
+            self._paths.add(path)
+            name = os.path.basename(path)
+            ext = os.path.splitext(name)[1].lower()
+            n = QStandardItem(name)
+            n.setData(path, _VIDEO_PATH)
+            n.setData(float(mtime), _VIDEO_MTIME)
+            n.setData(name.lower(), _VIDEO_SORT)
+            n.setToolTip(path)
+            s = QStandardItem(human(size))
+            s.setData(int(size), _VIDEO_SORT)
+            s.setTextAlignment(right)
+            kind = _VIDEO_KINDS.get(ext, f"{ext[1:].upper()} video")
+            k = QStandardItem(kind)
+            k.setData(kind, _VIDEO_SORT)
+            when = QDateTime.fromSecsSinceEpoch(int(mtime))
+            d = QStandardItem(QLocale.system().toString(when, QLocale.FormatType.ShortFormat))
+            d.setData(float(mtime), _VIDEO_SORT)
+            self.appendRow([n, s, k, d])
+
+    def remove_missing(self) -> int:
+        """Drop the rows whose file is gone (moved to the SSD, deleted); how many."""
+        gone = [r for r in range(self.rowCount()) if not os.path.lexists(self.item(r).data(_VIDEO_PATH))]
+        for r in reversed(gone):
+            self._paths.discard(self.item(r).data(_VIDEO_PATH))
+            self.removeRow(r)
+        return len(gone)
+
+
 # ============================================================================ pane
 
 
@@ -696,14 +913,26 @@ class Pane(QWidget):
         self.icon_px = int(settings.value(f"{role}/icon", 84))
         self.active = False
 
-        self.model = QFileSystemModel(self)
+        self.fs = QFileSystemModel(self)
         self._icons = QFileIconProvider()          # native Finder icons on macOS; kept alive with the pane
-        self.model.setIconProvider(self._icons)
-        self.model.setReadOnly(True)
-        self.model.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files | QDir.Filter.NoDotAndDotDot)
-        self.model.directoryLoaded.connect(lambda _p: self.update_status())
-        self.model.rowsInserted.connect(lambda *_: self.update_status())
-        self.model.rowsRemoved.connect(lambda *_: self.update_status())
+        self.fs.setIconProvider(self._icons)
+        self.fs.setReadOnly(True)
+        self.fs.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files | QDir.Filter.NoDotAndDotDot)
+        self.fs.directoryLoaded.connect(lambda _p: self.update_status())
+        self.fs.rowsInserted.connect(lambda *_: self.update_status())
+        self.fs.rowsRemoved.connect(lambda *_: self.update_status())
+        # "All Videos": the same views over a model the scanner fills (rows arrive in batches, so the
+        # status line is refreshed a moment later rather than per row).
+        self.videos = VideosModel(self, self._icons)
+        self._status_soon = QTimer(self)
+        self._status_soon.setSingleShot(True)
+        self._status_soon.setInterval(80)
+        self._status_soon.timeout.connect(self.update_status)
+        self.videos.rowsInserted.connect(lambda *_: self._status_soon.start())
+        self.videos.rowsRemoved.connect(lambda *_: self._status_soon.start())
+        self.model: QFileSystemModel | VideosModel = self.fs      # whichever the views show now
+        self.scanner: VideoScanner | None = None
+        self._folder_sort = (0, Qt.SortOrder.AscendingOrder)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -742,19 +971,10 @@ class Pane(QWidget):
 
         # views
         self.grid = GridView(self)
-        self.grid.setModel(self.model)
         self.grid.setItemDelegate(GridDelegate(self))
         self.list = ListView(self)
-        self.list.setModel(self.model)
-        self.list.setSelectionModel(self.grid.selectionModel())
         self.list.setItemDelegate(ListDelegate(self))
-        hdr = self.list.header()
-        hdr.moveSection(3, 1)              # Name, Date Modified, Size, Kind — Finder's order
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        hdr.setStretchLastSection(False)
-        hdr.resizeSection(1, 90)
-        hdr.resizeSection(2, 120)
-        hdr.resizeSection(3, 150)
+        self._attach(self.fs)
         self.list.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.grid)
@@ -765,7 +985,6 @@ class Pane(QWidget):
             v.customContextMenuRequested.connect(lambda pos, v=v: self.context_menu(v, pos))
             v.installEventFilter(self)
             v.viewport().installEventFilter(self)
-        self.grid.selectionModel().selectionChanged.connect(lambda *_: self.selection_changed.emit())
 
         # path bar
         self.pathbar = QWidget(objectName="PathBar")
@@ -798,6 +1017,22 @@ class Pane(QWidget):
         self.set_mode(settings.value(f"{role}/mode", "grid"))
 
     # -- building blocks
+    def _attach(self, model: "QFileSystemModel | VideosModel") -> None:
+        """Show `model` in both views, sharing one selection, with the list's Finder column layout."""
+        self.model = model
+        self.grid.setModel(model)
+        self.list.setModel(model)
+        self.list.setSelectionModel(self.grid.selectionModel())
+        self.grid.selectionModel().selectionChanged.connect(lambda *_: self.selection_changed.emit())
+        hdr = self.list.header()
+        if hdr.visualIndex(3) != 1:
+            hdr.moveSection(hdr.visualIndex(3), 1)          # Name, Date Modified, Size, Kind — Finder's order
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setStretchLastSection(False)
+        hdr.resizeSection(1, 90)
+        hdr.resizeSection(2, 120)
+        hdr.resizeSection(3, 150)
+
     def _tool(self, icon: str, tip: str, slot, name: str) -> QToolButton:
         b = QToolButton(objectName=name)
         b.setIcon(glyph(icon, THEME.secondary if name == "Nav" else THEME.text, 16))
@@ -862,14 +1097,22 @@ class Pane(QWidget):
 
     # -- navigation
     def go(self, path: str, record: bool = True) -> None:
+        if path == VIDEOS:
+            self._go_videos(record)
+            return
         path = os.path.abspath(path)
         if not os.path.isdir(path):
             return
         if record and self.location and self.location != path:
             self.history.append(self.location)
             self.future.clear()
+        if self.model is not self.fs:                      # back from All Videos
+            self._stop_scan()
+            self._attach(self.fs)
+            self.list.sortByColumn(*self._folder_sort)
+            self.new_folder_btn.setEnabled(True)
         self.location = path
-        idx = self.model.setRootPath(path)
+        idx = self.fs.setRootPath(path)
         self.grid.setRootIndex(idx)
         self.list.setRootIndex(idx)
         self.grid.clearSelection()
@@ -887,6 +1130,63 @@ class Pane(QWidget):
         self.settings.setValue(f"{self.role}/location", path)
         self.location_changed.emit(path)
 
+    def _go_videos(self, record: bool) -> None:
+        """Show every video in the home folder (newest first); opening it again looks afresh."""
+        if self.location == VIDEOS:
+            self._rescan()
+            return
+        if record and self.location:
+            self.history.append(self.location)
+            self.future.clear()
+        hdr = self.list.header()
+        self._folder_sort = (hdr.sortIndicatorSection(), hdr.sortIndicatorOrder())
+        self.location = VIDEOS
+        self._attach(self.videos)
+        self.list.sortByColumn(3, Qt.SortOrder.DescendingOrder)
+        self.grid.clearSelection()
+        self.grid.scrollToTop()
+        self.list.scrollToTop()
+        self.title.setText("All Videos")
+        self.title.setToolTip("Every video in your home folder")
+        self.new_folder_btn.setEnabled(False)
+        self.back_btn.setEnabled(bool(self.history))
+        self.fwd_btn.setEnabled(bool(self.future))
+        self.update_pathbar()
+        self.location_changed.emit(VIDEOS)
+        self._rescan()
+
+    def _rescan(self) -> None:
+        self._stop_scan()
+        self.videos.clear_all()
+        scanner = self.scanner = VideoScanner(video_roots())
+        queued = Qt.ConnectionType.QueuedConnection
+        scanner.signals.found.connect(lambda batch, s=scanner: self._videos_found(s, batch), queued)
+        scanner.signals.done.connect(lambda _ok, s=scanner: self._scan_done(s), queued)
+        scanner.start()
+        self.update_status()
+
+    def _stop_scan(self) -> None:
+        if self.scanner is not None:
+            self.scanner.cancel()
+            self.scanner = None
+
+    def _videos_found(self, scanner: VideoScanner, batch: list) -> None:
+        if scanner is not self.scanner:                  # a batch from a scan that was cancelled
+            return
+        self.videos.add(batch)
+        hdr = self.list.header()
+        self.videos.sort(hdr.sortIndicatorSection(), hdr.sortIndicatorOrder())
+
+    def _scan_done(self, scanner: VideoScanner) -> None:
+        if scanner is self.scanner:
+            self.scanner = None
+            self.update_status()
+
+    def refresh_videos(self) -> None:
+        """After a transfer: drop the videos that are no longer there."""
+        if self.location == VIDEOS and self.videos.remove_missing():
+            self.update_status()
+
     def go_back(self) -> None:
         if self.history:
             self.future.append(self.location)
@@ -898,6 +1198,8 @@ class Pane(QWidget):
             self.go(self.future.pop(), record=False)
 
     def go_up(self) -> None:
+        if self.location == VIDEOS:
+            return
         parent = os.path.dirname(self.location.rstrip(os.sep))
         if parent and parent != self.location:
             self.go(parent)
@@ -906,8 +1208,20 @@ class Pane(QWidget):
         while self.path_layout.count():
             item = self.path_layout.takeAt(0)
             if item.widget():
+                item.widget().hide()                        # gone now, not when the event loop gets to it
                 item.widget().deleteLater()
         if not self.location:
+            return
+        if self.location == VIDEOS:
+            b = QToolButton(objectName="Crumb")
+            b.setText("All Videos")
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            b.setIcon(glyph("film", THEME.accent, 14))
+            b.setIconSize(QSize(14, 14))
+            b.setToolTip("Every video in your home folder — click to look again")
+            b.clicked.connect(lambda _=False: self.go(VIDEOS))
+            self.path_layout.addWidget(b)
+            self.path_layout.addStretch(1)
             return
         p = Path(self.location)
         root = engine.volume_root(p)
@@ -934,7 +1248,16 @@ class Pane(QWidget):
     def update_status(self) -> None:
         if not self.location:
             return
-        n = self.model.rowCount(self.model.index(self.location))
+        if self.location == VIDEOS:
+            n = self.videos.rowCount()
+            sel = len(self.selected_paths())
+            text = f"{sel} of {n} selected" if sel else f"{n} video{'s' if n != 1 else ''}"
+            if self.scanner is not None:
+                text += " so far — looking through your home folder…"
+            self.status.setText(text)
+            self.fs_chip.setVisible(False)
+            return
+        n = self.fs.rowCount(self.fs.index(self.location))
         free = engine.free_space(Path(self.location))
         sel = len(self.selected_paths())
         text = f"{sel} of {n} selected" if sel else f"{n} item{'s' if n != 1 else ''}"
@@ -975,7 +1298,7 @@ class Pane(QWidget):
             subprocess.Popen(["qlmanage", "-p", *paths], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def new_folder(self) -> None:
-        if not self.location:
+        if not self.location or self.location == VIDEOS:
             return
         name, ok = QInputDialog.getText(self, "New Folder", "Name of the new folder:", text="untitled folder")
         if not ok or not name.strip():
@@ -1025,7 +1348,10 @@ class Pane(QWidget):
             if isinstance(win, MainWindow) and self is win.src:
                 menu.addAction(win.copy_btn.text(), lambda: win.transfer_selection(False))
                 menu.addAction(win.move_btn.text(), lambda: win.transfer_selection(True))
-        menu.addAction("New Folder", self.new_folder)
+        if self.location == VIDEOS:
+            menu.addAction("Look for Videos Again", lambda: self.go(VIDEOS))
+        else:
+            menu.addAction("New Folder", self.new_folder)
         menu.exec(view.viewport().mapToGlobal(pos))
 
 
@@ -1134,12 +1460,22 @@ class Sidebar(QWidget):
         it.setToolTip(0, str(path) + (" — click ⏏ to eject" if ejectable else ""))
         parent.addChild(it)
 
+    def _collection(self, parent: QTreeWidgetItem, label: str, key: str, icon: QIcon, tip: str) -> None:
+        it = QTreeWidgetItem([label])
+        it.setData(0, PATH_ROLE, key)
+        it.setData(0, EJECT_ROLE, False)
+        it.setIcon(0, icon)
+        it.setToolTip(0, tip)
+        parent.addChild(it)
+
     def rebuild(self) -> None:
         global MOUNTS
         MOUNTS = mounts()
         selected = [i.data(0, PATH_ROLE) for i in self.tree.selectedItems()]
         self.tree.clear()
         fav = self._section("Favorites")
+        self._collection(fav, "All Videos", VIDEOS, glyph("film", THEME.accent, 16),
+                         "Every video in your home folder, newest first — shown on the From side")
         home = Path.home()
         for label, p in (("Desktop", home / "Desktop"), ("Downloads", home / "Downloads"),
                          ("Documents", home / "Documents"), ("Pictures", home / "Pictures"),
@@ -1438,7 +1774,7 @@ class MainWindow(QMainWindow):
 
         self.sidebar = Sidebar()
         self.sidebar.setMinimumWidth(170)
-        self.sidebar.navigate.connect(lambda p: self.active_pane.go(p))
+        self.sidebar.navigate.connect(self._navigate)
         self.sidebar.eject.connect(self.eject)
         self.src = Pane("From", self.settings)
         self.dst = Pane("To", self.settings)
@@ -1515,6 +1851,13 @@ class MainWindow(QMainWindow):
     @property
     def active_pane(self) -> Pane:
         return self.src if self.src.active else self.dst
+
+    def _navigate(self, path: str) -> None:
+        if path == VIDEOS:                     # a collection of the Mac's videos — always the From side
+            self.set_active(self.src)
+            self.src.go(VIDEOS)
+        else:
+            self.active_pane.go(path)
 
     def set_active(self, pane: Pane) -> None:
         for p in (self.src, self.dst):
@@ -1624,6 +1967,7 @@ class MainWindow(QMainWindow):
 
     def _finished(self, st: dict) -> None:
         self.current = None
+        self.src.refresh_videos()
         verb = "Moved" if "Moving" in self._title else "Copied"
         n_ok = st["copied"] + st["skipped"]
         secs = st["seconds"]
@@ -1770,7 +2114,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Safe Finder — move files onto the SSD safely.")
     ap.add_argument("--from", dest="src", help="folder to show on the left")
     ap.add_argument("--to", dest="dst", help="folder to show on the right (the SSD)")
-    args = ap.parse_args()
+    args, _ = ap.parse_known_args()        # launched as an app, Finder may add its own arguments
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Safe Finder")

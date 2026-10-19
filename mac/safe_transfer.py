@@ -191,9 +191,24 @@ def build_plan(sources: list[Path], dest: Path) -> Plan:
     return plan
 
 
+def relocate_tool() -> str:
+    """Where relocate_folders.py is, for the Terminal commands shown to the user: next to this file when
+    run from the repo; inside the app bundle (Contents/Resources, which the build script fills) when Safe
+    Finder runs as "Safe Finder.app"."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [os.path.join(here, "relocate_folders.py")]
+    if getattr(sys, "frozen", False):
+        contents = os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))      # …/Contents
+        candidates += [os.path.join(contents, "Resources", "relocate_folders.py"),
+                       os.path.join(getattr(sys, "_MEIPASS", here), "relocate_folders.py")]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return candidates[0]
+
+
 def spares_command(volume: Path) -> str:
-    tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relocate_folders.py")
-    return f'sudo python3 "{tool}" "{volume}" --apply --spares 100'
+    return f'sudo python3 "{relocate_tool()}" "{volume}" --apply --spares 100'
 
 
 def spares_note(plan: Plan) -> tuple[str, str] | None:
