@@ -1514,10 +1514,14 @@ class Pane(QWidget):
             sc.activated.connect(slot)
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
-        if obj is self.search and event.type() == event.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
-            self.search.clear()                      # and, if a search is up, back to the folder
-            self.view().setFocus()
-            return True
+        if obj is self.search:
+            if event.type() == event.Type.ShortcutOverride and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                event.accept()                       # Return is the field's (run the search), not the pane's Open shortcut
+                return True
+            if event.type() == event.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+                self.search.clear()                  # and, if a search is up, back to the folder
+                self.view().setFocus()
+                return True
         if event.type() in (event.Type.FocusIn, event.Type.MouseButtonPress):
             self.activated.emit(self)
         return False
