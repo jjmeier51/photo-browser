@@ -88,7 +88,8 @@ cleanly.
 Looks and works like Finder: a sidebar (Favorites, and Locations with an eject button for the
 SSD), and two panes side by side — **From** (your Mac) and **To** (the SSD) — each with icon view
 (photo and video thumbnails, with a size slider up to 320 px and a spacing slider that packs the
-tiles edge to edge for more per row) or list view, back/forward and a path bar. Select files
+tiles edge to edge for more per row) or list view, a Sort menu, a search field, back/forward and a
+path bar. Select files
 or folders on the left and press **Move to “Extreme SSD”** (or Copy), or drag them onto the right
 pane — onto a folder there to put them inside it. Drags from the real Finder work too.
 
@@ -120,12 +121,30 @@ whether there's room. Then:
 - **Eject** (sidebar ⏏ or the button after a transfer) flushes everything and unmounts the SSD
   properly.
 
-**All Videos** (top of the sidebar) lists every video in your home folder in the From pane,
-newest first, wherever it is — Movies, Downloads, Desktop, Documents, any subfolder — so they can
-be picked and moved to the SSD from one place. It looks afresh each time you open it (click it
-again to look again) and skips `~/Library`, app and library bundles (Photos, iMovie, Final Cut),
-hidden items and other drives. Select, drag, Move and Copy work as in any folder; moved videos
-drop off the list. (`SAFE_FINDER_VIDEO_ROOTS=/path:/other` makes it look elsewhere.)
+**Sort** (the ≡ button in each pane's header) orders a folder by Name, Kind, Date Modified, Date
+Created, Date Added or Size, ascending or descending — folders first, names in Finder's natural
+order (IMG_2 before IMG_10). Clicking a list-view column does the same. Date Added is the day a
+file arrived in its folder, which macOS keeps per file on APFS; on the exFAT SSD it falls back to
+the creation date. Each pane remembers its sort.
+
+**Search** (the field in each pane's header, or ⌘F) finds files by words in the name, by extension
+(`.heic`, `*.mov`, `ext:mp4,mov`) or by kind (`kind:video`, or the Kind menu — Images, Videos, RAW
+photos, PDFs, Audio, Documents, Archives); everything typed must match. Press Return. The scope
+bar picks where: the folder you're in (and everything inside it), or the whole drive — "This Mac"
+on the Mac side, which asks Spotlight and so answers at once, walking your home folder itself only
+when Spotlight has nothing (an external drive is always walked, streaming results as it goes).
+Results come up in the same icon or list view, with thumbnails, newest first: open them, Quick
+Look, select and Move or Copy to the SSD exactly as in a folder, or right-click ▸ **Show in Safe
+Finder** to jump to the file in its folder, selected. Esc (or clearing the field) returns to the
+folder; back/forward bring a search up again. Searching in the To pane is for finding things on
+the SSD — Move/Copy wait until a folder is open there again.
+
+**All Videos** (top of the sidebar) is a ready-made search: every video in your home folder in the
+From pane, newest first, wherever it is — Movies, Downloads, Desktop, Documents, any subfolder — so
+they can be picked and moved to the SSD from one place. It looks afresh each time you open it
+(click it again to look again). Searches and All Videos skip `~/Library`, app and library bundles
+(Photos, iMovie, Final Cut), hidden items and other drives; moved files drop off the list.
+(`SAFE_FINDER_SEARCH_ROOTS=/path:/other` makes "This Mac" look elsewhere.)
 
 ```sh
 open "mac/Safe Finder.command"                     # or double-click it in Finder; the first run installs PySide6

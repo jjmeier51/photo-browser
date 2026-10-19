@@ -3,8 +3,12 @@
 
 Two Finder panes side by side — "From" (your Mac) and "To" (the SSD) — with a Finder sidebar
 (Favorites, Locations with eject buttons), icon view with photo/video thumbnails or list view,
-back/forward, a path bar, and sliders for the thumbnail size and the space between tiles. "All Videos" in the sidebar lists every video in
-your home folder in the From pane (newest first) so they can be moved to the SSD from one place. Select files or folders on the left and press
+back/forward, a path bar, a Sort menu (name, kind, date modified / created / added, size), a search
+field, and sliders for the thumbnail size and the space between tiles. Search looks through the
+current folder or the whole Mac (Spotlight when it can, walking the folders otherwise) for names,
+extensions or kinds and shows the results in the same icon or list view, where they can be opened,
+revealed in their folder ("Show in Safe Finder") or moved to the SSD. "All Videos" in the sidebar
+is the same thing for every video in your home folder. Select files or folders on the left and press
 Move / Copy, or drag them anywhere onto the right pane (or onto a folder in it). Drops from the
 real Finder work too.
 
@@ -25,6 +29,8 @@ import argparse
 import os
 import re
 import shutil
+import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -38,14 +44,14 @@ sys.path.insert(0, str(HERE))
 
 try:
     from PySide6.QtCore import (QDateTime, QDir, QFileInfo, QFileSystemWatcher, QLocale, QMimeData, QModelIndex,
-                                QObject, QPoint, QRect, QRectF, QRunnable, QSettings, QSize, Qt, QThreadPool,
-                                QTimer, QUrl, Signal)
-    from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage, QImageReader,
-                               QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap, QShortcut,
-                               QStandardItem, QStandardItemModel)
-    from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QDialog,
+                                QObject, QPoint, QRect, QRectF, QRunnable, QSettings, QSize, QSortFilterProxyModel,
+                                Qt, QThreadPool, QTimer, QUrl, Signal)
+    from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage,
+                               QImageReader, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap,
+                               QShortcut, QStandardItem, QStandardItemModel)
+    from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
                                    QFileIconProvider, QFileSystemModel, QFrame, QHBoxLayout, QHeaderView,
-                                   QInputDialog, QLabel, QListView, QMainWindow, QMenu, QMessageBox,
+                                   QInputDialog, QLabel, QLineEdit, QListView, QMainWindow, QMenu, QMessageBox,
                                    QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy,
                                    QSlider, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
                                    QStyleOptionViewItem, QToolButton, QTreeView, QTreeWidget,
@@ -146,6 +152,16 @@ class Theme:
         QToolButton#Nav:hover, QToolButton#Seg:hover {{ background: {t.hover}; }}
         QToolButton#Seg:checked {{ background: {t.select_bg}; }}
         QToolButton#Nav:disabled {{ background: transparent; }}
+        QLineEdit#Search {{ background: {t.content}; border: 1px solid {t.button_border}; border-radius: 7px;
+                            padding: 2px 6px; font-size: 12px; }}
+        QLineEdit#Search:focus {{ border-color: {t.accent}; }}
+        #ScopeBar {{ background: {t.header}; border-bottom: 1px solid {t.border}; }}
+        #ScopeBar QLabel {{ color: {t.secondary}; font-size: 11px; }}
+        QToolButton#Scope {{ border: 1px solid transparent; border-radius: 9px; padding: 1px 9px; font-size: 11px;
+                             color: {t.text}; }}
+        QToolButton#Scope:hover {{ background: {t.hover}; }}
+        QToolButton#Scope:checked {{ background: {t.accent_pill}; color: white; }}
+        #ScopeBar QComboBox {{ font-size: 11px; padding: 1px 6px; min-height: 18px; }}
         QListView, QTreeView {{ background: {t.content}; border: none; outline: 0; }}
         QAbstractItemView[dropActive="true"] {{ border: 2px solid {t.accent}; border-radius: 4px; }}
         QTreeView::item {{ height: 24px; border: none; }}
@@ -302,6 +318,12 @@ def glyph(name: str, color: str | None = None, size: int = 16) -> QIcon:
         p.drawRoundedRect(QRectF(s * 0.62, s * 0.28, s * 0.3, s * 0.44), 1.5, 1.5)
         p.setPen(QPen(c, 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         p.drawLine(QPoint(int(s * 0.42), int(s * 0.5)), QPoint(int(s * 0.58), int(s * 0.5)))
+    elif name == "sort":                                   # three lines, shortest at the bottom
+        for gy, w in ((0.25, 0.7), (0.5, 0.5), (0.75, 0.3)):
+            p.drawLine(QPoint(int(s * 0.15), int(s * gy)), QPoint(int(s * (0.15 + w)), int(s * gy)))
+    elif name == "search":                                 # a magnifier
+        p.drawEllipse(QRectF(s * 0.12, s * 0.12, s * 0.52, s * 0.52))
+        p.drawLine(QPoint(int(s * 0.58), int(s * 0.58)), QPoint(int(s * 0.88), int(s * 0.88)))
     elif name == "film":
         p.setPen(QPen(c, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         p.drawRoundedRect(QRectF(s * 0.1, s * 0.2, s * 0.8, s * 0.6), 2, 2)
@@ -640,7 +662,7 @@ class DropMixin:
         return self.pane.location
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls() and self.pane.location != VIDEOS:
+        if event.mimeData().hasUrls() and not self.pane.is_virtual:
             event.setDropAction(Qt.DropAction.CopyAction)
             event.accept()
             self.pane.set_drop_highlight(True)
@@ -648,7 +670,7 @@ class DropMixin:
             event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # noqa: N802
-        if not event.mimeData().hasUrls() or self.pane.location == VIDEOS:
+        if not event.mimeData().hasUrls() or self.pane.is_virtual:
             event.ignore()
             return
         super().dragMoveEvent(event)  # type: ignore[misc]   # keeps auto-scroll
@@ -663,7 +685,7 @@ class DropMixin:
         event.accept()
 
     def dropEvent(self, event) -> None:  # noqa: N802
-        if self.pane.location == VIDEOS:
+        if self.pane.is_virtual:
             event.ignore()
             return
         target = self._target(event)
@@ -705,7 +727,7 @@ class ListView(DropMixin, QTreeView):
         self.setItemsExpandable(False)
         self.setUniformRowHeights(True)
         self.setAlternatingRowColors(True)
-        self.setSortingEnabled(True)
+        self.setSortingEnabled(False)              # the pane sorts (its header click → Pane._header_sort)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
@@ -716,52 +738,216 @@ class ListView(DropMixin, QTreeView):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
 
-# ============================================================================ all videos
+# ============================================================================ search & collections
 
 
-VIDEOS = "safe-finder://videos"                 # the "All Videos" location — a collection, not a folder
-_VIDEO_PATH, _VIDEO_SORT, _VIDEO_MTIME = 258, 259, 260       # Qt.UserRole + 2… (256/257 are the sidebar's)
-_VIDEO_KINDS = {".mov": "QuickTime movie", ".mp4": "MPEG-4 movie", ".m4v": "MPEG-4 movie", ".avi": "AVI movie",
-                ".mkv": "Matroska video", ".webm": "WebM video", ".3gp": "3GPP movie", ".mts": "AVCHD video",
-                ".m2ts": "AVCHD video", ".wmv": "Windows Media video"}
+VIDEOS = "safe-finder://videos"                 # the "All Videos" collection
+SEARCH = "safe-finder://search/"                # + a number: one search's results (see Pane.searches)
+_R_PATH, _R_MTIME, _R_SIZE, _R_ISDIR = 258, 259, 260, 261    # roles on a results row (256/257: the sidebar's)
+KIND_EXT = {
+    "image": IMAGE_EXT, "video": VIDEO_EXT, "raw": RAW_EXT, "pdf": {".pdf"},
+    "audio": {".mp3", ".m4a", ".aac", ".wav", ".flac", ".aiff", ".aif", ".ogg", ".opus"},
+    "document": {".txt", ".rtf", ".md", ".doc", ".docx", ".pages", ".numbers", ".key", ".xls", ".xlsx",
+                 ".ppt", ".pptx", ".csv"},
+    "archive": {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".dmg", ".iso"},
+}
+KIND_LABELS = [("", "Any kind"), ("image", "Images"), ("video", "Videos"), ("raw", "RAW photos"), ("pdf", "PDFs"),
+               ("audio", "Audio"), ("document", "Documents"), ("archive", "Archives")]
+KIND_NAMES = {".mov": "QuickTime movie", ".mp4": "MPEG-4 movie", ".m4v": "MPEG-4 movie", ".avi": "AVI movie",
+              ".mkv": "Matroska video", ".webm": "WebM video", ".3gp": "3GPP movie", ".mts": "AVCHD video",
+              ".m2ts": "AVCHD video", ".wmv": "Windows Media video", ".jpg": "JPEG image", ".jpeg": "JPEG image",
+              ".png": "PNG image", ".heic": "HEIC image", ".heif": "HEIF image", ".gif": "GIF image",
+              ".tif": "TIFF image", ".tiff": "TIFF image", ".webp": "WebP image", ".avif": "AVIF image",
+              ".bmp": "Bitmap image", ".dng": "DNG raw image", ".cr2": "Canon raw image", ".cr3": "Canon raw image",
+              ".nef": "Nikon raw image", ".arw": "Sony raw image", ".raf": "Fujifilm raw image",
+              ".orf": "Olympus raw image", ".rw2": "Panasonic raw image", ".pdf": "PDF document",
+              ".zip": "ZIP archive", ".mp3": "MP3 audio", ".m4a": "AAC audio", ".wav": "WAV audio"}
 _SKIP_TOP = {"Library"}                           # directly under the home folder: caches, Mail, app data…
 _SKIP_ANYWHERE = {"node_modules"}
 _BUNDLE_EXT = {".app", ".photoslibrary", ".imovielibrary", ".fcpbundle", ".fcpcache", ".tvlibrary",
                ".musiclibrary", ".bundle", ".framework", ".xcarchive", ".playground", ".pkg", ".lrlibrary"}
+SORT_KEYS = [("name", "Name"), ("kind", "Kind"), ("modified", "Date Modified"), ("created", "Date Created"),
+             ("added", "Date Added"), ("size", "Size")]
+DATE_KEYS = {"modified", "created", "added"}
+_COLUMN_KEY = {0: "name", 1: "size", 2: "kind", 3: "modified"}      # the list view's columns
+_KEY_COLUMN = {v: k for k, v in _COLUMN_KEY.items()}
 
 
-def video_roots() -> list[Path]:
-    """Where "All Videos" looks: the home folder. SAFE_FINDER_VIDEO_ROOTS=a:b overrides it (tests)."""
-    env = os.environ.get("SAFE_FINDER_VIDEO_ROOTS")
+def mac_roots() -> list[Path]:
+    """What "This Mac" means to a search and to All Videos: the home folder, where files live (the
+    system, apps and ~/Library hold nothing you'd move to the SSD). SAFE_FINDER_SEARCH_ROOTS=a:b
+    overrides it (tests)."""
+    env = os.environ.get("SAFE_FINDER_SEARCH_ROOTS")
     return [Path(p) for p in env.split(":") if p] if env else [Path.home()]
 
 
+def kind_name(path: str, is_dir: bool) -> str:
+    if is_dir:
+        return "Folder"
+    ext = os.path.splitext(path)[1].lower()
+    return KIND_NAMES.get(ext, f"{ext[1:].upper()} file" if ext else "File")
+
+
+def natural_key(name: str) -> list:
+    """Finder's order: IMG_2 before IMG_10, case ignored."""
+    return [int(t) if i % 2 else t.lower() for i, t in enumerate(re.split(r"(\d+)", name))]
+
+
+_libc = None
+
+
+def added_time(path: str) -> float | None:
+    """When the file arrived in its folder (Finder's "Date Added"), which macOS keeps per file
+    (ATTR_CMN_ADDEDTIME); None where it isn't kept — other systems, exFAT drives."""
+    global _libc
+    if not IS_MAC:
+        return None
+    try:
+        import ctypes
+        import ctypes.util
+        if _libc is None:
+            _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+
+        class AttrList(ctypes.Structure):
+            _fields_ = [("bitmapcount", ctypes.c_ushort), ("reserved", ctypes.c_uint16),
+                        ("commonattr", ctypes.c_uint32), ("volattr", ctypes.c_uint32), ("dirattr", ctypes.c_uint32),
+                        ("fileattr", ctypes.c_uint32), ("forkattr", ctypes.c_uint32)]
+
+        attrs = AttrList(5, 0, 0x10000000, 0, 0, 0, 0)           # ATTR_BIT_MAP_COUNT, ATTR_CMN_ADDEDTIME
+        buf = ctypes.create_string_buffer(20)                     # u_int32 length + struct timespec
+        if _libc.getattrlist(path.encode("utf-8"), ctypes.byref(attrs), buf, 20, 1) != 0:   # FSOPT_NOFOLLOW
+            return None
+        length, sec, nsec = struct.unpack("<Iqq", buf.raw)
+        return sec + nsec / 1e9 if length >= 20 and sec > 0 else None
+    except Exception:  # noqa: BLE001 — any trouble just means "not known"
+        return None
+
+
+def file_times(path: str) -> tuple[float, float]:
+    """(created, added): when the file was made, and when it came into this folder. Where a system
+    or drive doesn't keep one, the other stands in (then the modification date)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return (0.0, 0.0)
+    created = getattr(st, "st_birthtime", None) or st.st_mtime
+    added = added_time(path)
+    return (created, added or created)
+
+
+class Query:
+    """What a search looks for: words that must all appear in the name, extensions (".heic",
+    "*.mov", "ext:mp4,mov") and a kind ("kind:video", or the Kind menu). All of it must match."""
+
+    def __init__(self, text: str = "", kind: str = "") -> None:
+        self.text = text.strip()
+        self.words: list[str] = []
+        self.exts: set[str] = set()
+        self.menu_kind = kind if kind in KIND_EXT else ""      # the Kind menu's choice, as such
+        self.kind = self.menu_kind                              # …which "kind:" in the text overrides
+        for tok in self.text.split():
+            low = tok.lower()
+            if low.startswith("kind:"):
+                if low[5:] in KIND_EXT:
+                    self.kind = low[5:]
+            elif low.startswith("ext:"):
+                self.exts |= {"." + e.strip(". ") for e in low[4:].split(",") if e.strip(". ")}
+            elif low.startswith("*.") and len(low) > 2:
+                self.exts.add(low[1:])
+            elif low.startswith(".") and len(low) > 1 and "." not in low[1:]:
+                self.exts.add(low)
+            else:
+                self.words.append(low)
+
+    def empty(self) -> bool:
+        return not (self.words or self.exts or self.kind)
+
+    def wants_folders(self) -> bool:
+        """A search by name finds folders too; one by extension or kind is about files."""
+        return bool(self.words) and not self.exts and not self.kind
+
+    def matches(self, name: str) -> bool:
+        low = name.lower()
+        ext = os.path.splitext(low)[1]
+        if self.exts and ext not in self.exts:
+            return False
+        if self.kind and ext not in KIND_EXT[self.kind]:
+            return False
+        return all(w in low for w in self.words)
+
+    def label(self) -> str:
+        bits = [self.text] if self.text else []
+        if self.kind and f"kind:{self.kind}" not in self.text.lower():
+            bits.append(dict(KIND_LABELS)[self.kind])
+        return " · ".join(bits)
+
+    def spotlight(self) -> str:
+        """The same search as a Spotlight (mdfind) query; what comes back is checked with `matches` too."""
+        def quote(s: str) -> str:
+            return s.replace("\\", "\\\\").replace('"', '\\"').replace("*", "\\*").replace("?", "\\?")
+        parts = [f'kMDItemFSName == "*{quote(w)}*"cd' for w in self.words]
+        exts = self.exts & KIND_EXT[self.kind] if (self.exts and self.kind) else self.exts or (KIND_EXT[self.kind] if self.kind else set())
+        if exts:
+            parts.append("(" + " || ".join(f'kMDItemFSName == "*{e}"c' for e in sorted(exts)) + ")")
+        return " && ".join(parts) or 'kMDItemFSName == "*"'
+
+
+class SearchRun:
+    """One search as it was run — so back/forward brings up the same one, from the same folder."""
+
+    def __init__(self, query: Query, folder: str, scope: str, roots: list[Path], spotlight: bool, where: str) -> None:
+        self.query, self.folder, self.scope, self.roots, self.spotlight, self.where = \
+            query, folder, scope, roots, spotlight, where
+
+
 class _ScanSignals(QObject):
-    found = Signal(list)          # a batch of (path, size, mtime)
+    found = Signal(list)          # a batch of (path, size, mtime, is_dir)
     done = Signal(bool)           # True when it got to the end, False when cancelled
 
 
-class VideoScanner:
-    """Finds every video under `roots` on a background thread and streams them in batches.
-    Skips hidden items, ~/Library (caches, Mail, app data), node_modules, app and library
-    bundles (Photos, iMovie, Final Cut…), symlinks and anything mounted inside the tree; a folder
-    it may not read is skipped (macOS asks for Desktop/Documents/Downloads access the first
-    time). Cheap enough to run afresh every time the view is opened."""
+class FileScanner:
+    """Finds the files under `roots` that `query` matches, on a background thread, streaming them
+    in batches. Walks the folders itself — skipping hidden items, ~/Library (caches, Mail, app
+    data), node_modules, app and library bundles (Photos, iMovie, Final Cut…), symlinks and
+    anything mounted inside the tree, and a folder it may not read (macOS asks for
+    Desktop/Documents/Downloads access the first time) — or, for the whole Mac, asks Spotlight
+    (mdfind), which answers at once, and walks only if Spotlight has nothing."""
 
-    def __init__(self, roots: list[Path]) -> None:
+    def __init__(self, roots: list[Path], query: Query, folders: bool, spotlight: bool = False) -> None:
         self.roots = roots
+        self.query = query
+        self.folders = folders
+        self.spotlight = spotlight
         self.signals = _ScanSignals()
         self._stop = threading.Event()
+        self._proc: subprocess.Popen | None = None
 
     def start(self) -> None:
-        threading.Thread(target=self._run, name="video-scan", daemon=True).start()
+        threading.Thread(target=self._run, name="file-scan", daemon=True).start()
 
     def cancel(self) -> None:
         self._stop.set()
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except OSError:
+                pass
 
     def _run(self) -> None:
-        batch: list[tuple[str, int, float]] = []
+        found = self._spotlight() if self.spotlight else 0
+        if not found and not self._stop.is_set():
+            self._walk()
+        self.signals.done.emit(not self._stop.is_set())
+
+    @staticmethod
+    def _skip_dir(name: str, top: bool) -> bool:
+        return (top and name in _SKIP_TOP) or name in _SKIP_ANYWHERE \
+            or os.path.splitext(name)[1].lower() in _BUNDLE_EXT
+
+    def _walk(self) -> int:
+        batch: list[tuple[str, int, float, bool]] = []
         flushed = time.monotonic()
+        total = 0
         stack: list[tuple[str, int, bool]] = []            # folder, its volume, is it a root
         for root in self.roots:
             try:
@@ -781,38 +967,88 @@ class VideoScanner:
                     continue
                 try:
                     if e.is_dir(follow_symlinks=False):
-                        if (top and name in _SKIP_TOP) or name in _SKIP_ANYWHERE \
-                                or os.path.splitext(name)[1].lower() in _BUNDLE_EXT:
+                        if self._skip_dir(name, top):
                             continue
-                        if e.stat(follow_symlinks=False).st_dev != dev:     # another volume mounted here
-                            continue
-                        stack.append((e.path, dev, False))
-                    elif e.is_file(follow_symlinks=False) and os.path.splitext(name)[1].lower() in VIDEO_EXT:
                         st = e.stat(follow_symlinks=False)
-                        batch.append((e.path, st.st_size, st.st_mtime))
+                        if st.st_dev != dev:                           # another volume mounted here
+                            continue
+                        if self.folders and self.query.matches(name):
+                            batch.append((e.path, 0, st.st_mtime, True))
+                        stack.append((e.path, dev, False))
+                    elif e.is_file(follow_symlinks=False) and self.query.matches(name):
+                        st = e.stat(follow_symlinks=False)
+                        batch.append((e.path, st.st_size, st.st_mtime, False))
                 except OSError:
                     continue
             if batch and (len(batch) >= 250 or time.monotonic() - flushed > 0.4):
+                total += len(batch)
                 self.signals.found.emit(batch)
                 batch, flushed = [], time.monotonic()
-        if self._stop.is_set():
-            self.signals.done.emit(False)
-            return
-        if batch:
+        if batch and not self._stop.is_set():
+            total += len(batch)
             self.signals.found.emit(batch)
-        self.signals.done.emit(True)
+        return total
+
+    def _skip_path(self, path: str, root: str) -> bool:
+        parts = path[len(root):].strip("/").split("/")
+        return any(p.startswith(".") or p in _SKIP_ANYWHERE or os.path.splitext(p)[1].lower() in _BUNDLE_EXT
+                   for p in parts) or (parts and parts[0] in _SKIP_TOP)
+
+    def _spotlight(self) -> int:
+        exe = os.environ.get("SAFE_FINDER_MDFIND") or shutil.which("mdfind")
+        if not exe:
+            return 0
+        batch: list[tuple[str, int, float, bool]] = []
+        flushed = time.monotonic()
+        total = 0
+        for root in self.roots:
+            try:
+                self._proc = subprocess.Popen([exe, "-onlyin", str(root), self.query.spotlight()],
+                                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            except OSError:
+                return total
+            assert self._proc.stdout is not None
+            for line in self._proc.stdout:
+                if self._stop.is_set():
+                    break
+                path = line.rstrip("\n")
+                if not path or self._skip_path(path, str(root)):
+                    continue
+                name = os.path.basename(path)
+                if not self.query.matches(name):
+                    continue
+                try:
+                    st = os.lstat(path)
+                except OSError:
+                    continue
+                if stat.S_ISLNK(st.st_mode):
+                    continue
+                is_dir = stat.S_ISDIR(st.st_mode)
+                if is_dir and not self.folders:
+                    continue
+                batch.append((path, 0 if is_dir else st.st_size, st.st_mtime, is_dir))
+                if len(batch) >= 250 or time.monotonic() - flushed > 0.4:
+                    total += len(batch)
+                    self.signals.found.emit(batch)
+                    batch, flushed = [], time.monotonic()
+            self._proc.wait()
+            self._proc = None
+        if batch and not self._stop.is_set():
+            total += len(batch)
+            self.signals.found.emit(batch)
+        return total
 
 
-class VideosModel(QStandardItemModel):
-    """The "All Videos" listing: a row per video the scanner found, in QFileSystemModel's four
-    columns (Name, Size, Kind, Date Modified) and answering its `filePath` / `isDir` / `fileIcon`
-    / `fileName` / `lastModified`, so the pane's views, delegates and drag-and-drop treat it like
-    any folder listing. Rows drag as file URLs; nothing can be dropped on it."""
+class ResultsModel(QStandardItemModel):
+    """A search's results (or All Videos): a row per file the scanner found, in QFileSystemModel's
+    four columns (Name, Size, Kind, Date Modified) and answering its `filePath` / `isDir` /
+    `fileIcon` / `fileName` / `size` / `lastModified`, so the pane's views, delegates and
+    drag-and-drop treat it like any folder listing. Rows drag as file URLs; nothing can be dropped
+    on it."""
 
     def __init__(self, parent: QObject, icons: QFileIconProvider) -> None:
         super().__init__(0, 4, parent)
         self.setHorizontalHeaderLabels(["Name", "Size", "Kind", "Date Modified"])
-        self.setSortRole(_VIDEO_SORT)
         self._icons = icons
         self._icon_cache: dict[str, QIcon] = {}
         self._paths: set[str] = set()
@@ -822,23 +1058,32 @@ class VideosModel(QStandardItemModel):
         return self._icons
 
     def filePath(self, index: QModelIndex) -> str:  # noqa: N802
-        return (self.data(index.siblingAtColumn(0), _VIDEO_PATH) or "") if index.isValid() else ""
+        return (self.data(index.siblingAtColumn(0), _R_PATH) or "") if index.isValid() else ""
 
-    def isDir(self, _index: QModelIndex) -> bool:  # noqa: N802
-        return False
+    def isDir(self, index: QModelIndex) -> bool:  # noqa: N802
+        return bool(self.data(index.siblingAtColumn(0), _R_ISDIR)) if index.isValid() else False
 
     def fileName(self, index: QModelIndex) -> str:  # noqa: N802
         return os.path.basename(self.filePath(index))
 
     def fileIcon(self, index: QModelIndex) -> QIcon:  # noqa: N802
-        return self._icon_for(self.filePath(index))
+        return self._icon_for(self.filePath(index), self.isDir(index))
+
+    def size(self, index: QModelIndex) -> int:
+        return int(self.data(index.siblingAtColumn(0), _R_SIZE) or 0) if index.isValid() else 0
 
     def lastModified(self, index: QModelIndex) -> QDateTime:  # noqa: N802
-        mtime = self.data(index.siblingAtColumn(0), _VIDEO_MTIME) if index.isValid() else None
+        mtime = self.data(index.siblingAtColumn(0), _R_MTIME) if index.isValid() else None
         return QDateTime.fromSecsSinceEpoch(int(mtime or 0))
 
-    def _icon_for(self, path: str) -> QIcon:
-        ext = os.path.splitext(path)[1].lower()        # one native icon per kind — asking per file is slow
+    def index_for(self, path: str) -> QModelIndex:
+        for r in range(self.rowCount()):
+            if self.item(r).data(_R_PATH) == path:
+                return self.index(r, 0)
+        return QModelIndex()
+
+    def _icon_for(self, path: str, is_dir: bool) -> QIcon:
+        ext = "/" if is_dir else os.path.splitext(path)[1].lower()   # one native icon per kind — per file is slow
         icon = self._icon_cache.get(ext)
         if icon is None:
             icon = self._icon_cache[ext] = self._icons.icon(QFileInfo(path))
@@ -846,7 +1091,7 @@ class VideosModel(QStandardItemModel):
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.DecorationRole and index.column() == 0:
-            return self._icon_for(self.filePath(index))
+            return self._icon_for(self.filePath(index), self.isDir(index))
         return super().data(index, role)
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
@@ -879,45 +1124,126 @@ class VideosModel(QStandardItemModel):
         self.removeRows(0, self.rowCount())
         self._paths.clear()
 
-    def add(self, found: list[tuple[str, int, float]]) -> None:
+    def add(self, found: list[tuple[str, int, float, bool]]) -> None:
         right = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        for path, size, mtime in found:
+        for path, size, mtime, is_dir in found:
             if path in self._paths:
                 continue
             self._paths.add(path)
             name = os.path.basename(path)
-            ext = os.path.splitext(name)[1].lower()
             n = QStandardItem(name)
-            n.setData(path, _VIDEO_PATH)
-            n.setData(float(mtime), _VIDEO_MTIME)
-            n.setData(name.lower(), _VIDEO_SORT)
+            n.setData(path, _R_PATH)
+            n.setData(float(mtime), _R_MTIME)
+            n.setData(int(size), _R_SIZE)
+            n.setData(bool(is_dir), _R_ISDIR)
             n.setToolTip(path)
-            s = QStandardItem(human(size))
-            s.setData(int(size), _VIDEO_SORT)
+            s = QStandardItem("--" if is_dir else human(size))
             s.setTextAlignment(right)
-            kind = _VIDEO_KINDS.get(ext, f"{ext[1:].upper()} video")
-            k = QStandardItem(kind)
-            k.setData(kind, _VIDEO_SORT)
+            k = QStandardItem(kind_name(path, is_dir))
             when = QDateTime.fromSecsSinceEpoch(int(mtime))
             d = QStandardItem(QLocale.system().toString(when, QLocale.FormatType.ShortFormat))
-            d.setData(float(mtime), _VIDEO_SORT)
             self.appendRow([n, s, k, d])
 
     def remove_missing(self) -> int:
         """Drop the rows whose file is gone (moved to the SSD, deleted); how many."""
-        gone = [r for r in range(self.rowCount()) if not os.path.lexists(self.item(r).data(_VIDEO_PATH))]
+        gone = [r for r in range(self.rowCount()) if not os.path.lexists(self.item(r).data(_R_PATH))]
         for r in reversed(gone):
-            self._paths.discard(self.item(r).data(_VIDEO_PATH))
+            self._paths.discard(self.item(r).data(_R_PATH))
             self.removeRow(r)
         return len(gone)
+
+
+class PaneModel(QSortFilterProxyModel):
+    """What a pane's views show: the folder listing (QFileSystemModel) or a results list, sorted the
+    way the Sort menu says — by the dates QFileSystemModel has no column for too (created, added)
+    — with folders first and names in natural order (IMG_2 before IMG_10). Passes through the
+    file-model calls the delegates and drag-and-drop make (`filePath`, `isDir`, …)."""
+
+    def __init__(self, parent: QObject) -> None:
+        super().__init__(parent)
+        self.key = "name"
+        self._is_fs = True
+        self._keys: dict[int, tuple] = {}            # node (fs) or row (results) → sort key, for `key`
+        self.setDynamicSortFilter(True)
+
+    def set_source(self, model: "QFileSystemModel | ResultsModel") -> None:
+        self._is_fs = isinstance(model, QFileSystemModel)
+        self._keys.clear()
+        self.setSourceModel(model)
+
+    def set_sort(self, key: str, order: Qt.SortOrder) -> None:
+        self.key = key
+        self._keys.clear()
+        self.sort(-1)                                  # a new key with the same column is still a new order
+        self.sort(_KEY_COLUMN.get(key, 0), order)
+
+    def forget_keys(self) -> None:
+        self._keys.clear()
+
+    # -- QFileSystemModel's face
+    def filePath(self, index: QModelIndex) -> str:  # noqa: N802
+        return self.sourceModel().filePath(self.mapToSource(index)) if index.isValid() else ""
+
+    def isDir(self, index: QModelIndex) -> bool:  # noqa: N802
+        return self.sourceModel().isDir(self.mapToSource(index)) if index.isValid() else False
+
+    def fileIcon(self, index: QModelIndex) -> QIcon:  # noqa: N802
+        return self.sourceModel().fileIcon(self.mapToSource(index))
+
+    def fileName(self, index: QModelIndex) -> str:  # noqa: N802
+        return self.sourceModel().fileName(self.mapToSource(index))
+
+    def lastModified(self, index: QModelIndex) -> QDateTime:  # noqa: N802
+        return self.sourceModel().lastModified(self.mapToSource(index))
+
+    def iconProvider(self) -> QFileIconProvider:  # noqa: N802
+        return self.sourceModel().iconProvider()
+
+    def index_for(self, path: str) -> QModelIndex:
+        src = self.sourceModel()
+        return self.mapFromSource(src.index(path) if self._is_fs else src.index_for(path))
+
+    # -- order
+    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:  # noqa: N802
+        kl, kr = self._sort_key(left), self._sort_key(right)
+        if kl[0] != kr[0]:                             # folders stay first whichever way the order runs
+            less = kl[0] < kr[0]
+            return less if self.sortOrder() == Qt.SortOrder.AscendingOrder else not less
+        return kl[1:] < kr[1:]
+
+    def _sort_key(self, idx: QModelIndex) -> tuple:
+        cid = idx.internalId() if self._is_fs else idx.row()
+        k = self._keys.get(cid)
+        if k is None:
+            k = self._keys[cid] = self._make_key(idx)
+        return k
+
+    def _make_key(self, idx: QModelIndex) -> tuple:
+        src = self.sourceModel()
+        is_dir = src.isDir(idx)
+        name = src.fileName(idx)
+        group, nat = (0 if is_dir else 1), natural_key(name)
+        key = self.key
+        if key == "kind":
+            return (group, "" if is_dir else os.path.splitext(name)[1].lower(), nat)
+        if key == "size":
+            return (group, 0 if is_dir else src.size(idx), nat)
+        if key == "modified":
+            return (group, src.lastModified(idx).toMSecsSinceEpoch(), nat)
+        if key in ("created", "added"):
+            created, added = file_times(src.filePath(idx))
+            return (group, added if key == "added" else created, nat)
+        return (group, nat)
 
 
 # ============================================================================ pane
 
 
 class Pane(QWidget):
-    """One Finder window's worth: header (back/forward, title, view toggle), the views, path bar
-    and status bar."""
+    """One Finder window's worth: header (back/forward, title, sort, search, view toggle), the
+    views, path bar and status bar. Besides folders it shows two kinds of collection in the same
+    views: All Videos, and a search's results (`searches` remembers each run so back/forward can
+    bring it up again)."""
 
     dropped = Signal(list, str)          # paths, target folder
     activated = Signal(object)           # this pane got focus/clicked
@@ -929,33 +1255,43 @@ class Pane(QWidget):
         self.role = role                 # "From" | "To"
         self.settings = settings
         self.location = ""
+        self.folder = ""                 # the last real folder: where a search starts, and returns to
         self.history: list[str] = []
         self.future: list[str] = []
         self.drop_target: str | None = None
         self.icon_px = int(settings.value(f"{role}/icon", 84))
         self.gap = int(settings.value(f"{role}/gap", 34))      # room around each tile; 2 packs them edge to edge
         self.active = False
+        self.searches: dict[str, SearchRun] = {}               # location → what was searched, and where
+        self._search_n = 0
+        self._pending_reveal: str | None = None
+        self.folder_sort = (str(settings.value(f"{role}/sort", "name")), self._order(settings.value(f"{role}/order", "asc")))
+        if self.folder_sort[0] not in dict(SORT_KEYS):
+            self.folder_sort = ("name", Qt.SortOrder.AscendingOrder)
+        self.results_sort = ("modified", Qt.SortOrder.DescendingOrder)   # newest first, like All Videos
 
         self.fs = QFileSystemModel(self)
         self._icons = QFileIconProvider()          # native Finder icons on macOS; kept alive with the pane
         self.fs.setIconProvider(self._icons)
         self.fs.setReadOnly(True)
         self.fs.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files | QDir.Filter.NoDotAndDotDot)
-        self.fs.directoryLoaded.connect(lambda _p: self.update_status())
-        self.fs.rowsInserted.connect(lambda *_: self.update_status())
-        self.fs.rowsRemoved.connect(lambda *_: self.update_status())
-        # "All Videos": the same views over a model the scanner fills (rows arrive in batches, so the
-        # status line is refreshed a moment later rather than per row).
-        self.videos = VideosModel(self, self._icons)
+        # The status line is refreshed a moment after rows come or go, never from inside the model's
+        # own signal: asking the model for anything mid-insertion, with the sorting proxy still
+        # catching up, is a crash.
         self._status_soon = QTimer(self)
         self._status_soon.setSingleShot(True)
         self._status_soon.setInterval(80)
         self._status_soon.timeout.connect(self.update_status)
-        self.videos.rowsInserted.connect(lambda *_: self._status_soon.start())
-        self.videos.rowsRemoved.connect(lambda *_: self._status_soon.start())
-        self.model: QFileSystemModel | VideosModel = self.fs      # whichever the views show now
-        self.scanner: VideoScanner | None = None
-        self._folder_sort = (0, Qt.SortOrder.AscendingOrder)
+        self.fs.directoryLoaded.connect(lambda _p: (self._status_soon.start(), self._try_reveal()))
+        self.fs.rowsInserted.connect(lambda *_: self._status_soon.start())
+        self.fs.rowsRemoved.connect(lambda *_: self._status_soon.start())
+        # Results (searches, All Videos): the same views over a model the scanner fills in batches.
+        self.results = ResultsModel(self, self._icons)
+        self.results.rowsInserted.connect(lambda *_: self._status_soon.start())
+        self.results.rowsRemoved.connect(lambda *_: self._status_soon.start())
+        self.model = PaneModel(self)               # what the views show: fs or results, in the chosen order
+        self.model.set_source(self.fs)
+        self.scanner: FileScanner | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -977,6 +1313,21 @@ class Pane(QWidget):
         self.title = QLabel(objectName="PaneTitle")
         self.title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         h.addWidget(self.title, 1)
+        self.search = QLineEdit(objectName="Search")
+        self.search.setPlaceholderText("Search")
+        self.search.setToolTip("Words in the name, an extension (.heic, *.mov) or a kind (kind:video) — "
+                               "press Return. ⌘F from anywhere.")
+        self.search.setClearButtonEnabled(True)
+        self.search.setFixedWidth(150)
+        self.search.returnPressed.connect(self.run_search)
+        self.search.textChanged.connect(self._search_text_changed)
+        self.search.installEventFilter(self)
+        h.addWidget(self.search)
+        h.addSpacing(2)
+        self.sort_btn = self._tool("sort", "Sort by", None, "Nav")
+        self.sort_btn.setMenu(self._sort_menu())
+        self.sort_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        h.addWidget(self.sort_btn)
         self.new_folder_btn = self._tool("plus", "New Folder (⇧⌘N)", self.new_folder, "Nav")
         h.addWidget(self.new_folder_btn)
         h.addSpacing(6)
@@ -992,13 +1343,48 @@ class Pane(QWidget):
         h.addWidget(self.list_btn)
         root.addWidget(header)
 
+        # scope bar — Finder's "Search: This Mac | “Downloads”", shown while a search is up
+        self.scopebar = QWidget(objectName="ScopeBar")
+        sb = QHBoxLayout(self.scopebar)
+        sb.setContentsMargins(10, 4, 10, 4)
+        sb.setSpacing(6)
+        sb.addWidget(QLabel("Search:"))
+        self.scope_volume = QToolButton(objectName="Scope")
+        self.scope_folder = QToolButton(objectName="Scope")
+        for b in (self.scope_volume, self.scope_folder):
+            b.setCheckable(True)
+            b.setAutoRaise(True)
+            b.clicked.connect(self._scope_clicked)
+            sb.addWidget(b)
+        scopes = QButtonGroup(self)
+        scopes.setExclusive(True)
+        scopes.addButton(self.scope_volume)
+        scopes.addButton(self.scope_folder)
+        (self.scope_volume if settings.value(f"{role}/scope", "folder") == "volume" else self.scope_folder).setChecked(True)
+        sb.addStretch(1)
+        sb.addWidget(QLabel("Kind:"))
+        self.kind_box = QComboBox()
+        for key, label in KIND_LABELS:
+            self.kind_box.addItem(label, key)
+        self.kind_box.currentIndexChanged.connect(lambda _i: self.run_search(if_active=True))
+        sb.addWidget(self.kind_box)
+        self.scopebar.hide()
+        root.addWidget(self.scopebar)
+
         # views
         self.grid = GridView(self)
         self.grid.setItemDelegate(GridDelegate(self))
         self.list = ListView(self)
         self.list.setItemDelegate(ListDelegate(self))
-        self._attach(self.fs)
-        self.list.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        self.grid.setModel(self.model)
+        self.list.setModel(self.model)
+        self.list.setSelectionModel(self.grid.selectionModel())
+        self.grid.selectionModel().selectionChanged.connect(lambda *_: self.selection_changed.emit())
+        hdr = self.list.header()
+        hdr.setSectionsClickable(True)
+        hdr.setSortIndicatorShown(True)
+        hdr.sortIndicatorChanged.connect(self._header_sort)
+        self._layout_header()
         self.stack = QStackedWidget()
         self.stack.addWidget(self.grid)
         self.stack.addWidget(self.list)
@@ -1054,15 +1440,14 @@ class Pane(QWidget):
         self._shortcuts()
         self.set_icon_size(self.icon_px)
         self.set_mode(settings.value(f"{role}/mode", "grid"))
+        self._apply_sort(*self.folder_sort)
 
     # -- building blocks
-    def _attach(self, model: "QFileSystemModel | VideosModel") -> None:
-        """Show `model` in both views, sharing one selection, with the list's Finder column layout."""
-        self.model = model
-        self.grid.setModel(model)
-        self.list.setModel(model)
-        self.list.setSelectionModel(self.grid.selectionModel())
-        self.grid.selectionModel().selectionChanged.connect(lambda *_: self.selection_changed.emit())
+    @staticmethod
+    def _order(value) -> Qt.SortOrder:
+        return Qt.SortOrder.DescendingOrder if str(value) == "desc" else Qt.SortOrder.AscendingOrder
+
+    def _layout_header(self) -> None:
         hdr = self.list.header()
         if hdr.visualIndex(3) != 1:
             hdr.moveSection(hdr.visualIndex(3), 1)          # Name, Date Modified, Size, Kind — Finder's order
@@ -1078,12 +1463,35 @@ class Pane(QWidget):
         b.setIconSize(QSize(16, 16))
         b.setToolTip(tip)
         b.setAutoRaise(True)
-        b.clicked.connect(slot)
+        if slot is not None:
+            b.clicked.connect(slot)
         b.setProperty("glyph", icon)
         return b
 
+    def _sort_menu(self) -> QMenu:
+        menu = QMenu(self)
+        keys = QActionGroup(menu)
+        keys.setExclusive(True)
+        self.sort_actions: dict[str, QAction] = {}
+        for key, label in SORT_KEYS:
+            a = menu.addAction(label)
+            a.setCheckable(True)
+            keys.addAction(a)
+            a.triggered.connect(lambda _=False, k=key: self.choose_sort(k))
+            self.sort_actions[key] = a
+        menu.addSeparator()
+        orders = QActionGroup(menu)
+        orders.setExclusive(True)
+        self.asc_action = menu.addAction("Ascending")
+        self.desc_action = menu.addAction("Descending")
+        for a, order in ((self.asc_action, Qt.SortOrder.AscendingOrder), (self.desc_action, Qt.SortOrder.DescendingOrder)):
+            a.setCheckable(True)
+            orders.addAction(a)
+            a.triggered.connect(lambda _=False, o=order: self.set_sort(self.current_sort()[0], o))
+        return menu
+
     def restyle(self) -> None:
-        for b in (self.back_btn, self.fwd_btn, self.new_folder_btn, self.grid_btn, self.list_btn):
+        for b in (self.back_btn, self.fwd_btn, self.sort_btn, self.new_folder_btn, self.grid_btn, self.list_btn):
             b.setIcon(glyph(b.property("glyph"), THEME.secondary if b.objectName() == "Nav" else THEME.text, 16))
         self._slider_icons()
         self.update_pathbar()
@@ -1106,6 +1514,10 @@ class Pane(QWidget):
             sc.activated.connect(slot)
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self.search and event.type() == event.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            self.search.clear()                      # and, if a search is up, back to the folder
+            self.view().setFocus()
+            return True
         if event.type() in (event.Type.FocusIn, event.Type.MouseButtonPress):
             self.activated.emit(self)
         return False
@@ -1122,6 +1534,18 @@ class Pane(QWidget):
         self.chip.style().unpolish(self.chip)
         self.chip.style().polish(self.chip)
         self.grid.viewport().update()
+
+    @property
+    def is_virtual(self) -> bool:
+        """A collection (All Videos, search results) rather than a folder."""
+        return self.location.startswith("safe-finder://")
+
+    @property
+    def is_search(self) -> bool:
+        return self.location.startswith(SEARCH)
+
+    def index_for(self, path: str) -> QModelIndex:
+        return self.model.index_for(path)
 
     # Tile geometry, all from `gap`: the room around a tile. At the default (34) it's Finder's icon
     # view; at 2 the thumbnails sit edge to edge, Photos-style, and a row holds as many as fit.
@@ -1160,10 +1584,49 @@ class Pane(QWidget):
             w.setVisible(mode == "grid")
         self.settings.setValue(f"{self.role}/mode", mode)
 
+    # -- sorting
+    def current_sort(self) -> tuple[str, Qt.SortOrder]:
+        return self.results_sort if self.is_virtual else self.folder_sort
+
+    def choose_sort(self, key: str) -> None:
+        """From the menu: a date reads newest first, everything else A to Z / smallest first."""
+        self.set_sort(key, Qt.SortOrder.DescendingOrder if key in DATE_KEYS else Qt.SortOrder.AscendingOrder)
+
+    def set_sort(self, key: str, order: Qt.SortOrder) -> None:
+        if self.is_virtual:
+            self.results_sort = (key, order)
+        else:
+            self.folder_sort = (key, order)
+            self.settings.setValue(f"{self.role}/sort", key)
+            self.settings.setValue(f"{self.role}/order", "desc" if order == Qt.SortOrder.DescendingOrder else "asc")
+        self._apply_sort(key, order)
+
+    def _apply_sort(self, key: str, order: Qt.SortOrder) -> None:
+        self.model.set_sort(key, order)
+        self.sort_actions[key].setChecked(True)
+        (self.desc_action if order == Qt.SortOrder.DescendingOrder else self.asc_action).setChecked(True)
+        hdr = self.list.header()
+        hdr.blockSignals(True)
+        if key in _KEY_COLUMN:
+            hdr.setSortIndicator(_KEY_COLUMN[key], order)
+            hdr.setSortIndicatorShown(True)
+        else:
+            hdr.setSortIndicatorShown(False)             # no column for created / added
+        hdr.blockSignals(False)
+        self.sort_btn.setToolTip(f"Sort by {dict(SORT_KEYS)[key]} — click to change")
+
+    def _header_sort(self, column: int, order: Qt.SortOrder) -> None:
+        if column in _COLUMN_KEY:
+            self.set_sort(_COLUMN_KEY[column], order)
+
     # -- navigation
     def go(self, path: str, record: bool = True) -> None:
         if path == VIDEOS:
-            self._go_videos(record)
+            self._show_results(VIDEOS, record)
+            return
+        if path.startswith(SEARCH):
+            if path in self.searches:
+                self._show_results(path, record)
             return
         path = os.path.abspath(path)
         if not os.path.isdir(path):
@@ -1171,13 +1634,18 @@ class Pane(QWidget):
         if record and self.location and self.location != path:
             self.history.append(self.location)
             self.future.clear()
-        if self.model is not self.fs:                      # back from All Videos
+        if self.is_virtual:                                # back from a collection
             self._stop_scan()
-            self._attach(self.fs)
-            self.list.sortByColumn(*self._folder_sort)
+            self.model.set_source(self.fs)
+            self._layout_header()
+            self._apply_sort(*self.folder_sort)
             self.new_folder_btn.setEnabled(True)
-        self.location = path
-        idx = self.fs.setRootPath(path)
+            self.scopebar.hide()
+            self.search.blockSignals(True)
+            self.search.clear()
+            self.search.blockSignals(False)
+        self.location = self.folder = path
+        idx = self.model.mapFromSource(self.fs.setRootPath(path))
         self.grid.setRootIndex(idx)
         self.list.setRootIndex(idx)
         self.grid.clearSelection()
@@ -1192,65 +1660,10 @@ class Pane(QWidget):
         self.fwd_btn.setEnabled(bool(self.future))
         self.update_pathbar()
         self.update_status()
+        self._update_scopes()
         self.settings.setValue(f"{self.role}/location", path)
         self.location_changed.emit(path)
-
-    def _go_videos(self, record: bool) -> None:
-        """Show every video in the home folder (newest first); opening it again looks afresh."""
-        if self.location == VIDEOS:
-            self._rescan()
-            return
-        if record and self.location:
-            self.history.append(self.location)
-            self.future.clear()
-        hdr = self.list.header()
-        self._folder_sort = (hdr.sortIndicatorSection(), hdr.sortIndicatorOrder())
-        self.location = VIDEOS
-        self._attach(self.videos)
-        self.list.sortByColumn(3, Qt.SortOrder.DescendingOrder)
-        self.grid.clearSelection()
-        self.grid.scrollToTop()
-        self.list.scrollToTop()
-        self.title.setText("All Videos")
-        self.title.setToolTip("Every video in your home folder")
-        self.new_folder_btn.setEnabled(False)
-        self.back_btn.setEnabled(bool(self.history))
-        self.fwd_btn.setEnabled(bool(self.future))
-        self.update_pathbar()
-        self.location_changed.emit(VIDEOS)
-        self._rescan()
-
-    def _rescan(self) -> None:
-        self._stop_scan()
-        self.videos.clear_all()
-        scanner = self.scanner = VideoScanner(video_roots())
-        queued = Qt.ConnectionType.QueuedConnection
-        scanner.signals.found.connect(lambda batch, s=scanner: self._videos_found(s, batch), queued)
-        scanner.signals.done.connect(lambda _ok, s=scanner: self._scan_done(s), queued)
-        scanner.start()
-        self.update_status()
-
-    def _stop_scan(self) -> None:
-        if self.scanner is not None:
-            self.scanner.cancel()
-            self.scanner = None
-
-    def _videos_found(self, scanner: VideoScanner, batch: list) -> None:
-        if scanner is not self.scanner:                  # a batch from a scan that was cancelled
-            return
-        self.videos.add(batch)
-        hdr = self.list.header()
-        self.videos.sort(hdr.sortIndicatorSection(), hdr.sortIndicatorOrder())
-
-    def _scan_done(self, scanner: VideoScanner) -> None:
-        if scanner is self.scanner:
-            self.scanner = None
-            self.update_status()
-
-    def refresh_videos(self) -> None:
-        """After a transfer: drop the videos that are no longer there."""
-        if self.location == VIDEOS and self.videos.remove_missing():
-            self.update_status()
+        self._try_reveal()
 
     def go_back(self) -> None:
         if self.history:
@@ -1263,12 +1676,168 @@ class Pane(QWidget):
             self.go(self.future.pop(), record=False)
 
     def go_up(self) -> None:
-        if self.location == VIDEOS:
+        if self.is_virtual:
             return
         parent = os.path.dirname(self.location.rstrip(os.sep))
         if parent and parent != self.location:
             self.go(parent)
 
+    def reveal(self, path: str) -> None:
+        """Show `path` in its folder, selected — "Show in Safe Finder" from a search or All Videos."""
+        self._pending_reveal = path
+        self.go(os.path.dirname(path.rstrip(os.sep)) or "/")
+
+    def _try_reveal(self) -> None:
+        path = self._pending_reveal
+        if not path or self.is_virtual or os.path.dirname(path.rstrip(os.sep)) != self.location:
+            return
+        idx = self.index_for(path)
+        if not idx.isValid():
+            return
+        self._pending_reveal = None
+        sel = self.grid.selectionModel()
+        sel.setCurrentIndex(idx, sel.SelectionFlag.ClearAndSelect | sel.SelectionFlag.Rows)
+        self.view().scrollTo(idx)
+
+    # -- collections: All Videos, search results
+    def _show_results(self, loc: str, record: bool) -> None:
+        if self.location == loc:
+            self._rescan()                                   # opening it again looks afresh
+            return
+        if record and self.location:
+            self.history.append(self.location)
+            self.future.clear()
+        self.location = loc
+        self._stop_scan()
+        self.results.clear_all()
+        if self.model.sourceModel() is not self.results:
+            self.model.set_source(self.results)
+            self._layout_header()
+        self.grid.setRootIndex(QModelIndex())
+        self.list.setRootIndex(QModelIndex())
+        self._apply_sort(*self.results_sort)
+        self.grid.clearSelection()
+        self.grid.scrollToTop()
+        self.list.scrollToTop()
+        self.new_folder_btn.setEnabled(False)
+        if loc == VIDEOS:
+            self.title.setText("All Videos")
+            self.title.setToolTip("Every video in your home folder")
+            self.scopebar.hide()
+        else:
+            run = self.searches[loc]
+            self.folder = run.folder                           # where it was started — and returns to
+            self.title.setText(f"“{run.query.label()}” — {run.where}")
+            self.title.setToolTip(f"Searching for {run.query.label()} in {run.where}")
+            self.search.blockSignals(True)
+            self.search.setText(run.query.text)
+            self.search.blockSignals(False)
+            self.kind_box.blockSignals(True)
+            self.kind_box.setCurrentIndex(max(0, self.kind_box.findData(run.query.menu_kind)))
+            self.kind_box.blockSignals(False)
+            (self.scope_volume if run.scope == "volume" else self.scope_folder).setChecked(True)
+            self._update_scopes()
+            self.scopebar.show()
+        self.back_btn.setEnabled(bool(self.history))
+        self.fwd_btn.setEnabled(bool(self.future))
+        self.update_pathbar()
+        self.location_changed.emit(loc)
+        self._rescan()
+
+    def _rescan(self) -> None:
+        self._stop_scan()
+        self.results.clear_all()
+        self.model.forget_keys()
+        if self.location == VIDEOS:
+            scanner = FileScanner(mac_roots(), Query(kind="video"), folders=False)
+        else:
+            run = self.searches[self.location]
+            scanner = FileScanner(run.roots, run.query, folders=run.query.wants_folders(), spotlight=run.spotlight)
+        self.scanner = scanner
+        queued = Qt.ConnectionType.QueuedConnection
+        scanner.signals.found.connect(lambda batch, s=scanner: self._found(s, batch), queued)
+        scanner.signals.done.connect(lambda _ok, s=scanner: self._scan_done(s), queued)
+        scanner.start()
+        self.update_status()
+
+    def _stop_scan(self) -> None:
+        if self.scanner is not None:
+            self.scanner.cancel()
+            self.scanner = None
+
+    def _found(self, scanner: FileScanner, batch: list) -> None:
+        if scanner is self.scanner:                          # not a batch from a scan that was cancelled
+            self.results.add(batch)
+
+    def _scan_done(self, scanner: FileScanner) -> None:
+        if scanner is self.scanner:
+            self.scanner = None
+            self.update_status()
+
+    def refresh_results(self) -> None:
+        """After a transfer: drop the results that are no longer there."""
+        if self.is_virtual and self.results.remove_missing():
+            self.model.forget_keys()
+            self.update_status()
+
+    # -- search
+    def _scope_roots(self) -> tuple[list[Path], bool]:
+        """Where the chosen scope looks, and whether Spotlight can answer for it (the whole Mac)."""
+        base = Path(self.folder or Path.home())
+        vol = engine.volume_root(base)
+        if self.scope_volume.isChecked():
+            if str(vol) == "/":
+                return mac_roots(), "SAFE_FINDER_SEARCH_ROOTS" not in os.environ
+            return [vol], False
+        return [base], False
+
+    def _scope_names(self) -> tuple[str, str]:
+        base = Path(self.folder or Path.home())
+        vol = engine.volume_root(base)
+        volume = "This Mac" if str(vol) == "/" else volume_name(base)
+        folder = base.name or volume_name(base)
+        return volume, folder
+
+    def _update_scopes(self) -> None:
+        volume, folder = self._scope_names()
+        self.scope_volume.setText(volume)
+        self.scope_volume.setToolTip("Your home folder — everything that is yours" if volume == "This Mac"
+                                     else f"The whole of “{volume}”")
+        self.scope_folder.setText(f"“{folder}”")
+        self.scope_folder.setToolTip("This folder and everything inside it")
+        base = Path(self.folder or Path.home())
+        same = str(engine.volume_root(base)) != "/" and engine.volume_root(base) == base   # at a drive's top: one scope
+        self.scope_folder.setVisible(not same)
+        if same:
+            self.scope_volume.setChecked(True)
+
+    def _scope_clicked(self) -> None:
+        self.settings.setValue(f"{self.role}/scope", "volume" if self.scope_volume.isChecked() else "folder")
+        self.run_search(if_active=True)
+
+    def run_search(self, if_active: bool = False) -> None:
+        """Search for what the field says, in the chosen scope, and show the results here."""
+        query = Query(self.search.text(), self.kind_box.currentData() or "")
+        if query.empty():
+            if self.is_search:
+                self.go(self.folder)
+            return
+        if if_active and not self.is_search and not self.search.text().strip():
+            return
+        volume, folder = self._scope_names()
+        scope = "volume" if self.scope_volume.isChecked() else "folder"
+        roots, spotlight = self._scope_roots()
+        self._search_n += 1
+        loc = f"{SEARCH}{self._search_n}"
+        self.searches[loc] = SearchRun(query, self.folder, scope, roots, spotlight,
+                                       volume if scope == "volume" else f"“{folder}”")
+        self._show_results(loc, record=True)
+
+    def _search_text_changed(self, text: str) -> None:
+        if not text.strip() and self.is_search:
+            self.go(self.folder)
+
+    # -- bars
     def update_pathbar(self) -> None:
         while self.path_layout.count():
             item = self.path_layout.takeAt(0)
@@ -1277,14 +1846,15 @@ class Pane(QWidget):
                 item.widget().deleteLater()
         if not self.location:
             return
-        if self.location == VIDEOS:
+        if self.is_virtual:
             b = QToolButton(objectName="Crumb")
-            b.setText("All Videos")
+            videos = self.location == VIDEOS
+            b.setText("All Videos" if videos else "Search results")
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            b.setIcon(glyph("film", THEME.accent, 14))
+            b.setIcon(glyph("film" if videos else "search", THEME.accent, 14))
             b.setIconSize(QSize(14, 14))
-            b.setToolTip("Every video in your home folder — click to look again")
-            b.clicked.connect(lambda _=False: self.go(VIDEOS))
+            b.setToolTip("Click to look again")
+            b.clicked.connect(lambda _=False, loc=self.location: self.go(loc))
             self.path_layout.addWidget(b)
             self.path_layout.addStretch(1)
             return
@@ -1313,12 +1883,13 @@ class Pane(QWidget):
     def update_status(self) -> None:
         if not self.location:
             return
-        if self.location == VIDEOS:
-            n = self.videos.rowCount()
+        if self.is_virtual:
+            n = self.results.rowCount()
             sel = len(self.selected_paths())
-            text = f"{sel} of {n} selected" if sel else f"{n} video{'s' if n != 1 else ''}"
+            what = "video" if self.location == VIDEOS else "result"
+            text = f"{sel} of {n} selected" if sel else f"{n} {what}{'s' if n != 1 else ''}"
             if self.scanner is not None:
-                text += " so far — looking through your home folder…"
+                text += " so far — still looking…"
             self.status.setText(text)
             self.fs_chip.setVisible(False)
             return
@@ -1363,7 +1934,7 @@ class Pane(QWidget):
             subprocess.Popen(["qlmanage", "-p", *paths], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def new_folder(self) -> None:
-        if not self.location or self.location == VIDEOS:
+        if not self.location or self.is_virtual:
             return
         name, ok = QInputDialog.getText(self, "New Folder", "Name of the new folder:", text="untitled folder")
         if not ok or not name.strip():
@@ -1408,6 +1979,7 @@ class Pane(QWidget):
             if IS_MAC:
                 menu.addAction("Quick Look", self.quick_look)
                 menu.addAction("Show in Finder", lambda: subprocess.Popen(["open", "-R", paths[0]]))
+            menu.addAction("Show in Safe Finder", lambda: self.reveal(paths[0]))
             menu.addSeparator()
             win = self.window()
             if isinstance(win, MainWindow) and self is win.src:
@@ -1415,6 +1987,8 @@ class Pane(QWidget):
                 menu.addAction(win.move_btn.text(), lambda: win.transfer_selection(True))
         if self.location == VIDEOS:
             menu.addAction("Look for Videos Again", lambda: self.go(VIDEOS))
+        elif self.is_search:
+            menu.addAction("Search Again", lambda: self.go(self.location))
         else:
             menu.addAction("New Folder", self.new_folder)
         menu.exec(view.viewport().mapToGlobal(pos))
@@ -1910,6 +2484,8 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geo)
         QShortcut(QKeySequence("Ctrl+Shift+M"), self, activated=lambda: self.transfer_selection(True))
         QShortcut(QKeySequence("Ctrl+Shift+C"), self, activated=lambda: self.transfer_selection(False))
+        QShortcut(QKeySequence("Ctrl+F"), self, activated=lambda: (self.active_pane.search.setFocus(),
+                                                                  self.active_pane.search.selectAll()))
         self.update_actions()
 
     # -- panes
@@ -1942,18 +2518,31 @@ class MainWindow(QMainWindow):
         self.sidebar.rebuild()
         self.sidebar.select_path(self.active_pane.location)
 
+    @property
+    def dest(self) -> str:
+        """Where Move/Copy put things: the To pane's folder — none while it shows search results."""
+        return "" if self.dst.is_virtual else self.dst.location
+
     def update_actions(self) -> None:
-        dest_name = os.path.basename(self.dst.location.rstrip(os.sep)) or volume_name(Path(self.dst.location))
-        if engine.volume_root(Path(self.dst.location)) == Path(self.dst.location):
-            dest_name = volume_name(Path(self.dst.location))
-        self.copy_btn.setText(f"Copy to “{dest_name}”")
-        self.move_btn.setText(f"Move to “{dest_name}”")
+        dest = self.dest
+        if dest:
+            dest_name = os.path.basename(dest.rstrip(os.sep)) or volume_name(Path(dest))
+            if engine.volume_root(Path(dest)) == Path(dest):
+                dest_name = volume_name(Path(dest))
+            self.copy_btn.setText(f"Copy to “{dest_name}”")
+            self.move_btn.setText(f"Move to “{dest_name}”")
+        else:
+            self.copy_btn.setText("Copy")
+            self.move_btn.setText("Move")
         paths = self.src.selected_paths()
-        enabled = bool(paths) and bool(self.dst.location)
+        enabled = bool(paths) and bool(dest)
         self.copy_btn.setEnabled(enabled)
         self.move_btn.setEnabled(enabled)
         if not paths:
             self.summary.setText("Select files or folders on the left, then Move or Copy — or drag them onto the right.")
+            return
+        if not dest:
+            self.summary.setText("Open a folder on the right to move or copy into — the right pane is showing search results.")
             return
         files = [p for p in paths if os.path.isfile(p)]
         folders = len(paths) - len(files)
@@ -1968,8 +2557,8 @@ class MainWindow(QMainWindow):
     # -- transfers
     def transfer_selection(self, move: bool) -> None:
         paths = self.src.selected_paths()
-        if paths and self.dst.location:
-            self.confirm_transfer(paths, self.dst.location, move)
+        if paths and self.dest:
+            self.confirm_transfer(paths, self.dest, move)
 
     def confirm_transfer(self, paths: list[str], dest: str, move: bool = True) -> None:
         verify = self.settings.value("verify", "true") == "true"
@@ -2032,7 +2621,8 @@ class MainWindow(QMainWindow):
 
     def _finished(self, st: dict) -> None:
         self.current = None
-        self.src.refresh_videos()
+        self.src.refresh_results()
+        self.dst.refresh_results()
         verb = "Moved" if "Moving" in self._title else "Copied"
         n_ok = st["copied"] + st["skipped"]
         secs = st["seconds"]
@@ -2111,8 +2701,8 @@ class MainWindow(QMainWindow):
             return
         vol = str(engine.volume_root(Path(path)))
         for pane in (self.src, self.dst):
-            if pane.location.startswith(vol):
-                pane.go(str(Path.home()))
+            if pane.location.startswith(vol) or (pane.is_virtual and pane.folder.startswith(vol)):
+                pane.go(str(Path.home()))                   # also stops a search still reading the drive
         self.panel.show()
         self.panel.icon.setPixmap(glyph("eject", THEME.secondary, 22).pixmap(22, 22))
         self.panel.title.setText(f"Ejecting “{os.path.basename(vol)}”…")
