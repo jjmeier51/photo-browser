@@ -79,6 +79,19 @@ def safe_name(name: str) -> str:
     return n
 
 
+def plain_name(name: str) -> str:
+    """A name for an APFS / HFS+ destination: kept as it is (every character is fine there), only
+    shortened when it wouldn't fit (255 bytes of UTF-8)."""
+    if len(name.encode("utf-8")) <= 255:
+        return name
+    stem, dot, ext = name.rpartition(".")
+    if not dot or len(ext) > 10:
+        stem, ext = name, ""
+    while len((stem + (("." + ext) if ext else "")).encode("utf-8")) > 250:
+        stem = stem[:-1]
+    return stem + (("." + ext) if ext else "")
+
+
 def rename_note(old: str, new: str) -> str:
     if unicodedata.normalize("NFC", old) == new:
         return f"{new}  (accents re-encoded in the standard form iOS expects; looks the same)"

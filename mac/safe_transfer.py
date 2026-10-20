@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Callable
 
 import spare_folders
-from safe_copy_to_ssd import CHUNK, IOS_FOLDER_LIMIT, hash_file, human, is_junk, rename_note, safe_name
+from safe_copy_to_ssd import CHUNK, IOS_FOLDER_LIMIT, hash_file, human, is_junk, plain_name, rename_note, safe_name
 
 STAGING_NAME = ".Safe Finder Staging"
 JOURNAL_NAME = "in-progress.txt"            # inside the staging folder: the file being written right now
@@ -128,6 +128,10 @@ def build_plan(sources: list[Path], dest: Path) -> Plan:
     if not dest.is_dir():
         plan.errors.append(f"The destination “{dest}” isn't a folder that exists.")
         return plan
+    # Names are only adjusted for exFAT / FAT (the characters iOS can't read there, NFC, 255 UTF-16
+    # units); on APFS they stay exactly as they are.
+    plan.on_exfat = spare_folders.on_exfat(str(dest))
+    fix_name = safe_name if plan.on_exfat else plain_name
     incoming_here = 0
     seen: set[str] = set()
     for src in sources:
@@ -144,7 +148,7 @@ def build_plan(sources: list[Path], dest: Path) -> Plan:
         if src.parent == dest:
             plan.notes.append(f"“{src.name}” is already in this folder — skipped.")
             continue
-        name = safe_name(src.name)
+        name = fix_name(src.name)
         if name != src.name:
             plan.renames.append((src.name, name))
         top = Top(src=src, dst=dest / name, is_dir=src.is_dir(), same_drive=same_device(src, dest))
@@ -158,7 +162,7 @@ def build_plan(sources: list[Path], dest: Path) -> Plan:
             for root, dirnames, filenames in os.walk(src):
                 dirnames[:] = sorted(d for d in dirnames if not is_junk(d) and not d.startswith("."))
                 rel = Path(root).relative_to(src)
-                parts = [safe_name(p) for p in rel.parts]
+                parts = [fix_name(p) for p in rel.parts]
                 for p, s in zip(rel.parts, parts):
                     if p != s and (p, s) not in plan.renames:
                         plan.renames.append((p, s))
@@ -175,7 +179,7 @@ def build_plan(sources: list[Path], dest: Path) -> Plan:
                     p = Path(root) / f
                     if p.is_symlink() or not p.is_file():
                         continue
-                    fname = safe_name(f)
+                    fname = fix_name(f)
                     if fname != f:
                         plan.renames.append((f, fname))
                     size = p.stat().st_size
@@ -186,7 +190,6 @@ def build_plan(sources: list[Path], dest: Path) -> Plan:
     existing = len(os.listdir(dest))
     if existing + incoming_here > IOS_FOLDER_LIMIT:
         plan.big_folders.insert(0, (dest, existing + incoming_here))
-    plan.on_exfat = spare_folders.on_exfat(str(dest))
     plan.spares_ready = spare_folders.count(str(dest))
     return plan
 

@@ -1252,6 +1252,15 @@ performance tests need a device (custom compositors don't run in the Simulator).
 
 ## 12. exFAT write durability — `DriveWriter` (the "AI folder corruption" fix)
 
+> **Oct 20, 2026 — the library moved to a 4 TB APFS SSD** (copied with Carbon Copy Cloner, metadata
+> restored from the phone's backup). Everything in this section and §3.5/§3.6 is exFAT-specific and
+> now dormant: `DriveWriter.configureForVolume` picks `.barrier` on APFS, `SpareFolders.pool/remaining`
+> return nil unless `syncMode == .full`, Drive Health hides the New-folders section and the 2.2 TB
+> advice, FolderView's "can't read this folder" text points at First Aid instead, and Safe Finder
+> (`spare_folders.on_exfat`, cached per volume) neither takes spares nor adjusts names on an APFS
+> destination (`plain_name` only caps 255 UTF-8 bytes). Keep the code — the exFAT drive still exists
+> as the old copy.
+
 **Symptom (Oct 2026).** `fsck_exfat` on the SSD kept finding `Cluster chain for /X/AI overlaps a
 previously allocated cluster`, `Directory /X/AI has zero length` and `Found an unexpected critical
 primary directory entry in /X/AI` — mostly in the "AI" subfolders where Astria results are saved,

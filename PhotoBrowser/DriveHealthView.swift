@@ -22,7 +22,7 @@ import SwiftUI
 struct DriveHealthView: View {
     @Environment(Library.self) private var library
     @State private var issues: [DriveIssue] = []
-    @State private var scanning = true
+    @State private var scanning = false                       // nothing runs until Start Scan is tapped
     @State private var scannedFolders = 0
     @State private var scannedFiles = 0
     @State private var liveIssues = 0
@@ -93,7 +93,9 @@ struct DriveHealthView: View {
                         ShareLink(item: exportText) { Image(systemName: "square.and.arrow.up") }
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) { Button("Rescan") { Task { await runScan() } }.disabled(working) }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(lastScan == nil ? "Scan" : "Rescan") { Task { await runScan() } }.disabled(working)
+                }
             }
         }
         .overlay {
@@ -159,9 +161,10 @@ struct DriveHealthView: View {
                             onForget: { paths in Task { await forget(paths, announce: false) } })
         }
         .task {
+            // Only the quick facts (backup dates, spares). The scan itself waits for Start Scan, so the
+            // backup / restore / reconnect buttons are usable the moment the page opens.
             await refreshBackups()
             await refreshSpares()
-            if scanning { await runScan() }
         }
     }
 
@@ -178,7 +181,7 @@ struct DriveHealthView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-            } else {
+            } else if lastScan != nil {
                 HStack(spacing: 12) {
                     Image(systemName: issues.isEmpty ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(issues.isEmpty ? Color.green : Color.orange)
@@ -190,6 +193,11 @@ struct DriveHealthView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+            } else {
+                Button { Task { await runScan() } } label: {
+                    Label("Start Scan", systemImage: "play.circle")
+                }
+                .disabled(working)
             }
             Toggle(isOn: $deepCheck) {
                 Label("Also check file contents", systemImage: "waveform.path.ecg")
@@ -198,7 +206,7 @@ struct DriveHealthView: View {
         } header: {
             Text("Scan")
         } footer: {
-            Text("Reads every folder and the size of every file. “Check file contents” also reads the first bytes of each photo and video to catch files whose size looks right but whose data never landed (all zeros), and files whose contents don't match their extension — slower on a big drive. Change it, then Rescan.")
+            Text("Reads every folder and the size of every file — it takes a while on a big drive, so it only runs when you start it; the backups below work without it. “Check file contents” also reads the first bytes of each photo and video to catch files whose size looks right but whose data never landed (all zeros), and files whose contents don't match their extension — slower still. Change it, then Rescan.")
         }
     }
 
@@ -242,7 +250,7 @@ struct DriveHealthView: View {
 
     private var metadataSection: some View {
         Section {
-            if !scanning && complete && orphanTotal == 0 {
+            if lastScan != nil, !scanning, complete, orphanTotal == 0 {
                 HStack(spacing: 10) {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                     Text("Every metadata entry points at a file or folder that exists").font(.subheadline)
@@ -733,9 +741,12 @@ enum DriveIssueKind: Int, Sendable, Comparable {
     var advice: String {
         switch self {
         case .unreadableFolder:
-            return "These folders kept failing to read even after retries. On a slow external drive that can be throttling — Rescan when the drive is idle. If one still fails, its list of contents is almost certainly stored more than 2.2 TB into the drive, where iOS's exFAT driver misreads it (macOS reads it fine). Fix it on the Mac: sudo python3 mac/relocate_folders.py \"/Volumes/<SSD>\" shows every such folder, and --apply moves their lists below that point — files, names and paths stay as they are, so everything attached to them stays. Folders stored there can also just look empty, which this scan can't spot, so the Mac's list is the complete one. Eject the drive in Finder before unplugging."
+            if DriveWriter.syncMode == .full {
+                return "These folders kept failing to read even after retries. On a slow external drive that can be throttling — Rescan when the drive is idle. If one still fails, its list of contents is almost certainly stored more than 2.2 TB into the drive, where iOS's exFAT driver misreads it (macOS reads it fine). Fix it on the Mac: sudo python3 mac/relocate_folders.py \"/Volumes/<SSD>\" shows every such folder, and --apply moves their lists below that point — files, names and paths stay as they are, so everything attached to them stays. Folders stored there can also just look empty, which this scan can't spot, so the Mac's list is the complete one. Eject the drive in Finder before unplugging."
+            }
+            return "These folders kept failing to read even after retries. On a slow external drive that can be throttling — Rescan when the drive is idle. If one still fails, check the drive on the Mac with Disk Utility ▸ First Aid, then eject it properly and reconnect."
         case .blankFile:
-            return "The file has a size but its data is all zeros — exFAT allocated the space and the copy was interrupted before the bytes landed. These can't be recovered here: delete and re-copy the real file to the same place, and its Favorites, captions and labels will pick up again."
+            return "The file has a size but its data is all zeros — the drive allocated the space and the copy was interrupted before the bytes landed. These can't be recovered here: delete and re-copy the real file to the same place, and its Favorites, captions and labels will pick up again."
         case .unreadableFile:
             return "The file's attributes couldn't be read. Delete and re-copy it cleanly to the same place."
         case .emptyFile:

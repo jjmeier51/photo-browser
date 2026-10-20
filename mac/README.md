@@ -187,6 +187,11 @@ python3 mac/safe_copy_to_ssd.py                                   # the window
 python3 mac/safe_copy_to_ssd.py --cli ~/Downloads/Folder --to "/Volumes/Extreme SSD/Porn" [--move]
 ```
 
+> **APFS note (Oct 2026):** the library now lives on an APFS SSD. The two sections below, the
+> relocation tool, spare folders and the name adjustments are for the old **exFAT** drive only — Safe
+> Finder notices the filesystem and leaves all of that alone on APFS (names are copied exactly as they
+> are). A `.Spare Folders` folder copied onto the APFS drive does nothing and can be deleted.
+
 ## Repair the SSD when iOS can't see or open folders (`repair_drive.sh`) — try this first
 
 If folders that Finder shows are missing in Photo Browser, look empty on iOS, or new "AI" /

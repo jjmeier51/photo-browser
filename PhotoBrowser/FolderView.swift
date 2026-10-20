@@ -1681,7 +1681,9 @@ struct FolderView: View {
                 if let unreadableReason, loaded {
                     Image(systemName: "folder.badge.questionmark").font(.largeTitle).foregroundStyle(.orange)
                     Text("iOS can’t read this folder").font(.headline)
-                    Text("This folder’s list of contents is stored more than 2.2 TB into the drive, where iOS’s exFAT driver misreads it (macOS reads it fine). Fix it on the Mac: run mac/relocate_folders.py on the SSD, which moves the list below that point without touching the files. Then eject the drive properly and reconnect.")
+                    Text(DriveWriter.syncMode == .full
+                         ? "This folder’s list of contents is stored more than 2.2 TB into the drive, where iOS’s exFAT driver misreads it (macOS reads it fine). Fix it on the Mac: run mac/relocate_folders.py on the SSD, which moves the list below that point without touching the files. Then eject the drive properly and reconnect."
+                         : "iOS couldn’t open this folder. Check the drive on the Mac with Disk Utility ▸ First Aid, then eject it properly and reconnect.")
                         .font(.footnote).foregroundStyle(.secondary)
                         .multilineTextAlignment(.center).padding(.horizontal, 28)
                     Text(unreadableReason).font(.caption2).foregroundStyle(.tertiary)
@@ -1713,7 +1715,7 @@ struct FolderView: View {
                              : (advancedActive || typeFilter != .all || formatFilter != .all || yearFilter != nil || ageFilter != nil || locationFilter != nil) ? "No matches for this filter"
                              : "This folder is empty")
                             .foregroundStyle(.secondary)
-                        if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !advancedActive && tagFilter == nil
+                        if DriveWriter.syncMode == .full && !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !advancedActive && tagFilter == nil
                             && yearFilter == nil && locationFilter == nil && typeFilter == .all && formatFilter == .all && ageFilter == nil
                             && categoryFilter.isEmpty && submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty {
                             // A folder stored past 2.2 TB on a big exFAT drive can read as empty with no

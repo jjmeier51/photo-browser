@@ -32,7 +32,10 @@ def volume_root(path: str) -> str:
 
 
 def pool_dir(path: str) -> str | None:
-    """The spare-folder pool on the volume holding `path`, if it has one."""
+    """The spare-folder pool on the volume holding `path`, if it has one — and only on exFAT / FAT,
+    where it matters."""
+    if not on_exfat(path):
+        return None
     pool = os.path.join(volume_root(path), POOL)
     return pool if os.path.isdir(pool) else None
 
@@ -134,18 +137,27 @@ def make_dirs(path: str) -> tuple[int, list[str]]:
     return used, plain
 
 
+_fs_cache: dict[str, bool] = {}
+
+
 def on_exfat(path: str) -> bool:
-    """Whether `path` is on an exFAT (or FAT) volume — the only kind this matters for."""
+    """Whether `path` is on an exFAT (or FAT) volume — the only kind this matters for. On APFS iOS reads
+    every folder wherever it sits, so no spare is ever used there (even when a `.Spare Folders` pool
+    was copied across with the library). Answered once per volume."""
     root = volume_root(path)
+    if root in _fs_cache:
+        return _fs_cache[root]
     try:
         out = subprocess.run(["mount"], capture_output=True, text=True).stdout
     except OSError:
         return False
+    found = False
     for line in out.splitlines():
         m = re.match(r".+? on (.+) \(([^,)]+)", line)
         if m and m.group(1) == root:
-            return m.group(2).lower() in ("exfat", "msdos")
-    return False
+            found = m.group(2).lower() in ("exfat", "msdos")
+    _fs_cache[root] = found
+    return found
 
 
 def make_spares(volume: str, want: int) -> int:

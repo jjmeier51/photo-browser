@@ -3,7 +3,9 @@ import Foundation
 /// Serializes the **final placement** of downloaded/exported files onto the external
 /// drive, and flushes each file + its parent directory to disk before the next.
 ///
-/// The drive is usually **exFAT**, whose single FAT + directory structure has no
+/// The drive was **exFAT** until Oct 2026 (a 4 TB APFS SSD since; `configureForVolume` tells
+/// them apart and the exFAT-only machinery — F_FULLFSYNC, spare folders — stands down on APFS).
+/// exFAT's single FAT + directory structure has no
 /// journaling: when many concurrent downloads finish at once they update the same
 /// directory simultaneously, and if iOS jetsam-kills the app mid-write the directory can
 /// be left corrupt (folders showing up as data files, create/delete failing). Downloading

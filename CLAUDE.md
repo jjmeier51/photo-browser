@@ -316,8 +316,14 @@ These were discovered the painful way; the current code already respects them.
     provide — that's why CommonCrypto is bridged in. Keep all MEGA work
     `nonisolated`/off-main (it's network + crypto + large file writes), and treat
     the reverse-engineered protocol as best-effort: surface failures as notes.
-12. **Every write to the drive goes through `DriveWriter`.** The SSD is exFAT (no
-    journal): a folder created with a bare `createDirectory`, a file written straight
+12. **Every write to the drive goes through `DriveWriter`.** The SSD was exFAT (no
+    journal) until Oct 20, 2026 — **the library now lives on a 4 TB APFS SSD**, and everything
+    exFAT-specific below (F_FULLFSYNC, the 2.2 TB line, spare folders, the Mac relocate/inspect
+    tools, iOS-safe name adjustment in Safe Finder) is gated on `DriveWriter.syncMode == .full` /
+    `spare_folders.on_exfat` and stands down on APFS; keep it, the old drive still exists. Hidden
+    folders on an APFS drive: `.Photo Browser Metadata` (keep — the backups), `.Spare Folders`
+    (unused there; delete), `.Safe Finder Staging` (Safe Finder's crash note; harmless).
+    On exFAT: a folder created with a bare `createDirectory`, a file written straight
     to its final path, or a write still in flight when iOS suspends the app leaves a
     torn directory that `fsck_exfat` later reports as "zero length directory",
     "cluster chain overlaps" or "unexpected critical primary directory entry" (the

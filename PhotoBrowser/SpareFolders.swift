@@ -15,6 +15,10 @@ import Darwin
 /// (or the drive has none) the folder is made the usual way and counted, so Drive Health can say to top
 /// the pool up on the Mac, which also moves those folders' lists below the line.
 ///
+/// **exFAT / FAT only** (`DriveWriter.syncMode == .full`): on APFS or HFS+ iOS reads every folder
+/// wherever it sits, so the pool is ignored even if a `.Spare Folders` folder was copied across with
+/// the library (Oct 20, 2026: the library moved to a 4 TB APFS SSD), and nothing is counted.
+///
 /// `nonisolated`: called from every write path, off the main actor. The lock serializes taking spares
 /// so two saves can't grab the same one.
 nonisolated enum SpareFolders {
@@ -50,9 +54,10 @@ nonisolated enum SpareFolders {
         return d.hasPrefix(r + "/") && d != pool && !d.hasPrefix(pool + "/")
     }
 
-    /// The pool for a new folder at `dir`, when `dir` is on the browsed drive and the drive has one.
+    /// The pool for a new folder at `dir`, when `dir` is on the browsed drive, the drive is exFAT/FAT
+    /// (the only kind this matters for) and it has one.
     static func pool(for dir: URL) -> URL? {
-        guard isOnDrive(dir), let root = currentRoot() else { return nil }
+        guard DriveWriter.syncMode == .full, isOnDrive(dir), let root = currentRoot() else { return nil }
         let pool = root.appendingPathComponent(poolName, isDirectory: true)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: pool.path, isDirectory: &isDir), isDir.boolValue else { return nil }
@@ -78,9 +83,10 @@ nonisolated enum SpareFolders {
         names(in: pool).map { pool.appendingPathComponent($0, isDirectory: true) }.filter(isSpare)
     }
 
-    /// Spares left on the browsed drive; nil when it has no pool. Reads the drive — call off main.
+    /// Spares left on the browsed drive; nil when it has no pool or isn't exFAT/FAT. Reads the drive —
+    /// call off main.
     static func remaining() -> Int? {
-        guard let root = currentRoot() else { return nil }
+        guard DriveWriter.syncMode == .full, let root = currentRoot() else { return nil }
         let pool = root.appendingPathComponent(poolName, isDirectory: true)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: pool.path, isDirectory: &isDir), isDir.boolValue else { return nil }
