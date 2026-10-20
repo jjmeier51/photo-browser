@@ -22,6 +22,7 @@ struct TikTokImportView: View {
     @State private var queued = 0
     @State private var remaining = 0
     @State private var batchToken = 0
+    @State private var showChallenge = false       // tikwm's Cloudflare check wants a tap — show it
 
     private var username: String { TikTokService.sanitizeHandle(handle) }
     private var isUpdate: Bool { library.lastTikTokHandle(for: targetFolder) != nil }
@@ -69,6 +70,14 @@ struct TikTokImportView: View {
             }
             .onAppear {
                 if handle.isEmpty, let last = library.lastTikTokHandle(for: targetFolder) { handle = last }
+            }
+            // The resolver's bot check couldn't be passed quietly: show it, and once the person taps
+            // Verify the same download starts again on its own (the clearance is banked by then).
+            .sheet(isPresented: $showChallenge) {
+                TikTokChallengeSheet {
+                    showChallenge = false
+                    start()
+                }
             }
             // Keep the screen awake during the (foreground) link-resolution pass.
             .onChange(of: resolving) { _, on in UIApplication.shared.isIdleTimerDisabled = on }
@@ -181,6 +190,10 @@ struct TikTokImportView: View {
             resolving = false
             note = (queued == 0) ? (result.note ?? "Nothing to download.") : nil
             if queued > 0 { onFinished() }
+            if queued == 0, TikTokWebFetcher.shared.pendingChallenge != nil {
+                note = "tikwm.com — the service that lists a profile's videos — wants a quick check that a person is here. Tap Verify in the window that opens; the download then carries on by itself."
+                showChallenge = true
+            }
             bg.end()
         }
     }

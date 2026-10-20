@@ -1041,6 +1041,24 @@ via CommonCrypto (bridging header), which CryptoKit can't do.
 If an account is **public**, downloads without using the user's cookie. Meta anti-automation
 mitigations: human-like pacing/headers while still downloading reasonably fast.
 
+### 7.4b TikTok — `TikTokService.swift` / `TikTokWebFetcher.swift` / `TikTokChallengeView.swift`
+Profiles are listed and resolved through the public **tikwm.com** resolver (no login, no
+request signing): `user/posts` pages the whole profile, the single-video endpoint gives the HD
+watermark-free URL; the files themselves come straight from TikTok's CDN on a background
+`URLSession`. **Oct 20, 2026: tikwm put its site and `user/posts` behind a Cloudflare *managed*
+challenge ("Just a moment…", HTTP 403 + HTML) — only the single-video endpoint and the
+`/video/media/…` redirects still answer plainly.** The first listing request of every run now
+hits it. Handling: a plain request that gets 403/HTML goes to the hidden `WKWebView`
+(`TikTokWebFetcher.fetchJSON`), which runs the challenge and banks `cf_clearance` + the UA it was
+issued for, so the rest of the run uses `URLSession` again. When the challenge wants a tap
+("Verify you are human") the hidden view can't give it one: the URL stays as
+`pendingChallenge`, the import view says so and opens `TikTokChallengeSheet` — the same web
+view, visible — and the moment the page turns into JSON the clearance is banked and the
+download runs again by itself. The hidden view is kept **full-size behind the key window's root
+view** (a 2-px view reads as no browser; a view outside any window gets its JS timers
+suspended). If tikwm ever hard-blocks or moves the listing behind a login, that endpoint is the
+only piece to replace — the resolve and download paths are unaffected.
+
 ### 7.4a MPEG-TS → MP4 — `TSRemuxer.swift`
 
 **iOS cannot play a `.ts` file.** AVFoundation has no file-level MPEG-2 transport-stream demuxer

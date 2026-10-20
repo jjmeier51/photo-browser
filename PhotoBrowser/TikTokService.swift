@@ -246,6 +246,8 @@ enum TikTokService {
             }
             if intValue(obj["code"]) == 0, let d = obj["data"] as? [String: Any] { return (d, nil) }
             reason = "resolver busy (\((obj["msg"] as? String) ?? "code \(intValue(obj["code"]) ?? -1)"))"
+        } else if blocked, await TikTokWebFetcher.shared.pendingChallenge != nil {
+            reason = "tikwm.com is asking for a quick check that a person is here"
         }
         return (nil, reason)
     }
