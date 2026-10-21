@@ -31,6 +31,14 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    NavigationLink { AppearanceView() } label: { Label("Appearance", systemImage: "paintpalette") }
+                } header: {
+                    Text("Look")
+                } footer: {
+                    Text("Themes — everyday, Halloween, Christmas — or your own background colours, accent and typeface. The theme is “\(library.theme.name)”.")
+                }
+
+                Section {
                     Picker("Delay video", selection: $videoDelay) {
                         Text("Off").tag(0.0)
                         Text("1 s").tag(1.0)

@@ -1008,6 +1008,33 @@ iOS 17+). `.webm` is classified as video (`webVideoExtensions`) and:
 - Other AVFoundation features (Video Editor import, trim, bulk rotate, frame export, duration
   badge) don't support WebM.
 
+## 6d. Appearance — `AppTheme`, `AppearanceView`, `Library.theme` (Oct 21, 2026)
+
+Settings ▸ Appearance. `AppTheme` is one `Codable` value: `background` (`.solid(RGB)` or
+`.gradient([RGB], Direction)`), `accent` (RGB), `typeface` (`FontChoice`: the four system designs
+plus nine iOS families by PostScript name), `light`. `Library.theme` holds it (`photoBrowser.theme`
+JSON; `setTheme` saves and pushes the family into `UINavigationBar.appearance()` — the proxy only
+reaches bars made afterwards, so an existing title changes after a relaunch). Where it shows:
+`AppGradient` (the background under every browsing screen, now reading the theme), the app root
+(`.preferredColorScheme`, `.tint`, `.fontDesign`, `.environment(\.font)` for custom families), the
+chip bar (`chip()` → `theme.font(.subheadline)`) and every former `Color.accentColor` in
+`FolderView`. System designs reach every label through `.fontDesign`; a custom family reaches
+titles, chips and un-styled text only — smaller labels keep the system font on purpose. Presets live
+in `AppTheme.groups` (Everyday, Halloween, Christmas); `matchingPreset` names a custom choice that
+equals one. The viewer stays black regardless.
+
+## 6e. Multi-select responsiveness — `Memo` (Oct 21, 2026)
+
+Every selection tap re-renders `FolderView`, and `filtered` (the whole filter/sort pipeline),
+`igBubbles`, `tagOptions`, `locationOptions`, `availableYears` and `categoryOptions` were all
+computed properties — recomputed per render, `filtered` twice (grid + the toolbar's All/None
+label). They are now memoized in `Memo<T>` objects (`Models.swift`: a one-slot cache in a plain
+class held by `@State`, refilled inside `body` without triggering another render) keyed on
+everything they depend on: `entriesVersion` (bumped at every `entries =`), the library counters
+(`changeToken`, `labelsVersion`), every filter/mode, and the counts of the derived dictionaries
+(`fileSpecs`, `captureDates`, `placeLabels`, …). If a list ever looks stale, the key in
+`filterKey` is missing an input — add it there rather than removing the memo.
+
 ## 7. Downloaders (from the broader project + this session)
 
 The app has several **download-only, opt-in** importers. All are best-effort, `nonisolated`,
@@ -1044,6 +1071,20 @@ via CommonCrypto (bridging header), which CryptoKit can't do.
 ### 7.4 Instagram / Facebook — `InstagramService.swift` / `FacebookService.swift`
 If an account is **public**, downloads without using the user's cookie. Meta anti-automation
 mitigations: human-like pacing/headers while still downloading reasonably fast.
+
+### 7.4c taylorpictures.net — `TaylorGallery.swift` / `TaylorBrowserView.swift` (Oct 21, 2026)
+Listing: the first page's pager gives the page count (`pageCount(in:pattern:)`), and the rest of a
+section's album pages or an album's image pages are fetched six at a time (`fetchPages`) in page
+order — it used to be one round trip per page. `images(inAlbum:onPage:)` streams each page's new
+images so the album grid fills while listing. Downloading: 8 images in flight (was 4); the album
+folder is **reused** and images already there are skipped, so running an album again only fetches
+what's missing (it used to make "Title 1" folders and "name 1.jpg" copies); cancellation stops
+cleanly. The browser has a `TaylorDownloads` queue (`@Observable`, app lifetime): albums are queued
+from an album's page, a row's ↓ button, a swipe, or ⋯ ▸ "Download N Albums Here/Shown"; they come
+down one after another under a `BackgroundTaskHolder`, progress shows in a bottom bar and as an
+app-wide activity pill, the folder behind reloads after each (`onFinished`), and the browser is
+never dismissed for you. Album lists are searchable (title or id). Everything heavy runs through
+`Task.detached` (constraint 13).
 
 ### 7.4b TikTok — `TikTokService.swift` / `TikTokWebFetcher.swift` / `TikTokChallengeView.swift`
 Profiles are listed and resolved through the public **tikwm.com** resolver (no login, no

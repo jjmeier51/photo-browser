@@ -1,14 +1,12 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The app-wide background gradient (behind the browsing surfaces): a subtle deep
-/// navy blue at the top fading to black at the bottom.
+/// The app-wide background (behind the browsing surfaces): whatever the chosen theme says —
+/// by default a subtle deep navy at the top fading to black (see `AppTheme`).
 struct AppGradient: View {
+    @Environment(Library.self) private var library
     var body: some View {
-        LinearGradient(colors: [Color(red: 0.05, green: 0.09, blue: 0.20),
-                                Color.black],
-                       startPoint: .top, endPoint: .bottom)
-            .ignoresSafeArea()
+        library.theme.backgroundView.ignoresSafeArea()
     }
 }
 

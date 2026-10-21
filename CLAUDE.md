@@ -101,6 +101,11 @@ actions the app makes no network calls.
   skipped; all file management (move/copy with duplicate detection, rename, delete,
   metadata, captions, labels) stays. (`Library.pureTransferMode`, see
   `docs/feature-notes.md` §5c.)
+- **Appearance** — Settings ▸ Appearance: ready-made themes (everyday, Halloween, Christmas
+  sets) or a custom background (solid / gradient), accent colour, typeface and light/dark chrome;
+  `AppTheme` (persisted by `Library.theme`), drawn by `AppGradient`, applied at the app root
+  (`.tint`, `.preferredColorScheme`, `.fontDesign`, default font) and in the chip bar.
+  (`AppTheme`, `AppearanceView`)
 - **Add from MEGA** — "Add from MEGA…" downloads the media inside a public
   `mega.nz/folder/…` link into a subfolder of the current folder, preserving
   structure. Pure-Swift implementation of MEGA's encrypted client protocol (no
@@ -165,6 +170,7 @@ under the `photoBrowser.*` namespace:
 - `photoOrigins` — imported file path → originating Photos asset id
 - `birthdays` — folder path → Unix timestamp (drives the per-file "Age" feature)
 - `thumbSize`, `folderBookmark`
+- `theme` — the Appearance choice (`AppTheme` JSON: background, accent, typeface, light/dark)
 
 Because everything is keyed by path, **moving/renaming must re-key this data.**
 When you add code that moves or renames files/folders, call

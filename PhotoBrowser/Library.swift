@@ -53,6 +53,16 @@ final class Library {
     var pendingFolderNavigation: URL?
     var sort: SortKey = .smart
 
+    // MARK: - Appearance
+
+    /// The look chosen in Settings ▸ Appearance (see `AppTheme`); one value for the whole app.
+    var theme: AppTheme = AppTheme.load()
+    func setTheme(_ t: AppTheme) {
+        theme = t
+        t.save()
+        t.applyNavigationBarFont()
+    }
+
     // MARK: - Pure File Transfer mode
 
     /// **Pure File Transfer**: the app as a plain conduit for moving files from this phone onto the

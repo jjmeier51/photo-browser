@@ -233,3 +233,20 @@ func livePhotoVideoURL(for imageURL: URL) -> URL? {
     }
     return nil
 }
+
+
+/// A one-slot memo for a value derived inside a SwiftUI `body`: the value is kept with the key
+/// it was computed for and recomputed only when the key changes. A class, so a `@State` holder
+/// can be refilled during `body` without triggering a render (see `FolderView.filtered`).
+final class Memo<Value> {
+    private var key = ""
+    private var stored: Value?
+
+    func value(for key: String, _ compute: () -> Value) -> Value {
+        if key == self.key, let stored { return stored }
+        let v = compute()
+        self.key = key
+        stored = v
+        return v
+    }
+}

@@ -58,46 +58,96 @@ enum TaylorGallery {
             return added
         }
         add(parseAlbums(first))
-        var p = 2
-        while p <= 500 {                                // keep paging until one adds nothing new
-            guard let html = await fetchHTML(path(p)) else { break }
-            if add(parseAlbums(html)) == 0 { break }
-            p += 1
+        // The pager on page 1 says how many album pages there are: fetch the rest together rather
+        // than one after another (a big section used to take a round trip per page).
+        let pages = pageCount(in: first, pattern: cat.map { "index\\.php\\?cat=\($0)&(?:amp;)?page=(\\d+)" } ?? "index\\.php\\?page=(\\d+)")
+        if pages > 1 {
+            for html in await fetchPages(2...pages, path: path) { add(parseAlbums(html)) }
+        } else {
+            var p = 2
+            while p <= 500 {                            // no pager found: keep paging until one adds nothing new
+                guard let html = await fetchHTML(path(p)) else { break }
+                if add(parseAlbums(html)) == 0 { break }
+                p += 1
+            }
         }
         let albums = order.compactMap { byID[$0] }
         if !(categories.isEmpty && albums.isEmpty) { await GalleryCache.shared.setBrowse(key, (categories, albums)) }
         return (categories, albums, nil)
     }
 
-    /// Every image in an album. Pages until one adds nothing new, so a windowed
-    /// thumbnail pager can't truncate a big album. Cached in memory.
-    nonisolated static func images(inAlbum id: Int) async -> [Image] {
-        if let hit = await GalleryCache.shared.images(id) { return hit }
+    /// Every image in an album. The first page says how many pages there are; the rest are
+    /// fetched together, and `onPage` gets each page's new images as soon as it's in (in page
+    /// order), so a grid can fill while the album is still listing. Cached in memory.
+    nonisolated static func images(inAlbum id: Int, onPage: (@Sendable ([Image]) -> Void)? = nil) async -> [Image] {
+        if let hit = await GalleryCache.shared.images(id) { onPage?(hit); return hit }
         var all: [Image] = []; var seen = Set<String>()
-        var p = 1
-        while p <= 500 {
-            guard let html = await fetchHTML("thumbnails.php?album=\(id)&page=\(p)") else { break }
-            var added = 0
-            for img in parseImages(html) where seen.insert(img.fullURL.absoluteString).inserted { all.append(img); added += 1 }
-            if added == 0 { break }
-            p += 1
+        @discardableResult func add(_ html: String) -> [Image] {
+            var fresh: [Image] = []
+            for img in parseImages(html) where seen.insert(img.fullURL.absoluteString).inserted {
+                let numbered = Image(pid: all.count, fullURL: img.fullURL, thumbURL: img.thumbURL, filename: img.filename)
+                all.append(numbered); fresh.append(numbered)
+            }
+            if !fresh.isEmpty { onPage?(fresh) }
+            return fresh
+        }
+        func path(_ p: Int) -> String { "thumbnails.php?album=\(id)&page=\(p)" }
+        guard let first = await fetchHTML(path(1)) else { return [] }
+        add(first)
+        let pages = pageCount(in: first, pattern: "thumbnails\\.php\\?album=\(id)&(?:amp;)?page=(\\d+)")
+        if pages > 1 {
+            for html in await fetchPages(2...pages, path: path) { add(html) }
+        } else {
+            var p = 2
+            while p <= 500 {                            // no pager found: keep paging until one adds nothing new
+                guard let html = await fetchHTML(path(p)), !add(html).isEmpty else { break }
+                p += 1
+            }
         }
         if !all.isEmpty { await GalleryCache.shared.setImages(id, all) }
         return all
     }
 
+    /// The highest page number the pager links to (0 when there is no pager).
+    nonisolated private static func pageCount(in html: String, pattern: String) -> Int {
+        matches(html, pattern).compactMap { Int($0[1]) }.max() ?? 0
+    }
+
+    /// Fetches a run of pages up to six at a time and hands them back in page order (a missing page
+    /// is left out), so callers add albums / images in the order the site shows them.
+    nonisolated private static func fetchPages(_ range: ClosedRange<Int>, path: @escaping @Sendable (Int) -> String) async -> [String] {
+        var byPage: [Int: String] = [:]
+        await withTaskGroup(of: (Int, String?).self) { group in
+            var next = range.lowerBound
+            func addNext() {
+                guard next <= range.upperBound else { return }
+                let p = next; next += 1
+                group.addTask { (p, await fetchHTML(path(p))) }
+            }
+            for _ in 0..<min(6, range.count) { addNext() }
+            while let (p, html) = await group.next() {
+                if let html { byPage[p] = html }
+                addNext()
+            }
+        }
+        return range.compactMap { byPage[$0] }
+    }
+
     // MARK: - Downloading
 
-    /// Downloads every full-size image of `album` into a new subfolder of `parent`
-    /// (named after the album), 4 at a time. Returns counts so the caller can
+    /// Downloads every full-size image of `album` into a subfolder of `parent` named after the
+    /// album, 8 at a time. The folder is reused if it's already there and images already in it
+    /// are skipped (counted as downloaded), so running an album again only fetches what's
+    /// missing. Stops cleanly when the task is cancelled. Returns counts so the caller can
     /// migrate nothing (these are fresh files) and reload.
     nonisolated static func downloadAlbum(_ album: Album, into parent: URL,
                                           progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         progress(Progress(fraction: 0, done: 0, total: 0, currentName: "Listing…"))
         let images = await images(inAlbum: album.id)
         guard !images.isEmpty else { return DownloadResult(downloaded: 0, failed: 0, folderName: nil, note: "No images found in this album.") }
+        if Task.isCancelled { return DownloadResult(downloaded: 0, failed: 0, folderName: nil, note: "Cancelled.") }
 
-        let folder = uniqueDestination(for: sanitize(album.title.isEmpty ? "Album \(album.id)" : album.title), in: parent)
+        let folder = parent.appendingPathComponent(sanitize(album.title.isEmpty ? "Album \(album.id)" : album.title), isDirectory: true)
         guard (try? DriveWriter.createDirectory(at: folder)) != nil else {
             return DownloadResult(downloaded: 0, failed: 0, folderName: nil, note: "Couldn’t create the album folder.")
         }
@@ -107,10 +157,10 @@ enum TaylorGallery {
 
         let total = images.count
         var done = 0, downloaded = 0, failed = 0, index = 0
-        let maxConcurrent = 4
+        let maxConcurrent = 8
         await withTaskGroup(of: Bool.self) { group in
             func addNext() {
-                guard index < total else { return }
+                guard index < total, !Task.isCancelled else { return }
                 let image = images[index]; index += 1
                 group.addTask { await downloadImage(image, into: folder, albumDate: albumDate) }
             }
@@ -122,19 +172,27 @@ enum TaylorGallery {
                 addNext()
             }
         }
+        if Task.isCancelled {
+            return DownloadResult(downloaded: downloaded, failed: failed, folderName: folder.lastPathComponent,
+                                  note: "Cancelled after \(downloaded) of \(total) — run it again to finish.")
+        }
         return DownloadResult(downloaded: downloaded, failed: failed,
                               folderName: folder.lastPathComponent,
                               note: failed > 0 ? "\(failed) image(s) couldn’t be downloaded." : nil)
     }
 
     nonisolated private static func downloadImage(_ image: Image, into folder: URL, albumDate: Date?) async -> Bool {
+        let dest = folder.appendingPathComponent(sanitize(image.filename))
+        if let size = try? FileManager.default.attributesOfItem(atPath: dest.path)[.size] as? Int, size > 0 {
+            return true                                   // already here from an earlier run
+        }
+        if Task.isCancelled { return false }
         var req = URLRequest(url: image.fullURL)
         req.setValue(host, forHTTPHeaderField: "Referer")
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         guard let (data, response) = try? await session.data(for: req),
               (response as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true,
               data.count >= 256 else { return false }
-        let dest = uniqueDestination(for: sanitize(image.filename), in: folder)
         return await saveImage(data, to: dest, date: albumDate)
     }
 

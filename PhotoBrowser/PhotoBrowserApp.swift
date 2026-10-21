@@ -11,7 +11,10 @@ struct PhotoBrowserApp: App {
         WindowGroup {
             ContentView()
                 .environment(library)
-                .preferredColorScheme(.dark)
+                .preferredColorScheme(library.theme.colorScheme)
+                .tint(library.theme.accentColor)
+                .fontDesign(library.theme.fontDesign)
+                .environment(\.font, library.theme.defaultFont)
                 .task {
                     library.applyPureTransferMode()
                     library.restoreLastFolder()
@@ -75,6 +78,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // present reliably while the app is foreground (iOS only fires `willPresent` when the
         // delegate is set this early).
         AINotifications.configureAtLaunch()
+        AppTheme.load().applyNavigationBarFont()    // appearance proxies only reach bars made after this
         return true
     }
 

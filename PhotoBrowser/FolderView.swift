@@ -43,6 +43,17 @@ struct FolderView: View {
     let isRoot: Bool
 
     @State private var entries: [Entry] = []
+    @State private var entriesVersion = 0                   // bumps with every `entries` assignment (memo keys)
+    /// Per-render memo of the expensive derived lists. SwiftUI re-evaluates `body` on every selection
+    /// tap, and recomputing the whole filter/sort pipeline — plus the chip bar's option lists — each
+    /// time was the lag when selecting in a big folder. These are plain objects, so refilling them inside
+    /// `body` doesn't itself trigger another render; each is keyed on everything its result depends on.
+    @State private var filteredMemo = Memo<[Entry]>()
+    @State private var bubblesMemo = Memo<[Entry]>()
+    @State private var tagsMemo = Memo<[Library.TagCount]>()
+    @State private var locationsMemo = Memo<[LocationOption]>()
+    @State private var yearsMemo = Memo<[Int]>()
+    @State private var categoriesMemo = Memo<[CategoryOption]>()
     @State private var query = ""
     @State private var submittedQuery = ""   // the query actually searched — only set on Return/Search
 
@@ -273,14 +284,16 @@ struct FolderView: View {
     }
 
     private var categoryOptions: [CategoryOption] {
-        var counts: [String: Int] = [:]
-        for (folder, cats) in galleryCategories where categoryFilter.isSubset(of: Set(cats)) {
-            if library.isUnderHiddenFolder(folder.path) && !showHiddenFolders { continue }
-            for c in cats { counts[c, default: 0] += 1 }
+        categoriesMemo.value(for: "\(galleryCategories.count)|\(categoryFilter.sorted())|\(showHiddenFolders)|\(library.labelsVersion)") {
+            var counts: [String: Int] = [:]
+            for (folder, cats) in galleryCategories where categoryFilter.isSubset(of: Set(cats)) {
+                if library.isUnderHiddenFolder(folder.path) && !showHiddenFolders { continue }
+                for c in cats { counts[c, default: 0] += 1 }
+            }
+            for c in categoryFilter where counts[c] == nil { counts[c] = 0 }
+            return counts.map { CategoryOption(name: $0.key, count: $0.value) }
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         }
-        for c in categoryFilter where counts[c] == nil { counts[c] = 0 }
-        return counts.map { CategoryOption(name: $0.key, count: $0.value) }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
     private var availableAges: [Int] { Array(Set(agedList.map { $0.age })).sorted() }
     /// Whether anything on screen actually needs per-file ages right now.
@@ -301,11 +314,30 @@ struct FolderView: View {
     }
 
     private var filtered: [Entry] {
-        let list = applyFormat(filteredRaw)
-        if library.sort.isAge { return sortByAge(list) }
-        if library.sort.isLikes { return sortByLikes(list) }
-        if library.sort.isDuration { return sortByDuration(list) }
-        return list
+        filteredMemo.value(for: filterKey) {
+            let list = applyFormat(filteredRaw)
+            if library.sort.isAge { return sortByAge(list) }
+            if library.sort.isLikes { return sortByLikes(list) }
+            if library.sort.isDuration { return sortByDuration(list) }
+            return list
+        }
+    }
+
+    /// Everything `filtered` depends on, as one string: the listing, every filter and mode, the
+    /// derived lists the modes draw on, and the library counters that change labels / hidden items.
+    private var filterKey: String {
+        [
+            "\(entriesVersion)", "\(library.changeToken)", "\(library.labelsVersion)", library.sort.rawValue,
+            submittedQuery, "\(typeFilter)", "\(formatFilter)", "\(labelKind)",
+            "\(showFavoritesOnly)\(showAIOnly)\(showEditedOnly)\(showHiddenFolders)\(tsNoLabel)",
+            tsLabelFilter.sorted().joined(separator: ","), tagFilters.sorted().joined(separator: ","),
+            categoryFilter.sorted().joined(separator: ","),
+            yearFilter.map(String.init) ?? "", locationFilter ?? "-", ageFilter.map(String.init) ?? "",
+            "\(videoRes)\(imageRes)\(hdrOnly)",
+            "\(favoriteEntries.count)/\(aiEntries.count)/\(tagEntries.count)/\(tsLabelEntries.count)/\(searchResults.count)",
+            "\(agedList.count)/\(fileSpecs.count)/\(captureDates.count)/\(placeLabels.count)/\(folderYears.count)/\(galleryCategories.count)",
+            "\(library.captions.count)/\(fileCaptions.count)/\(library.tiktokLikes.count)",
+        ].joined(separator: "|")
     }
 
     /// Sorts by TikTok like count, most-liked first (folders first; items without a count last).
@@ -565,7 +597,9 @@ struct FolderView: View {
     }
 
     private var availableYears: [Int] {
-        Array(Set(entries.filter { !$0.isFolder }.map { year(of: $0) })).sorted(by: >)
+        yearsMemo.value(for: "\(entriesVersion)|\(captureDates.count)") {
+            Array(Set(entries.filter { !$0.isFolder }.map { year(of: $0) })).sorted(by: >)
+        }
     }
 
     private struct LocationOption: Identifiable {
@@ -577,12 +611,14 @@ struct FolderView: View {
     /// The Location menu: each place with how many files here are from it, most first; "No
     /// Location" (label "") last.
     private var locationOptions: [LocationOption] {
-        var counts: [String: Int] = [:]
-        for e in entries where !e.isFolder { if let label = placeLabels[e.url] { counts[label, default: 0] += 1 } }
-        let named = counts.filter { !$0.key.isEmpty }
-            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
-            .map { LocationOption(label: $0.key, count: $0.value) }
-        return named + (counts[""].map { [LocationOption(label: "", count: $0)] } ?? [])
+        locationsMemo.value(for: "\(entriesVersion)|\(placeLabels.count)") {
+            var counts: [String: Int] = [:]
+            for e in entries where !e.isFolder { if let label = placeLabels[e.url] { counts[label, default: 0] += 1 } }
+            let named = counts.filter { !$0.key.isEmpty }
+                .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+                .map { LocationOption(label: $0.key, count: $0.value) }
+            return named + (counts[""].map { [LocationOption(label: "", count: $0)] } ?? [])
+        }
     }
 
     private var placesNeeded: Bool { locationFilter != nil || placesRequested }
@@ -1791,6 +1827,10 @@ struct FolderView: View {
         return 4
     }
     private var igBubbles: [Entry] {
+        bubblesMemo.value(for: "\(entriesVersion)|\(library.labelsVersion)|\(library.changeToken)|\(showHiddenFolders)") { computeBubbles() }
+    }
+
+    private func computeBubbles() -> [Entry] {
         let order = library.bubbleOrder(for: url)
         return entries.filter { $0.isFolder && isBubbleFolder($0.url)
                 && (showHiddenFolders || !library.isHiddenFolder($0.url)) }
@@ -1999,7 +2039,7 @@ struct FolderView: View {
                     .overlay { if selecting && !isSel { Circle().fill(.black.opacity(0.4)) } }
                 if selecting {
                     Image(systemName: isSel ? "checkmark.circle.fill" : "circle")
-                        .font(.body).foregroundStyle(isSel ? Color.accentColor : .white)
+                        .font(.body).foregroundStyle(isSel ? library.theme.accentColor : .white)
                         .background(Circle().fill(.black.opacity(0.4)))
                         .offset(x: badgeOffset, y: badgeOffset)
                 }
@@ -2119,7 +2159,7 @@ struct FolderView: View {
                     }
                 } label: {
                     chip("Type: \(typeFilter.rawValue)")
-                        .foregroundStyle(typeFilter != .all ? Color.accentColor : Color.primary)
+                        .foregroundStyle(typeFilter != .all ? library.theme.accentColor : Color.primary)
                 }
 
                 Menu {
@@ -2128,7 +2168,7 @@ struct FolderView: View {
                     }
                 } label: {
                     chip("Format: \(formatFilter.rawValue)")
-                        .foregroundStyle(formatFilter != .all ? Color.accentColor : Color.primary)
+                        .foregroundStyle(formatFilter != .all ? library.theme.accentColor : Color.primary)
                 }
 
                 // Sort lives here, not in the toolbar: on a phone the toolbar overflowed it into "…".
@@ -2151,7 +2191,7 @@ struct FolderView: View {
                         }
                     } label: {
                         chip("Year: \(yearFilter.map(String.init) ?? "All")")
-                            .foregroundStyle(yearFilter != nil ? Color.accentColor : Color.primary)
+                            .foregroundStyle(yearFilter != nil ? library.theme.accentColor : Color.primary)
                     }
                 }
 
@@ -2181,7 +2221,7 @@ struct FolderView: View {
                     }
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     .background(.thinMaterial, in: Capsule())
-                    .foregroundStyle(showEditedOnly ? Color.accentColor : Color.primary)
+                    .foregroundStyle(showEditedOnly ? library.theme.accentColor : Color.primary)
                 }
 
                 if hasCustomLabels {
@@ -2199,7 +2239,7 @@ struct FolderView: View {
                         }
                     } label: {
                         chip(tsNoLabel ? "No Label" : tsLabelFilter.isEmpty ? "Labels" : "Labels (\(tsLabelFilter.count))")
-                            .foregroundStyle(tsLabelMode ? Color.accentColor : Color.primary)
+                            .foregroundStyle(tsLabelMode ? library.theme.accentColor : Color.primary)
                     }
                 }
 
@@ -2223,7 +2263,7 @@ struct FolderView: View {
                             }
                         } label: {
                             chip("Age: \(ageFilter.map { "\($0)" } ?? "All")")
-                                .foregroundStyle(ageFilter != nil ? Color.accentColor : Color.primary)
+                                .foregroundStyle(ageFilter != nil ? library.theme.accentColor : Color.primary)
                         }
                     }
 
@@ -2244,7 +2284,7 @@ struct FolderView: View {
                             chip(categoryFilter.isEmpty ? "Categories"
                                  : categoryFilter.count == 1 ? categoryFilter.first!
                                  : "Categories (\(categoryFilter.count))")
-                                .foregroundStyle(categoryFilter.isEmpty ? Color.primary : Color.accentColor)
+                                .foregroundStyle(categoryFilter.isEmpty ? Color.primary : library.theme.accentColor)
                         }
                     }
 
@@ -2267,7 +2307,7 @@ struct FolderView: View {
                         }
                     } label: {
                         chip("Location: \(locationFilter.map { $0.isEmpty ? "None" : $0 } ?? "All")")
-                            .foregroundStyle(locationFilter != nil ? Color.accentColor : Color.primary)
+                            .foregroundStyle(locationFilter != nil ? library.theme.accentColor : Color.primary)
                     }
 
                     if !tagOptions.isEmpty || !tagFilters.isEmpty {
@@ -2289,7 +2329,7 @@ struct FolderView: View {
                             chip(tagFilters.isEmpty ? "Tags"
                                  : tagFilters.count == 1 ? "Tag: \(tagFilters.first ?? "")"
                                  : "Tags: \(tagFilters.count)")
-                                .foregroundStyle(!tagFilters.isEmpty ? Color.accentColor : Color.primary)
+                                .foregroundStyle(!tagFilters.isEmpty ? library.theme.accentColor : Color.primary)
                         }
                     }
 
@@ -2306,7 +2346,7 @@ struct FolderView: View {
                             }
                             .padding(.horizontal, 12).padding(.vertical, 6)
                             .background(.thinMaterial, in: Capsule())
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(library.theme.accentColor)
                         }
                     }
                 }
@@ -2345,7 +2385,9 @@ struct FolderView: View {
 
     /// Tags under this folder and its subfolders, with counts (recomputed as `library.tags` changes);
     /// with tags already selected, the counts are within that selection.
-    private var tagOptions: [Library.TagCount] { library.tagCounts(under: url, having: tagFilters) }
+    private var tagOptions: [Library.TagCount] {
+        tagsMemo.value(for: "\(library.labelsVersion)|\(tagFilters.sorted())") { library.tagCounts(under: url, having: tagFilters) }
+    }
 
     private func hasTagFilter(_ tag: String) -> Bool {
         tagFilters.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
@@ -2366,7 +2408,7 @@ struct FolderView: View {
 
     private func chip(_ text: String) -> some View {
         HStack(spacing: 4) {
-            Text(text).font(.subheadline.weight(.medium))
+            Text(text).font(library.theme.font(.subheadline, weight: .medium))
             Image(systemName: "chevron.down").font(.caption2)
         }
         .padding(.horizontal, 12).padding(.vertical, 6)
@@ -3322,11 +3364,11 @@ struct FolderView: View {
     /// the re-render this triggers; name/size/kind/smart/date sort the entries here.
     private func resort() async {
         guard loaded, !entries.isEmpty else { await reload(); return }
-        entries = Library.sortEntries(entries, by: library.sort)
+        entries = Library.sortEntries(entries, by: library.sort); entriesVersion &+= 1
         // Capture-date sorts refine the modified-date order with real EXIF dates.
         if [SortKey.smart, .dateDesc, .dateAsc].contains(library.sort) {
             if captureDates.isEmpty { captureDates = await library.captureDates(for: entries) }
-            entries = sortedByCaptureDate(entries)
+            entries = sortedByCaptureDate(entries); entriesVersion &+= 1
         }
     }
 
@@ -3364,11 +3406,11 @@ struct FolderView: View {
         // re-read from disk below and update if anything changed. On a cold launch any
         // folder falls back to its persisted snapshot so it appears immediately.
         if let cached = library.cachedListing(of: url), !cached.isEmpty {
-            entries = cached; liveImageURLs = Self.detectLivePairs(in: cached); loaded = true
+            entries = cached; liveImageURLs = Self.detectLivePairs(in: cached); loaded = true; entriesVersion &+= 1
         } else if let saved = await library.persistedListing(of: url), !saved.isEmpty {
             // Cold launch: every folder (not just the root) paints its last-known
             // listing instantly; the live re-read below refreshes it.
-            entries = saved; liveImageURLs = Self.detectLivePairs(in: saved); loaded = true
+            entries = saved; liveImageURLs = Self.detectLivePairs(in: saved); loaded = true; entriesVersion &+= 1
         } else {
             loaded = false
         }
@@ -3385,7 +3427,7 @@ struct FolderView: View {
             if let root = library.rootURL, !FileManager.default.fileExists(atPath: root.path) { return }
         }
         library.cacheListing(list, for: url)
-        entries = list
+        entries = list; entriesVersion &+= 1
         liveImageURLs = Self.detectLivePairs(in: list)
         // An empty listing is either a genuinely empty folder or one iOS's exFAT driver can't read
         // (macOS shows its contents). Tell them apart so the empty state can say which.
@@ -3413,7 +3455,7 @@ struct FolderView: View {
             // Now that real capture dates are in, re-order so "newest" reflects when
             // media was taken (the file's modified date is just when it was added).
             if library.sort == .smart || library.sort == .dateDesc || library.sort == .dateAsc {
-                entries = sortedByCaptureDate(entries)
+                entries = sortedByCaptureDate(entries); entriesVersion &+= 1
             }
         } else {
             captureDates = [:]
