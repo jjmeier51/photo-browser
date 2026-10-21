@@ -965,11 +965,15 @@ backups made before tags existed still decode; `MetadataCategory.tags` for Drive
 list), and matched by the index search. Changes bump `labelsVersion`.
 
 The **Tags chip** (after Location) lists every tag under the folder *and its subfolders* with
-counts (`tagCounts(under:)`, case-insensitive merge, most used first), and picking one is a mode
-like Favorites: `taggedPaths(under:tag:)` → `labeledEntries` gathers the tagged files from the whole
-subtree (the "labels" task), honouring Type and the search box; the other modes step aside
-(`selectTag`), and Favorites / To AI / Edited clear it. Header subtitle "Tag: x"; empty state
-"Nothing tagged “x” here"; Clear resets it.
+counts (`tagCounts(under:)`, case-insensitive merge, most used first). **Several tags can be on
+at once** (`tagFilters: Set<String>`, toggled by `toggleTag`); a file must carry **all** of them
+(`taggedPaths(under:tags:)`), like the Categories filter, and while any are selected the menu's
+counts come from `tagCounts(under:having:)` — what each further tag would narrow the selection
+to (selected tags stay listed; others at zero drop out). Tags are a mode like Favorites:
+`labeledEntries` gathers the tagged files from the whole subtree (the "labels" task), honouring
+Type and the search box; the other modes step aside, and Favorites / To AI / Edited clear it.
+Header subtitle "Tag: x" / "Tags: x, y"; chip "Tag: x" / "Tags: 2"; "Clear Tags" at the top of
+the menu; the chip-bar Clear resets it too.
 
 **Bulk tagging:** in selection mode, More ▸ **Tags** has "Add Tag…" (an alert with a text field,
 presented deferred per constraint #4) that tags every selected item at once, plus the existing
@@ -1058,6 +1062,21 @@ download runs again by itself. The hidden view is kept **full-size behind the ke
 view** (a 2-px view reads as no browser; a view outside any window gets its JS timers
 suspended). If tikwm ever hard-blocks or moves the listing behind a login, that endpoint is the
 only piece to replace — the resolve and download paths are unaffected.
+
+**Download speed (Oct 21, 2026) — two lanes in `BackgroundDownloader`.** A background
+`URLSession` runs out of process under the system's scheduling: a few transfers at a time, each
+paced, so a profile of hundreds of videos crawled even with the app open. Now, while the app is
+on screen, `enqueue` hands downloads to an in-process `fast` session (10 connections per host,
+no system pacing); on `scenePhase == .background` `setForeground(false)` stops every fast task
+with its resume data and re-queues it on the background session (`downloadTask(withResumeData:)`,
+TikTok's CDN serves ranges), so "keeps going when you close the app" still holds; a fast task that
+fails for a network reason gets one retry on the background session. Both lanes land files in the
+same inbox; the downloader posts `BackgroundDownloader.landed` and the app files them at once.
+`Library.processPendingTikTok` now does the inbox → drive moves in a detached task
+(`fileTikTokRecords`) and applies captions / likes / the profile record on the main actor
+(`applyFiledTikTok`), one pass at a time (`filingTikTok`), re-running if more landed meanwhile —
+copying a video onto the drive used to block the UI. The listing and per-video HD resolve are
+still paced at ~1 request/s: that is tikwm's limit, not ours.
 
 ### 7.4a MPEG-TS → MP4 — `TSRemuxer.swift`
 

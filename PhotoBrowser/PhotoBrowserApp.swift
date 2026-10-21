@@ -32,8 +32,13 @@ struct PhotoBrowserApp: App {
                 // that completed while we were away, and finish any Astria job whose
                 // wait was cut short (suspended app, lost network) — Astria keeps the
                 // images, so this is when they can finally be fetched.
+                // A TikTok download that finished while the app is in use is filed straight away.
+                .onReceive(NotificationCenter.default.publisher(for: BackgroundDownloader.landed)) { _ in
+                    if !library.pureTransferMode { library.processPendingTikTok() }
+                }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
+                        BackgroundDownloader.shared.setForeground(true)
                         library.reconnectIfNeeded()
                         if !library.pureTransferMode {
                             library.processPendingTikTok()
@@ -41,6 +46,9 @@ struct PhotoBrowserApp: App {
                             library.resumePendingAIEdits()
                         }
                     } else if phase == .background {
+                        // Hand any in-flight TikTok downloads to the background session first — the
+                        // fast lane only runs while we're on screen.
+                        BackgroundDownloader.shared.setForeground(false)
                         // Arm the drive's "safe to remove" state on the way out. This drains
                         // any commit already in flight and flushes the drive root, so if the
                         // user unplugs while the app is suspended, the last thing that touched
@@ -74,6 +82,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                      handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
         BackgroundDownloader.shared.backgroundCompletion = completionHandler
+        BackgroundDownloader.shared.setForeground(false)       // relaunched in the background for the session's events
         BackgroundDownloader.shared.activate()
     }
 }

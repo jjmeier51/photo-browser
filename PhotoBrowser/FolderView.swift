@@ -84,7 +84,7 @@ struct FolderView: View {
     @State private var showFavoritesOnly = false
     @State private var favoriteEntries: [Entry] = []
     /// Tags filter: files carrying this tag anywhere under the folder (recursive, like Favorites).
-    @State private var tagFilter: String?
+    @State private var tagFilters: Set<String> = []                // selected tags (a file must carry all of them)
     @State private var tagEntries: [Entry] = []
     @State private var captureDates: [URL: Date] = [:]
     /// Years present under each subfolder — fills in while a year filter is active
@@ -377,8 +377,8 @@ struct FolderView: View {
             return applyHidden(q.isEmpty ? base : base.filter { matches($0, q) })
         }
 
-        // Tag mode: files carrying the tag, gathered recursively under this folder.
-        if tagFilter != nil {
+        // Tag mode: files carrying every selected tag, gathered recursively under this folder.
+        if !tagFilters.isEmpty {
             let base = applyType(tagEntries)
             return applyHidden(q.isEmpty ? base : base.filter { matches($0, q) })
         }
@@ -1592,7 +1592,7 @@ struct FolderView: View {
                 if submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty { fileCaptions = [:] }
                 else if fileCaptions.isEmpty { fileCaptions = await library.fileCaptions(for: entries) }
             }
-            .task(id: "labels-\(showFavoritesOnly)-\(showAIOnly)-\(tagFilter ?? "")-\(library.labelsVersion)-\(library.sort.rawValue)") {
+            .task(id: "labels-\(showFavoritesOnly)-\(showAIOnly)-\(tagFilters.sorted().joined(separator: "|"))-\(library.labelsVersion)-\(library.sort.rawValue)") {
                 // Favorites / To AI / a tag are scoped to *this* folder (and its subfolders).
                 if showFavoritesOnly {
                     favoriteEntries = await library.labeledEntries(under: url, paths: library.favorites, sort: library.sort)
@@ -1600,8 +1600,8 @@ struct FolderView: View {
                 if showAIOnly {
                     aiEntries = await library.labeledEntries(under: url, paths: library.aiLabels, sort: library.sort)
                 }
-                if let tagFilter {
-                    tagEntries = await library.labeledEntries(under: url, paths: library.taggedPaths(under: url, tag: tagFilter),
+                if !tagFilters.isEmpty {
+                    tagEntries = await library.labeledEntries(under: url, paths: library.taggedPaths(under: url, tags: tagFilters),
                                                               sort: library.sort)
                 }
             }
@@ -1710,12 +1710,13 @@ struct FolderView: View {
                              : tsLabelMode ? "No items match these labels"
                              : showFavoritesOnly ? "No favorites here yet"
                              : showAIOnly ? "Nothing marked To AI yet"
-                             : tagFilter != nil ? "Nothing tagged “\(tagFilter ?? "")” here"
+                             : !tagFilters.isEmpty ? (tagFilters.count == 1 ? "Nothing tagged “\(tagFilters.first ?? "")” here"
+                                                       : "Nothing here carries all of these tags")
                              : !categoryFilter.isEmpty ? "No galleries have all of these categories"
                              : (advancedActive || typeFilter != .all || formatFilter != .all || yearFilter != nil || ageFilter != nil || locationFilter != nil) ? "No matches for this filter"
                              : "This folder is empty")
                             .foregroundStyle(.secondary)
-                        if DriveWriter.syncMode == .full && !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !advancedActive && tagFilter == nil
+                        if DriveWriter.syncMode == .full && !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !advancedActive && tagFilters.isEmpty
                             && yearFilter == nil && locationFilter == nil && typeFilter == .all && formatFilter == .all && ageFilter == nil
                             && categoryFilter.isEmpty && submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty {
                             // A folder stored past 2.2 TB on a big exFAT drive can read as empty with no
@@ -1725,7 +1726,7 @@ struct FolderView: View {
                         }
                         // A genuinely empty folder (no filter hiding things) gets the two ways to
                         // fill it, instead of a dead end.
-                        if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !showEditedOnly && tagFilter == nil
+                        if !tsNoLabel && !tsLabelMode && !showFavoritesOnly && !showAIOnly && !showEditedOnly && tagFilters.isEmpty
                             && !advancedActive && yearFilter == nil && locationFilter == nil && typeFilter == .all && formatFilter == .all && ageFilter == nil
                             && categoryFilter.isEmpty {
                             HStack(spacing: 12) {
@@ -2068,7 +2069,7 @@ struct FolderView: View {
         if showFavoritesOnly { return "Favorites" }
         if showAIOnly { return "To AI" }
         if showEditedOnly { return "Edited" }
-        if let tagFilter { return "Tag: \(tagFilter)" }
+        if !tagFilters.isEmpty { return (tagFilters.count == 1 ? "Tag: " : "Tags: ") + tagFilters.sorted().joined(separator: ", ") }
         if let ig = library.instagramInfo(for: url) {
             let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
             let when = f.string(from: Date(timeIntervalSince1970: ig.lastUpdated))
@@ -2101,7 +2102,7 @@ struct FolderView: View {
             HStack(spacing: 10) {
                 Button {
                     showFavoritesOnly.toggle()
-                    if showFavoritesOnly { showAIOnly = false; showEditedOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false; tagFilter = nil }
+                    if showFavoritesOnly { showAIOnly = false; showEditedOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false; tagFilters.removeAll() }
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: showFavoritesOnly ? "heart.fill" : "heart")
@@ -2156,7 +2157,7 @@ struct FolderView: View {
 
                 Button {
                     showAIOnly.toggle()
-                    if showAIOnly { showFavoritesOnly = false; showEditedOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false; tagFilter = nil }
+                    if showAIOnly { showFavoritesOnly = false; showEditedOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false; tagFilters.removeAll() }
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "sparkles")
@@ -2171,7 +2172,7 @@ struct FolderView: View {
                     showEditedOnly.toggle()
                     if showEditedOnly {
                         showFavoritesOnly = false; showAIOnly = false
-                        tsLabelFilter.removeAll(); tsNoLabel = false; ageFilter = nil; tagFilter = nil
+                        tsLabelFilter.removeAll(); tsNoLabel = false; ageFilter = nil; tagFilters.removeAll()
                     }
                 } label: {
                     HStack(spacing: 4) {
@@ -2269,25 +2270,34 @@ struct FolderView: View {
                             .foregroundStyle(locationFilter != nil ? Color.accentColor : Color.primary)
                     }
 
-                    if !tagOptions.isEmpty || tagFilter != nil {
+                    if !tagOptions.isEmpty || !tagFilters.isEmpty {
+                        // Several tags can be on at once; a file must carry all of them. The counts say what
+                        // each further tag would narrow the current selection to.
                         Menu {
-                            Button { tagFilter = nil } label: { check("All Tags", tagFilter == nil) }
+                            if !tagFilters.isEmpty {
+                                Button(role: .destructive) { tagFilters.removeAll() } label: {
+                                    Label("Clear Tags", systemImage: "xmark.circle")
+                                }
+                                Divider()
+                            }
                             ForEach(tagOptions) { t in
-                                Button { selectTag(t.tag) } label: {
-                                    check("\(t.tag) (\(t.count))", tagFilter?.caseInsensitiveCompare(t.tag) == .orderedSame)
+                                Button { toggleTag(t.tag) } label: {
+                                    check("\(t.tag) (\(t.count))", hasTagFilter(t.tag))
                                 }
                             }
                         } label: {
-                            chip(tagFilter.map { "Tag: \($0)" } ?? "Tags")
-                                .foregroundStyle(tagFilter != nil ? Color.accentColor : Color.primary)
+                            chip(tagFilters.isEmpty ? "Tags"
+                                 : tagFilters.count == 1 ? "Tag: \(tagFilters.first ?? "")"
+                                 : "Tags: \(tagFilters.count)")
+                                .foregroundStyle(!tagFilters.isEmpty ? Color.accentColor : Color.primary)
                         }
                     }
 
                     // One tap back to an unfiltered view once any menu-driven filter is active.
                     if yearFilter != nil || locationFilter != nil || typeFilter != .all || formatFilter != .all || ageFilter != nil
-                        || advancedActive || !categoryFilter.isEmpty || tagFilter != nil {
+                        || advancedActive || !categoryFilter.isEmpty || !tagFilters.isEmpty {
                         Button {
-                            yearFilter = nil; locationFilter = nil; typeFilter = .all; formatFilter = .all; ageFilter = nil; tagFilter = nil
+                            yearFilter = nil; locationFilter = nil; typeFilter = .all; formatFilter = .all; ageFilter = nil; tagFilters.removeAll()
                             videoRes = .all; imageRes = .all; hdrOnly = false; categoryFilter.removeAll()
                         } label: {
                             HStack(spacing: 4) {
@@ -2333,13 +2343,23 @@ struct FolderView: View {
         }
     }
 
-    /// Tags under this folder and its subfolders, with counts (recomputed as `library.tags` changes).
-    private var tagOptions: [Library.TagCount] { library.tagCounts(under: url) }
+    /// Tags under this folder and its subfolders, with counts (recomputed as `library.tags` changes);
+    /// with tags already selected, the counts are within that selection.
+    private var tagOptions: [Library.TagCount] { library.tagCounts(under: url, having: tagFilters) }
 
-    /// Picking a tag is a mode like Favorites: it shows tagged files from the whole subtree, so
-    /// the other modes step aside.
-    private func selectTag(_ tag: String) {
-        tagFilter = tag
+    private func hasTagFilter(_ tag: String) -> Bool {
+        tagFilters.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
+    }
+
+    /// Tags are a mode like Favorites: they show tagged files from the whole subtree, so the other
+    /// modes step aside. Tapping a tag adds it to (or takes it out of) the selection.
+    private func toggleTag(_ tag: String) {
+        if let existing = tagFilters.first(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) {
+            tagFilters.remove(existing)
+        } else {
+            tagFilters.insert(tag)
+        }
+        guard !tagFilters.isEmpty else { return }
         showFavoritesOnly = false; showAIOnly = false; showEditedOnly = false
         tsLabelFilter.removeAll(); tsNoLabel = false; ageFilter = nil
     }

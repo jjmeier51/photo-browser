@@ -376,50 +376,90 @@ final class Library {
         UserDefaults.standard.set(lastVSCOUsernameByFolder, forKey: "photoBrowser.lastVSCOUsername")
     }
 
-    /// Files TikTok videos that finished downloading in the background (in the app inbox) onto
-    /// the actual drive folder: moves each into place, stamps its capture date, attaches its
-    /// caption, and updates the profile record's count/dedup set. Runs in the foreground (drive
-    /// mounted, security scope active). Safe to call repeatedly — it consumes the pending queue.
+    /// One finished download waiting in the inbox, as `BackgroundDownloader` recorded it.
+    nonisolated struct TikTokRecord: Sendable {
+        let inbox: String, dest: String, createTime: Double, caption: String, folder: String, id: String, likes: Int
+        init?(_ rec: [String: Any]) {
+            guard let inbox = rec["inbox"] as? String, let dest = rec["dest"] as? String else { return nil }
+            self.inbox = inbox; self.dest = dest
+            createTime = rec["createTime"] as? Double ?? 0
+            caption = rec["caption"] as? String ?? ""
+            folder = rec["folder"] as? String ?? ""
+            id = rec["id"] as? String ?? ""
+            likes = rec["likes"] as? Int ?? 0
+        }
+        var dictionary: [String: Any] {
+            ["inbox": inbox, "dest": dest, "createTime": createTime, "caption": caption, "folder": folder, "id": id, "likes": likes]
+        }
+    }
+
+    private var filingTikTok = false
+
+    /// Files TikTok videos that finished downloading (in the app inbox) onto the actual drive
+    /// folder: moves each into place, stamps its capture date, attaches its caption, and updates
+    /// the profile record's count/dedup set. Needs the foreground (drive mounted, security scope
+    /// active). The moves run off the main actor — with the fast download lane files land while
+    /// the app is in use, and copying a video onto the drive must not stall the UI. Safe to call
+    /// repeatedly: it consumes the pending queue, one pass at a time, and runs again if more
+    /// landed meanwhile.
     func processPendingTikTok() {
-        guard rootURL != nil else { return }     // need the drive mounted + security scope to file onto it
-        let pending = BackgroundDownloader.loadPending()
-        guard !pending.isEmpty else { return }
-        BackgroundDownloader.shared.removeProcessed(pending.count)
+        guard rootURL != nil, !filingTikTok else { return }
+        let raw = BackgroundDownloader.loadPending()
+        guard !raw.isEmpty else { return }
+        BackgroundDownloader.shared.removeProcessed(raw.count)
+        let pending = raw.compactMap(TikTokRecord.init)
+        filingTikTok = true
+        Task {
+            let outcome = await Task.detached(priority: .userInitiated) { Self.fileTikTokRecords(pending) }.value
+            BackgroundDownloader.shared.requeue(outcome.requeue.map(\.dictionary))
+            applyFiledTikTok(outcome.filed)
+            filingTikTok = false
+            if !BackgroundDownloader.loadPending().isEmpty { processPendingTikTok() }
+        }
+    }
+
+    /// The file moves (inbox → drive, dates stamped), off the main actor: what landed, and what
+    /// has to wait for another pass (drive busy or gone).
+    nonisolated private static func fileTikTokRecords(_ pending: [TikTokRecord]) -> (filed: [TikTokRecord], requeue: [TikTokRecord]) {
         let fm = FileManager.default
-        var captionUpdates: [String: String] = [:]
-        var idsByFolder: [String: [String]] = [:]
-        var newestByFolder: [String: Double] = [:]   // newest post date actually filed, per profile folder
-        var requeue: [[String: Any]] = []        // entries we couldn't file yet (drive busy) — retry later
-        var changed = false
+        var filed: [TikTokRecord] = [], requeue: [TikTokRecord] = []
         for rec in pending {
-            guard let inbox = rec["inbox"] as? String, let dest = rec["dest"] as? String else { continue }
-            guard fm.fileExists(atPath: inbox) else { continue }     // inbox file gone (already filed) — drop
-            let inboxURL = URL(fileURLWithPath: inbox), destURL = URL(fileURLWithPath: dest)
+            guard fm.fileExists(atPath: rec.inbox) else { continue }     // inbox file gone (already filed) — drop
+            let inboxURL = URL(fileURLWithPath: rec.inbox), destURL = URL(fileURLWithPath: rec.dest)
             try? DriveWriter.createDirectory(at: destURL.deletingLastPathComponent())
-            if fm.fileExists(atPath: dest) {
+            if fm.fileExists(atPath: rec.dest) {
                 try? fm.removeItem(at: inboxURL)                     // already have it — drop the dupe
             } else if (try? fm.moveItem(at: inboxURL, to: destURL)) == nil {
                 _ = try? fm.copyItem(at: inboxURL, to: destURL)
-                if fm.fileExists(atPath: dest) { try? fm.removeItem(at: inboxURL) }
+                if fm.fileExists(atPath: rec.dest) { try? fm.removeItem(at: inboxURL) }
             }
-            if fm.fileExists(atPath: dest) { DriveWriter.fullSyncFileAndParent(destURL) }   // exFAT: entry durable before the next
-            guard fm.fileExists(atPath: dest) else { requeue.append(rec); continue }   // couldn't file — keep for retry
-            if let ct = rec["createTime"] as? Double, ct > 0 {
-                let date = Date(timeIntervalSince1970: ct)
-                try? fm.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: dest)
+            if fm.fileExists(atPath: rec.dest) { DriveWriter.fullSyncFileAndParent(destURL) }   // entry durable before the next
+            guard fm.fileExists(atPath: rec.dest) else { requeue.append(rec); continue }   // couldn't file — keep for retry
+            if rec.createTime > 0 {
+                let date = Date(timeIntervalSince1970: rec.createTime)
+                try? fm.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: rec.dest)
             }
-            if let caption = rec["caption"] as? String, !caption.isEmpty { captionUpdates[dest] = caption }
-            if let likes = rec["likes"] as? Int, likes > 0 { tiktokLikes[dest] = likes }
-            if let folder = rec["folder"] as? String, let id = rec["id"] as? String {
-                idsByFolder[folder, default: []].append(id)
-                if let ct = rec["createTime"] as? Double, ct > 0 {
-                    newestByFolder[folder] = max(newestByFolder[folder] ?? 0, ct)
-                }
-            }
-            changed = true
+            filed.append(rec)
         }
-        BackgroundDownloader.shared.requeue(requeue)
-        if changed { persistTikTokLikes() }
+        return (filed, requeue)
+    }
+
+    /// Attach what the filed videos carry — captions, likes, the profile record's dedup set and
+    /// incremental cutoff — and refresh the folder.
+    private func applyFiledTikTok(_ filed: [TikTokRecord]) {
+        guard !filed.isEmpty else { return }
+        var captionUpdates: [String: String] = [:]
+        var idsByFolder: [String: [String]] = [:]
+        var newestByFolder: [String: Double] = [:]   // newest post date actually filed, per profile folder
+        for rec in filed {
+            if !rec.caption.isEmpty { captionUpdates[rec.dest] = rec.caption }
+            if rec.likes > 0 { tiktokLikes[rec.dest] = rec.likes }
+            if !rec.folder.isEmpty, !rec.id.isEmpty {
+                idsByFolder[rec.folder, default: []].append(rec.id)
+                if rec.createTime > 0 { newestByFolder[rec.folder] = max(newestByFolder[rec.folder] ?? 0, rec.createTime) }
+            }
+        }
+        persistTikTokLikes()
         setCaptions(captionUpdates)
         for (folder, ids) in idsByFolder {
             guard var info = tiktokFolders[folder] else { continue }
@@ -441,7 +481,7 @@ final class Library {
             tiktokFolders[folder] = info
         }
         if !idsByFolder.isEmpty { persistTikTokFolders() }
-        if changed { contentDidChange() }
+        contentDidChange()
     }
 
     /// Grid thumbnail minimum size (points); pinch-to-zoom adjusts it ±30%.
@@ -839,9 +879,39 @@ final class Library {
 
     /// Paths under `folder` whose files carry `tag` (any case) — feed `labeledEntries` for the grid.
     func taggedPaths(under folder: URL, tag: String) -> Set<String> {
+        taggedPaths(under: folder, tags: [tag])
+    }
+
+    /// Files under `folder` carrying **every** tag in `wanted` (case-insensitive); empty when nothing is wanted.
+    func taggedPaths(under folder: URL, tags wanted: Set<String>) -> Set<String> {
+        guard !wanted.isEmpty else { return [] }
         let root = folder.path, prefix = root + "/"
+        let keys = Set(wanted.map { $0.lowercased() })
         return Set(tags.filter { ($0.key == root || $0.key.hasPrefix(prefix))
-                                 && $0.value.contains { $0.caseInsensitiveCompare(tag) == .orderedSame } }.keys)
+                                 && keys.isSubset(of: Set($0.value.map { $0.lowercased() })) }.keys)
+    }
+
+    /// Like `tagCounts(under:)`, but counting only the files that already carry every tag in `having`
+    /// — what each further tag would narrow the current selection to. The selected tags themselves
+    /// stay listed (their count is the selection's size).
+    func tagCounts(under folder: URL, having selected: Set<String>) -> [TagCount] {
+        guard !selected.isEmpty else { return tagCounts(under: folder) }
+        let root = folder.path, prefix = root + "/"
+        let keys = Set(selected.map { $0.lowercased() })
+        var counts: [String: Int] = [:], shown: [String: String] = [:]
+        for (path, list) in tags where path == root || path.hasPrefix(prefix) {
+            let lower = list.map { $0.lowercased() }
+            guard keys.isSubset(of: Set(lower)) else { continue }
+            for (tag, key) in zip(list, lower) {
+                counts[key, default: 0] += 1
+                if shown[key] == nil { shown[key] = tag }
+            }
+        }
+        for key in keys where counts[key] == nil { counts[key] = 0 }
+        return counts.map { entry in
+                TagCount(tag: shown[entry.key] ?? selected.first { $0.lowercased() == entry.key } ?? entry.key, count: entry.value)
+            }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.tag.localizedStandardCompare($1.tag) == .orderedAscending }
     }
 
     /// Reads existing captions embedded in the files (pull-in), bounded concurrency.
