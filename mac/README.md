@@ -96,6 +96,32 @@ cleanly. `--airdrop` then sends what's new to the iPhone app (the galleries that
 plus `pornstar.json`, as one archive of the star folder — the app merges it into the star's folder on
 the drive); `--airdrop-all` sends every gallery. See the next section.
 
+## ImageFap gallery downloader (`imagefap_downloader.py`)
+
+Every full-size photo of one or more ImageFap galleries, in gallery order (stdlib only):
+
+```sh
+python3 mac/imagefap_downloader.py "https://www.imagefap.com/pictures/11350651/Gabrielle%20Santini%20NEW%20PICS"
+python3 mac/imagefap_downloader.py 11350651 98765432 --dest ~/Pictures/ImageFap --airdrop
+python3 mac/imagefap_downloader.py <gallery URL> --dry-run      # list what it would fetch
+```
+
+Each gallery becomes `~/Pictures/ImageFap/<Gallery Title>/` (`--dest` to choose) with its photos
+named `001_<image id>.jpg`, `002_…` so sorting by name keeps the gallery's order, and a
+`gallery.json` sidecar (title, uploader, date, categories, tags, photo list) in the same shape the
+pornpics tools write — so the iOS app's Categories filter works on these folders too. A re-run only
+fetches what's missing; `--limit N` takes the first N photos. Each file's date is the gallery's
+"Date Added" (plus its position in seconds, so Date sorting keeps the order too), and JPEGs with no
+EXIF get that date, the title as the caption and the uploader as the artist written in (`--no-exif`
+to skip). `--airdrop` then sends the galleries that got new photos to the iPhone app, one archive
+each (see the next section).
+
+How it works: the gallery's `view=2` pages list every photo id (100 a page); the full-size files sit
+behind signed CDN links (`…/images/full/…?secure=…`) that only photo pages hand out, and the strip
+of 24 that the site's own `partial=true` photo endpoint returns carries them, so one request per 24
+photos resolves a gallery. Downloads run 3 at a time (`--workers`); the site rate-limits, and a 429
+is waited out and retried.
+
 ## AirDrop galleries to the iPhone app (`airdrop_to_iphone.py`)
 
 Download on the Mac, send to the phone without unplugging the SSD from it:
