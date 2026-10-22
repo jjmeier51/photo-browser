@@ -21,10 +21,12 @@ enum StorySharing {
 
     /// One thing the user shared into the app.
     struct PendingShare: Codable, Identifiable, Sendable, Equatable {
-        enum Kind: String, Codable, Sendable { case url, file }
+        enum Kind: String, Codable, Sendable { case url, file, archive }
         var id = UUID()
         var kind: Kind
         /// For `.url`: the shared link. For `.file`: the filename inside the App Group container.
+        /// For `.archive`: the path inside the container (`share_<id>/<original name>`) of a zip or
+        /// `.pbgallery`, which the app routes to `ArchiveIntake` rather than the story importer.
         var value: String
         var isVideoHint: Bool = false             // for `.file`, whether it was a movie
         var timestamp: Double
@@ -48,6 +50,13 @@ enum StorySharing {
         guard let d = defaults, let data = d.data(forKey: key),
               let items = try? JSONDecoder().decode([PendingShare].self, from: data) else { return [] }
         return items
+    }
+
+    /// Replaces the queue (the app uses it to take the archives out and leave the rest).
+    static func save(_ items: [PendingShare]) {
+        guard let d = defaults else { return }
+        if items.isEmpty { d.removeObject(forKey: key) }
+        else if let data = try? JSONEncoder().encode(items) { d.set(data, forKey: key) }
     }
 
     static func clear() { defaults?.removeObject(forKey: key) }

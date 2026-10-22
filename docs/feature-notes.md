@@ -1161,6 +1161,60 @@ Long-press to save; `bestImgSrc` prefers the anchor's (base-aware) href so it gr
 image behind a thumbnail; captures the blog post **date** and keeps it with the photo
 (`precedingDate`/`dateForImageURL`/`parseCaptureDate`; lightbox/fancybox handling).
 
+### 7.6 Receive from the Mac — AirDrop archives (`ArchiveIntake`, `ReceivedArchivesView`, `mac/airdrop_to_iphone.py`) (Oct 22, 2026)
+
+**Why.** Galleries downloaded on the Mac (`mac/pornpics_*.py`) used to reach the drive only by
+plugging the SSD into the Mac (Safe Finder). AirDrop lets the SSD stay on the phone — but AirDrop
+can't hand a folder to an iOS app, a Mac folder arrives on iOS as a zip, and a plain zip is claimed
+by Files and every zip-capable app, so the phone would ask "which app?" each time.
+
+**The route.**
+- The Mac tool zips each folder into `<Name>.pbgallery` with the folder itself at the archive's top
+  level (`Name/…`). Media is *stored* (already compressed), sidecars deflated, mtimes kept, Finder
+  junk / `.part` skipped; archives land in `~/Library/Caches/PhotoBrowser/AirDrop/`. It then opens
+  the Mac's AirDrop window through `airdrop_helper.swift` (NSSharingService; built once with
+  `swiftc` — stock Python can't reach AppKit) and falls back to `open -R` + "Share ▸ AirDrop" when
+  swiftc is missing. Exit codes: 0 sent, 3 cancelled, 2 unavailable. The pornpics browser's
+  "AirDrop to iPhone" button, the star downloader's `--airdrop` (the galleries that got new photos
+  this run + `pornstar.json`, as one archive of the star folder; `--airdrop-all` for all) and Safe
+  Finder's "AirDrop to iPhone…" context item all call `archive_items`/`archive_folder` + `send` on
+  a thread. `build_safe_finder_app.sh` bundles the tool and the helper source.
+- `Config/Info.plist` declares the exported type `jayymei.PhotoBrowser.gallery-archive`
+  (`.pbgallery`, conforms to `public.data`/`public.archive` — deliberately *not* `public.zip-archive`,
+  so no other zip app claims it) as Owner, and `public.zip-archive` as Alternate (a folder
+  AirDropped straight from Finder still works, via a chooser). An opened file reaches
+  `PhotoBrowserApp.onOpenURL` as a `file://` URL (iOS copies it to `Documents/Inbox`) →
+  `Library.receiveArchive` → `ArchiveIntake.stage` moves it into Application Support/
+  `receivedArchives` (excluded from backup). The Inbox is also swept on launch/foreground
+  (`refreshPendingArchives`), so an archive opened while the app wasn't running is picked up, and
+  staging is the queue (`Library.pendingArchives`), so archives survive a crash or a dismissed sheet.
+- `ReceivedArchivesView` (root-level sheet, `library.receivedSheetShown`) lists the batch — several
+  archives arrive from one AirDrop — with a peek of each (`Archiver.peek`: single top folder,
+  photo/video counts, size; central directory only, file mapped), one destination (`FolderPicker`;
+  default: last used → the folder open in the app → root), and Merge / Keep both. Unpacking runs
+  one archive at a time from `Task.detached` (constraint 13) under a `BackgroundTaskHolder`;
+  `Archiver.unzip(dropTopFolder: true)` strips the single top folder so the result is
+  `<dest>/<Name>/…`, never `Name/Name/…`. Success deletes the staged archive; failure keeps it listed
+  (and removes a folder *we* created, never a merged-into one). "Later" keeps the queue; Settings ▸
+  "Received Archives (N)" (shown only when non-empty) reopens the sheet after dismissing Settings —
+  one modal at a time, hence the 0.6 s delay. `lastArchiveDest` remembers the destination.
+- Share Extension: `NSExtensionActivationSupportsFileWithMaxCount` (20) plus archive detection
+  (`UTType.zip` or the custom type, or a `.pbgallery` name) copies each archive to
+  `share_<id>/<original name>` in the App Group (its own folder so the name survives — it names the
+  unpacked folder) and records `PendingShare(kind: .archive)`. The extension now records *every*
+  usable item in a share (archives, photos, links) instead of the first. `Library.refreshPendingShares`
+  pulls `.archive` items out of the stash (`StorySharing.save` keeps the rest) and stages them
+  through `receiveArchive`, which removes the emptied `share_<id>` folder.
+- `Archiver` changes shared with "Extract Here": the archive is now `Data(.mappedIfSafe)` (a multi-GB
+  archive no longer sits in memory whole), `__MACOSX/`, `.DS_Store` and `._*` are skipped, and the
+  folder view's extraction passes `dropTopFolder: true` too (a Finder zip used to unpack as
+  `Name/Name/…`). `.pbgallery` files on the drive get "Extract Here" like zips.
+
+**Gotchas.** The "Open with" tap on the phone can't be avoided (iOS asks before opening any received
+file in an app; with `.pbgallery` the app is the only choice). `canPerform(withItems:)` is false with
+AirDrop off/unavailable → exit 2 → Finder fallback. The custom UTI must stay listed under
+`CFBundleDocumentTypes`, not only exported — iOS ignores an exported-only declaration for opening.
+
 ---
 
 ## 8. Cross-cutting concurrency & sessions

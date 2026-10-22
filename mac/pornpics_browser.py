@@ -39,6 +39,7 @@ from pornpics_downloader import (  # noqa: E402 — the shared download logic li
     photo_urls,
     safe_folder_name,
 )
+import airdrop_to_iphone as airdrop  # noqa: E402 — AirDrop the galleries to the iPhone app
 
 try:
     from PySide6.QtCore import QObject, QSettings, Qt, QUrl, Signal
@@ -176,8 +177,11 @@ class BrowserView(QWebEngineView):
 
 
 class MainWindow(QMainWindow):
+    _airdrop_note = Signal(str)      # progress/outcome lines from the AirDrop thread → status bar + log
+
     def __init__(self, start_url: str) -> None:
         super().__init__()
+        self._airdrop_note.connect(self._airdrop_noted)
         self.setWindowTitle("PornPics Browser")
         self.resize(1280, 900)
         self.settings = QSettings("PhotoBrowser", "PornPicsBrowser")
@@ -248,9 +252,12 @@ class MainWindow(QMainWindow):
         self.dest_label = QLabel(str(self.dest))
         self.dest_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         row.addWidget(self.dest_label, 1)
-        for text, slot in (("Choose…", self._choose_dest), ("Open Folder", self._open_dest),
-                           ("Stop All", self._stop_all), ("Clear Finished", self._clear_finished)):
+        for text, slot, tip in (("Choose…", self._choose_dest, ""), ("Open Folder", self._open_dest, ""),
+                                ("AirDrop to iPhone", self._airdrop,
+                                 "Send the selected galleries (or every finished one) to the Photo Browser app"),
+                                ("Stop All", self._stop_all, ""), ("Clear Finished", self._clear_finished, "")):
             b = QPushButton(text)
+            b.setToolTip(tip)
             b.clicked.connect(slot)
             row.addWidget(b)
         lay.addLayout(row)
@@ -258,6 +265,7 @@ class MainWindow(QMainWindow):
         self.jobs = QTreeWidget()
         self.jobs.setHeaderLabels(["Gallery", "Status"])
         self.jobs.setRootIsDecorated(False)
+        self.jobs.setSelectionMode(self.jobs.SelectionMode.ExtendedSelection)
         self.jobs.setColumnWidth(0, 520)
         self.jobs.itemDoubleClicked.connect(self._open_job_folder)
         self.log = QPlainTextEdit()
@@ -411,6 +419,38 @@ class MainWindow(QMainWindow):
         for i in reversed(range(self.jobs.topLevelItemCount())):
             if self.jobs.topLevelItem(i).data(1, Qt.ItemDataRole.UserRole) == "finished":
                 self.jobs.takeTopLevelItem(i)
+
+    # -- AirDrop to the iPhone app
+    def _airdrop(self) -> None:
+        """AirDrop the selected galleries — or, with nothing selected, every finished one — to the Photo
+        Browser app on the iPhone (one .pbgallery archive each; see airdrop_to_iphone.py). Packing and
+        the send run on a thread so the browser stays usable."""
+        items = self.jobs.selectedItems() or [
+            self.jobs.topLevelItem(i) for i in range(self.jobs.topLevelItemCount())
+            if self.jobs.topLevelItem(i).data(1, Qt.ItemDataRole.UserRole) == "finished"]
+        folders: list[Path] = []
+        for it in items:
+            folder = Path(str(it.data(0, Qt.ItemDataRole.UserRole)))
+            if folder.is_dir() and folder not in folders:
+                folders.append(folder)
+        if not folders:
+            self.statusBar().showMessage("Download a gallery first, then AirDrop it (select rows to choose which).", 6000)
+            return
+        self._airdrop_noted(f"Packing {len(folders)} galler{'y' if len(folders) == 1 else 'ies'} for AirDrop…")
+
+        def work() -> None:
+            try:
+                archives = airdrop.archive_items(folders, airdrop.default_out_dir())
+            except (OSError, ValueError) as e:
+                self._airdrop_note.emit(f"AirDrop: {e}")
+                return
+            airdrop.send(archives, log=self._airdrop_note.emit)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _airdrop_noted(self, line: str) -> None:
+        self.statusBar().showMessage(line, 12000)
+        self._log(f"[AirDrop] {line}")
 
 
 def reveal(path: Path) -> None:

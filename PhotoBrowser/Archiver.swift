@@ -1,5 +1,6 @@
 import Foundation
 import Compression
+import UniformTypeIdentifiers
 
 /// Zip / unzip for the browser and folder view, using **only Apple frameworks** (no third-party
 /// zip library, per the project's no-dependencies rule).
@@ -109,21 +110,85 @@ enum Archiver {
     }
 
     /// Extract `archive` into `destDir` (created if needed), reporting 0…1 progress per entry.
-    nonisolated static func unzip(_ archive: URL, to destDir: URL, progress: (@Sendable (Double) -> Void)? = nil) async throws {
+    /// With `dropTopFolder`, an archive whose every entry sits under one top-level folder (a
+    /// Finder-zipped folder, a `.pbgallery` from the Mac tools) unpacks that folder's *contents* into
+    /// `destDir`, so the caller names the folder once instead of ending up with `Name/Name/…`.
+    nonisolated static func unzip(_ archive: URL, to destDir: URL, dropTopFolder: Bool = false,
+                                  progress: (@Sendable (Double) -> Void)? = nil) async throws {
         // The archive lives on the security-scoped external drive — claim access for the read (the
         // root's access usually covers it, but claiming the file directly is safe on exFAT/file-provider).
         let scoped = archive.startAccessingSecurityScopedResource()
         defer { if scoped { archive.stopAccessingSecurityScopedResource() } }
-        let data = try Data(contentsOf: archive)
+        // Mapped, not read: a multi-gigabyte archive (a whole star's galleries AirDropped at once) is
+        // paged in as its entries are inflated instead of being held in memory whole.
+        let data = try Data(contentsOf: archive, options: .mappedIfSafe)
         let entries = try centralDirectory(data)
+        let top = dropTopFolder ? commonTopFolder(entries) : nil
         do { try retrying { try DriveWriter.createDirectory(at: destDir) } }
         catch { throw ArchiveError.driveWrite(writeFailureReason(error)) }
         let total = max(entries.count, 1)
         for (i, e) in entries.enumerated() {
-            // Skip macOS resource-fork sidecars that clutter every Finder-made zip.
-            if !e.name.hasPrefix("__MACOSX/") { try await extract(e, from: data, into: destDir) }
-            progress?(Double(i + 1) / Double(total))
+            defer { progress?(Double(i + 1) / Double(total)) }
+            // Skip the resource forks and Finder droppings that clutter every Finder-made zip.
+            if isJunk(e.name) { continue }
+            var entry = e
+            if let top {
+                let stripped = String(e.name.dropFirst(top.count + 1))
+                if stripped.isEmpty { continue }                    // the top folder's own entry
+                entry = CDEntry(name: stripped, method: e.method, compSize: e.compSize, uncompSize: e.uncompSize,
+                                localOffset: e.localOffset, mtime: e.mtime, mdate: e.mdate)
+            }
+            try await extract(entry, from: data, into: destDir)
         }
+    }
+
+    /// What an archive holds, without unpacking it: the single top-level folder (when everything
+    /// sits under one), how many files, photos and videos, and their unpacked size. Reads only the
+    /// central directory of a mapped file, so it's cheap even for a multi-gigabyte archive.
+    struct Peek: Sendable {
+        let topFolder: String?
+        let files: Int
+        let photos: Int
+        let videos: Int
+        let bytes: Int64
+    }
+
+    nonisolated static func peek(_ archive: URL) throws -> Peek {
+        let scoped = archive.startAccessingSecurityScopedResource()
+        defer { if scoped { archive.stopAccessingSecurityScopedResource() } }
+        let data = try Data(contentsOf: archive, options: .mappedIfSafe)
+        let entries = try centralDirectory(data).filter { !isJunk($0.name) && !$0.name.hasSuffix("/") }
+        var photos = 0, videos = 0, bytes: Int64 = 0
+        for e in entries {
+            bytes += Int64(e.uncompSize)
+            let ext = (e.name as NSString).pathExtension.lowercased()
+            // The containers UTType doesn't map from the extension alone (see `classify` in Models).
+            if ["ts", "mts", "m2ts", "webm"].contains(ext) { videos += 1; continue }
+            guard let type = UTType(filenameExtension: ext) else { continue }
+            if type.conforms(to: .image) { photos += 1 }
+            else if type.conforms(to: .movie) || type.conforms(to: .video) { videos += 1 }
+        }
+        return Peek(topFolder: commonTopFolder(entries), files: entries.count, photos: photos, videos: videos, bytes: bytes)
+    }
+
+    /// The one folder every (non-junk) entry lives under, or nil when a file sits at the root or the
+    /// archive holds several top-level folders.
+    private nonisolated static func commonTopFolder(_ entries: [CDEntry]) -> String? {
+        var top: String?
+        for e in entries where !isJunk(e.name) {
+            let comps = e.name.split(separator: "/", omittingEmptySubsequences: true)
+            guard let first = comps.first.map(String.init) else { continue }
+            if comps.count == 1, !e.name.hasSuffix("/") { return nil }
+            if top == nil { top = first } else if top != first { return nil }
+        }
+        return top
+    }
+
+    /// Finder's resource forks (`__MACOSX/…`), `.DS_Store` and AppleDouble `._x` shadows.
+    private nonisolated static func isJunk(_ name: String) -> Bool {
+        if name.hasPrefix("__MACOSX/") { return true }
+        let last = name.split(separator: "/", omittingEmptySubsequences: true).last.map(String.init) ?? ""
+        return last == ".DS_Store" || last.hasPrefix("._")
     }
 
     private nonisolated static func centralDirectory(_ data: Data) throws -> [CDEntry] {

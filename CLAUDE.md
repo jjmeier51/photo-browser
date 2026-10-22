@@ -110,6 +110,15 @@ actions the app makes no network calls.
   `mega.nz/folder/…` link into a subfolder of the current folder, preserving
   structure. Pure-Swift implementation of MEGA's encrypted client protocol (no
   SDK). (`MegaImportView`, `MegaDownloader`, `MegaCrypto`)
+- **Receive from the Mac (AirDrop / Share sheet)** — the app opens `.pbgallery` archives (its own
+  type, made by `mac/airdrop_to_iphone.py`; also offered by the pornpics browser, the star
+  downloader's `--airdrop`, and Safe Finder's context menu) and plain `.zip`s: an AirDropped one
+  arrives via "Open with Photo Browser" (`onOpenURL` file URL → `ArchiveIntake` staging), the
+  **Received** sheet (`ReceivedArchivesView`) lists the batch, you pick the drive folder, and each
+  archive unpacks into its own folder there (single top folder dropped, sidecars kept; merge or
+  keep both). The Share Extension also takes archives (and several items at once) and routes them
+  to the same sheet. Document types live in `Config/Info.plist`. (`ArchiveIntake`,
+  `ReceivedArchivesView`, `Archiver.peek`/`unzip(dropTopFolder:)`)
 
 ## Build / run
 
@@ -171,6 +180,7 @@ under the `photoBrowser.*` namespace:
 - `birthdays` — folder path → Unix timestamp (drives the per-file "Age" feature)
 - `thumbSize`, `folderBookmark`
 - `theme` — the Appearance choice (`AppTheme` JSON: background, accent, typeface, light/dark)
+- `lastArchiveDest` — where the last AirDropped/opened archives were unpacked (the Received sheet's default)
 
 Because everything is keyed by path, **moving/renaming must re-key this data.**
 When you add code that moves or renames files/folders, call

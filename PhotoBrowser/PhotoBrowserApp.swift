@@ -19,6 +19,7 @@ struct PhotoBrowserApp: App {
                     library.applyPureTransferMode()
                     library.restoreLastFolder()
                     library.configureAINotificationRouting()
+                    library.refreshPendingArchives()        // file management — on in every mode
                     // Pure File Transfer: no background jobs — the app is only here to move files.
                     if !library.pureTransferMode {
                         library.refreshPendingShares()
@@ -27,8 +28,12 @@ struct PhotoBrowserApp: App {
                 }
                 // The Share Extension opens us via photobrowser://share after stashing what was
                 // shared in the App Group; pick it up so ContentView can present the import sheet.
+                // A file handed to us — an AirDropped `.pbgallery`/zip ("Open with Photo Browser") or
+                // "Open in Photo Browser" from Files — arrives as a file URL (iOS has copied it into
+                // Documents/Inbox); the Received sheet asks where on the drive it unpacks.
                 .onOpenURL { url in
                     if url.scheme == StorySharing.urlScheme { library.refreshPendingShares() }
+                    else if url.isFileURL { library.receiveArchive(url) }
                 }
                 // On every return to foreground: retry the drive if it was missing
                 // (or moved to a new mount path), then file any background downloads
@@ -43,6 +48,7 @@ struct PhotoBrowserApp: App {
                     if phase == .active {
                         BackgroundDownloader.shared.setForeground(true)
                         library.reconnectIfNeeded()
+                        library.refreshPendingArchives()
                         if !library.pureTransferMode {
                             library.processPendingTikTok()
                             library.refreshPendingShares()

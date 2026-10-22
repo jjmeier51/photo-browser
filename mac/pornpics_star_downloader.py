@@ -34,6 +34,10 @@ What it does beyond the single-gallery tool:
 * **Gallery data.** Each gallery folder gets a `gallery.json` (url, id, title, date, models,
   channel, categories, tags, photo list); the star folder gets `pornstar.json` listing every
   gallery newest-first.
+* **`--airdrop`** then sends the star folder to the Photo Browser app on the iPhone — only the
+  galleries that got new photos this run (plus `pornstar.json`), as one `.pbgallery` archive, through
+  the Mac's AirDrop window (`airdrop_to_iphone.py`). On the phone the app asks which drive folder the
+  star folder goes in and merges into it if it's already there. `--airdrop-all` sends every gallery.
 
 Two galleries with the same name get the id appended to the second folder ("Name (12345678)").
 """
@@ -587,6 +591,7 @@ def download_gallery(gid: int, url: str, star_dir: Path, slug: str, star_name: s
     record["_folder"] = folder
     record["_date"] = meta["date"]
     record["_failed"] = counts["failed"]
+    record["_saved"] = counts["saved"]
     return record
 
 
@@ -622,6 +627,10 @@ def main() -> None:
     ap.add_argument("--browser", choices=("auto", "always", "never"), default="auto",
                     help="scroll the star page in a browser window to find every gallery: when the "
                          "plain requests come up short (auto, default), always, or never")
+    ap.add_argument("--airdrop", action="store_true",
+                    help="afterwards AirDrop the galleries that got new photos (and pornstar.json) to the "
+                         "Photo Browser app on the iPhone")
+    ap.add_argument("--airdrop-all", action="store_true", help="afterwards AirDrop every gallery of the star")
     args = ap.parse_args()
 
     url = args.url.strip()
@@ -671,6 +680,18 @@ def main() -> None:
     log(f"\nDone: {len(records)} galleries in {star_dir}"
         + (f", {failed_galleries} galleries failed" if failed_galleries else "")
         + (f", {photos_failed} photos failed (run again to retry)" if photos_failed else ""))
+    if args.airdrop or args.airdrop_all:
+        import airdrop_to_iphone as airdrop
+        only = None if args.airdrop_all else {r["_folder"].name for r in records if r["_saved"]}
+        if only is not None and not only:
+            log("Nothing new to AirDrop — every gallery was already here (--airdrop-all sends them all).")
+        else:
+            try:
+                archive = airdrop.archive_folder(star_dir, airdrop.default_out_dir(), only=only)
+                log(f"AirDrop: {archive.name} ({airdrop.human(archive.stat().st_size)})")
+                airdrop.send([archive], log=log)
+            except (OSError, ValueError) as e:
+                log(f"AirDrop failed: {e}")
 
 
 if __name__ == "__main__":

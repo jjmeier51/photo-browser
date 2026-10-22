@@ -112,7 +112,67 @@ final class Library {
     /// photo/video). Non-empty presents the import sheet (pick folder + upscale options).
     var pendingShares: [StorySharing.PendingShare] = []
     /// Re-reads what the Share Extension left in the App Group. Called on launch/open-URL/foreground.
-    func refreshPendingShares() { pendingShares = StorySharing.load() }
+    /// Archives shared that way (a zip, a `.pbgallery`) aren't stories: they move into the archive
+    /// staging and go to the Received sheet instead.
+    func refreshPendingShares() {
+        let all = StorySharing.load()
+        let archives = all.filter { $0.kind == .archive }
+        guard !archives.isEmpty, let container = StorySharing.containerURL else { pendingShares = all; return }
+        let rest = all.filter { $0.kind != .archive }
+        StorySharing.save(rest)
+        pendingShares = rest
+        for a in archives { receiveArchive(container.appendingPathComponent(a.value)) }
+    }
+
+    // MARK: - Received archives (AirDrop "Open with", Files ▸ Open in, shared archives)
+
+    /// Archives that reached the app as files and wait to be unpacked onto the drive — see
+    /// `ArchiveIntake`. Several can arrive at once (one AirDrop of a star's galleries).
+    var pendingArchives: [ArchiveIntake.Received] = []
+    /// Presents `ReceivedArchivesView`. Set when an archive arrives; cleared when the sheet closes.
+    /// Archives left waiting stay in `pendingArchives` (and in staging); the sheet comes back for
+    /// the next arrival, or from Settings ▸ Received Archives.
+    var receivedSheetShown = false
+
+    /// A file handed to the app (`onOpenURL` with a file URL, or an extension-shared archive): stage
+    /// it and show the Received sheet. Off-main — a move, possibly a copy, on the app container.
+    func receiveArchive(_ url: URL) {
+        Task {
+            let (staged, all) = await Task.detached(priority: .userInitiated) {
+                (ArchiveIntake.stage(url), ArchiveIntake.pending())
+            }.value
+            pendingArchives = all
+            if staged != nil { receivedSheetShown = true }
+        }
+    }
+
+    /// Sweeps iOS's Inbox and re-lists staging. Shows the sheet only for archives not seen before, so
+    /// ones the user set aside don't pop back up on every foreground.
+    func refreshPendingArchives() {
+        Task {
+            let all = await Task.detached(priority: .utility) { () -> [ArchiveIntake.Received] in
+                _ = ArchiveIntake.sweepInbox()
+                return ArchiveIntake.pending()
+            }.value
+            let known = Set(pendingArchives.map(\.id))
+            pendingArchives = all
+            if all.contains(where: { !known.contains($0.id) }) { receivedSheetShown = true }
+        }
+    }
+
+    /// Drops a staged archive — after it was unpacked, or to discard it unopened.
+    func discardArchive(_ item: ArchiveIntake.Received) {
+        pendingArchives.removeAll { $0.id == item.id }
+        Task.detached(priority: .utility) { ArchiveIntake.discard(item) }
+    }
+
+    /// The last folder received archives were unpacked into, so the sheet defaults there next time.
+    var lastArchiveDestination: URL? = UserDefaults.standard.string(forKey: "photoBrowser.lastArchiveDest")
+        .map { URL(fileURLWithPath: $0) }
+    func setLastArchiveDestination(_ url: URL) {
+        lastArchiveDestination = url
+        UserDefaults.standard.set(url.path, forKey: "photoBrowser.lastArchiveDest")
+    }
     /// Signals a content change. Pass the folder the change happened under to evict
     /// only that subtree's cached listings/years — a global clear forces every folder
     /// (and the year/age passes) to recompute, which made one saved edit or one

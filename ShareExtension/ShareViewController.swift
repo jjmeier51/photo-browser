@@ -2,10 +2,11 @@ import UIKit
 import UniformTypeIdentifiers
 
 /// The Share-sheet extension's entry point. It runs when you tap **PhotoBrowser** in the iOS
-/// share sheet (e.g. from Instagram's "Share story" → the story's link). It does the minimum an
-/// app extension safely can: pull the shared link (or copy the shared image/video into the App
-/// Group container), record it, then open the main app to finish — pick a folder, choose upscale
-/// options, and download. The main app does the drive + network work.
+/// share sheet (e.g. from Instagram's "Share story" → the story's link, or an archive in Files).
+/// It does the minimum an app extension safely can: pull the shared link (or copy the shared
+/// image/video/archive into the App Group container), record it, then open the main app to
+/// finish — pick a folder, choose upscale options, download, or unpack. The main app does the
+/// drive + network work. Every usable item in the share is recorded (several archives at once).
 ///
 /// Self-contained on purpose: the App-Group hand-off (the constants + the `PendingShare` shape
 /// below) is **duplicated** from `PhotoBrowser/StorySharing.swift` rather than shared, so this
@@ -13,7 +14,8 @@ import UniformTypeIdentifiers
 /// membership. The two copies MUST stay in sync — the app reads exactly what this writes:
 ///   • App Group id `group.jayymei.PhotoBrowser`
 ///   • UserDefaults key `photoBrowser.pendingSharedItems`
-///   • `PendingShare` fields: id, kind ("url"/"file"), value, isVideoHint, timestamp
+///   • `PendingShare` fields: id, kind ("url"/"file"/"archive"), value, isVideoHint, timestamp
+///     (an archive's value is `share_<id>/<original name>` inside the container)
 ///   • URL scheme `photobrowser://share`
 final class ShareViewController: UIViewController {
 
@@ -21,9 +23,12 @@ final class ShareViewController: UIViewController {
 
     private static let appGroupID = "group.jayymei.PhotoBrowser"
     private static let defaultsKey = "photoBrowser.pendingSharedItems"
+    /// Archives the app unpacks: zips, and its own `.pbgallery` (declared by the app's Info.plist,
+    /// which the extension shares, so the type resolves here too).
+    private static let archiveTypes: [UTType] = [UTType.zip, UTType("jayymei.PhotoBrowser.gallery-archive")].compactMap { $0 }
 
     private struct PendingShare: Codable {
-        enum Kind: String, Codable { case url, file }
+        enum Kind: String, Codable { case url, file, archive }
         var id = UUID()
         var kind: Kind
         var value: String
@@ -62,6 +67,7 @@ final class ShareViewController: UIViewController {
         let providers = (extensionContext?.inputItems as? [NSExtensionItem] ?? [])
             .flatMap { $0.attachments ?? [] }
         let now = Date().timeIntervalSince1970
+        var recorded = 0
 
         for p in providers {
             // A shared story is a web link — but ONLY a real http/https link. A shared movie/image
@@ -69,11 +75,18 @@ final class ShareViewController: UIViewController {
             // check recorded that bogus file:// "link" (which the app can't download) instead of the
             // actual video. That's why sharing a *video* story did nothing while photos (whose image
             // item isn't exposed as a URL) worked. Requiring http/https lets a movie's file:// URL
-            // fall through to the file branch below.
+            // fall through to the file branches below.
             if p.hasItemConformingToTypeIdentifier(UTType.url.identifier), let url = await loadURL(p),
                let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
-                record(.init(kind: .url, value: url.absoluteString, timestamp: now))
-                return openAppAndFinish()
+                record(.init(kind: .url, value: url.absoluteString, timestamp: now)); recorded += 1
+                continue
+            }
+            // An archive — a `.pbgallery` from the Mac's airdrop tool, or any zip (an AirDropped
+            // folder that landed in Files arrives as one): copied into the container under its own
+            // name, so the app can name the unpacked folder after it. Before image/movie: a zip is neither.
+            if let typeID = Self.archiveType(of: p), let path = await copyArchive(p, typeID: typeID) {
+                record(.init(kind: .archive, value: path, timestamp: now)); recorded += 1
+                continue
             }
             // A shared photo/video file (from Instagram's "share to", Photos, etc.): copy it into
             // the App Group container. Checked before plain text so a movie always beats any stray
@@ -81,17 +94,28 @@ final class ShareViewController: UIViewController {
             let isMovie = p.hasItemConformingToTypeIdentifier(UTType.movie.identifier)
             if isMovie || p.hasItemConformingToTypeIdentifier(UTType.image.identifier),
                let name = await copyFile(p, movie: isMovie) {
-                record(.init(kind: .file, value: name, isVideoHint: isMovie, timestamp: now))
-                return openAppAndFinish()
+                record(.init(kind: .file, value: name, isVideoHint: isMovie, timestamp: now)); recorded += 1
+                continue
             }
             // Some apps share the link as plain text.
             if p.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
                let text = await loadText(p), let link = firstURL(in: text) {
-                record(.init(kind: .url, value: link, timestamp: now))
-                return openAppAndFinish()
+                record(.init(kind: .url, value: link, timestamp: now)); recorded += 1
             }
         }
-        finish()   // nothing usable
+        if recorded > 0 { openAppAndFinish() } else { finish() }   // nothing usable → just close
+    }
+
+    /// The type identifier to load an archive under, or nil when the item isn't one. A `.pbgallery`
+    /// coming from an app that didn't resolve the type is recognised by its name.
+    private static func archiveType(of p: NSItemProvider) -> String? {
+        for id in p.registeredTypeIdentifiers {
+            if let t = UTType(id), archiveTypes.contains(where: { t.conforms(to: $0) }) { return id }
+        }
+        if p.suggestedName?.lowercased().hasSuffix(".pbgallery") == true {
+            return p.registeredTypeIdentifiers.first { UTType($0)?.conforms(to: .data) ?? false }
+        }
+        return nil
     }
 
     // MARK: - Item loading
@@ -127,6 +151,33 @@ final class ShareViewController: UIViewController {
             }
         }
         return dest?.lastPathComponent
+    }
+
+    /// Copies an archive into the App Group container as `share_<id>/<its name>` — a folder of its
+    /// own so the original name survives (the app names the unpacked folder after it). Returns that
+    /// relative path.
+    private func copyArchive(_ p: NSItemProvider, typeID: String) async -> String? {
+        let suggested = p.suggestedName
+        return await withCheckedContinuation { cont in
+            p.loadFileRepresentation(forTypeIdentifier: typeID) { url, _ in
+                // The file is only valid inside this callback — copy it synchronously here.
+                guard let url, let container = Self.containerURL else { cont.resume(returning: nil); return }
+                var name = url.lastPathComponent
+                if let suggested, !suggested.isEmpty { name = suggested }
+                if (name as NSString).pathExtension.isEmpty {
+                    name += "." + (url.pathExtension.isEmpty ? "zip" : url.pathExtension)
+                }
+                let dir = container.appendingPathComponent("share_\(UUID().uuidString)", isDirectory: true)
+                do {
+                    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    try FileManager.default.copyItem(at: url, to: dir.appendingPathComponent(name))
+                    cont.resume(returning: "\(dir.lastPathComponent)/\(name)")
+                } catch {
+                    try? FileManager.default.removeItem(at: dir)
+                    cont.resume(returning: nil)
+                }
+            }
+        }
     }
 
     private func firstURL(in text: String) -> String? {

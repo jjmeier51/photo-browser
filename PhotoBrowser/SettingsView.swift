@@ -137,6 +137,16 @@ struct SettingsView: View {
                 Section {
                     NavigationLink { StorageView() } label: { Label("Storage", systemImage: "internaldrive") }
                     NavigationLink { DriveHealthView() } label: { Label("Drive Health", systemImage: "stethoscope") }
+                    if !library.pendingArchives.isEmpty {
+                        // Archives set aside with "Later" — reopen the Received sheet. It's presented from the
+                        // root, so this sheet has to be gone first (one modal at a time).
+                        Button {
+                            dismiss()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { library.receivedSheetShown = true }
+                        } label: {
+                            Label("Received Archives (\(library.pendingArchives.count))", systemImage: "tray.and.arrow.down")
+                        }
+                    }
                 } header: {
                     Text("Maintenance")
                 } footer: {

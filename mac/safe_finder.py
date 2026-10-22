@@ -63,6 +63,7 @@ except ModuleNotFoundError:
     sys.exit("Safe Finder needs PySide6. Double-click “Safe Finder.command” (it sets everything up), or run:\n"
              "  python3 -m venv mac/.venv && mac/.venv/bin/pip install -r mac/requirements.txt")
 
+import airdrop_to_iphone as airdrop
 import safe_transfer as engine
 import spare_folders
 from safe_copy_to_ssd import human, safe_name
@@ -1249,6 +1250,7 @@ class Pane(QWidget):
     activated = Signal(object)           # this pane got focus/clicked
     location_changed = Signal(str)
     selection_changed = Signal()
+    airdrop_note = Signal(str)           # lines from the AirDrop thread → the status line
 
     def __init__(self, role: str, settings: QSettings) -> None:
         super().__init__()
@@ -1408,6 +1410,7 @@ class Pane(QWidget):
         sl.setContentsMargins(10, 3, 10, 3)
         sl.setSpacing(8)
         self.status = QLabel()
+        self.airdrop_note.connect(self._airdrop_noted)
         self.fs_chip = QLabel(objectName="FsChip")
         # Finder's View Options, inline: how big the tiles are, and how much room is around them.
         self.gap_icon = QLabel()
@@ -1937,6 +1940,29 @@ class Pane(QWidget):
         if paths and IS_MAC:
             subprocess.Popen(["qlmanage", "-p", *paths], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    def airdrop(self, paths: list[str]) -> None:
+        """Pack the selection into .pbgallery archives (one per folder; loose files together) and open
+        the Mac's AirDrop window — the Photo Browser app on the iPhone unpacks them into a drive folder
+        of your choosing (see airdrop_to_iphone.py). Packing and the send run on a thread; progress and
+        the outcome show on the status line."""
+        if not paths:
+            return
+        self._airdrop_noted(f"Packing {len(paths)} item{'s' if len(paths) != 1 else ''} for AirDrop…")
+
+        def work() -> None:
+            try:
+                archives = airdrop.archive_items([Path(p) for p in paths], airdrop.default_out_dir())
+            except (OSError, ValueError) as e:
+                self.airdrop_note.emit(f"AirDrop: {e}")
+                return
+            airdrop.send(archives, log=self.airdrop_note.emit)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _airdrop_noted(self, line: str) -> None:
+        self.status.setText(line)
+        QTimer.singleShot(15000, self.update_status)
+
     def new_folder(self) -> None:
         if not self.location or self.is_virtual:
             return
@@ -1984,6 +2010,8 @@ class Pane(QWidget):
                 menu.addAction("Quick Look", self.quick_look)
                 menu.addAction("Show in Finder", lambda: subprocess.Popen(["open", "-R", paths[0]]))
             menu.addAction("Show in Safe Finder", lambda: self.reveal(paths[0]))
+            if IS_MAC:
+                menu.addAction("AirDrop to iPhone…", lambda: self.airdrop(paths))
             menu.addSeparator()
             win = self.window()
             if isinstance(win, MainWindow) and self is win.src:

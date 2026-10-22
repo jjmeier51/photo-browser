@@ -5,8 +5,9 @@
 	<!-- Base Info.plist for the app. GENERATE_INFOPLIST_FILE stays YES, so the build merges
 	     the INFOPLIST_KEY_* settings (usage strings, scene manifest, orientations, …) on top
 	     of this. Only keys with no INFOPLIST_KEY_* equivalent live here — the custom URL scheme
-	     the Share Extension uses to open the app. Kept in Config/ (not PhotoBrowser/) so the
-	     app target's synchronized file group doesn't try to copy it into the bundle. -->
+	     the Share Extension uses to open the app, and the document types the app opens. Kept in
+	     Config/ (not PhotoBrowser/) so the app target's synchronized file group doesn't try to
+	     copy it into the bundle. -->
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -37,5 +38,58 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<!-- Files the app opens (they arrive in Documents/Inbox and reach `ArchiveIntake` through
+	     onOpenURL): its own gallery archive, `.pbgallery` — what mac/airdrop_to_iphone.py sends, a zip
+	     under a name only this app claims, so an AirDropped one offers "Open with Photo Browser" and
+	     nothing else — and plain zips as an Alternate handler, so a folder AirDropped straight from
+	     Finder (which arrives as a zip) can be opened here too, among the other zip-capable apps. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Photo Browser Gallery Archive</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>jayymei.PhotoBrowser.gallery-archive</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Zip Archive</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>jayymei.PhotoBrowser.gallery-archive</string>
+			<key>UTTypeDescription</key>
+			<string>Photo Browser Gallery Archive</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.archive</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>pbgallery</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/vnd.photobrowser.gallery</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>

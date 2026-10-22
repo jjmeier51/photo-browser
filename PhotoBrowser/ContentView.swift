@@ -82,6 +82,14 @@ struct ContentView: View {
             set: { if !$0 { library.pendingShares = []; StorySharing.clear() } })) {
             StoryImportView()
         }
+        // An archive handed to the app as a file (an AirDrop from the Mac tools, Files ▸ Open in) →
+        // ask where on the drive it unpacks. Closing with archives still waiting keeps them staged;
+        // the sheet returns for the next arrival or from Settings ▸ Received Archives.
+        .sheet(isPresented: Binding(
+            get: { library.receivedSheetShown },
+            set: { library.receivedSheetShown = $0 })) {
+            ReceivedArchivesView()
+        }
         // AI results (and the creator reopened after review) are NOT sheets here: a root-view sheet
         // can't present while the viewer's full-screen cover is up, so they go through
         // `ModalPresenter` onto whatever is top-most (see `Library.showAIResults`).

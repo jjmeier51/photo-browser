@@ -989,9 +989,10 @@ struct FolderView: View {
                 }
             }
             // File utilities for every file, including non-viewable ones (e.g. a downloaded .zip).
-            // Offer Extract for a .zip, or any extension-less "data" file (a zip saved without a
-            // suffix) — the extractor validates the contents and reports cleanly if it isn't one.
-            if ["zip", ""].contains(entry.url.pathExtension.lowercased()) {
+            // Offer Extract for a .zip or .pbgallery (the Mac tools' AirDrop archive), or any
+            // extension-less "data" file (a zip saved without a suffix) — the extractor validates the
+            // contents and reports cleanly if it isn't one.
+            if ["zip", "pbgallery", ""].contains(entry.url.pathExtension.lowercased()) {
                 Button { extractZip(entry) } label: {
                     Label("Extract Here", systemImage: "tray.and.arrow.up")
                 }
@@ -2771,7 +2772,9 @@ struct FolderView: View {
     }
 
     /// Extract a `.zip` into a new subfolder of the current folder. Files are written verbatim
-    /// (EXIF kept) and each gets its archived modification date back.
+    /// (EXIF kept) and each gets its archived modification date back. A Finder-zipped folder (or a
+    /// `.pbgallery`) carries its folder at the top level; that level is dropped so the result is
+    /// `Name/…`, not `Name/Name/…`.
     private func extractZip(_ entry: Entry) {
         let archive = entry.url
         let folder = url
@@ -2785,7 +2788,7 @@ struct FolderView: View {
                 var n = 1
                 while fm.fileExists(atPath: d.path) { d = folder.appendingPathComponent("\(destName) \(n)", isDirectory: true); n += 1 }
                 do {
-                    try await Archiver.unzip(archive, to: d) { f in Task { @MainActor in editProgress = f } }
+                    try await Archiver.unzip(archive, to: d, dropTopFolder: true) { f in Task { @MainActor in editProgress = f } }
                     return (d, nil)
                 } catch {
                     // Failed partway → remove the half-extracted folder so no corrupt partial files
@@ -3357,7 +3360,7 @@ struct FolderView: View {
                                                     startIndex: media.firstIndex(of: entry) ?? 0)
         } else if entry.kind == .audio {
             audioEntry = entry
-        } else if entry.url.pathExtension.lowercased() == "zip" {
+        } else if ["zip", "pbgallery"].contains(entry.url.pathExtension.lowercased()) {
             pendingArchive = entry                      // a zip → offer to extract (or preview)
         } else if entry.kind == .other {
             // An extension-less "data" tile is usually a download that lost its suffix. Sniff the

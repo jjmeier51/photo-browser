@@ -43,7 +43,9 @@ and whenever you're on a gallery the **Download Gallery** button (⌘D) lights u
 count — click it and keep browsing while it downloads. Galleries queue up and download one at a
 time; you can also right-click any gallery link → **Download Linked Gallery** without opening it.
 The panel at the bottom shows the queue (double-click a row to open its folder), the log, the
-destination, and Stop All. It saves into the same folders as `pornpics_downloader.py`, and the
+destination, Stop All, and **AirDrop to iPhone** — sends the selected galleries (or every finished
+one when nothing is selected) straight to the Photo Browser app on the phone; see "AirDrop galleries
+to the iPhone app" below. It saves into the same folders as `pornpics_downloader.py`, and the
 button shows "Downloaded ✓" for galleries you already have. Cookies persist between runs.
 
 ```sh
@@ -81,7 +83,41 @@ the gallery date, and JPEGs with no EXIF get capture dates, the gallery title (s
 in the iOS app) and the model names written in (`--no-exif` to skip). Each gallery folder gets a
 `gallery.json` (title, date, models, channel, categories, tags, photo list) and the star folder a
 `pornstar.json` index. `--workers N` sets parallel downloads per gallery (default 4); Ctrl-C stops
-cleanly.
+cleanly. `--airdrop` then sends what's new to the iPhone app (the galleries that got photos this run,
+plus `pornstar.json`, as one archive of the star folder — the app merges it into the star's folder on
+the drive); `--airdrop-all` sends every gallery. See the next section.
+
+## AirDrop galleries to the iPhone app (`airdrop_to_iphone.py`)
+
+Download on the Mac, send to the phone without unplugging the SSD from it:
+
+```sh
+python3 mac/airdrop_to_iphone.py "~/Pictures/PornPics/Lucie Wilde/Beautiful Woman Posing"   # one gallery
+python3 mac/airdrop_to_iphone.py "~/Pictures/PornPics/Lucie Wilde"                           # the whole star
+python3 mac/airdrop_to_iphone.py --one "Picked" gallery1 gallery2                            # several, as one folder
+```
+
+Each folder becomes a `.pbgallery` archive (a zip under a name only Photo Browser claims, so the
+phone offers *only* that app), the Mac's AirDrop window opens, and you pick the iPhone. On the
+phone: **Accept ▸ Open with Photo Browser** — the app's **Received** sheet lists the archives, you
+pick the drive folder they go in (last used, or the folder you're in), and each one unpacks into its
+own folder there, named after the folder you sent, with `gallery.json` / `pornstar.json` beside the
+photos so the Categories filter works. A folder that already exists is merged into (re-sending adds
+only what's new) unless you pick "Keep both". Several archives can arrive in one AirDrop; "Later"
+keeps them on the phone (Settings ▸ Received Archives brings the sheet back) and a failed one stays
+listed to try again.
+
+The archives: photos and videos stored uncompressed (already compressed; AirDrop's speed is the
+limit), small sidecars deflated, file dates kept, `.DS_Store` / `._*` / `.part` skipped; written to
+`~/Library/Caches/PhotoBrowser/AirDrop/` and left there (`--clean` removes day-old ones). Opening
+the AirDrop window needs a one-time build of `airdrop_helper.swift` with `swiftc` (Xcode or its
+Command Line Tools — `xcode-select --install`); without it the archives are revealed in Finder:
+right-click ▸ Share ▸ AirDrop. `--reveal` does that on purpose; `--no-send` only builds the archives.
+
+The same button lives in the PornPics browser ("AirDrop to iPhone"), the star downloader
+(`--airdrop` / `--airdrop-all`) and Safe Finder (right-click ▸ "AirDrop to iPhone…", for any folders
+or files). A folder AirDropped straight from Finder also works — it arrives as a zip, and the phone
+lists Photo Browser among the apps that can open it, with the same Received sheet.
 
 ## Safe Finder — a Finder window that moves files onto the SSD safely (`safe_finder.py`)
 

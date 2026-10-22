@@ -7,7 +7,9 @@
 # Uses mac/.venv (the same one "Safe Finder.command" makes), adding PyInstaller to it; turns
 # safe_finder_icon.png into the app icon; bundles the drive tools (relocate_folders.py, exfat_inspect.py,
 # spare_folders.py) into the app's Contents/Resources so the "make spare folders" command Safe Finder
-# shows works without the repo; adds the privacy strings macOS shows when the app first opens Desktop,
+# shows works without the repo, plus airdrop_to_iphone.py and airdrop_helper.swift for "AirDrop to
+# iPhone…" (the helper is compiled on first use with Xcode's swiftc); adds the privacy strings macOS
+# shows when the app first opens Desktop,
 # Documents, Downloads or an external drive; signs the app ad hoc (so those permissions stick) and
 # copies it to /Applications, or ~/Applications when /Applications isn't writable.
 #
@@ -55,6 +57,8 @@ rm -rf "dist/Safe Finder" "dist/Safe Finder.app"
   --add-data "$PWD/relocate_folders.py:." \
   --add-data "$PWD/exfat_inspect.py:." \
   --add-data "$PWD/spare_folders.py:." \
+  --add-data "$PWD/airdrop_to_iphone.py:." \
+  --add-data "$PWD/airdrop_helper.swift:." \
   --workpath build/pyinstaller --distpath dist --specpath build \
   safe_finder.py
 

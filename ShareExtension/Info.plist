@@ -24,6 +24,8 @@
 				<integer>1</integer>
 				<key>NSExtensionActivationSupportsMovieWithMaxCount</key>
 				<integer>1</integer>
+				<key>NSExtensionActivationSupportsFileWithMaxCount</key>
+				<integer>20</integer>
 				<key>NSExtensionActivationSupportsText</key>
 				<true/>
 			</dict>
