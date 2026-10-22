@@ -112,7 +112,7 @@ final class Library {
     /// photo/video). Non-empty presents the import sheet (pick folder + upscale options).
     var pendingShares: [StorySharing.PendingShare] = []
     /// Re-reads what the Share Extension left in the App Group. Called on launch/open-URL/foreground.
-    /// Archives shared that way (a zip, a `.pbgallery`) aren't stories: they move into the archive
+    /// Archives and other plain files shared that way aren't stories: they move into the Received
     /// staging and go to the Received sheet instead.
     func refreshPendingShares() {
         let all = StorySharing.load()
@@ -124,18 +124,19 @@ final class Library {
         for a in archives { receiveArchive(container.appendingPathComponent(a.value)) }
     }
 
-    // MARK: - Received archives (AirDrop "Open with", Files ▸ Open in, shared archives)
+    // MARK: - Received files (AirDrop "Open with", Files ▸ Open in, shared files)
 
-    /// Archives that reached the app as files and wait to be unpacked onto the drive — see
-    /// `ArchiveIntake`. Several can arrive at once (one AirDrop of a star's galleries).
+    /// Files that reached the app as files — archives to unpack, anything else to place as is — and
+    /// wait for a drive folder; see `ArchiveIntake`. Several can arrive at once (one AirDrop of a
+    /// star's galleries, a handful of documents).
     var pendingArchives: [ArchiveIntake.Received] = []
     /// Presents `ReceivedArchivesView`. Set when an archive arrives; cleared when the sheet closes.
     /// Archives left waiting stay in `pendingArchives` (and in staging); the sheet comes back for
     /// the next arrival, or from Settings ▸ Received Archives.
     var receivedSheetShown = false
 
-    /// A file handed to the app (`onOpenURL` with a file URL, or an extension-shared archive): stage
-    /// it and show the Received sheet. Off-main — a move, possibly a copy, on the app container.
+    /// A file handed to the app (`onOpenURL` with a file URL, or an extension-shared file): stage it
+    /// and show the Received sheet. Off-main — a move, possibly a copy, on the app container.
     func receiveArchive(_ url: URL) {
         Task {
             let (staged, all) = await Task.detached(priority: .userInitiated) {
@@ -160,7 +161,7 @@ final class Library {
         }
     }
 
-    /// Drops a staged archive — after it was unpacked, or to discard it unopened.
+    /// Drops a staged item — after it reached the drive, or to discard it unopened.
     func discardArchive(_ item: ArchiveIntake.Received) {
         pendingArchives.removeAll { $0.id == item.id }
         Task.detached(priority: .utility) { ArchiveIntake.discard(item) }

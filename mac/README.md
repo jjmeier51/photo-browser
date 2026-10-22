@@ -125,8 +125,14 @@ right-click ▸ Share ▸ AirDrop. `--reveal` does that on purpose; `--no-send` 
 
 The same button lives in the PornPics browser ("AirDrop to iPhone"), the star downloader
 (`--airdrop` / `--airdrop-all`) and Safe Finder (right-click ▸ "AirDrop to iPhone…", for any folders
-or files). A folder AirDropped straight from Finder also works — it arrives as a zip, and the phone
-lists Photo Browser among the apps that can open it, with the same Received sheet.
+or files).
+
+**Anything else AirDropped works too.** A folder sent straight from Finder arrives on the phone as a
+zip, and a PDF, a video file, a document — any file — is offered to Photo Browser among the apps
+that can take it; the same Received sheet puts it on the drive (an archive as a folder, any other
+file as it is; an identical file already there is skipped, nothing is overwritten). The one thing
+iOS keeps for itself: loose photos and videos AirDropped to an iPhone go straight into the Photos
+app before any app is asked — send them inside a folder, or use the app's "Add from iOS Album".
 
 ## Safe Finder — a Finder window that moves files onto the SSD safely (`safe_finder.py`)
 

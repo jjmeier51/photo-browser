@@ -25,8 +25,9 @@ enum StorySharing {
         var id = UUID()
         var kind: Kind
         /// For `.url`: the shared link. For `.file`: the filename inside the App Group container.
-        /// For `.archive`: the path inside the container (`share_<id>/<original name>`) of a zip or
-        /// `.pbgallery`, which the app routes to `ArchiveIntake` rather than the story importer.
+        /// For `.archive`: the path inside the container (`share_<id>/<original name>`) of a zip, a
+        /// `.pbgallery`, or any other file that isn't a photo/video story — routed to `ArchiveIntake`
+        /// (the Received sheet) rather than the story importer.
         var value: String
         var isVideoHint: Bool = false             // for `.file`, whether it was a movie
         var timestamp: Double

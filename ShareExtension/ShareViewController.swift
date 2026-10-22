@@ -15,7 +15,8 @@ import UniformTypeIdentifiers
 ///   • App Group id `group.jayymei.PhotoBrowser`
 ///   • UserDefaults key `photoBrowser.pendingSharedItems`
 ///   • `PendingShare` fields: id, kind ("url"/"file"/"archive"), value, isVideoHint, timestamp
-///     (an archive's value is `share_<id>/<original name>` inside the container)
+///     ("archive" is anything for the app's Received sheet — a zip, a `.pbgallery`, or any other
+///     file that isn't a photo/video story; its value is `share_<id>/<original name>` in the container)
 ///   • URL scheme `photobrowser://share`
 final class ShareViewController: UIViewController {
 
@@ -84,7 +85,7 @@ final class ShareViewController: UIViewController {
             // An archive — a `.pbgallery` from the Mac's airdrop tool, or any zip (an AirDropped
             // folder that landed in Files arrives as one): copied into the container under its own
             // name, so the app can name the unpacked folder after it. Before image/movie: a zip is neither.
-            if let typeID = Self.archiveType(of: p), let path = await copyArchive(p, typeID: typeID) {
+            if let typeID = Self.archiveType(of: p), let path = await copyReceived(p, typeID: typeID) {
                 record(.init(kind: .archive, value: path, timestamp: now)); recorded += 1
                 continue
             }
@@ -101,9 +102,24 @@ final class ShareViewController: UIViewController {
             if p.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
                let text = await loadText(p), let link = firstURL(in: text) {
                 record(.init(kind: .url, value: link, timestamp: now)); recorded += 1
+                continue
+            }
+            // Any other file (a PDF, an audio file, a document…): to the Received sheet, which places
+            // it on the drive as it is. Links and text were handled above; this takes real files only.
+            if let typeID = Self.fileType(of: p), let path = await copyReceived(p, typeID: typeID) {
+                record(.init(kind: .archive, value: path, timestamp: now)); recorded += 1
             }
         }
         if recorded > 0 { openAppAndFinish() } else { finish() }   // nothing usable → just close
+    }
+
+    /// The type identifier to load a plain file under — its own data type, never a link or text.
+    private static func fileType(of p: NSItemProvider) -> String? {
+        for id in p.registeredTypeIdentifiers {
+            guard let t = UTType(id), t.conforms(to: .data), !t.conforms(to: .text), !t.conforms(to: .url) else { continue }
+            return id
+        }
+        return nil
     }
 
     /// The type identifier to load an archive under, or nil when the item isn't one. A `.pbgallery`
@@ -153,10 +169,10 @@ final class ShareViewController: UIViewController {
         return dest?.lastPathComponent
     }
 
-    /// Copies an archive into the App Group container as `share_<id>/<its name>` — a folder of its
-    /// own so the original name survives (the app names the unpacked folder after it). Returns that
-    /// relative path.
-    private func copyArchive(_ p: NSItemProvider, typeID: String) async -> String? {
+    /// Copies a file for the Received sheet (an archive, or any other file) into the App Group
+    /// container as `share_<id>/<its name>` — a folder of its own so the original name survives (the
+    /// app names the unpacked folder, or the placed file, after it). Returns that relative path.
+    private func copyReceived(_ p: NSItemProvider, typeID: String) async -> String? {
         let suggested = p.suggestedName
         return await withCheckedContinuation { cont in
             p.loadFileRepresentation(forTypeIdentifier: typeID) { url, _ in

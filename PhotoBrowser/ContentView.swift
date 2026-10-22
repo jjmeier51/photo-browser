@@ -82,9 +82,10 @@ struct ContentView: View {
             set: { if !$0 { library.pendingShares = []; StorySharing.clear() } })) {
             StoryImportView()
         }
-        // An archive handed to the app as a file (an AirDrop from the Mac tools, Files ▸ Open in) →
-        // ask where on the drive it unpacks. Closing with archives still waiting keeps them staged;
-        // the sheet returns for the next arrival or from Settings ▸ Received Archives.
+        // A file handed to the app (an AirDrop opened with Photo Browser, Files ▸ Open in) → ask where
+        // on the drive it goes: archives unpack into folders, other files are placed as they are.
+        // Closing with items still waiting keeps them staged; the sheet returns for the next arrival
+        // or from Settings ▸ Received Files.
         .sheet(isPresented: Binding(
             get: { library.receivedSheetShown },
             set: { library.receivedSheetShown = $0 })) {

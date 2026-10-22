@@ -112,13 +112,17 @@ actions the app makes no network calls.
   SDK). (`MegaImportView`, `MegaDownloader`, `MegaCrypto`)
 - **Receive from the Mac (AirDrop / Share sheet)** — the app opens `.pbgallery` archives (its own
   type, made by `mac/airdrop_to_iphone.py`; also offered by the pornpics browser, the star
-  downloader's `--airdrop`, and Safe Finder's context menu) and plain `.zip`s: an AirDropped one
-  arrives via "Open with Photo Browser" (`onOpenURL` file URL → `ArchiveIntake` staging), the
-  **Received** sheet (`ReceivedArchivesView`) lists the batch, you pick the drive folder, and each
-  archive unpacks into its own folder there (single top folder dropped, sidecars kept; merge or
-  keep both). The Share Extension also takes archives (and several items at once) and routes them
-  to the same sheet. Document types live in `Config/Info.plist`. (`ArchiveIntake`,
-  `ReceivedArchivesView`, `Archiver.peek`/`unzip(dropTopFolder:)`)
+  downloader's `--airdrop`, and Safe Finder's context menu) and, as an Alternate handler, **any
+  file** (`public.data`: a folder AirDropped from Finder arrives as a zip; PDFs, videos, documents):
+  an AirDropped one arrives via "Open with Photo Browser" (`onOpenURL` file URL → `ArchiveIntake`
+  staging), the **Received** sheet (`ReceivedArchivesView`) lists the batch, you pick the drive
+  folder, and each archive unpacks into its own folder there (single top folder dropped, sidecars
+  kept; merge or keep both) while any other file is placed as it is (identical file skipped, never
+  overwritten). Loose photos/videos AirDropped to an iPhone go to the Photos app — iOS decides that
+  before any app is asked; "Add from iOS Album" brings them over. The Share Extension also takes
+  archives and other files (and several items at once) and routes them to the same sheet. Document
+  types live in `Config/Info.plist`. (`ArchiveIntake`, `ReceivedArchivesView`,
+  `Archiver.peek`/`unzip(dropTopFolder:)`, `DriveWriter.moveItem`)
 
 ## Build / run
 

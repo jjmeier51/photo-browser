@@ -28,9 +28,10 @@ struct PhotoBrowserApp: App {
                 }
                 // The Share Extension opens us via photobrowser://share after stashing what was
                 // shared in the App Group; pick it up so ContentView can present the import sheet.
-                // A file handed to us — an AirDropped `.pbgallery`/zip ("Open with Photo Browser") or
-                // "Open in Photo Browser" from Files — arrives as a file URL (iOS has copied it into
-                // Documents/Inbox); the Received sheet asks where on the drive it unpacks.
+                // A file handed to us — anything AirDropped and opened with Photo Browser (a
+                // `.pbgallery`, a zipped folder, a PDF, a video…) or "Open in Photo Browser" from Files —
+                // arrives as a file URL (iOS has copied it into Documents/Inbox); the Received sheet asks
+                // where on the drive it goes.
                 .onOpenURL { url in
                     if url.scheme == StorySharing.urlScheme { library.refreshPendingShares() }
                     else if url.isFileURL { library.receiveArchive(url) }

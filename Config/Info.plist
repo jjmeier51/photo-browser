@@ -41,8 +41,11 @@
 	<!-- Files the app opens (they arrive in Documents/Inbox and reach `ArchiveIntake` through
 	     onOpenURL): its own gallery archive, `.pbgallery` — what mac/airdrop_to_iphone.py sends, a zip
 	     under a name only this app claims, so an AirDropped one offers "Open with Photo Browser" and
-	     nothing else — and plain zips as an Alternate handler, so a folder AirDropped straight from
-	     Finder (which arrives as a zip) can be opened here too, among the other zip-capable apps. -->
+	     nothing else — and, as an Alternate handler, any file at all (`public.data`): a folder
+	     AirDropped straight from Finder (which arrives as a zip), a PDF, a video, a document… all show
+	     Photo Browser among the apps that can take them, and the Received sheet puts them on the drive.
+	     Loose photos and videos AirDropped to an iPhone go straight into the Photos app — iOS decides
+	     that before any app is asked; "Add from iOS Album" brings those over. -->
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
@@ -57,12 +60,12 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeName</key>
-			<string>Zip Archive</string>
+			<string>Any File</string>
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>public.zip-archive</string>
+				<string>public.data</string>
 			</array>
 		</dict>
 	</array>

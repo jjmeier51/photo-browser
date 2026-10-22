@@ -144,7 +144,7 @@ struct SettingsView: View {
                             dismiss()
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { library.receivedSheetShown = true }
                         } label: {
-                            Label("Received Archives (\(library.pendingArchives.count))", systemImage: "tray.and.arrow.down")
+                            Label("Received Files (\(library.pendingArchives.count))", systemImage: "tray.and.arrow.down")
                         }
                     }
                 } header: {

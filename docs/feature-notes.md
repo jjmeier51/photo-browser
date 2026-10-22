@@ -1210,6 +1210,16 @@ by Files and every zip-capable app, so the phone would ask "which app?" each tim
   folder view's extraction passes `dropTopFolder: true` too (a Finder zip used to unpack as
   `Name/Name/…`). `.pbgallery` files on the drive get "Extract Here" like zips.
 
+**Any file (Oct 22).** The Alternate document type is now `public.data`, so every AirDropped or
+Files-opened file — a Finder folder (a zip), a PDF, a video, a document — offers Photo Browser.
+`ArchiveIntake.Received.isArchive` (extension or `Archiver.isZip`) decides the path: archives unpack
+as above; any other file is placed in the destination as it is by `DriveWriter.moveItem` (copy +
+delete across volumes, so a failed copy leaves it staged), skipped when an identical file (same
+name and size) is already there, numbered when a different same-named file is — nothing on the
+drive is overwritten. The Share Extension's last branch takes any real file (`conforms(to: .data)`,
+not text/url) the same way. What this can't reach: loose photos/videos AirDropped to an iPhone go
+straight to the Photos app, before any app is asked.
+
 **Gotchas.** The "Open with" tap on the phone can't be avoided (iOS asks before opening any received
 file in an app; with `.pbgallery` the app is the only choice). `canPerform(withItems:)` is false with
 AirDrop off/unavailable → exit 2 → Finder fallback. The custom UTI must stay listed under
