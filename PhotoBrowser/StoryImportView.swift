@@ -135,8 +135,9 @@ struct StoryImportView: View {
             for item in items {
                 let paths: [String]
                 switch item.kind {
-                case .url:  paths = await importURL(item.value, into: dest)
-                case .file: paths = await Self.importFile(item.value, into: dest)
+                case .url:     paths = await importURL(item.value, into: dest)
+                case .file:    paths = await Self.importFile(item.value, into: dest)
+                case .archive: continue      // routed to the Received sheet by `Library.refreshPendingShares`
                 }
                 guard !paths.isEmpty else { continue }
                 saved += paths.count
