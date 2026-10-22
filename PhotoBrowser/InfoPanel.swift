@@ -14,7 +14,6 @@ struct InfoPanel: View {
     @State private var placeName: String?
     @State private var showCaptionEditor = false
     @State private var captionDraft = ""
-    @State private var tagDraft = ""
     @State private var promptCopied = false
 
     /// App override wins (incl. "" = cleared); otherwise the file's embedded caption.
@@ -27,64 +26,12 @@ struct InfoPanel: View {
 
     private var tagsHere: [String] { library.tags(for: entry.url) }
 
-    /// Tags already used elsewhere that match what's being typed (or all of them while the field is
-    /// empty), minus the ones this file has — one tap adds one.
-    private var tagSuggestions: [String] {
-        let draft = Library.normalizedTag(tagDraft).lowercased()
-        let mine = Set(tagsHere.map { $0.lowercased() })
-        return library.allTags.filter { !mine.contains($0.lowercased()) && (draft.isEmpty || $0.lowercased().hasPrefix(draft)) }
-            .prefix(8).map { $0 }
-    }
-
-    private func addTagFromDraft() {
-        let tag = Library.normalizedTag(tagDraft)
-        guard !tag.isEmpty else { return }
-        library.addTag(tag, to: entry.url)
-        tagDraft = ""
-    }
-
-    /// Tags, one at a time: the file's tags as chips (tap ✕ to drop one), a field to type the next,
-    /// and suggestions from tags already in use. Filter on them with the Tags chip in any folder.
+    /// Tags, one at a time (`TagEditor`, shared with the clean-up screens): the file's tags as
+    /// chips, a field for the next, suggestions from tags already in use. Filter on them with the
+    /// Tags chip in any folder.
     private var tagsSection: some View {
         Section {
-            if !tagsHere.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(tagsHere, id: \.self) { tag in
-                            HStack(spacing: 4) {
-                                Text(tag).font(.subheadline)
-                                Button { library.removeTag(tag, from: entry.url) } label: {
-                                    Image(systemName: "xmark.circle.fill").font(.caption).foregroundStyle(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Remove tag \(tag)")
-                            }
-                            .padding(.horizontal, 10).padding(.vertical, 5)
-                            .background(.thinMaterial, in: Capsule())
-                        }
-                    }
-                    .padding(.vertical, 2)
-                }
-            }
-            HStack {
-                TextField("Add a tag", text: $tagDraft)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.done)
-                    .onSubmit(addTagFromDraft)
-                Button("Add", action: addTagFromDraft)
-                    .disabled(Library.normalizedTag(tagDraft).isEmpty)
-            }
-            if !tagSuggestions.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(tagSuggestions, id: \.self) { tag in
-                            Button(tag) { library.addTag(tag, to: entry.url); tagDraft = "" }
-                                .buttonStyle(.bordered).controlSize(.small)
-                        }
-                    }
-                }
-            }
+            TagEditor(url: entry.url)
         } header: {
             Text("Tags")
         } footer: {

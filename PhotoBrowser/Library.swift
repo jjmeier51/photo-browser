@@ -806,6 +806,9 @@ final class Library {
 
     func tags(for url: URL) -> [String] { tags[url.path] ?? [] }
 
+    /// Every file that carries at least one tag — what the "No Tags" filter leaves out.
+    var taggedPathSet: Set<String> { Set(tags.filter { !$0.value.isEmpty }.keys) }
+
     /// Adds a tag to a file — once, whatever its case. Bumps `labelsVersion` so tag views re-query.
     func addTag(_ raw: String, to url: URL) {
         let tag = Self.normalizedTag(raw)

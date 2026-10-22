@@ -973,7 +973,14 @@ to (selected tags stay listed; others at zero drop out). Tags are a mode like Fa
 `labeledEntries` gathers the tagged files from the whole subtree (the "labels" task), honouring
 Type and the search box; the other modes step aside, and Favorites / To AI / Edited clear it.
 Header subtitle "Tag: x" / "Tags: x, y"; chip "Tag: x" / "Tags: 2"; "Clear Tags" at the top of
-the menu; the chip-bar Clear resets it too.
+the menu; the chip-bar Clear resets it too. **"No Tags"** (first menu item, `noTagsFilter`) shows
+every photo/video under the folder with no tag yet — `unlabeledMedia(under:labeled:)` with
+`taggedPathSet`, the same walk as the labels' "(No Label)" — so untagged work is easy to find.
+The editor itself is `TagEditor` (chips + field + suggestions, a `Group` of rows), shared by the
+info panel and both clean-up screens (`FrameCleanupView.tagRow`, under the card, keyed on the
+item), so tags can be added while swiping through. Folders can be favorited too: the folder
+context menu has Favorite/Unfavorite (Get Info had it already), the tile shows the heart, and the
+Favorites mode lists them (its Folders sub-filter).
 
 **Bulk tagging:** in selection mode, More ▸ **Tags** has "Add Tag…" (an alert with a text field,
 presented deferred per constraint #4) that tags every selected item at once, plus the existing

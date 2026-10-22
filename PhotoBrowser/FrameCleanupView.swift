@@ -115,10 +115,22 @@ struct FrameCleanupView: View {
             VStack(spacing: 0) {
                 card
                 scrubber
+                if let current { tagRow(for: current) }
                 if isIMessage { sortRow }
                 controls
             }
         }
+    }
+
+    /// Tags for the item on the card — add one as you decide, without leaving the review. Keyed on
+    /// the item so the field clears as the next card comes up.
+    private func tagRow(for entry: Entry) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TagEditor(url: entry.url, onDark: true)
+        }
+        .font(.subheadline)
+        .padding(.horizontal, 14).padding(.top, 8)
+        .id(entry.url)
     }
 
     /// Quick "sort to person" chips shown when cleaning up the iMessage folder. One

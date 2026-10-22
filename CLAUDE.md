@@ -60,7 +60,7 @@ actions the app makes no network calls.
   photos/videos; New Folder / rename / move; name search; sort by
   name/date/size/age; filters for type, year (EXIF date), location (GPS reverse-geocoded to
   "City, ST" / "City, Country" with counts, via the place index), tags (recursive, with
-  counts; several at once — a file must carry all of them), resolution/HDR, age; the chip bar runs Favorites, Type, Format, Sort, Year, then the rest;
+  counts; several at once — a file must carry all of them; "No Tags" for what's untagged), resolution/HDR, age; the chip bar runs Favorites, Type, Format, Sort, Year, then the rest;
   Favorites / "To AI" modes; a **Categories** filter on folders whose subfolders hold pornpics
   `gallery.json` sidecars (from `mac/pornpics_*.py`) — galleries must carry every selected
   category; the sidecars (`gallery.json`, `pornstar.json`) are hidden from listings.
