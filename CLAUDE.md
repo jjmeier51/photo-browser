@@ -63,7 +63,7 @@ actions the app makes no network calls.
   counts; several at once — a file must carry all of them; "No Tags" for what's untagged), resolution/HDR, age; the chip bar runs Favorites, Type, Format, Sort, Year, then the rest;
   Favorites / "To AI" modes; a **Categories** filter on folders whose subfolders hold pornpics
   `gallery.json` sidecars (from `mac/pornpics_*.py`) — galleries must carry every selected
-  category; the sidecars (`gallery.json`, `pornstar.json`) are hidden from listings.
+  category; the sidecars (`gallery.json`, `pornstar.json`, `search.json`) are hidden from listings.
   (`FolderView`, `GalleryCategories`)
 - **Viewer** — photo pinch + double-tap zoom; custom `AVPlayer` video page with
   zoom, ms-precision scrubber, looping, HDR/res badge. Gestures: swipe L/R =

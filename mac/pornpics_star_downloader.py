@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""PornPics star downloader — every gallery of one pornstar in one go (standard library only).
+"""PornPics star downloader — every gallery of one pornstar, or of a site search, in one go
+(standard library only).
 
     python3 pornpics_star_downloader.py https://www.pornpics.com/pornstars/lucie-wilde/ [DEST]
+    python3 pornpics_star_downloader.py "https://www.pornpics.com/?q=star+makeup" [DEST]
+    python3 pornpics_star_downloader.py --search "star makeup" [DEST]
 
-creates `DEST/Lucie Wilde/` (DEST defaults to ~/Pictures/PornPics) and inside it one folder per
-gallery, named exactly like `pornpics_downloader.py` names them ("Beautiful Woman Posing"), so
-the two tools share folders and a re-run only fetches what's missing.
+creates `DEST/Lucie Wilde/` — or `DEST/Star Makeup/` for a search — (DEST defaults to
+~/Pictures/PornPics) and inside it one folder per gallery, named exactly like
+`pornpics_downloader.py` names them ("Beautiful Woman Posing"), so the two tools share folders and
+a re-run only fetches what's missing. A search takes every gallery the site's search returns, in
+the site's order (best matches first), with no model check, and writes a `search.json` index
+instead of `pornstar.json`.
 
 What it does beyond the single-gallery tool:
 
@@ -138,6 +144,19 @@ def last_modified(headers: dict) -> datetime | None:
 def star_slug(url: str) -> str | None:
     m = STAR_RE.match(url.strip())
     return m.group(1).lower() if m else None
+
+
+def search_query(url: str) -> str | None:
+    """The words of a pornpics search URL (https://www.pornpics.com/?q=star+makeup, or the search
+    endpoint's srch.php?q=…), else None."""
+    try:
+        parts = urllib.parse.urlsplit(url.strip())
+    except ValueError:
+        return None
+    if not re.fullmatch(r"(?:www\.)?pornpics\.com", parts.netloc, re.I):
+        return None
+    q = urllib.parse.parse_qs(parts.query).get("q", [""])[0].strip()
+    return q or None
 
 
 def title_case(slug: str) -> str:
@@ -372,6 +391,26 @@ def star_galleries(star_url: str, use_browser: str = "auto") -> dict[int, str]:
     return found
 
 
+def search_galleries(query: str, max_pages: int = MAX_PAGES) -> dict[int, str]:
+    """Every gallery id → url the site's search returns for `query`, in the site's order (best
+    matches first). The search page itself carries only the first 20; the endpoint the page
+    scrolls with (`/search/srch.php?q=…&limit=20&offset=N`, JSON) serves the rest, 20 a page, and
+    answers `[]` at the end."""
+    referer = f"{ROOT}/?{urllib.parse.urlencode({'q': query})}"
+
+    def pages():
+        offset = 0
+        while True:
+            got = yield f"{ROOT}/search/srch.php?" + urllib.parse.urlencode(
+                {"q": query, "lang": "en", "limit": PAGE_LIMIT, "offset": offset})
+            offset += max(got or 0, 1)
+
+    found: dict[int, str] = {}
+    _paginate(found, "search", pages, xhr=True, referer=referer, max_pages=max_pages)
+    log(f"Search “{query}”: {len(found)} galleries")
+    return found
+
+
 # ----------------------------------------------------------------------------- gallery page
 
 
@@ -519,11 +558,13 @@ def download_one(url: str, gallery_url: str, target: Path, meta: dict, write_exi
     return "saved", lm
 
 
-def download_gallery(gid: int, url: str, star_dir: Path, slug: str, star_name: str,
+def download_gallery(gid: int, url: str, star_dir: Path, slug: str | None, star_name: str,
                      workers: int, write_exif: bool) -> dict | None:
+    """One gallery into `star_dir`. With `slug` (a star run) galleries that don't list the star as
+    a model are skipped; a search run passes None and takes everything the search returned."""
     page = text(url)
     meta = gallery_metadata(page, url, gid)
-    if not belongs_to(meta, slug, star_name):
+    if slug and not belongs_to(meta, slug, star_name):
         log(f"  skip {gid}: {star_name} isn't listed as a model")
         return None
     urls = photo_urls(page)
@@ -617,10 +658,14 @@ def main() -> None:
         found = browser_galleries(sys.argv[2], int(sys.argv[3]) or None)
         print(json.dumps({str(k): v for k, v in found.items()}))
         return
-    ap = argparse.ArgumentParser(description="Download every gallery of a pornpics.com pornstar.")
-    ap.add_argument("url", help="e.g. https://www.pornpics.com/pornstars/lucie-wilde/ (or just lucie-wilde)")
+    ap = argparse.ArgumentParser(
+        description="Download every gallery of a pornpics.com pornstar, or every gallery a site search finds.")
+    ap.add_argument("url", nargs="?", default="",
+                    help="a pornstar page (https://www.pornpics.com/pornstars/lucie-wilde/, or just lucie-wilde) "
+                         "or a search (https://www.pornpics.com/?q=star+makeup)")
     ap.add_argument("dest", nargs="?", default=str(Path.home() / "Pictures" / "PornPics"),
-                    help="folder the star's folder is created in (default ~/Pictures/PornPics)")
+                    help="folder the star's (or search's) folder is created in (default ~/Pictures/PornPics)")
+    ap.add_argument("--search", metavar="WORDS", help="search the site for WORDS instead of giving a URL")
     ap.add_argument("--workers", type=int, default=4, help="photos downloaded in parallel per gallery (default 4)")
     ap.add_argument("--limit", type=int, default=0, help="only the N most recent galleries")
     ap.add_argument("--no-exif", action="store_true", help="don't write EXIF into JPEGs that have none")
@@ -634,22 +679,33 @@ def main() -> None:
     args = ap.parse_args()
 
     url = args.url.strip()
-    if re.fullmatch(r"[a-z0-9-]+", url, re.I):
-        url = f"{ROOT}/pornstars/{url.lower()}/"
-    slug = star_slug(url)
-    if not slug:
-        sys.exit("That doesn't look like a pornstar URL (expected https://www.pornpics.com/pornstars/<name>/).")
-    star_name = title_case(slug)
+    query = args.search.strip() if args.search else search_query(url)
+    if query:
+        # A search: its folder is the words, title-cased ("Star Makeup"); no star to check models against.
+        slug = None
+        star_name = title_case(re.sub(r"[^a-z0-9]+", "-", query.lower()).strip("-")) or query
+        url = f"{ROOT}/?{urllib.parse.urlencode({'q': query})}"
+    else:
+        if re.fullmatch(r"[a-z0-9-]+", url, re.I):
+            url = f"{ROOT}/pornstars/{url.lower()}/"
+        slug = star_slug(url)
+        if not slug:
+            sys.exit("That doesn't look like a pornstar page or a search (expected "
+                     "https://www.pornpics.com/pornstars/<name>/ or https://www.pornpics.com/?q=<words>).")
+        star_name = title_case(slug)
     star_dir = Path(args.dest).expanduser() / safe_folder_name(star_name)
     star_dir.mkdir(parents=True, exist_ok=True)
-    log(f"{star_name} → {star_dir}")
+    log(f"{'Search “' + query + '”' if query else star_name} → {star_dir}")
 
-    galleries = sorted(star_galleries(url, args.browser).items(), reverse=True)  # newest (highest id) first
+    if query:
+        galleries = list(search_galleries(query).items())                          # the site's order: best matches first
+    else:
+        galleries = sorted(star_galleries(url, args.browser).items(), reverse=True)  # newest (highest id) first
     if args.limit:
         galleries = galleries[:args.limit]
     if not galleries:
-        sys.exit("No galleries found on that page.")
-    log(f"{len(galleries)} galleries, newest first\n")
+        sys.exit("No galleries found for that search." if query else "No galleries found on that page.")
+    log(f"{len(galleries)} galleries, {'best matches first' if query else 'newest first'}\n")
 
     records: list[dict] = []
     failed_galleries = 0
@@ -669,13 +725,14 @@ def main() -> None:
         if records:
             order_folder_dates(records)
             index = {
-                "pornstar": star_name,
+                "search" if query else "pornstar": query or star_name,
                 "url": url,
                 "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "galleries": [{k: r[k] for k in ("id", "title", "date", "folder", "photo_count", "url")}
                               for r in sorted(records, key=lambda r: r["id"], reverse=True)],
             }
-            (star_dir / "pornstar.json").write_text(json.dumps(index, indent=2, ensure_ascii=False), "utf-8")
+            (star_dir / ("search.json" if query else "pornstar.json")).write_text(
+                json.dumps(index, indent=2, ensure_ascii=False), "utf-8")
     photos_failed = sum(r["_failed"] for r in records)
     log(f"\nDone: {len(records)} galleries in {star_dir}"
         + (f", {failed_galleries} galleries failed" if failed_galleries else "")

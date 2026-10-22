@@ -13,9 +13,10 @@ import Foundation
 /// most folders in the library aren't galleries and shouldn't be re-probed on every open.
 nonisolated enum GalleryCategories {
 
-    /// Sidecar file names the downloaders write, plus the Surprise Me prompt file at the drive root
-    /// (`SurprisePrompts.fileName`); all hidden from the grid. Compared lowercased.
-    static let sidecarNames: Set<String> = ["gallery.json", "pornstar.json", SurprisePrompts.fileName.lowercased()]
+    /// Sidecar file names the downloaders write (`search.json` is a search run's index), plus the
+    /// Surprise Me prompt file at the drive root (`SurprisePrompts.fileName`); all hidden from the
+    /// grid. Compared lowercased.
+    static let sidecarNames: Set<String> = ["gallery.json", "pornstar.json", "search.json", SurprisePrompts.fileName.lowercased()]
 
     static func isSidecar(_ url: URL) -> Bool {
         sidecarNames.contains(url.lastPathComponent.lowercased())

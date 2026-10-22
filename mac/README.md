@@ -54,15 +54,24 @@ mac/.venv/bin/python mac/pornpics_browser.py   # opens pornpics.com
 mac/.venv/bin/python mac/pornpics_browser.py <gallery URL>
 ```
 
-### Every gallery of one star (`pornpics_star_downloader.py`)
+### Every gallery of one star, or of a search (`pornpics_star_downloader.py`)
 
-Give it a pornstar page and it downloads all of their galleries in one go (stdlib only):
+Give it a pornstar page and it downloads all of their galleries in one go (stdlib only); give it a
+site search instead and it downloads every gallery the search finds:
 
 ```sh
 ./mac/run.sh     # once, to create mac/.venv with PySide6 (used to scroll the star page)
 mac/.venv/bin/python mac/pornpics_star_downloader.py https://www.pornpics.com/pornstars/lucie-wilde/ [destination]
 mac/.venv/bin/python mac/pornpics_star_downloader.py lucie-wilde --limit 10     # just the 10 newest
+python3 mac/pornpics_star_downloader.py "https://www.pornpics.com/?q=star+makeup"   # a search (quote the URL)
+python3 mac/pornpics_star_downloader.py --search "star makeup" --limit 50           # the same, by words
 ```
+
+A search goes into `<destination>/Star Makeup/` (the words, title-cased), one folder per gallery
+as below, in the site's order (best matches first — `--limit N` keeps the first N) and with no
+model check; it writes a `search.json` index (hidden in the iOS app like `pornstar.json`). The
+search page is paged with the same endpoint the site scrolls with, so it gets every result, not
+just the first screen. `--airdrop` works the same way.
 
 A star page only shows its first ~16–20 galleries; the rest load as you scroll. The downloader
 first tries plain requests for the further pages, and if those fall short of the star's gallery
