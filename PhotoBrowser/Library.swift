@@ -132,7 +132,7 @@ final class Library {
     var pendingArchives: [ArchiveIntake.Received] = []
     /// Presents `ReceivedArchivesView`. Set when an archive arrives; cleared when the sheet closes.
     /// Archives left waiting stay in `pendingArchives` (and in staging); the sheet comes back for
-    /// the next arrival, or from Settings ▸ Received Archives.
+    /// the next arrival, or from Settings ▸ Received Files.
     var receivedSheetShown = false
 
     /// A file handed to the app (`onOpenURL` with a file URL, or an extension-shared file): stage it
