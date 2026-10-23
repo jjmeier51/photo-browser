@@ -963,14 +963,18 @@ enum MediaEditing {
     /// across. **Replaces the file in place** — so its path-keyed labels/captions/
     /// Favorite state are kept and the original is gone. Videos already ≥ `targetShort`
     /// are skipped (never downscaled). Lossy by nature, and best-effort.
-    static func upscaleVideo(url: URL, targetShort: CGFloat,
+    /// `frameRate` (30 or 60) retimes the output: the composition renders at that rate, so 60 from
+    /// a 30 fps source repeats frames (no interpolation) and 30 from 60 drops every other one; nil
+    /// keeps the source rate.
+    static func upscaleVideo(url: URL, targetShort: CGFloat, frameRate: Double? = nil,
                              progress: @escaping @Sendable (Double) -> Void) async -> UpscaleResult {
         let asset = AVURLAsset(url: url)
         guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return .failed }
         let natural = (try? await track.load(.naturalSize)) ?? .zero
         let pt = (try? await track.load(.preferredTransform)) ?? .identity
         let duration = (try? await asset.load(.duration)) ?? .zero
-        let fps = (try? await track.load(.nominalFrameRate)).map { $0 > 0 ? $0 : 30 } ?? 30
+        let sourceFPS = (try? await track.load(.nominalFrameRate)).map { $0 > 0 ? $0 : 30 } ?? 30
+        let fps: Float = frameRate.map { Float($0) } ?? sourceFPS
         guard natural.width > 0, natural.height > 0, duration.seconds > 0 else { return .failed }
 
         let dispRect = CGRect(origin: .zero, size: natural).applying(pt)
@@ -1065,14 +1069,17 @@ enum MediaEditing {
     /// cleaner result than a plain rescale. SDR only: HDR sources fall back to the standard
     /// `upscaleVideo` so their wide-gamut/transfer isn't tone-mapped to SDR. Replaces the file
     /// in place, preserving metadata, labels, and capture date. Lossy and best-effort.
-    static func enhanceVideo(url: URL, targetShort: CGFloat,
+    /// `frameRate` as in `upscaleVideo`: 30 or 60 retimes the output (repeating or dropping frames),
+    /// nil keeps the source rate.
+    static func enhanceVideo(url: URL, targetShort: CGFloat, frameRate: Double? = nil,
                              progress: @escaping @Sendable (Double) -> Void) async -> UpscaleResult {
         let asset = AVURLAsset(url: url)
         guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return .failed }
         let natural = (try? await track.load(.naturalSize)) ?? .zero
         let pt = (try? await track.load(.preferredTransform)) ?? .identity
         let duration = (try? await asset.load(.duration)) ?? .zero
-        let fps = (try? await track.load(.nominalFrameRate)).map { $0 > 0 ? $0 : 30 } ?? 30
+        let sourceFPS = (try? await track.load(.nominalFrameRate)).map { $0 > 0 ? $0 : 30 } ?? 30
+        let fps: Float = frameRate.map { Float($0) } ?? sourceFPS
         guard natural.width > 0, natural.height > 0, duration.seconds > 0 else { return .failed }
 
         // HDR → standard upscale (Core Image would tone-map the wide gamut/transfer to SDR).
@@ -1081,7 +1088,7 @@ enum MediaEditing {
             let tf = ext[kCMFormatDescriptionExtension_TransferFunction] as? String
             if tf == (kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String)
                 || tf == (kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG as String) {
-                return await upscaleVideo(url: url, targetShort: targetShort, progress: progress)
+                return await upscaleVideo(url: url, targetShort: targetShort, frameRate: frameRate, progress: progress)
             }
         }
 

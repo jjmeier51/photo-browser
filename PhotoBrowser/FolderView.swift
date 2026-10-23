@@ -97,6 +97,13 @@ struct FolderView: View {
     /// Tags filter: files carrying this tag anywhere under the folder (recursive, like Favorites).
     @State private var tagFilters: Set<String> = []                // selected tags (a file must carry all of them)
     @State private var noTagsFilter = false                        // photos/videos under here with no tag yet
+    @State private var tagMatchAny = false                         // Tags filter: any of the chosen tags (OR), not all of them
+    @State private var tagTargets: [URL]? = nil                    // "Add Tag…" prompt targets from a long-press (else the selection)
+    @State private var pendingUpscale: PendingUpscale? = nil       // an upscale waiting on the frame-rate choice
+    @State private var showFrameRateChoice = false
+    @State private var deepMemo = Memo<[Entry]>()                  // Home: the whole drive's media, for drive-wide filters
+    @State private var deepGalleryFolders: [Entry] = []            // Home: every gallery folder on the drive (Categories)
+    @State private var deepYearsRequested = false                  // Home: the Year menu was opened → load drive-wide dates
     @State private var tagEntries: [Entry] = []
     @State private var captureDates: [URL: Date] = [:]
     /// Years present under each subfolder — fills in while a year filter is active
@@ -239,6 +246,28 @@ struct FolderView: View {
     }
 
     private var advancedActive: Bool { videoRes != .all || imageRes != .all || hdrOnly }
+
+    /// At Home, a Type / Format / Resolution / Year / Location / Edited / Categories filter looks through
+    /// every subfolder: the grid draws on the whole drive (the full index) instead of the top level's
+    /// own listing, so a filter at Home finds things wherever they sit. (Tags, Age, Favorites and
+    /// search already cover the subtree.)
+    private var deepFilterActive: Bool {
+        isRoot && !labelMode && !tsLabelMode && tagFilters.isEmpty && !noTagsFilter && ageFilter == nil
+            && submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty
+            && (typeFilter != .all || formatFilter != .all || advancedActive || yearFilter != nil
+                || locationFilter != nil || showEditedOnly || !categoryFilter.isEmpty)
+    }
+
+    /// Every file on the drive (the full index) in the current sort — what Home's drive-wide filters
+    /// and its Year / Location menus draw on.
+    private var deepMedia: [Entry] {
+        deepMemo.value(for: "\(library.index.count)|\(library.sort.rawValue)|\(library.changeToken)") {
+            Library.sortEntries(library.index.filter { !$0.isFolder }, by: library.sort)
+        }
+    }
+
+    /// An upscale waiting on the frame-rate prompt (1080p / 4K ask for 30, 60 or the source rate).
+    private struct PendingUpscale { let urls: [URL]; let target: CGFloat; let label: String; let enhance: Bool }
     private var labelMode: Bool { showFavoritesOnly || showAIOnly }
     /// A "Reviews" folder: a container that holds only highlight folders. Its whole
     /// presentation is replaced by a centered grid of large highlight bubbles.
@@ -331,7 +360,8 @@ struct FolderView: View {
             "\(entriesVersion)", "\(library.changeToken)", "\(library.labelsVersion)", library.sort.rawValue,
             submittedQuery, "\(typeFilter)", "\(formatFilter)", "\(labelKind)",
             "\(showFavoritesOnly)\(showAIOnly)\(showEditedOnly)\(showHiddenFolders)\(tsNoLabel)",
-            tsLabelFilter.sorted().joined(separator: ","), tagFilters.sorted().joined(separator: ",") + (noTagsFilter ? "|none" : ""),
+            tsLabelFilter.sorted().joined(separator: ","), tagFilters.sorted().joined(separator: ",") + (noTagsFilter ? "|none" : "") + (tagMatchAny ? "|any" : ""),
+            "\(deepFilterActive)/\(library.index.count)/\(deepGalleryFolders.count)",
             categoryFilter.sorted().joined(separator: ","),
             yearFilter.map(String.init) ?? "", locationFilter ?? "-", ageFilter.map(String.init) ?? "",
             "\(videoRes)\(imageRes)\(hdrOnly)",
@@ -410,8 +440,8 @@ struct FolderView: View {
             return applyHidden(q.isEmpty ? base : base.filter { matches($0, q) })
         }
 
-        // Tag mode: files carrying every selected tag — or, for No Tags, none at all — gathered
-        // recursively under this folder.
+        // Tag mode: files carrying every selected tag (any of them, in Any mode) — or, for No Tags,
+        // none at all — gathered recursively under this folder.
         if !tagFilters.isEmpty || noTagsFilter {
             let base = applyType(tagEntries)
             return applyHidden(q.isEmpty ? base : base.filter { matches($0, q) })
@@ -438,6 +468,19 @@ struct FolderView: View {
                 results += aged.filter { !existing.contains($0.url) }
             }
             return applyHidden(applyEdited(results))
+        }
+
+        // Home with a filter on: the whole drive, not just the top level (see `deepFilterActive`).
+        if deepFilterActive {
+            if !categoryFilter.isEmpty {
+                return applyHidden(deepGalleryFolders.filter { matchesCategories($0) })
+            }
+            var list = deepMedia
+            if let yearFilter { list = list.filter { year(of: $0) == yearFilter } }
+            if let locationFilter { list = list.filter { placeLabels[$0.url] == locationFilter } }
+            list = applyEdited(applyType(list))
+            if advancedActive { list = list.filter { passesAdvanced($0) } }
+            return applyHidden(list)
         }
 
         // Bubble folders (Instagram + album highlights) are shown as bubbles, not tiles.
@@ -598,9 +641,12 @@ struct FolderView: View {
         return entries.contains { $0.isViewable && !reviewed.contains($0.url.path) } ? .resume : .rerun
     }
 
+    /// Years to offer: this folder's files — or, at Home, every file on the drive (real capture dates
+    /// once the drive-wide pass has them, the file date meanwhile).
     private var availableYears: [Int] {
-        yearsMemo.value(for: "\(entriesVersion)|\(captureDates.count)") {
-            Array(Set(entries.filter { !$0.isFolder }.map { year(of: $0) })).sorted(by: >)
+        yearsMemo.value(for: "\(entriesVersion)|\(captureDates.count)|\(isRoot ? library.index.count : -1)") {
+            let scope = isRoot ? deepMedia : entries
+            return Array(Set(scope.filter { !$0.isFolder }.map { year(of: $0) })).sorted(by: >)
         }
     }
 
@@ -613,9 +659,10 @@ struct FolderView: View {
     /// The Location menu: each place with how many files here are from it, most first; "No
     /// Location" (label "") last.
     private var locationOptions: [LocationOption] {
-        locationsMemo.value(for: "\(entriesVersion)|\(placeLabels.count)") {
+        locationsMemo.value(for: "\(entriesVersion)|\(placeLabels.count)|\(isRoot ? library.index.count : -1)") {
             var counts: [String: Int] = [:]
-            for e in entries where !e.isFolder { if let label = placeLabels[e.url] { counts[label, default: 0] += 1 } }
+            let scope = isRoot ? deepMedia : entries        // Home offers the whole drive's places
+            for e in scope where !e.isFolder { if let label = placeLabels[e.url] { counts[label, default: 0] += 1 } }
             let named = counts.filter { !$0.key.isEmpty }
                 .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
                 .map { LocationOption(label: $0.key, count: $0.value) }
@@ -627,7 +674,11 @@ struct FolderView: View {
 
     /// Same ceiling as the capture-date pass: reading every file's GPS in a huge folder would stall
     /// the drive just like reading every EXIF date did.
-    private var tooManyForPlaces: Bool { entries.filter { !$0.isFolder }.count > 8000 }
+    /// Home reads the whole drive's places (the place index makes repeat passes cheap), so its ceiling
+    /// is far higher.
+    private var tooManyForPlaces: Bool {
+        isRoot ? deepMedia.count > 200_000 : entries.filter { !$0.isFolder }.count > 8000
+    }
 
     private var grid: some View {
         ScrollViewReader { proxy in
@@ -931,6 +982,7 @@ struct FolderView: View {
                 Button { library.toggleAI(entry.url) } label: {
                     Label(library.isAI(entry.url) ? "Remove To AI" : "To AI", systemImage: "sparkles")
                 }
+                tagMenu(for: [entry.url])
                 Button { saveSingleToPhotos(entry) } label: {
                     Label("Save to Photos", systemImage: "photo.on.rectangle")
                 }
@@ -1061,10 +1113,13 @@ struct FolderView: View {
         viewerPresentation = ViewerPresentation(items: media, startIndex: 0, slideshow: true)
     }
 
+    /// Duplicates in place; each copy gets the original's labels, caption, tags and the rest of its
+    /// path-keyed metadata (`duplicateMetadata` maps every store).
     private func duplicateEntries(_ entries: [Entry]) {
-        let n = FileActions.duplicate(entries)
+        let pairs = FileActions.duplicate(entries)
+        for pair in pairs { _ = library.duplicateMetadata(from: pair.source, to: pair.copy) }
         if selecting { selecting = false; selection.removeAll() }
-        if entries.count > 1 { resultMessage = "Duplicated \(n) item(s)." }
+        if entries.count > 1 { resultMessage = "Duplicated \(pairs.count) item(s)." }
         Task { await reload() }
     }
 
@@ -1163,14 +1218,23 @@ struct FolderView: View {
                 Button("Create") { createFolder() }
                 Button("Cancel", role: .cancel) { newFolderName = "" }
             }
-            .alert("Add Tag to \(selection.count) Item\(selection.count == 1 ? "" : "s")", isPresented: $showBulkTag) {
+            .alert("Add Tag to \(tagTargetURLs.count) Item\(tagTargetURLs.count == 1 ? "" : "s")", isPresented: $showBulkTag) {
                 TextField("Tag", text: $bulkTagDraft)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 Button("Add") { bulkAddTag(bulkTagDraft) }
-                Button("Cancel", role: .cancel) { bulkTagDraft = "" }
+                Button("Cancel", role: .cancel) { bulkTagDraft = ""; tagTargets = nil }
             } message: {
                 Text("One tag at a time. Items that already have it are left as they are.")
+            }
+            // Every 1080p / 4K upscale asks this first, then runs in the background (see UpscaleQueue).
+            .alert("Frame Rate", isPresented: $showFrameRateChoice) {
+                Button("Keep Source Rate") { startUpscale(frameRate: nil) }
+                Button("30 fps") { startUpscale(frameRate: 30) }
+                Button("60 fps") { startUpscale(frameRate: 60) }
+                Button("Cancel", role: .cancel) { pendingUpscale = nil }
+            } message: {
+                Text("Upscale to \(pendingUpscale?.label ?? "") at which frame rate? It runs in the background and each finished video is tagged “upscaled”. 60 fps from a 30 fps video repeats frames rather than inventing new ones.")
             }
             .alert("Create Reviews Folder", isPresented: $showNewReviewsFolder) {
                 TextField("Name", text: $newReviewsFolderName)
@@ -1635,7 +1699,7 @@ struct FolderView: View {
                 if submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty { fileCaptions = [:] }
                 else if fileCaptions.isEmpty { fileCaptions = await library.fileCaptions(for: entries) }
             }
-            .task(id: "labels-\(showFavoritesOnly)-\(showAIOnly)-\(tagFilters.sorted().joined(separator: "|"))-\(noTagsFilter)-\(library.labelsVersion)-\(library.sort.rawValue)") {
+            .task(id: "labels-\(showFavoritesOnly)-\(showAIOnly)-\(tagFilters.sorted().joined(separator: "|"))-\(noTagsFilter)-\(tagMatchAny)-\(library.labelsVersion)-\(library.sort.rawValue)") {
                 // Favorites / To AI / a tag are scoped to *this* folder (and its subfolders).
                 if showFavoritesOnly {
                     favoriteEntries = await library.labeledEntries(under: url, paths: library.favorites, sort: library.sort)
@@ -1646,7 +1710,7 @@ struct FolderView: View {
                 if noTagsFilter {
                     tagEntries = await library.unlabeledMedia(under: url, labeled: library.taggedPathSet, sort: library.sort)
                 } else if !tagFilters.isEmpty {
-                    tagEntries = await library.labeledEntries(under: url, paths: library.taggedPaths(under: url, tags: tagFilters),
+                    tagEntries = await library.labeledEntries(under: url, paths: library.taggedPaths(under: url, tags: tagFilters, any: tagMatchAny),
                                                               sort: library.sort)
                 }
             }
@@ -1664,10 +1728,15 @@ struct FolderView: View {
                 }
             }
             // Load dimensions/HDR/duration when the resolution filter is on or sorting by length.
-            .task(id: "specs-\(advancedActive)-\(library.sort.isDuration)-\(entries.count)-\(url.path)") {
-                if (advancedActive || library.sort.isDuration), fileSpecs.isEmpty {
-                    fileSpecs = await library.mediaSpecs(for: entries)
-                }
+            .task(id: "specs-\(advancedActive)-\(library.sort.isDuration)-\(entries.count)-\(url.path)-\(deepFilterActive ? library.index.count : 0)") {
+                guard advancedActive || library.sort.isDuration else { return }
+                // Home's drive-wide resolution filter needs every file's specs; elsewhere this folder's.
+                let scope = deepFilterActive ? deepMedia : entries
+                let missing = scope.filter { !$0.isFolder && fileSpecs[$0.url] == nil }
+                guard !missing.isEmpty else { return }
+                let more = await library.mediaSpecs(for: missing)
+                if Task.isCancelled { return }
+                fileSpecs.merge(more) { $1 }
             }
             // Compute ages (folder + subfolders) only when actually engaged — an age
             // sort/filter, a numeric (age) search, or the Age menu being opened. The
@@ -1693,12 +1762,22 @@ struct FolderView: View {
                     folderYears[folder.url] = await library.folderYears(of: folder.url)
                 }
             }
+            // Home: real capture dates for the whole drive, for its Year menu and drive-wide Year filter.
+            // Mostly cache hits — the index build prewarms them — so cheap after the first pass.
+            .task(id: "deepdates-\(isRoot && (yearFilter != nil || deepYearsRequested))-\(library.index.count)-\(library.changeToken)") {
+                guard isRoot, yearFilter != nil || deepYearsRequested, !library.index.isEmpty else { return }
+                let missing = deepMedia.filter { captureDates[$0.url] == nil }
+                guard !missing.isEmpty else { return }
+                let dates = await library.captureDates(for: missing)
+                if Task.isCancelled { return }
+                captureDates.merge(dates) { $1 }
+            }
             // Place labels for the Location filter — lazy (the menu opening or an active filter asks
             // for them): a GPS read per file, then one geocode per distinct place.
-            .task(id: "places-\(placesNeeded)-\(entries.count)-\(library.changeToken)-\(url.path)") {
+            .task(id: "places-\(placesNeeded)-\(entries.count)-\(library.changeToken)-\(url.path)-\(isRoot ? library.index.count : 0)") {
                 guard placesNeeded, !tooManyForPlaces else { return }
                 loadingPlaces = true; placeProgress = nil
-                let labels = await library.placeLabels(in: url, for: entries) { text in
+                let labels = await library.placeLabels(in: url, for: isRoot ? deepMedia : entries) { text in
                     Task { @MainActor in placeProgress = text }
                 }
                 if Task.isCancelled { return }
@@ -1707,8 +1786,19 @@ struct FolderView: View {
             }
             // Gallery categories: subfolders holding a pornpics gallery.json (a star's folder of
             // galleries) feed the Categories filter. Folders without one cost a cached miss.
-            .task(id: "gallerycats-\(entries.count)-\(library.changeToken)-\(url.path)") {
-                let cats = await GalleryCategories.load(for: entries)
+            .task(id: "gallerycats-\(entries.count)-\(library.changeToken)-\(url.path)-\(isRoot ? library.index.count : 0)") {
+                var scope = entries
+                if isRoot, !library.index.isEmpty {
+                    // Home looks through every folder on the drive, so Categories can find galleries
+                    // wherever they sit (a star's folder is usually two levels down). The index holds
+                    // files; their parent folders are stat'ed (bounded) to become entries.
+                    let parents = Set(library.index.map { $0.url.deletingLastPathComponent().path })
+                    let folders = await library.labeledEntries(under: url, paths: parents, sort: library.sort).filter(\.isFolder)
+                    if Task.isCancelled { return }
+                    deepGalleryFolders = folders
+                    scope = entries + folders
+                }
+                let cats = await GalleryCategories.load(for: scope)
                 if Task.isCancelled { return }
                 galleryCategories = cats
                 // Drop selections no gallery here carries any more (e.g. after a re-download).
@@ -1757,7 +1847,7 @@ struct FolderView: View {
                              : showAIOnly ? "Nothing marked To AI yet"
                              : noTagsFilter ? "Everything here is tagged"
                              : !tagFilters.isEmpty ? (tagFilters.count == 1 ? "Nothing tagged “\(tagFilters.first ?? "")” here"
-                                                       : "Nothing here carries all of these tags")
+                                                       : tagMatchAny ? "Nothing here carries any of these tags" : "Nothing here carries all of these tags")
                              : !categoryFilter.isEmpty ? "No galleries have all of these categories"
                              : (advancedActive || typeFilter != .all || formatFilter != .all || yearFilter != nil || ageFilter != nil || locationFilter != nil) ? "No matches for this filter"
                              : "This folder is empty")
@@ -2120,7 +2210,7 @@ struct FolderView: View {
         if showAIOnly { return "To AI" }
         if showEditedOnly { return "Edited" }
         if noTagsFilter { return "No Tags" }
-        if !tagFilters.isEmpty { return (tagFilters.count == 1 ? "Tag: " : "Tags: ") + tagFilters.sorted().joined(separator: ", ") }
+        if !tagFilters.isEmpty { return (tagFilters.count == 1 ? "Tag: " : "Tags: ") + tagFilters.sorted().joined(separator: tagMatchAny ? " or " : ", ") }
         if let ig = library.instagramInfo(for: url) {
             let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
             let when = f.string(from: Date(timeIntervalSince1970: ig.lastUpdated))
@@ -2151,6 +2241,19 @@ struct FolderView: View {
     private var filterBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 10) {
+                if !submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty {
+                    // The navigation bar gives way to the search field during a search, taking the Select
+                    // button with it — so the results get their own, with All/None alongside.
+                    Button {
+                        if selecting { selecting = false; selection.removeAll() } else { selecting = true }
+                    } label: {
+                        chip(selecting ? "Done" : "Select")
+                            .foregroundStyle(selecting ? library.theme.accentColor : Color.primary)
+                    }
+                    if selecting {
+                        Button { toggleAll() } label: { chip(selection.count == selectableEntries.count ? "None" : "All") }
+                    }
+                }
                 Button {
                     showFavoritesOnly.toggle()
                     if showFavoritesOnly { showAIOnly = false; showEditedOnly = false; tsLabelFilter.removeAll(); tsNoLabel = false; tagFilters.removeAll(); noTagsFilter = false }
@@ -2197,6 +2300,7 @@ struct FolderView: View {
                 if !labelMode {
                     Menu {
                         Button { yearFilter = nil } label: { check("All Years", yearFilter == nil) }
+                            .onAppear { if isRoot { deepYearsRequested = true } }     // the menu opened: Home needs every file's year
                         ForEach(availableYears, id: \.self) { year in
                             Button { yearFilter = year } label: { check(String(year), yearFilter == year) }
                         }
@@ -2322,12 +2426,20 @@ struct FolderView: View {
                     }
 
                     if !tagOptions.isEmpty || !tagFilters.isEmpty || noTagsFilter || !library.tags.isEmpty {
-                        // Several tags can be on at once; a file must carry all of them. The counts say what
-                        // each further tag would narrow the current selection to. "No Tags" is the rest.
+                        // Several tags can be on at once: a file must carry all of them, or — Match any — at
+                        // least one. In All mode the counts say what each further tag would narrow the
+                        // selection to; in Any mode, what it would add. "No Tags" is the rest.
                         Menu {
                             if !tagFilters.isEmpty || noTagsFilter {
                                 Button(role: .destructive) { tagFilters.removeAll(); noTagsFilter = false } label: {
                                     Label("Clear Tags", systemImage: "xmark.circle")
+                                }
+                                Divider()
+                            }
+                            if !tagFilters.isEmpty {
+                                Picker("Match", selection: $tagMatchAny) {
+                                    Text("Match all of these tags").tag(false)
+                                    Text("Match any of these tags").tag(true)
                                 }
                                 Divider()
                             }
@@ -2342,7 +2454,7 @@ struct FolderView: View {
                             chip(noTagsFilter ? "No Tags"
                                  : tagFilters.isEmpty ? "Tags"
                                  : tagFilters.count == 1 ? "Tag: \(tagFilters.first ?? "")"
-                                 : "Tags: \(tagFilters.count)")
+                                 : "Tags: \(tagFilters.count)\(tagMatchAny ? " (any)" : "")")
                                 .foregroundStyle(!tagFilters.isEmpty || noTagsFilter ? library.theme.accentColor : Color.primary)
                         }
                     }
@@ -2372,21 +2484,46 @@ struct FolderView: View {
         }
     }
 
-    /// Adds one tag to every selected item (the "Add Tag…" prompt); one save for the batch.
+    /// Adds one tag to every target item (the "Add Tag…" prompt); one save for the batch.
     private func bulkAddTag(_ raw: String) {
         let tag = Library.normalizedTag(raw)
-        bulkTagDraft = ""
+        let urls = tagTargetURLs
+        bulkTagDraft = ""; tagTargets = nil
         guard !tag.isEmpty else { return }
-        let urls = selectedEntries().map(\.url)
         let n = library.addTag(tag, to: urls)
         resultMessage = n == 0 ? "Every selected item already has “\(tag)”."
             : "Tagged \(n) item\(n == 1 ? "" : "s") “\(tag)”" + (n < urls.count ? " (\(urls.count - n) already had it)." : ".")
     }
 
-    /// The Tags submenu's existing-tag rows: adds the tag to every selected item, or removes it from
-    /// all of them when they already all carry it.
-    private func bulkToggleTag(_ tag: String) {
-        let urls = selectedEntries().map(\.url)
+    /// The Tags submenu, for one item (long-press) or the selection: "Add Tag…" first, then every tag
+    /// in use, alphabetically, checked when all the targets carry it — tap adds it to all, or takes it
+    /// off all when they all have it already. `.menuOrder(.fixed)` keeps "Add Tag…" on top even when
+    /// the menu opens upward from the selection bar.
+    @ViewBuilder private func tagMenu(for urls: [URL]) -> some View {
+        Menu {
+            Button {
+                bulkTagDraft = ""; tagTargets = urls
+                // Defer so the Menu's dismissal doesn't swallow the alert (constraint #4).
+                DispatchQueue.main.async { showBulkTag = true }
+            } label: { Label("Add Tag…", systemImage: "plus") }
+            if !library.allTags.isEmpty {
+                Divider()
+                ForEach(library.allTags, id: \.self) { tag in
+                    Button { toggleTag(tag, on: urls) } label: {
+                        check(tag, !urls.isEmpty && urls.allSatisfy { library.hasTag(tag, $0) })
+                    }
+                }
+            }
+        } label: { Label("Tags", systemImage: "number") }
+        .menuOrder(.fixed)
+    }
+
+    /// The items the "Add Tag…" prompt applies to: a long-pressed item, else the selection.
+    private var tagTargetURLs: [URL] { tagTargets ?? selectedEntries().map(\.url) }
+
+    /// A tag row in `tagMenu`: adds the tag to every target, or removes it from all of them when they
+    /// already all carry it.
+    private func toggleTag(_ tag: String, on urls: [URL]) {
         guard !urls.isEmpty else { return }
         if urls.allSatisfy({ library.hasTag(tag, $0) }) {
             let n = library.removeTag(tag, from: urls)
@@ -2400,7 +2537,10 @@ struct FolderView: View {
     /// Tags under this folder and its subfolders, with counts (recomputed as `library.tags` changes);
     /// with tags already selected, the counts are within that selection.
     private var tagOptions: [Library.TagCount] {
-        tagsMemo.value(for: "\(library.labelsVersion)|\(tagFilters.sorted())") { library.tagCounts(under: url, having: tagFilters) }
+        tagsMemo.value(for: "\(library.labelsVersion)|\(tagFilters.sorted())|\(tagMatchAny)") {
+            // Any mode: each tag's own count (what choosing it adds); All mode: counts within the selection.
+            tagMatchAny ? library.tagCounts(under: url) : library.tagCounts(under: url, having: tagFilters)
+        }
     }
 
     private func hasTagFilter(_ tag: String) -> Bool {
@@ -2853,23 +2993,7 @@ struct FolderView: View {
                         }
                     } label: { Label(customLabelMenuTitle, systemImage: "tag") }
                 }
-                Menu {
-                    Button {
-                        bulkTagDraft = ""
-                        // Defer so the Menu's dismissal doesn't swallow the alert (constraint #4).
-                        DispatchQueue.main.async { showBulkTag = true }
-                    } label: { Label("Add Tag…", systemImage: "plus") }
-                    if !library.allTags.isEmpty {
-                        Divider()
-                        // Existing tags: a check when every selected item has it; tap adds it to all,
-                        // or takes it off all when they all have it already.
-                        ForEach(library.allTags.prefix(30), id: \.self) { tag in
-                            Button { bulkToggleTag(tag) } label: {
-                                check(tag, !selection.isEmpty && selectedEntries().allSatisfy { library.hasTag(tag, $0.url) })
-                            }
-                        }
-                    }
-                } label: { Label("Tags", systemImage: "number") }
+                tagMenu(for: selectedEntries().map(\.url))
                 if !library.pureTransferMode {   // pixel editing — not offered in Pure File Transfer
                 Menu {
                     Button { bulkRotate(2) } label: { Label("Rotate 180°", systemImage: "arrow.clockwise") }
@@ -3131,155 +3255,52 @@ struct FolderView: View {
         }
     }
 
-    /// Upscales the selected videos in place to the target resolution (short side
-    /// `target` px: 1080 or 2160), preserving HDR, metadata, labels, and capture
-    /// date; originals are replaced. Videos already at/above the target are skipped.
-    /// Bulk AI photo upscale to 2×, in place, EXIF/date preserved. Apple Photos "…preview" JPEGs get
-    /// a pipeline tuned for their compression artifacts (`enhancePreviewInPlace`); everything else
-    /// uses the standard clarity enhance.
+    /// The selected photos, AI-upscaled 2× in place (EXIF/date kept) — queued as background work
+    /// (`Library.enqueueUpscale`, see UpscaleQueue.swift), so the grid stays usable; each gets the
+    /// "upscaled" tag when done.
     private func bulkUpscalePhotos() {
         let targets = selectedEntries().filter { $0.kind == .image }
         guard !targets.isEmpty else { resultMessage = "Select one or more photos."; return }
         selecting = false; selection.removeAll()
-        editLabel = "AI Upscaling photos…"; editProcessing = true; editProgress = 0
-        let bg = BackgroundTaskHolder(); bg.begin(name: "AI Upscale Photos")
-        Task {
-            let n = targets.count
-            var ok = 0, previews = 0
-            for (i, e) in targets.enumerated() {
-                let isPreview = PhotosBackupImporter.previewInfo(e.name).isPreview
-                let dates = try? e.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
-                let done = await Task.detached(priority: .userInitiated) {
-                    isPreview ? MediaEditing.enhancePreviewInPlace(url: e.url, scale: 2)
-                              : MediaEditing.enhancePhotoInPlace(url: e.url, scale: 2)
-                }.value
-                if done {
-                    ok += 1; if isPreview { previews += 1 }
-                    // The in-place re-encode resets the file dates — restore them (EXIF is preserved).
-                    var attrs: [FileAttributeKey: Any] = [:]
-                    if let c = dates?.creationDate { attrs[.creationDate] = c }
-                    if let m = dates?.contentModificationDate { attrs[.modificationDate] = m }
-                    if !attrs.isEmpty { try? FileManager.default.setAttributes(attrs, ofItemAtPath: e.url.path) }
-                }
-                editProgress = Double(i + 1) / Double(n)
-            }
-            editProcessing = false; bg.end()
-            resultMessage = "Upscaled \(ok) of \(n) photo\(n == 1 ? "" : "s") (2×)"
-                + (previews > 0 ? " — \(previews) tuned for Photos previews." : ".")
-            library.contentDidChange(under: url)
-            await reload()
-        }
+        library.enqueueUpscale(.init(urls: targets.map(\.url), kind: .photo(scale: 2), folder: url))
     }
 
+    /// Plain rescale of the selected videos to 1080p / 4K (HDR preserved), after the frame-rate prompt.
     private func bulkUpscale(to target: CGFloat, label: String) {
-        let targets = selectedEntries().filter { $0.kind == .video }
-        guard !targets.isEmpty else { resultMessage = "Select one or more videos."; return }
-        selecting = false; selection.removeAll()
-        editLabel = "Upscaling to \(label)…"; editProcessing = true; editProgress = 0
-        let bg = BackgroundTaskHolder(); bg.begin(name: "Upscale Videos")
-        Task {
-            var upscaled = 0, skipped = 0, failed = 0
-            let n = targets.count
-            for (i, e) in targets.enumerated() {
-                // Real progress: per-video index blended with the export's per-frame fraction.
-                switch await MediaEditing.upscaleVideo(url: e.url, targetShort: target, progress: { f in
-                    Task { @MainActor in editProgress = (Double(i) + f) / Double(n) }
-                }) {
-                case .upscaled: upscaled += 1
-                case .skipped:  skipped += 1
-                case .failed:   failed += 1
-                }
-                editProgress = Double(i + 1) / Double(n)
-            }
-            editProcessing = false; bg.end()
-            var msg = "Upscaled \(upscaled) video\(upscaled == 1 ? "" : "s") to \(label)."
-            if skipped > 0 { msg += " \(skipped) already ≥\(label)." }
-            if failed > 0 { msg += " \(failed) couldn’t be processed." }
-            resultMessage = msg
-            library.contentDidChange(under: url)
-            await reload()
-        }
+        askUpscale(selectedEntries().filter { $0.kind == .video }.map(\.url), target: target, label: label, enhance: false)
     }
 
-    /// Like `bulkUpscale`, but runs each frame through a Core Image enhancement pipeline
-    /// (denoise + unsharp detail recovery) as it upscales — sharper, cleaner output than a
-    /// plain rescale. SDR only; HDR videos fall back to the standard upscale so they aren't
-    /// tone-mapped. Replaces in place, preserving metadata/labels/date.
+    /// Like `bulkUpscale`, but each frame also goes through the Core Image enhancement pipeline
+    /// (denoise + unsharp detail recovery); HDR sources fall back to the plain rescale.
     private func bulkEnhance(to target: CGFloat, label: String) {
-        let targets = selectedEntries().filter { $0.kind == .video }
-        guard !targets.isEmpty else { resultMessage = "Select one or more videos."; return }
-        selecting = false; selection.removeAll()
-        editLabel = "Enhancing to \(label)…"; editProcessing = true; editProgress = 0
-        let bg = BackgroundTaskHolder(); bg.begin(name: "Enhance Videos")
-        Task {
-            var done = 0, skipped = 0, failed = 0
-            let n = targets.count
-            for (i, e) in targets.enumerated() {
-                switch await MediaEditing.enhanceVideo(url: e.url, targetShort: target, progress: { f in
-                    Task { @MainActor in editProgress = (Double(i) + f) / Double(n) }
-                }) {
-                case .upscaled: done += 1
-                case .skipped:  skipped += 1
-                case .failed:   failed += 1
-                }
-                editProgress = Double(i + 1) / Double(n)
-            }
-            editProcessing = false; bg.end()
-            var msg = "Enhanced \(done) video\(done == 1 ? "" : "s") to \(label)."
-            if skipped > 0 { msg += " \(skipped) already ≥\(label)." }
-            if failed > 0 { msg += " \(failed) couldn’t be processed." }
-            resultMessage = msg
-            library.contentDidChange(under: url)
-            await reload()
-        }
+        askUpscale(selectedEntries().filter { $0.kind == .video }.map(\.url), target: target, label: label, enhance: true)
     }
 
-    /// "AI Upscale" a single photo in place: light denoise + sharpen + a 1.5× resolution bump,
-    /// metadata preserved. Shows the shared processing overlay; reloads when done.
+    /// "AI Upscale" a single photo (long-press): denoise + sharpen + a 1.5× bump, in place, queued.
     private func aiUpscale(_ entry: Entry) {
-        editLabel = "AI Upscaling…"; editProcessing = true; editProgress = 0
-        let bg = BackgroundTaskHolder(); bg.begin(name: "AI Upscale")
-        // Apple Photos "…preview" JPEGs use the tuned 2× pipeline; other photos the standard 1.5× enhance.
-        let isPreview = PhotosBackupImporter.previewInfo(entry.name).isPreview
-        let dates = try? entry.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
-        Task {
-            let ok = await Task.detached(priority: .userInitiated) {
-                isPreview ? MediaEditing.enhancePreviewInPlace(url: entry.url, scale: 2)
-                          : MediaEditing.enhancePhotoInPlace(url: entry.url, scale: 1.5)
-            }.value
-            if ok {
-                var attrs: [FileAttributeKey: Any] = [:]
-                if let c = dates?.creationDate { attrs[.creationDate] = c }
-                if let m = dates?.contentModificationDate { attrs[.modificationDate] = m }
-                if !attrs.isEmpty { try? FileManager.default.setAttributes(attrs, ofItemAtPath: entry.url.path) }
-            }
-            editProgress = 1
-            editProcessing = false; bg.end()
-            resultMessage = ok ? "Upscaled “\(entry.name)”\(isPreview ? " (preview-tuned 2×)" : "")." : "Couldn’t upscale “\(entry.name)”."
-            library.contentDidChange(under: url)
-            await reload()
-        }
+        library.enqueueUpscale(.init(urls: [entry.url], kind: .photo(scale: 1.5), folder: url))
     }
 
-    /// "AI Upscale" a single video from the long-press menu — the HDR-preserving enhance
-    /// path (denoise + sharpen while rescaling; HDR videos fall back to a plain rescale so
-    /// their transfer isn't tone-mapped). Metadata/labels/date preserved.
+    /// "AI Upscale" a single video (long-press) — the enhance path, after the frame-rate prompt.
     private func aiUpscaleVideo(_ entry: Entry, to target: CGFloat, label: String) {
-        editLabel = "AI Upscaling to \(label)…"; editProcessing = true; editProgress = 0
-        let bg = BackgroundTaskHolder(); bg.begin(name: "AI Upscale Video")
-        Task {
-            let outcome = await MediaEditing.enhanceVideo(url: entry.url, targetShort: target, progress: { f in
-                Task { @MainActor in editProgress = f }
-            })
-            editProgress = 1; editProcessing = false; bg.end()
-            switch outcome {
-            case .upscaled: resultMessage = "Upscaled “\(entry.name)” to \(label)."
-            case .skipped:  resultMessage = "“\(entry.name)” is already ≥\(label)."
-            case .failed:   resultMessage = "Couldn’t upscale “\(entry.name)”."
-            }
-            library.contentDidChange(under: url)
-            await reload()
-        }
+        askUpscale([entry.url], target: target, label: label, enhance: true)
+    }
+
+    /// Every 1080p / 4K upscale first asks for the frame rate (30, 60, or the source's), then goes to
+    /// the background queue — the folder stays usable and the result arrives as a popup.
+    private func askUpscale(_ urls: [URL], target: CGFloat, label: String, enhance: Bool) {
+        guard !urls.isEmpty else { resultMessage = "Select one or more videos."; return }
+        selecting = false; selection.removeAll()
+        pendingUpscale = PendingUpscale(urls: urls, target: target, label: label, enhance: enhance)
+        DispatchQueue.main.async { showFrameRateChoice = true }      // defer past the menu dismissal (constraint #4)
+    }
+
+    private func startUpscale(frameRate: Double?) {
+        guard let p = pendingUpscale else { return }
+        pendingUpscale = nil
+        library.enqueueUpscale(.init(urls: p.urls,
+                                     kind: .video(targetShort: p.target, label: p.label, frameRate: frameRate, enhance: p.enhance),
+                                     folder: url))
     }
 
     private func startBulkMetadataEdit() {

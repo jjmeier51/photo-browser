@@ -232,19 +232,24 @@ enum FileActions {
         for i in items { try? FileManager.default.removeItem(atPath: i.trashedPath) }
     }
 
-    /// Copies each file in place as "<name> copy.ext" (non-colliding). Returns the count.
+    /// Copies each file in place as "<name> copy.ext" (non-colliding). Returns the (original, copy)
+    /// pairs so the caller can carry the original's labels, caption and tags over to the copy
+    /// (`Library.duplicateMetadata`).
     @discardableResult
-    static func duplicate(_ entries: [Entry]) -> Int {
-        var count = 0
+    static func duplicate(_ entries: [Entry]) -> [(source: URL, copy: URL)] {
+        var pairs: [(source: URL, copy: URL)] = []
         for e in entries where !e.isFolder {
             let folder = e.url.deletingLastPathComponent()
             let base = e.url.deletingPathExtension().lastPathComponent
             let ext = e.url.pathExtension
             let name = ext.isEmpty ? "\(base) copy" : "\(base) copy.\(ext)"
             let dest = uniqueDestination(for: name, in: folder)
-            if (try? DriveWriter.copyItem(at: e.url, to: dest)) != nil { DriveWriter.fullSyncFileAndParent(dest); count += 1 }
+            if (try? DriveWriter.copyItem(at: e.url, to: dest)) != nil {
+                DriveWriter.fullSyncFileAndParent(dest)
+                pairs.append((e.url, dest))
+            }
         }
-        return count
+        return pairs
     }
 
     @discardableResult

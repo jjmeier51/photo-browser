@@ -1015,6 +1015,35 @@ iOS 17+). `.webm` is classified as video (`webVideoExtensions`) and:
 - Other AVFoundation features (Video Editor import, trim, bulk rotate, frame export, duration
   badge) don't support WebM.
 
+## 6f. Home-wide filters, Any-tag matching, upscale queue (Oct 23, 2026)
+
+- **Home looks through the whole drive.** At the root, a Type / Format / Resolution / Year / Location /
+  Edited / Categories filter switches `filteredRaw` to `deepMedia` — every file in `library.index`, in
+  the current sort — instead of the top level's own listing (`deepFilterActive`; tags, age, favorites
+  and search already covered the subtree). The loaders follow: specs/places/capture dates run over
+  the deep list (missing entries only, merged in), the Year menu at Home triggers a drive-wide
+  capture-date pass (`deepYearsRequested`, mostly cache hits — the index build prewarms them), the
+  Location menu at Home reads the whole drive's places (ceiling 200k files instead of 8k), and
+  Categories at Home stat every folder in the index (`deepGalleryFolders`, via `labeledEntries`) so
+  galleries two levels down are found. First passes over an unindexed set (resolution, places) are
+  slow by nature; repeats are cached.
+- **Match any.** The Tags chip's picker (`tagMatchAny`) switches `taggedPaths(under:tags:any:)` from
+  "every tag" to "at least one"; the counts then are each tag's own (`tagCounts(under:)`), i.e. what
+  choosing it adds. The header joins the tags with "or".
+- **Tags from a long-press.** `tagMenu(for:)` serves both the thumbnail context menu and the
+  selection bar: "Add Tag…" (one prompt, `tagTargets` says which items) first, then every tag
+  alphabetically with a check when all targets carry it; `.menuOrder(.fixed)` stops iOS reversing the
+  order when the selection-bar menu opens upward (which put "Add Tag…" at the bottom).
+- **Search results select.** The navigation bar hides behind the active search field, taking the
+  Select button with it; the chip bar now carries Select / Done / All while a search is submitted.
+- **Upscales in the background.** `Library.enqueueUpscale` (`UpscaleQueue.swift`) runs one batch at a
+  time as an activity (the progress pill), so the user keeps browsing; 1080p / 4K video upscales ask
+  for the frame rate first (`askUpscale` → the Frame Rate alert → 30 / 60 / source; `MediaEditing.
+  upscaleVideo(frameRate:)` and `enhanceVideo(frameRate:)` retime the composition — 60 from 30 repeats
+  frames, no interpolation). Every upscaled item gets the "upscaled" tag; the in-place re-encode
+  keeps its labels, caption and tags. Duplicate now returns (original, copy) pairs and
+  `duplicateMetadata` carries every path-keyed store over to the copy.
+
 ## 6d. Appearance — `AppTheme`, `AppearanceView`, `Library.theme` (Oct 21, 2026)
 
 Settings ▸ Appearance. `AppTheme` is one `Codable` value: `background` (`.solid(RGB)` or

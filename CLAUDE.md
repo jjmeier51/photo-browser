@@ -60,7 +60,10 @@ actions the app makes no network calls.
   photos/videos; New Folder / rename / move; name search; sort by
   name/date/size/age; filters for type, year (EXIF date), location (GPS reverse-geocoded to
   "City, ST" / "City, Country" with counts, via the place index), tags (recursive, with
-  counts; several at once — a file must carry all of them; "No Tags" for what's untagged), resolution/HDR, age; the chip bar runs Favorites, Type, Format, Sort, Year, then the rest;
+  counts; several at once — a file must carry all of them, or any one with "Match any"; "No Tags"
+  for what's untagged), resolution/HDR, age; the chip bar runs Favorites, Type, Format, Sort, Year,
+  then the rest; **at Home every one of these filters looks through the whole drive** (the full
+  index — `deepFilterActive` in `FolderView`), not just the top level;
   Favorites / "To AI" modes; a **Categories** filter on folders whose subfolders hold
   `gallery.json` sidecars (from `mac/pornpics_*.py` and `mac/imagefap_downloader.py`) — galleries
   must carry every selected category; the sidecars (`gallery.json`, `pornstar.json`, `search.json`)
@@ -78,13 +81,19 @@ actions the app makes no network calls.
   `WebMPlayer`)
 - **Info panel** (swipe-up) — date, device, dimensions, size, GPS →
   reverse-geocoded place, "Saved from" (xattrs), Age, inline caption edit, tags (one at a
-  time, with suggestions).
+  time, with suggestions). Tags are also applied from a thumbnail's long-press menu and the
+  selection bar (`tagMenu`: "Add Tag…" first, then every tag alphabetically, `.menuOrder(.fixed)`).
 - **Editing** — crop/rotate saved **in place** over the original (no duplicate),
   preserving EXIF/creation metadata, under a best-effort background-task window;
   bulk **rotate** (180°/left/right, mainly to fix upside-down videos) on a
   multi-selection; metadata editor (capture date + location, photos & videos),
   album covers (from a photo or a video frame, with cropper), captions (app
-  overrides + pull-in of embedded IPTC/EXIF). (`MediaEditor`)
+  overrides + pull-in of embedded IPTC/EXIF). (`MediaEditor`) **Upscales** (1080p / 4K video, AI
+  photo) run as background activities through `Library.enqueueUpscale` (`UpscaleQueue.swift`):
+  a video upscale first asks for the frame rate (30 / 60 / source — the composition is retimed,
+  no interpolation), everything that comes out upscaled gets the "upscaled" tag, and the outcome
+  is an activity popup. Duplicate copies the original's metadata (labels, caption, tags) to the copy
+  via `duplicateMetadata`.
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,
   "Add from iOS Album" (import then delete the iOS originals), save drive media
   to Photos, capture/export HDR-preserving video frames. (`PhotosLibraryView`,

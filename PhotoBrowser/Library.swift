@@ -956,13 +956,17 @@ final class Library {
         taggedPaths(under: folder, tags: [tag])
     }
 
-    /// Files under `folder` carrying **every** tag in `wanted` (case-insensitive); empty when nothing is wanted.
-    func taggedPaths(under folder: URL, tags wanted: Set<String>) -> Set<String> {
+    /// Files under `folder` carrying **every** tag in `wanted` — or, with `any`, **at least one** of
+    /// them (case-insensitive); empty when nothing is wanted.
+    func taggedPaths(under folder: URL, tags wanted: Set<String>, any: Bool = false) -> Set<String> {
         guard !wanted.isEmpty else { return [] }
         let root = folder.path, prefix = root + "/"
         let keys = Set(wanted.map { $0.lowercased() })
-        return Set(tags.filter { ($0.key == root || $0.key.hasPrefix(prefix))
-                                 && keys.isSubset(of: Set($0.value.map { $0.lowercased() })) }.keys)
+        return Set(tags.filter { entry in
+            guard entry.key == root || entry.key.hasPrefix(prefix) else { return false }
+            let have = Set(entry.value.map { $0.lowercased() })
+            return any ? !keys.isDisjoint(with: have) : keys.isSubset(of: have)
+        }.keys)
     }
 
     /// Like `tagCounts(under:)`, but counting only the files that already carry every tag in `having`
@@ -1404,6 +1408,9 @@ final class Library {
     }
     var activities: [Activity] = []
     var activityResults: [String] = []    // completion messages → shown as popups, oldest first
+    /// Queued upscales (see `UpscaleQueue.swift`): one batch runs at a time, as an activity.
+    @ObservationIgnored var upscaleJobs: [UpscaleJob] = []
+    @ObservationIgnored var upscaleRunning = false
 
     @discardableResult
     func beginActivity(_ title: String, indeterminate: Bool = false) -> UUID {
