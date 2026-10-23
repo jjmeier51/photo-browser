@@ -228,6 +228,26 @@ open "mac/Safe Finder.command"                     # or double-click it in Finde
 mac/.venv/bin/python mac/safe_finder.py --from ~/Downloads --to "/Volumes/Extreme SSD"
 ```
 
+### Sizes, a size filter, empty folders, and the Trash
+
+- **Folder sizes.** Each pane adds up what its folders hold, in the background, and shows it in the
+  list view's Size column (and the folder's tooltip); "Calculate Folder Sizes" in the Sort menu turns
+  it off. Sort by Size orders folders by what they hold. The status line shows the selection's size;
+  the Move/Copy summary counts folders by it too.
+- **Size filter.** The funnel button next to Sort narrows the listing (or search results) to Empty
+  (0 KB), under 1 MB, or 1 MB / 10 MB / 100 MB / 1 GB and up — folders by their calculated size (one
+  not calculated yet still shows, except under "Empty"). The status line says how many are shown.
+  In a search, `size:>100mb`, `size:<1gb` or `size:0` does the same for files (`size:>1gb` alone
+  finds the big ones).
+- **Empty Folders** in the sidebar: every folder under Documents, Pictures, Movies and Downloads with
+  nothing in it (0 KB — dot files like .DS_Store don't count; a folder holding only empty folders is
+  listed once, as itself). Click one to see it in its folder, selected; click "All Empty Folders"
+  for the whole list on the From side, where you can select them all and press ⌘⌫. The list refreshes
+  after a transfer or a delete, and when you open the collection.
+- **Move to Trash.** Select files or folders — in a folder, in search results, All Videos or Empty
+  Folders, on either side — and press ⌘⌫ (or right-click ▸ Move to Trash). It asks first, with the
+  names and the size, and uses the system Trash, so it can be undone from there.
+
 ### Install it as a Mac app
 
 ```sh

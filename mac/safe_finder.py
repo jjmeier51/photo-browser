@@ -339,6 +339,25 @@ def glyph(name: str, color: str | None = None, size: int = 16) -> QIcon:
         path.lineTo(s * 0.42, s * 0.64)
         path.closeSubpath()
         p.drawPath(path)
+    elif name == "funnel":                                 # a filter
+        path = QPainterPath()
+        path.moveTo(s * 0.12, s * 0.18)
+        path.lineTo(s * 0.88, s * 0.18)
+        path.lineTo(s * 0.58, s * 0.52)
+        path.lineTo(s * 0.58, s * 0.82)
+        path.lineTo(s * 0.42, s * 0.74)
+        path.lineTo(s * 0.42, s * 0.52)
+        path.closeSubpath()
+        p.drawPath(path)
+    elif name == "trash":                                  # a bin with its lid
+        p.drawLine(QPoint(int(s * 0.14), int(s * 0.26)), QPoint(int(s * 0.86), int(s * 0.26)))
+        p.drawLine(QPoint(int(s * 0.38), int(s * 0.26)), QPoint(int(s * 0.38), int(s * 0.16)))
+        p.drawLine(QPoint(int(s * 0.38), int(s * 0.16)), QPoint(int(s * 0.62), int(s * 0.16)))
+        p.drawLine(QPoint(int(s * 0.62), int(s * 0.16)), QPoint(int(s * 0.62), int(s * 0.26)))
+        p.drawPolyline([QPoint(int(s * 0.22), int(s * 0.26)), QPoint(int(s * 0.28), int(s * 0.86)),
+                        QPoint(int(s * 0.72), int(s * 0.86)), QPoint(int(s * 0.78), int(s * 0.26))])
+        p.drawLine(QPoint(int(s * 0.42), int(s * 0.4)), QPoint(int(s * 0.44), int(s * 0.72)))
+        p.drawLine(QPoint(int(s * 0.58), int(s * 0.4)), QPoint(int(s * 0.56), int(s * 0.72)))
     elif name == "arrow":
         p.setPen(QPen(c, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         p.drawLine(QPoint(int(s * 0.15), int(s * 0.5)), QPoint(int(s * 0.82), int(s * 0.5)))
@@ -744,6 +763,7 @@ class ListView(DropMixin, QTreeView):
 
 VIDEOS = "safe-finder://videos"                 # the "All Videos" collection
 SEARCH = "safe-finder://search/"                # + a number: one search's results (see Pane.searches)
+EMPTY = "safe-finder://empty"                   # the "Empty Folders" collection (see empty_roots)
 _R_PATH, _R_MTIME, _R_SIZE, _R_ISDIR = 258, 259, 260, 261    # roles on a results row (256/257: the sidebar's)
 KIND_EXT = {
     "image": IMAGE_EXT, "video": VIDEO_EXT, "raw": RAW_EXT, "pdf": {".pdf"},
@@ -772,6 +792,57 @@ SORT_KEYS = [("name", "Name"), ("kind", "Kind"), ("modified", "Date Modified"), 
 DATE_KEYS = {"modified", "created", "added"}
 _COLUMN_KEY = {0: "name", 1: "size", 2: "kind", 3: "modified"}      # the list view's columns
 _KEY_COLUMN = {v: k for k, v in _COLUMN_KEY.items()}
+SIZE_FILTERS = [("", "Any size"), ("empty", "Empty (0 KB)"), ("<1m", "Under 1 MB"), (">=1m", "1 MB or more"),
+                (">=10m", "10 MB or more"), (">=100m", "100 MB or more"), (">=1g", "1 GB or more")]
+_UNITS = {"b": 1, "k": 1024, "kb": 1024, "m": 1024 ** 2, "mb": 1024 ** 2, "g": 1024 ** 3, "gb": 1024 ** 3,
+          "t": 1024 ** 4, "tb": 1024 ** 4}
+
+
+def parse_size(text: str) -> int | None:
+    """"100mb", "1.5 GB", "0", "empty" → bytes; None when it isn't a size."""
+    t = text.strip().lower().replace(" ", "")
+    if t in ("0", "empty", "zero"):
+        return 0
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)([kmgt]?b?)", t)
+    if not m:
+        return None
+    return int(float(m.group(1)) * _UNITS.get(m.group(2) or "b", 1))
+
+
+def size_bounds(spec: str) -> tuple[int | None, int | None] | None:
+    """A size spec ("empty", "<1m", ">=10m", ">100mb", "<=2gb") → (min, max) in bytes, inclusive;
+    None when it means any size."""
+    t = spec.strip().lower().replace(" ", "")
+    if not t:
+        return None
+    if t in ("empty", "0", "zero"):
+        return (0, 0)
+    m = re.fullmatch(r"(>=|<=|>|<|=)?(.+)", t)
+    op, n = (m.group(1) or "="), parse_size(m.group(2)) if m else None
+    if n is None:
+        return None
+    if op == ">":
+        return (n + 1, None)
+    if op == ">=":
+        return (n, None)
+    if op == "<":
+        return (None, max(n - 1, 0))
+    if op == "<=":
+        return (None, n)
+    return (n, n)
+
+
+def size_label(bounds: tuple[int | None, int | None] | None) -> str:
+    if bounds is None:
+        return ""
+    lo, hi = bounds
+    if lo == 0 and hi == 0:
+        return "empty"
+    if lo is not None and hi is None:
+        return f"{human(lo)} or more"
+    if lo is None and hi is not None:
+        return f"under {human(hi + 1)}"
+    return f"{human(lo or 0)}–{human(hi or 0)}"
 
 
 def mac_roots() -> list[Path]:
@@ -780,6 +851,17 @@ def mac_roots() -> list[Path]:
     overrides it (tests)."""
     env = os.environ.get("SAFE_FINDER_SEARCH_ROOTS")
     return [Path(p) for p in env.split(":") if p] if env else [Path.home()]
+
+
+def empty_roots() -> list[Path]:
+    """Where the sidebar looks for empty folders: Documents, Pictures, Movies and Downloads — the
+    places downloads and exports pile up and leave husks behind. SAFE_FINDER_EMPTY_ROOTS=a:b
+    overrides it (tests)."""
+    env = os.environ.get("SAFE_FINDER_EMPTY_ROOTS")
+    if env:
+        return [Path(p) for p in env.split(":") if p]
+    home = Path.home()
+    return [home / n for n in ("Documents", "Pictures", "Movies", "Downloads") if (home / n).is_dir()]
 
 
 def kind_name(path: str, is_dir: bool) -> str:
@@ -838,12 +920,14 @@ def file_times(path: str) -> tuple[float, float]:
 
 class Query:
     """What a search looks for: words that must all appear in the name, extensions (".heic",
-    "*.mov", "ext:mp4,mov") and a kind ("kind:video", or the Kind menu). All of it must match."""
+    "*.mov", "ext:mp4,mov"), a kind ("kind:video", or the Kind menu) and a size ("size:>100mb",
+    "size:<1gb", "size:0"). All of it must match."""
 
     def __init__(self, text: str = "", kind: str = "") -> None:
         self.text = text.strip()
         self.words: list[str] = []
         self.exts: set[str] = set()
+        self.size: tuple[int | None, int | None] | None = None   # (min, max) bytes, files only
         self.menu_kind = kind if kind in KIND_EXT else ""      # the Kind menu's choice, as such
         self.kind = self.menu_kind                              # …which "kind:" in the text overrides
         for tok in self.text.split():
@@ -851,6 +935,8 @@ class Query:
             if low.startswith("kind:"):
                 if low[5:] in KIND_EXT:
                     self.kind = low[5:]
+            elif low.startswith("size:"):
+                self.size = size_bounds(low[5:])
             elif low.startswith("ext:"):
                 self.exts |= {"." + e.strip(". ") for e in low[4:].split(",") if e.strip(". ")}
             elif low.startswith("*.") and len(low) > 2:
@@ -861,11 +947,17 @@ class Query:
                 self.words.append(low)
 
     def empty(self) -> bool:
-        return not (self.words or self.exts or self.kind)
+        return not (self.words or self.exts or self.kind or self.size)
 
     def wants_folders(self) -> bool:
-        """A search by name finds folders too; one by extension or kind is about files."""
-        return bool(self.words) and not self.exts and not self.kind
+        """A search by name finds folders too; one by extension, kind or size is about files."""
+        return bool(self.words) and not self.exts and not self.kind and not self.size
+
+    def matches_size(self, size: int) -> bool:
+        if self.size is None:
+            return True
+        lo, hi = self.size
+        return (lo is None or size >= lo) and (hi is None or size <= hi)
 
     def matches(self, name: str) -> bool:
         low = name.lower()
@@ -880,6 +972,8 @@ class Query:
         bits = [self.text] if self.text else []
         if self.kind and f"kind:{self.kind}" not in self.text.lower():
             bits.append(dict(KIND_LABELS)[self.kind])
+        if self.size and "size:" not in self.text.lower():
+            bits.append(size_label(self.size))
         return " · ".join(bits)
 
     def spotlight(self) -> str:
@@ -890,6 +984,12 @@ class Query:
         exts = self.exts & KIND_EXT[self.kind] if (self.exts and self.kind) else self.exts or (KIND_EXT[self.kind] if self.kind else set())
         if exts:
             parts.append("(" + " || ".join(f'kMDItemFSName == "*{e}"c' for e in sorted(exts)) + ")")
+        if self.size:
+            lo, hi = self.size
+            if lo is not None:
+                parts.append(f"kMDItemFSSize >= {lo}")
+            if hi is not None:
+                parts.append(f"kMDItemFSSize <= {hi}")
         return " && ".join(parts) or 'kMDItemFSName == "*"'
 
 
@@ -978,6 +1078,8 @@ class FileScanner:
                         stack.append((e.path, dev, False))
                     elif e.is_file(follow_symlinks=False) and self.query.matches(name):
                         st = e.stat(follow_symlinks=False)
+                        if not self.query.matches_size(st.st_size):
+                            continue
                         batch.append((e.path, st.st_size, st.st_mtime, False))
                 except OSError:
                     continue
@@ -1027,6 +1129,8 @@ class FileScanner:
                 is_dir = stat.S_ISDIR(st.st_mode)
                 if is_dir and not self.folders:
                     continue
+                if not is_dir and not self.query.matches_size(st.st_size):
+                    continue
                 batch.append((path, 0 if is_dir else st.st_size, st.st_mtime, is_dir))
                 if len(batch) >= 250 or time.monotonic() - flushed > 0.4:
                     total += len(batch)
@@ -1038,6 +1142,163 @@ class FileScanner:
             total += len(batch)
             self.signals.found.emit(batch)
         return total
+
+
+def dir_size(folder: str, stop: threading.Event | None = None) -> int:
+    """Bytes of every file under `folder` — dot items skipped, symlinks not followed, nothing on a
+    volume mounted inside it. What Finder's "Calculate all sizes" shows, minus the .DS_Store noise."""
+    total = 0
+    try:
+        dev = os.stat(folder).st_dev
+    except OSError:
+        return 0
+    stack = [folder]
+    while stack and not (stop is not None and stop.is_set()):
+        try:
+            with os.scandir(stack.pop()) as it:
+                for e in it:
+                    if e.name.startswith("."):
+                        continue
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            if e.stat(follow_symlinks=False).st_dev == dev:
+                                stack.append(e.path)
+                        elif e.is_file(follow_symlinks=False):
+                            total += e.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total
+
+
+class FolderSizer(QObject):
+    """Recursive folder sizes on a background thread, cached for the session. A pane asks for the
+    folders it shows (`request`); each size comes back through `ready` and goes into the list's Size
+    column, the size sort, the size filter and the status line. The cache is dropped after a
+    transfer or a delete (`clear`), since sizes up the tree changed."""
+
+    ready = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sizes: dict[str, int] = {}
+        self._queue: list[str] = []
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        threading.Thread(target=self._run, name="folder-sizes", daemon=True).start()
+
+    def get(self, path: str) -> int | None:
+        return self.sizes.get(path)
+
+    def request(self, paths: list[str]) -> None:
+        with self._lock:
+            wanted = [p for p in paths if p not in self.sizes and p not in self._queue]
+            self._queue = wanted + self._queue              # what's on screen now goes first
+        if wanted:
+            self._wake.set()
+
+    def clear(self) -> None:
+        with self._lock:
+            self.sizes.clear()
+            self._queue.clear()
+
+    def _run(self) -> None:
+        while True:
+            self._wake.wait()
+            with self._lock:
+                if not self._queue:
+                    self._wake.clear()
+                    continue
+                path = self._queue.pop(0)
+            size = dir_size(path)
+            self.sizes[path] = size
+            self.ready.emit(path)
+
+
+_SIZER: FolderSizer | None = None
+
+
+def sizer() -> FolderSizer:
+    """The one folder-size worker (made on first use, from the GUI thread)."""
+    global _SIZER
+    if _SIZER is None:
+        _SIZER = FolderSizer()
+    return _SIZER
+
+
+def folder_size(path: str) -> int | None:
+    return _SIZER.sizes.get(path) if _SIZER is not None else None
+
+
+class EmptyFolderScanner:
+    """Finds the empty folders under `roots` — every folder whose files add up to 0 bytes (dot items
+    ignored), reported at its topmost level: a folder holding only empty folders is listed once, as
+    itself. The same signals as FileScanner, so a pane shows the result like a search."""
+
+    def __init__(self, roots: list[Path]) -> None:
+        self.roots = roots
+        self.signals = _ScanSignals()
+        self._stop = threading.Event()
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, name="empty-scan", daemon=True).start()
+
+    def cancel(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        batch: list[tuple[str, int, float, bool]] = []
+        for root in self.roots:
+            try:
+                dev = os.stat(root).st_dev
+            except OSError:
+                continue
+            for path, mtime in self._walk(str(root), dev, top=True)[1]:
+                batch.append((path, 0, mtime, True))
+                if len(batch) >= 100:
+                    self.signals.found.emit(batch)
+                    batch = []
+        if batch and not self._stop.is_set():
+            self.signals.found.emit(batch)
+        self.signals.done.emit(not self._stop.is_set())
+
+    def _walk(self, folder: str, dev: int, top: bool) -> tuple[int, list[tuple[str, float]]]:
+        """(bytes under `folder`, the topmost empty folders under it)."""
+        if self._stop.is_set():
+            return 1, []
+        total = 0
+        empties: list[tuple[str, float]] = []
+        try:
+            with os.scandir(folder) as it:
+                entries = list(it)
+        except OSError:
+            return 1, []                                     # unreadable: not something to call empty
+        for e in entries:
+            if e.name.startswith("."):
+                continue
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    if FileScanner._skip_dir(e.name, top):
+                        total += 1                            # a bundle counts as content
+                        continue
+                    st = e.stat(follow_symlinks=False)
+                    if st.st_dev != dev:
+                        total += 1
+                        continue
+                    sub, below = self._walk(e.path, dev, False)
+                    total += sub
+                    if sub == 0:
+                        empties.append((e.path, st.st_mtime))  # this folder, not what's inside it
+                    else:
+                        empties.extend(below)
+                elif e.is_file(follow_symlinks=False):
+                    total += e.stat(follow_symlinks=False).st_size
+                else:
+                    total += 1                                # a symlink or device is content
+            except OSError:
+                continue
+        return total, empties
 
 
 class ResultsModel(QStandardItemModel):
@@ -1165,7 +1426,59 @@ class PaneModel(QSortFilterProxyModel):
         self.key = "name"
         self._is_fs = True
         self._keys: dict[int, tuple] = {}            # node (fs) or row (results) → sort key, for `key`
+        self.show_sizes = True                       # folder sizes in the Size column (and the size sort)
+        self.size_filter: tuple[int | None, int | None] | None = None
+        self.root_path = ""                          # the folder listed — only its own rows are filtered
         self.setDynamicSortFilter(True)
+
+    def set_size_filter(self, bounds: tuple[int | None, int | None] | None) -> None:
+        self.size_filter = bounds
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, row: int, parent: QModelIndex) -> bool:  # noqa: N802
+        if self.size_filter is None:
+            return True
+        src = self.sourceModel()
+        if self._is_fs and (not parent.isValid() or src.filePath(parent) != self.root_path):
+            return True                              # never the listed folder's own ancestors
+        idx = src.index(row, 0, parent)
+        lo, hi = self.size_filter
+        if src.isDir(idx):
+            size = folder_size(src.filePath(idx))
+            if size is None:                         # not calculated yet: shown, except by "Empty" until known
+                return not (lo == 0 and hi == 0)
+        else:
+            size = src.size(idx)
+        return (lo is None or size >= lo) and (hi is None or size <= hi)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if self._is_fs and self.show_sizes and index.isValid() and self.isDir(index):
+            if index.column() == 1:
+                if role == Qt.ItemDataRole.DisplayRole:
+                    size = folder_size(self.filePath(index))
+                    return "—" if size is None else human(size)
+                if role == Qt.ItemDataRole.TextAlignmentRole:
+                    return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            elif index.column() == 0 and role == Qt.ItemDataRole.ToolTipRole:
+                size = folder_size(self.filePath(index))
+                return self.filePath(index) + ("" if size is None else f"\n{human(size)}")
+        return super().data(index, role)
+
+    def size_known(self, path: str) -> None:
+        """A folder's size came in: its row shows it; the order and the filter follow when they
+        depend on sizes."""
+        if not self._is_fs:
+            return
+        src_idx = self.sourceModel().index(path)
+        if not src_idx.isValid():
+            return
+        self._keys.pop(src_idx.internalId(), None)
+        if self.key == "size" or self.size_filter is not None:
+            self.invalidate()
+        idx = self.mapFromSource(src_idx)
+        if idx.isValid():
+            cell = idx.siblingAtColumn(1)
+            self.dataChanged.emit(cell, cell, [Qt.ItemDataRole.DisplayRole])
 
     def set_source(self, model: "QFileSystemModel | ResultsModel") -> None:
         self._is_fs = isinstance(model, QFileSystemModel)
@@ -1228,7 +1541,7 @@ class PaneModel(QSortFilterProxyModel):
         if key == "kind":
             return (group, "" if is_dir else os.path.splitext(name)[1].lower(), nat)
         if key == "size":
-            return (group, 0 if is_dir else src.size(idx), nat)
+            return (group, (folder_size(src.filePath(idx)) or 0) if is_dir else src.size(idx), nat)
         if key == "modified":
             return (group, src.lastModified(idx).toMSecsSinceEpoch(), nat)
         if key in ("created", "added"):
@@ -1267,6 +1580,7 @@ class Pane(QWidget):
         self.searches: dict[str, SearchRun] = {}               # location → what was searched, and where
         self._search_n = 0
         self._pending_reveal: str | None = None
+        self._note_at = 0.0              # when a transient note (AirDrop, Trash) took the status line
         self.folder_sort = (str(settings.value(f"{role}/sort", "name")), self._order(settings.value(f"{role}/order", "asc")))
         if self.folder_sort[0] not in dict(SORT_KEYS):
             self.folder_sort = ("name", Qt.SortOrder.AscendingOrder)
@@ -1293,7 +1607,12 @@ class Pane(QWidget):
         self.results.rowsRemoved.connect(lambda *_: self._status_soon.start())
         self.model = PaneModel(self)               # what the views show: fs or results, in the chosen order
         self.model.set_source(self.fs)
-        self.scanner: FileScanner | None = None
+        self.model.show_sizes = settings.value(f"{role}/sizes", "true") == "true"
+        self.size_filter_key = ""
+        self.scanner: FileScanner | EmptyFolderScanner | None = None
+        # Folder sizes arrive from the worker thread; the listing asks for its folders' as it loads.
+        sizer().ready.connect(self._size_ready, Qt.ConnectionType.QueuedConnection)
+        self.fs.directoryLoaded.connect(lambda _p: self._request_sizes())
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1326,6 +1645,10 @@ class Pane(QWidget):
         self.search.installEventFilter(self)
         h.addWidget(self.search)
         h.addSpacing(2)
+        self.filter_btn = self._tool("funnel", "Filter by size", None, "Nav")
+        self.filter_btn.setMenu(self._size_menu())
+        self.filter_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        h.addWidget(self.filter_btn)
         self.sort_btn = self._tool("sort", "Sort by", None, "Nav")
         self.sort_btn.setMenu(self._sort_menu())
         self.sort_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -1491,11 +1814,75 @@ class Pane(QWidget):
             a.setCheckable(True)
             orders.addAction(a)
             a.triggered.connect(lambda _=False, o=order: self.set_sort(self.current_sort()[0], o))
+        menu.addSeparator()
+        self.sizes_action = menu.addAction("Calculate Folder Sizes")
+        self.sizes_action.setCheckable(True)
+        self.sizes_action.setChecked(self.model.show_sizes)
+        self.sizes_action.setToolTip("Add up what each folder holds (in the background) — shown in the Size column, "
+                                     "used by the size sort and the size filter")
+        self.sizes_action.toggled.connect(self.set_show_sizes)
         return menu
+
+    def _size_menu(self) -> QMenu:
+        """The size filter: what the listing (or the results) shows, by size. Folders count by what
+        they hold, once calculated."""
+        menu = QMenu(self)
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        self.size_actions: dict[str, QAction] = {}
+        for key, label in SIZE_FILTERS:
+            a = menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(key == "")
+            group.addAction(a)
+            a.triggered.connect(lambda _=False, k=key: self.set_size_filter(k))
+            self.size_actions[key] = a
+            if key == "":
+                menu.addSeparator()
+        return menu
+
+    def set_size_filter(self, key: str) -> None:
+        self.size_filter_key = key if key in dict(SIZE_FILTERS) else ""
+        self.model.set_size_filter(size_bounds(self.size_filter_key))
+        self.size_actions[self.size_filter_key].setChecked(True)
+        label = dict(SIZE_FILTERS)[self.size_filter_key]
+        self.filter_btn.setToolTip("Filter by size" if not self.size_filter_key else f"Showing: {label} — click to change")
+        self.filter_btn.setIcon(glyph("funnel", THEME.accent if self.size_filter_key else THEME.secondary, 16))
+        if self.size_filter_key:
+            self._request_sizes()
+        self._status_soon.start()
+
+    def set_show_sizes(self, on: bool) -> None:
+        self.model.show_sizes = on
+        self.settings.setValue(f"{self.role}/sizes", "true" if on else "false")
+        self.model.forget_keys()
+        self.model.invalidate()
+        if on:
+            self._request_sizes()
+        self._status_soon.start()
+
+    def _request_sizes(self) -> None:
+        """Ask for the sizes of the folders in this listing (what's on screen is queued first)."""
+        if self.is_virtual or not self.location or not (self.model.show_sizes or self.size_filter_key):
+            return
+        root = self.fs.index(self.location)
+        paths = []
+        for r in range(self.fs.rowCount(root)):
+            idx = self.fs.index(r, 0, root)
+            if self.fs.isDir(idx):
+                paths.append(self.fs.filePath(idx))
+        if paths:
+            sizer().request(paths)
+
+    def _size_ready(self, path: str) -> None:
+        if not self.is_virtual and os.path.dirname(path.rstrip(os.sep)) == self.location:
+            self.model.size_known(path)
+            self._status_soon.start()
 
     def restyle(self) -> None:
         for b in (self.back_btn, self.fwd_btn, self.sort_btn, self.new_folder_btn, self.grid_btn, self.list_btn):
             b.setIcon(glyph(b.property("glyph"), THEME.secondary if b.objectName() == "Nav" else THEME.text, 16))
+        self.filter_btn.setIcon(glyph("funnel", THEME.accent if self.size_filter_key else THEME.secondary, 16))
         self._slider_icons()
         self.update_pathbar()
         self.grid.viewport().update()
@@ -1511,7 +1898,8 @@ class Pane(QWidget):
         for keys, slot in (("Ctrl+[", self.go_back), ("Ctrl+]", self.go_forward), ("Ctrl+Up", self.go_up),
                            ("Ctrl+Down", self.open_selected), ("Return", self.open_selected),
                            ("Space", self.quick_look), ("Ctrl+1", lambda: self.set_mode("grid")),
-                           ("Ctrl+2", lambda: self.set_mode("list")), ("Ctrl+Shift+N", self.new_folder)):
+                           ("Ctrl+2", lambda: self.set_mode("list")), ("Ctrl+Shift+N", self.new_folder),
+                           ("Ctrl+Backspace", self.delete_selection)):
             sc = QShortcut(QKeySequence(keys), self)
             sc.setContext(ctx)
             sc.activated.connect(slot)
@@ -1628,8 +2016,8 @@ class Pane(QWidget):
 
     # -- navigation
     def go(self, path: str, record: bool = True) -> None:
-        if path == VIDEOS:
-            self._show_results(VIDEOS, record)
+        if path in (VIDEOS, EMPTY):
+            self._show_results(path, record)
             return
         if path.startswith(SEARCH):
             if path in self.searches:
@@ -1652,6 +2040,7 @@ class Pane(QWidget):
             self.search.clear()
             self.search.blockSignals(False)
         self.location = self.folder = path
+        self.model.root_path = path
         idx = self.model.mapFromSource(self.fs.setRootPath(path))
         self.grid.setRootIndex(idx)
         self.list.setRootIndex(idx)
@@ -1727,9 +2116,11 @@ class Pane(QWidget):
         self.grid.scrollToTop()
         self.list.scrollToTop()
         self.new_folder_btn.setEnabled(False)
-        if loc == VIDEOS:
-            self.title.setText("All Videos")
-            self.title.setToolTip("Every video in your home folder")
+        if loc in (VIDEOS, EMPTY):
+            self.title.setText("All Videos" if loc == VIDEOS else "Empty Folders")
+            self.title.setToolTip("Every video in your home folder" if loc == VIDEOS else
+                                  "Folders in Documents, Pictures, Movies and Downloads with nothing in them (0 KB) — "
+                                  "select some and press ⌘⌫ to move them to the Trash")
             self.scopebar.hide()
         else:
             run = self.searches[loc]
@@ -1757,6 +2148,8 @@ class Pane(QWidget):
         self.model.forget_keys()
         if self.location == VIDEOS:
             scanner = FileScanner(mac_roots(), Query(kind="video"), folders=False)
+        elif self.location == EMPTY:
+            scanner = EmptyFolderScanner(empty_roots())
         else:
             run = self.searches[self.location]
             scanner = FileScanner(run.roots, run.query, folders=run.query.wants_folders(), spotlight=run.spotlight)
@@ -1855,10 +2248,11 @@ class Pane(QWidget):
             return
         if self.is_virtual:
             b = QToolButton(objectName="Crumb")
-            videos = self.location == VIDEOS
-            b.setText("All Videos" if videos else "Search results")
+            text, icon = {VIDEOS: ("All Videos", "film"), EMPTY: ("Empty Folders", "trash")}.get(
+                self.location, ("Search results", "search"))
+            b.setText(text)
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            b.setIcon(glyph("film" if videos else "search", THEME.accent, 14))
+            b.setIcon(glyph(icon, THEME.accent, 14))
             b.setIconSize(QSize(14, 14))
             b.setToolTip("Click to look again")
             b.clicked.connect(lambda _=False, loc=self.location: self.go(loc))
@@ -1888,28 +2282,51 @@ class Pane(QWidget):
         self.path_layout.addStretch(1)
 
     def update_status(self) -> None:
-        if not self.location:
+        if not self.location or time.monotonic() - self._note_at < 1.5:
             return
+        selected = self.selected_paths()
+        sel = len(selected)
+        chosen = self._selection_bytes(selected) if sel else 0
+        size_note = f" · {human(chosen)}" if chosen else ""
         if self.is_virtual:
             n = self.results.rowCount()
-            sel = len(self.selected_paths())
-            what = "video" if self.location == VIDEOS else "result"
-            text = f"{sel} of {n} selected" if sel else f"{n} {what}{'s' if n != 1 else ''}"
+            shown = self.model.rowCount()
+            what = {VIDEOS: "video", EMPTY: "empty folder"}.get(self.location, "result")
+            text = f"{sel} of {n} selected{size_note}" if sel else f"{n} {what}{'s' if n != 1 else ''}"
+            if shown != n:
+                text += f" ({shown} shown)"
             if self.scanner is not None:
                 text += " so far — still looking…"
             self.status.setText(text)
             self.fs_chip.setVisible(False)
             return
-        n = self.fs.rowCount(self.fs.index(self.location))
+        root = self.fs.index(self.location)
+        n = self.fs.rowCount(root)
+        shown = self.model.rowCount(self.model.mapFromSource(root))
         free = engine.free_space(Path(self.location))
-        sel = len(self.selected_paths())
-        text = f"{sel} of {n} selected" if sel else f"{n} item{'s' if n != 1 else ''}"
+        text = f"{sel} of {n} selected{size_note}" if sel else f"{n} item{'s' if n != 1 else ''}"
+        if self.size_filter_key and shown != n:
+            text += f" ({shown} shown — {dict(SIZE_FILTERS)[self.size_filter_key].lower()})"
         self.status.setText(f"{text}, {human(free)} available")
         fs = MOUNTS.get(str(engine.volume_root(Path(self.location))), "")
         self.fs_chip.setText(FS_NAMES.get(fs, fs))
         self.fs_chip.setVisible(bool(fs))
 
     # -- selection / actions
+    @staticmethod
+    def _selection_bytes(paths: list[str]) -> int:
+        """Files by their size, folders by their calculated size where it's known."""
+        total = 0
+        for p in paths:
+            if os.path.isdir(p):
+                total += folder_size(p) or 0
+            else:
+                try:
+                    total += os.path.getsize(p)
+                except OSError:
+                    pass
+        return total
+
     def selected_paths(self) -> list[str]:
         rows = self.grid.selectionModel().selectedIndexes()
         seen, out = set(), []
@@ -1960,8 +2377,52 @@ class Pane(QWidget):
         threading.Thread(target=work, daemon=True).start()
 
     def _airdrop_noted(self, line: str) -> None:
+        """A transient note on the status line (an AirDrop step, a Trash result): it holds against
+        the automatic refreshes for a moment, then the status comes back on its own."""
         self.status.setText(line)
+        self._note_at = time.monotonic()
         QTimer.singleShot(15000, self.update_status)
+
+    def _confirm(self, title: str, text: str, detail: str) -> bool:
+        box = QMessageBox(self.window())
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setInformativeText(detail)
+        go = box.addButton("Move to Trash", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(go)
+        box.exec()
+        return box.clickedButton() is go
+
+    def delete_selection(self) -> None:
+        """Move the selected files and folders to the Trash (recoverable), after a confirmation —
+        in a folder listing, search results, All Videos or Empty Folders alike."""
+        paths = self.selected_paths()
+        if not paths:
+            return
+        names = [os.path.basename(p.rstrip(os.sep)) for p in paths]
+        detail = "\n".join("• " + n for n in names[:8]) + (f"\n… and {len(names) - 8} more" if len(names) > 8 else "")
+        total = self._selection_bytes(paths)
+        what = f"“{names[0]}”" if len(paths) == 1 else f"these {len(paths)} items"
+        size = f" ({human(total)})" if total else ""
+        if not self._confirm("Move to Trash", f"Move {what} to the Trash?{size}",
+                             detail + "\n\nThey can be put back from the Trash."):
+            return
+        failed = [p for p in paths if not MainWindow.trash_item(Path(p))]
+        moved = len(paths) - len(failed)
+        sizer().clear()                                   # sizes up the tree changed
+        self.view().clearSelection()
+        self.refresh_results()
+        win = self.window()
+        if isinstance(win, MainWindow):
+            win.update_actions()
+            win.sidebar.refresh_empty()
+        if failed:
+            QMessageBox.warning(self.window(), "Move to Trash",
+                                f"{len(failed)} of {len(paths)} couldn't be moved to the Trash:\n"
+                                + "\n".join("• " + os.path.basename(f) for f in failed[:8]))
+        self._airdrop_noted(f"Moved {moved} item{'s' if moved != 1 else ''} to the Trash.")
 
     def new_folder(self) -> None:
         if not self.location or self.is_virtual:
@@ -2017,8 +2478,12 @@ class Pane(QWidget):
             if isinstance(win, MainWindow) and self is win.src:
                 menu.addAction(win.copy_btn.text(), lambda: win.transfer_selection(False))
                 menu.addAction(win.move_btn.text(), lambda: win.transfer_selection(True))
+            menu.addAction("Move to Trash", self.delete_selection).setShortcut(QKeySequence("Ctrl+Backspace"))
+            menu.addSeparator()
         if self.location == VIDEOS:
             menu.addAction("Look for Videos Again", lambda: self.go(VIDEOS))
+        elif self.location == EMPTY:
+            menu.addAction("Look for Empty Folders Again", lambda: self.go(EMPTY))
         elif self.is_search:
             menu.addAction("Search Again", lambda: self.go(self.location))
         else:
@@ -2086,12 +2551,19 @@ class SidebarTree(QTreeWidget):
         super().mousePressEvent(event)
 
 
+REVEAL_ROLE = 258                         # a sidebar row that reveals its folder (selects it in its parent)
+
+
 class Sidebar(QWidget):
     navigate = Signal(str)
     eject = Signal(str)
+    reveal = Signal(str)
 
     def __init__(self) -> None:
         super().__init__(objectName="Sidebar")
+        self.empty: list[str] = []              # the empty folders found under empty_roots()
+        self._empty_scan: EmptyFolderScanner | None = None
+        self._empty_found: list[str] = []
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 4, 0, 8)
         self.tree = SidebarTree(objectName="SidebarTree")
@@ -2116,6 +2588,31 @@ class Sidebar(QWidget):
         self._debounce.timeout.connect(self.rebuild)
         self.watcher.directoryChanged.connect(lambda _p: self._debounce.start())
         self.rebuild()
+        QTimer.singleShot(1200, self.refresh_empty)      # once the window is up: look for empty folders
+
+    def refresh_empty(self) -> None:
+        """Look for empty folders under Documents, Pictures, Movies and Downloads (background); the
+        section rebuilds when the scan is done."""
+        if self._empty_scan is not None:
+            self._empty_scan.cancel()
+        scan = EmptyFolderScanner(empty_roots())
+        self._empty_scan, self._empty_found = scan, []
+        queued = Qt.ConnectionType.QueuedConnection
+        scan.signals.found.connect(lambda batch, s=scan: self._empty_batch(s, batch), queued)
+        scan.signals.done.connect(lambda ok, s=scan: self._empty_done(s, ok), queued)
+        scan.start()
+
+    def _empty_batch(self, scan: EmptyFolderScanner, batch: list) -> None:
+        if scan is self._empty_scan:
+            self._empty_found.extend(path for path, _size, _mtime, _is_dir in batch)
+
+    def _empty_done(self, scan: EmptyFolderScanner, ok: bool) -> None:
+        if scan is not self._empty_scan:
+            return
+        self._empty_scan = None
+        if ok:
+            self.empty = sorted(self._empty_found, key=lambda p: natural_key(p))
+            self.rebuild()
 
     def _section(self, title: str) -> QTreeWidgetItem:
         it = QTreeWidgetItem([title])
@@ -2157,6 +2654,27 @@ class Sidebar(QWidget):
         self._entry(loc, boot_volume_name(), Path("/"))
         for v in external_volumes():
             self._entry(loc, v.name, v, ejectable=True)
+        # Empty folders (0 KB) under Documents, Pictures, Movies and Downloads: the collection
+        # first (all of them, for a bulk Move to Trash), then each one — a click shows it in its
+        # folder, selected, so ⌘⌫ is one keystroke away.
+        n = len(self.empty)
+        sec = self._section("Empty Folders" + (f" ({n})" if n else ""))
+        self._collection(sec, "All Empty Folders" if n else ("Looking…" if self._empty_scan else "None found"),
+                         EMPTY, glyph("trash", THEME.accent, 16),
+                         "Folders with nothing in them under Documents, Pictures, Movies and Downloads — "
+                         "shown on the From side; select some and press ⌘⌫")
+        cap = 40
+        for path in self.empty[:cap]:
+            it = QTreeWidgetItem([os.path.basename(path.rstrip(os.sep))])
+            it.setData(0, PATH_ROLE, path)
+            it.setData(0, EJECT_ROLE, False)
+            it.setData(0, REVEAL_ROLE, True)
+            it.setIcon(0, self.provider.icon(QFileInfo(path)))
+            it.setToolTip(0, path + " — empty; click to show it in its folder")
+            sec.addChild(it)
+        if n > cap:
+            self._collection(sec, f"… and {n - cap} more", EMPTY, glyph("trash", THEME.secondary, 16),
+                             "Open All Empty Folders to see every one")
         self.tree.expandAll()
         if selected:
             self.select_path(selected[0])
@@ -2172,7 +2690,11 @@ class Sidebar(QWidget):
 
     def _clicked(self, item: QTreeWidgetItem, _col: int) -> None:
         path = item.data(0, PATH_ROLE)
-        if path:
+        if not path:
+            return
+        if item.data(0, REVEAL_ROLE):
+            self.reveal.emit(path)
+        else:
             self.navigate.emit(path)
 
 
@@ -2446,6 +2968,7 @@ class MainWindow(QMainWindow):
         self.sidebar = Sidebar()
         self.sidebar.setMinimumWidth(170)
         self.sidebar.navigate.connect(self._navigate)
+        self.sidebar.reveal.connect(lambda path: self.active_pane.reveal(path))
         self.sidebar.eject.connect(self.eject)
         self.src = Pane("From", self.settings)
         self.dst = Pane("To", self.settings)
@@ -2526,9 +3049,11 @@ class MainWindow(QMainWindow):
         return self.src if self.src.active else self.dst
 
     def _navigate(self, path: str) -> None:
-        if path == VIDEOS:                     # a collection of the Mac's videos — always the From side
+        if path in (VIDEOS, EMPTY):            # a collection of the Mac's own — always the From side
             self.set_active(self.src)
-            self.src.go(VIDEOS)
+            self.src.go(path)
+            if path == EMPTY:
+                self.sidebar.refresh_empty()   # the sidebar's list looks again too
         else:
             self.active_pane.go(path)
 
@@ -2577,13 +3102,16 @@ class MainWindow(QMainWindow):
             self.summary.setText("Open a folder on the right to move or copy into — the right pane is showing search results.")
             return
         files = [p for p in paths if os.path.isfile(p)]
-        folders = len(paths) - len(files)
+        folders = [p for p in paths if p not in files]
         size = sum(os.path.getsize(p) for p in files)
+        known = [folder_size(p) for p in folders]
         bits = [f"{len(paths)} item{'s' if len(paths) != 1 else ''} selected"]
         if files:
             bits.append(f"{len(files)} file{'s' if len(files) != 1 else ''} · {human(size)}")
         if folders:
-            bits.append(f"{folders} folder{'s' if folders != 1 else ''}")
+            folder_bytes = sum(k for k in known if k is not None)
+            note = f" · {human(folder_bytes)}" if all(k is not None for k in known) else (f" · {human(folder_bytes)}+" if folder_bytes else "")
+            bits.append(f"{len(folders)} folder{'s' if len(folders) != 1 else ''}{note}")
         self.summary.setText("   ·   ".join(bits))
 
     # -- transfers
@@ -2653,8 +3181,10 @@ class MainWindow(QMainWindow):
 
     def _finished(self, st: dict) -> None:
         self.current = None
+        sizer().clear()                                   # folder sizes on both sides changed
         self.src.refresh_results()
         self.dst.refresh_results()
+        self.sidebar.refresh_empty()
         verb = "Moved" if "Moving" in self._title else "Copied"
         n_ok = st["copied"] + st["skipped"]
         secs = st["seconds"]
