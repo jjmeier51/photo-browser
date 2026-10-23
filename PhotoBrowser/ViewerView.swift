@@ -192,11 +192,14 @@ struct ViewerView: View {
 
     // MARK: - Item actions (Duplicate / Copy / Move / Delete)
 
+    /// Duplicates in place; the copy gets the original's labels, caption, tags and the rest of its
+    /// path-keyed metadata.
     private func duplicateCurrent() {
         guard let current else { return }
-        let n = FileActions.duplicate([current])
+        let pairs = FileActions.duplicate([current])
+        for pair in pairs { _ = library.duplicateMetadata(from: pair.source, to: pair.copy) }
         library.contentDidChange(under: current.url.deletingLastPathComponent())
-        note(n > 0 ? "Duplicated" : "Couldn’t duplicate")
+        note(pairs.isEmpty ? "Couldn’t duplicate" : "Duplicated")
     }
 
     private func copyCurrent(to dest: URL) {
