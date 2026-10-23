@@ -3143,7 +3143,8 @@ struct FolderView: View {
     // MARK: - Selection action bar
 
     private var selectionBar: some View {
-        HStack {
+        let selected = selectedEntries()      // once per render — the bar used to recompute it a dozen times over
+        return HStack {
             barButton("Delete", "trash", role: .destructive) { confirmDelete = true }
             Spacer()
             barButton("Favorite", "heart") { bulkFavorite() }
@@ -3160,12 +3161,12 @@ struct FolderView: View {
                     Menu {
                         ForEach(currentLabelSet, id: \.self) { name in
                             Button { bulkToggleTSLabel(name) } label: {
-                                check(name, !selection.isEmpty && selectedEntries().allSatisfy { library.hasLabel(name, $0.url) })
+                                check(name, !selection.isEmpty && selected.allSatisfy { library.hasLabel(name, $0.url) })
                             }
                         }
                     } label: { Label(customLabelMenuTitle, systemImage: "tag") }
                 }
-                tagMenu(for: selectedEntries().map(\.url))
+                tagMenu(for: selected.map(\.url))
                 if !library.pureTransferMode {   // pixel editing — not offered in Pure File Transfer
                 Menu {
                     Button { bulkRotate(2) } label: { Label("Rotate 180°", systemImage: "arrow.clockwise") }
@@ -3194,25 +3195,25 @@ struct FolderView: View {
                     Divider()
                     Button { bulkEnhance(to: 1080, label: "1080p") } label: { Label("AI Enhance to 1080p", systemImage: "wand.and.stars") }
                 } label: { Label("Upscale Video", systemImage: "arrow.up.right.video") }
-                if selectedEntries().contains(where: { $0.kind == .image }) {
+                if selected.contains(where: { $0.kind == .image }) {
                     Button { bulkUpscalePhotos() } label: {
                         Label("AI Upscale Photos (2×)", systemImage: "wand.and.rays")
                     }
                 }
-                if selectedEntries().contains(where: { $0.kind == .video }) {
+                if selected.contains(where: { $0.kind == .video }) {
                     Button { startBulkFrameExport() } label: {
                         Label("Export All Frames", systemImage: "square.stack.3d.down.right")
                     }
-                    Button { startAudioExtract(selectedEntries()) } label: {
+                    Button { startAudioExtract(selected) } label: {
                         Label("Extract Audio…", systemImage: "waveform")
                     }
                 }
-                if selectedEntries().filter({ $0.kind == .video }).count >= 2 {
+                if selected.filter({ $0.kind == .video }).count >= 2 {
                     Button { startCombine() } label: { Label("Combine Videos", systemImage: "film.stack") }
                 }
-                if selectedEntries().contains(where: VideoEditorModule.isEditable) {
+                if selected.contains(where: VideoEditorModule.isEditable) {
                     // Video editor entry points (§2): selection order is timeline order.
-                    let items = selectedEntries().filter(VideoEditorModule.isEditable).map(\.url)
+                    let items = selected.filter(VideoEditorModule.isEditable).map(\.url)
                     Button {
                         DispatchQueue.main.async { videoEditorLaunch = .new(items: items); selecting = false; selection.removeAll() }
                     } label: { Label("New Video Project", systemImage: "film.stack.fill") }
@@ -3221,11 +3222,11 @@ struct FolderView: View {
                     } label: { Label("Add to Video Project…", systemImage: "rectangle.stack.badge.plus") }
                 }
                 }   // !pureTransferMode
-                if selectedEntries().contains(where: { extraVideoExtensions.contains($0.url.pathExtension.lowercased()) }) {
-                    Button { convertTransportStreams(selectedEntries()) } label: { Label("Convert .ts to MP4", systemImage: "film.stack") }
+                if selected.contains(where: { extraVideoExtensions.contains($0.url.pathExtension.lowercased()) }) {
+                    Button { convertTransportStreams(selected) } label: { Label("Convert .ts to MP4", systemImage: "film.stack") }
                 }
-                Button { duplicateEntries(selectedEntries()) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
-                Button { compress(selectedEntries()) } label: { Label("Compress to Zip", systemImage: "archivebox") }
+                Button { duplicateEntries(selected) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
+                Button { compress(selected) } label: { Label("Compress to Zip", systemImage: "archivebox") }
                 Button { showCopyPicker = true } label: { Label("Copy to Folder…", systemImage: "doc.on.doc") }
                 Button {
                     moveNewFolderName = ""
