@@ -22,6 +22,12 @@ final class HomeSettleTracker {
     var sawAny = false
 }
 
+/// The grid's visible cell frames (see `FolderView.frameStore`): updated on every scroll tick, read
+/// only by the drag-select hit-testing, so it lives outside SwiftUI's state tracking.
+final class CellFrameStore {
+    var frames: [URL: CGRect] = [:]
+}
+
 /// Carries the selected videos into the combine-order sheet (an array isn't `Identifiable`).
 struct CombineRequest: Identifiable {
     let id = UUID()
@@ -232,7 +238,11 @@ struct FolderView: View {
     @State private var showMetadataEditor = false
     @State private var transferItem: PreviewItem?
     @State private var photosBackupItem: PreviewItem?
-    @State private var cellFrames: [URL: CGRect] = [:]
+    /// The visible cells' frames, for drag-select hit-testing. A plain reference, NOT @State: the
+    /// preference that feeds it fires on every scroll tick, and keeping it in @State re-ran this
+    /// whole body — every filter, memo key and the grid — on each tick, which is what made scrolling
+    /// (and everything timed against it) feel sluggish.
+    @State private var frameStore = CellFrameStore()
     @State private var dragSelectAdding = true
     @State private var lastDragPoint: CGPoint?
     // Drag-select state, snapshotted at the start of a drag so it's stable while
@@ -808,7 +818,7 @@ struct FolderView: View {
                         .onChange(of: g.size) { _, newValue in gridSize = newValue }
                 }
             )
-            .onPreferenceChange(CellFramesKey.self) { cellFrames = $0 }
+            .onPreferenceChange(CellFramesKey.self) { frameStore.frames = $0 }
             // Pinch out → bigger thumbnails (+30%), pinch in → smaller (−30%).
             .simultaneousGesture(
                 MagnificationGesture(minimumScaleDelta: 0.05)
@@ -955,9 +965,10 @@ struct FolderView: View {
         let map = dragAnchorIndex == nil
             ? Dictionary(uniqueKeysWithValues: filtered.enumerated().map { ($1.url, $0) })
             : dragIndexMap
-        if let url = cellFrames.first(where: { $0.value.contains(point) })?.key, let i = map[url] { return i }
+        let frames = frameStore.frames
+        if let url = frames.first(where: { $0.value.contains(point) })?.key, let i = map[url] { return i }
         var best: (idx: Int, dist: CGFloat)?
-        for (url, frame) in cellFrames {
+        for (url, frame) in frames {
             guard let i = map[url] else { continue }
             let dx = max(frame.minX - point.x, point.x - frame.maxX, 0)
             let dy = max(frame.minY - point.y, point.y - frame.maxY, 0)
@@ -1002,7 +1013,10 @@ struct FolderView: View {
     }
 
     private func autoScrollStep(_ proxy: ScrollViewProxy, direction: Int) {
-        let indices = cellFrames.keys.compactMap { url in filtered.firstIndex(where: { $0.url == url }) }
+        // The drag's index map, when a drag is on (it always is here); a linear search per visible
+        // cell over a large result was a stall on every auto-scroll step.
+        let map = dragIndexMap.isEmpty ? Dictionary(uniqueKeysWithValues: filtered.enumerated().map { ($1.url, $0) }) : dragIndexMap
+        let indices = frameStore.frames.keys.compactMap { map[$0] }
         guard let edge = (direction > 0 ? indices.max() : indices.min()) else { return }
         let target = edge + direction * 4
         guard target >= 0, target < filtered.count else { return }

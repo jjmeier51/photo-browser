@@ -1082,6 +1082,13 @@ everything they depend on: `entriesVersion` (bumped at every `entries =`), the l
 (`fileSpecs`, `captureDates`, `placeLabels`, …). If a list ever looks stale, the key in
 `filterKey` is missing an input — add it there rather than removing the memo.
 
+**Cell frames out of @State (Oct 23).** Every visible tile publishes its frame through a preference
+(for drag-select hit-testing), and that preference fires on every scroll tick. It used to land in a
+`@State` dictionary, so each tick re-ran the whole `FolderView` body — every filter, memo key and the
+grid — which made scrolling and anything timed against it sluggish in every folder. The frames now
+live in a plain reference (`CellFrameStore`, `frameStore`), read only by `dragIndex(at:)` and the
+auto-scroll step (which also uses the drag's index map instead of a linear search per visible cell).
+
 ## 7. Downloaders (from the broader project + this session)
 
 The app has several **download-only, opt-in** importers. All are best-effort, `nonisolated`,
