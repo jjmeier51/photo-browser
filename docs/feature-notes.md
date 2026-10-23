@@ -1025,8 +1025,19 @@ iOS 17+). `.webm` is classified as video (`webVideoExtensions`) and:
   capture-date pass (`deepYearsRequested`, mostly cache hits — the index build prewarms them), the
   Location menu at Home reads the whole drive's places (ceiling 200k files instead of 8k), and
   Categories at Home stat every folder in the index (`deepGalleryFolders`, via `labeledEntries`) so
-  galleries two levels down are found. First passes over an unindexed set (resolution, places) are
-  slow by nature; repeats are cached.
+  galleries two levels down are found (from the index's own `gallery.json` entries — no stats).
+  First passes over an unindexed set (resolution, places) are slow by nature; repeats are cached.
+  **The pass runs off-main** (Oct 23, later the same day): doing the sift + sort of 100k entries
+  inside `filtered` on the main actor froze the grid, so `deepKey` drives a `.task` that snapshots
+  the inputs (`DeepInputs`) and runs `deepFilter` detached; `filteredRaw` just returns
+  `deepResults`. A banner under the chip bar (and the empty state) shows "Filtering the whole
+  drive…" / "Reading capture dates / resolutions / places across the drive…" (`deepFiltering`,
+  `deepStatus`) while it works; Home's years list is computed off-main too (`deepYears`).
+  **The grid pages large results**: `displayed` is the first `visibleLimit` (400) of `filtered`
+  and a footer that appears at the end draws the next page — a `ForEach` over tens of thousands
+  of tiles re-diffed on every re-render is what made the result view lag. `filterSignature`
+  (filters + sort, no counts) resets the page; All/None and drag-select still cover the whole
+  `filtered`.
 - **Match any.** The Tags chip's picker (`tagMatchAny`) switches `taggedPaths(under:tags:any:)` from
   "every tag" to "at least one"; the counts then are each tag's own (`tagCounts(under:)`), i.e. what
   choosing it adds. The header joins the tags with "or".

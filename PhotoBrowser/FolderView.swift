@@ -104,6 +104,12 @@ struct FolderView: View {
     @State private var deepMemo = Memo<[Entry]>()                  // Home: the whole drive's media, for drive-wide filters
     @State private var deepGalleryFolders: [Entry] = []            // Home: every gallery folder on the drive (Categories)
     @State private var deepYearsRequested = false                  // Home: the Year menu was opened → load drive-wide dates
+    @State private var deepResults: [Entry] = []                   // Home: the drive-wide filter's result (computed off-main)
+    @State private var deepResultsVersion = 0
+    @State private var deepFiltering = false                       // the drive-wide pass is running
+    @State private var deepStatus: String? = nil                   // what a drive-wide loader is reading right now
+    @State private var deepYears: [Int] = []                       // Home: years across the drive (computed off-main)
+    @State private var visibleLimit = FolderView.pageSize          // tiles rendered so far (the grid pages large results)
     @State private var tagEntries: [Entry] = []
     @State private var captureDates: [URL: Date] = [:]
     /// Years present under each subfolder — fills in while a year filter is active
@@ -258,12 +264,112 @@ struct FolderView: View {
                 || locationFilter != nil || showEditedOnly || !categoryFilter.isEmpty)
     }
 
-    /// Every file on the drive (the full index) in the current sort — what Home's drive-wide filters
-    /// and its Year / Location menus draw on.
+    /// Every file on the drive (the full index), unsorted — what Home's drive-wide loaders and its
+    /// Year / Location menus draw on. The filter itself (`deepFilter`) sorts its own result off-main.
     private var deepMedia: [Entry] {
-        deepMemo.value(for: "\(library.index.count)|\(library.sort.rawValue)|\(library.changeToken)") {
-            Library.sortEntries(library.index.filter { !$0.isFolder }, by: library.sort)
+        deepMemo.value(for: "\(library.index.count)|\(library.changeToken)") {
+            library.index.filter { !$0.isFolder }
         }
+    }
+
+    /// Everything the drive-wide filter depends on, as one string: the `.task` keyed on it re-runs
+    /// the pass whenever a filter, the sort, the index or a loader's data changes.
+    private var deepKey: String {
+        [
+            "\(library.index.count)", library.sort.rawValue, "\(typeFilter)", "\(formatFilter)",
+            yearFilter.map(String.init) ?? "", locationFilter ?? "-", categoryFilter.sorted().joined(separator: ","),
+            "\(videoRes)\(imageRes)\(hdrOnly)", "\(showEditedOnly)\(showHiddenFolders)",
+            "\(library.labelsVersion)", "\(library.changeToken)",
+            "\(captureDates.count)/\(placeLabels.count)/\(fileSpecs.count)/\(galleryCategories.count)/\(deepGalleryFolders.count)",
+        ].joined(separator: "|")
+    }
+
+    /// The drive-wide filter's inputs, snapshotted on the main actor so the pass itself can run
+    /// detached: sifting and sorting 100k entries takes a moment, and doing it inside `filtered`
+    /// (on the main actor, on every re-render) froze the grid.
+    private struct DeepInputs {
+        let index: [Entry]; let galleryFolders: [Entry]
+        let sort: SortKey; let typeFilter: TypeFilter; let formatExts: Set<String>
+        let yearFilter: Int?; let locationFilter: String?; let categoryFilter: Set<String>
+        let videoRes: VideoRes; let imageRes: ImageRes; let hdrOnly: Bool; let editedOnly: Bool
+        let showHidden: Bool; let hiddenFolders: Set<String>; let hiddenFiles: Set<String>; let editedPaths: Set<String>
+        let captureDates: [URL: Date]; let placeLabels: [URL: String]; let fileSpecs: [URL: MediaSpec]
+        let galleryCategories: [URL: [String]]
+    }
+
+    /// Home's drive-wide filter, off the main actor: the same rules as `filteredRaw` / `applyHidden` /
+    /// `passesAdvanced`, over the whole index, then sorted (capture dates refine the date sorts).
+    nonisolated private static func deepFilter(_ inp: DeepInputs) -> [Entry] {
+        func hidden(_ list: [Entry]) -> [Entry] {
+            let list = list.filter { !GalleryCategories.isSidecar($0.url) }
+            guard !inp.showHidden else { return list }
+            let anyFolders = !inp.hiddenFolders.isEmpty, anyFiles = !inp.hiddenFiles.isEmpty
+            return list.filter { e in
+                if e.kind != .folder && e.size == 0 && e.unreadable != true && e.modified != .distantPast { return false }
+                if anyFolders {
+                    let path = e.url.path
+                    if inp.hiddenFolders.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) { return false }
+                }
+                if anyFiles && e.kind != .folder && inp.hiddenFiles.contains(e.url.path) { return false }
+                return true
+            }
+        }
+        if !inp.categoryFilter.isEmpty {
+            return hidden(inp.galleryFolders.filter { inp.categoryFilter.isSubset(of: Set(inp.galleryCategories[$0.url] ?? [])) })
+        }
+        func screenshot(_ e: Entry) -> Bool {
+            e.kind == .image && (e.url.pathExtension.lowercased() == "png" || e.name.localizedCaseInsensitiveContains("screenshot"))
+        }
+        var list = inp.index.filter { $0.kind != .folder }
+        switch inp.typeFilter {
+        case .all:        break
+        case .photo:      list = list.filter { $0.kind == .image && !screenshot($0) }
+        case .video:      list = list.filter { $0.kind == .video }
+        case .screenshot: list = list.filter { screenshot($0) }
+        }
+        if !inp.formatExts.isEmpty { list = list.filter { inp.formatExts.contains($0.url.pathExtension.lowercased()) } }
+        if let year = inp.yearFilter {
+            let cal = Calendar.current
+            list = list.filter { cal.component(.year, from: inp.captureDates[$0.url] ?? $0.modified) == year }
+        }
+        if let place = inp.locationFilter { list = list.filter { inp.placeLabels[$0.url] == place } }
+        if inp.editedOnly { list = list.filter { inp.editedPaths.contains($0.url.path) } }
+        if inp.videoRes != .all || inp.imageRes != .all || inp.hdrOnly {
+            let resActive = inp.videoRes != .all || inp.imageRes != .all
+            list = list.filter { e in
+                guard let spec = inp.fileSpecs[e.url] else { return false }
+                if inp.hdrOnly, !spec.isHDR { return false }
+                guard resActive else { return true }
+                switch e.kind {
+                case .video: return inp.videoRes != .all ? spec.videoRes == inp.videoRes : inp.imageRes == .all
+                case .image: return inp.imageRes != .all ? spec.imageRes == inp.imageRes : inp.videoRes == .all
+                default:     return false
+                }
+            }
+        }
+        list = Library.sortEntries(hidden(list), by: inp.sort)
+        if [SortKey.smart, .dateDesc, .dateAsc].contains(inp.sort), !inp.captureDates.isEmpty {
+            let ascending = inp.sort == .dateAsc
+            list.sort { a, b in
+                let da = inp.captureDates[a.url] ?? a.modified, db = inp.captureDates[b.url] ?? b.modified
+                return ascending ? da < db : da > db
+            }
+        }
+        return list
+    }
+
+    /// The grid draws large results a page at a time: `displayed` is the first `visibleLimit` of
+    /// `filtered`, and reaching the end of it draws the next page. A `ForEach` over tens of
+    /// thousands of tiles is what made a drive-wide result lag on every re-render.
+    static let pageSize = 400
+    private var displayed: [Entry] { filtered.count > visibleLimit ? Array(filtered.prefix(visibleLimit)) : filtered }
+
+    /// The filters and sort alone (no counts): a change here is a new result, so the grid starts
+    /// again from its first page.
+    private var filterSignature: String {
+        "\(url.path)|\(library.sort.rawValue)|\(submittedQuery)|\(typeFilter)|\(formatFilter)|\(yearFilter ?? -1)|\(locationFilter ?? "-")|"
+            + "\(categoryFilter.sorted())|\(tagFilters.sorted())|\(noTagsFilter)|\(tagMatchAny)|\(showFavoritesOnly)\(showAIOnly)\(showEditedOnly)|"
+            + "\(videoRes)\(imageRes)\(hdrOnly)|\(ageFilter ?? -1)|\(tsLabelFilter.sorted())|\(tsNoLabel)|\(labelKind)"
     }
 
     /// An upscale waiting on the frame-rate prompt (1080p / 4K ask for 30, 60 or the source rate).
@@ -361,7 +467,7 @@ struct FolderView: View {
             submittedQuery, "\(typeFilter)", "\(formatFilter)", "\(labelKind)",
             "\(showFavoritesOnly)\(showAIOnly)\(showEditedOnly)\(showHiddenFolders)\(tsNoLabel)",
             tsLabelFilter.sorted().joined(separator: ","), tagFilters.sorted().joined(separator: ",") + (noTagsFilter ? "|none" : "") + (tagMatchAny ? "|any" : ""),
-            "\(deepFilterActive)/\(library.index.count)/\(deepGalleryFolders.count)",
+            "\(deepFilterActive)/\(library.index.count)/\(deepGalleryFolders.count)/\(deepResultsVersion)",
             categoryFilter.sorted().joined(separator: ","),
             yearFilter.map(String.init) ?? "", locationFilter ?? "-", ageFilter.map(String.init) ?? "",
             "\(videoRes)\(imageRes)\(hdrOnly)",
@@ -470,18 +576,9 @@ struct FolderView: View {
             return applyHidden(applyEdited(results))
         }
 
-        // Home with a filter on: the whole drive, not just the top level (see `deepFilterActive`).
-        if deepFilterActive {
-            if !categoryFilter.isEmpty {
-                return applyHidden(deepGalleryFolders.filter { matchesCategories($0) })
-            }
-            var list = deepMedia
-            if let yearFilter { list = list.filter { year(of: $0) == yearFilter } }
-            if let locationFilter { list = list.filter { placeLabels[$0.url] == locationFilter } }
-            list = applyEdited(applyType(list))
-            if advancedActive { list = list.filter { passesAdvanced($0) } }
-            return applyHidden(list)
-        }
+        // Home with a filter on: the whole drive, not just the top level — computed off-main by
+        // `deepFilter` (see `deepFilterActive`); hidden items and the sort are already applied.
+        if deepFilterActive { return deepResults }
 
         // Bubble folders (Instagram + album highlights) are shown as bubbles, not tiles.
         var list = entries.filter { !($0.isFolder && isBubbleFolder($0.url)) }
@@ -644,9 +741,9 @@ struct FolderView: View {
     /// Years to offer: this folder's files — or, at Home, every file on the drive (real capture dates
     /// once the drive-wide pass has them, the file date meanwhile).
     private var availableYears: [Int] {
-        yearsMemo.value(for: "\(entriesVersion)|\(captureDates.count)|\(isRoot ? library.index.count : -1)") {
-            let scope = isRoot ? deepMedia : entries
-            return Array(Set(scope.filter { !$0.isFolder }.map { year(of: $0) })).sorted(by: >)
+        if isRoot { return deepYears }           // computed off-main (see the `deepyears` task)
+        return yearsMemo.value(for: "\(entriesVersion)|\(captureDates.count)") {
+            Array(Set(entries.filter { !$0.isFolder }.map { year(of: $0) })).sorted(by: >)
         }
     }
 
@@ -683,12 +780,23 @@ struct FolderView: View {
     private var grid: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVGrid(columns: columns, spacing: 4) {
-                    ForEach(filtered) { entry in
-                        cell(for: entry)
+                VStack(spacing: 0) {
+                    LazyVGrid(columns: columns, spacing: 4) {
+                        ForEach(displayed) { entry in
+                            cell(for: entry)
+                        }
+                    }
+                    .padding(4)
+                    if filtered.count > displayed.count {
+                        // Reaching the end of the rendered page draws the next one.
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Showing \(displayed.count) of \(filtered.count)…").font(.footnote).foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 14)
+                        .onAppear { visibleLimit += Self.pageSize }
                     }
                 }
-                .padding(4)
             }
             .scrollDisabled(scrollLocked)        // freeze the page while a select-drag is active
             .refreshable { Haptics.light(); await forceRefresh() }   // pull down to force a fresh disk re-listing
@@ -1658,6 +1766,14 @@ struct FolderView: View {
                         }
                     }
                     if !entries.isEmpty { filterBar }
+                    if deepFilterActive, deepFiltering || deepStatus != nil {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text(deepStatus ?? "Filtering the whole drive…").font(.footnote).foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 6)
+                    }
                     // Edge swipes on the grid: left edge, swipe right → back to the parent folder;
                     // right edge, swipe left → next alphabetical sibling. Simultaneous so scrolling,
                     // taps and long-presses are untouched; attached to the grid only so the horizontal
@@ -1688,6 +1804,7 @@ struct FolderView: View {
         )
         let loaders = AnyView(chrome
             .task(id: library.sort) { await resort() }
+            .onChange(of: filterSignature) { visibleLimit = Self.pageSize }
             .onChange(of: library.changeToken) { Task { await reload() } }
             // Re-list on return to foreground, so folders created/changed while the app was backgrounded
             // (e.g. a stories run finishing, or a change made in the Files app) show up.
@@ -1734,6 +1851,8 @@ struct FolderView: View {
                 let scope = deepFilterActive ? deepMedia : entries
                 let missing = scope.filter { !$0.isFolder && fileSpecs[$0.url] == nil }
                 guard !missing.isEmpty else { return }
+                if deepFilterActive { deepStatus = "Reading resolutions across the drive…" }
+                defer { if deepFilterActive { deepStatus = nil } }
                 let more = await library.mediaSpecs(for: missing)
                 if Task.isCancelled { return }
                 fileSpecs.merge(more) { $1 }
@@ -1762,12 +1881,44 @@ struct FolderView: View {
                     folderYears[folder.url] = await library.folderYears(of: folder.url)
                 }
             }
+            // Home's drive-wide filter: snapshot the inputs, sift and sort off-main, hand the result to
+            // `filteredRaw`. Re-runs whenever a filter, the sort, the index or a loader's data changes.
+            .task(id: "deep-\(deepFilterActive ? deepKey : "")") {
+                guard deepFilterActive else { deepFiltering = false; return }
+                deepFiltering = true
+                let inputs = DeepInputs(
+                    index: library.index, galleryFolders: deepGalleryFolders,
+                    sort: library.sort, typeFilter: typeFilter, formatExts: formatFilter.extensions,
+                    yearFilter: yearFilter, locationFilter: locationFilter, categoryFilter: categoryFilter,
+                    videoRes: videoRes, imageRes: imageRes, hdrOnly: hdrOnly, editedOnly: showEditedOnly,
+                    showHidden: showHiddenFolders, hiddenFolders: library.hiddenFolders, hiddenFiles: library.hiddenFiles,
+                    editedPaths: library.editedInAppPaths, captureDates: captureDates, placeLabels: placeLabels,
+                    fileSpecs: fileSpecs, galleryCategories: galleryCategories)
+                let results = await Task.detached(priority: .userInitiated) { Self.deepFilter(inputs) }.value
+                if Task.isCancelled { return }
+                deepResults = results; deepResultsVersion &+= 1
+                deepFiltering = false
+            }
+            // Home: the years across the drive for the Year menu — file dates at once, real capture
+            // dates as the pass below brings them in. Off-main: a Calendar read per file adds up.
+            .task(id: "deepyears-\(isRoot ? library.index.count : 0)-\(captureDates.count)") {
+                guard isRoot, !library.index.isEmpty else { return }
+                let media = deepMedia, dates = captureDates
+                let years = await Task.detached(priority: .utility) { () -> [Int] in
+                    let cal = Calendar.current
+                    return Array(Set(media.map { cal.component(.year, from: dates[$0.url] ?? $0.modified) })).sorted(by: >)
+                }.value
+                if Task.isCancelled { return }
+                deepYears = years
+            }
             // Home: real capture dates for the whole drive, for its Year menu and drive-wide Year filter.
             // Mostly cache hits — the index build prewarms them — so cheap after the first pass.
             .task(id: "deepdates-\(isRoot && (yearFilter != nil || deepYearsRequested))-\(library.index.count)-\(library.changeToken)") {
                 guard isRoot, yearFilter != nil || deepYearsRequested, !library.index.isEmpty else { return }
                 let missing = deepMedia.filter { captureDates[$0.url] == nil }
                 guard !missing.isEmpty else { return }
+                deepStatus = "Reading capture dates across the drive…"
+                defer { deepStatus = nil }
                 let dates = await library.captureDates(for: missing)
                 if Task.isCancelled { return }
                 captureDates.merge(dates) { $1 }
@@ -1777,6 +1928,8 @@ struct FolderView: View {
             .task(id: "places-\(placesNeeded)-\(entries.count)-\(library.changeToken)-\(url.path)-\(isRoot ? library.index.count : 0)") {
                 guard placesNeeded, !tooManyForPlaces else { return }
                 loadingPlaces = true; placeProgress = nil
+                if isRoot { deepStatus = "Reading places across the drive…" }
+                defer { if isRoot { deepStatus = nil } }
                 let labels = await library.placeLabels(in: url, for: isRoot ? deepMedia : entries) { text in
                     Task { @MainActor in placeProgress = text }
                 }
@@ -1790,11 +1943,13 @@ struct FolderView: View {
                 var scope = entries
                 if isRoot, !library.index.isEmpty {
                     // Home looks through every folder on the drive, so Categories can find galleries
-                    // wherever they sit (a star's folder is usually two levels down). The index holds
-                    // files; their parent folders are stat'ed (bounded) to become entries.
-                    let parents = Set(library.index.map { $0.url.deletingLastPathComponent().path })
-                    let folders = await library.labeledEntries(under: url, paths: parents, sort: library.sort).filter(\.isFolder)
-                    if Task.isCancelled { return }
+                    // wherever they sit (a star's folder is usually two levels down). The index lists
+                    // the gallery.json sidecars themselves, so their parents are the gallery folders —
+                    // no stat needed; the sidecar's own date keys the categories cache.
+                    let folders = library.index.filter { $0.name.lowercased() == "gallery.json" }.map { sidecar in
+                        let folder = sidecar.url.deletingLastPathComponent()
+                        return Entry(url: folder, name: folder.lastPathComponent, kind: .folder, size: 0, modified: sidecar.modified)
+                    }
                     deepGalleryFolders = folders
                     scope = entries + folders
                 }
@@ -1834,6 +1989,9 @@ struct FolderView: View {
                 } else if !submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty {
                     Image(systemName: "magnifyingglass").font(.largeTitle).foregroundStyle(.secondary)
                     Text("No results").foregroundStyle(.secondary)
+                } else if deepFilterActive, deepFiltering || deepStatus != nil {
+                    ProgressView()
+                    Text(deepStatus ?? "Filtering the whole drive…").foregroundStyle(.secondary)
                 } else if loaded {
                     // A folder presented as album-highlight bubbles isn't "empty" — the albums
                     // ARE its content — so no empty-state text or actions (they collided with
