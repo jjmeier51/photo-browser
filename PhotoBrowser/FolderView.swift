@@ -791,20 +791,28 @@ struct FolderView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 0) {
+                    let lastShown = displayed.last?.id
                     LazyVGrid(columns: columns, spacing: 4) {
                         ForEach(displayed) { entry in
                             cell(for: entry)
+                                // The last rendered tile coming into view draws the next page. (A footer's own
+                                // onAppear fires once, when it's first built, and never again as it's pushed down.)
+                                .onAppear {
+                                    if entry.id == lastShown, filtered.count > visibleLimit { visibleLimit += Self.pageSize }
+                                }
                         }
                     }
                     .padding(4)
                     if filtered.count > displayed.count {
-                        // Reaching the end of the rendered page draws the next one.
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text("Showing \(displayed.count) of \(filtered.count)…").font(.footnote).foregroundStyle(.secondary)
+                        Button { visibleLimit += Self.pageSize } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "chevron.down.circle")
+                                Text("Showing \(displayed.count) of \(filtered.count) — scroll or tap for more")
+                            }
+                            .font(.footnote).foregroundStyle(.secondary)
                         }
+                        .buttonStyle(.plain)
                         .padding(.vertical, 14)
-                        .onAppear { visibleLimit += Self.pageSize }
                     }
                 }
             }
