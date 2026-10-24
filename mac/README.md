@@ -228,6 +228,17 @@ open "mac/Safe Finder.command"                     # or double-click it in Finde
 mac/.venv/bin/python mac/safe_finder.py --from ~/Downloads --to "/Volumes/Extreme SSD"
 ```
 
+### Thumbnails
+
+Each photo and video is rendered once, at one size (512 px), and that one thumbnail is drawn at
+whatever icon size the slider is on — so resizing is instant, nothing re-renders. Thumbnails are kept
+on disk in `~/Library/Caches/PhotoBrowser/SafeFinderThumbs/` (keyed by path and date, so an edited
+file gets a fresh one) and come straight back on the next launch. Opening a folder renders what's on
+screen first and then the rest of the listing in the background, so scrolling finds them ready.
+Videos, and formats Qt and Pillow can't read, go through Quick Look a dozen at a time instead of one
+process per file. The system may clear the Caches folder under disk pressure; the thumbnails just
+render again.
+
 ### Sizes, a size filter, empty folders, and the Trash
 
 - **Folder sizes.** Each pane adds up what its folders hold, in the background, and shows it in the

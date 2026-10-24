@@ -26,6 +26,7 @@ Run:  double-click "Safe Finder.command" next to this file, or
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -460,59 +461,170 @@ def kind_of(path: str) -> str:
 # ============================================================================ thumbnails
 
 
+THUMB_PX = 512          # one master thumbnail per file; icons of every size are drawn from it
+_QL_BATCH = 12          # files per qlmanage run — one process for a dozen, not one each
+
+
+def thumb_cache_dir() -> Path:
+    """Where thumbnails persist between launches: ~/Library/Caches on a Mac (the system may clear it
+    under pressure — nothing is lost but a re-render). SAFE_FINDER_THUMB_CACHE overrides it (tests)."""
+    env = os.environ.get("SAFE_FINDER_THUMB_CACHE")
+    if env:
+        return Path(env)
+    if IS_MAC:
+        return Path.home() / "Library" / "Caches" / "PhotoBrowser" / "SafeFinderThumbs"
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "PhotoBrowser" / "SafeFinderThumbs"
+
+
+def thumb_key(path: str, mtime: float) -> str:
+    return f"{path}|{int(mtime)}"
+
+
+def thumb_file(key: str) -> Path:
+    h = hashlib.sha1(key.encode("utf-8", "surrogateescape")).hexdigest()
+    return thumb_cache_dir() / h[:2] / (h + ".jpg")
+
+
+def _save_thumb(img: QImage, f: Path) -> None:
+    """Into the disk cache as a JPEG (transparency flattened onto dark grey), written whole then renamed."""
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        if img.hasAlphaChannel():
+            flat = QImage(img.size(), QImage.Format.Format_RGB32)
+            flat.fill(QColor(44, 44, 46))
+            painter = QPainter(flat)
+            painter.drawImage(0, 0, img)
+            painter.end()
+            img = flat
+        tmp = f.with_name(f.name + ".part")
+        if img.save(str(tmp), "JPG", 88):
+            os.replace(tmp, f)
+    except OSError:
+        pass
+
+
 class _ThumbSignals(QObject):
     done = Signal(str, QImage)
+    skipped = Signal(str)        # a prefetch from a listing that's gone — forget it was asked for
+
+
+class _QuickLookRunner:
+    """Thumbnails qlmanage makes (videos, and images Qt/PIL can't read): one qlmanage run per batch
+    of files on its own thread, so a folder of videos costs a few process launches rather than one
+    per file. Each result goes to the disk cache and comes back through `done`."""
+
+    def __init__(self, signals: _ThumbSignals) -> None:
+        self.signals = signals
+        self._queue: list[tuple[str, str]] = []
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        threading.Thread(target=self._run, name="quicklook-thumbs", daemon=True).start()
+
+    def enqueue(self, key: str, path: str) -> None:
+        with self._lock:
+            self._queue.append((key, path))
+        self._wake.set()
+
+    def _run(self) -> None:
+        while True:
+            self._wake.wait()
+            with self._lock:
+                if not self._queue:
+                    self._wake.clear()
+                    continue
+                batch, self._queue = self._queue[:_QL_BATCH], self._queue[_QL_BATCH:]
+            self._render(batch)
+
+    def _render(self, batch: list[tuple[str, str]]) -> None:
+        # qlmanage names each output "<file name>.png", so a batch holds one file of each name;
+        # the rest wait for the next run.
+        by_name: dict[str, tuple[str, str]] = {}
+        later: list[tuple[str, str]] = []
+        for key, path in batch:
+            name = os.path.basename(path)
+            if name in by_name:
+                later.append((key, path))
+            else:
+                by_name[name] = (key, path)
+        if later:
+            with self._lock:
+                self._queue = later + self._queue
+            self._wake.set()
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                subprocess.run(["qlmanage", "-t", "-s", str(THUMB_PX), "-o", td, *(p for _k, p in by_name.values())],
+                               capture_output=True, timeout=180)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            for name, (key, _path) in by_name.items():
+                out = os.path.join(td, name + ".png")
+                img = QImage(out) if os.path.exists(out) else QImage()
+                if not img.isNull():
+                    _save_thumb(img, thumb_file(key))
+                self.signals.done.emit(key, img)
 
 
 class _ThumbJob(QRunnable):
-    def __init__(self, key: str, path: str, px: int, signals: _ThumbSignals) -> None:
+    """One thumbnail: the disk cache first, else rendered from the file (PIL, then Qt), else handed
+    to Quick Look's batch runner. A prefetch job from a listing the user has left is skipped."""
+
+    def __init__(self, key: str, path: str, signals: _ThumbSignals, ql: "_QuickLookRunner | None",
+                 owner: "Thumbnails", gen: int | None) -> None:
         super().__init__()
-        self.key, self.path, self.px, self.signals = key, path, px, signals
+        self.key, self.path, self.signals, self.ql, self.owner, self.gen = key, path, signals, ql, owner, gen
         self.setAutoDelete(True)
 
     def run(self) -> None:
+        if self.gen is not None and self.gen != self.owner.generation:
+            self.signals.skipped.emit(self.key)
+            return
         img = QImage()
         try:
-            img = self._load()
+            f = thumb_file(self.key)
+            if f.is_file():
+                img = QImage(str(f))
+            if img.isNull():
+                img = self._load()
+                if img.isNull() and self.ql is not None and kind_of(self.path) in ("image", "video"):
+                    self.ql.enqueue(self.key, self.path)        # Quick Look answers later
+                    return
+                if not img.isNull():
+                    _save_thumb(img, f)
         except Exception:  # noqa: BLE001 — a bad file just keeps its icon
-            pass
+            img = QImage()
         self.signals.done.emit(self.key, img)
 
     def _load(self) -> QImage:
         kind = kind_of(self.path)
         ext = os.path.splitext(self.path)[1].lower()
-        if kind == "image" and ext not in RAW_EXT:
-            if PIL_OK:
-                try:
-                    with Image.open(self.path) as im:
-                        im.draft("RGB", (self.px * 2, self.px * 2))
-                        im = ImageOps.exif_transpose(im)
-                        im.thumbnail((self.px, self.px))
-                        im = im.convert("RGBA")
-                        data = im.tobytes("raw", "RGBA")
-                        return QImage(data, im.width, im.height, im.width * 4, QImage.Format.Format_RGBA8888).copy()
-                except Exception:  # noqa: BLE001
-                    pass
-            reader = QImageReader(self.path)
-            reader.setAutoTransform(True)
-            size = reader.size()
-            if size.isValid():
-                reader.setScaledSize(size.scaled(self.px, self.px, Qt.AspectRatioMode.KeepAspectRatio))
-            img = reader.read()
-            if not img.isNull():
-                return img
-        if IS_MAC and kind in ("image", "video") and shutil.which("qlmanage"):
-            with tempfile.TemporaryDirectory() as td:
-                subprocess.run(["qlmanage", "-t", "-s", str(self.px), "-o", td, self.path],
-                               capture_output=True, timeout=30)
-                made = [f for f in os.listdir(td) if f.endswith(".png")]
-                if made:
-                    return QImage(os.path.join(td, made[0]))
-        return QImage()
+        if kind != "image" or ext in RAW_EXT:
+            return QImage()
+        if PIL_OK:
+            try:
+                with Image.open(self.path) as im:
+                    im.draft("RGB", (THUMB_PX * 2, THUMB_PX * 2))
+                    im = ImageOps.exif_transpose(im)
+                    im.thumbnail((THUMB_PX, THUMB_PX))
+                    im = im.convert("RGBA")
+                    data = im.tobytes("raw", "RGBA")
+                    return QImage(data, im.width, im.height, im.width * 4, QImage.Format.Format_RGBA8888).copy()
+            except Exception:  # noqa: BLE001
+                pass
+        reader = QImageReader(self.path)
+        reader.setAutoTransform(True)
+        size = reader.size()
+        if size.isValid():
+            reader.setScaledSize(size.scaled(THUMB_PX, THUMB_PX, Qt.AspectRatioMode.KeepAspectRatio))
+        return reader.read()
 
 
 class Thumbnails(QObject):
-    """Async thumbnail cache (memory only). `get` returns a pixmap or None and requests it."""
+    """Async thumbnail cache: memory (LRU, byte budget) over a disk cache that persists between
+    launches. One master thumbnail (THUMB_PX) per file serves every icon size — the delegate scales
+    it — so changing the thumbnail size redraws at once instead of re-rendering everything. `get`
+    returns the pixmap, or None and requests it (visible tiles first); `prefetch` queues the rest of
+    a listing behind them, so scrolling finds its thumbnails ready; `new_listing` drops a left
+    listing's prefetch."""
     ready = Signal()
 
     def __init__(self) -> None:
@@ -520,25 +632,41 @@ class Thumbnails(QObject):
         self._cache: OrderedDict[str, QPixmap | None] = OrderedDict()
         self._bytes = 0                                    # what the cached pixmaps hold, roughly
         self._pending: set[str] = set()
+        self.generation = 0
         self._pool = QThreadPool(self)
-        self._pool.setMaxThreadCount(4)
+        self._pool.setMaxThreadCount(max(4, min(8, os.cpu_count() or 4)))
         self._signals = _ThumbSignals()
         self._signals.done.connect(self._done, Qt.ConnectionType.QueuedConnection)
+        self._signals.skipped.connect(self._pending.discard, Qt.ConnectionType.QueuedConnection)
+        self._ql = _QuickLookRunner(self._signals) if IS_MAC and shutil.which("qlmanage") else None
         self._tick = QTimer(self)
         self._tick.setSingleShot(True)
         self._tick.setInterval(60)
         self._tick.timeout.connect(self.ready.emit)
 
-    def get(self, path: str, mtime: float, px: int) -> QPixmap | None:
-        bucket = 128 if px <= 128 else 256 if px <= 256 else 384      # rendered at 2× for Retina
-        key = f"{path}|{mtime}|{bucket}"
+    def get(self, path: str, mtime: float, px: int = 0) -> QPixmap | None:
+        key = thumb_key(path, mtime)
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]
-        if key not in self._pending:
-            self._pending.add(key)
-            self._pool.start(_ThumbJob(key, path, bucket * 2, self._signals))
+        self._request(key, path, gen=None, priority=1)
         return None
+
+    def prefetch(self, items: list[tuple[str, float]]) -> None:
+        for path, mtime in items:
+            key = thumb_key(path, mtime)
+            if key not in self._cache:
+                self._request(key, path, gen=self.generation, priority=0)
+
+    def new_listing(self) -> None:
+        """The pane moved on: prefetches still queued for the old listing are skipped as they come up."""
+        self.generation += 1
+
+    def _request(self, key: str, path: str, gen: int | None, priority: int) -> None:
+        if key in self._pending:
+            return
+        self._pending.add(key)
+        self._pool.start(_ThumbJob(key, path, self._signals, self._ql, self, gen), priority)
 
     def _done(self, key: str, img: QImage) -> None:
         self._pending.discard(key)
@@ -1612,7 +1740,7 @@ class Pane(QWidget):
         self.scanner: FileScanner | EmptyFolderScanner | None = None
         # Folder sizes arrive from the worker thread; the listing asks for its folders' as it loads.
         sizer().ready.connect(self._size_ready, Qt.ConnectionType.QueuedConnection)
-        self.fs.directoryLoaded.connect(lambda _p: self._request_sizes())
+        self.fs.directoryLoaded.connect(lambda _p: (self._request_sizes(), self._prefetch_thumbs()))
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1874,6 +2002,21 @@ class Pane(QWidget):
         if paths:
             sizer().request(paths)
 
+    def _prefetch_thumbs(self) -> None:
+        """Queue the listing's photo and video thumbnails behind the visible ones, so scrolling finds
+        them ready (the first 2000; a bigger folder renders the rest as it scrolls)."""
+        if THUMBS is None or self.is_virtual or not self.location:
+            return
+        root = self.fs.index(self.location)
+        items: list[tuple[str, float]] = []
+        for r in range(min(self.fs.rowCount(root), 2000)):
+            idx = self.fs.index(r, 0, root)
+            if not self.fs.isDir(idx):
+                path = self.fs.filePath(idx)
+                if kind_of(path) != "other":
+                    items.append((path, self.fs.lastModified(idx).toSecsSinceEpoch()))
+        THUMBS.prefetch(items)
+
     def _size_ready(self, path: str) -> None:
         if not self.is_virtual and os.path.dirname(path.rstrip(os.sep)) == self.location:
             self.model.size_known(path)
@@ -2041,6 +2184,8 @@ class Pane(QWidget):
             self.search.blockSignals(False)
         self.location = self.folder = path
         self.model.root_path = path
+        if THUMBS is not None:
+            THUMBS.new_listing()
         idx = self.model.mapFromSource(self.fs.setRootPath(path))
         self.grid.setRootIndex(idx)
         self.list.setRootIndex(idx)
