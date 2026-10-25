@@ -339,9 +339,16 @@ struct FolderView: View {
         case .screenshot: list = list.filter { screenshot($0) }
         }
         if !inp.formatExts.isEmpty { list = list.filter { inp.formatExts.contains($0.url.pathExtension.lowercased()) } }
+        // Capture dates for the Year filter and the date sorts: every one the store already holds (the
+        // index build fills it for the whole drive), plus whatever this view has read itself.
+        var dates: [URL: Date] = [:]
+        if inp.yearFilter != nil || Library.isDateSort(inp.sort) {
+            dates = MetadataLoader.cachedCaptureDates(for: list).known
+            dates.merge(inp.captureDates) { _, read in read }
+        }
         if let year = inp.yearFilter {
             let cal = Calendar.current
-            list = list.filter { cal.component(.year, from: inp.captureDates[$0.url] ?? $0.modified) == year }
+            list = list.filter { cal.component(.year, from: dates[$0.url] ?? $0.modified) == year }
         }
         if let place = inp.locationFilter { list = list.filter { inp.placeLabels[$0.url] == place } }
         if inp.editedOnly { list = list.filter { inp.editedPaths.contains($0.url.path) } }
@@ -358,15 +365,9 @@ struct FolderView: View {
                 }
             }
         }
-        list = Library.sortEntries(hidden(list), by: inp.sort)
-        if [SortKey.smart, .dateDesc, .dateAsc].contains(inp.sort), !inp.captureDates.isEmpty {
-            let ascending = inp.sort == .dateAsc
-            list.sort { a, b in
-                let da = inp.captureDates[a.url] ?? a.modified, db = inp.captureDates[b.url] ?? b.modified
-                return ascending ? da < db : da > db
-            }
-        }
-        return list
+        list = hidden(list)
+        return Library.isDateSort(inp.sort) ? Library.sortedByCaptureDate(list, dates: dates, sort: inp.sort)
+                                            : Library.sortEntries(list, by: inp.sort)
     }
 
     /// The grid draws large results a page at a time: `displayed` is the first `visibleLimit` of
@@ -651,10 +652,13 @@ struct FolderView: View {
     }
 
     /// Whether a (revealed) entry should be dimmed to read as hidden: a hidden folder, a hidden
-    /// file, or a 0 KB file.
+    /// file, or a real 0 KB file. Not a file whose size was never read — the huge-folder path
+    /// defers size and date (`modified == .distantPast`), and a stat the drive refused leaves 0 —
+    /// the same exemption `applyHidden` makes; those used to draw at 45% and look dull and shadowed.
     private func isDimmedHidden(_ entry: Entry) -> Bool {
         if entry.isFolder { return library.isHiddenFolder(entry.url) }
-        return library.isHiddenFile(entry.url) || entry.size == 0
+        if library.isHiddenFile(entry.url) { return true }
+        return entry.size == 0 && !entry.isUnreadable && entry.modified != .distantPast
     }
 
     /// Keeps only files produced by the in-app editor (when the "Edited" filter is on).
@@ -3617,7 +3621,7 @@ struct FolderView: View {
         // Sorted off the main thread (a locale-aware name compare over thousands of entries was a
         // visible hitch); a reload that lands meanwhile wins.
         let snapshot = entries, sort = library.sort, version = entriesVersion
-        let sorted = await Task.detached(priority: .userInitiated) { Library.sortEntries(snapshot, by: sort) }.value
+        let sorted = await Task.detached(priority: .userInitiated) { Library.sortEntriesByCapture(snapshot, by: sort) }.value
         guard entriesVersion == version, library.sort == sort else { return }
         entries = sorted; entriesVersion &+= 1
         // Capture-date sorts refine the modified-date order with real EXIF dates.
@@ -3712,6 +3716,13 @@ struct FolderView: View {
             if library.sort == .smart || library.sort == .dateDesc || library.sort == .dateAsc {
                 await applyCaptureDateOrder()
             }
+        } else if list.count > 8000,
+                  Library.isDateSort(library.sort) || library.sort.isAge || yearFilter != nil || ageFilter != nil {
+            // A huge folder reads no dates (that's what keeps it opening), but uses every capture date
+            // the store already holds — found through the index, since this listing has no sizes or
+            // dates to key on. Files without one count as undated (last when newest-first), by name.
+            captureDates = await library.knownCaptureDates(forUnstattedEntries: list)
+            if Library.isDateSort(library.sort) { await applyCaptureDateOrder() }
         } else {
             captureDates = [:]
         }
@@ -3722,28 +3733,10 @@ struct FolderView: View {
     private func applyCaptureDateOrder() async {
         let list = entries, dates = captureDates, sort = library.sort, version = entriesVersion
         let sorted = await Task.detached(priority: .userInitiated) {
-            Self.sortedByCaptureDate(list, dates: dates, sort: sort)
+            Library.sortedByCaptureDate(list, dates: dates, sort: sort)
         }.value
         guard entriesVersion == version, library.sort == sort else { return }
         entries = sorted; entriesVersion &+= 1
-    }
-
-    /// Re-orders a date-sorted listing by true capture date+time (folders first,
-    /// then media by `dates`, falling back to the file's modified date).
-    nonisolated private static func sortedByCaptureDate(_ list: [Entry], dates: [URL: Date], sort: SortKey) -> [Entry] {
-        let ascending = (sort == .dateAsc)
-        let smart = (sort == .smart)
-        func key(_ e: Entry) -> Date { dates[e.url] ?? e.modified }
-        return list.sorted { a, b in
-            if a.isFolder != b.isFolder { return a.isFolder }
-            if a.isFolder {
-                return smart ? a.name.localizedStandardCompare(b.name) == .orderedAscending
-                             : (ascending ? a.modified < b.modified : a.modified > b.modified)
-            }
-            let ka = key(a), kb = key(b)
-            if ka != kb { return ascending ? ka < kb : ka > kb }
-            return a.name.localizedStandardCompare(b.name) == .orderedAscending
-        }
     }
 
     // MARK: - Caption / folder / move actions

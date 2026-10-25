@@ -3041,7 +3041,7 @@ final class Library {
                         && !labeledKeys.contains(Self.canonicalPath(e.url.path))
                         && (e.url.path == rootPath || e.url.path.hasPrefix(rootPath + "/"))
                 }
-                return Self.sortEntries(result, by: sort)
+                return Self.sortEntriesByCapture(result, by: sort)
             }.value
         }
         return await Self.walkUnlabeled(under: folder, labeled: labeled, sort: sort)
@@ -3063,7 +3063,7 @@ final class Library {
                                     size: Int64(rv?.fileSize ?? 0),
                                     modified: rv?.contentModificationDate ?? .distantPast))
             }
-            return Self.sortEntries(result, by: sort)
+            return Self.sortEntriesByCapture(result, by: sort)
         }.value
     }
 
@@ -3613,7 +3613,7 @@ final class Library {
                 }
                 result.append(contentsOf: slots.compactMap { $0 })
             }
-            return Self.sortEntries(result, by: sort)
+            return Self.sortEntriesByCapture(result, by: sort)
         }.value
     }
 
@@ -3642,7 +3642,7 @@ final class Library {
                 guard nameMatch || capMatch || ocrMatch || placeMatch else { continue }
                 result.append(entry)
             }
-            return Self.sortEntries(result, by: sort)
+            return Self.sortEntriesByCapture(result, by: sort)
         }.value
     }
 
@@ -4289,7 +4289,7 @@ final class Library {
             let u = URL(fileURLWithPath: fp, isDirectory: true)
             matches.append(Entry(url: u, name: u.lastPathComponent, kind: .folder, size: 0, modified: .distantPast))
         }
-        return Self.sortEntries(matches, by: sort)
+        return Self.sortEntriesByCapture(matches, by: sort)
     }
 
     /// Scans every photo's GPS under `folder` (cached per file, ImageIO only) and
@@ -4838,7 +4838,7 @@ final class Library {
                 return Entry(url: url, name: url.lastPathComponent,
                              kind: classify(url: url, isDirectory: isDir), size: 0, modified: .distantPast)
             }
-            return Self.sortEntries(entries, by: sort)
+            return Self.sortEntriesByCapture(entries, by: sort)
         }
 
         var slots = [Entry?](repeating: nil, count: urls.count)
@@ -4875,7 +4875,7 @@ final class Library {
             for _ in 0..<min(maxConcurrent, urls.count) { addNext() }
             while let (i, e) = await group.next() { slots[i] = e; addNext() }
         }
-        return Self.sortEntries(slots.compactMap { $0 }, by: sort)
+        return Self.sortEntriesByCapture(slots.compactMap { $0 }, by: sort)
     }
 
     /// The normal grid read: the coordinated listing **plus** one plain uncoordinated read, merged by
@@ -4960,6 +4960,56 @@ final class Library {
         if lstat(url.path, &st) == 0 { return ((st.st_mode & S_IFMT) == S_IFDIR, true) }
         if url.hasDirectoryPath { return (true, true) }
         return (classify(url: url, isDirectory: false) == .other, true)
+    }
+
+    /// Whether `sort` orders files by date — Default, Newest first, Oldest first.
+    nonisolated static func isDateSort(_ sort: SortKey) -> Bool { sort == .smart || sort == .dateDesc || sort == .dateAsc }
+
+    /// `sortEntries`, with the date sorts on each file's **capture date** wherever one is already
+    /// known — in memory, or in the persisted store the index build fills for the whole drive — and
+    /// its modified date (when it landed on the drive) otherwise. Reads no file, so every list can
+    /// use it: Favorites, Tags, No Tags, search and a folder's first paint used to be in "date
+    /// added" order. `FolderView` still reads a folder's never-seen files and re-orders after.
+    nonisolated static func sortEntriesByCapture(_ entries: [Entry], by sort: SortKey) -> [Entry] {
+        guard isDateSort(sort) else { return sortEntries(entries, by: sort) }
+        return sortedByCaptureDate(entries, dates: MetadataLoader.cachedCaptureDates(for: entries).known, sort: sort)
+    }
+
+    /// Folders first — A–Z for Default, by modified date for Newest/Oldest — then files by capture
+    /// date (`dates`, else their modified date), newest first unless Oldest first; ties by name.
+    nonisolated static func sortedByCaptureDate(_ list: [Entry], dates: [URL: Date], sort: SortKey) -> [Entry] {
+        let ascending = (sort == .dateAsc)
+        let smart = (sort == .smart)
+        func key(_ e: Entry) -> Date { dates[e.url] ?? e.modified }
+        return list.sorted { a, b in
+            if a.isFolder != b.isFolder { return a.isFolder }
+            if a.isFolder {
+                return smart ? a.name.localizedStandardCompare(b.name) == .orderedAscending
+                             : (ascending ? a.modified < b.modified : a.modified > b.modified)
+            }
+            let ka = key(a), kb = key(b)
+            if ka != kb { return ascending ? ka < kb : ka > kb }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
+    }
+
+    /// Capture dates already in the store for files listed without their size and date (a folder
+    /// over 8,000 items, read lazily): the store is keyed on size and date, so they're looked up
+    /// through the drive index, which has both. Reads no file.
+    func knownCaptureDates(forUnstattedEntries entries: [Entry]) async -> [URL: Date] {
+        let idx = index
+        guard !idx.isEmpty, !entries.isEmpty else { return [:] }
+        return await Task.detached(priority: .userInitiated) { () -> [URL: Date] in
+            var listed: [String: URL] = [:]
+            for e in entries where !e.isFolder { listed[Self.canonicalPath(e.url.path)] = e.url }
+            var indexed: [Entry] = []
+            for e in idx where !e.isFolder && listed[Self.canonicalPath(e.url.path)] != nil { indexed.append(e) }
+            var result: [URL: Date] = [:]
+            for (url, date) in MetadataLoader.cachedCaptureDates(for: indexed).known {
+                if let mine = listed[Self.canonicalPath(url.path)] { result[mine] = date }
+            }
+            return result
+        }.value
     }
 
     nonisolated static func sortEntries(_ entries: [Entry], by sort: SortKey) -> [Entry] {

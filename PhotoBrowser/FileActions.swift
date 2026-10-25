@@ -4,6 +4,7 @@ import PhotosUI
 import UIKit
 import QuickLook
 import CoreImage
+import CoreImage.CIFilterBuiltins
 import CoreVideo
 import AVFoundation
 import ImageIO
@@ -1188,11 +1189,13 @@ enum FileActions {
     private static let ciContext = CIContext()
 
     /// Encodes one video frame to image data: oriented upright, metadata embedded,
-    /// 10-bit HDR HEIC when the frame is HDR, otherwise a standard HEIC.
+    /// 10-bit HDR HEIC when the frame is HDR, otherwise a standard HEIC. `softenHDR` applies the
+    /// screenshot look (`softenedHDRFrame`) to an HDR frame; bulk frame export leaves it off.
     static func encodeFrame(_ pixelBuffer: CVPixelBuffer,
                             transform: CGAffineTransform,
                             properties: [String: Any],
-                            scale: CGFloat = 1) -> Data? {
+                            scale: CGFloat = 1,
+                            softenHDR: Bool = false) -> Data? {
         var ci = CIImage(cvImageBuffer: pixelBuffer)
         if !transform.isIdentity {
             // CIImage is Y-up but the video transform is Y-down, so the rotation
@@ -1215,7 +1218,8 @@ enum FileActions {
 
         var data: Data?
         if isHDR {
-            data = try? ciContext.heif10Representation(of: ci, colorSpace: cs, options: [:])
+            let frame = softenHDR ? softenedHDRFrame(ci) : ci
+            data = try? ciContext.heif10Representation(of: frame, colorSpace: cs, options: [:])
         }
         if data == nil {
             let sdr = CGColorSpace(name: CGColorSpace.displayP3) ?? cs
@@ -1225,6 +1229,33 @@ enum FileActions {
             data = UIImage(cgImage: cg).pngData()
         }
         return data
+    }
+
+    /// HDR screenshots came out a little brighter than the clip looks while it plays: the player
+    /// tone-maps HDR video with the clip's own metadata (Dolby Vision on an iPhone video), and a
+    /// still frame keeps none of it, so its highlights show at full strength. A light touch before
+    /// encoding keeps the frame HDR without the blown look — highlights eased from HLG's ~4.9× SDR
+    /// white to `hdrFrameHeadroom` (iOS 18+), and the frame trimmed by `hdrFrameExposureTrim`
+    /// (doubled on iOS 17, which has no highlight-only control). Tune the two constants here.
+    private static let hdrFrameHeadroom: Float = 3.0
+    private static let hdrFrameExposureTrim: Float = -0.15
+
+    private static func softenedHDRFrame(_ ci: CIImage) -> CIImage {
+        var out = ci
+        var trim = hdrFrameExposureTrim
+        if #available(iOS 18.0, *) {
+            let tone = CIFilter.toneMapHeadroom()
+            tone.inputImage = out
+            tone.sourceHeadroom = 4.93                 // HLG: 1,000 nits over 203-nit reference white
+            tone.targetHeadroom = hdrFrameHeadroom
+            out = tone.outputImage ?? out
+        } else {
+            trim *= 2
+        }
+        let exposure = CIFilter.exposureAdjust()
+        exposure.inputImage = out
+        exposure.ev = trim
+        return exposure.outputImage ?? out
     }
 
     /// The "Screenshots" folder beside `fileURL`, created on first use (nil on failure). If an
@@ -1241,7 +1272,8 @@ enum FileActions {
                           properties: [String: Any] = [:],
                           in folder: URL) -> URL? {
         // Save screenshots at 2× the source resolution (high-quality Lanczos upscale).
-        guard let data = encodeFrame(pixelBuffer, transform: transform, properties: properties, scale: 2) else { return nil }
+        guard let data = encodeFrame(pixelBuffer, transform: transform, properties: properties,
+                                     scale: 2, softenHDR: true) else { return nil }
         return writeScreenshot(data, in: folder)
     }
 

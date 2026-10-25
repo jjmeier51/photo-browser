@@ -1,5 +1,6 @@
 import UIKit
 import ImageIO
+import CoreImage
 import QuickLookThumbnailing
 import CryptoKit
 
@@ -149,11 +150,17 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         let diskURL = diskDir.appendingPathComponent(key).appendingPathExtension("jpg")
         let useDisk = diskCacheEnabled
         if useDisk, let data = try? Data(contentsOf: diskURL), let raw = UIImage(data: data) {
-            // Force the JPEG decode here, off-main — UIImage(data:) defers it to first render,
-            // which shows up as scroll hitches on the main thread.
-            let img = raw.preparingForDisplay() ?? raw
-            memory.setObject(img, forKey: nsKey, cost: cost(of: img))
-            return img
+            if Self.isHDR(raw.cgImage) {
+                // Saved before thumbnails were tone-mapped (an HDR-tagged JPEG that drew flat and
+                // dark): drop it and make it again below. Only those files regenerate.
+                try? FileManager.default.removeItem(at: diskURL)
+            } else {
+                // Force the JPEG decode here, off-main — UIImage(data:) defers it to first render,
+                // which shows up as scroll hitches on the main thread.
+                let img = raw.preparingForDisplay() ?? raw
+                memory.setObject(img, forKey: nsKey, cost: cost(of: img))
+                return img
+            }
         }
         // Adopt a thumbnail generated under the pre–move-stable key (full path) instead of
         // regenerating it: on the upgrade that switched to parent+filename keys, rename the
@@ -163,7 +170,7 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         // branch never runs for that file again.
         if useDisk, let legacy = legacyCacheKey(forFileAt: url) {
             let legacyURL = diskDir.appendingPathComponent(legacy).appendingPathExtension("jpg")
-            if let data = try? Data(contentsOf: legacyURL), let raw = UIImage(data: data) {
+            if let data = try? Data(contentsOf: legacyURL), let raw = UIImage(data: data), !Self.isHDR(raw.cgImage) {
                 do { try FileManager.default.moveItem(at: legacyURL, to: diskURL) }
                 catch { try? data.write(to: diskURL, options: .atomic) }   // rename raced/failed — copy the bytes
                 let img = raw.preparingForDisplay() ?? raw
@@ -171,12 +178,36 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
                 return img
             }
         }
-        guard let img = await generate(url: url, kind: kind, size: size, scale: scale) else { return nil }
+        guard let made = await generate(url: url, kind: kind, size: size, scale: scale) else { return nil }
+        let img = Self.standardRange(made)
         memory.setObject(img, forKey: nsKey, cost: cost(of: img))
         if useDisk, let data = img.jpegData(compressionQuality: 0.8) {
             try? data.write(to: diskURL, options: .atomic)
         }
         return img
+    }
+
+    /// Whether a thumbnail is in an HDR colour space (PQ / HLG transfer, or more than 8 bits).
+    private static func isHDR(_ cg: CGImage?) -> Bool {
+        guard let cg else { return false }
+        if cg.bitsPerComponent > 8 { return true }
+        guard let cs = cg.colorSpace else { return false }
+        if CGColorSpaceUsesITUR_2100TF(cs) { return true }
+        let name = (cs.name as String?) ?? ""
+        return name.contains("2100") || name.contains("PQ") || name.contains("HLG")
+    }
+
+    private static let sdrContext = CIContext(options: [.cacheIntermediates: false])
+
+    /// A thumbnail that still came back in an HDR colour space (a QuickLook poster of an HDR video,
+    /// a photo ImageIO couldn't tone-map) redrawn as standard-range 8-bit Display P3, so it is drawn
+    /// and saved like every other tile. Anything else is returned untouched.
+    private static func standardRange(_ image: UIImage) -> UIImage {
+        guard isHDR(image.cgImage), let cg = image.cgImage else { return image }
+        let ci = CIImage(cgImage: cg)
+        let space = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
+        guard let sdr = sdrContext.createCGImage(ci, from: ci.extent, format: .RGBA8, colorSpace: space) else { return image }
+        return UIImage(cgImage: sdr, scale: image.scale, orientation: image.imageOrientation)
     }
 
     /// Approximate decoded size in bytes (RGBA), for the cache's cost limit.
@@ -197,13 +228,17 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
     }
 
     /// Fast in-process photo thumbnail via ImageIO (honors EXIF orientation, decoded immediately).
+    /// HDR photos decode to standard range with ImageIO's own tone mapping (`DecodeToSDR`, iOS 17):
+    /// a 10-bit PQ/HLG still — what crop, rotate, the photo editor and frame capture save an HDR
+    /// image as — otherwise came back in its HDR colour space and drew flat and dark as a tile.
     private func imageThumbnail(url: URL, maxPixel: CGFloat) -> UIImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceThumbnailMaxPixelSize: Int(max(1, maxPixel))
+            kCGImageSourceThumbnailMaxPixelSize: Int(max(1, maxPixel)),
+            kCGImageSourceDecodeRequest: kCGImageSourceDecodeToSDR
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
         return UIImage(cgImage: cg)
@@ -318,11 +353,12 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: Int(maxPixel)
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxPixel),
+            kCGImageSourceDecodeRequest: kCGImageSourceDecodeToSDR      // an HDR frame tile, tone-mapped
         ]
         guard let src = CGImageSourceCreateWithData(imageData as CFData, nil),
               let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return }
-        if let data = UIImage(cgImage: cg).jpegData(compressionQuality: 0.8) {
+        if let data = Self.standardRange(UIImage(cgImage: cg)).jpegData(compressionQuality: 0.8) {
             try? data.write(to: diskURL, options: .atomic)
         }
     }

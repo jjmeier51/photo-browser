@@ -1126,6 +1126,27 @@ Implemented from the improvement report's top items.
   the activity pill opens a sheet with each job's progress and Stop (upscales); a "Drive disconnected"
   banner shows when the drive vanishes mid-session (checked every 4 s) and clears when it returns.
 
+**Follow-up (Oct 25): dull tiles, sort order, HDR screenshots.**
+- *Dull, shadowed tiles* had two causes. `isDimmedHidden` drew any file with size 0 at 45%, including
+  files whose size was never read (every file in a folder over 8,000 items; any file the drive
+  refused to stat) — it now makes `applyHidden`'s exemption. And HDR stills (the 10-bit PQ HEICs that
+  crop/rotate, the photo editor and frame capture save) came back from ImageIO in their HDR colour
+  space and were cached as HDR-tagged JPEGs that drew flat and dark: thumbnails now decode with
+  `kCGImageSourceDecodeRequest: DecodeToSDR`, anything still HDR (an HDR video's QuickLook poster) is
+  redrawn as 8-bit Display P3 (`Thumbnailer.standardRange`), and a cached thumbnail found HDR-tagged
+  is deleted and regenerated — only those. Storage ▸ Clear Caches rebuilds the rest if one slips by.
+- *Default didn't sort by capture date.* `sortEntries(.smart)` orders files by modified date (when they
+  landed on the drive); only a plain folder of ≤ 8,000 items re-sorted by capture date, after a flash.
+  Every list now sorts with `Library.sortEntriesByCapture` — the dates already in the persisted store
+  (filled for the whole drive by the index build), no file reads — so Favorites, Tags, No Tags,
+  search, Home's filters and a folder's first paint are in capture order; huge folders look their
+  dates up through the index (`knownCaptureDates(forUnstattedEntries:)`). Files with no embedded date
+  still use their modified date.
+- *HDR screenshots a little too bright.* A captured frame keeps none of the Dolby Vision metadata the
+  player tone-maps with, so highlights showed at full strength. Screenshots (not bulk frame export)
+  now ease highlights to 3× SDR white with `CIToneMapHeadroom` (iOS 18+) and trim 0.15 EV (0.3 EV on
+  iOS 17): `FileActions.hdrFrameHeadroom` / `hdrFrameExposureTrim` to tune.
+
 ## 7. Downloaders (from the broader project + this session)
 
 The app has several **download-only, opt-in** importers. All are best-effort, `nonisolated`,
