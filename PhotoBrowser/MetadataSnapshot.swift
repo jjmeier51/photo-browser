@@ -377,10 +377,12 @@ nonisolated enum MetadataBackup {
         let fm = FileManager.default
         try? DriveWriter.createDirectory(at: dir)
         let enc = JSONEncoder(); enc.outputFormatting = [.sortedKeys]
+        // Through DriveWriter (temp → flush → rename): a backup on the drive must never be left
+        // half-written under its real name.
         guard let data = try? enc.encode(s),
-              (try? data.write(to: dir.appendingPathComponent(jsonName), options: .atomic)) != nil else { return false }
+              (try? DriveWriter.writeDataSync(data, to: dir.appendingPathComponent(jsonName))) != nil else { return false }
         if let places, !places.fileBins.isEmpty, let pdata = try? JSONEncoder().encode(places) {
-            try? pdata.write(to: dir.appendingPathComponent(placesName), options: .atomic)
+            try? DriveWriter.writeDataSync(pdata, to: dir.appendingPathComponent(placesName))
         }
         func copyAll(_ names: some Sequence<String>, from src: URL, sub: String) {
             let d = dir.appendingPathComponent(sub, isDirectory: true)
@@ -388,7 +390,7 @@ nonisolated enum MetadataBackup {
             for n in names {
                 let to = d.appendingPathComponent(n)
                 guard !fm.fileExists(atPath: to.path) else { continue }
-                try? fm.copyItem(at: src.appendingPathComponent(n), to: to)
+                try? DriveWriter.copyItem(at: src.appendingPathComponent(n), to: to)
             }
         }
         copyAll(s.folderCovers.values, from: covers, sub: coversSubfolder)

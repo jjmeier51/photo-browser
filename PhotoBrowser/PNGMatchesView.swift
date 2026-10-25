@@ -155,7 +155,7 @@ struct PNGMatchesView: View {
                     }
                 }
             }
-            .confirmationDialog("Delete \(selectedFiles.count) file\(selectedFiles.count == 1 ? "" : "s")? This permanently removes the files you ticked from the drive."
+            .confirmationDialog("Delete \(selectedFiles.count) file\(selectedFiles.count == 1 ? "" : "s")? They go to Recently Deleted for 30 days."
                                 + (fullyTickedGroups > 0 ? " \(fullyTickedGroups) group\(fullyTickedGroups == 1 ? " loses" : "s lose") every file — nothing of \(fullyTickedGroups == 1 ? "that photo" : "those photos") will remain." : ""),
                                 isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("Delete \(selectedFiles.count)", role: .destructive) { deleteSelectedFiles() }
@@ -218,12 +218,7 @@ struct PNGMatchesView: View {
         var seen = Set<URL>()
         let targets = groups.flatMap { $0.entries }.filter { urls.contains($0.url) && seen.insert($0.url).inserted }
         guard !targets.isEmpty else { return }
-        FileActions.delete(targets)
-        for e in targets {
-            library.clearOrigins([e.url]); library.clearLabels([e.url])
-            if library.isHiddenFile(e.url) { library.setFileHidden(false, for: e.url) }   // don't leave a stale hidden mark
-        }
-        library.contentDidChange(under: folder)
+        library.trashItems(targets)          // Recently Deleted; labels (and a hidden mark) stay for a restore
         for u in urls { remove(u, persisting: false) }
         selectedFiles.removeAll()
         persist()

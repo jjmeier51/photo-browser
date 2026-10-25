@@ -174,16 +174,22 @@ enum FileActions {
         guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
             return (nil, "Couldn’t start the audio export.")
         }
-        export.outputURL = dest
+        // Export to a hidden temp and commit it, so an interrupted export never leaves a cut-off
+        // .m4a under the real name.
+        let tmp = DriveWriter.tempURL(for: dest)
+        export.outputURL = tmp
         export.outputFileType = .m4a
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             export.exportAsynchronously { cont.resume() }
         }
         guard export.status == .completed else {
-            try? fm.removeItem(at: dest)
+            try? fm.removeItem(at: tmp)
             return (nil, export.error?.localizedDescription ?? "Audio export failed.")
         }
-        DriveWriter.fullSyncFileAndParent(dest)
+        do { try await DriveWriter.shared.commit(tmp, to: dest) } catch {
+            try? fm.removeItem(at: tmp)
+            return (nil, error.localizedDescription)
+        }
         return (dest, nil)
     }
 
@@ -1410,7 +1416,7 @@ enum FileActions {
         // Count only frames actually on disk — counting before the write made a run whose
         // writes all failed (missing folder, yanked drive) report success with nothing saved.
         do {
-            try data.write(to: job.dest)
+            try DriveWriter.writeDataSync(data, to: job.dest)    // temp → flush → rename: never a cut-off frame
             ctx.recordWritten()
             // Warm the folder's thumbnail from the frame we already have in memory, so opening
             // a 6k-frame folder later reads small cached JPEGs from local storage instead of

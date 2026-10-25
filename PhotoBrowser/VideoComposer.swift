@@ -41,10 +41,17 @@ enum VideoComposer {
         let ts: CMTimeScale = 600
         export.timeRange = CMTimeRange(start: CMTime(seconds: max(0, start), preferredTimescale: ts),
                                        end: CMTime(seconds: end, preferredTimescale: ts))
-        export.outputURL = dest
+        // Export to a hidden temp and commit it into place, so an interrupted export never leaves a
+        // cut-off video under the real name (or the old one already removed).
+        let tmp = DriveWriter.tempURL(for: dest)
+        export.outputURL = tmp
         export.outputFileType = fileType(for: dest)
-        try? FileManager.default.removeItem(at: dest)
-        return await run(export)
+        guard await run(export) else { try? FileManager.default.removeItem(at: tmp); return false }
+        do { try await DriveWriter.shared.commit(tmp, to: dest) } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            return false
+        }
+        return true
     }
 
     // MARK: - Stitch
@@ -127,18 +134,23 @@ enum VideoComposer {
         let preset = hdrColor != nil ? AVAssetExportPresetHEVCHighestQuality : AVAssetExportPresetHighestQuality
         guard let export = AVAssetExportSession(asset: comp, presetName: preset) else { return false }
         export.videoComposition = videoComp
-        export.outputURL = dest
+        let tmp = DriveWriter.tempURL(for: dest)        // committed into place once whole (see `trim`)
+        export.outputURL = tmp
         export.outputFileType = fileType(for: dest)
         export.shouldOptimizeForNetworkUse = true
         export.metadata = combinedMetadata(baseMeta, date: oldest)   // carry over metadata; stamp the oldest date
-        try? FileManager.default.removeItem(at: dest)
-        let ok = await run(export, progress: progress)
-        // Also set the file's dates so the browser's timeline/Age/sort use the oldest source date.
-        if ok, let oldest {
+        guard await run(export, progress: progress) else { try? FileManager.default.removeItem(at: tmp); return false }
+        // Also set the file's dates so the browser's timeline/Age/sort use the oldest source date —
+        // on the temp, so the final entry is written once.
+        if let oldest {
             try? FileManager.default.setAttributes([.creationDate: oldest, .modificationDate: oldest],
-                                                   ofItemAtPath: dest.path)
+                                                   ofItemAtPath: tmp.path)
         }
-        return ok
+        do { try await DriveWriter.shared.commit(tmp, to: dest) } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            return false
+        }
+        return true
     }
 
     /// The video track's color primaries / transfer function / YCbCr matrix, plus whether it's HDR

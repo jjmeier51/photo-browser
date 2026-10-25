@@ -59,6 +59,10 @@ struct PhotoBrowserApp: App {
                         // Hand any in-flight TikTok downloads to the background session first — the
                         // fast lane only runs while we're on screen.
                         BackgroundDownloader.shared.setForeground(false)
+                        // Tags, captions and favorites save a moment after each change; make sure
+                        // nothing is still waiting when iOS suspends the app.
+                        library.flushBulkSaves(wait: true)
+                        FilePrefs.shared.flush()
                         // Arm the drive's "safe to remove" state on the way out. This drains
                         // any commit already in flight and flushes the drive root, so if the
                         // user unplugs while the app is suspended, the last thing that touched

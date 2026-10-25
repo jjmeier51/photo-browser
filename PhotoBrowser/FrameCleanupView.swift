@@ -327,7 +327,7 @@ struct FrameCleanupView: View {
 
     private func performDelete() {
         guard let item = current else { return }
-        FileActions.delete([item])               // risk understood — no extra confirmation
+        library.trashItems([item], notify: false)   // to Recently Deleted (no confirmation needed); one reload on close
         reviewed.insert(item.url.path)            // recorded so progress survives a restart
         library.markCleanupReviewed(item.url, in: folder)
         items.removeAll { $0.url == item.url }    // gone from disk

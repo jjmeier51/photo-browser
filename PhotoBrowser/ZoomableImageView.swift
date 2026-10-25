@@ -3,11 +3,14 @@ import ImageIO
 import UIKit
 import AVFoundation
 
-/// Shows a photo with pinch + double-tap zoom. Loads a fast embedded-thumbnail
-/// preview first, then the full image. Swipes (handled in UIKit, reliable over
-/// the scroll view) at 1×: left/right = next/prev, up = info, down = exit.
+/// Shows a photo with pinch + double-tap zoom. Opens on the grid tile already in memory (else the
+/// file's embedded thumbnail), then the image decoded at the screen's own resolution; zooming in
+/// past 1.3× swaps in a sharper decode. Swipes (handled in UIKit, reliable over the scroll view)
+/// at 1×: left/right = next/prev, up = info, down = exit.
 struct ZoomableImageView: View {
     let url: URL
+    /// The grid's thumbnail for this photo, shown on the first frame so opening never flashes black.
+    var placeholder: UIImage? = nil
     var coverSource: CoverFrameSource? = nil
     var onDismiss: () -> Void = {}
     var onInfo: () -> Void = {}
@@ -17,6 +20,8 @@ struct ZoomableImageView: View {
     var onNext: () -> Void = {}
 
     @State private var displayImage: UIImage?
+    @State private var detailImage: UIImage?          // the sharper decode for a zoomed-in view
+    @State private var loadingDetail = false
     @State private var badge: String?
     @State private var livePairURL: URL?
     @State private var livePlaying = false
@@ -24,10 +29,11 @@ struct ZoomableImageView: View {
     var body: some View {
         ZStack {
             if let displayImage {
-                ZoomScrollView(image: displayImage, onZoomChanged: onZoomChanged,
+                ZoomScrollView(image: displayImage, detail: detailImage, onZoomChanged: onZoomChanged,
                                onDismiss: onDismiss, onInfo: onInfo, onToggleChrome: onToggleChrome,
                                onPrev: onPrev, onNext: onNext,
-                               onLivePress: { pressing in if livePairURL != nil { livePlaying = pressing } })
+                               onLivePress: { pressing in if livePairURL != nil { livePlaying = pressing } },
+                               onZoomSettled: { scale in loadDetailIfNeeded(scale: scale) })
             } else {
                 Color.clear
             }
@@ -50,7 +56,8 @@ struct ZoomableImageView: View {
             }
         }
         .task(id: url) {
-            badge = await MetadataLoader.photoBadge(url: url)
+            detailImage = nil
+            loadingDetail = false
             // This page owns the album-cover source while it's visible.
             coverSource?.liveProvider = nil
             coverSource?.liveTime = nil
@@ -59,22 +66,71 @@ struct ZoomableImageView: View {
             if let ready = ViewerPageCache.shared.image(for: url) {
                 displayImage = ready
                 coverSource?.staticImage = ready
+                badge = await MetadataLoader.photoBadge(url: url)
                 return
             }
-            // Fast embedded-thumbnail preview first, then the full image.
-            if let preview = await Self.decode(url: url, maxPixel: 1400, fullQuality: false) {
+            // The grid tile first (already in memory, same shape), else the file's embedded
+            // thumbnail — then the screen-resolution image.
+            if let placeholder {
+                displayImage = placeholder
+            } else if let preview = await Self.decode(url: url, maxPixel: 1400, fullQuality: false) {
                 if displayImage == nil { displayImage = preview; coverSource?.staticImage = preview }
             }
-            if let full = await Self.decode(url: url, maxPixel: 2600, fullQuality: true) {
+            if let full = await Self.decode(url: url, maxPixel: Self.fitPixels, fullQuality: true) {
                 displayImage = full
                 coverSource?.staticImage = full
                 ViewerPageCache.shared.store(full, for: url)   // swiping back is instant
             }
+            badge = await MetadataLoader.photoBadge(url: url)
         }
         // If this still has a motion sibling, enable touch-and-hold to play it.
         .task(id: url) {
             livePlaying = false
             livePairURL = await Self.findLivePair(for: url)
+        }
+    }
+
+    /// The long side, in pixels, of the image the viewer fits to the screen: the display's own
+    /// resolution (2,796 on a Pro Max, 2,752 on a 13-inch iPad), so a fitted photo is pixel-sharp.
+    /// It used to be a fixed 2,600, under the larger phones' and iPads' screens.
+    static var fitPixels: CGFloat {
+        let native = UIScreen.main.nativeBounds.size
+        return max(2048, max(native.width, native.height))
+    }
+
+    /// Zoomed in past 1.3×: decode the photo again at up to 2.5× the fitted size (capped at about
+    /// 24 megapixels, ~96 MB) and swap it in without moving the zoom. Held only while this page is
+    /// up — it isn't cached, so swiping on frees it.
+    private func loadDetailIfNeeded(scale: CGFloat) {
+        guard scale > 1.3, detailImage == nil, !loadingDetail else { return }
+        loadingDetail = true
+        let url = self.url, fit = Self.fitPixels
+        Task {
+            let detail = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+                guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+                      let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+                      let pw = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+                      let ph = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue, pw > 0, ph > 0
+                else { return nil }
+                // The decode below applies the orientation; the long side is the same either way.
+                let w = CGFloat(pw), h = CGFloat(ph)
+                let long = max(w, h)
+                var target = min(long, fit * 2.5)
+                let maxArea: CGFloat = 24_000_000
+                let area = (w * target / long) * (h * target / long)
+                if area > maxArea { target *= (maxArea / area).squareRoot() }
+                guard target > fit * 1.1 else { return nil }       // the fitted image is already as sharp
+                let options: [CFString: Any] = [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceShouldCacheImmediately: true,
+                    kCGImageSourceThumbnailMaxPixelSize: target
+                ]
+                guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else { return nil }
+                return UIImage(cgImage: cg)
+            }.value
+            guard url == self.url else { return }
+            detailImage = detail
         }
     }
 
@@ -169,13 +225,13 @@ nonisolated final class ViewerPageCache: @unchecked Sendable {
     /// The cache is a handful of images — refilling it is cheap.
     func clear() { cache.removeAllObjects() }
 
-    /// Decodes `url` at full viewer quality into the cache, off the main thread.
-    /// No-op if it's already there or another preload beat us to it.
-    func preload(url: URL) {
+    /// Decodes `url` at full viewer quality (`maxPixel`: `ZoomableImageView.fitPixels`) into the
+    /// cache, off the main thread. No-op if it's already there or another preload beat us to it.
+    func preload(url: URL, maxPixel: CGFloat) {
         guard image(for: url) == nil else { return }
         Task.detached(priority: .utility) { [weak self] in
             guard let self, self.image(for: url) == nil else { return }
-            if let full = await ZoomableImageView.decode(url: url, maxPixel: 2600, fullQuality: true) {
+            if let full = await ZoomableImageView.decode(url: url, maxPixel: maxPixel, fullQuality: true) {
                 self.store(full, for: url)
             }
         }
@@ -248,6 +304,12 @@ private final class CenteringScrollView: UIScrollView {
         setNeedsLayout()
     }
 
+    /// Swaps in a sharper copy of the same picture without touching the layout or the zoom (the
+    /// image view's frame stays; only the pixels it draws get denser).
+    func setDetailImage(_ image: UIImage) {
+        imageView.image = image
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         guard imageSize.width > 0, bounds.width > 0, bounds.height > 0 else { return }
@@ -279,6 +341,7 @@ private final class CenteringScrollView: UIScrollView {
 
 private struct ZoomScrollView: UIViewRepresentable {
     let image: UIImage
+    var detail: UIImage? = nil
     var onZoomChanged: ((Bool) -> Void)?
     var onDismiss: () -> Void
     var onInfo: () -> Void
@@ -286,6 +349,7 @@ private struct ZoomScrollView: UIViewRepresentable {
     var onPrev: () -> Void
     var onNext: () -> Void
     var onLivePress: (Bool) -> Void = { _ in }
+    var onZoomSettled: (CGFloat) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onZoomChanged: onZoomChanged, onDismiss: onDismiss, onInfo: onInfo,
@@ -308,6 +372,7 @@ private struct ZoomScrollView: UIViewRepresentable {
         scroll.addSubview(scroll.imageView)
 
         context.coordinator.scrollView = scroll
+        context.coordinator.baseImage = image
 
         let doubleTap = UITapGestureRecognizer(target: context.coordinator,
                                                action: #selector(Coordinator.handleDoubleTap(_:)))
@@ -344,13 +409,26 @@ private struct ZoomScrollView: UIViewRepresentable {
         context.coordinator.onPrev = onPrev
         context.coordinator.onNext = onNext
         context.coordinator.onLivePress = onLivePress
-        if uiView.imageView.image !== image {
+        context.coordinator.onZoomSettled = onZoomSettled
+        // Compared against the last base image, not what the image view shows — that may be the
+        // sharper zoom copy, which must not bounce back to the fitted one on every update.
+        if context.coordinator.baseImage !== image {
+            context.coordinator.baseImage = image
+            context.coordinator.detailImage = nil
             uiView.setImage(image)
+        }
+        if let detail, context.coordinator.detailImage !== detail {
+            context.coordinator.detailImage = detail
+            uiView.setDetailImage(detail)
         }
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate {
         weak var scrollView: CenteringScrollView?
+        var baseImage: UIImage?
+        var detailImage: UIImage?
+        var onZoomSettled: (CGFloat) -> Void = { _ in }
+        private var lastZoomed = false
         let onZoomChanged: ((Bool) -> Void)?
         var onDismiss: () -> Void
         var onInfo: () -> Void
@@ -389,7 +467,9 @@ private struct ZoomScrollView: UIViewRepresentable {
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             let zoomed = scrollView.zoomScale > scrollView.minimumZoomScale + 0.01
             scrollView.isScrollEnabled = zoomed
-            onZoomChanged?(zoomed)
+            // Report only the flips: this fires every frame of a pinch, and each report re-ran the
+            // viewer's SwiftUI body.
+            if zoomed != lastZoomed { lastZoomed = zoomed; onZoomChanged?(zoomed) }
             (scrollView as? CenteringScrollView)?.centerContent()
             // A crisp tick when a pinch bumps against the max zoom — fires once until you back off.
             if scrollView.zoomScale >= scrollView.maximumZoomScale - 0.01 {
@@ -397,6 +477,10 @@ private struct ZoomScrollView: UIViewRepresentable {
             } else {
                 didHitZoomLimit = false
             }
+        }
+
+        func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+            onZoomSettled(scale)
         }
 
         private var atRest: Bool {

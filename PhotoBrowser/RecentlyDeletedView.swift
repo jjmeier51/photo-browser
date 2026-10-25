@@ -77,10 +77,7 @@ struct RecentlyDeletedView: View {
 
     private func restore(_ item: TrashEntry) {
         Haptics.light()
-        if FileActions.restoreFromTrash(item) != nil {
-            library.removeTrashRecords([item.id])
-            library.contentDidChange()
-        }
+        library.restoreTrashed([item])      // a renamed restore keeps its labels
     }
     private func purge(_ item: TrashEntry) {
         Haptics.warning()

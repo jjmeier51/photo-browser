@@ -175,7 +175,7 @@ struct DuplicatesView: View {
                     }
                 }
             }
-            .confirmationDialog("Delete \(selectedFiles.count) file\(selectedFiles.count == 1 ? "" : "s")? This permanently removes the copies you ticked from the drive."
+            .confirmationDialog("Delete \(selectedFiles.count) file\(selectedFiles.count == 1 ? "" : "s")? They go to Recently Deleted for 30 days."
                                 + (fullyTickedGroups > 0 ? " \(fullyTickedGroups) group\(fullyTickedGroups == 1 ? " loses" : "s lose") every copy — nothing of \(fullyTickedGroups == 1 ? "that photo" : "those photos") will remain." : ""),
                                 isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("Delete \(selectedFiles.count)", role: .destructive) { deleteSelectedFiles() }
@@ -270,9 +270,7 @@ struct DuplicatesView: View {
         var seen = Set<URL>()
         let targets = groups.flatMap { $0.entries }.filter { urls.contains($0.url) && seen.insert($0.url).inserted }
         guard !targets.isEmpty else { return }
-        FileActions.delete(targets)
-        for e in targets { library.clearOrigins([e.url]); library.clearLabels([e.url]) }
-        library.contentDidChange(under: folder)
+        library.trashItems(targets)          // Recently Deleted; labels stay for a restore
         for i in groups.indices.reversed() {
             groups[i].entries.removeAll { urls.contains($0.url) }
             if groups[i].entries.count < 2 { groups.remove(at: i) }   // no longer a duplicate
@@ -791,14 +789,14 @@ struct DuplicateCompareView: View {
             Button("Save") { if let t = captionTarget { library.setCaption(captionDraft, for: t.url) }; captionTarget = nil }
             Button("Cancel", role: .cancel) { captionTarget = nil }
         }
-        .confirmationDialog("Delete this file? This permanently removes it from the drive.",
+        .confirmationDialog("Move this file to Recently Deleted? It stays restorable for 30 days.",
                             isPresented: Binding(get: { confirmDelete != nil },
                                                  set: { if !$0 { confirmDelete = nil } }),
                             titleVisibility: .visible) {
             Button("Delete", role: .destructive) { if let e = confirmDelete { delete(e) } }
             Button("Cancel", role: .cancel) { confirmDelete = nil }
         }
-        .confirmationDialog("Delete \(selected.count) file\(selected.count == 1 ? "" : "s")? This permanently removes \(selected.count == 1 ? "it" : "them") from the drive.",
+        .confirmationDialog("Delete \(selected.count) file\(selected.count == 1 ? "" : "s")? \(selected.count == 1 ? "It goes" : "They go") to Recently Deleted for 30 days.",
                             isPresented: $confirmMultiDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) { deleteMultiple() }
             Button("Cancel", role: .cancel) {}
@@ -964,9 +962,8 @@ struct DuplicateCompareView: View {
         let urls = selected
         let targets = items.filter { urls.contains($0.url) }
         guard !targets.isEmpty else { return }
-        FileActions.delete(targets)
-        for e in targets { library.clearOrigins([e.url]); library.clearLabels([e.url]); onDelete(e.url) }
-        library.contentDidChange()
+        library.trashItems(targets)          // Recently Deleted; labels stay for a restore
+        for e in targets { onDelete(e.url) }
         items.removeAll { urls.contains($0.url) }
         selected.removeAll()
         guard items.count >= 2 else { dismiss(); return }   // no longer a duplicate group
@@ -1027,10 +1024,7 @@ struct DuplicateCompareView: View {
     }
 
     private func delete(_ entry: Entry) {
-        FileActions.delete([entry])
-        library.clearOrigins([entry.url])
-        library.clearLabels([entry.url])
-        library.contentDidChange()
+        library.trashItems([entry])          // Recently Deleted; labels stay for a restore
         confirmDelete = nil
         onDelete(entry.url)
         if let idx = items.firstIndex(where: { $0.url == entry.url }) { items.remove(at: idx) }

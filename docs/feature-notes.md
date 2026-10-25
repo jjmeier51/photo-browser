@@ -1089,6 +1089,43 @@ grid — which made scrolling and anything timed against it sluggish in every fo
 live in a plain reference (`CellFrameStore`, `frameStore`), read only by `dragIndex(at:)` and the
 auto-scroll step (which also uses the drag's index map instead of a linear search per visible cell).
 
+## 6g. Safety, main-thread and viewer pass (Oct 25, 2026)
+
+Implemented from the improvement report's top items.
+
+- **No Tags showed tagged files as untagged (and dropped their hearts).** No Tags is built from the
+  whole-drive `index`, and the index was only rebuilt at launch: a file moved or renamed mid-session
+  kept its old path there while its tags, favorite and caption followed it to the new path, so No
+  Tags listed the stale path as "untagged" with no labels. The index now follows every change
+  (`noteIndexChange` re-reads the folder a `contentDidChange(under:)` names; `remapIndex` moves
+  entries with `itemsMoved`), its walk spells every path under the root's own spelling (the
+  enumerator can return `/private/var/…` for `/var/…`), and label lookups compare via
+  `Library.canonicalPath`. Launch re-walks only folders whose modification date moved
+  (`incrementalWalk`); a full walk still runs on exFAT, every sixth walk and after three days,
+  because a file edited in place keeps its folder's date. The snapshot moved to Application Support.
+- **Every Delete is reversible.** `Library.trashItems` is the one Delete (grid, viewer, Find
+  Duplicates, Compare PNGs, Clean Up); the viewer used to delete for good and also delete the iOS
+  Photos original. `restoreTrashed` copies labels onto a renamed restore.
+- **DriveWriter sweep.** Frame export (`writeDataSync`), audio extraction, trim and combine (export to
+  `DriveWriter.tempURL` then `commit`), metadata backups and `DriveWriter.copyItem` (temp + rename)
+  no longer write straight to a final drive path; the photo editor's temp is `.pbtmp_…` and flushed.
+- **Main thread.** `MetadataLoader` is `nonisolated` (its cache lookups no longer hop to main from
+  the bulk passes); the bulk loaders in `Library` are `@concurrent`; `cachedCaptureDates` /
+  `cachedMediaSpecs` answer the known files in one pass so tasks start only for misses; the folder's
+  re-sorts and Live Photo pairing run detached.
+- **Grid.** `EntryCell` is `Equatable` (wrapped in `.equatable()`), so a selection tap redraws the
+  tiles that changed; tiles draw `Thumbnailer.cached(for:)` on their first frame; auto-picked folder
+  covers are encoded off-main and published in one batch every 300 ms.
+- **Saves.** Per-tap stores save through `scheduleBulkSave`; bulk favorite/To AI/caption use the batch
+  setters (`setFavorite(_:for:)`, `setAI`, `setCaptions`); the remaining `UserDefaults` stores moved to
+  `FilePrefs`.
+- **Viewer.** Opens on the grid tile, decodes at the screen's native size (`fitPixels`), and swaps in
+  a sharper decode (≤ 24 MP) once a zoom settles past 1.3×; videos show the tile as a poster until
+  `isReadyForDisplay`. A bottom bar carries Share, Favorite, Info and Delete.
+- **Status.** Confirmations are toasts (`showToast`); failures are notices titled with what failed;
+  the activity pill opens a sheet with each job's progress and Stop (upscales); a "Drive disconnected"
+  banner shows when the drive vanishes mid-session (checked every 4 s) and clears when it returns.
+
 ## 7. Downloaders (from the broader project + this session)
 
 The app has several **download-only, opt-in** importers. All are best-effort, `nonisolated`,

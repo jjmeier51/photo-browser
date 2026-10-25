@@ -52,10 +52,12 @@ extension Library {
         case .photo:
             title = "AI Upscaling \(n) photo\(plural)"
         }
-        let activity = beginActivity(title)
+        let activity = beginActivity(title, cancellable: true)      // Stop in the activities sheet
         let bg = BackgroundTaskHolder(); bg.begin(name: "Upscale")
         var done = 0, skipped = 0, failed = 0
+        var stopped = false
         for (i, url) in job.urls.enumerated() {
+            if isActivityCancelled(activity) { stopped = true; break }      // finish the file in hand, then stop
             setActivity(activity, status: url.lastPathComponent, fraction: Double(i) / Double(n))
             let outcome: MediaEditing.UpscaleResult
             switch job.kind {
@@ -100,6 +102,7 @@ extension Library {
         }
         if failed > 0 { msg += " \(failed) couldn’t be processed." }
         if done > 0 { msg += " Tagged “\(Self.upscaledTag)”." }
+        if stopped { msg += " Stopped before the rest." }
         endActivity(activity, result: msg)
         contentDidChange(under: job.folder)
     }

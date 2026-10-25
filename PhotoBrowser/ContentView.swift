@@ -12,6 +12,7 @@ struct AppGradient: View {
 
 struct ContentView: View {
     @Environment(Library.self) private var library
+    @State private var showActivities = false
 
     var body: some View {
         @Bindable var library = library
@@ -35,40 +36,58 @@ struct ContentView: View {
                         .id(url)            // fresh identity per folder, so a path *replace* (e.g. "Open Stories") reloads the listing
                 }
             }
-            // Non-blocking, app-wide progress pills for background jobs (frame export, Instagram
-            // downloads, …) — so they keep running while you browse and view media.
-            if !library.activities.isEmpty {
-                VStack(spacing: 8) {
-                    Spacer()
-                    ForEach(library.activities) { activity in
-                        HStack(spacing: 10) {
-                            ProgressView().controlSize(.small).tint(.white)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(pillTitle(activity)).font(.caption.weight(.semibold))
-                                if !activity.status.isEmpty {
-                                    Text(activity.status).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                                }
-                            }
-                            if activity.fraction >= 0 {
-                                ProgressView(value: activity.fraction).progressViewStyle(.linear).frame(width: 70)
-                            }
-                        }
-                        .padding(.horizontal, 14).padding(.vertical, 10)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .allowsHitTesting(false)         // never intercepts taps
-                    }
-                }
-                .padding(.bottom, 30)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+            // The drive went away mid-session: say so, instead of a normal-looking grid whose taps
+            // do nothing. It clears itself when the drive comes back.
+            if library.waitingForDrive && library.rootURL != nil {
+                VStack { DriveBanner(); Spacer() }
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
+            // Bottom of the screen: a confirmation toast above the activity pill. Neither blocks
+            // what's underneath (the empty space of this stack passes touches through).
+            VStack(spacing: 8) {
+                Spacer()
+                if let toast = library.toast {
+                    ToastView(text: toast.text)
+                        .onTapGesture { library.toast = nil }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                if !library.activities.isEmpty {
+                    // One pill for every background job (frame export, downloads, upscales…); tap it
+                    // for each job's progress and, where a job allows it, Stop.
+                    Button { showActivities = true } label: { activityPill }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Shows background tasks")
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .padding(.bottom, 30)
         }
         .animation(.default, value: library.activities.count)
-        .alert("Done", isPresented: Binding(
-            get: { !library.activityResults.isEmpty },
-            set: { if !$0 { library.dismissActivityResult() } })) {
-            Button("OK", role: .cancel) { library.dismissActivityResult() }
-        } message: {
-            Text(library.activityResults.first ?? "")
+        .animation(.easeOut(duration: 0.25), value: library.toast)
+        .animation(.easeOut(duration: 0.25), value: library.waitingForDrive)
+        // Notice an unplugged drive while the app sits idle (otherwise only the next reload would).
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                await library.checkDrivePresence()
+            }
+        }
+        .sheet(isPresented: $showActivities) { ActivitiesSheet() }
+        // A job that failed or needs reading: one at a time, titled with what it's about. (Successes
+        // are toasts.) Dismissed only through the binding — a button that also dismissed used to skip
+        // the next queued message.
+        .alert(library.notices.first?.title ?? "",
+               isPresented: Binding(get: { !library.notices.isEmpty },
+                                    set: { if !$0 { library.dismissNotice() } }),
+               presenting: library.notices.first) { notice in
+            if notice.opensSettings {
+                Button("Open Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                }
+            }
+            Button("OK", role: .cancel) {}
+        } message: { notice in
+            Text(notice.message)
         }
         // Portuguese→English caption translation for accessKardashian downloads —
         // hosted app-wide so it completes even after the download screen is closed.
@@ -98,6 +117,118 @@ struct ContentView: View {
 
     private func pillTitle(_ a: Library.Activity) -> String {
         a.fraction >= 0 ? "\(a.title) — \(Int(a.fraction * 100))%" : a.title
+    }
+
+    /// The job in progress — or, with several, how many and the first one's name.
+    private var activityPill: some View {
+        let first = library.activities[0]
+        let many = library.activities.count > 1
+        return HStack(spacing: 10) {
+            ProgressView().controlSize(.small).tint(.primary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(many ? "\(library.activities.count) tasks running" : pillTitle(first))
+                    .font(.caption.weight(.semibold))
+                let status = many ? first.title : first.status
+                if !status.isEmpty {
+                    Text(status).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            if !many, first.fraction >= 0 {
+                ProgressView(value: first.fraction).progressViewStyle(.linear).frame(width: 70)
+            }
+            Image(systemName: "chevron.up").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: Capsule())
+        .contentShape(Capsule())
+    }
+}
+
+/// A short confirmation that fades by itself (see `Library.showToast`). Tap to dismiss early.
+private struct ToastView: View {
+    let text: String
+    var body: some View {
+        Text(text)
+            .font(.subheadline.weight(.medium))
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .padding(.horizontal, 24)
+    }
+}
+
+/// Every background job with its progress, and Stop for the ones that can stop between items.
+private struct ActivitiesSheet: View {
+    @Environment(Library.self) private var library
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List(library.activities) { a in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(a.title).font(.subheadline.weight(.semibold))
+                        Spacer()
+                        if a.fraction >= 0 {
+                            Text("\(Int(a.fraction * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                    }
+                    if !a.status.isEmpty {
+                        Text(a.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    if a.fraction >= 0 { ProgressView(value: a.fraction) } else { ProgressView().frame(maxWidth: .infinity, alignment: .leading) }
+                    if a.cancellable && !a.stopping {
+                        Button("Stop", role: .destructive) { library.cancelActivity(a.id) }
+                            .font(.subheadline)
+                            .buttonStyle(.borderless)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .overlay {
+                if library.activities.isEmpty {
+                    ContentUnavailableView("Nothing Running", systemImage: "checkmark.circle",
+                                           description: Text("Background jobs show here while they run."))
+                }
+            }
+            .navigationTitle("Activity")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+/// Shown over the browser when the drive disappears mid-session. Re-checks every couple of
+/// seconds; when the drive is back (same or new mount path) the library reopens and the folder on
+/// screen re-reads.
+private struct DriveBanner: View {
+    @Environment(Library.self) private var library
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "externaldrive.badge.exclamationmark")
+                .font(.title3).foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Drive disconnected").font(.subheadline.weight(.semibold))
+                Text("Plug it back in and the library reopens on its own.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            ProgressView().controlSize(.small)
+        }
+        .padding(12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(.horizontal, 12)
+        .padding(.top, 4)
+        .accessibilityElement(children: .combine)
+        .task {
+            while !Task.isCancelled && library.waitingForDrive {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                library.reconnectIfNeeded()
+            }
+            if !Task.isCancelled && !library.waitingForDrive { library.contentDidChange() }   // re-list what's on screen
+        }
     }
 }
 

@@ -252,8 +252,33 @@ actor DriveWriter {
             }
             return
         }
-        if clonefile(src.path, dest.path, 0) == 0 { return }
-        try fm.copyItem(at: src, to: dest)
+        // A file lands under a hidden temp name first and is renamed into place once it's whole and
+        // flushed, so a crash or unplug mid-copy never leaves a cut-off file under the real name.
+        guard !fm.fileExists(atPath: dest.path) else {     // like `copyItem`: never replace what's there
+            throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: dest.path])
+        }
+        // `.pbcopy_`, not `.pbtmp_`: a copy (and a clone) keeps the source's modification date, and
+        // the folder listing sweeps `.pbtmp_` files older than two minutes — it would delete a long
+        // copy of an old file mid-way. Hidden from listings all the same.
+        let tmp = tempURL(for: dest, prefix: ".pbcopy_")
+        do {
+            if clonefile(src.path, tmp.path, 0) != 0 { try fm.copyItem(at: src, to: tmp) }
+            fullSync(tmp)
+            try fm.moveItem(at: tmp, to: dest)
+        } catch {
+            try? fm.removeItem(at: tmp)
+            throw error
+        }
+    }
+
+    /// A hidden sibling of `dest` for writers that can only write to a path (an export session, an
+    /// encoder, a copy): write there, then `commit` (or rename) it into place, so `dest` only ever
+    /// appears complete. The folder listing hides `.pbtmp_` files and sweeps up stale ones a crash
+    /// left behind.
+    nonisolated static func tempURL(for dest: URL, prefix: String = ".pbtmp_") -> URL {
+        let ext = dest.pathExtension
+        return dest.deletingLastPathComponent()
+            .appendingPathComponent(prefix + UUID().uuidString + (ext.isEmpty ? "" : "." + ext))
     }
 
     /// Move `src` to `dest`. On one volume it's a rename — a folder keeps its list of contents where it

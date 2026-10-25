@@ -81,7 +81,7 @@ struct FolderView: View {
     @State private var confirmDelete = false
     @State private var showExporter = false
     @State private var exportURLs: [URL] = []
-    @State private var resultMessage: String?
+    @State private var resultMessage: String?          // a confirmation → shown as a toast
     @State private var showFolderPicker = false
     @State private var folderPurpose: ImportPurpose = .open
     @State private var loaded = false
@@ -223,6 +223,7 @@ struct FolderView: View {
     @State private var audioEntry: Entry?          // a tapped audio file → full-screen player
     @State private var reloading = false           // single-flight guard for reload()
     @State private var reloadPending = false
+    @State private var missedReload = false        // a content change arrived while another folder was on top
     @State private var thoroughNextReload = false  // the next reload() merges every directory read (Force Refresh)
     @State private var unreadableReason: String?   // set when iOS can't read this folder at all (see emptyOverlay)
     @State private var showRotatePreview = false   // bulk photo-rotate preview sheet
@@ -277,7 +278,7 @@ struct FolderView: View {
     /// Every file on the drive (the full index), unsorted — what Home's drive-wide loaders and its
     /// Year / Location menus draw on. The filter itself (`deepFilter`) sorts its own result off-main.
     private var deepMedia: [Entry] {
-        deepMemo.value(for: "\(library.index.count)|\(library.changeToken)") {
+        deepMemo.value(for: "\(library.indexRevision)|\(library.changeToken)") {
             library.index.filter { !$0.isFolder }
         }
     }
@@ -286,7 +287,7 @@ struct FolderView: View {
     /// the pass whenever a filter, the sort, the index or a loader's data changes.
     private var deepKey: String {
         [
-            "\(library.index.count)", library.sort.rawValue, "\(typeFilter)", "\(formatFilter)",
+            "\(library.indexRevision)", library.sort.rawValue, "\(typeFilter)", "\(formatFilter)",
             yearFilter.map(String.init) ?? "", locationFilter ?? "-", categoryFilter.sorted().joined(separator: ","),
             "\(videoRes)\(imageRes)\(hdrOnly)", "\(showEditedOnly)\(showHiddenFolders)",
             "\(library.labelsVersion)", "\(library.changeToken)",
@@ -372,6 +373,15 @@ struct FolderView: View {
     /// `filtered`, and reaching the end of it draws the next page. A `ForEach` over tens of
     /// thousands of tiles is what made a drive-wide result lag on every re-render.
     static let pageSize = 400
+    /// A failure, as an alert titled with what failed (a Photos permission problem offers Settings).
+    private func fail(_ title: String, _ message: String) {
+        let lower = message.lowercased()
+        library.postNotice(title, message, opensSettings: lower.contains("access") && lower.contains("settings"))
+    }
+
+    /// Whether this folder is the one on screen (the root with nothing pushed, or the last pushed).
+    private var isTopMost: Bool { isRoot ? library.path.isEmpty : library.path.last == url }
+
     private var displayed: [Entry] { filtered.count > visibleLimit ? Array(filtered.prefix(visibleLimit)) : filtered }
 
     /// The filters and sort alone (no counts): a change here is a new result, so the grid starts
@@ -477,7 +487,7 @@ struct FolderView: View {
             submittedQuery, "\(typeFilter)", "\(formatFilter)", "\(labelKind)",
             "\(showFavoritesOnly)\(showAIOnly)\(showEditedOnly)\(showHiddenFolders)\(tsNoLabel)",
             tsLabelFilter.sorted().joined(separator: ","), tagFilters.sorted().joined(separator: ",") + (noTagsFilter ? "|none" : "") + (tagMatchAny ? "|any" : ""),
-            "\(deepFilterActive)/\(library.index.count)/\(deepGalleryFolders.count)/\(deepResultsVersion)",
+            "\(deepFilterActive)/\(library.indexRevision)/\(deepGalleryFolders.count)/\(deepResultsVersion)",
             categoryFilter.sorted().joined(separator: ","),
             yearFilter.map(String.init) ?? "", locationFilter ?? "-", ageFilter.map(String.init) ?? "",
             "\(videoRes)\(imageRes)\(hdrOnly)",
@@ -766,7 +776,7 @@ struct FolderView: View {
     /// The Location menu: each place with how many files here are from it, most first; "No
     /// Location" (label "") last.
     private var locationOptions: [LocationOption] {
-        locationsMemo.value(for: "\(entriesVersion)|\(placeLabels.count)|\(isRoot ? library.index.count : -1)") {
+        locationsMemo.value(for: "\(entriesVersion)|\(placeLabels.count)|\(isRoot ? library.indexRevision : -1)") {
             var counts: [String: Int] = [:]
             let scope = isRoot ? deepMedia : entries        // Home offers the whole drive's places
             for e in scope where !e.isFolder { if let label = placeLabels[e.url] { counts[label, default: 0] += 1 } }
@@ -818,6 +828,7 @@ struct FolderView: View {
                 }
             }
             .scrollDisabled(scrollLocked)        // freeze the page while a select-drag is active
+            .allowsHitTesting(!library.waitingForDrive)   // the drive is gone (see the banner): nothing here would work
             .refreshable { Haptics.light(); await forceRefresh() }   // pull down to force a fresh disk re-listing
             .coordinateSpace(name: "grid")
             .background(
@@ -874,6 +885,7 @@ struct FolderView: View {
                   likeCount: entry.kind == .video ? library.tiktokLikeCount(for: entry.url) : nil,
                   reviewsFolder: entry.isFolder && library.isReviewsFolder(entry.url),
                   onReady: { homeCellReady() })
+            .equatable()            // redraw only tiles whose inputs changed (see `EntryCell`)
             // A revealed hidden item (folder, file, or 0 KB file) reads as hidden (dimmed) so it
             // isn't mistaken for a normal one; invisible entirely unless Show Hidden Items is on.
             .opacity(isDimmedHidden(entry) ? 0.45 : 1)
@@ -1224,7 +1236,8 @@ struct FolderView: View {
     private func saveSingleToPhotos(_ entry: Entry) {
         Task {
             let r = await FileActions.saveToPhotos([entry])
-            resultMessage = r.note ?? (r.failed == 0 ? "Saved to Photos." : "Couldn’t save to Photos.")
+            if r.failed > 0 { fail("Couldn’t Save to Photos", r.note ?? "The photo couldn’t be added to your library.") }
+            else { resultMessage = r.note ?? "Saved to Photos." }
         }
     }
 
@@ -1333,11 +1346,12 @@ struct FolderView: View {
                 Button("Delete", role: .destructive) { performDelete() }
                 Button("Cancel", role: .cancel) {}
             }
-            .alert("Done", isPresented: Binding(get: { resultMessage != nil },
-                                                set: { if !$0 { resultMessage = nil } })) {
-                Button("OK") { resultMessage = nil }
-            } message: {
-                Text(resultMessage ?? "")
+            // Confirmations ("Tagged 3 items", "Moved 5 items") are toasts now, not a modal "Done"
+            // alert to tap away; failures go through `fail(_:_:)` as alerts that say what failed.
+            .onChange(of: resultMessage) {
+                guard let message = resultMessage else { return }
+                resultMessage = nil
+                library.showToast(message)
             }
             .alert("Caption", isPresented: $showCaptionEditor) {
                 TextField("Caption", text: $captionDraft)
@@ -1757,9 +1771,8 @@ struct FolderView: View {
                 if let id = item.assetID { library.setOrigin(id, for: item.url) }
             }
             importing = false
-            resultMessage = imported.isEmpty
-                ? "Couldn’t add the selected items."
-                : "Added \(imported.count) item(s) from Photos."
+            if imported.isEmpty { fail("Couldn’t Add from Photos", "None of the selected items could be copied to the drive.") }
+            else { resultMessage = "Added \(imported.count) item\(imported.count == 1 ? "" : "s") from Photos." }
             await reload()
         }
     }
@@ -1828,18 +1841,29 @@ struct FolderView: View {
         let loaders = AnyView(chrome
             .task(id: library.sort) { await resort() }
             .onChange(of: filterSignature) { visibleLimit = Self.pageSize }
-            .onChange(of: library.changeToken) { Task { await reload() } }
+            // Only the folder on screen re-reads at once. Folders further back in the navigation stack
+            // stay alive, and a download landing a file per second used to re-list every one of them;
+            // they reload once when they're back on top.
+            .onChange(of: library.changeToken) {
+                if isTopMost { Task { await reload() } } else { missedReload = true }
+            }
+            .onChange(of: isTopMost) {
+                if isTopMost && missedReload { missedReload = false; Task { await reload() } }
+            }
             // Re-list on return to foreground, so folders created/changed while the app was backgrounded
             // (e.g. a stories run finishing, or a change made in the Files app) show up.
-            .onChange(of: scenePhase) { if scenePhase == .active { Task { await reload() } } }
-            .task(id: "search-\(submittedQuery)-\(library.sort.rawValue)-\(library.index.count)") { await runSearch() }
+            .onChange(of: scenePhase) {
+                guard scenePhase == .active else { return }
+                if isTopMost { Task { await reload() } } else { missedReload = true }
+            }
+            .task(id: "search-\(submittedQuery)-\(library.sort.rawValue)-\(library.indexRevision)") { await runSearch() }
             // Embedded captions are only needed to match a search; load them lazily so a
             // plain folder open doesn't read every file on the drive.
             .task(id: "filecaps-\(submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty)-\(entries.count)") {
                 if submittedQuery.trimmingCharacters(in: .whitespaces).isEmpty { fileCaptions = [:] }
                 else if fileCaptions.isEmpty { fileCaptions = await library.fileCaptions(for: entries) }
             }
-            .task(id: "labels-\(showFavoritesOnly)-\(showAIOnly)-\(tagFilters.sorted().joined(separator: "|"))-\(noTagsFilter)-\(tagMatchAny)-\(library.labelsVersion)-\(library.sort.rawValue)") {
+            .task(id: "labels-\(showFavoritesOnly)-\(showAIOnly)-\(tagFilters.sorted().joined(separator: "|"))-\(noTagsFilter)-\(tagMatchAny)-\(library.labelsVersion)-\(library.sort.rawValue)-\(library.indexRevision)") {
                 // Favorites / To AI / a tag are scoped to *this* folder (and its subfolders).
                 if showFavoritesOnly {
                     favoriteEntries = await library.labeledEntries(under: url, paths: library.favorites, sort: library.sort)
@@ -1858,7 +1882,7 @@ struct FolderView: View {
         return AnyView(loaders
             // Taylor Swift label filter: either items carrying every selected label,
             // or (No Label) every photo/video under this folder with no label yet.
-            .task(id: "tslabels-\(tsLabelFilter.sorted().joined(separator: "|"))-\(tsNoLabel)-\(library.labelsVersion)-\(library.sort.rawValue)") {
+            .task(id: "tslabels-\(tsLabelFilter.sorted().joined(separator: "|"))-\(tsNoLabel)-\(library.labelsVersion)-\(library.sort.rawValue)-\(library.indexRevision)") {
                 if tsNoLabel {
                     tsLabelEntries = await library.unlabeledMedia(under: url, labeled: library.allLabeledPaths(), sort: library.sort)
                 } else if !tsLabelFilter.isEmpty {
@@ -1868,7 +1892,7 @@ struct FolderView: View {
                 }
             }
             // Load dimensions/HDR/duration when the resolution filter is on or sorting by length.
-            .task(id: "specs-\(advancedActive)-\(library.sort.isDuration)-\(entries.count)-\(url.path)-\(deepFilterActive ? library.index.count : 0)") {
+            .task(id: "specs-\(advancedActive)-\(library.sort.isDuration)-\(entries.count)-\(url.path)-\(deepFilterActive ? library.indexRevision : 0)") {
                 guard advancedActive || library.sort.isDuration else { return }
                 // Home's drive-wide resolution filter needs every file's specs; elsewhere this folder's.
                 let scope = deepFilterActive ? deepMedia : entries
@@ -1924,7 +1948,7 @@ struct FolderView: View {
             }
             // Home: the years across the drive for the Year menu — file dates at once, real capture
             // dates as the pass below brings them in. Off-main: a Calendar read per file adds up.
-            .task(id: "deepyears-\(isRoot ? library.index.count : 0)-\(captureDates.count)") {
+            .task(id: "deepyears-\(isRoot ? library.indexRevision : 0)-\(captureDates.count)") {
                 guard isRoot, !library.index.isEmpty else { return }
                 let media = deepMedia, dates = captureDates
                 let years = await Task.detached(priority: .utility) { () -> [Int] in
@@ -1936,7 +1960,7 @@ struct FolderView: View {
             }
             // Home: real capture dates for the whole drive, for its Year menu and drive-wide Year filter.
             // Mostly cache hits — the index build prewarms them — so cheap after the first pass.
-            .task(id: "deepdates-\(isRoot && (yearFilter != nil || deepYearsRequested))-\(library.index.count)-\(library.changeToken)") {
+            .task(id: "deepdates-\(isRoot && (yearFilter != nil || deepYearsRequested))-\(library.indexRevision)-\(library.changeToken)") {
                 guard isRoot, yearFilter != nil || deepYearsRequested, !library.index.isEmpty else { return }
                 let missing = deepMedia.filter { captureDates[$0.url] == nil }
                 guard !missing.isEmpty else { return }
@@ -1948,7 +1972,7 @@ struct FolderView: View {
             }
             // Place labels for the Location filter — lazy (the menu opening or an active filter asks
             // for them): a GPS read per file, then one geocode per distinct place.
-            .task(id: "places-\(placesNeeded)-\(entries.count)-\(library.changeToken)-\(url.path)-\(isRoot ? library.index.count : 0)") {
+            .task(id: "places-\(placesNeeded)-\(entries.count)-\(library.changeToken)-\(url.path)-\(isRoot ? library.indexRevision : 0)") {
                 guard placesNeeded, !tooManyForPlaces else { return }
                 loadingPlaces = true; placeProgress = nil
                 if isRoot { deepStatus = "Reading places across the drive…" }
@@ -1962,7 +1986,7 @@ struct FolderView: View {
             }
             // Gallery categories: subfolders holding a pornpics gallery.json (a star's folder of
             // galleries) feed the Categories filter. Folders without one cost a cached miss.
-            .task(id: "gallerycats-\(entries.count)-\(library.changeToken)-\(url.path)-\(isRoot ? library.index.count : 0)") {
+            .task(id: "gallerycats-\(entries.count)-\(library.changeToken)-\(url.path)-\(isRoot ? library.indexRevision : 0)") {
                 var scope = entries
                 if isRoot, !library.index.isEmpty {
                     // Home looks through every folder on the drive, so Categories can find galleries
@@ -3055,7 +3079,7 @@ struct FolderView: View {
                 library.contentDidChange(under: folder)
                 await reload()
             } else {
-                resultMessage = outcome.error ?? "Couldn’t extract the audio."
+                fail("Couldn’t Extract the Audio", outcome.error ?? "The audio couldn’t be written to the drive.")
             }
         }
     }
@@ -3087,7 +3111,7 @@ struct FolderView: View {
                 library.contentDidChange(under: folder)
                 await reload()
             } else {
-                resultMessage = outcome.error ?? "Couldn’t create the zip."
+                fail("Couldn’t Create the Zip", outcome.error ?? "The archive couldn’t be written to the drive.")
             }
         }
     }
@@ -3128,7 +3152,7 @@ struct FolderView: View {
                 library.contentDidChange(under: folder)
                 await reload()
             } else {
-                resultMessage = outcome.error ?? "Couldn’t extract the archive."
+                fail("Couldn’t Extract the Archive", outcome.error ?? "The archive couldn’t be unpacked.")
             }
         }
     }
@@ -3307,9 +3331,8 @@ struct FolderView: View {
                 editProgress = Double(i + 1) / Double(n)
             }
             editProcessing = false; bg.end()
-            resultMessage = failed == 0
-                ? "Rotated \(n) item\(n == 1 ? "" : "s")."
-                : "Rotated \(n - failed) of \(n); \(failed) couldn’t be saved."
+            if failed == 0 { resultMessage = "Rotated \(n) item\(n == 1 ? "" : "s")." }
+            else { fail("Some Items Weren’t Rotated", "Rotated \(n - failed) of \(n); \(failed) couldn’t be saved.") }
             library.contentDidChange(under: url)
             await reload()
         }
@@ -3346,9 +3369,8 @@ struct FolderView: View {
                 editProgress = Double(i + 1) / Double(n)
             }
             editProcessing = false; bg.end()
-            resultMessage = failed == 0
-                ? "Applied \(name) to \(n) photo\(n == 1 ? "" : "s")."
-                : "Applied to \(n - failed) of \(n); \(failed) couldn’t be saved."
+            if failed == 0 { resultMessage = "Applied \(name) to \(n) photo\(n == 1 ? "" : "s")." }
+            else { fail("Some Photos Weren’t Changed", "Applied \(name) to \(n - failed) of \(n); \(failed) couldn’t be saved.") }
             library.contentDidChange(under: url)
             await reload()
         }
@@ -3388,9 +3410,8 @@ struct FolderView: View {
                 Task { @MainActor in editProgress = p }
             }
             editProcessing = false; bg.end()
-            resultMessage = ok
-                ? "Combined \(orderedURLs.count) videos into “\(dest.lastPathComponent)”."
-                : "Couldn’t combine the videos."
+            if ok { resultMessage = "Combined \(orderedURLs.count) videos into “\(dest.lastPathComponent)”." }
+            else { fail("Couldn’t Combine the Videos", "The combined video couldn’t be made or written to the drive.") }
             library.contentDidChange(under: url)
             await reload()
         }
@@ -3429,9 +3450,8 @@ struct FolderView: View {
             }
             editProcessing = false
             bg.end()
-            resultMessage = failed == 0
-                ? "Rotated \(targets.count) item(s)."
-                : "Rotated \(targets.count - failed) of \(targets.count); \(failed) couldn’t be saved."
+            if failed == 0 { resultMessage = "Rotated \(targets.count) item\(targets.count == 1 ? "" : "s")." }
+            else { fail("Some Items Weren’t Rotated", "Rotated \(targets.count - failed) of \(targets.count); \(failed) couldn’t be saved.") }
             library.contentDidChange(under: url)
             await reload()
         }
@@ -3497,7 +3517,7 @@ struct FolderView: View {
     private func bulkFavorite() {
         let sel = selectedEntries()
         let allOn = sel.allSatisfy { library.isFavorite($0.url) }
-        for e in sel where library.isFavorite(e.url) == allOn { library.toggleFavorite(e.url) }
+        library.setFavorite(!allOn, for: sel.map(\.url))          // one change, one save
         selecting = false; selection.removeAll()
     }
 
@@ -3505,7 +3525,7 @@ struct FolderView: View {
     private func bulkAI() {
         let sel = selectedEntries()
         let allOn = sel.allSatisfy { library.isAI($0.url) }
-        for e in sel where library.isAI(e.url) == allOn { library.toggleAI(e.url) }
+        library.setAI(!allOn, for: sel.map(\.url))
         selecting = false; selection.removeAll()
     }
 
@@ -3594,11 +3614,16 @@ struct FolderView: View {
     /// the re-render this triggers; name/size/kind/smart/date sort the entries here.
     private func resort() async {
         guard loaded, !entries.isEmpty else { await reload(); return }
-        entries = Library.sortEntries(entries, by: library.sort); entriesVersion &+= 1
+        // Sorted off the main thread (a locale-aware name compare over thousands of entries was a
+        // visible hitch); a reload that lands meanwhile wins.
+        let snapshot = entries, sort = library.sort, version = entriesVersion
+        let sorted = await Task.detached(priority: .userInitiated) { Library.sortEntries(snapshot, by: sort) }.value
+        guard entriesVersion == version, library.sort == sort else { return }
+        entries = sorted; entriesVersion &+= 1
         // Capture-date sorts refine the modified-date order with real EXIF dates.
-        if [SortKey.smart, .dateDesc, .dateAsc].contains(library.sort) {
+        if [SortKey.smart, .dateDesc, .dateAsc].contains(sort) {
             if captureDates.isEmpty { captureDates = await library.captureDates(for: entries) }
-            entries = sortedByCaptureDate(entries); entriesVersion &+= 1
+            await applyCaptureDateOrder()
         }
     }
 
@@ -3658,7 +3683,7 @@ struct FolderView: View {
         }
         library.cacheListing(list, for: url)
         entries = list; entriesVersion &+= 1
-        liveImageURLs = Self.detectLivePairs(in: list)
+        liveImageURLs = await Task.detached(priority: .userInitiated) { Self.detectLivePairs(in: list) }.value
         // An empty listing is either a genuinely empty folder or one iOS's exFAT driver can't read
         // (macOS shows its contents). Tell them apart so the empty state can say which.
         if list.isEmpty {
@@ -3685,19 +3710,30 @@ struct FolderView: View {
             // Now that real capture dates are in, re-order so "newest" reflects when
             // media was taken (the file's modified date is just when it was added).
             if library.sort == .smart || library.sort == .dateDesc || library.sort == .dateAsc {
-                entries = sortedByCaptureDate(entries); entriesVersion &+= 1
+                await applyCaptureDateOrder()
             }
         } else {
             captureDates = [:]
         }
     }
 
+    /// Re-orders `entries` by true capture date, off the main thread; skipped if the listing changed
+    /// while it sorted.
+    private func applyCaptureDateOrder() async {
+        let list = entries, dates = captureDates, sort = library.sort, version = entriesVersion
+        let sorted = await Task.detached(priority: .userInitiated) {
+            Self.sortedByCaptureDate(list, dates: dates, sort: sort)
+        }.value
+        guard entriesVersion == version, library.sort == sort else { return }
+        entries = sorted; entriesVersion &+= 1
+    }
+
     /// Re-orders a date-sorted listing by true capture date+time (folders first,
-    /// then media by `captureDates`, falling back to the file's modified date).
-    private func sortedByCaptureDate(_ list: [Entry]) -> [Entry] {
-        let ascending = (library.sort == .dateAsc)
-        let smart = (library.sort == .smart)
-        func key(_ e: Entry) -> Date { captureDates[e.url] ?? e.modified }
+    /// then media by `dates`, falling back to the file's modified date).
+    nonisolated private static func sortedByCaptureDate(_ list: [Entry], dates: [URL: Date], sort: SortKey) -> [Entry] {
+        let ascending = (sort == .dateAsc)
+        let smart = (sort == .smart)
+        func key(_ e: Entry) -> Date { dates[e.url] ?? e.modified }
         return list.sorted { a, b in
             if a.isFolder != b.isFolder { return a.isFolder }
             if a.isFolder {
@@ -3719,7 +3755,8 @@ struct FolderView: View {
     }
 
     private func applyCaption() {
-        for e in selectedEntries() { library.setCaption(captionDraft, for: e.url) }
+        library.setCaptions(Dictionary(selectedEntries().map { ($0.url.path, captionDraft) },
+                                       uniquingKeysWith: { a, _ in a }))      // one change, one save
         selecting = false; selection.removeAll()
     }
 
@@ -3772,7 +3809,7 @@ struct FolderView: View {
         var isDir: ObjCBool = false
         if !(FileManager.default.fileExists(atPath: dest.path, isDirectory: &isDir) && isDir.boolValue) {
             guard FileActions.createFolder(named: name, in: url) else {
-                resultMessage = "Couldn’t create “\(name)”. A file with that name may already exist, or the drive isn’t writable right now."
+                fail("Couldn’t Create the Folder", "“\(name)” couldn’t be made. A file with that name may already exist, or the drive isn’t writable right now.")
                 return
             }
         }
@@ -3937,7 +3974,7 @@ struct FolderView: View {
     private func selectedEntries() -> [Entry] { selectableEntries.filter { selection.contains($0.url) } }
 
     /// Image URLs in `entries` that have a same-basename sibling video.
-    private static func detectLivePairs(in entries: [Entry]) -> Set<URL> {
+    nonisolated private static func detectLivePairs(in entries: [Entry]) -> Set<URL> {
         let videoBases = Set(entries.filter { $0.kind == .video }
             .map { $0.url.deletingPathExtension().lastPathComponent.lowercased() })
         guard !videoBases.isEmpty else { return [] }
@@ -3974,7 +4011,7 @@ struct FolderView: View {
                 library.contentDidChange(under: url)
                 resultMessage = "Live Photo created. Touch and hold the photo to play it."
             } else {
-                resultMessage = "Couldn’t make a Live Photo from those two items."
+                fail("Couldn’t Make a Live Photo", "Those two items couldn’t be paired.")
             }
             await reload()
         }
@@ -3984,19 +4021,10 @@ struct FolderView: View {
         let targets = selectedEntries()
         Haptics.warning()
         selection.removeAll(); selecting = false
-        // Move to the drive's Recently Deleted trash (recoverable for 30 days) rather than a hard
-        // delete. Labels/captions stay keyed to the original path so a restore reconnects them.
-        // The iOS Photos originals are left alone here — they're only a separate copy, and trashing
-        // is meant to be reversible; a hard delete would be the place to also clear those.
-        if let trashFolder = library.trashFolder {
-            let records = FileActions.moveToTrash(targets, trashFolder: trashFolder)
-            library.recordTrashed(records)
-        } else {
-            // No root (shouldn't happen in normal use) — fall back to a permanent delete.
-            FileActions.delete(targets)
-            library.clearOrigins(targets.map(\.url))
-        }
-        Task { await reload() }
+        // To the drive's Recently Deleted (recoverable for 30 days); labels stay keyed to the original
+        // path so a restore reconnects them, and iOS Photos originals are left alone. The content
+        // change it posts reloads this folder.
+        library.trashItems(targets)
     }
 
     private func saveToPhotos() {
@@ -4004,9 +4032,11 @@ struct FolderView: View {
         Task {
             let r = await FileActions.saveToPhotos(targets)
             selecting = false; selection.removeAll()
-            resultMessage = r.note ?? (r.failed == 0
-                ? "Saved \(r.saved) to Photos."
-                : "Saved \(r.saved), \(r.failed) couldn't be saved.")
+            if r.failed > 0 {
+                fail("Some Items Weren’t Saved to Photos", r.note ?? "Saved \(r.saved); \(r.failed) couldn’t be saved.")
+            } else {
+                resultMessage = r.note ?? "Saved \(r.saved) to Photos."
+            }
         }
     }
 

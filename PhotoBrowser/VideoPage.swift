@@ -8,6 +8,9 @@ import CoreImage
 /// swipe down = dismiss (when not zoomed).
 struct VideoPage: View {
     let url: URL
+    /// The grid's thumbnail of this video: shown over the player until its first frame is ready,
+    /// so the page opens on the picture (in its real shape) instead of black.
+    var poster: UIImage? = nil
     var coverSource: CoverFrameSource? = nil
     var infoShown: Bool = false
     let onDismiss: () -> Void
@@ -22,7 +25,7 @@ struct VideoPage: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            ZoomableVideo(url: url, coverSource: coverSource, infoShown: infoShown,
+            ZoomableVideo(url: url, poster: poster, coverSource: coverSource, infoShown: infoShown,
                           onDismiss: onDismiss, onInfo: onInfo,
                           onZoomChanged: onZoomChanged, onControlsHidden: onControlsHidden,
                           onPrev: onPrev, onNext: onNext, onCaptured: onCaptured)
@@ -55,6 +58,7 @@ enum PlaybackSettings {
 
 private struct ZoomableVideo: UIViewControllerRepresentable {
     let url: URL
+    var poster: UIImage? = nil
     var coverSource: CoverFrameSource? = nil
     var infoShown: Bool = false
     let onDismiss: () -> Void
@@ -66,7 +70,7 @@ private struct ZoomableVideo: UIViewControllerRepresentable {
     var onCaptured: () -> Void = {}
 
     func makeUIViewController(context: Context) -> ZoomableVideoController {
-        ZoomableVideoController(url: url)
+        ZoomableVideoController(url: url, poster: poster)
     }
 
     func updateUIViewController(_ vc: ZoomableVideoController, context: Context) {
@@ -112,6 +116,9 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
     private let playerLayer: AVPlayerLayer
     private let scrollView = UIScrollView()
     private let contentView = UIView()
+    /// The grid thumbnail laid over the player until it has a frame to show (see `VideoPage.poster`).
+    private let posterView = UIImageView()
+    private var readyObservation: NSKeyValueObservation?
 
     private let controlsBar = UIView()
     private let playButton = UIButton(type: .system)
@@ -145,13 +152,17 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
     private var tempPeek = false
     private let sloMoBadge = UILabel()
 
-    init(url: URL) {
+    init(url: URL, poster: UIImage? = nil) {
         self.url = url
+        // Lay the page out in the video's real shape from the start (the poster has it), instead of
+        // 16:9 until the player reports its size.
+        if let poster, poster.size.width > 0, poster.size.height > 0 { videoSize = poster.size }
         // With a video delay set (Settings → Playback, for CarPlay's late audio) the item is a
         // composition built asynchronously in viewDidLoad; otherwise the plain file plays at once.
         player = PlaybackSettings.videoDelay > 0 ? AVPlayer() : AVPlayer(url: url)
         playerLayer = AVPlayerLayer(player: player)
         super.init(nibName: nil, bundle: nil)
+        posterView.image = poster
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -171,6 +182,20 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         scrollView.addSubview(contentView)
         playerLayer.videoGravity = .resizeAspect
         contentView.layer.addSublayer(playerLayer)
+        if posterView.image != nil {
+            posterView.contentMode = .scaleAspectFill
+            posterView.clipsToBounds = true
+            contentView.addSubview(posterView)          // above the player layer until the first frame
+            readyObservation = playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] layer, _ in
+                guard layer.isReadyForDisplay else { return }
+                DispatchQueue.main.async {
+                    guard let self, self.posterView.superview != nil else { return }
+                    UIView.animate(withDuration: 0.15, animations: { self.posterView.alpha = 0 },
+                                   completion: { _ in self.posterView.removeFromSuperview() })
+                    self.readyObservation = nil
+                }
+            }
+        }
 
         player.actionAtItemEnd = .none      // loop instead of stopping at the end
         if player.currentItem != nil {
@@ -262,6 +287,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
             let fit = AVMakeRect(aspectRatio: videoSize, insideRect: view.bounds)
             contentView.frame = fit
             playerLayer.frame = contentView.bounds
+            posterView.frame = contentView.bounds
             scrollView.contentSize = fit.size
         }
         layoutControls()
@@ -793,6 +819,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         if let timeObserver { player.removeTimeObserver(timeObserver) }
         timeObserver = nil
         statusObservation?.invalidate(); statusObservation = nil
+        readyObservation?.invalidate(); readyObservation = nil
         NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: player.currentItem)
         player.pause()
     }

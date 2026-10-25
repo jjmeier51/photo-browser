@@ -179,23 +179,35 @@ final class Library {
     /// (and the year/age passes) to recompute, which made one saved edit or one
     /// finished download re-scan the whole drive. Omit it for genuinely global events.
     func contentDidChange(under folder: URL? = nil) {
-        changeToken += 1
-        ViewerPageCache.shared.clear()   // pages are path-keyed; an in-place edit must not re-show old pixels
         guard let folder else {
+            changeToken += 1
+            ViewerPageCache.shared.clear()   // pages are path-keyed; an in-place edit must not re-show old pixels
+            noteIndexChangeAnywhere()
             folderYearsCache.removeAll()
             placeLabelsCache.removeAll()
             listingCache.removeAll()
             listingOrder.removeAll()
             return
         }
-        // Ancestors matter too: their listings show this folder, and their year sets
-        // aggregate the whole subtree.
-        let p = folder.path
-        func related(_ key: String) -> Bool { key == p || key.hasPrefix(p + "/") || p.hasPrefix(key + "/") }
-        for key in Array(listingCache.keys) where related(key) { listingCache.removeValue(forKey: key) }
+        contentDidChange(underFolders: [folder])
+    }
+
+    /// `contentDidChange(under:)` for several folders at once: one reload, each subtree evicted.
+    func contentDidChange(underFolders folders: [URL]) {
+        guard !folders.isEmpty else { return }
+        changeToken += 1
+        ViewerPageCache.shared.clear()   // pages are path-keyed; an in-place edit must not re-show old pixels
+        for folder in Set(folders) {
+            noteIndexChange(under: folder)
+            // Ancestors matter too: their listings show this folder, and their year sets
+            // aggregate the whole subtree.
+            let p = folder.path
+            func related(_ key: String) -> Bool { key == p || key.hasPrefix(p + "/") || p.hasPrefix(key + "/") }
+            for key in Array(listingCache.keys) where related(key) { listingCache.removeValue(forKey: key) }
+            for key in Array(folderYearsCache.keys) where related(key) { folderYearsCache.removeValue(forKey: key) }
+            for key in Array(placeLabelsCache.keys) where related(key) { placeLabelsCache.removeValue(forKey: key) }
+        }
         listingOrder.removeAll { listingCache[$0] == nil }
-        for key in Array(folderYearsCache.keys) where related(key) { folderYearsCache.removeValue(forKey: key) }
-        for key in Array(placeLabelsCache.keys) where related(key) { placeLabelsCache.removeValue(forKey: key) }
     }
 
     // MARK: - Bulk store (file-backed)
@@ -218,6 +230,39 @@ final class Library {
         guard let data = try? JSONEncoder().encode(value) else { return }
         try? data.write(to: bulkDir.appendingPathComponent(name + ".json"), options: .atomic)
     }
+    // MARK: Deferred saves
+
+    /// Bulk stores changed by a single tap (a tag, a caption, a favorite, a Clean Up decision) are
+    /// written about a second later on the serial persist queue instead of synchronously on the
+    /// main thread: encoding a 50,000-path store per tap was a visible stall, and a run of taps
+    /// now coalesces into one write of the latest value. `flushBulkSaves` writes everything still
+    /// pending — when the app backgrounds and before a full persist.
+    @ObservationIgnored private var pendingBulkSaves: [String: @Sendable () -> Void] = [:]
+    @ObservationIgnored private var bulkSaveTask: Task<Void, Never>?
+
+    func scheduleBulkSave<T: Encodable & Sendable>(_ value: T, _ name: String) {
+        pendingBulkSaves[name] = { Library.saveBulk(value, name) }
+        guard bulkSaveTask == nil else { return }
+        bulkSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.flushBulkSaves()
+        }
+    }
+
+    /// Writes every pending deferred save now, in order on the persist queue. `wait` blocks until
+    /// they're on disk (the app going to the background, where a queued write could be cut off).
+    func flushBulkSaves(wait: Bool = false) {
+        bulkSaveTask?.cancel()
+        bulkSaveTask = nil
+        let jobs = Array(pendingBulkSaves.values)
+        pendingBulkSaves.removeAll()
+        if !jobs.isEmpty {
+            Self.persistQueue.async { for job in jobs { job() } }
+        }
+        if wait { Self.persistQueue.sync {} }
+    }
+
     /// Loads from the bulk file, else migrates the legacy UserDefaults value once
     /// (then drops the oversized/corrupt UserDefaults key).
     nonisolated static func migrateBulk<T: Codable>(_ name: String, legacyKey: String, legacy: (String) -> T) -> T {
@@ -316,7 +361,7 @@ final class Library {
     /// Folder path → the Facebook profile downloaded into it (drives "Get New",
     /// the blue-ringed bubble, the subtitle, and dedup).
     var facebookFolders: [String: FBFolderInfo] = {
-        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.facebookFolders"),
+        guard let data = FilePrefs.shared.data(forKey: "photoBrowser.facebookFolders"),
               let m = try? JSONDecoder().decode([String: FBFolderInfo].self, from: data) else { return [:] }
         return m
     }()
@@ -329,14 +374,14 @@ final class Library {
     }
     private func persistFacebookFolders() {
         if let data = try? JSONEncoder().encode(facebookFolders) {
-            UserDefaults.standard.set(data, forKey: "photoBrowser.facebookFolders")
+            FilePrefs.shared.set(data, forKey: "photoBrowser.facebookFolders")
         }
     }
-    var lastFacebookURLByFolder: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.lastFacebookURL") as? [String: String]) ?? [:]
+    var lastFacebookURLByFolder: [String: String] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.lastFacebookURL") as? [String: String]) ?? [:]
     func lastFacebookURL(for folder: URL) -> String? { lastFacebookURLByFolder[folder.path] }
     func setLastFacebookURL(_ url: String, for folder: URL) {
         lastFacebookURLByFolder[folder.path] = url
-        UserDefaults.standard.set(lastFacebookURLByFolder, forKey: "photoBrowser.lastFacebookURL")
+        FilePrefs.shared.set(lastFacebookURLByFolder, forKey: "photoBrowser.lastFacebookURL")
     }
 
     // MARK: - OF creator folders
@@ -345,7 +390,7 @@ final class Library {
     /// the blue-ringed bubble, the subtitle, and dedup). Mirrors `facebookFolders`.
     var ofFolders: [String: OFFolderInfo] = {
         // Legacy defaults key kept verbatim — renaming it would orphan existing folder mappings.
-        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.onlyfansFolders"),
+        guard let data = FilePrefs.shared.data(forKey: "photoBrowser.onlyfansFolders"),
               let m = try? JSONDecoder().decode([String: OFFolderInfo].self, from: data) else { return [:] }
         return m
     }()
@@ -358,16 +403,16 @@ final class Library {
     }
     private func persistOFFolders() {
         if let data = try? JSONEncoder().encode(ofFolders) {
-            UserDefaults.standard.set(data, forKey: "photoBrowser.onlyfansFolders")
+            FilePrefs.shared.set(data, forKey: "photoBrowser.onlyfansFolders")
         }
     }
     /// Person-folder path → the OF username last downloaded under it, so reruns
     /// prefill the username and resume the same folder.
-    var lastOFUsernameByFolder: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.lastOFUsername") as? [String: String]) ?? [:]
+    var lastOFUsernameByFolder: [String: String] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.lastOFUsername") as? [String: String]) ?? [:]
     func lastOFUsername(for folder: URL) -> String? { lastOFUsernameByFolder[folder.path] }
     func setLastOFUsername(_ username: String, for folder: URL) {
         lastOFUsernameByFolder[folder.path] = username
-        UserDefaults.standard.set(lastOFUsernameByFolder, forKey: "photoBrowser.lastOFUsername")
+        FilePrefs.shared.set(lastOFUsernameByFolder, forKey: "photoBrowser.lastOFUsername")
     }
 
     // MARK: - TikTok profile folders
@@ -375,7 +420,7 @@ final class Library {
     /// `@handle` folder path → the TikTok profile downloaded into it (drives "Get New
     /// videos", the pinned highlight bubble, and dedup). Mirrors `facebookFolders`.
     var tiktokFolders: [String: TTFolderInfo] = {
-        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.tiktokFolders"),
+        guard let data = FilePrefs.shared.data(forKey: "photoBrowser.tiktokFolders"),
               let m = try? JSONDecoder().decode([String: TTFolderInfo].self, from: data) else { return [:] }
         return m
     }()
@@ -388,13 +433,13 @@ final class Library {
     }
     private func persistTikTokFolders() {
         if let data = try? JSONEncoder().encode(tiktokFolders) {
-            UserDefaults.standard.set(data, forKey: "photoBrowser.tiktokFolders")
+            FilePrefs.shared.set(data, forKey: "photoBrowser.tiktokFolders")
         }
     }
     /// Video file path → its TikTok like count (shown in the info panel).
-    var tiktokLikes: [String: Int] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.tiktokLikes") as? [String: Int]) ?? [:]
+    var tiktokLikes: [String: Int] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.tiktokLikes") as? [String: Int]) ?? [:]
     func tiktokLikeCount(for url: URL) -> Int? { tiktokLikes[url.path] }
-    private func persistTikTokLikes() { UserDefaults.standard.set(tiktokLikes, forKey: "photoBrowser.tiktokLikes") }
+    private func persistTikTokLikes() { FilePrefs.shared.set(tiktokLikes, forKey: "photoBrowser.tiktokLikes") }
 
     /// Refreshes the like counts of already-downloaded videos in `folder` from a fresh `id → likes`
     /// map (a "Get New" run), so existing videos' counts update too. Persists + reloads once.
@@ -412,11 +457,11 @@ final class Library {
 
     /// Person-folder path → the TikTok handle last downloaded under it, so re-opening the
     /// downloader from that folder prefills the handle and resumes the same `@handle` folder.
-    var lastTikTokHandleByFolder: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.lastTikTokHandle") as? [String: String]) ?? [:]
+    var lastTikTokHandleByFolder: [String: String] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.lastTikTokHandle") as? [String: String]) ?? [:]
     func lastTikTokHandle(for folder: URL) -> String? { lastTikTokHandleByFolder[folder.path] }
     func setLastTikTokHandle(_ handle: String, for folder: URL) {
         lastTikTokHandleByFolder[folder.path] = handle
-        UserDefaults.standard.set(lastTikTokHandleByFolder, forKey: "photoBrowser.lastTikTokHandle")
+        FilePrefs.shared.set(lastTikTokHandleByFolder, forKey: "photoBrowser.lastTikTokHandle")
     }
 
     // MARK: - VSCO profile folders
@@ -424,7 +469,7 @@ final class Library {
     /// Profile folder path → the VSCO profile downloaded into it (drives "Get New VSCO
     /// Photos" and dedup).
     var vscoFolders: [String: VSCOFolderInfo] = {
-        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.vscoFolders"),
+        guard let data = FilePrefs.shared.data(forKey: "photoBrowser.vscoFolders"),
               let m = try? JSONDecoder().decode([String: VSCOFolderInfo].self, from: data) else { return [:] }
         return m
     }()
@@ -436,15 +481,15 @@ final class Library {
     }
     private func persistVSCOFolders() {
         if let data = try? JSONEncoder().encode(vscoFolders) {
-            UserDefaults.standard.set(data, forKey: "photoBrowser.vscoFolders")
+            FilePrefs.shared.set(data, forKey: "photoBrowser.vscoFolders")
         }
     }
     /// Person-folder path → the VSCO username last downloaded under it (prefills the sheet).
-    var lastVSCOUsernameByFolder: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.lastVSCOUsername") as? [String: String]) ?? [:]
+    var lastVSCOUsernameByFolder: [String: String] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.lastVSCOUsername") as? [String: String]) ?? [:]
     func lastVSCOUsername(for folder: URL) -> String? { lastVSCOUsernameByFolder[folder.path] }
     func setLastVSCOUsername(_ handle: String, for folder: URL) {
         lastVSCOUsernameByFolder[folder.path] = handle
-        UserDefaults.standard.set(lastVSCOUsernameByFolder, forKey: "photoBrowser.lastVSCOUsername")
+        FilePrefs.shared.set(lastVSCOUsernameByFolder, forKey: "photoBrowser.lastVSCOUsername")
     }
 
     /// One finished download waiting in the inbox, as `BackgroundDownloader` recorded it.
@@ -569,17 +614,17 @@ final class Library {
     /// caption, filtered on in FolderView across a folder and its subfolders. Bulk-stored like captions.
     var tags: [String: [String]] = Library.loadBulk("tags") ?? [:]
     /// Folder path → cover-image filename (stored under Application Support/folderCovers).
-    var folderCovers: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.folderCovers") as? [String: String]) ?? [:]
+    var folderCovers: [String: String] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.folderCovers") as? [String: String]) ?? [:]
     /// Item file path → custom-thumbnail filename (stored under Application Support/itemThumbs).
     /// A per-item override of the auto-generated grid thumbnail — the item equivalent of a folder cover.
-    var itemThumbnails: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.itemThumbnails") as? [String: String]) ?? [:]
+    var itemThumbnails: [String: String] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.itemThumbnails") as? [String: String]) ?? [:]
     /// Drive file path → originating Photos-library asset identifier (for imports).
     var photoOrigins: [String: String] = Library.migrateBulk("photoOrigins", legacyKey: "photoBrowser.photoOrigins") {
         (UserDefaults.standard.dictionary(forKey: $0) as? [String: String]) ?? [:]
     }
     /// Folder path → birthday (stored as a Unix timestamp). Files in the folder and
     /// its subfolders get an "Age" computed from this and their EXIF capture date.
-    var folderBirthdays: [String: Double] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.birthdays") as? [String: Double]) ?? [:]
+    var folderBirthdays: [String: Double] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.birthdays") as? [String: Double]) ?? [:]
     /// Full recursive index of everything under the root — built once for fast
     /// search and the Library view.
     var index: [Entry] = []
@@ -610,7 +655,7 @@ final class Library {
 
     /// Folder path → filename of an imported text-message HTML archive (kept in Application Support),
     /// so the in-app Messages viewer reopens the last import for a folder instead of re-importing.
-    var textMessageArchives: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.textMessageArchives") as? [String: String]) ?? [:]
+    var textMessageArchives: [String: String] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.textMessageArchives") as? [String: String]) ?? [:]
     func textMessageArchiveURL(for folder: URL) -> URL? {
         guard let name = textMessageArchives[folder.path] else { return nil }
         let url = textMessagesDirectory.appendingPathComponent(name)
@@ -625,13 +670,13 @@ final class Library {
         let url = textMessagesDirectory.appendingPathComponent(name)
         guard (try? data.write(to: url, options: .atomic)) != nil else { return nil }
         textMessageArchives[folder.path] = name
-        UserDefaults.standard.set(textMessageArchives, forKey: "photoBrowser.textMessageArchives")
+        FilePrefs.shared.set(textMessageArchives, forKey: "photoBrowser.textMessageArchives")
         return url
     }
     func clearTextMessageArchive(for folder: URL) {
         if let old = textMessageArchives.removeValue(forKey: folder.path) {
             try? FileManager.default.removeItem(at: textMessagesDirectory.appendingPathComponent(old))
-            UserDefaults.standard.set(textMessageArchives, forKey: "photoBrowser.textMessageArchives")
+            FilePrefs.shared.set(textMessageArchives, forKey: "photoBrowser.textMessageArchives")
         }
     }
 
@@ -653,7 +698,7 @@ final class Library {
         do {
             try data.write(to: coversDirectory.appendingPathComponent(name))
             folderCovers[folder.path] = name
-            UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
+            FilePrefs.shared.set(folderCovers, forKey: "photoBrowser.folderCovers")
         } catch {}
     }
 
@@ -667,7 +712,7 @@ final class Library {
         do {
             try data.write(to: coversDirectory.appendingPathComponent(name))
             folderCovers[folder.path] = name
-            UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
+            FilePrefs.shared.set(folderCovers, forKey: "photoBrowser.folderCovers")
         } catch {}
     }
 
@@ -692,7 +737,7 @@ final class Library {
         do {
             try data.write(to: itemThumbsDirectory.appendingPathComponent(name))
             itemThumbnails[url.path] = name
-            UserDefaults.standard.set(itemThumbnails, forKey: "photoBrowser.itemThumbnails")
+            FilePrefs.shared.set(itemThumbnails, forKey: "photoBrowser.itemThumbnails")
         } catch {}
     }
 
@@ -702,7 +747,7 @@ final class Library {
             try? FileManager.default.removeItem(at: itemThumbsDirectory.appendingPathComponent(old))
         }
         itemThumbnails[url.path] = nil
-        UserDefaults.standard.set(itemThumbnails, forKey: "photoBrowser.itemThumbnails")
+        FilePrefs.shared.set(itemThumbnails, forKey: "photoBrowser.itemThumbnails")
     }
 
     // MARK: - Photos-library origin tracking (for imports)
@@ -739,7 +784,7 @@ final class Library {
             if let date { folderBirthdays[folder.path] = date.timeIntervalSince1970 }
             else { folderBirthdays.removeValue(forKey: folder.path) }
         }
-        UserDefaults.standard.set(folderBirthdays, forKey: "photoBrowser.birthdays")
+        FilePrefs.shared.set(folderBirthdays, forKey: "photoBrowser.birthdays")
         labelsVersion += 1
         changeToken += 1
     }
@@ -789,7 +834,7 @@ final class Library {
 
     /// Every media file under `folder` (recursively) that has a computable age,
     /// paired with that age. Loads EXIF capture dates, so it's used lazily.
-    nonisolated func agedMedia(under folder: URL, birthdays: [String: Double], sort: SortKey) async -> [(entry: Entry, age: Int)] {
+    @concurrent nonisolated func agedMedia(under folder: URL, birthdays: [String: Double], sort: SortKey) async -> [(entry: Entry, age: Int)] {
         guard !birthdays.isEmpty else { return [] }
         return await Task.detached(priority: .userInitiated) { () -> [(entry: Entry, age: Int)] in
             let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
@@ -838,7 +883,7 @@ final class Library {
 
     func setCaption(_ text: String, for url: URL) {
         captions[url.path] = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        Self.saveBulk(captions, "captions")
+        scheduleBulkSave(captions, "captions")
     }
 
     /// Batch caption set (persists once) — avoids O(n²) UserDefaults writes when a
@@ -846,7 +891,7 @@ final class Library {
     func setCaptions(_ map: [String: String]) {
         guard !map.isEmpty else { return }
         for (k, v) in map { captions[k] = v.trimmingCharacters(in: .whitespacesAndNewlines) }
-        Self.saveBulk(captions, "captions")
+        scheduleBulkSave(captions, "captions")
     }
 
     // MARK: - Tags
@@ -878,7 +923,7 @@ final class Library {
         guard !list.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) else { return }
         list.append(tag)
         tags[url.path] = list
-        Self.saveBulk(tags, "tags")
+        scheduleBulkSave(tags, "tags")
         labelsVersion += 1
     }
 
@@ -886,7 +931,7 @@ final class Library {
         var list = tags[url.path] ?? []
         list.removeAll { $0.caseInsensitiveCompare(tag) == .orderedSame }
         if list.isEmpty { tags.removeValue(forKey: url.path) } else { tags[url.path] = list }
-        Self.saveBulk(tags, "tags")
+        scheduleBulkSave(tags, "tags")
         labelsVersion += 1
     }
 
@@ -904,7 +949,7 @@ final class Library {
             tags[url.path] = list
             added += 1
         }
-        if added > 0 { Self.saveBulk(tags, "tags"); labelsVersion += 1 }
+        if added > 0 { scheduleBulkSave(tags, "tags"); labelsVersion += 1 }
         return added
     }
 
@@ -920,7 +965,7 @@ final class Library {
             if list.isEmpty { tags.removeValue(forKey: url.path) } else { tags[url.path] = list }
             removed += 1
         }
-        if removed > 0 { Self.saveBulk(tags, "tags"); labelsVersion += 1 }
+        if removed > 0 { scheduleBulkSave(tags, "tags"); labelsVersion += 1 }
         return removed
     }
 
@@ -993,7 +1038,7 @@ final class Library {
     }
 
     /// Reads existing captions embedded in the files (pull-in), bounded concurrency.
-    nonisolated func fileCaptions(for entries: [Entry]) async -> [URL: String] {
+    @concurrent nonisolated func fileCaptions(for entries: [Entry]) async -> [URL: String] {
         let files = entries.filter { !$0.isFolder }
         guard !files.isEmpty else { return [:] }
         var result: [URL: String] = [:]
@@ -1020,15 +1065,34 @@ final class Library {
 
     func toggleFavorite(_ url: URL) {
         if favorites.contains(url.path) { favorites.remove(url.path) } else { favorites.insert(url.path) }
-        Self.saveBulk(favorites, "favorites")
+        scheduleBulkSave(favorites, "favorites")
+        labelsVersion += 1
+    }
+
+    /// Favorites (or un-favorites) many items as one change: one store update, one save, one
+    /// `labelsVersion` bump — a bulk favorite used to re-save the whole store once per item.
+    func setFavorite(_ on: Bool, for urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let paths = urls.map(\.path)
+        if on { favorites.formUnion(paths) } else { favorites.subtract(paths) }
+        scheduleBulkSave(favorites, "favorites")
         labelsVersion += 1
     }
 
     func isAI(_ url: URL) -> Bool { aiLabels.contains(url.path) }
 
+    /// `setFavorite(_:for:)` for To AI.
+    func setAI(_ on: Bool, for urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let paths = urls.map(\.path)
+        if on { aiLabels.formUnion(paths) } else { aiLabels.subtract(paths) }
+        scheduleBulkSave(aiLabels, "ai")
+        labelsVersion += 1
+    }
+
     func toggleAI(_ url: URL) {
         if aiLabels.contains(url.path) { aiLabels.remove(url.path) } else { aiLabels.insert(url.path) }
-        Self.saveBulk(aiLabels, "ai")
+        scheduleBulkSave(aiLabels, "ai")
         labelsVersion += 1
     }
 
@@ -1046,6 +1110,48 @@ final class Library {
         trash.append(contentsOf: entries)
         Self.saveBulk(trash, "trash")
         labelsVersion += 1
+    }
+
+    /// Moves items to the drive's Recently Deleted, where they stay restorable for 30 days. This is
+    /// the one Delete every screen uses (grid, viewer, Find Duplicates, Compare PNGs, Clean Up), so a
+    /// mistaken tap is never final. Labels stay keyed to the original path so a restore reconnects
+    /// them, and the iOS Photos original of an imported file is left alone. Only with no root to hold
+    /// a trash does it fall back to a permanent delete. Returns how many items it removed.
+    /// `notify: false` skips the content change, for a screen that deletes one item per swipe and
+    /// posts a single change when it closes (Clean Up) — otherwise each swipe re-lists the folder.
+    @discardableResult
+    func trashItems(_ entries: [Entry], notify: Bool = true) -> Int {
+        guard !entries.isEmpty else { return 0 }
+        let parents = entries.map { $0.url.deletingLastPathComponent() }
+        guard let trashFolder else {
+            FileActions.delete(entries)
+            clearOrigins(entries.map(\.url))
+            if notify { contentDidChange(underFolders: parents) }
+            return entries.count
+        }
+        let records = FileActions.moveToTrash(entries, trashFolder: trashFolder)
+        recordTrashed(records)
+        if notify { contentDidChange(underFolders: parents) }
+        return records.count
+    }
+
+    /// Puts trashed items back. When something new has taken an item's old name it comes back under
+    /// a unique one, and its labels (still keyed to the old path) are copied onto the new name so it
+    /// keeps its favorite, tags and caption. Returns the restored items' URLs.
+    @discardableResult
+    func restoreTrashed(_ items: [TrashEntry]) -> [URL] {
+        var restored: [URL] = []
+        var done: [String] = []
+        for item in items {
+            guard let dest = FileActions.restoreFromTrash(item) else { continue }
+            restored.append(dest)
+            done.append(item.id)
+            let original = URL(fileURLWithPath: item.originalPath, isDirectory: item.isFolder)
+            if dest.path != original.path { _ = duplicateMetadata(from: original, to: dest) }
+        }
+        removeTrashRecords(done)
+        if !restored.isEmpty { contentDidChange(underFolders: restored.map { $0.deletingLastPathComponent() }) }
+        return restored
     }
 
     /// Drops trash records by id (after a restore or permanent delete).
@@ -1094,7 +1200,7 @@ final class Library {
     /// Viewable media captured on today's month/day in previous years, grouped by year (newest year
     /// first, items name-sorted within a year). Capture dates come from the cached `captureDates`
     /// path, so a repeat visit is cheap. Nonisolated: the recursive walk stays off the main actor.
-    nonisolated func onThisDay(under folder: URL) async -> [MemorySection] {
+    @concurrent nonisolated func onThisDay(under folder: URL) async -> [MemorySection] {
         let cal = Calendar.current
         let now = Date()
         let month = cal.component(.month, from: now)
@@ -1262,7 +1368,7 @@ final class Library {
     }
 
     private func persistPeople() {
-        Self.saveBulk(people, "people")
+        scheduleBulkSave(people, "people")
         labelsVersion += 1
     }
     func setPeople(_ p: [String: Set<String>]) { people = p.filter { !$0.value.isEmpty }; persistPeople() }
@@ -1335,20 +1441,20 @@ final class Library {
     /// show them and search can match on them. Path-keyed like captions; JSON in UserDefaults.
     struct AIGenInfo: Codable, Sendable, Hashable { var model: String; var prompt: String }
     var aiGenerations: [String: AIGenInfo] = {
-        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.aiGenerations"),
+        guard let data = FilePrefs.shared.data(forKey: "photoBrowser.aiGenerations"),
               let m = try? JSONDecoder().decode([String: AIGenInfo].self, from: data) else { return [:] }
         return m
     }()
     private func persistAIGenerations() {
         if let data = try? JSONEncoder().encode(aiGenerations) {
-            UserDefaults.standard.set(data, forKey: "photoBrowser.aiGenerations")
+            FilePrefs.shared.set(data, forKey: "photoBrowser.aiGenerations")
         }
     }
     func aiGeneration(for url: URL) -> AIGenInfo? { aiGenerations[url.path] }
 
     func markAIGenerated(_ url: URL, model: String? = nil, prompt: String? = nil) {
         aiGeneratedPaths.insert(url.path)
-        Self.saveBulk(aiGeneratedPaths, "aiGenerated")
+        scheduleBulkSave(aiGeneratedPaths, "aiGenerated")
         if let model, let prompt {
             let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
             if !model.isEmpty || !p.isEmpty {
@@ -1389,10 +1495,10 @@ final class Library {
     // MARK: - Frame folders + Tinder-style clean up
 
     /// Folders produced by "Export All Frames" — "Start Clean Up" appears only here.
-    var framesFolders: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.framesFolders") ?? [])
+    var framesFolders: Set<String> = Set(FilePrefs.shared.stringArray(forKey: "photoBrowser.framesFolders") ?? [])
     func markFramesFolder(_ url: URL) {
         guard framesFolders.insert(url.path).inserted else { return }
-        UserDefaults.standard.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
+        FilePrefs.shared.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
     }
     func isFramesFolder(_ url: URL) -> Bool { framesFolders.contains(url.path) }
 
@@ -1405,29 +1511,86 @@ final class Library {
         var title: String
         var status: String = ""
         var fraction: Double = 0          // 0…1, or <0 for indeterminate (spinner only)
+        var cancellable = false           // shows Stop in the activities sheet (see `cancelActivity`)
+        var stopping = false
     }
     var activities: [Activity] = []
-    var activityResults: [String] = []    // completion messages → shown as popups, oldest first
+
+    /// Something that needs reading: a failed or partly failed job, or a result the user must act on.
+    /// Shown one at a time as an alert titled with what it's about. Successes are toasts instead —
+    /// they don't need an OK.
+    struct Notice: Identifiable, Sendable {
+        let id = UUID()
+        let title: String
+        let message: String
+        var opensSettings = false         // offer "Open Settings" (a permission is off)
+    }
+    var notices: [Notice] = []
+    func postNotice(_ title: String, _ message: String, opensSettings: Bool = false) {
+        notices.append(Notice(title: title, message: message, opensSettings: opensSettings))
+    }
+    func dismissNotice() { if !notices.isEmpty { notices.removeFirst() } }
+
+    /// A short confirmation at the bottom of the screen that goes away by itself.
+    struct Toast: Identifiable, Equatable, Sendable {
+        let id = UUID()
+        let text: String
+    }
+    var toast: Toast?
+    func showToast(_ text: String) {
+        let t = Toast(text: text)
+        toast = t
+        UIAccessibility.post(notification: .announcement, argument: text)   // VoiceOver hears it too
+        let seconds = min(6, 2.2 + Double(text.count) * 0.03)     // longer messages stay a little longer
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            if self?.toast?.id == t.id { self?.toast = nil }
+        }
+    }
+
+    /// Whether a finished job's message reports a problem (then it's a notice, else a toast).
+    nonisolated static func readsAsFailure(_ text: String) -> Bool {
+        let t = text.lowercased()
+        return ["failed", "couldn’t", "couldn't", "can’t", "can't", "error", "not enough", "denied"]
+            .contains { t.contains($0) }
+    }
+
     /// Queued upscales (see `UpscaleQueue.swift`): one batch runs at a time, as an activity.
     @ObservationIgnored var upscaleJobs: [UpscaleJob] = []
     @ObservationIgnored var upscaleRunning = false
 
     @discardableResult
-    func beginActivity(_ title: String, indeterminate: Bool = false) -> UUID {
-        let a = Activity(title: title, fraction: indeterminate ? -1 : 0)
+    func beginActivity(_ title: String, indeterminate: Bool = false, cancellable: Bool = false) -> UUID {
+        let a = Activity(title: title, fraction: indeterminate ? -1 : 0, cancellable: cancellable)
         activities.append(a)
         return a.id
     }
+
+    @ObservationIgnored private var cancelledActivities: Set<UUID> = []
+    /// Asks a cancellable activity to stop; the job checks `isActivityCancelled` between items and
+    /// finishes the one in hand.
+    func cancelActivity(_ id: UUID) {
+        guard let i = activities.firstIndex(where: { $0.id == id }), activities[i].cancellable else { return }
+        cancelledActivities.insert(id)
+        activities[i].stopping = true
+        activities[i].status = "Stopping after this item…"
+    }
+    func isActivityCancelled(_ id: UUID) -> Bool { cancelledActivities.contains(id) }
     func setActivity(_ id: UUID, status: String? = nil, fraction: Double? = nil) {
         guard let i = activities.firstIndex(where: { $0.id == id }) else { return }
         if let status { activities[i].status = status }
         if let fraction { activities[i].fraction = fraction }
     }
+    /// Ends an activity. Its result is a toast, or — when it reports a problem — a notice titled
+    /// with the job's name, so it says what didn't finish.
     func endActivity(_ id: UUID, result: String? = nil) {
+        let title = activities.first(where: { $0.id == id })?.title
         activities.removeAll { $0.id == id }
-        if let result { activityResults.append(result) }
+        cancelledActivities.remove(id)
+        guard let result else { return }
+        if Self.readsAsFailure(result) { postNotice(title ?? "Didn’t Finish", result) }
+        else { showToast(result) }
     }
-    func dismissActivityResult() { if !activityResults.isEmpty { activityResults.removeFirst() } }
 
     /// Exports every (or every Nth) frame of `entry` into a folder beside it, app-wide so the user
     /// can navigate around while it runs. `fps` of 0 means every frame.
@@ -1754,7 +1917,7 @@ final class Library {
                         var msg = "\(saved) AI image\(saved == 1 ? "" : "s") saved to the “AI” folder in “\(folderURL.lastPathComponent)”."
                         if let count, saved < count { msg += " (Astria returned \(saved) of \(count).)" }
                         live.finish(success: true, message: msg, jobID: jobID, folderPath: folderURL.path)
-                        activityResults.append(msg)
+                        showToast(msg)
                     } else {
                         // Images came back but none could be written. The pass is already counted;
                         // the record stays for a later foreground (up to the attempt/age limits).
@@ -1968,13 +2131,13 @@ final class Library {
                 // (no alert: recovery posts the real "ready" one when the images arrive). This
                 // is the one message about it: recovery itself stays silent until it succeeds.
                 live.finish(success: false, message: msg, notify: false)
-                activityResults.append("\(label): \(msg) The app will check once more in a minute and again the next few times you open it, and save the images to the “AI” folder if they finish. Anything Astria completes is also in the Astria.ai Browser.")
+                postNotice("\(label) Is Still Running", "\(msg) The app will check once more in a minute and again the next few times you open it, and save the images to the “AI” folder if they finish. Anything Astria completes is also in the Astria.ai Browser.")
                 scheduleAIRecoveryRetry(after: 60)
                 return
             }
             removePendingAstria(jobID: jobID)
             live.finish(success: false, message: msg)
-            activityResults.append("\(label) failed — \(msg)")
+            postNotice("\(label) Failed", msg)
         }
     }
 
@@ -2467,12 +2630,12 @@ final class Library {
         var s = Set(cleanupReviewed[folder.path] ?? [])
         guard s.insert(url.path).inserted else { return }
         cleanupReviewed[folder.path] = Array(s)
-        Self.saveBulk(cleanupReviewed, "cleanupReviewed")
+        scheduleBulkSave(cleanupReviewed, "cleanupReviewed")
     }
     func resetCleanup(_ folder: URL) {
         guard cleanupReviewed[folder.path] != nil else { return }
         cleanupReviewed.removeValue(forKey: folder.path)
-        Self.saveBulk(cleanupReviewed, "cleanupReviewed")
+        scheduleBulkSave(cleanupReviewed, "cleanupReviewed")
     }
 
     // MARK: - Instagram profile folders
@@ -2480,7 +2643,7 @@ final class Library {
     /// Folder path → the Instagram profile downloaded into it (handle, last-updated,
     /// downloaded post ids for incremental "Get New", and photo/video counts).
     var instagramFolders: [String: IGFolderInfo] = {
-        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.instagramFolders"),
+        guard let data = FilePrefs.shared.data(forKey: "photoBrowser.instagramFolders"),
               let m = try? JSONDecoder().decode([String: IGFolderInfo].self, from: data) else { return [:] }
         return m
     }()
@@ -2493,7 +2656,7 @@ final class Library {
     }
     private func persistInstagramFolders() {
         if let data = try? JSONEncoder().encode(instagramFolders) {
-            UserDefaults.standard.set(data, forKey: "photoBrowser.instagramFolders")
+            FilePrefs.shared.set(data, forKey: "photoBrowser.instagramFolders")
         }
     }
 
@@ -2563,9 +2726,9 @@ final class Library {
         for s in newStoryHighlights { instagramHighlights.insert(s) }   // ensure "Stories" is a highlight bubble
         if moves.isEmpty {
             persistInstagramFolders()
-            UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
-            UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
-            UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
+            FilePrefs.shared.set(folderCovers, forKey: "photoBrowser.folderCovers")
+            FilePrefs.shared.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
+            FilePrefs.shared.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
         } else {
             itemsMoved(moves)     // re-keys all moved content + persists every path-keyed collection
         }
@@ -2595,23 +2758,23 @@ final class Library {
             }
         }
         if changed {
-            UserDefaults.standard.set(folderCovers, forKey: "photoBrowser.folderCovers")
+            FilePrefs.shared.set(folderCovers, forKey: "photoBrowser.folderCovers")
             changeToken += 1
         }
     }
 
     /// Highlight subfolders (shown as bubbles inside an Instagram profile folder).
-    var instagramHighlights: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.instagramHighlights") ?? [])
+    var instagramHighlights: Set<String> = Set(FilePrefs.shared.stringArray(forKey: "photoBrowser.instagramHighlights") ?? [])
     func isInstagramHighlight(_ folder: URL) -> Bool { instagramHighlights.contains(folder.path) }
     func markInstagramHighlight(_ folder: URL) {
         guard instagramHighlights.insert(folder.path).inserted else { return }
-        UserDefaults.standard.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
+        FilePrefs.shared.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
     }
 
     /// Folders hidden from browsing — no grid tile, no bubble, and (with their
     /// contents) no search hits — without touching anything on the drive. The
     /// "Show Hidden Folders" toggle in the ⋯ menu reveals them for unhiding.
-    var hiddenFolders: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.hiddenFolders") ?? [])
+    var hiddenFolders: Set<String> = Set(FilePrefs.shared.stringArray(forKey: "photoBrowser.hiddenFolders") ?? [])
     func isHiddenFolder(_ url: URL) -> Bool { hiddenFolders.contains(url.path) }
     /// Whether `path` is a hidden folder or lives inside one.
     func isUnderHiddenFolder(_ path: String) -> Bool {
@@ -2619,29 +2782,29 @@ final class Library {
     }
     func setFolderHidden(_ hidden: Bool, for url: URL) {
         if hidden { hiddenFolders.insert(url.path) } else { hiddenFolders.remove(url.path) }
-        UserDefaults.standard.set(Array(hiddenFolders), forKey: "photoBrowser.hiddenFolders")
+        FilePrefs.shared.set(Array(hiddenFolders), forKey: "photoBrowser.hiddenFolders")
         labelsVersion += 1
         contentDidChange(under: url.deletingLastPathComponent())
     }
 
     /// Individual files hidden from browsing — same idea as `hiddenFolders`, but per file (nothing on
     /// the drive is touched). Revealed by the same "Show Hidden Items" toggle.
-    var hiddenFiles: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.hiddenFiles") ?? [])
+    var hiddenFiles: Set<String> = Set(FilePrefs.shared.stringArray(forKey: "photoBrowser.hiddenFiles") ?? [])
     func isHiddenFile(_ url: URL) -> Bool { hiddenFiles.contains(url.path) }
     func setFileHidden(_ hidden: Bool, for url: URL) {
         if hidden { hiddenFiles.insert(url.path) } else { hiddenFiles.remove(url.path) }
-        UserDefaults.standard.set(Array(hiddenFiles), forKey: "photoBrowser.hiddenFiles")
+        FilePrefs.shared.set(Array(hiddenFiles), forKey: "photoBrowser.hiddenFiles")
         labelsVersion += 1
         contentDidChange(under: url.deletingLastPathComponent())
     }
 
     /// Folders the user turned into "album highlights" — shown as bubbles like the
     /// Instagram ones (but for any folder).
-    var albumHighlights: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.albumHighlights") ?? [])
+    var albumHighlights: Set<String> = Set(FilePrefs.shared.stringArray(forKey: "photoBrowser.albumHighlights") ?? [])
     func isAlbumHighlight(_ folder: URL) -> Bool { albumHighlights.contains(folder.path) }
     func setAlbumHighlight(_ on: Bool, for folder: URL) {
         if on { albumHighlights.insert(folder.path) } else { albumHighlights.remove(folder.path) }
-        UserDefaults.standard.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
+        FilePrefs.shared.set(Array(albumHighlights), forKey: "photoBrowser.albumHighlights")
     }
 
     /// Folders the user created as a "Reviews" folder — a container that holds *only*
@@ -2649,22 +2812,22 @@ final class Library {
     /// (`FolderView`): every subfolder is shown as a large highlight bubble, and the
     /// normal photo grid / filters are hidden. Marked by path (like `albumHighlights`),
     /// so it is remapped on move/rename and duplicated to a backup drive.
-    var reviewsFolders: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.reviewsFolders") ?? [])
+    var reviewsFolders: Set<String> = Set(FilePrefs.shared.stringArray(forKey: "photoBrowser.reviewsFolders") ?? [])
     func isReviewsFolder(_ folder: URL) -> Bool { reviewsFolders.contains(folder.path) }
     func setReviewsFolder(_ on: Bool, for folder: URL) {
         if on { reviewsFolders.insert(folder.path) } else { reviewsFolders.remove(folder.path) }
-        UserDefaults.standard.set(Array(reviewsFolders), forKey: "photoBrowser.reviewsFolders")
+        FilePrefs.shared.set(Array(reviewsFolders), forKey: "photoBrowser.reviewsFolders")
         labelsVersion += 1
     }
 
     /// User-chosen order of the highlight bubbles within a folder (parent path →
     /// ordered child bubble paths). The Instagram bubble is always pinned first by
     /// the view regardless of this order; everything else follows it.
-    var bubbleOrders: [String: [String]] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.bubbleOrder") as? [String: [String]]) ?? [:]
+    var bubbleOrders: [String: [String]] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.bubbleOrder") as? [String: [String]]) ?? [:]
     func bubbleOrder(for parent: URL) -> [String] { bubbleOrders[parent.path] ?? [] }
     func setBubbleOrder(_ paths: [String], for parent: URL) {
         bubbleOrders[parent.path] = paths
-        UserDefaults.standard.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
+        FilePrefs.shared.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
     }
 
     /// File path → posting Instagram handle ("Posted by"); presence also marks the
@@ -2675,13 +2838,13 @@ final class Library {
     func postedBy(for url: URL) -> String? { igPostedBy[url.path] }
     func setPostedBy(_ handle: String, for url: URL) {
         igPostedBy[url.path] = handle
-        Self.saveBulk(igPostedBy, "igPostedBy")
+        scheduleBulkSave(igPostedBy, "igPostedBy")
     }
     /// Batch "posted by" set (persists once) — avoids O(n²) writes on bulk imports.
     func setPostedBy(_ map: [String: String]) {
         guard !map.isEmpty else { return }
         for (k, v) in map { igPostedBy[k] = v }
-        Self.saveBulk(igPostedBy, "igPostedBy")
+        scheduleBulkSave(igPostedBy, "igPostedBy")
     }
 
     /// When the shared "Today's Instagram Stories" temp folder was last (re)started.
@@ -2696,14 +2859,14 @@ final class Library {
     /// "Today's Instagram Stories" file path → that person's own Stories folder path, so
     /// a collected story can link back to where the rest of that person's stories live
     /// (surfaced as an "Open Stories" action in the info panel).
-    var storyLinks: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.storyLinks") as? [String: String]) ?? [:]
+    var storyLinks: [String: String] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.storyLinks") as? [String: String]) ?? [:]
     func storyLink(for url: URL) -> URL? {
         storyLinks[url.path].map { URL(fileURLWithPath: $0) }
     }
     func setStoryLinks(_ paths: [String], to storiesFolder: URL) {
         guard !paths.isEmpty else { return }
         for p in paths { storyLinks[p] = storiesFolder.path }
-        UserDefaults.standard.set(storyLinks, forKey: "photoBrowser.storyLinks")
+        FilePrefs.shared.set(storyLinks, forKey: "photoBrowser.storyLinks")
     }
 
     /// Returns the shared "Today's Instagram Stories" folder under `root`, clearing it
@@ -2728,7 +2891,7 @@ final class Library {
             }
             setIGStoriesTempStart(now)
             storyLinks = [:]                                  // the linked temp files are gone now
-            UserDefaults.standard.set(storyLinks, forKey: "photoBrowser.storyLinks")
+            FilePrefs.shared.set(storyLinks, forKey: "photoBrowser.storyLinks")
         }
         try? DriveWriter.createDirectory(at: folder)
         flattenStoriesSubfolders(in: folder)
@@ -2759,11 +2922,11 @@ final class Library {
     }
 
     /// Last Instagram handle downloaded from a folder, so reruns prefill it.
-    var igLastHandle: [String: String] = (UserDefaults.standard.dictionary(forKey: "photoBrowser.igLastHandle") as? [String: String]) ?? [:]
+    var igLastHandle: [String: String] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.igLastHandle") as? [String: String]) ?? [:]
     func lastIGHandle(for folder: URL) -> String? { igLastHandle[folder.path] }
     func setLastIGHandle(_ handle: String, for folder: URL) {
         igLastHandle[folder.path] = handle
-        UserDefaults.standard.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
+        FilePrefs.shared.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
     }
 
     // MARK: - accessKardashian per-member downloads
@@ -2784,7 +2947,7 @@ final class Library {
         var updated: Double       // last-run timestamp
     }
     var accessKardashian: [String: AKMember] = {
-        guard let data = UserDefaults.standard.data(forKey: "photoBrowser.accessKardashian"),
+        guard let data = FilePrefs.shared.data(forKey: "photoBrowser.accessKardashian"),
               let m = try? JSONDecoder().decode([String: AKMember].self, from: data) else { return [:] }
         return m
     }()
@@ -2792,17 +2955,17 @@ final class Library {
     func setAKMember(_ name: String, _ state: AKMember?) {
         if let state { accessKardashian[name] = state } else { accessKardashian.removeValue(forKey: name) }
         if let data = try? JSONEncoder().encode(accessKardashian) {
-            UserDefaults.standard.set(data, forKey: "photoBrowser.accessKardashian")
+            FilePrefs.shared.set(data, forKey: "photoBrowser.accessKardashian")
         }
         changeToken += 1
     }
 
     /// Member folder paths (so the folder view knows to show the Kardashian filter
     /// chips inside them or any subfolder).
-    var kardashianFolders: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "photoBrowser.kardashianFolders") ?? [])
+    var kardashianFolders: Set<String> = Set(FilePrefs.shared.stringArray(forKey: "photoBrowser.kardashianFolders") ?? [])
     func markKardashianFolder(_ folder: URL) {
         guard kardashianFolders.insert(folder.path).inserted else { return }
-        UserDefaults.standard.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
+        FilePrefs.shared.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
     }
     /// Whether `folder` is a member folder or nested inside one.
     func inKardashianContext(_ folder: URL) -> Bool {
@@ -2836,7 +2999,7 @@ final class Library {
     func markNotDuplicates(_ paths: [String]) {
         guard paths.count >= 2 else { return }
         for i in 0..<paths.count { for j in (i + 1)..<paths.count { notDuplicatePairs.insert(Self.pairKey(paths[i], paths[j])) } }
-        Self.saveBulk(notDuplicatePairs, "notDuplicates")
+        scheduleBulkSave(notDuplicatePairs, "notDuplicates")
     }
     /// The distinct photo paths a person appears in (face IDs are "path#index").
     func photoPaths(forPerson name: String) -> Set<String> {
@@ -2870,9 +3033,12 @@ final class Library {
         let idx = index                                    // snapshot on the main actor
         if !idx.isEmpty {
             return await Task.detached(priority: .userInitiated) {
+                // Compared in one spelling, so a `/private/var` vs `/var` difference between the index
+                // and the stores can't make a tagged file look untagged.
+                let labeledKeys = Set(labeled.map(Self.canonicalPath))
                 let result = idx.filter { e in
                     (e.kind == .image || e.kind == .video)
-                        && !labeled.contains(e.url.path)
+                        && !labeledKeys.contains(Self.canonicalPath(e.url.path))
                         && (e.url.path == rootPath || e.url.path.hasPrefix(rootPath + "/"))
                 }
                 return Self.sortEntries(result, by: sort)
@@ -2891,13 +3057,21 @@ final class Library {
                 let rv = try? url.resourceValues(forKeys: keys)
                 if rv?.isDirectory == true { continue }
                 let kind = classify(url: url, isDirectory: false)
-                guard kind == .image || kind == .video, !labeled.contains(url.path) else { continue }
+                guard kind == .image || kind == .video, !labeled.contains(url.path),
+                      !labeled.contains(Self.canonicalPath(url.path)) else { continue }
                 result.append(Entry(url: url, name: url.lastPathComponent, kind: kind,
                                     size: Int64(rv?.fileSize ?? 0),
                                     modified: rv?.contentModificationDate ?? .distantPast))
             }
             return Self.sortEntries(result, by: sort)
         }.value
+    }
+
+    /// One spelling for paths under `/var`, which iOS also reaches as `/private/var` (a symlink): the
+    /// directory enumerator can return either, so comparisons between the index and the stores go
+    /// through this.
+    nonisolated static func canonicalPath(_ p: String) -> String {
+        p.hasPrefix("/private/var/") ? String(p.dropFirst("/private".count)) : p
     }
 
     /// Every custom label currently attached to `url`.
@@ -2982,6 +3156,7 @@ final class Library {
             for f in folders where p.hasPrefix(f.oldSlash) { return f.new + p.dropFirst(f.old.count) }
             return p
         }
+        remapIndex(exact: exact, folders: folders.map { IndexMove(old: $0.old, oldSlash: $0.oldSlash, new: $0.new) })
     }
 
     /// Applies `remap` to every path-keyed collection, then persists once.
@@ -3074,6 +3249,11 @@ final class Library {
     /// Snapshots every path-keyed collection (cheap — copy-on-write) and writes them
     /// on the persist queue. `saveBulk` and `UserDefaults` are both thread-safe.
     private func persistAllPathKeyed() {
+        // This writes the current value of every store, so older pending copies must not land after it.
+        for name in ["favorites", "ai", "editedInApp", "aiGenerated", "cleanupReviewed", "notDuplicates",
+                     "people", "captions", "tags", "photoOrigins", "igPostedBy"] {
+            pendingBulkSaves[name] = nil
+        }
         let favorites = self.favorites, aiLabels = self.aiLabels
         let editedInAppPaths = self.editedInAppPaths, aiGeneratedPaths = self.aiGeneratedPaths
         let cleanupReviewed = self.cleanupReviewed, notDuplicatePairs = self.notDuplicatePairs
@@ -3106,7 +3286,7 @@ final class Library {
             Self.saveBulk(tags, "tags")
             Self.saveBulk(photoOrigins, "photoOrigins")
             Self.saveBulk(igPostedBy, "igPostedBy")
-            let ud = UserDefaults.standard
+            let ud = FilePrefs.shared            // these used to be UserDefaults keys (see `FilePrefs`)
             ud.set(Array(framesFolders), forKey: "photoBrowser.framesFolders")
             ud.set(Array(kardashianFolders), forKey: "photoBrowser.kardashianFolders")
             ud.set(Array(instagramHighlights), forKey: "photoBrowser.instagramHighlights")
@@ -3399,11 +3579,17 @@ final class Library {
             guard !inScope.isEmpty else { return [] }
             var byPath: [String: Entry] = [:]
             byPath.reserveCapacity(idx.count)
-            for e in idx { byPath[e.url.path] = e }
+            for e in idx { byPath[Self.canonicalPath(e.url.path)] = e }
             var result: [Entry] = []
             var missing: [String] = []
             for path in inScope {
-                if let e = byPath[path] { result.append(e) } else { missing.append(path) }
+                guard let e = byPath[Self.canonicalPath(path)] else { missing.append(path); continue }
+                // Hand back the stores' spelling, so the tile's heart, labels and tags look up right.
+                if e.url.path == path { result.append(e) }
+                else {
+                    result.append(Entry(url: URL(fileURLWithPath: path, isDirectory: e.isFolder), name: e.name,
+                                        kind: e.kind, size: e.size, modified: e.modified, unreadable: e.unreadable))
+                }
             }
             if !missing.isEmpty {
                 let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
@@ -3432,7 +3618,7 @@ final class Library {
     }
 
     /// Recursive search by filename (and app caption) from `folder` downward.
-    nonisolated func search(in folder: URL, query: String, captions: [String: String], sort: SortKey) async -> [Entry] {
+    @concurrent nonisolated func search(in folder: URL, query: String, captions: [String: String], sort: SortKey) async -> [Entry] {
         let q = query.lowercased()
         guard !q.isEmpty else { return [] }
         return await Task.detached(priority: .userInitiated) {
@@ -3561,10 +3747,11 @@ final class Library {
     func scheduleIndexBuild() {
         guard let root = rootURL else { return }
         indexing = true                 // show index-dependent views a loading state during the wait
+        indexBuildInFlight = true       // changes noted before the walk starts wait for it, not a second walk
         Task {
             if index.isEmpty, let saved = await Self.loadIndexSnapshot(for: root), !saved.isEmpty {
                 if index.isEmpty && rootURL == root {   // nothing newer arrived while we read
-                    index = saved
+                    replaceIndex(saved)
                     indexing = false
                 }
             }
@@ -3573,22 +3760,306 @@ final class Library {
         }
     }
 
-    func buildIndex() {
-        guard let root = rootURL else { return }
+    /// Walks the drive into `index`. With a loaded snapshot of this root, only folders whose
+    /// modification date moved are re-read (`incrementalWalk`). The whole drive is re-read when there
+    /// is no snapshot, on the old exFAT drive (whose folder dates iOS doesn't keep reliably), every
+    /// sixth walk or after three days, and when `full` asks for it — a file edited in place keeps its
+    /// folder's date, so only a full walk refreshes its size and date.
+    func buildIndex(full: Bool = false) {
+        guard let root = rootURL else { indexBuildInFlight = false; return }
         if index.isEmpty { indexing = true }    // a snapshot already loaded → refresh silently
+        let rootPrefix = root.path + "/"
+        let reusable = index.filter { $0.url.path.hasPrefix(rootPrefix) }
+        let walks = UserDefaults.standard.integer(forKey: "photoBrowser.indexWalks") + 1
+        UserDefaults.standard.set(walks, forKey: "photoBrowser.indexWalks")
+        let lastFull = UserDefaults.standard.double(forKey: "photoBrowser.lastFullIndexWalk")
+        let fullDue = full || reusable.isEmpty || DriveWriter.syncMode == .full
+            || walks % 6 == 0 || Date().timeIntervalSince1970 - lastFull > 3 * 86_400
+        indexBuildInFlight = true
         Task {
-            let all = await Self.enumerateAll(root)
-            self.index = all
+            let all: [Entry]
+            if fullDue { all = await Self.enumerateAll(root) }
+            else { all = await Self.incrementalWalk(root, reusing: reusable) }
+            indexBuildInFlight = false
+            guard rootURL == root else { return }
+            if fullDue { UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "photoBrowser.lastFullIndexWalk") }
+            replaceIndex(all)
             self.indexing = false
             Self.saveIndexSnapshot(all, for: root)
             self.prewarmCaptureDates()
+            // Changes noted while the walk ran may have landed behind it — patch them in now.
+            if !pendingIndexFolders.isEmpty || pendingIndexRewalk { scheduleIndexPatch() }
         }
+    }
+
+    // MARK: - Keeping the index current
+
+    /// Bumped whenever `index` is replaced or patched. Views whose results come from the index (the
+    /// label modes, No Tags, Home's filters) key their reloads on it, and a background patch computed
+    /// from an older snapshot checks it so it never lands on top of a newer index.
+    private(set) var indexRevision = 0
+    @ObservationIgnored private var indexBuildInFlight = false
+    @ObservationIgnored private var pendingIndexFolders: Set<String> = []
+    @ObservationIgnored private var pendingIndexRewalk = false
+    @ObservationIgnored private var indexPatchTask: Task<Void, Never>?
+    @ObservationIgnored private var indexSaveTask: Task<Void, Never>?
+
+    private func replaceIndex(_ entries: [Entry]) {
+        index = entries
+        indexRevision += 1
+    }
+
+    /// Queues `folder` for a re-read into the index: its direct children are listed again and merged
+    /// (a new subfolder is walked whole, a vanished one leaves with everything under it), so a move,
+    /// import, download, save or delete shows up in search, Home's filters and the label modes at
+    /// once instead of at the next launch. Called from `contentDidChange(under:)`; bursts coalesce.
+    func noteIndexChange(under folder: URL) {
+        guard let root = rootURL else { return }
+        let p = folder.path
+        guard p == root.path || p.hasPrefix(root.path + "/") else { return }
+        pendingIndexFolders.insert(p)
+        scheduleIndexPatch()
+    }
+
+    /// A change somewhere unnamed (a download batch, a restore): re-walk the drive, re-reading only
+    /// folders whose modification date moved.
+    func noteIndexChangeAnywhere() {
+        guard rootURL != nil else { return }
+        pendingIndexRewalk = true
+        scheduleIndexPatch(after: 1_500_000_000)
+    }
+
+    private func scheduleIndexPatch(after delay: UInt64 = 700_000_000) {
+        guard indexPatchTask == nil else { return }
+        indexPatchTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: delay)
+            await self?.runIndexPatch()
+        }
+    }
+
+    private func runIndexPatch() async {
+        indexPatchTask = nil
+        // A walk in flight replaces the index when it ends and re-schedules what's still pending.
+        guard let root = rootURL, !indexBuildInFlight else { return }
+        guard !index.isEmpty else { pendingIndexFolders.removeAll(); pendingIndexRewalk = false; return }
+        let folders = pendingIndexFolders, rewalk = pendingIndexRewalk
+        pendingIndexFolders.removeAll(); pendingIndexRewalk = false
+        let snapshot = index, generation = indexRevision
+        let patched: [Entry]
+        if rewalk { patched = await Self.incrementalWalk(root, reusing: snapshot) }
+        else { patched = await Self.patchIndex(snapshot, refreshing: folders, root: root) }
+        guard rootURL == root else { return }
+        guard generation == indexRevision else {
+            // The index changed while this ran — redo it against the newer one.
+            pendingIndexFolders.formUnion(folders)
+            if rewalk { pendingIndexRewalk = true }
+            scheduleIndexPatch(after: 200_000_000)
+            return
+        }
+        replaceIndex(patched)
+        scheduleIndexSnapshotSave(for: root)
+    }
+
+    /// Persists the patched index a few seconds after the last change (a download lands one file
+    /// at a time; writing the whole snapshot per file would be wasted work).
+    private func scheduleIndexSnapshotSave(for root: URL) {
+        indexSaveTask?.cancel()
+        indexSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled, let self, self.rootURL == root else { return }
+            Self.saveIndexSnapshot(self.index, for: root)
+        }
+    }
+
+    /// Moves index entries along with a move or rename (the same exact/prefix tables `itemsMoved`
+    /// builds), off the main thread; the folder re-reads that follow then only confirm it.
+    nonisolated private struct IndexMove: Sendable { let old: String; let oldSlash: String; let new: String }
+
+    private func remapIndex(exact: [String: String], folders: [IndexMove]) {
+        guard !index.isEmpty, !exact.isEmpty else { return }
+        let snapshot = index, generation = indexRevision
+        Task {
+            let moved = await Task.detached(priority: .userInitiated) { () -> [Entry] in
+                snapshot.map { e in
+                    let p = e.url.path
+                    var np = exact[p]
+                    if np == nil {
+                        for f in folders where p.hasPrefix(f.oldSlash) { np = f.new + p.dropFirst(f.old.count); break }
+                    }
+                    guard let np, np != p else { return e }
+                    let u = URL(fileURLWithPath: np, isDirectory: e.isFolder)
+                    return Entry(url: u, name: u.lastPathComponent, kind: e.kind, size: e.size,
+                                 modified: e.modified, unreadable: e.unreadable)
+                }
+            }.value
+            if generation == indexRevision { replaceIndex(moved) }
+            else { remapIndex(exact: exact, folders: folders) }     // the index moved on; redo on the new one
+        }
+    }
+
+    /// One folder's direct children for the index, with the same exclusions and classification as
+    /// the full walk and spelled under `folder`'s own path (so they match the keys the stores use).
+    /// Nil when the folder is gone.
+    nonisolated static func indexChildren(of folder: URL) -> [Entry]? {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDir), isDir.boolValue else { return nil }
+        let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
+        let keySet = Set(keys)
+        var out: [Entry] = []
+        for u in coordinatedContents(of: folder, keys: keys) {
+            let name = u.lastPathComponent
+            if name.hasPrefix(".") { continue }
+            let rv = try? u.resourceValues(forKeys: keySet)
+            let (dir, unreadable) = directoryStatus(of: u, statted: rv?.isDirectory)
+            let url = folder.appendingPathComponent(name, isDirectory: dir)
+            out.append(Entry(url: url, name: name, kind: classify(url: url, isDirectory: dir),
+                             size: Int64(rv?.fileSize ?? 0), modified: rv?.contentModificationDate ?? .distantPast,
+                             unreadable: unreadable ? true : nil))
+        }
+        return out
+    }
+
+    /// Re-reads `folders` (direct children only) into a copy of `snapshot`. New subfolders are walked
+    /// whole; folders that vanished leave with everything under them. An empty read of a folder the
+    /// index knew to hold things is treated as a drive hiccup, not an emptying, so a bad read can't
+    /// wipe a subtree out of search.
+    nonisolated static func patchIndex(_ snapshot: [Entry], refreshing folders: Set<String>, root: URL) async -> [Entry] {
+        await Task.detached(priority: .utility) { () -> [Entry] in
+            let rootPath = root.path
+            let ordered = folders.filter { $0 == rootPath || $0.hasPrefix(rootPath + "/") }.sorted { $0.count < $1.count }
+            guard !ordered.isEmpty else { return snapshot }
+            let wanted = Set(ordered)
+            var childrenOf: [String: [Entry]] = [:]
+            for e in snapshot {
+                let parent = (e.url.path as NSString).deletingLastPathComponent
+                if wanted.contains(parent) { childrenOf[parent, default: []].append(e) }
+            }
+            var removed = Set<String>()
+            var removedTrees: [String] = []       // "…/" prefixes dropped with everything under them
+            var walkedTrees: [String] = []        // "…/" prefixes just walked whole
+            var replacements: [String: Entry] = [:]
+            var additions: [Entry] = []
+            for folderPath in ordered {
+                let under = folderPath + "/"
+                if walkedTrees.contains(where: { under.hasPrefix($0) }) || removedTrees.contains(where: { under.hasPrefix($0) }) { continue }
+                let old = childrenOf[folderPath] ?? []
+                guard let fresh = indexChildren(of: URL(fileURLWithPath: folderPath, isDirectory: true)) else {
+                    if folderPath != rootPath { removed.insert(folderPath); removedTrees.append(under) }
+                    continue
+                }
+                if fresh.isEmpty && !old.isEmpty { continue }
+                var oldByPath: [String: Entry] = [:]
+                for e in old { oldByPath[e.url.path] = e }
+                let freshPaths = Set(fresh.map { $0.url.path })
+                for (p, e) in oldByPath where !freshPaths.contains(p) {
+                    removed.insert(p)
+                    if e.isFolder { removedTrees.append(p + "/") }
+                }
+                for e in fresh {
+                    let p = e.url.path
+                    if let prior = oldByPath[p] {
+                        if prior.size != e.size || prior.modified != e.modified || prior.kind != e.kind
+                            || prior.unreadable != e.unreadable { replacements[p] = e }
+                    } else {
+                        additions.append(e)
+                        if e.isFolder && !e.isUnreadable {
+                            additions.append(contentsOf: walkIndex(e.url))
+                            walkedTrees.append(p + "/")
+                        }
+                    }
+                }
+            }
+            if removed.isEmpty && replacements.isEmpty && additions.isEmpty { return snapshot }
+            var result: [Entry] = []
+            result.reserveCapacity(snapshot.count + additions.count)
+            for e in snapshot {
+                let p = e.url.path
+                if removed.contains(p) { continue }
+                if !removedTrees.isEmpty, removedTrees.contains(where: { p.hasPrefix($0) }) { continue }
+                result.append(replacements[p] ?? e)
+            }
+            var present = Set(result.map { $0.url.path })
+            for e in additions where present.insert(e.url.path).inserted { result.append(e) }
+            return result
+        }.value
+    }
+
+    /// The drive walk behind the index, reusing `snapshot` for every folder whose modification date
+    /// hasn't moved: adding, removing or renaming an item changes its folder's date, so an unchanged
+    /// folder's children are already known. Every folder is still visited (one stat each), because a
+    /// change deep down doesn't touch its ancestors; only changed folders are re-listed.
+    nonisolated static func incrementalWalk(_ root: URL, reusing snapshot: [Entry]) async -> [Entry] {
+        await Task.detached(priority: .utility) { () -> [Entry] in
+            var childrenOf: [String: [Entry]] = [:]
+            var folderDates: [String: Date] = [:]
+            for e in snapshot {
+                childrenOf[(e.url.path as NSString).deletingLastPathComponent, default: []].append(e)
+                if e.isFolder { folderDates[e.url.path] = e.modified }
+            }
+            let known = childrenOf, dates = folderDates, rootPath = root.path
+            var result: [Entry] = []
+            result.reserveCapacity(snapshot.count)
+            var slotOf: [String: Int] = [:]          // folder path → its entry in `result`
+            var level: [URL] = [root]
+            while !level.isEmpty {
+                let current = level
+                var outcomes = [IndexLevelOutcome](repeating: IndexLevelOutcome(entries: [], date: nil), count: current.count)
+                await withTaskGroup(of: (Int, IndexLevelOutcome).self) { group in
+                    var next = 0
+                    func addNext() {
+                        guard next < current.count else { return }
+                        let i = next, folder = current[i]
+                        next += 1
+                        group.addTask {
+                            let p = folder.path
+                            let now = (try? folder.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                            let kids = known[p]
+                            if p != rootPath, let kids, let was = dates[p], let now,
+                               abs(now.timeIntervalSince(was)) < 0.0005 {
+                                return (i, IndexLevelOutcome(entries: kids, date: now))
+                            }
+                            let fresh = indexChildren(of: folder) ?? []
+                            // An empty read where we knew children: keep them (a drive hiccup, not an emptying).
+                            if fresh.isEmpty, let kids, !kids.isEmpty { return (i, IndexLevelOutcome(entries: kids, date: now)) }
+                            return (i, IndexLevelOutcome(entries: fresh, date: now))
+                        }
+                    }
+                    for _ in 0..<min(8, current.count) { addNext() }
+                    while let (i, outcome) = await group.next() { outcomes[i] = outcome; addNext() }
+                }
+                var nextLevel: [URL] = []
+                for (i, folder) in current.enumerated() {
+                    let outcome = outcomes[i]
+                    // Keep the folder's own entry on its current date, so the next walk compares right.
+                    if let date = outcome.date, let slot = slotOf[folder.path], result[slot].modified != date {
+                        let e = result[slot]
+                        result[slot] = Entry(url: e.url, name: e.name, kind: e.kind, size: e.size,
+                                             modified: date, unreadable: e.unreadable)
+                    }
+                    for e in outcome.entries {
+                        if e.isFolder {
+                            slotOf[e.url.path] = result.count
+                            if !e.isUnreadable { nextLevel.append(e.url) }
+                        }
+                        result.append(e)
+                    }
+                }
+                level = nextLevel
+            }
+            return result
+        }.value
     }
 
     /// Persisted whole-drive index (same remount-tolerant scheme as the listing
     /// snapshots), so launch #2+ has instant search/Library while the fresh walk runs.
     private struct IndexSnapshot: Codable { let rootStable: String; let rootPath: String; let entries: [Entry] }
+    /// In Application Support, not Caches: iOS purges Caches under storage pressure, and losing the
+    /// snapshot means a full drive walk and an empty search until it ends.
     @ObservationIgnored nonisolated private static let indexFile: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("libraryIndex.json")
+    }()
+    @ObservationIgnored nonisolated private static let legacyIndexFile: URL = {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("libraryIndex.json")
     }()
@@ -3602,7 +4073,7 @@ final class Library {
     }
     nonisolated private static func loadIndexSnapshot(for root: URL) async -> [Entry]? {
         await Task.detached(priority: .userInitiated) { () -> [Entry]? in
-            guard let data = try? Data(contentsOf: indexFile),
+            guard let data = (try? Data(contentsOf: indexFile)) ?? (try? Data(contentsOf: legacyIndexFile)),
                   let snapshot = try? JSONDecoder().decode(IndexSnapshot.self, from: data),
                   snapshot.rootStable == root.stableCacheID else { return nil }
             if snapshot.rootPath == root.path { return snapshot.entries }
@@ -3664,7 +4135,46 @@ final class Library {
                           kind: classify(url: pick, isDirectory: false), size: 0, modified: Date())
         guard let img = await Thumbnailer.shared.thumbnail(
                   for: entry, size: CGSize(width: 240, height: 240), scale: 2) else { return }
-        if folderCovers[folder.path] == nil { setCover(img, for: folder) }   // still missing — set it
+        guard folderCovers[folder.path] == nil, pendingAutoCovers[folder.path] == nil else { return }
+        // Encode and write off the main thread (the covers folder is in the app's container, not on
+        // the drive), then publish in a batch: scrolling Home assigns dozens of covers, and each
+        // assignment redrew the grid and re-saved the whole cover store on the main thread.
+        let dir = coversDirectory
+        let name: String? = await Task.detached(priority: .utility) { () -> String? in
+            guard let data = img.jpegData(compressionQuality: 0.9) else { return nil }
+            let name = UUID().uuidString + ".jpg"
+            return (try? data.write(to: dir.appendingPathComponent(name))) != nil ? name : nil
+        }.value
+        guard let name else { return }
+        guard folderCovers[folder.path] == nil, pendingAutoCovers[folder.path] == nil else {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))   // set meanwhile
+            return
+        }
+        pendingAutoCovers[folder.path] = name
+        guard autoCoverFlush == nil else { return }
+        autoCoverFlush = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            self?.publishAutoCovers()
+        }
+    }
+
+    @ObservationIgnored private var pendingAutoCovers: [String: String] = [:]
+    @ObservationIgnored private var autoCoverFlush: Task<Void, Never>?
+
+    /// Applies the auto-picked covers gathered in the last moment as one change and one save. A
+    /// cover set by hand in the meantime wins; its auto pick is discarded.
+    private func publishAutoCovers() {
+        autoCoverFlush = nil
+        let picks = pendingAutoCovers
+        pendingAutoCovers.removeAll()
+        guard !picks.isEmpty else { return }
+        var updated = folderCovers
+        for (path, name) in picks {
+            if updated[path] == nil { updated[path] = name }
+            else { try? FileManager.default.removeItem(at: coversDirectory.appendingPathComponent(name)) }
+        }
+        folderCovers = updated
+        FilePrefs.shared.set(folderCovers, forKey: "photoBrowser.folderCovers")
     }
 
     /// A random photo/video somewhere under `folder`: prefers a direct child, otherwise
@@ -3695,31 +4205,53 @@ final class Library {
     }
 
     nonisolated static func enumerateAll(_ root: URL) async -> [Entry] {
-        await Task.detached(priority: .utility) {
-            let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
-            guard let walker = FileManager.default.enumerator(
-                at: root, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles]) else { return [] }
-            let rootDepth = root.pathComponents.count
-            var result: [Entry] = []
-            for case let url as URL in walker {
-                // Never surface app-internal dot-directories (e.g. `.Trash`) or dot-files: the
-                // file-provider drive can ignore `.skipsHiddenFiles`, which would otherwise leak
-                // trashed items into search / Places / the indexes. Checked below the root only, so a
-                // root that itself lives under a dot-path isn't wholesale excluded.
-                if url.pathComponents.dropFirst(rootDepth).contains(where: { $0.hasPrefix(".") }) { continue }
-                let rv = try? url.resourceValues(forKeys: keys)
-                // Same classification as the grid (`directoryStatus`): an entry iOS can't stat is not
-                // a 0 KB file to be hidden, it's usually a damaged folder.
-                let (isDir, unreadable) = Library.directoryStatus(of: url, statted: rv?.isDirectory)
-                result.append(Entry(url: url, name: url.lastPathComponent,
-                                    kind: classify(url: url, isDirectory: isDir),
-                                    size: Int64(rv?.fileSize ?? 0),
-                                    modified: rv?.contentModificationDate ?? .distantPast,
-                                    unreadable: unreadable ? true : nil))
-            }
-            return result
-        }.value
+        await Task.detached(priority: .utility) { walkIndex(root) }.value
     }
+
+    /// Recursive walk of `folder` for the index (synchronous; callers run it off the main actor).
+    /// Every entry is spelled under `folder`'s own path: the directory enumerator can hand back the
+    /// symlink-resolved spelling (`/private/var/…` for `/var/…`), and an index whose paths differ
+    /// from the keys the stores were written under shows tagged files as untagged in No Tags and
+    /// drops their hearts and labels.
+    nonisolated static func walkIndex(_ folder: URL) -> [Entry] {
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
+        guard let walker = FileManager.default.enumerator(
+            at: folder, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles]) else { return [] }
+        let base = folder.path
+        // Each spelling the walker might use for `folder`, longest first.
+        var spellings = [base]
+        let resolved = folder.resolvingSymlinksInPath().path
+        if resolved != base { spellings.append(resolved) }
+        if base.hasPrefix("/private/") { spellings.append(String(base.dropFirst("/private".count))) }
+        else if base.hasPrefix("/var/") { spellings.append("/private" + base) }
+        spellings.sort { $0.count > $1.count }
+        var result: [Entry] = []
+        for case let raw as URL in walker {
+            let rawPath = raw.path
+            var relative: Substring?
+            for s in spellings where rawPath.hasPrefix(s + "/") { relative = rawPath.dropFirst(s.count + 1); break }
+            guard let relative else { continue }
+            // Never surface app-internal dot-directories (e.g. `.Trash`) or dot-files: the
+            // file-provider drive can ignore `.skipsHiddenFiles`, which would otherwise leak
+            // trashed items into search / Places / the indexes. Checked below the walked folder
+            // only, so a root that itself lives under a dot-path isn't wholesale excluded.
+            if relative.split(separator: "/").contains(where: { $0.hasPrefix(".") }) { continue }
+            let rv = try? raw.resourceValues(forKeys: keys)
+            // Same classification as the grid (`directoryStatus`): an entry iOS can't stat is not
+            // a 0 KB file to be hidden, it's usually a damaged folder.
+            let (isDir, unreadable) = Library.directoryStatus(of: raw, statted: rv?.isDirectory)
+            let url = URL(fileURLWithPath: base + "/" + relative, isDirectory: isDir)
+            result.append(Entry(url: url, name: url.lastPathComponent,
+                                kind: classify(url: url, isDirectory: isDir),
+                                size: Int64(rv?.fileSize ?? 0),
+                                modified: rv?.contentModificationDate ?? .distantPast,
+                                unreadable: unreadable ? true : nil))
+        }
+        return result
+    }
+
+    /// One folder's re-read result inside `incrementalWalk`.
+    nonisolated private struct IndexLevelOutcome: Sendable { let entries: [Entry]; let date: Date? }
 
     /// In-memory search over the prebuilt index (instant once the index exists).
     /// Matches folder names, file names, app captions, OCR'd photo text, and
@@ -3908,12 +4440,23 @@ final class Library {
 
     func goHome() { path.removeAll() }
 
+    /// Notices a drive unplugged while the app sits idle (a reload would notice too, but nothing
+    /// reloads while you're just looking), so the "Drive disconnected" banner shows at once instead
+    /// of a grid whose taps do nothing. One `stat` of the root, off the main thread.
+    func checkDrivePresence() async {
+        guard let root = rootURL, !waitingForDrive else { return }
+        let path = root.path
+        let present = await Task.detached(priority: .utility) { FileManager.default.fileExists(atPath: path) }.value
+        if !present, rootURL == root, !waitingForDrive { waitingForDrive = true }
+    }
+
     /// Reads capture dates (EXIF/creation) for the given files, bounded to a few
     /// concurrent reads so big folders don't stall.
-    nonisolated func captureDates(for entries: [Entry]) async -> [URL: Date] {
-        let files = entries.filter { !$0.isFolder }
-        guard !files.isEmpty else { return [:] }
-        var result: [URL: Date] = [:]
+    @concurrent nonisolated func captureDates(for entries: [Entry]) async -> [URL: Date] {
+        // Known dates in one locked pass; read tasks only for files never read before.
+        let (known, files) = MetadataLoader.cachedCaptureDates(for: entries)
+        guard !files.isEmpty else { return known }
+        var result = known
         var index = 0
         let maxConcurrent = 12
         await withTaskGroup(of: (URL, Date?).self) { group in
@@ -3955,7 +4498,7 @@ final class Library {
     /// rate-limited geocoder — at most `geocodeLimit` per call, so a never-indexed, well-travelled
     /// folder shows what it can now and names the rest next time. Files with no location map to "";
     /// a file whose bin isn't named yet is left out. `progress` gets a short status line.
-    nonisolated func placeLabels(for entries: [Entry], geocodeLimit: Int = 60,
+    @concurrent nonisolated func placeLabels(for entries: [Entry], geocodeLimit: Int = 60,
                                  progress: @escaping @Sendable (String) -> Void) async -> [URL: String] {
         let files = entries.filter { $0.kind == .image || $0.kind == .video }
         guard !files.isEmpty else { return [:] }
@@ -3993,10 +4536,10 @@ final class Library {
     }
 
     /// Reads dimensions + HDR for media files (for resolution/HDR filters).
-    nonisolated func mediaSpecs(for entries: [Entry]) async -> [URL: MediaSpec] {
-        let media = entries.filter { $0.kind == .image || $0.kind == .video }
-        guard !media.isEmpty else { return [:] }
-        var result: [URL: MediaSpec] = [:]
+    @concurrent nonisolated func mediaSpecs(for entries: [Entry]) async -> [URL: MediaSpec] {
+        let (known, media) = MetadataLoader.cachedMediaSpecs(for: entries)
+        guard !media.isEmpty else { return known }
+        var result = known
         var index = 0
         let maxConcurrent = 8
         await withTaskGroup(of: (URL, MediaSpec).self) { group in
@@ -4057,7 +4600,7 @@ final class Library {
 
     // MARK: - Folder statistics (Get Info)
 
-    nonisolated func folderStats(of folder: URL) async -> FolderStats {
+    @concurrent nonisolated func folderStats(of folder: URL) async -> FolderStats {
         // 1) Walk the tree: counts, size, and the media list (off the main thread).
         let base = await Task.detached(priority: .userInitiated) { () -> FolderStats in
             var stats = FolderStats()
@@ -4236,7 +4779,7 @@ final class Library {
         return urls
     }
 
-    nonisolated func listing(of folder: URL, sort: SortKey, thorough: Bool = false) async -> [Entry] {
+    @concurrent nonisolated func listing(of folder: URL, sort: SortKey, thorough: Bool = false) async -> [Entry] {
         // Enumerate names only (fast), then read each file's size/date/type concurrently.
         // On a slow external/file-provider drive each stat blocks, so overlapping them is
         // the difference between a folder opening instantly and taking 5–30s; on a local

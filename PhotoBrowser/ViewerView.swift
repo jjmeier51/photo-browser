@@ -68,6 +68,7 @@ struct ViewerView: View {
             }
 
             topChrome
+            bottomBar
             if let actionNote { toast(actionNote) }
         }
         .statusBarHidden(true)
@@ -94,7 +95,7 @@ struct ViewerView: View {
         .sheet(isPresented: $showCopyPicker) {
             FolderPicker(root: coverPickerRoot, confirmTitle: "Copy Here") { dest in copyCurrent(to: dest) }
         }
-        .confirmationDialog("Delete this item?", isPresented: $confirmDelete, titleVisibility: .visible) {
+        .confirmationDialog("Move to Recently Deleted?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) { deleteCurrent() }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -158,7 +159,7 @@ struct ViewerView: View {
             for delta in [1, -1] {
                 let i = index + delta
                 guard items.indices.contains(i), items[i].kind == .image else { continue }
-                ViewerPageCache.shared.preload(url: items[i].url)
+                ViewerPageCache.shared.preload(url: items[i].url, maxPixel: ZoomableImageView.fitPixels)
             }
         }
         // Slideshow: hold each item, then advance (wrapping around).
@@ -229,13 +230,13 @@ struct ViewerView: View {
         }
     }
 
+    /// Same Delete as the grid: to the drive's Recently Deleted (restorable for 30 days), with the
+    /// iOS Photos original of an imported file left alone. It used to delete the file for good and
+    /// the Photos original with it.
     private func deleteCurrent() {
         guard let current else { return }
-        let assetIDs = library.origin(for: current.url).map { [$0] } ?? []
-        FileActions.delete([current])
-        library.clearOrigins([current.url])
-        library.contentDidChange(under: current.url.deletingLastPathComponent())
-        if !assetIDs.isEmpty { Task { await FileActions.deletePhotosAssets(assetIDs) } }
+        Haptics.warning()
+        library.trashItems([current])
         removeCurrentAndAdvance()
     }
 
@@ -263,11 +264,54 @@ struct ViewerView: View {
                 .font(.subheadline.weight(.medium)).foregroundStyle(.white)
                 .padding(.horizontal, 16).padding(.vertical, 10)
                 .background(.black.opacity(0.6), in: Capsule())
-                .padding(.bottom, 60)
+                .padding(.bottom, 130)              // clear of the bottom bar (and a video's scrubber)
         }
         .frame(maxWidth: .infinity)
         .allowsHitTesting(false)
         .transition(.opacity)
+    }
+
+    /// Share, Favorite, Info and Delete as buttons — the viewer's main actions used to be reachable
+    /// only by gestures (swipe up for Info) or from inside the info panel. Hidden with the rest of
+    /// the chrome; on a video it sits above the player's scrubber.
+    @ViewBuilder private var bottomBar: some View {
+        if showChrome, let current {
+            let favorite = library.isFavorite(current.url)
+            VStack {
+                Spacer()
+                HStack {
+                    ShareLink(item: current.url) {
+                        barIcon("square.and.arrow.up")
+                    }
+                    .accessibilityLabel("Share")
+                    Spacer()
+                    Button {
+                        Haptics.light()
+                        library.toggleFavorite(current.url)
+                    } label: {
+                        barIcon(favorite ? "heart.fill" : "heart", tint: favorite ? .red : .white)
+                    }
+                    .accessibilityLabel(favorite ? "Remove from Favorites" : "Add to Favorites")
+                    Spacer()
+                    Button { showInfo = true } label: { barIcon("info.circle") }
+                        .accessibilityLabel("Info")
+                    Spacer()
+                    Button { confirmDelete = true } label: { barIcon("trash") }
+                        .accessibilityLabel("Delete")
+                }
+                .padding(.horizontal, 28)
+                .padding(.bottom, current.kind == .video ? 72 : 14)
+            }
+            .transition(.opacity)
+        }
+    }
+
+    private func barIcon(_ name: String, tint: Color = .white) -> some View {
+        Image(systemName: name)
+            .font(.title3).foregroundStyle(tint)
+            .frame(width: 46, height: 46)
+            .background(.black.opacity(0.45), in: Circle())
+            .contentShape(Circle())
     }
 
     // Close button + centered title/date; both hidden while zoomed in.
@@ -376,13 +420,15 @@ private struct PageView: View {
             WebMPage(url: item.url, onDismiss: onDismiss, onInfo: onInfo, onPrev: onPrev, onNext: onNext)
                 .ignoresSafeArea()
         } else if item.kind == .video {
-            VideoPage(url: item.url, coverSource: coverSource, infoShown: infoShown,
+            VideoPage(url: item.url, poster: Thumbnailer.shared.cached(for: item),
+                      coverSource: coverSource, infoShown: infoShown,
                       onDismiss: onDismiss, onInfo: onInfo,
                       onZoomChanged: onZoomChanged, onControlsHidden: onControlsHidden,
                       onPrev: onPrev, onNext: onNext,
                       onCaptured: { library.contentDidChange(under: item.url.deletingLastPathComponent()) })
         } else {
-            ZoomableImageView(url: item.url, coverSource: coverSource, onDismiss: onDismiss, onInfo: onInfo,
+            ZoomableImageView(url: item.url, placeholder: Thumbnailer.shared.cached(for: item),
+                              coverSource: coverSource, onDismiss: onDismiss, onInfo: onInfo,
                               onZoomChanged: onZoomChanged, onToggleChrome: onToggleChrome,
                               onPrev: onPrev, onNext: onNext)
         }

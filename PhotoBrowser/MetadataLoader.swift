@@ -18,7 +18,11 @@ struct MediaInfo: Sendable {
 /// CoreLocation, xattrs) run inside `Task.detached` so the project's
 /// default-MainActor isolation can't pull them onto the main thread — the single
 /// biggest source of "the app froze" bugs on a slow external drive.
-enum MetadataLoader {
+///
+/// The type itself is `nonisolated`: its stores are lock-protected or `NSCache`, and nothing here
+/// touches UIKit, so cache lookups called from the background passes (`Library.captureDates` and
+/// friends) stay on their own threads instead of hopping onto the main actor once per file.
+nonisolated enum MetadataLoader {
 
     // MARK: - Per-file result cache
 
@@ -28,7 +32,7 @@ enum MetadataLoader {
     /// by path|mtime|size (the Thumbnailer's scheme), so an in-place edit
     /// invalidates naturally. Negative results are cached too — "no embedded
     /// caption / date" is the common case and just as expensive to discover.
-    private final class CachedValue<T> {
+    nonisolated private final class CachedValue<T> {
         let value: T?
         init(_ value: T?) { self.value = value }
     }
@@ -56,7 +60,7 @@ enum MetadataLoader {
     /// read at most once, ever. `0` records a known "no embedded date" so those
     /// files aren't re-read either. The key includes mtime+size, so an in-place
     /// edit re-reads naturally.
-    private final class DateStore: @unchecked Sendable {
+    nonisolated private final class DateStore: @unchecked Sendable {
         private let lock = NSLock()
         private var map: [String: Double]
         private var dirty = false
@@ -140,7 +144,7 @@ enum MetadataLoader {
     /// specs persist keyed `path|mtime|size` — each file is inspected at most once,
     /// ever. Single stores debounce their flush: tiles record specs one at a time
     /// as they first appear, and rewriting the whole file per tile would thrash.
-    private final class SpecStore: @unchecked Sendable {
+    nonisolated private final class SpecStore: @unchecked Sendable {
         private let lock = NSLock()
         private var map: [String: MediaSpec]
         private var dirty = false
@@ -219,7 +223,7 @@ enum MetadataLoader {
     /// Recognized text per photo, keyed `path|mtime|size` (so an edit re-OCRs).
     /// Persisted to disk so the (slow) Vision pass runs at most once per file.
     /// An empty string records "scanned, no text" so it isn't re-scanned.
-    private final class OCRStore: @unchecked Sendable {
+    nonisolated private final class OCRStore: @unchecked Sendable {
         private let lock = NSLock()
         private var map: [String: String]
         private var dirty = false
@@ -284,13 +288,13 @@ enum MetadataLoader {
     /// their label by the next naming pass.
     /// The on-disk shape of the place index — also what a metadata backup carries (`places.json`),
     /// so the geocoding done over months isn't lost with the app container.
-    struct PlaceIndex: Codable, Sendable {
+    nonisolated struct PlaceIndex: Codable, Sendable {
         var version: Int?
         var fileBins: [String: String]
         var binPlaces: [String: String]
         var binLabels: [String: String]?
     }
-    private final class PlaceStore: @unchecked Sendable {
+    nonisolated private final class PlaceStore: @unchecked Sendable {
         private let lock = NSLock()
         private var fileBins: [String: String]     // fileKey → bin ("" = no GPS)
         private var binPlaces: [String: String]    // bin → place, stored lowercased for matching
@@ -743,6 +747,45 @@ enum MetadataLoader {
     }
 
     // MARK: - Capture date (for year filtering)
+
+    /// Every capture date already known for `entries` (memory, else the persisted store) in one pass,
+    /// plus the files still to read. A folder open then starts read tasks only for real misses instead
+    /// of one task per file — on a warm library that's almost none.
+    static func cachedCaptureDates(for entries: [Entry]) -> (known: [URL: Date], missing: [Entry]) {
+        var known: [URL: Date] = [:]
+        var missing: [Entry] = []
+        for e in entries where !e.isFolder {
+            let key = cacheKey(for: e)
+            if let cached = dateCache.object(forKey: key) {
+                if let d = cached.value { known[e.url] = d }
+                continue
+            }
+            if let stored = dateStore.lookup(key as String) {
+                dateCache.setObject(CachedValue(stored), forKey: key)
+                if let d = stored { known[e.url] = d }
+                continue
+            }
+            missing.append(e)
+        }
+        return (known, missing)
+    }
+
+    /// `cachedCaptureDates` for dimensions/HDR/duration.
+    static func cachedMediaSpecs(for entries: [Entry]) -> (known: [URL: MediaSpec], missing: [Entry]) {
+        var known: [URL: MediaSpec] = [:]
+        var missing: [Entry] = []
+        for e in entries where e.kind == .image || e.kind == .video {
+            let key = cacheKey(for: e)
+            if let cached = specCache.object(forKey: key) { known[e.url] = cached.value ?? MediaSpec(); continue }
+            if let stored = specStore.lookup(key as String) {
+                specCache.setObject(CachedValue(stored), forKey: key)
+                known[e.url] = stored
+                continue
+            }
+            missing.append(e)
+        }
+        return (known, missing)
+    }
 
     /// The real capture date from EXIF (photos) or creation metadata (videos);
     /// nil if the file carries none.

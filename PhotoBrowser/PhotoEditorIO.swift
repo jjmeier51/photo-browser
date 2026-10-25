@@ -134,7 +134,7 @@ enum PhotoEditorIO {
         }
         if format != .png { props[kCGImageDestinationLossyCompressionQuality as CFString] = quality }
 
-        let tmp = destURL.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).edit")
+        let tmp = destURL.deletingLastPathComponent().appendingPathComponent(".pbtmp_\(UUID().uuidString).edit")
         guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL, format.utType, 1, nil) else { return false }
         CGImageDestinationAddImage(dest, cg, props as CFDictionary)
         guard CGImageDestinationFinalize(dest),
@@ -245,7 +245,7 @@ enum PhotoEditorIO {
         guard let data = try? context.heif10Representation(of: withMeta, colorSpace: outSpace, options: [:])
         else { return false }
 
-        let tmp = destURL.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).edit")
+        let tmp = destURL.deletingLastPathComponent().appendingPathComponent(".pbtmp_\(UUID().uuidString).edit")
         do { try data.write(to: tmp) } catch { return false }
         guard CGImageSourceCreateWithURL(tmp as CFURL, nil) != nil else {
             try? FileManager.default.removeItem(at: tmp); return false
@@ -270,13 +270,17 @@ enum PhotoEditorIO {
     /// Moves the finished temp file into place. An existing destination (the overwrite path) is
     /// swapped atomically via `replaceItemAt`, so the original can never be left deleted-but-not-
     /// replaced if the save dies between the two steps.
+    /// The temp is flushed first and the result after, like every other drive write (`DriveWriter`),
+    /// and it's named `.pbtmp_…` so the folder listing sweeps it up if a crash leaves it behind.
     private static func promote(_ tmp: URL, to destURL: URL) -> Bool {
         do {
+            DriveWriter.fullSync(tmp)
             if FileManager.default.fileExists(atPath: destURL.path) {
                 _ = try FileManager.default.replaceItemAt(destURL, withItemAt: tmp)
             } else {
                 try FileManager.default.moveItem(at: tmp, to: destURL)
             }
+            DriveWriter.fullSyncFileAndParent(destURL)
             return true
         } catch {
             try? FileManager.default.removeItem(at: tmp)

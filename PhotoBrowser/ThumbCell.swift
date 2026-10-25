@@ -5,7 +5,19 @@ import AVFoundation
 /// One square tile: a folder, or a file with a lazily-loaded thumbnail.
 /// The thumbnail is framed to the cell and clipped so wide/tall images can't
 /// bleed over neighbouring tiles.
-struct EntryCell: View {
+///
+/// `Equatable` over everything it draws (not `onReady`, a closure SwiftUI can't compare): the grid
+/// wraps it in `.equatable()`, so a selection tap or a favorite redraws the one or two tiles that
+/// changed instead of every visible tile.
+struct EntryCell: View, Equatable {
+    nonisolated static func == (lhs: EntryCell, rhs: EntryCell) -> Bool {
+        lhs.entry == rhs.entry && lhs.selecting == rhs.selecting && lhs.selected == rhs.selected
+            && lhs.favorited == rhs.favorited && lhs.aiLabeled == rhs.aiLabeled && lhs.isLive == rhs.isLive
+            && lhs.isAIGenerated == rhs.isAIGenerated && lhs.coverURL == rhs.coverURL
+            && lhs.thumbnailOverrideURL == rhs.thumbnailOverrideURL && lhs.likeCount == rhs.likeCount
+            && lhs.reviewsFolder == rhs.reviewsFolder
+    }
+
     let entry: Entry
     var selecting: Bool = false
     var selected: Bool = false
@@ -116,6 +128,14 @@ struct EntryCell: View {
             }
     }
 
+    /// The thumbnail already in memory, drawn on the tile's first frame — otherwise a tile whose
+    /// thumbnail is cached still rendered once empty and again after its load task resumed.
+    private var memoryThumbnail: UIImage? {
+        guard thumbnailOverrideURL == nil, entry.kind == .image || entry.kind == .video || entry.kind == .pdf
+        else { return nil }
+        return Thumbnailer.shared.cached(for: entry)
+    }
+
     /// Fires `onReady` exactly once for this cell.
     private func report() {
         guard !reported else { return }
@@ -177,7 +197,7 @@ struct EntryCell: View {
                         .shadow(color: .black.opacity(0.5), radius: 1)       // legible on the gradient
                 }
             }
-        } else if let image {
+        } else if let image = image ?? memoryThumbnail {
             GeometryReader { geo in
                 Image(uiImage: image)
                     .resizable()

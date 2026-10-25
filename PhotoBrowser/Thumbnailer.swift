@@ -114,6 +114,13 @@ nonisolated final class Thumbnailer: @unchecked Sendable {
         previous?.cancel()
     }
 
+    /// The thumbnail if it's already in memory — never touches the disk and starts no work. Lets a
+    /// grid tile (and the viewer, as its first frame) draw a cached thumbnail immediately instead
+    /// of after an `await`.
+    func cached(for entry: Entry) -> UIImage? {
+        memory.object(forKey: cacheKey(for: entry) as NSString)
+    }
+
     func thumbnail(for entry: Entry, size: CGSize, scale: CGFloat) async -> UIImage? {
         let key = cacheKey(for: entry)
         if let cached = memory.object(forKey: key as NSString) { return cached }

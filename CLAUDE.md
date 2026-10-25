@@ -180,8 +180,19 @@ It owns the chosen `rootURL` (with a security-scoped bookmark persisted to
 background tasks. Most of these methods are `nonisolated` + `Task.detached` so
 heavy I/O on a slow external drive never blocks the main actor.
 
-Persistence is **`UserDefaults`-only**, keyed by absolute file path. Keys are all
-under the `photoBrowser.*` namespace:
+Persistence is keyed by absolute file path, in three places — **never add a growing store to
+`UserDefaults`** (it rejects any value ≥ 4 MB and corrupts the prefs):
+- **Bulk JSON files** (Application Support/`bulkStore`, `Library.loadBulk`/`saveBulk`): favorites,
+  To AI, captions, tags, people, Clean Up progress, photo origins, the trash records… Stores changed
+  by a single tap save through `scheduleBulkSave` (≈1 s later, off the main thread, coalesced);
+  `flushBulkSaves(wait:)` runs when the app backgrounds and `persistAllPathKeyed` drops pending ones.
+- **`FilePrefs`** (Application Support/`prefs/<key>.plist`, same API as `UserDefaults`): the path-keyed
+  collections that used to be `UserDefaults` keys — folder covers, item thumbnails, birthdays, hidden
+  folders/files, highlight/reviews/frames folders, bubble order, story links, the downloaders'
+  per-folder records, AI prompts, Messages archives. A key moves over from `UserDefaults` on first read.
+- **`UserDefaults`** only for small settings (`thumbSize`, `folderBookmark`, `theme`, …).
+
+Keys are all under the `photoBrowser.*` namespace:
 - `favorites`, `ai` — labeled item paths (Sets of path strings)
 - `captions` — app caption overrides (path → text)
 - `tags` — per-file tags (path → [tag]), bulk JSON store; the Tags chip filters a folder's
@@ -204,9 +215,24 @@ Favorites, captions, covers, and birthdays.
 
 Change-notification counters that views observe:
 - `changeToken` / `contentDidChange()` — bump to force the current folder to
-  reload (used after edits made outside the folder view, e.g. saving a crop).
+  reload (used after edits made outside the folder view, e.g. saving a crop). Only the folder on
+  top of the navigation stack reloads at once; the others reload when they're back on top. Pass
+  the folder (`contentDidChange(under:)` / `underFolders:`) whenever you know it — it also re-reads
+  just that folder into the drive index; the bare form re-walks the drive (unchanged folders reused).
 - `labelsVersion` — bump on any label/birthday change so label-derived views
   re-query even when the count is unchanged.
+- `indexRevision` — bumped whenever the whole-drive `index` changes. Key anything derived from the
+  index on it (not `index.count`: a rename or move keeps the count). The index is kept current
+  during a session (`noteIndexChange`, `remapIndex` from `itemsMoved`), not just rebuilt at launch.
+
+**Deleting:** every Delete goes through `library.trashItems(_:)` — the drive's 30-day Recently
+Deleted, labels kept for a restore, iOS Photos originals untouched; `restoreTrashed` puts items
+back (a renamed restore keeps its labels). Never `FileActions.delete` from a screen.
+
+**Results:** a success is `library.showToast(_:)` (or `resultMessage` in `FolderView`, shown as a
+toast); a failure is `library.postNotice(title, message)` — an alert titled with what failed.
+Activities (`beginActivity`/`endActivity`) route their result the same way; pass `cancellable: true`
+and check `isActivityCancelled` between items to offer Stop in the activities sheet.
 
 ### Core data types — `Models.swift`
 - `FileKind` (folder/image/video/pdf/other) and `classify(url:isDirectory:)`
