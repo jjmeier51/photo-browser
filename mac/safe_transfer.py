@@ -285,7 +285,9 @@ def trash_with_finder(path: Path) -> bool:
 
 class Transfer:
     """Runs one plan on a worker thread. Callbacks are called from that thread:
-    log(str), progress(dict), finished(dict)."""
+    log(str), progress(dict), finished(dict). The finished dict also says where every file ended up
+    ("placed": [(original, copy)], so Photo Browser tags can follow it) and which originals went to
+    the Trash ("trashed_paths")."""
 
     def __init__(self, plan: Plan, move: bool, verify: bool,
                  log: Callable[[str], None], progress: Callable[[dict], None], finished: Callable[[dict], None],
@@ -306,6 +308,9 @@ class Transfer:
         self.spare_dirs = 0                      # new folders made from spares (their lists sit below 2.2 TB)
         self.plain_dirs = 0                      # new folders made the usual way (no spare left)
         self.spare_miss = ""                     # why (spare_folders.last_miss)
+        self.placed: list[tuple[str, str]] = []  # (original, where its copy is) for every file that made it
+        self.trashed: list[str] = []             # originals that went to the Trash
+        self._landed: Path | None = None         # where _copy_one put (or found) the last file
 
     # -- control
     def start(self) -> threading.Thread:
@@ -334,6 +339,7 @@ class Transfer:
                 verb = "Moving" if self.move else "Copying"
                 self.log(f"{verb} “{top.src.name}” → {top.dst.parent}")
                 failed_here = 0
+                placed_here: list[tuple[Path, Path]] = []
                 # A brand-new folder is built hidden and revealed whole (see the module doc).
                 building = top.is_dir and not os.path.lexists(top.dst)
                 root = top.dst.parent / f".{top.dst.name}{INCOMING_SUFFIX}" if building else top.dst
@@ -353,6 +359,7 @@ class Transfer:
                         self._make_dirs(dst.parent)
                         result = self._copy_one(c, dst, building=building)
                         st[result] += 1
+                        placed_here.append((c.src, self._landed or dst))
                         if result == "skipped":
                             self.log(f"   already there, identical: {c.dst.name}")
                     except InterruptedError:
@@ -384,14 +391,18 @@ class Transfer:
                         os.sync()
                         if final != top.dst:
                             self.log(f"   “{top.dst.name}” appeared meanwhile — this one is “{final.name}”")
+                        placed_here = [(s, final / d.relative_to(root)) for s, d in placed_here]
                 else:
                     os.sync()
+                if not building or not (failed_here or self.stop.is_set()):    # a hidden unfinished copy isn't placed yet
+                    self.placed.extend((str(s), str(d)) for s, d in placed_here)
                 if self.move and not self.stop.is_set():
                     if failed_here:
                         st["kept"] += 1
                         self.log(f"   kept the original “{top.src.name}” — {failed_here} file(s) failed")
                     elif self.trash(top.src):
                         st["trashed"] += 1
+                        self.trashed.append(str(top.src))
                         self.log(f"   original “{top.src.name}” moved to the Trash")
                     else:
                         st["kept"] += 1
@@ -413,6 +424,8 @@ class Transfer:
         st["spare_dirs"] = self.spare_dirs
         st["plain_dirs"] = self.plain_dirs if self.plan.on_exfat else 0      # only matters on the exFAT SSD
         st["spare_miss"] = self.spare_miss
+        st["placed"] = self.placed
+        st["trashed_paths"] = self.trashed
         self._tick("", "Done", force=True)
         self.finished(st)
 
@@ -501,6 +514,7 @@ class Transfer:
         place. `building`: `dst` is inside a hidden ".incoming" folder this tool is building, so a
         non-identical file already there is our own leftover and is replaced; in any other folder a
         different file with the name is kept and this one is saved as "name (1)"."""
+        self._landed = dst
         if os.path.lexists(dst):
             src_hash = hash_file(c.src)
             if building:
@@ -512,11 +526,13 @@ class Transfer:
                 i, cand = 0, dst
                 while os.path.lexists(cand):
                     if cand.is_file() and cand.stat().st_size == c.size and hash_file(cand) == src_hash:
+                        self._landed = cand
                         return "skipped"
                     i += 1
                     cand = dst.with_name(f"{stem} ({i}){ext}")
                 self.log(f"   a different “{dst.name}” is already there — saving this one as “{cand.name}”")
                 dst = cand
+                self._landed = cand
         self._journal(dst)
         try:
             self._write_verified(c, dst)

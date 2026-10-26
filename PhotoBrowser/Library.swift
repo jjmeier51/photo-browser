@@ -613,6 +613,15 @@ final class Library {
     /// User tags per file ("portrait", "beach", …), keyed by path — edited in the info panel below the
     /// caption, filtered on in FolderView across a folder and its subfolders. Bulk-stored like captions.
     var tags: [String: [String]] = Library.loadBulk("tags") ?? [:]
+    /// Shared with Safe Finder through the drive (see `SharedTags`): what the store and each drive's
+    /// shared tag file agreed on at the last sync, by the file's id.
+    @ObservationIgnored var tagSyncBases: [String: SharedTags.Base] = Library.loadBulk("tagSyncBase") ?? [:]
+    @ObservationIgnored var tagSyncTask: Task<Void, Never>?
+    @ObservationIgnored var tagSyncRunning = false
+    @ObservationIgnored var tagSyncAgain = false
+    @ObservationIgnored var tagEditGeneration = 0
+    /// How the last sync with the drive's shared tag file went (Drive Health shows it).
+    var tagSyncStatus: SharedTags.Status?
     /// Folder path → cover-image filename (stored under Application Support/folderCovers).
     var folderCovers: [String: String] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.folderCovers") as? [String: String]) ?? [:]
     /// Item file path → custom-thumbnail filename (stored under Application Support/itemThumbs).
@@ -924,6 +933,7 @@ final class Library {
         list.append(tag)
         tags[url.path] = list
         scheduleBulkSave(tags, "tags")
+        noteTagsEdited()
         labelsVersion += 1
     }
 
@@ -932,6 +942,7 @@ final class Library {
         list.removeAll { $0.caseInsensitiveCompare(tag) == .orderedSame }
         if list.isEmpty { tags.removeValue(forKey: url.path) } else { tags[url.path] = list }
         scheduleBulkSave(tags, "tags")
+        noteTagsEdited()
         labelsVersion += 1
     }
 
@@ -949,7 +960,7 @@ final class Library {
             tags[url.path] = list
             added += 1
         }
-        if added > 0 { scheduleBulkSave(tags, "tags"); labelsVersion += 1 }
+        if added > 0 { scheduleBulkSave(tags, "tags"); noteTagsEdited(); labelsVersion += 1 }
         return added
     }
 
@@ -965,7 +976,7 @@ final class Library {
             if list.isEmpty { tags.removeValue(forKey: url.path) } else { tags[url.path] = list }
             removed += 1
         }
-        if removed > 0 { scheduleBulkSave(tags, "tags"); labelsVersion += 1 }
+        if removed > 0 { scheduleBulkSave(tags, "tags"); noteTagsEdited(); labelsVersion += 1 }
         return removed
     }
 
@@ -3249,6 +3260,7 @@ final class Library {
     /// Snapshots every path-keyed collection (cheap — copy-on-write) and writes them
     /// on the persist queue. `saveBulk` and `UserDefaults` are both thread-safe.
     private func persistAllPathKeyed() {
+        noteTagsEdited()      // a move, prune or restore may have changed tags: the drive's shared copy follows
         // This writes the current value of every store, so older pending copies must not land after it.
         for name in ["favorites", "ai", "editedInApp", "aiGenerated", "cleanupReviewed", "notDuplicates",
                      "people", "captions", "tags", "photoOrigins", "igPostedBy"] {
@@ -4343,6 +4355,7 @@ final class Library {
         processPendingTikTok()            // file anything that finished while we were closed
         purgeExpiredTrash()               // drop trashed items past their 30-day window
         scheduleIndexBuild()
+        scheduleTagSync(after: 1)         // pick up tags added in Safe Finder while the drive was on the Mac
     }
 
     func restoreLastFolder() {
@@ -4378,6 +4391,7 @@ final class Library {
         processPendingTikTok()            // file anything that finished while we were closed
         purgeExpiredTrash()               // drop trashed items past their 30-day window
         scheduleIndexBuild()
+        scheduleTagSync(after: 1)         // pick up tags added in Safe Finder while the drive was on the Mac
     }
 
     /// Re-checks drive availability. Cheap when everything is fine, so it's safe to
@@ -4420,6 +4434,7 @@ final class Library {
         rekeyRootIfRemounted(to: fresh.path)
         processPendingTikTok()
         scheduleIndexBuild()
+        scheduleTagSync(after: 1)
         contentDidChange()
     }
 

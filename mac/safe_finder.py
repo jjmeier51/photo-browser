@@ -18,6 +18,12 @@ iOS-safe names; never overwrites; originals go to the Trash only after their cop
 and is confirmed first in a sheet that lists exactly what will happen. The Mac is kept awake while
 it runs, and "Eject" flushes and unmounts the SSD properly.
 
+Tags are the Photo Browser app's own (see shared_tags.py): select files — or folders, for everything
+inside them — and press ⌘T (or right-click ▸ Tags, or drop them on a tag in the sidebar). Tags on a
+drive are saved on the drive, where the iPhone app syncs with them; a tag added in the app shows up
+here. The sidebar's Tags list opens every file carrying a tag; tags go along when files are moved or
+copied.
+
 Run:  double-click "Safe Finder.command" next to this file, or
       mac/.venv/bin/python mac/safe_finder.py [--from FOLDER] [--to FOLDER]
       — or build it into /Applications with "sh mac/build_safe_finder_app.sh" (see mac/README.md).
@@ -37,6 +43,8 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
+import zlib
 from collections import OrderedDict
 from pathlib import Path
 
@@ -46,14 +54,15 @@ sys.path.insert(0, str(HERE))
 try:
     from PySide6.QtCore import (QDateTime, QDir, QFileInfo, QFileSystemWatcher, QLocale, QMimeData, QModelIndex,
                                 QObject, QPoint, QRect, QRectF, QRunnable, QSettings, QSize, QSortFilterProxyModel,
-                                Qt, QThreadPool, QTimer, QUrl, Signal)
+                                QStringListModel, Qt, QThreadPool, QTimer, QUrl, Signal)
     from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage,
                                QImageReader, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap,
                                QShortcut, QStandardItem, QStandardItemModel)
     from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
-                                   QFileIconProvider, QFileSystemModel, QFrame, QHBoxLayout, QHeaderView,
-                                   QInputDialog, QLabel, QLineEdit, QListView, QMainWindow, QMenu, QMessageBox,
-                                   QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy,
+                                   QCompleter, QFileIconProvider, QFileSystemModel, QFrame, QHBoxLayout,
+                                   QHeaderView, QInputDialog, QLabel, QLayout, QLineEdit, QListView, QMainWindow,
+                                   QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
+                                   QSizePolicy,
                                    QSlider, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
                                    QStyleOptionViewItem, QToolButton, QTreeView, QTreeWidget,
                                    QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -66,6 +75,7 @@ except ModuleNotFoundError:
 
 import airdrop_to_iphone as airdrop
 import safe_transfer as engine
+import shared_tags
 import spare_folders
 from safe_copy_to_ssd import human, safe_name
 
@@ -213,6 +223,16 @@ class Theme:
         QMenu::item {{ padding: 4px 18px; border-radius: 4px; }}
         QMenu::item:selected {{ background: {t.accent}; color: white; }}
         QMenu::separator {{ height: 1px; background: {t.border}; margin: 4px 6px; }}
+        QToolButton#TagChip {{ border: 1px solid {t.button_border}; border-radius: 11px; padding: 3px 10px 3px 7px;
+                               background: {t.button}; font-size: 12px; }}
+        QToolButton#TagChip:hover {{ background: {t.hover}; }}
+        QToolButton#TagChip[state="on"] {{ background: {t.accent}; border-color: {t.accent}; color: white; }}
+        QToolButton#TagChip[state="part"] {{ border: 1px solid {t.accent}; color: {t.accent}; }}
+        QLineEdit#TagField {{ background: {t.content}; border: 1px solid {t.button_border}; border-radius: 7px;
+                              padding: 5px 8px; font-size: 13px; }}
+        QLineEdit#TagField:focus {{ border-color: {t.accent}; }}
+        #TagHint {{ color: {t.secondary}; font-size: 11px; }}
+        QScrollArea#TagScroll, QWidget#TagBox {{ background: transparent; border: none; }}
         """
 
 
@@ -359,6 +379,16 @@ def glyph(name: str, color: str | None = None, size: int = 16) -> QIcon:
                         QPoint(int(s * 0.72), int(s * 0.86)), QPoint(int(s * 0.78), int(s * 0.26))])
         p.drawLine(QPoint(int(s * 0.42), int(s * 0.4)), QPoint(int(s * 0.44), int(s * 0.72)))
         p.drawLine(QPoint(int(s * 0.58), int(s * 0.4)), QPoint(int(s * 0.56), int(s * 0.72)))
+    elif name == "tag":                                    # a luggage tag, pointing left, with its hole
+        path = QPainterPath()
+        path.moveTo(s * 0.08, s * 0.5)
+        path.lineTo(s * 0.36, s * 0.2)
+        path.lineTo(s * 0.88, s * 0.2)
+        path.lineTo(s * 0.88, s * 0.8)
+        path.lineTo(s * 0.36, s * 0.8)
+        path.closeSubpath()
+        p.drawPath(path)
+        p.drawEllipse(QRectF(s * 0.33, s * 0.43, s * 0.14, s * 0.14))
     elif name == "arrow":
         p.setPen(QPen(c, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         p.drawLine(QPoint(int(s * 0.15), int(s * 0.5)), QPoint(int(s * 0.82), int(s * 0.5)))
@@ -456,6 +486,127 @@ def two_lines(fm: QFontMetrics, text: str, width: int) -> list[str]:
 def kind_of(path: str) -> str:
     ext = os.path.splitext(path)[1].lower()
     return "image" if ext in IMAGE_EXT else "video" if ext in VIDEO_EXT else "other"
+
+
+# ============================================================================ tags
+
+
+TAG_COLORS = ["#FF453A", "#FF9F0A", "#FFCC00", "#32D74B", "#0A84FF", "#BF5AF2", "#FF6482", "#64D2FF", "#AC8E68"]
+_TAG_DOTS: dict[str, QIcon] = {}
+
+
+def tag_color(name: str) -> str:
+    """A tag's colour — the same every time for the same tag (any case), like Finder's."""
+    return TAG_COLORS[zlib.crc32(shared_tags.fold(name).encode("utf-8")) % len(TAG_COLORS)]
+
+
+def tag_dot(name: str, size: int = 12) -> QIcon:
+    color = tag_color(name)
+    key = f"{color}/{size}"
+    if key not in _TAG_DOTS:
+        dpr = 3
+        pm = QPixmap(size * dpr, size * dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        pm.setDevicePixelRatio(dpr)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(color))
+        p.drawEllipse(QRectF(size * 0.12, size * 0.12, size * 0.76, size * 0.76))
+        p.end()
+        _TAG_DOTS[key] = QIcon(pm)
+    return _TAG_DOTS[key]
+
+
+class _TagEvents(QObject):
+    changed = Signal()              # a tag was added or removed somewhere: views repaint, the sidebar recounts
+
+
+_TAGS: shared_tags.TagStore | None = None
+_TAG_EVENTS: _TagEvents | None = None
+
+
+def tag_store() -> shared_tags.TagStore:
+    """The tags on this Mac and every connected drive (one store for the whole app)."""
+    global _TAGS
+    if _TAGS is None:
+        _TAGS = shared_tags.TagStore(is_drive=lambda p: is_external(Path(p)), volumes=external_volumes)
+    return _TAGS
+
+
+def tag_events() -> _TagEvents:
+    global _TAG_EVENTS
+    if _TAG_EVENTS is None:
+        _TAG_EVENTS = _TagEvents()
+    return _TAG_EVENTS
+
+
+def tags_changed() -> None:
+    tag_events().changed.emit()
+
+
+def has_tag(path: str, tag: str) -> bool:
+    f = shared_tags.fold(tag)
+    return any(shared_tags.fold(t) == f for t in tag_store().tags(path, fresh=False))
+
+
+def tag_counts(files: list[str]) -> dict[str, tuple[str, int]]:
+    """fold(tag) → (the tag as first written, how many of `files` carry it) — one pass over the files."""
+    out: dict[str, tuple[str, int]] = {}
+    for f in files:
+        for t in tag_store().tags(f, fresh=False):
+            k = shared_tags.fold(t)
+            name, n = out.get(k, (t, 0))
+            out[k] = (name, n + 1)
+    return out
+
+
+class _Expanded(QObject):
+    done = Signal(object, int)      # the files, how many folders they came from
+
+
+_EXPANDING: set[_Expanded] = set()
+
+
+def expand_files(paths: list[str], then) -> None:
+    """The files a selection tags: its files as they are, and for each folder everything inside it
+    (hidden items, app bundles and gallery sidecars left out). Folders are walked on a thread; `then(files,
+    folder_count)` is called on the UI thread either way."""
+    folders = [p for p in paths if os.path.isdir(p)]
+    files = [p for p in paths if p not in folders and shared_tags.taggable(p)]
+    if not folders:
+        then(files, 0)
+        return
+    sig = _Expanded()
+    _EXPANDING.add(sig)
+
+    def finish(out: list, n: int) -> None:
+        _EXPANDING.discard(sig)
+        then(out, n)
+
+    sig.done.connect(finish, Qt.ConnectionType.QueuedConnection)
+
+    def work() -> None:
+        out = list(files)
+        for folder in folders:
+            for dirpath, dirnames, filenames in os.walk(folder):
+                dirnames[:] = sorted(d for d in dirnames
+                                     if not d.startswith(".") and os.path.splitext(d)[1].lower() not in _BUNDLE_EXT)
+                out.extend(os.path.join(dirpath, n) for n in sorted(filenames, key=natural_key)
+                           if shared_tags.taggable(n))
+        sig.done.emit(out, len(folders))
+
+    threading.Thread(target=work, name="tag-expand", daemon=True).start()
+
+
+def describe_files(files: list[str], folders: int) -> str:
+    """“IMG_4810.JPG” · 12 files · 38 files in 2 folders."""
+    if len(files) == 1 and not folders:
+        return f"“{os.path.basename(files[0])}”"
+    text = f"{len(files):,} file{'s' if len(files) != 1 else ''}"
+    if folders:
+        text += f" in {folders} folder{'s' if folders != 1 else ''}"
+    return text
 
 
 # ============================================================================ thumbnails
@@ -726,10 +877,14 @@ class GridDelegate(QStyledItemDelegate):
         if not is_dir and kind_of(path) != "other" and THUMBS is not None:
             thumb = THUMBS.get(path, model.lastModified(index).toSecsSinceEpoch(), s)
         if thumb is not None:
-            self._draw_thumb(p, thumb, icon_rect, kind_of(path) == "video")
+            shown = self._draw_thumb(p, thumb, icon_rect, kind_of(path) == "video")
         else:
-            icon = model.fileIcon(index)
-            icon.paint(p, icon_rect.adjusted(2, 2, -2, -2))
+            shown = icon_rect.adjusted(2, 2, -2, -2)
+            model.fileIcon(index).paint(p, shown)
+        if not is_dir:
+            tags = tag_store().tags(path, fresh=False)
+            if tags:
+                self._draw_tags(p, tags, shown, option.font, kind_of(path) == "video" and thumb is not None)
         # name
         fm = QFontMetrics(option.font)
         width = r.width() - 2 * inset
@@ -748,7 +903,42 @@ class GridDelegate(QStyledItemDelegate):
         p.restore()
 
     @staticmethod
-    def _draw_thumb(p: QPainter, pm: QPixmap, rect: QRect, video: bool) -> None:
+    def _draw_tags(p: QPainter, tags: list[str], rect: QRect, font: QFont, video: bool) -> None:
+        """The file's tags on its tile, bottom left: a dark pill with a coloured dot per tag (up to three,
+        overlapping like Finder's) and, when the tile is big enough, the first tag's name and "+N"."""
+        f = QFont(font)
+        f.setPointSizeF(max(7.0, f.pointSizeF() - 2.5))
+        f.setWeight(QFont.Weight.DemiBold)
+        fm = QFontMetrics(f)
+        h = fm.height() + 4
+        d = max(6, h - 8)
+        dots = tags[:3]
+        step = max(3, int(d * 0.6))
+        dots_w = d + (len(dots) - 1) * step
+        avail = rect.width() - 8 - (26 if video else 0) - dots_w - 15
+        text = tags[0] + (f" +{len(tags) - 1}" if len(tags) > 1 else "")
+        label = fm.elidedText(text, Qt.TextElideMode.ElideRight, avail) if rect.width() >= 64 and avail > 24 else ""
+        if label == "…":
+            label = ""
+        w = 6 + dots_w + (5 + fm.horizontalAdvance(label) if label else 0) + 6
+        x0, y0 = rect.x() + 4, rect.bottom() - h - 3
+        p.save()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 170))
+        p.drawRoundedRect(QRectF(x0, y0, w, h), h / 2, h / 2)
+        for i in reversed(range(len(dots))):
+            p.setPen(QPen(QColor(0, 0, 0, 170), 1))
+            p.setBrush(QColor(tag_color(dots[i])))
+            p.drawEllipse(QRectF(x0 + 6 + i * step, y0 + (h - d) / 2, d, d))
+        if label:
+            p.setFont(f)
+            p.setPen(QColor("white"))
+            p.drawText(QRectF(x0 + 6 + dots_w + 5, y0, fm.horizontalAdvance(label) + 2, h),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
+        p.restore()
+
+    @staticmethod
+    def _draw_thumb(p: QPainter, pm: QPixmap, rect: QRect, video: bool) -> QRect:
         size = pm.size().scaled(rect.size() - QSize(6, 6), Qt.AspectRatioMode.KeepAspectRatio)
         target = QRect(rect.x() + (rect.width() - size.width()) // 2, rect.y() + (rect.height() - size.height()) // 2,
                        size.width(), size.height())
@@ -777,6 +967,7 @@ class GridDelegate(QStyledItemDelegate):
             tri.closeSubpath()
             p.setBrush(QColor("white"))
             p.drawPath(tri)
+        return target
 
 
 class ListDelegate(QStyledItemDelegate):
@@ -792,7 +983,63 @@ class ListDelegate(QStyledItemDelegate):
             p.drawRect(option.rect)
             p.restore()
             option.palette.setColor(QPalette.ColorRole.Text, QColor("white"))
-        super().paint(p, option, index)
+        tags = []
+        if index.column() == 0 and not self.pane.model.isDir(index):
+            tags = tag_store().tags(self.pane.model.filePath(index), fresh=False)
+        if not tags:
+            super().paint(p, option, index)
+            return
+        self._paint_with_tags(p, option, index, tags)
+
+    def _paint_with_tags(self, p: QPainter, option: QStyleOptionViewItem, index: QModelIndex, tags: list[str]) -> None:
+        """The name column with the file's tags as small chips at its right end (as many as fit in half
+        the column, then "+N"); the name is elided before them."""
+        f = QFont(option.font)
+        f.setPointSizeF(max(7.0, f.pointSizeF() - 1.5))
+        fm = QFontMetrics(f)
+        room = option.rect.width() // 2
+        chips: list[tuple[str, int, str | None]] = []
+        total = 0
+        for i, t in enumerate(tags):
+            w = fm.horizontalAdvance(t) + 22
+            if total + w > room and chips:
+                more = f"+{len(tags) - i}"
+                chips.append((more, fm.horizontalAdvance(more) + 12, None))
+                total += chips[-1][1] + 4
+                break
+            chips.append((t, w, t))
+            total += w + 4
+        full = QStyleOptionViewItem(option)
+        self.initStyleOption(full, index)
+        full.text = ""
+        full.icon = QIcon()
+        style = option.widget.style() if option.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, full, p, option.widget)   # the row behind the chips
+        name = QStyleOptionViewItem(option)
+        name.rect = option.rect.adjusted(0, 0, -(total + 6), 0)
+        super().paint(p, name, index)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        h = fm.height() + 4
+        x = option.rect.right() - total - 2
+        y = option.rect.center().y() - h / 2 + 1
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setFont(f)
+        for text, w, tag in chips:
+            r = QRectF(x, y, w, h)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255, 50) if selected else qc(THEME.select_bg))
+            p.drawRoundedRect(r, h / 2, h / 2)
+            tx = x + 6
+            if tag is not None:
+                d = h - 9
+                p.setBrush(QColor(tag_color(tag)))
+                p.drawEllipse(QRectF(x + 6, y + (h - d) / 2, d, d))
+                tx = x + 6 + d + 4
+            p.setPen(QColor("white") if selected else QColor(THEME.text))
+            p.drawText(QRectF(tx, y, w - (tx - x), h), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+            x += w + 4
+        p.restore()
 
 
 class DropMixin:
@@ -892,6 +1139,7 @@ class ListView(DropMixin, QTreeView):
 VIDEOS = "safe-finder://videos"                 # the "All Videos" collection
 SEARCH = "safe-finder://search/"                # + a number: one search's results (see Pane.searches)
 EMPTY = "safe-finder://empty"                   # the "Empty Folders" collection (see empty_roots)
+TAG = "safe-finder://tag/"                      # + a tag: every file carrying it (see TagScanner)
 _R_PATH, _R_MTIME, _R_SIZE, _R_ISDIR = 258, 259, 260, 261    # roles on a results row (256/257: the sidebar's)
 KIND_EXT = {
     "image": IMAGE_EXT, "video": VIDEO_EXT, "raw": RAW_EXT, "pdf": {".pdf"},
@@ -1429,6 +1677,46 @@ class EmptyFolderScanner:
         return total, empties
 
 
+class TagScanner:
+    """The files carrying one tag — on this Mac and the connected drives — each checked to still be
+    there (a file moved or deleted outside Safe Finder keeps its entry until it's tagged again). The same
+    signals as FileScanner, so a pane shows them like a search."""
+
+    def __init__(self, tag: str) -> None:
+        self.tag = tag
+        self.signals = _ScanSignals()
+        self._stop = threading.Event()
+
+    def start(self) -> None:
+        paths = tag_store().files_with(self.tag)            # read here, on the UI thread, with the tables
+        threading.Thread(target=self._run, args=(paths,), name="tag-scan", daemon=True).start()
+
+    def cancel(self) -> None:
+        self._stop.set()
+
+    def _run(self, paths: list[str]) -> None:
+        batch: list[tuple[str, int, float, bool]] = []
+        for path in paths:
+            if self._stop.is_set():
+                break
+            try:
+                st = os.stat(path)
+            except OSError:
+                try:                                         # the drive may spell the name decomposed
+                    path = unicodedata.normalize("NFD", path)
+                    st = os.stat(path)
+                except OSError:
+                    continue
+            is_dir = stat.S_ISDIR(st.st_mode)
+            batch.append((path, 0 if is_dir else st.st_size, st.st_mtime, is_dir))
+            if len(batch) >= 200:
+                self.signals.found.emit(batch)
+                batch = []
+        if batch and not self._stop.is_set():
+            self.signals.found.emit(batch)
+        self.signals.done.emit(not self._stop.is_set())
+
+
 class ResultsModel(QStandardItemModel):
     """A search's results (or All Videos): a row per file the scanner found, in QFileSystemModel's
     four columns (Name, Size, Kind, Date Modified) and answering its `filePath` / `isDir` /
@@ -1536,7 +1824,11 @@ class ResultsModel(QStandardItemModel):
 
     def remove_missing(self) -> int:
         """Drop the rows whose file is gone (moved to the SSD, deleted); how many."""
-        gone = [r for r in range(self.rowCount()) if not os.path.lexists(self.item(r).data(_R_PATH))]
+        return self.remove_where(lambda path: not os.path.lexists(path))
+
+    def remove_where(self, gone_if) -> int:
+        """Drop the rows whose path `gone_if` says no longer belong; how many."""
+        gone = [r for r in range(self.rowCount()) if gone_if(self.item(r).data(_R_PATH))]
         for r in reversed(gone):
             self._paths.discard(self.item(r).data(_R_PATH))
             self.removeRow(r)
@@ -1737,7 +2029,7 @@ class Pane(QWidget):
         self.model.set_source(self.fs)
         self.model.show_sizes = settings.value(f"{role}/sizes", "true") == "true"
         self.size_filter_key = ""
-        self.scanner: FileScanner | EmptyFolderScanner | None = None
+        self.scanner: FileScanner | EmptyFolderScanner | TagScanner | None = None
         # Folder sizes arrive from the worker thread; the listing asks for its folders' as it loads.
         sizer().ready.connect(self._size_ready, Qt.ConnectionType.QueuedConnection)
         self.fs.directoryLoaded.connect(lambda _p: (self._request_sizes(), self._prefetch_thumbs()))
@@ -1783,6 +2075,9 @@ class Pane(QWidget):
         h.addWidget(self.sort_btn)
         self.new_folder_btn = self._tool("plus", "New Folder (⇧⌘N)", self.new_folder, "Nav")
         h.addWidget(self.new_folder_btn)
+        self.tags_btn = self._tool("tag", "Tags (⌘T) — for the selected files, or everything inside the selected "
+                                   "folders. They show up in Photo Browser on the iPhone.", self.edit_tags, "Nav")
+        h.addWidget(self.tags_btn)
         h.addSpacing(6)
         self.grid_btn = self._tool("grid", "as Icons (⌘1)", lambda: self.set_mode("grid"), "Seg")
         self.list_btn = self._tool("list", "as List (⌘2)", lambda: self.set_mode("list"), "Seg")
@@ -2023,7 +2318,8 @@ class Pane(QWidget):
             self._status_soon.start()
 
     def restyle(self) -> None:
-        for b in (self.back_btn, self.fwd_btn, self.sort_btn, self.new_folder_btn, self.grid_btn, self.list_btn):
+        for b in (self.back_btn, self.fwd_btn, self.sort_btn, self.new_folder_btn, self.tags_btn, self.grid_btn,
+                  self.list_btn):
             b.setIcon(glyph(b.property("glyph"), THEME.secondary if b.objectName() == "Nav" else THEME.text, 16))
         self.filter_btn.setIcon(glyph("funnel", THEME.accent if self.size_filter_key else THEME.secondary, 16))
         self._slider_icons()
@@ -2042,7 +2338,7 @@ class Pane(QWidget):
                            ("Ctrl+Down", self.open_selected), ("Return", self.open_selected),
                            ("Space", self.quick_look), ("Ctrl+1", lambda: self.set_mode("grid")),
                            ("Ctrl+2", lambda: self.set_mode("list")), ("Ctrl+Shift+N", self.new_folder),
-                           ("Ctrl+Backspace", self.delete_selection)):
+                           ("Ctrl+Backspace", self.delete_selection), ("Ctrl+T", self.edit_tags)):
             sc = QShortcut(QKeySequence(keys), self)
             sc.setContext(ctx)
             sc.activated.connect(slot)
@@ -2075,7 +2371,7 @@ class Pane(QWidget):
 
     @property
     def is_virtual(self) -> bool:
-        """A collection (All Videos, search results) rather than a folder."""
+        """A collection (All Videos, search results, a tag's files) rather than a folder."""
         return self.location.startswith("safe-finder://")
 
     @property
@@ -2159,7 +2455,7 @@ class Pane(QWidget):
 
     # -- navigation
     def go(self, path: str, record: bool = True) -> None:
-        if path in (VIDEOS, EMPTY):
+        if path in (VIDEOS, EMPTY) or path.startswith(TAG):
             self._show_results(path, record)
             return
         if path.startswith(SEARCH):
@@ -2267,6 +2563,12 @@ class Pane(QWidget):
                                   "Folders in Documents, Pictures, Movies and Downloads with nothing in them (0 KB) — "
                                   "select some and press ⌘⌫ to move them to the Trash")
             self.scopebar.hide()
+        elif loc.startswith(TAG):
+            tag = loc[len(TAG):]
+            self.title.setText(f"#{tag}")
+            self.title.setToolTip(f"Every file tagged “{tag}” on this Mac and the connected drives — ⌘T changes "
+                                  "the selected files' tags")
+            self.scopebar.hide()
         else:
             run = self.searches[loc]
             self.folder = run.folder                           # where it was started — and returns to
@@ -2295,6 +2597,8 @@ class Pane(QWidget):
             scanner = FileScanner(mac_roots(), Query(kind="video"), folders=False)
         elif self.location == EMPTY:
             scanner = EmptyFolderScanner(empty_roots())
+        elif self.location.startswith(TAG):
+            scanner = TagScanner(self.location[len(TAG):])
         else:
             run = self.searches[self.location]
             scanner = FileScanner(run.roots, run.query, folders=run.query.wants_folders(), spotlight=run.spotlight)
@@ -2361,7 +2665,13 @@ class Pane(QWidget):
         self.run_search(if_active=True)
 
     def run_search(self, if_active: bool = False) -> None:
-        """Search for what the field says, in the chosen scope, and show the results here."""
+        """Search for what the field says, in the chosen scope, and show the results here. "tag:beach" (or
+        "#beach") opens the files tagged beach instead."""
+        text = self.search.text().strip()
+        m = re.match(r"^(?:tag:\s*|#)(.+)$", text, re.IGNORECASE)
+        if m and not if_active and shared_tags.normalized(m.group(1)):
+            self.go(TAG + shared_tags.normalized(m.group(1)))
+            return
         query = Query(self.search.text(), self.kind_box.currentData() or "")
         if query.empty():
             if self.is_search:
@@ -2395,6 +2705,8 @@ class Pane(QWidget):
             b = QToolButton(objectName="Crumb")
             text, icon = {VIDEOS: ("All Videos", "film"), EMPTY: ("Empty Folders", "trash")}.get(
                 self.location, ("Search results", "search"))
+            if self.location.startswith(TAG):
+                text, icon = f"Tag “{self.location[len(TAG):]}”", "tag"
             b.setText(text)
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             b.setIcon(glyph(icon, THEME.accent, 14))
@@ -2433,16 +2745,23 @@ class Pane(QWidget):
         sel = len(selected)
         chosen = self._selection_bytes(selected) if sel else 0
         size_note = f" · {human(chosen)}" if chosen else ""
+        tag_note = ""
+        if sel == 1 and not os.path.isdir(selected[0]):
+            tags = tag_store().tags(selected[0], fresh=False)
+            if tags:
+                tag_note = "  ·  " + ", ".join(f"#{t}" for t in tags[:4]) + (f" +{len(tags) - 4}" if len(tags) > 4 else "")
         if self.is_virtual:
             n = self.results.rowCount()
             shown = self.model.rowCount()
             what = {VIDEOS: "video", EMPTY: "empty folder"}.get(self.location, "result")
             text = f"{sel} of {n} selected{size_note}" if sel else f"{n} {what}{'s' if n != 1 else ''}"
+            if self.location.startswith(TAG) and not sel:
+                text = f"{n} file{'s' if n != 1 else ''} tagged “{self.location[len(TAG):]}”"
             if shown != n:
                 text += f" ({shown} shown)"
             if self.scanner is not None:
                 text += " so far — still looking…"
-            self.status.setText(text)
+            self.status.setText(text + tag_note)
             self.fs_chip.setVisible(False)
             return
         root = self.fs.index(self.location)
@@ -2452,7 +2771,7 @@ class Pane(QWidget):
         text = f"{sel} of {n} selected{size_note}" if sel else f"{n} item{'s' if n != 1 else ''}"
         if self.size_filter_key and shown != n:
             text += f" ({shown} shown — {dict(SIZE_FILTERS)[self.size_filter_key].lower()})"
-        self.status.setText(f"{text}, {human(free)} available")
+        self.status.setText(f"{text}, {human(free)} available{tag_note}")
         fs = MOUNTS.get(str(engine.volume_root(Path(self.location))), "")
         self.fs_chip.setText(FS_NAMES.get(fs, fs))
         self.fs_chip.setVisible(bool(fs))
@@ -2556,6 +2875,11 @@ class Pane(QWidget):
             return
         failed = [p for p in paths if not MainWindow.trash_item(Path(p))]
         moved = len(paths) - len(failed)
+        try:
+            if tag_store().forget([p for p in paths if p not in failed]):
+                tags_changed()
+        except OSError:
+            pass                                          # the tags of a trashed file are only orphaned
         sizer().clear()                                   # sizes up the tree changed
         self.view().clearSelection()
         self.refresh_results()
@@ -2623,6 +2947,7 @@ class Pane(QWidget):
             if isinstance(win, MainWindow) and self is win.src:
                 menu.addAction(win.copy_btn.text(), lambda: win.transfer_selection(False))
                 menu.addAction(win.move_btn.text(), lambda: win.transfer_selection(True))
+            self._tags_menu(menu, paths)
             menu.addAction("Move to Trash", self.delete_selection).setShortcut(QKeySequence("Ctrl+Backspace"))
             menu.addSeparator()
         if self.location == VIDEOS:
@@ -2631,9 +2956,324 @@ class Pane(QWidget):
             menu.addAction("Look for Empty Folders Again", lambda: self.go(EMPTY))
         elif self.is_search:
             menu.addAction("Search Again", lambda: self.go(self.location))
+        elif self.location.startswith(TAG):
+            menu.addAction("Look Again", lambda: self.go(self.location))
         else:
             menu.addAction("New Folder", self.new_folder)
         menu.exec(view.viewport().mapToGlobal(pos))
+
+    # -- tags (shared with the Photo Browser app — see shared_tags.py)
+    def _tags_menu(self, menu: QMenu, paths: list[str]) -> None:
+        """Right-click ▸ Tags: "Add Tags…", then every tag — ticked when every selected file has it; choosing
+        one puts it on all of them, or takes it off when they all have it. For a folder, the files inside."""
+        sub = menu.addMenu(glyph("tag", THEME.secondary, 16), "Tags")
+        sub.addAction("Add Tags…", self.edit_tags).setShortcut(QKeySequence("Ctrl+T"))
+        files = [p for p in paths if not os.path.isdir(p)]
+        folders = len(paths) - len(files)
+        have = tag_counts(files)
+        names = tag_store().names()
+        if names:
+            sub.addSeparator()
+            for name in names[:80]:
+                n = have.get(shared_tags.fold(name), (name, 0))[1]
+                label = name + (f"  ({n} of {len(files)})" if 0 < n < len(files) else "")
+                act = sub.addAction(tag_dot(name), label)
+                act.setCheckable(True)
+                act.setChecked(bool(files) and not folders and n == len(files))
+                act.triggered.connect(lambda _=False, name=name: self.toggle_tag(paths, name))
+            if len(names) > 80:
+                sub.addAction(f"… {len(names) - 80} more — Add Tags…", self.edit_tags)
+        if have or folders:
+            sub.addSeparator()
+            sub.addAction("Remove All Tags…", lambda: self.clear_tags(paths))
+
+    def edit_tags(self) -> None:
+        """⌘T: the Tags window for the selection (folders: everything inside them)."""
+        paths = self.selected_paths()
+        if not paths:
+            self._airdrop_noted("Select files or folders to tag, then press ⌘T.")
+            return
+        folders = sum(1 for p in paths if os.path.isdir(p))
+        if folders:
+            self._airdrop_noted(f"Finding the files in {folders} folder{'s' if folders != 1 else ''}…")
+        expand_files(paths, self._open_tags)
+
+    def _open_tags(self, files: list[str], folders: int) -> None:
+        if not files:
+            QMessageBox.information(self.window(), "Tags", "There are no files to tag in what's selected.")
+            return
+        TagDialog(self.window(), files, describe_files(files, folders)).open()
+        self.update_status()
+
+    def toggle_tag(self, paths: list[str], name: str) -> None:
+        """Puts `name` on every file (and every file inside the folders), or takes it off them all when
+        they all have it already."""
+        def apply(files: list[str], _folders: int) -> None:
+            if not files:
+                return
+            try:
+                if all(has_tag(f, name) for f in files):
+                    n = tag_store().remove(files, [name])
+                    note = f"Removed “{name}” from {n:,} file{'s' if n != 1 else ''}."
+                else:
+                    n = tag_store().add(files, [name])
+                    note = f"Tagged {n:,} file{'s' if n != 1 else ''} “{name}”."
+            except OSError as e:
+                QMessageBox.warning(self.window(), "Tags", f"Couldn't save the tags: {e}")
+                return
+            tags_changed()
+            self._airdrop_noted(note)
+        expand_files(paths, apply)
+
+    def clear_tags(self, paths: list[str]) -> None:
+        def apply(files: list[str], _folders: int) -> None:
+            tagged = [f for f in files if tag_store().tags(f, fresh=False)]
+            if not tagged:
+                self._airdrop_noted("None of these files has tags.")
+                return
+            if len(tagged) > 1 and QMessageBox.question(
+                    self.window(), "Remove All Tags",
+                    f"Take every tag off these {len(tagged):,} files?") != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                n = tag_store().clear(tagged)
+            except OSError as e:
+                QMessageBox.warning(self.window(), "Tags", f"Couldn't save the tags: {e}")
+                return
+            tags_changed()
+            self._airdrop_noted(f"Removed the tags from {n:,} file{'s' if n != 1 else ''}.")
+        expand_files(paths, apply)
+
+    def on_tags_changed(self) -> None:
+        """Tags changed (here, in the other pane, the sidebar or a transfer): repaint; a tag's collection
+        drops the files that no longer carry it."""
+        self.grid.viewport().update()
+        self.list.viewport().update()
+        if self.location.startswith(TAG):
+            tag = self.location[len(TAG):]
+            if self.results.remove_where(lambda path: not has_tag(path, tag)):
+                self.model.forget_keys()
+        self.update_status()
+
+
+# ============================================================================ tags window
+
+
+class FlowLayout(QLayout):
+    """Lays its widgets out left to right, wrapping onto new lines — the tag chips."""
+
+    def __init__(self, parent: QWidget | None = None, spacing: int = 6) -> None:
+        super().__init__(parent)
+        self._items = []
+        self._gap = spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item) -> None:  # noqa: N802
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, i: int):  # noqa: N802
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i: int):  # noqa: N802
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._place(QRect(0, 0, width, 0), move=False)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._place(rect, move=True)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802
+        size = QSize()
+        for it in self._items:
+            size = size.expandedTo(it.minimumSize())
+        return size
+
+    def _place(self, rect: QRect, move: bool) -> int:
+        x, y, line = rect.x(), rect.y(), 0
+        for it in self._items:
+            hint = it.sizeHint()
+            if x + hint.width() > rect.right() + 1 and line > 0:
+                x, y, line = rect.x(), y + line + self._gap, 0
+            if move:
+                it.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self._gap
+            line = max(line, hint.height())
+        return y + line - rect.y()
+
+
+class _TagCompleter(QCompleter):
+    """Suggests a known tag for the part after the last comma, and keeps what's before it."""
+
+    def splitPath(self, path: str) -> list[str]:  # noqa: N802
+        return [path.split(",")[-1].strip()]
+
+    def pathFromIndex(self, index) -> str:  # noqa: N802
+        before = self.widget().text().rsplit(",", 1)
+        return (before[0] + ", " if len(before) == 2 else "") + super().pathFromIndex(index)
+
+
+class TagDialog(QDialog):
+    """The tags of a set of files (⌘T). Type new ones — several at once with commas, suggestions as you
+    type — and press Return; or click any tag below to put it on every file, and click it again to take
+    it off (a tag only some of the files have shows "3/12" and goes on all of them). Every change is saved
+    at once: on a drive to its tag file, which Photo Browser on the iPhone syncs with."""
+
+    def __init__(self, parent: QWidget, files: list[str], what: str) -> None:
+        super().__init__(parent)
+        self.files = files
+        self._have: dict[str, tuple[str, int]] | None = None
+        self.setWindowTitle("Tags")
+        self.setMinimumWidth(480)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 16)
+        lay.setSpacing(10)
+        top = QHBoxLayout()
+        icon = QLabel()
+        icon.setPixmap(glyph("tag", THEME.accent, 22).pixmap(22, 22))
+        top.addWidget(icon)
+        title = QLabel(f"Tags for {what}", objectName="SheetTitle")
+        title.setWordWrap(True)
+        top.addWidget(title, 1)
+        lay.addLayout(top)
+        self.field = QLineEdit(objectName="TagField")
+        self.field.setPlaceholderText("Add tags — separate several with commas, then press Return")
+        self.completer = _TagCompleter(tag_store().names(), self)
+        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.field.setCompleter(self.completer)
+        self.field.returnPressed.connect(self._return)
+        self.field.textChanged.connect(lambda _t: self._fill())
+        lay.addWidget(self.field)
+        self.hint = QLabel(objectName="TagHint")
+        lay.addWidget(self.hint)
+        self.box = QWidget(objectName="TagBox")
+        self.flow = FlowLayout(self.box, 6)
+        scroll = QScrollArea(objectName="TagScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(self.box)
+        scroll.setMinimumHeight(110)
+        scroll.setMaximumHeight(260)
+        lay.addWidget(scroll, 1)
+        where = QLabel(self._where(), objectName="SheetSub")
+        where.setWordWrap(True)
+        lay.addWidget(where)
+        buttons = QHBoxLayout()
+        self.clear_btn = QPushButton("Remove All Tags", objectName="Danger")
+        self.clear_btn.setAutoDefault(False)              # Return belongs to the field (add, or Done when empty)
+        self.clear_btn.clicked.connect(self._clear)
+        buttons.addWidget(self.clear_btn)
+        buttons.addStretch(1)
+        done = QPushButton("Done", objectName="Primary")
+        done.setAutoDefault(False)
+        done.clicked.connect(self.accept)
+        buttons.addWidget(done)
+        lay.addLayout(buttons)
+        self._fill()
+        self.field.setFocus()
+
+    def _where(self) -> str:
+        folders = {os.path.dirname(f) for f in self.files}
+        drives = sorted({volume_name(Path(d)) for d in folders if is_external(Path(d))})
+        if drives:
+            return (f"Saved on “{'”, “'.join(drives)}” — Photo Browser on the iPhone picks them up the next time "
+                    "it opens the drive, and tags added there show up here.")
+        return ("These files are on this Mac: their tags go along when Safe Finder moves or copies them onto the "
+                "drive, and from there to the iPhone.")
+
+    def _fill(self) -> None:
+        while self.flow.count():
+            item = self.flow.takeAt(0)
+            if item.widget() is not None:
+                item.widget().hide()                       # gone now, not when the event loop gets to it
+                item.widget().deleteLater()
+        total = len(self.files)
+        if self._have is None:                             # counted once per change, not per keystroke
+            self._have = tag_counts(self.files)
+        have = self._have
+        typed = shared_tags.fold(self.field.text().split(",")[-1].strip())
+        on = sorted(have.values(), key=lambda x: (-x[1], x[0].casefold()))
+        others = [n for n in tag_store().names() if shared_tags.fold(n) not in have]
+        shown = 0
+        for name, n in [(name, n) for name, n in on] + [(name, 0) for name in others]:
+            if typed and typed not in shared_tags.fold(name):
+                continue
+            b = QToolButton(objectName="TagChip")
+            b.setIcon(tag_dot(name))
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            if n == total:
+                b.setText(f"{name}  ✕")
+                b.setProperty("state", "on")
+                b.setToolTip(f"Remove “{name}”" + ("" if total == 1 else f" from all {total:,} files"))
+            elif n:
+                b.setText(f"{name}  {n}/{total}")
+                b.setProperty("state", "part")
+                b.setToolTip(f"{n:,} of the {total:,} files have “{name}” — click to put it on all of them")
+            else:
+                b.setText(name)
+                b.setProperty("state", "off")
+                b.setToolTip(f"Add “{name}”" + ("" if total == 1 else f" to all {total:,} files"))
+            b.clicked.connect(lambda _=False, name=name, all_on=(n == total): self._toggle(name, all_on))
+            self.flow.addWidget(b)
+            shown += 1
+        if not shown:
+            empty = QLabel("No tags yet — type one above and press Return." if not typed else
+                           "No tag like that yet — press Return to add it.", objectName="TagHint")
+            self.flow.addWidget(empty)
+        self.hint.setText("Click a tag to put it on every file — ✕ takes it off:" if have else
+                          "Click a tag to add it:" if others else "")
+        self.hint.setVisible(bool(have or others))
+        self.clear_btn.setEnabled(bool(have))
+        self.box.updateGeometry()
+
+    def _apply(self, change) -> None:
+        try:
+            change()
+        except OSError as e:
+            QMessageBox.warning(self, "Tags", f"Couldn't save the tags: {e}")
+            return
+        tags_changed()
+        self._have = None
+        model = self.completer.model()
+        if isinstance(model, QStringListModel):
+            model.setStringList(tag_store().names())
+        self._fill()
+
+    def _toggle(self, name: str, all_on: bool) -> None:
+        if all_on:
+            self._apply(lambda: tag_store().remove(self.files, [name]))
+        else:
+            self._apply(lambda: tag_store().add(self.files, [name]))
+
+    def _return(self) -> None:
+        if self.completer.popup().isVisible():
+            return                                         # Return picked a suggestion — press it again to add
+        tags = shared_tags.split_tags(self.field.text())
+        if not tags:
+            self.accept()                                  # an empty field: Return is Done
+            return
+        self.field.clear()
+        self._apply(lambda: tag_store().add(self.files, tags))
+
+    def _clear(self) -> None:
+        if len(self.files) > 1 and QMessageBox.question(
+                self, "Remove All Tags", f"Take every tag off these {len(self.files):,} files?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._apply(lambda: tag_store().clear(self.files))
 
 
 # ============================================================================ sidebar
@@ -2663,7 +3303,12 @@ class SidebarDelegate(QStyledItemDelegate):
             p.restore()
             return
         row = QRectF(r).adjusted(0, 1, 0, -1)
-        if option.state & QStyle.StateFlag.State_Selected:
+        tree = self.parent()
+        if isinstance(tree, SidebarTree) and tree.drop_path and index.data(PATH_ROLE) == tree.drop_path:
+            p.setPen(QPen(QColor(THEME.accent), 1.5))           # a tag files are being dragged onto
+            p.setBrush(QColor(THEME.accent).lighter(170) if not THEME.dark else QColor(10, 132, 255, 60))
+            p.drawRoundedRect(row.adjusted(1, 0, -1, 0), 6, 6)
+        elif option.state & QStyle.StateFlag.State_Selected:
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(qc(THEME.select_bg))
             p.drawRoundedRect(row, 6, 6)
@@ -2675,17 +3320,28 @@ class SidebarDelegate(QStyledItemDelegate):
         if isinstance(icon, QIcon):
             icon.paint(p, QRect(r.x() + 8, r.center().y() - 9, 18, 18))
         eject = bool(index.data(EJECT_ROLE))
-        width = r.width() - 36 - (28 if eject else 6)
-        p.setPen(QColor(THEME.text))
+        count = index.data(COUNT_ROLE)
+        count_text = f"{count:,}" if isinstance(count, int) else ""
+        count_w = QFontMetrics(option.font).horizontalAdvance(count_text) + 10 if count_text else 0
+        width = r.width() - 36 - (28 if eject else 6) - count_w
+        p.setPen(QColor(THEME.text) if index.flags() & Qt.ItemFlag.ItemIsSelectable else QColor(THEME.secondary))
         text = QFontMetrics(option.font).elidedText(index.data(Qt.ItemDataRole.DisplayRole), Qt.TextElideMode.ElideRight, width)
         p.drawText(QRect(r.x() + 34, r.y(), width, r.height()), Qt.AlignmentFlag.AlignVCenter, text)
+        if count_text:
+            p.setPen(QColor(THEME.secondary))
+            p.drawText(QRect(r.right() - count_w - 4, r.y(), count_w, r.height()),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, count_text)
         if eject:
             glyph("eject", THEME.secondary, 14).paint(p, QRect(r.right() - 24, r.center().y() - 7, 14, 14))
         p.restore()
 
 
 class SidebarTree(QTreeWidget):
+    """The sidebar's rows. Files dragged onto a tag (from either pane or the Finder) get that tag."""
+
     eject = Signal(str)
+    tag_drop = Signal(str, list)          # tag, the paths dropped on it
+    drop_path: str | None = None
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         idx = self.indexAt(event.position().toPoint())
@@ -2695,14 +3351,58 @@ class SidebarTree(QTreeWidget):
             return
         super().mousePressEvent(event)
 
+    def _tag_at(self, event) -> str | None:
+        idx = self.indexAt(event.position().toPoint())
+        path = idx.data(PATH_ROLE) if idx.isValid() else None
+        return path if isinstance(path, str) and path.startswith(TAG) else None
+
+    def _set_drop(self, path: str | None) -> None:
+        if path != self.drop_path:
+            self.drop_path = path
+            self.viewport().update()
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        tag = self._tag_at(event) if event.mimeData().hasUrls() else None
+        self._set_drop(tag)
+        if tag:
+            event.setDropAction(Qt.DropAction.CopyAction)     # never let the source "move" anything
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._set_drop(None)
+        event.accept()
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        tag = self._tag_at(event)
+        self._set_drop(None)
+        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        if not tag or not paths:
+            event.ignore()
+            return
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+        QTimer.singleShot(0, lambda: self.tag_drop.emit(tag[len(TAG):], paths))
+
 
 REVEAL_ROLE = 258                         # a sidebar row that reveals its folder (selects it in its parent)
+COUNT_ROLE = 259                          # a number shown at the row's right end (a tag's files)
 
 
 class Sidebar(QWidget):
     navigate = Signal(str)
     eject = Signal(str)
     reveal = Signal(str)
+    tag_drop = Signal(str, list)          # tag, paths dropped on it
+    tag_renamed = Signal(str, str)        # old, new
 
     def __init__(self) -> None:
         super().__init__(objectName="Sidebar")
@@ -2722,6 +3422,13 @@ class Sidebar(QWidget):
         self.tree.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover)
         self.tree.itemClicked.connect(self._clicked)
         self.tree.eject.connect(self.eject.emit)
+        self.tree.setAcceptDrops(True)
+        self.tree.viewport().setAcceptDrops(True)
+        self.tree.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+        self.tree.tag_drop.connect(self.tag_drop.emit)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._context_menu)
+        self._tags_section: QTreeWidgetItem | None = None
         lay.addWidget(self.tree)
         self.provider = QFileIconProvider()
         self.watcher = QFileSystemWatcher(self)
@@ -2784,6 +3491,7 @@ class Sidebar(QWidget):
     def rebuild(self) -> None:
         global MOUNTS
         MOUNTS = mounts()
+        tag_store().forget_volumes()                   # a drive came or went: its tags with it
         selected = [i.data(0, PATH_ROLE) for i in self.tree.selectedItems()]
         self.tree.clear()
         fav = self._section("Favorites")
@@ -2799,6 +3507,8 @@ class Sidebar(QWidget):
         self._entry(loc, boot_volume_name(), Path("/"))
         for v in external_volumes():
             self._entry(loc, v.name, v, ejectable=True)
+        self._tags_section = self._section("Tags")
+        self._fill_tags()
         # Empty folders (0 KB) under Documents, Pictures, Movies and Downloads: the collection
         # first (all of them, for a bulk Move to Trash), then each one — a click shows it in its
         # folder, selected, so ⌘⌫ is one keystroke away.
@@ -2823,6 +3533,86 @@ class Sidebar(QWidget):
         self.tree.expandAll()
         if selected:
             self.select_path(selected[0])
+
+    def _fill_tags(self) -> None:
+        """The Tags section: every tag on this Mac and the connected drives, A to Z, with how many files
+        carry it. A click shows those files; files dropped on one get it."""
+        sec = self._tags_section
+        if sec is None:
+            return
+        for child in sec.takeChildren():
+            del child
+        counts = sorted(tag_store().counts(), key=lambda x: x[0].casefold())
+        if not counts:
+            it = QTreeWidgetItem(["Select files and press ⌘T"])
+            it.setData(0, PATH_ROLE, "")
+            it.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            it.setIcon(0, glyph("tag", THEME.tertiary, 16))
+            it.setToolTip(0, "Tag files here and they show up in Photo Browser on the iPhone — and tags added "
+                             "there show up here")
+            sec.addChild(it)
+            return
+        for name, n in counts:
+            it = QTreeWidgetItem([name])
+            it.setData(0, PATH_ROLE, TAG + name)
+            it.setData(0, EJECT_ROLE, False)
+            it.setData(0, COUNT_ROLE, n)
+            it.setIcon(0, tag_dot(name, 14))
+            it.setToolTip(0, f"{n:,} file{'s' if n != 1 else ''} tagged “{name}” — click to see them, drop files "
+                             "here to tag them, right-click to rename")
+            sec.addChild(it)
+
+    def refresh_tags(self) -> None:
+        selected = [i.data(0, PATH_ROLE) for i in self.tree.selectedItems()]
+        self._fill_tags()
+        if self._tags_section is not None:
+            self._tags_section.setExpanded(True)
+        if selected:
+            self.select_path(selected[0])
+
+    def _context_menu(self, pos) -> None:
+        item = self.tree.itemAt(pos)
+        path = item.data(0, PATH_ROLE) if item is not None else None
+        if not isinstance(path, str) or not path.startswith(TAG):
+            return
+        name = path[len(TAG):]
+        menu = QMenu(self)
+        menu.addAction(f"Show Files Tagged “{name}”", lambda: self.navigate.emit(path))
+        menu.addAction("Rename Tag…", lambda: self._rename_tag(name))
+        menu.addSeparator()
+        menu.addAction(f"Remove “{name}” from Every File…", lambda: self._remove_tag(name))
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _rename_tag(self, name: str) -> None:
+        new, ok = QInputDialog.getText(self.window(), "Rename Tag",
+                                       f"New name for “{name}”, on every file that has it (on this Mac and the "
+                                       "connected drives — the iPhone follows when it next opens the drive):",
+                                       text=name)
+        new = shared_tags.normalized(new) if ok else ""
+        if not new or new == name:
+            return
+        try:
+            tag_store().rename(name, new)
+        except OSError as e:
+            QMessageBox.warning(self.window(), "Rename Tag", f"Couldn't save the tags: {e}")
+            return
+        tags_changed()
+        self.tag_renamed.emit(name, new)
+
+    def _remove_tag(self, name: str) -> None:
+        files = tag_store().files_with(name)
+        if QMessageBox.question(
+                self.window(), "Remove Tag",
+                f"Take “{name}” off all {len(files):,} file{'s' if len(files) != 1 else ''} that have it, on this Mac "
+                "and the connected drives? The iPhone follows when it next opens the drive.") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            tag_store().remove(files, [name])
+        except OSError as e:
+            QMessageBox.warning(self.window(), "Remove Tag", f"Couldn't save the tags: {e}")
+            return
+        tags_changed()
 
     def select_path(self, path: str) -> None:
         self.tree.clearSelection()
@@ -3115,6 +3905,8 @@ class MainWindow(QMainWindow):
         self.sidebar.navigate.connect(self._navigate)
         self.sidebar.reveal.connect(lambda path: self.active_pane.reveal(path))
         self.sidebar.eject.connect(self.eject)
+        self.sidebar.tag_drop.connect(self._tag_dropped)
+        self.sidebar.tag_renamed.connect(self._tag_renamed)
         self.src = Pane("From", self.settings)
         self.dst = Pane("To", self.settings)
         for pane in (self.src, self.dst):
@@ -3171,6 +3963,7 @@ class MainWindow(QMainWindow):
         self.bridge.progress.connect(self._progress)
         self.bridge.finished.connect(self._finished)
         THUMBS.ready.connect(lambda: (self.src.grid.viewport().update(), self.dst.grid.viewport().update()))
+        tag_events().changed.connect(self._tags_changed)
 
         home = str(Path.home())
         start_src = start_from or self.settings.value("From/location") or str(Path.home() / "Downloads")
@@ -3206,6 +3999,32 @@ class MainWindow(QMainWindow):
         for p in (self.src, self.dst):
             p.set_active(p is pane)
         self.sidebar.select_path(pane.location)
+
+    # -- tags
+    def _tags_changed(self) -> None:
+        self.sidebar.refresh_tags()
+        for pane in (self.src, self.dst):
+            pane.on_tags_changed()
+
+    def _tag_dropped(self, tag: str, paths: list[str]) -> None:
+        """Files (or folders: everything inside them) dropped on a tag in the sidebar get it."""
+        pane = self.active_pane
+
+        def apply(files: list[str], _folders: int) -> None:
+            try:
+                n = tag_store().add(files, [tag])
+            except OSError as e:
+                QMessageBox.warning(self, "Tags", f"Couldn't save the tags: {e}")
+                return
+            tags_changed()
+            pane._airdrop_noted(f"Tagged {n:,} file{'s' if n != 1 else ''} “{tag}”." if n else
+                                f"Those already have “{tag}”.")
+        expand_files(paths, apply)
+
+    def _tag_renamed(self, old: str, new: str) -> None:
+        for pane in (self.src, self.dst):
+            if pane.location == TAG + old:
+                pane.go(TAG + new, record=False)
 
     def _location_changed(self, pane: Pane) -> None:
         if pane.active:
@@ -3326,6 +4145,7 @@ class MainWindow(QMainWindow):
 
     def _finished(self, st: dict) -> None:
         self.current = None
+        self._carry_tags(st)
         sizer().clear()                                   # folder sizes on both sides changed
         self.src.refresh_results()
         self.dst.refresh_results()
@@ -3393,6 +4213,21 @@ class MainWindow(QMainWindow):
         self.panel.finished(ok, title, detail, eject)
         if not ok:
             self.panel.details_btn.setChecked(True)
+
+    def _carry_tags(self, st: dict) -> None:
+        """Each copy gets its original's tags; an original that went to the Trash loses its own."""
+        placed, gone = st.get("placed") or [], st.get("trashed_paths") or []
+        if not placed and not gone:
+            return
+        try:
+            n = tag_store().carry(placed)
+            tag_store().forget(gone)
+        except OSError as e:
+            self.panel.log.appendPlainText(f"   couldn't carry the tags over: {e}")
+            return
+        if n:
+            self.panel.log.appendPlainText(f"   tags went along with {n:,} file{'s' if n != 1 else ''}")
+        tags_changed()
 
     def stop_transfer(self) -> None:
         if self.current is None:

@@ -996,6 +996,57 @@ apply it.
 
 ---
 
+## 6h. Tags shared with Safe Finder — `SharedTags.swift`, `mac/shared_tags.py` (Oct 26, 2026)
+
+The app's tags and Safe Finder's are one set. **Where:** `<drive>/.Photo Browser Metadata/shared-tags.json`
+(the metadata-backup folder at the app's root), `{"format", "version", "id", "updated", "by",
+"files": {drive-relative path: [tag]}}` — the same key for a file on the Mac (`/Volumes/SSD/…`) and
+here (`…/userfsd/<UUID>/SSD/…`). Tags are stored as `normalizedTag` makes them and compared ignoring
+case on both sides; hidden paths (`.Trash`…) are never in it; Safe Finder writes keys NFC (Swift's
+String equality is canonical, so NFD keys here match).
+
+**Why a file on the drive, merged three ways.** The SSD is plugged into one device at a time, so
+there is never a second writer to race. Safe Finder edits the drive's file directly — while the
+drive is on the Mac it *is* the copy of record. The app keeps its own `Library.tags` (everything
+else reads it) and `syncDriveTags` merges: for each path, a side that left the last-agreed state
+alone takes the other side's tags; when both changed, removals from either side go and additions
+from both stay (`SharedTags.merge`). The last-agreed state (`tagSyncBases`, bulk store
+"tagSyncBase") is kept **by the file's `id`**, not by root path — the root path changes on every
+replug (new mount UUID), which would have turned every sync into a no-history union and stopped Mac
+removals from ever reaching the phone. No base for the file's id (new file, a drive never synced,
+Safe Finder restarted a damaged file with a new id) → plain union, never a removal: a lost file can't
+wipe tags. Timestamps were considered and rejected: last-writer-wins per path loses one side of a
+both-changed file and depends on two clocks.
+
+**When the app syncs:** `chooseFolder` / `restoreLastFolder` / a reconnect under a new mount path
+(1 s later), every return to the foreground (the drive may have been on the Mac), 2 s after any tag
+change (`noteTagsEdited` — from `addTag`/`removeTag` and from `persistAllPathKeyed`, which covers
+moves, renames, prunes and backup restores), and on the way to the background (`flushTagSync`, under
+a background-task window, saving the base before it closes). Coalesced (`scheduleTagSync`); one at a
+time (`tagSyncRunning` / `tagSyncAgain`); an entry edited while a sync was reading is left for the next
+one. Reading/merging/writing is detached; the write goes through `DriveWriter.writeDataSync`. A sync
+that brings changes shows a toast ("Tags from Safe Finder: 12 files updated") and bumps
+`labelsVersion`. Drive Health ▸ Metadata safety has **Sync Tags with Safe Finder** and the last
+result (`tagSyncStatus`).
+
+**Safe Finder** (`shared_tags.TagStore`): a drive file's table is found per folder by walking up to
+the nearest folder holding `.Photo Browser Metadata` (else the volume root), cached per folder; files
+on the Mac's own disk go into `~/Library/Application Support/Safe Finder/tags.json` (absolute keys)
+and travel with Move/Copy (`Transfer` now reports `placed` (original → where its copy landed, incl.
+"name (1)" and a renamed `.incoming` folder) and `trashed_paths`; `MainWindow._carry_tags` copies tags
+over and drops the trashed originals'). The file is re-read when its mtime/size change (checked at most
+every 2 s, forced before every edit). Writing: APFS temp + fsync + `os.replace`; exFAT in place (Mac tools
+never rename or fsync there) — a torn file reads as damaged and is restarted with a new id. UI: ⌘T /
+header button / right-click ▸ Tags ▸ Add Tags… open `TagDialog` (type, commas, completer for the last
+segment; chips toggle on all / ✕ off all / "3/12" partial); right-click ▸ Tags lists every tag with
+ticks; folders in a selection expand to their files on a thread (`expand_files`, hidden/bundles/
+sidecars skipped); the sidebar's Tags section (counts, colour dot from a CRC of the folded name) opens
+`safe-finder://tag/<name>` (a `TagScanner` collection), takes file drops, and renames / removes a tag
+everywhere; `tag:x` / `#x` in a search field opens the same collection; tiles show a pill (dots + first
+tag), list rows chips, the status line a single selection's tags; Move to Trash drops the tags.
+
+---
+
 ## 6a. WebM playback — `WebMPlayer.swift`
 
 AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,

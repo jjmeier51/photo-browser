@@ -83,6 +83,13 @@ actions the app makes no network calls.
   reverse-geocoded place, "Saved from" (xattrs), Age, inline caption edit, tags (one at a
   time, with suggestions). Tags are also applied from a thumbnail's long-press menu and the
   selection bar (`tagMenu`: "Add Tag…" first, then every tag alphabetically, `.menuOrder(.fixed)`).
+- **Tags shared with Safe Finder** — the drive's `.Photo Browser Metadata/shared-tags.json` holds
+  the tags by drive-relative path; Safe Finder (`mac/shared_tags.py`, ⌘T / sidebar Tags) edits it
+  directly while the drive is on the Mac, and the app three-way merges it with `Library.tags`
+  whenever it opens or gets the drive back, returns to the foreground, or a tag changes — base kept
+  by the file's id (`tagSyncBase`), so removals cross too and a lost file never wipes anything.
+  Every tag change must reach `noteTagsEdited()` (the tag setters and `persistAllPathKeyed` call
+  it). (`SharedTags.swift`, `docs/feature-notes.md` §6h)
 - **Editing** — crop/rotate saved **in place** over the original (no duplicate),
   preserving EXIF/creation metadata, under a best-effort background-task window;
   bulk **rotate** (180°/left/right, mainly to fix upside-down videos) on a
@@ -196,7 +203,8 @@ Keys are all under the `photoBrowser.*` namespace:
 - `favorites`, `ai` — labeled item paths (Sets of path strings)
 - `captions` — app caption overrides (path → text)
 - `tags` — per-file tags (path → [tag]), bulk JSON store; the Tags chip filters a folder's
-  subtree by them
+  subtree by them. `tagSyncBase` (bulk) — what the store and each drive's shared tag file last
+  agreed on, by the file's id (see `SharedTags`)
 - (not UserDefaults) the place index `placeIndex.json` — per-file GPS bins + per-bin names for
   search and the Location filter; backed up as `places.json` with every metadata backup
 - `folderCovers` — folder path → cover image filename (images stored in

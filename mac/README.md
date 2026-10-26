@@ -162,8 +162,8 @@ app before any app is asked — send them inside a folder, or use the app's "Add
 
 ## Safe Finder — a Finder window that moves files onto the SSD safely (`safe_finder.py`)
 
-Looks and works like Finder: a sidebar (Favorites, and Locations with an eject button for the
-SSD), and two panes side by side — **From** (your Mac) and **To** (the SSD) — each with icon view
+Looks and works like Finder: a sidebar (Favorites, Locations with an eject button for the SSD, and
+your Tags), and two panes side by side — **From** (your Mac) and **To** (the SSD) — each with icon view
 (photo and video thumbnails, with a size slider up to 320 px and a spacing slider that packs the
 tiles edge to edge for more per row) or list view, a Sort menu, a search field, back/forward and a
 path bar. Select files
@@ -258,6 +258,44 @@ render again.
 - **Move to Trash.** Select files or folders — in a folder, in search results, All Videos or Empty
   Folders, on either side — and press ⌘⌫ (or right-click ▸ Move to Trash). It asks first, with the
   names and the size, and uses the system Trash, so it can be undone from there.
+
+### Tags — the same tags as Photo Browser on the iPhone
+
+Safe Finder's tags *are* the app's tags: tag a file here and it has that tag in Photo Browser on the
+iPhone (the Tags filter, the info panel, "No Tags"); tag it there and it shows up here. Removing a
+tag, renaming one, or moving a file carries across the same way.
+
+- **One file or a thousand.** Select files — or folders, which tags every file inside them — and press
+  **⌘T** (or the tag button in the pane's header, or right-click ▸ Tags ▸ Add Tags…). Type a tag, or
+  several separated by commas, and press Return; suggestions come from the tags you already use. Every
+  existing tag is listed below as a chip: click one to put it on every selected file, click it again
+  (✕) to take it off. A tag only some of the files have shows "3/12" — one click puts it on the rest.
+  Return in an empty field (or Done) closes the window. Changes are saved as you make them.
+- **Right-click ▸ Tags** lists every tag with a tick when all the selected files have it; choosing one
+  adds it to all of them, or takes it off when they all have it. "Remove All Tags…" clears them.
+- **The sidebar's Tags** lists every tag with how many files carry it. Click one to see all of those
+  files together — on the Mac and on the drive — and select, Quick Look, move or re-tag them from
+  there. **Drag files or folders onto a tag** in the sidebar to tag them. Right-click a tag to rename it
+  or take it off every file. Typing `tag:beach` (or `#beach`) in a search field does the same as
+  clicking it.
+- **On the tiles:** a tagged file shows a small pill with a coloured dot per tag (each tag always gets
+  the same colour) and the first tag's name; the list view shows them as chips beside the name, and
+  the status line lists a selected file's tags.
+- **Moving and copying keeps them.** A copy on the SSD gets its original's tags; a moved original's
+  tags go with it. Tags on files still on the Mac are kept on the Mac (in
+  `~/Library/Application Support/Safe Finder/tags.json`) and travel when Safe Finder moves or copies
+  the files onto the drive. A file moved to the Trash loses its tags.
+
+**How they stay in step.** The tags of the files on a drive are saved *on the drive*, in the hidden
+`.Photo Browser Metadata/shared-tags.json` (the folder the app keeps its metadata backups in), by each
+file's path inside the drive. The drive is with one device at a time: Safe Finder edits that file
+directly, and the app merges it with its own tags whenever it opens the drive, gets it back, or
+returns to the foreground — and writes its own changes back a couple of seconds after each one (and
+on the way to the background). The merge is three-way: a tag added or removed on one side wins over
+one left alone, and additions from both sides are all kept. If the file is ever lost or damaged
+nothing is wiped — the app fills it back in. Drive Health ▸ Sync Tags with Safe Finder syncs on
+demand and shows when it last did. (Tags are only shared for files on the drive the app has open;
+Finder's own coloured tags are separate.)
 
 ### Install it as a Mac app
 

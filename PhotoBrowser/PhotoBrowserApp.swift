@@ -49,6 +49,7 @@ struct PhotoBrowserApp: App {
                     if phase == .active {
                         BackgroundDownloader.shared.setForeground(true)
                         library.reconnectIfNeeded()
+                        library.scheduleTagSync(after: 1)   // the drive may have been on the Mac meanwhile
                         library.refreshPendingArchives()
                         if !library.pureTransferMode {
                             library.processPendingTikTok()
@@ -60,7 +61,9 @@ struct PhotoBrowserApp: App {
                         // fast lane only runs while we're on screen.
                         BackgroundDownloader.shared.setForeground(false)
                         // Tags, captions and favorites save a moment after each change; make sure
-                        // nothing is still waiting when iOS suspends the app.
+                        // nothing is still waiting when iOS suspends the app — the drive's shared tag
+                        // file included, in case the drive goes to the Mac next.
+                        library.flushTagSync()
                         library.flushBulkSaves(wait: true)
                         FilePrefs.shared.flush()
                         // Arm the drive's "safe to remove" state on the way out. This drains

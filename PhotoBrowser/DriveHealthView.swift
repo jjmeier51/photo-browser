@@ -278,10 +278,18 @@ struct DriveHealthView: View {
                 Label("Reconnect Profile Folders", systemImage: "person.crop.circle.badge.checkmark")
             }
             .disabled(working)
+            Button { Task { await library.syncDriveTags(announce: true) } } label: {
+                Label("Sync Tags with Safe Finder", systemImage: "number")
+            }
+            .disabled(working)
+            if let s = library.tagSyncStatus {
+                LabeledContent("Shared tags", value: s.error.map { "Not synced — \($0)" }
+                               ?? "\(s.files) tagged file\(s.files == 1 ? "" : "s") · \(s.date.formatted(date: .omitted, time: .shortened))")
+            }
         } header: {
             Text("Metadata safety")
         } footer: {
-            Text("Everything the app attaches to your files — Favorites, To AI, labels, captions, tags, folder covers, custom thumbnails, birthdays, hidden items, linked Instagram / Facebook / TikTok / VSCO / OF profiles, highlights, People, AI provenance — plus the photo locations it has already looked up (so the Location filter needn't geocode them again) is saved by each item's place on the drive into a hidden “.Photo Browser Metadata” folder on the drive and into the app (the last three are kept). Back up before fixing the drive on the Mac; afterwards Restore merges back anything that went missing. Restoring never overwrites what's already set.\n\nReconnect Profile Folders is for Instagram and TikTok folders that are still full of their downloads but have forgotten which profile they belong to (no bubble, no “Get New”). It puts the link back from the backups where it can, and otherwise rebuilds it from the files in the folder; nothing on the drive is changed.")
+            Text("Everything the app attaches to your files — Favorites, To AI, labels, captions, tags, folder covers, custom thumbnails, birthdays, hidden items, linked Instagram / Facebook / TikTok / VSCO / OF profiles, highlights, People, AI provenance — plus the photo locations it has already looked up (so the Location filter needn't geocode them again) is saved by each item's place on the drive into a hidden “.Photo Browser Metadata” folder on the drive and into the app (the last three are kept). Back up before fixing the drive on the Mac; afterwards Restore merges back anything that went missing. Restoring never overwrites what's already set.\n\nTags are also kept in “shared-tags.json” in that folder, which Safe Finder on the Mac reads and writes: a tag added or removed on either side shows up on the other. The app syncs with it whenever the drive is opened or comes back, when the app returns to the foreground, and a moment after a tag changes; Sync Tags does it now.\n\nReconnect Profile Folders is for Instagram and TikTok folders that are still full of their downloads but have forgotten which profile they belong to (no bubble, no “Get New”). It puts the link back from the backups where it can, and otherwise rebuilds it from the files in the folder; nothing on the drive is changed.")
         }
     }
 
