@@ -1806,6 +1806,7 @@ struct PhotoEditorView: View {
                 library.endActivity(id, result: ok ? "Saved edited photo" : "Couldn’t save the edit")
                 if ok {
                     if overwrite, dest != src { library.itemMoved(from: src, to: dest) }
+                    if !overwrite { library.copyTags([(from: src, to: dest)]) }   // Save as New: the photo's tags come along
                     library.markEditedInApp(dest)
                     library.contentDidChange(under: dest.deletingLastPathComponent())
                 }

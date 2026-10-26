@@ -19,16 +19,18 @@ import Foundation
 ///
 /// **Tags travel with the file.** The tables are keyed by path, so on their own a file moved or copied
 /// by anything else (Finder, the Files app, `cp`) would leave its tags behind. So each file also
-/// *carries* its tags in two extended attributes — Finder's own tags
-/// (`com.apple.metadata:_kMDItemUserTags`, which every Apple tool keeps through a copy or move, and which
-/// Finder and Spotlight show) and a marker (`com.photobrowser.tags`: the drive-relative path and tags it
-/// had when last written). Not on exFAT, where macOS would scatter `._` files. A sync writes them for
-/// every file whose tags changed (all of them, once, the first time — `Base.carried`); a file new to
-/// the index (`Library.adoptCarriedTags`) is squared with the store by `reconcile`: a marker naming
-/// another path means the file arrived from elsewhere, so its tags are adopted here (and dropped from
-/// the old path when nothing is there any more — a move); Finder tags that differ from the marker were
-/// edited in Finder and are merged in three ways; Finder tags without a marker are adopted. Safe Finder
-/// does the same for every folder it opens (`mac/shared_tags.py`).
+/// *carries* its tags in a private extended attribute, `com.photobrowser.tags` (the drive-relative path
+/// and tags it had when last written), which those tools keep through a copy or move. Not on exFAT,
+/// where macOS would scatter `._` files. Private on purpose: Finder doesn't show it, and Finder's own
+/// tags are left alone — they aren't Photo Browser tags. A sync writes it for every file whose tags
+/// changed (all of them, once, the first time — `Base.markers`); a file new to the index
+/// (`Library.adoptCarriedTags`) is squared with the store by `reconcile`: a marker naming another path
+/// means the file arrived from elsewhere, so its tags are adopted here (and dropped from the old path
+/// when nothing is there any more — a move); a marker for this very path on a file the store has nothing
+/// for means it came back (put back from a Trash) and its tags are restored; otherwise the store is the
+/// record and the marker follows it (every removal clears it at the next sync). An earlier build (Oct 26,
+/// 2026) briefly wrote Finder tags too; they come off wherever they're exactly what it wrote
+/// (`isOursInFinder`). Safe Finder does the same for every folder it opens (`mac/shared_tags.py`).
 ///
 /// Everything here runs off the main actor; reading and applying the store is `Library.syncDriveTags`.
 nonisolated enum SharedTags {
@@ -49,7 +51,7 @@ nonisolated enum SharedTags {
     nonisolated struct Base: Codable, Sendable {
         var files: [String: [String]]
         var date: Double
-        var carried: Bool?          // every file's own attributes were written at that sync (nil: not yet)
+        var markers: Bool?          // every file's marker was written at that sync (nil: not yet)
     }
 
     /// `com.photobrowser.tags` on a file: where it was, and what it carried, when last written.
@@ -58,7 +60,8 @@ nonisolated enum SharedTags {
         var tags: [String]
     }
 
-    /// What a file carries: Finder's entries as stored ("Name\nColour") and the marker.
+    /// What a file carries: the marker, and Finder's tag entries as stored ("Name\nColour") — read only
+    /// to take off what an earlier build wrote.
     nonisolated struct Carried: Sendable {
         var finder: [String]?
         var marker: Marker?
@@ -81,13 +84,13 @@ nonisolated enum SharedTags {
     nonisolated enum Outcome: Sendable {
         /// `adopted`: drive-relative keys whose files carried tags the store lacked; `movedAway`: keys
         /// whose files moved elsewhere (their tags went with them).
-        case synced(merged: [String: [String]], id: String, by: String?, carried: Bool,
+        case synced(merged: [String: [String]], id: String, by: String?, markers: Bool,
                     adopted: [String: [String]], movedAway: [String])
         case failed(String)
     }
 
-    static let finderTagsName = "com.apple.metadata:_kMDItemUserTags"
     static let markerName = "com.photobrowser.tags"
+    static let finderTagsName = "com.apple.metadata:_kMDItemUserTags"
     /// In a `.pbgallery` from the Mac (`mac/airdrop_to_iphone.py`), beside the files: their tags.
     static let archiveSidecar = ".photobrowser-tags.json"
 
@@ -167,29 +170,26 @@ nonisolated enum SharedTags {
         return carried
     }
 
-    /// Puts `tags` on the file (Finder's tags + the marker), or takes both off when there are none. A
-    /// tag Finder had already coloured keeps its colour; new ones get none.
+    /// Puts `tags` on the file (the marker, at `key`), or takes it off when there are none.
     @discardableResult
-    static func writeCarried(_ path: String, key: String, tags: [String], finderBefore: [String]?) -> Bool {
+    static func writeCarried(_ path: String, key: String, tags: [String]) -> Bool {
         if tags.isEmpty {
-            removexattr(path, finderTagsName, XATTR_NOFOLLOW)
             removexattr(path, markerName, XATTR_NOFOLLOW)
             return true
         }
-        var colours: [String: String] = [:]
-        for entry in finderBefore ?? [] {
-            let parts = entry.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
-            guard let name = parts.first else { continue }
-            colours[Library.normalizedTag(String(name)).lowercased()] = parts.count > 1 ? String(parts[1]) : "0"
-        }
-        let entries = tags.map { "\($0)\n\(colours[$0.lowercased()] ?? "0")" }
-        guard let plist = try? PropertyListSerialization.data(fromPropertyList: entries, format: .binary, options: 0),
-              let marker = try? JSONEncoder().encode(Marker(path: key, tags: tags)) else { return false }
-        return setAttribute(path, finderTagsName, plist) && setAttribute(path, markerName, marker)
+        guard let marker = try? JSONEncoder().encode(Marker(path: key, tags: tags)) else { return false }
+        return setAttribute(path, markerName, marker)
     }
 
-    /// The tag attributes a file carries, raw — kept across an in-place rewrite that replaces the file
-    /// (a crop, a rotate, a capture-date write), which would otherwise drop them.
+    /// Finder tags an earlier build wrote: exactly the marker's tags, none of them coloured.
+    static func isOursInFinder(_ carried: Carried) -> Bool {
+        guard let finder = carried.finder, !finder.isEmpty, let marker = carried.marker else { return false }
+        return finderNames(finder) == clean(marker.tags) && finder.allSatisfy { $0.hasSuffix("\n0") }
+    }
+
+    /// The tag marker a file carries — and its Finder tags, which are the user's — raw, kept across an
+    /// in-place rewrite that replaces the file (a crop, a rotate, a capture-date write), which would
+    /// otherwise drop them.
     static func carriedAttributes(of url: URL) -> [(String, Data)] {
         [finderTagsName, markerName].compactMap { name in getAttribute(url.path, name).map { (name, $0) } }
     }
@@ -200,28 +200,29 @@ nonisolated enum SharedTags {
 
     /// Squares a file's carried tags with what the store has for it (`have`), at drive-relative `key`.
     /// Returns the tags the file should have, whether its attributes need rewriting, and — when its
-    /// marker names another path — that path (a move if nothing is there any more).
-    static func reconcile(have: [String], carried: Carried, key: String) -> (tags: [String], write: Bool, movedFrom: String?) {
-        let onFile = finderNames(carried.finder ?? [])
+    /// marker names another path — that path (a move if nothing is there any more). `arrived`: the file
+    /// is new here (not a sync writing out the store's own changes, where an empty `have` is a removal).
+    static func reconcile(have: [String], carried: Carried, key: String,
+                          arrived: Bool) -> (tags: [String], write: Bool, movedFrom: String?) {
         let markTags = carried.marker.map { clean($0.tags) }
         var movedFrom: String?
         let new: [String]
-        if let marker = carried.marker, marker.path == key {
-            new = onFile != markTags ? merge(local: have, base: markTags ?? [], remote: onFile) : have
+        if let marker = carried.marker, marker.path != key || (arrived && have.isEmpty) {
+            new = clean(have + (markTags ?? []))       // arrived from elsewhere — or back (put back from a Trash)
+            if marker.path != key { movedFrom = marker.path }
         } else {
-            new = clean(have + onFile)                 // put on in Finder, or arrived from elsewhere
-            movedFrom = carried.marker?.path
+            new = have                                 // the store is the record
         }
-        let write = onFile != new
-            || (new.isEmpty ? carried.marker != nil : (carried.marker?.path != key || markTags != new))
+        let write = new.isEmpty ? carried.marker != nil : (carried.marker?.path != key || markTags != new)
         return (new, write, movedFrom)
     }
 
     /// Reads, reconciles and (if needed) rewrites one file's carried tags. Blocking.
     static func settle(path: String, key: String, have: [String]) -> (tags: [String], movedFrom: String?) {
         let carried = readCarried(path)
-        let r = reconcile(have: have, carried: carried, key: key)
-        if r.write { writeCarried(path, key: key, tags: r.tags, finderBefore: carried.finder) }
+        let r = reconcile(have: have, carried: carried, key: key, arrived: false)
+        if r.write { writeCarried(path, key: key, tags: r.tags) }
+        if isOursInFinder(carried) { removexattr(path, finderTagsName, XATTR_NOFOLLOW) }
         return (r.tags, r.movedFrom)
     }
 
@@ -235,10 +236,11 @@ nonisolated enum SharedTags {
             let key = String(path.dropFirst(prefix.count))
             guard isShared(key) else { continue }
             let carried = readCarried(path)
-            guard carried.finder != nil || carried.marker != nil else { continue }
+            guard carried.marker != nil else { continue }
             let have = store[path] ?? []
-            let r = reconcile(have: have, carried: carried, key: key)
-            if r.write { writeCarried(path, key: key, tags: r.tags, finderBefore: carried.finder) }
+            let r = reconcile(have: have, carried: carried, key: key, arrived: true)
+            if r.write { writeCarried(path, key: key, tags: r.tags) }
+            if isOursInFinder(carried) { removexattr(path, finderTagsName, XATTR_NOFOLLOW) }
             if r.tags != have { out.updates[path] = r.tags }
             if let from = r.movedFrom, !from.hasPrefix("/"), isShared(from), from != key,
                !fm.fileExists(atPath: prefix + from) {
@@ -284,7 +286,7 @@ nonisolated enum SharedTags {
         var adopted: [String: [String]] = [:]
         var movedAway: [String] = []
         if carry {
-            let prior = base?.carried == true ? base?.files : nil
+            let prior = base?.markers == true ? base?.files : nil
             let keys = prior.map { p in Set(merged.keys).union(p.keys).filter { merged[$0] != p[$0] } } ?? Set(merged.keys)
             let prefix = root.path + "/"
             for key in keys {
@@ -298,7 +300,7 @@ nonisolated enum SharedTags {
                 }
             }
         }
-        return .synced(merged: merged, id: id, by: remote?.by, carried: carry, adopted: adopted, movedAway: movedAway)
+        return .synced(merged: merged, id: id, by: remote?.by, markers: carry, adopted: adopted, movedAway: movedAway)
     }
 }
 
@@ -373,7 +375,7 @@ extension Library {
         case .failed(let why):
             tagSyncStatus = SharedTags.Status(date: Date(), files: local.count, error: why)
             if announce { postNotice("Couldn't Sync Tags", why) }
-        case .synced(let merged, let id, let by, let carried, let adopted, let movedAway):
+        case .synced(let merged, let id, let by, let markers, let adopted, let movedAway):
             var changed = 0
             for rel in Set(local.keys).union(merged.keys) {
                 let new = merged[rel] ?? [], old = local[rel] ?? []
@@ -383,7 +385,7 @@ extension Library {
                 if new.isEmpty { tags.removeValue(forKey: key) } else { tags[key] = new }
                 changed += 1
             }
-            // Tags the files themselves brought (moved or copied in, edited in Finder) — they reach
+            // Tags the files themselves brought (moved or copied in by something else) — they reach
             // the drive's file at the next sync, which `noteTagsEdited` schedules.
             var carriedIn = 0
             for (rel, new) in adopted {
@@ -397,7 +399,7 @@ extension Library {
                 if tags.removeValue(forKey: key) != nil { carriedIn += 1 }
             }
             tagSyncBases[id] = SharedTags.Base(files: merged, date: Date().timeIntervalSince1970,
-                                               carried: carried ? true : tagSyncBases[id]?.carried)
+                                               markers: markers ? true : tagSyncBases[id]?.markers)
             scheduleBulkSave(tagSyncBases, "tagSyncBase")
             if carriedIn > 0 {
                 scheduleBulkSave(tags, "tags")

@@ -1801,6 +1801,7 @@ final class Library {
         let startedAt = Date().timeIntervalSince1970
         return { [weak self] promptID in
             Task { @MainActor in
+                if !isCreate { self?.noteAstriaPromptSource(promptID, original: originalPath) }
                 self?.addPendingAstria(PendingAstriaJob(jobID: jobID, promptID: promptID, tune: tune,
                                                         originalPath: originalPath, folderPath: folderPath,
                                                         prompt: promptText, model: model, startedAt: startedAt,
@@ -1909,8 +1910,8 @@ final class Library {
                 defer { bg.end() }
                 switch result {
                 case .success(let data):
-                    let saved = await Task.detached(priority: .utility) { () -> Int in
-                        var n = 0
+                    let savedURLs = await Task.detached(priority: .utility) { () -> [URL] in
+                        var urls: [URL] = []
                         for d in data {
                             let url: URL?
                             if let originalURL {
@@ -1918,10 +1919,15 @@ final class Library {
                             } else {
                                 url = await AIExtend.saveGeneratedToFolder(d, in: folderURL, model: modelRaw, prompt: promptText)
                             }
-                            if url != nil { n += 1 }
+                            if let url { urls.append(url) }
                         }
-                        return n
+                        return urls
                     }.value
+                    let saved = savedURLs.count
+                    // Like a result kept from the review: marked as AI (badge, model and prompt) and,
+                    // for an edit, carrying the original photo's tags.
+                    for url in savedURLs { markAIGenerated(url, model: modelRaw, prompt: promptText) }
+                    if let originalURL { copyTags(savedURLs.map { (from: originalURL, to: $0) }) }
                     if saved > 0 {
                         removePendingAstria(jobID: jobID)
                         contentDidChange(under: folderURL)
@@ -2211,6 +2217,24 @@ final class Library {
     func markAstriaImageSaved(_ imageURL: URL, as file: URL) {
         astriaSavedImages[imageURL.absoluteString] = file.path
         UserDefaults.standard.set(astriaSavedImages, forKey: Self.astriaSavedKey)
+    }
+
+    /// Astria prompt id → the photo an Edit with AI started from, so an image saved later from the
+    /// Astria.ai Browser gets that photo's tags (`copyTagsFromAstriaPrompt`). The paths follow moves
+    /// (`applyRemap`).
+    @ObservationIgnored var astriaPromptSources: [String: String] =
+        (FilePrefs.shared.dictionary(forKey: "photoBrowser.astriaPromptSources") as? [String: String]) ?? [:]
+    func noteAstriaPromptSource(_ promptID: Int, original: String) {
+        guard !original.isEmpty else { return }
+        astriaPromptSources[String(promptID)] = original
+        FilePrefs.shared.set(astriaPromptSources, forKey: "photoBrowser.astriaPromptSources")
+    }
+
+    /// An image saved from the Astria.ai Browser: when its prompt was an Edit with AI started here, it
+    /// gets the original photo's tags.
+    func copyTagsFromAstriaPrompt(_ promptID: Int, to file: URL) {
+        guard let original = astriaPromptSources[String(promptID)] else { return }
+        copyTags([(from: URL(fileURLWithPath: original), to: file)])
     }
 
     private func navigate(toFolder folder: URL) {
@@ -3244,6 +3268,8 @@ final class Library {
             })
         }
         FaceStore.shared.remap(remap)
+        astriaPromptSources = astriaPromptSources.mapValues(remap)
+        FilePrefs.shared.set(astriaPromptSources, forKey: "photoBrowser.astriaPromptSources")
 
         persistCustomLabels()          // already coalesced onto a later turn
         persistAllPathKeyed()

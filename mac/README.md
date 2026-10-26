@@ -281,16 +281,18 @@ tag, renaming one, or moving a file carries across the same way.
 - **On the tiles:** a tagged file shows a small pill with a coloured dot per tag (each tag always gets
   the same colour) and the first tag's name; the list view shows them as chips beside the name, and
   the status line lists a selected file's tags.
-- **Tags stick to the file — however it's moved or copied.** Each tagged file carries its tags
-  itself, as Finder tags (so you'll see them in Finder and can search them with Spotlight) plus a small
-  hidden note of where it was. Move or copy it with Safe Finder, Finder, the Files app, `cp`, or AirDrop it
-  to the iPhone with "AirDrop to iPhone…", and the tags go with it: Safe Finder picks them up when you
-  open the folder it landed in, the app when it next opens the drive. A move leaves nothing behind at the
-  old place; a copy keeps the original's tags too. Tags you change in Finder come back into Safe Finder
-  and the app the same way — and Finder tags you already had count as Photo Browser tags. (On an exFAT
-  drive files can't carry them without `._` clutter, so there they only travel through Safe Finder.)
-  Tags on files still on the Mac are also listed in `~/Library/Application Support/Safe Finder/tags.json`.
-  A file moved to the Trash loses its tags. Copies made in the iPhone app keep their tags too.
+- **Tags stick to the file — however it's moved or copied.** Each tagged file carries its tags itself,
+  in a small private field (with a note of where it was) that Finder doesn't show — Finder's own tags
+  are a separate thing and are left alone. Move or copy it with Safe Finder, Finder, the Files app or
+  `cp`, or AirDrop it to the iPhone with "AirDrop to iPhone…", and the tags go with it: Safe Finder picks
+  them up when you open the folder it landed in, the app when it next opens the drive. A move leaves
+  nothing behind at the old place; a copy keeps the original's tags too; a file put back from the Trash
+  gets its tags back. (Cloud folders such as iCloud Drive may drop the private field, and on an exFAT
+  drive files can't carry it without `._` clutter — there tags only travel through Safe Finder.) Tags on
+  files still on the Mac are also listed in `~/Library/Application Support/Safe Finder/tags.json`. A file
+  moved to the Trash loses its tags until it's put back. On the iPhone, copies, photos saved as new from
+  the photo editor, and AI edits (Edit / Extend with AI, and their images saved later from the Astria.ai
+  Browser) all get the original photo's tags.
 - **Backed up.** The tags are part of the app's metadata backups (Drive Health ▸ Back Up Metadata Now,
   and the automatic ones), which now sync with the drive first so tags added here are in them. Safe
   Finder also keeps a copy of each drive's tag file (and the Mac's) from before the first change of each

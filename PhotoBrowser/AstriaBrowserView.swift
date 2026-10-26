@@ -302,6 +302,7 @@ struct AstriaBrowserView: View {
                     savedCount += 1
                     lib.markAIGenerated(dest, model: model, prompt: text)
                     lib.markAstriaImageSaved(url, as: dest)
+                    lib.copyTagsFromAstriaPrompt(ref.prompt.id, to: dest)   // an edit started here: the photo's tags
                 } else {
                     failed += 1
                 }

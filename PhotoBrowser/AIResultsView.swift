@@ -170,6 +170,7 @@ struct AIResultsView: View {
                 savedAny = true
                 decided[i] = .kept(url.deletingLastPathComponent().lastPathComponent)
                 library.markAIGenerated(url, model: m, prompt: p)
+                if case .edit(let original) = tgt { library.copyTags([(from: original, to: url)]) }   // the photo's tags come along
                 // Refresh now, per save: the review may already be closed when the write lands.
                 library.contentDidChange(under: url.deletingLastPathComponent().deletingLastPathComponent())
             } else {

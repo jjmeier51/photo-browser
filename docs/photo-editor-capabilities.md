@@ -260,7 +260,8 @@ the HDR save path are detected on a clamped SDR copy so detection stays accurate
   Display P3 PQ) with headroom intact.
 - **2× AI Upscale** — Lanczos + light denoise + sharpen at save time.
 - Saved files are tagged in the library so a folder's **"Edited" filter** can list
-  in‑app‑edited photos.
+  in‑app‑edited photos. **Save as New** gives the new photo the original's Photo Browser tags
+  (`library.copyTags`); Overwrite keeps the file's own (re‑keyed by `itemMoved` on a container change).
 - *Open from the PRD:* an explicit export‑controls sheet (format/quality picker +
   share‑sheet) beyond the current options.
 

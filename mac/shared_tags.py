@@ -33,18 +33,23 @@ previous file is kept in ~/Library/Application Support/Safe Finder/Tag Backups/ 
 
 Tags that travel with the file
   The tables are keyed by path, so on their own a file moved or copied by anything else — Finder, the
-  Files app, `cp`, AirDrop between Macs — would leave its tags behind. So each file also *carries* its
-  tags, in two extended attributes (never on exFAT, where macOS would scatter `._` files):
-  - Finder's own tags (`com.apple.metadata:_kMDItemUserTags`) — the tags show in Finder and Spotlight,
-    and every Apple tool keeps them when it copies or moves the file;
-  - a marker (`com.photobrowser.tags`, JSON {"path": key, "tags": [...]}) — where the file was, and what
-    it carried, when Safe Finder or the app last wrote it.
-  Every change writes both. When a folder is looked at (`read_carried` + `apply_carried`), each file is
+  Files app, `cp` — would leave its tags behind. So each file also *carries* its tags, in a private
+  extended attribute, `com.photobrowser.tags` (JSON {"path": key, "tags": [...]}: where the file was, and
+  what it carried, when Safe Finder or the app last wrote it). Never on exFAT, where macOS would scatter
+  `._` files. Finder, the Files app, cp/mv and ditto keep it through a copy or move; Finder doesn't show
+  it, and Finder's own tags are left entirely alone — they are not Photo Browser tags. (Cloud folders such
+  as iCloud Drive may drop a private attribute; the tags then stay behind, as they would without it.)
+  Every change writes it. When a folder is looked at (`read_folder` + `apply_carried`), each file is
   checked against the tables: a marker naming another path means the file arrived from elsewhere — its
-  tags are adopted here, and if the old path is gone (a move, not a copy) its old entry is dropped; Finder
-  tags that differ from the marker mean they were edited in Finder — merged three ways like the app's sync;
-  Finder tags with no marker (put on in Finder) are adopted; a tagged file with nothing on it gets them
-  written. The app does the same for files that turn up in its index (`SharedTags.adoptCarried`).
+  tags are adopted here, and if the old path is gone (a move, not a copy) its old entry is dropped; a
+  marker for this very path on a file the tables have nothing for means it came back (Put Back from the
+  Trash, which dropped its tags) — they're restored; otherwise the tables are the record and the marker
+  is brought in line with them (written for a tagged file that has none, changed with every edit — so a
+  removal clears it at once). The app does the same for files that turn
+  up in its index (`SharedTags.adoptCarried`).
+  For a few hours on Oct 26, 2026 the tags were also written as Finder tags. Those are taken off again
+  wherever they are exactly what was written (the marker's tags, none coloured — `ours_in_finder`);
+  Finder tags anyone else put on are never touched.
 
 No Qt here: Safe Finder drives it from the UI thread; it's also usable from scripts.
 """
@@ -74,8 +79,8 @@ FOLDER = ".Photo Browser Metadata"
 FILE_NAME = "shared-tags.json"
 SIDECARS = {"gallery.json", "pornstar.json", "search.json"}     # gallery sidecars the app hides — never tagged
 _RECHECK = 2.0                                                    # seconds between "did the file change?" checks
-FINDER_TAGS = "com.apple.metadata:_kMDItemUserTags"              # Finder's tags: a binary plist of "Name\nColour"
 MARKER = "com.photobrowser.tags"                                  # {"path": key when written, "tags": [...]}
+FINDER_TAGS = "com.apple.metadata:_kMDItemUserTags"              # read only to take off what an earlier build wrote
 BACKUPS_KEPT = 14
 
 
@@ -127,18 +132,6 @@ def taggable(path: str) -> bool:
 
 def _nfc(s: str) -> str:
     return unicodedata.normalize("NFC", s)
-
-
-def merge3(local: list[str], base: list[str], remote: list[str]) -> list[str]:
-    """One file's tags, three ways (the app's `SharedTags.merge`): a side that left the base alone takes
-    the other's; when both changed, what either removed goes and what either added stays."""
-    if local == base:
-        return remote
-    if remote == base:
-        return local
-    in_base = {fold(x) for x in base}
-    removed = (in_base - {fold(x) for x in local}) | (in_base - {fold(x) for x in remote})
-    return clean([x for x in local + remote if fold(x) not in removed])
 
 
 # ---------------------------------------------------------------------------- extended attributes
@@ -199,9 +192,16 @@ def finder_names(raw: list[str]) -> list[str]:
     return clean(entry.split("\n", 1)[0] for entry in raw if isinstance(entry, str))
 
 
+def ours_in_finder(finder: list[str] | None, marker: dict | None) -> bool:
+    """Finder tags an earlier build wrote: exactly the marker's tags, none of them coloured."""
+    return bool(finder) and marker is not None and finder_names(finder) == clean(marker["tags"]) \
+        and all(e.endswith("\n0") for e in finder)
+
+
 def read_carried(path: str) -> tuple[list[str] | None, dict | None]:
-    """The tags a file carries: Finder's entries as stored ("Name\nColour"; None when it has none) and the
-    marker (None when absent or unreadable). Blocking — call off the UI thread for many files."""
+    """What a file carries: Finder's tag entries as stored ("Name\nColour"; None when it has none — read
+    only to take off what an earlier build wrote) and the marker (None when absent or unreadable).
+    Blocking — call off the UI thread for many files."""
     raw = xattr_get(path, FINDER_TAGS)
     finder = None
     if raw:
@@ -222,18 +222,11 @@ def read_carried(path: str) -> tuple[list[str] | None, dict | None]:
     return finder, marker
 
 
-def write_carried(path: str, key: str, tags: list[str], finder_before: list[str] | None = None) -> None:
-    """Puts `tags` on the file (Finder's tags + the marker), or takes both off when there are none. A tag
-    that was already there keeps the colour Finder gave it; new ones get none. Raises OSError."""
+def write_carried(path: str, key: str, tags: list[str]) -> None:
+    """Puts `tags` on the file (the marker, at `key`), or takes it off when there are none. Raises OSError."""
     if not tags:
-        xattr_remove(path, FINDER_TAGS)
         xattr_remove(path, MARKER)
         return
-    if finder_before is None:
-        finder_before, _ = read_carried(path)
-    colours = {fold(e.split("\n", 1)[0].strip()): (e.split("\n", 1) + ["0"])[1] for e in finder_before or []}
-    entries = [f"{t}\n{colours.get(fold(t), '0')}" for t in tags]
-    xattr_set(path, FINDER_TAGS, plistlib.dumps(entries, fmt=plistlib.FMT_BINARY))
     xattr_set(path, MARKER, json.dumps({"path": key, "tags": tags}, ensure_ascii=False).encode("utf-8"))
 
 
@@ -382,13 +375,13 @@ def default_store() -> "TagStore":
 
 
 def tags_for_archive(paths: Iterable[str], store: "TagStore | None" = None) -> dict[str, list[str]]:
-    """The tags of files about to leave in an archive (AirDrop): the tables' and the Finder tags each file
-    carries, together. Only files that have any."""
+    """The tags of files about to leave in an archive (AirDrop): the tables' and those the file carries,
+    together. Only files that have any."""
     store = store or default_store()
     out: dict[str, list[str]] = {}
     for p in paths:
-        finder = read_carried(p)[0] if store.carries(p) else None
-        tags = clean(store.tags(p) + finder_names(finder or []))
+        marker = read_carried(p)[1] if store.carries(p) else None
+        tags = clean(store.tags(p) + (marker["tags"] if marker else []))
         if tags:
             out[p] = tags
     return out
@@ -599,7 +592,7 @@ class TagStore:
         """Squares what files carry with the tables (see the module doc) — on the UI thread, with what
         `read_folder` read. Returns how many files' tags changed in the tables."""
         dirty: dict[int, TagFile] = {}
-        writes: list[tuple[str, str, list[str], list[str] | None]] = []
+        writes: list[tuple[str, str, list[str]]] = []
         changed = 0
         for path, finder, marker in found:
             t = self.table_for(path)
@@ -609,20 +602,16 @@ class TagStore:
             if id(t) not in dirty:
                 t.refresh()
             have = t.files.get(k, [])
-            on_file = finder_names(finder or [])
             m_path = _nfc(marker["path"]) if marker else None
             m_tags = clean(marker["tags"]) if marker else []
-            if marker is None or m_path != k:
-                new = clean(have + on_file)                # put on in Finder, or arrived from elsewhere
-                if marker is not None:
-                    old = self.mac if m_path.startswith("/") else t
-                    if m_path in old.files and not os.path.lexists(old.path(m_path)):
-                        old.files.pop(m_path, None)        # moved, not copied: its old place is gone
-                        dirty[id(old)] = old
-            elif on_file != m_tags:
-                new = merge3(have, m_tags, on_file)        # edited in Finder since it was last written
+            if marker is not None and (m_path != k or not have):
+                new = clean(have + m_tags)                 # arrived from elsewhere — or back (Put Back)
+                old = self.mac if m_path.startswith("/") else t
+                if m_path != k and m_path in old.files and not os.path.lexists(old.path(m_path)):
+                    old.files.pop(m_path, None)            # moved, not copied: its old place is gone
+                    dirty[id(old)] = old
             else:
-                new = have
+                new = have                                 # the tables are the record
             if new != have:
                 if new:
                     t.files[k] = new
@@ -630,8 +619,13 @@ class TagStore:
                     t.files.pop(k, None)
                 dirty[id(t)] = t
                 changed += 1
-            if (on_file, (m_path, m_tags) if marker else None) != (new, (k, new) if new else None):
-                writes.append((path, k, new, finder))
+            if ((m_path, m_tags) if marker else None) != ((k, new) if new else None):
+                writes.append((path, k, new))
+            if ours_in_finder(finder, marker):
+                try:
+                    xattr_remove(path, FINDER_TAGS)
+                except OSError:
+                    pass
         for t in dirty.values():
             try:
                 t.save()
@@ -639,9 +633,9 @@ class TagStore:
                 pass
         if dirty:
             self.version += 1
-        for path, key, tags, finder in writes:
+        for path, key, tags in writes:
             try:
-                write_carried(path, key, tags, finder)
+                write_carried(path, key, tags)
             except OSError:
                 pass
         return changed

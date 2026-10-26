@@ -6,7 +6,7 @@ doesn't touch. Reads are batched (one process per few hundred files, JSON out); 
 `write()` which builds a single command per file, or one command for a whole batch when every file
 gets the same values (the bulk case), with `-overwrite_original_in_place` so no `_original` copies
 litter the drive — "in place" so the file keeps its extended attributes, among them the Photo Browser
-tags it carries (Finder tags + marker, see shared_tags.py) and where it was downloaded from.
+tags it carries (its tag marker, see shared_tags.py) and where it was downloaded from.
 
 The `Field` table below is the app's vocabulary: each editable field maps to the ExifTool tag(s)
 written and the flat tag names read back. Captions use the MWG (Metadata Working Group) composite

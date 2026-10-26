@@ -179,7 +179,9 @@ history. On generate they save `RunSettings`, call `resolveGeneration`, then
   a Create job killed mid-generation was simply lost).
 - **Recovery — `resumePendingAIEdits()`** re-polls each record and saves the images straight into
   the "AI" folder (there's no review session to hand them to after a relaunch), then posts the
-  ready alert (tap → that folder). It runs at **launch, on every return to the foreground, on a
+  ready alert (tap → that folder). Like a kept result, each saved image is marked AI-generated (model
+  + prompt) and an edit's images get the original photo's tags (Oct 26 — before, recovered images had
+  neither). It runs at **launch, on every return to the foreground, on a
   notification tap, and once ~1 min after an in-process failure** — the old launch-only pass left
   a job stranded until the next cold start whenever the app was merely suspended. It skips jobs
   in `activeAIJobIDs` (live in this process) and `recoveringAIJobIDs` (a pass already running),
@@ -1047,31 +1049,42 @@ tag), list rows chips, the status line a single selection's tags; Move to Trash 
 
 **Sticky tags — they travel inside the file (Oct 26, 2026).** Path-keyed tables lose a file's tags
 when something else moves or copies it (Finder, the Files app, `cp`). So each file also carries its tags
-in two extended attributes (never on exFAT, where macOS writes `._` files): **Finder's own tags**
-(`com.apple.metadata:_kMDItemUserTags`, a binary plist of `"Name\nColour"`) — chosen over a private
-attribute because every Apple copy/move/AirDrop keeps it and Finder/Spotlight/the Files app show it —
-and a **marker** (`com.photobrowser.tags`, JSON `{"path": drive-relative key (absolute for the Mac's own
-disk), "tags": [...]}`) recording where the file was and what it carried when last written. The marker
-is what tells the cases apart (`SharedTags.reconcile` / `TagStore.apply_carried`, kept identical —
-`test_reconcile_parity.py` checks them against each other): marker at another path → the file arrived
-from elsewhere: adopt its tags (union with any here), and if nothing is at the old path any more it was
-a move, so drop the old entry; marker here but Finder tags differ → edited in Finder: three-way merge
-(store, marker, Finder); Finder tags and no marker → tags put on in Finder: adopt (Finder's own tags
-*are* Photo Browser tags now — existing coloured Finder tags show up in the app); store tagged, file bare
-→ write them. Then the file is rewritten to carry exactly the result (Finder colours kept for tags that
-stay). **Who writes:** Safe Finder on every edit (`TagStore._edit`) and when a folder is opened
+in a **private extended attribute**, `com.photobrowser.tags` (JSON `{"path": drive-relative key (absolute
+for the Mac's own disk), "tags": [...]}`: where the file was and what it carried when last written) —
+never on exFAT, where macOS writes `._` files. Finder, the Files app, cp/mv and ditto keep any extended
+attribute through a copy or move; iCloud Drive and some cloud folders keep only a whitelist (Finder tags
+yes, a private one no) — accepted. **Why private, not Finder's tags:** the first cut wrote Finder's own
+`_kMDItemUserTags` too (Finder/Spotlight visibility, Finder edits flowing in), but that made every
+existing Finder tag ("Red", "Work") a Photo Browser tag and put Photo Browser's tags all over Finder; the
+user chose a private field the same day. Finder's tags are now never read except to take off ones that
+build wrote (`ours_in_finder` / `isOursInFinder`: exactly the marker's tags, none coloured), and kept
+across in-place rewrites like any other attribute. The marker is what tells the cases apart
+(`SharedTags.reconcile` / `TagStore.apply_carried`, kept identical — `test_reconcile_parity.py` checks them
+against each other): marker at another path → the file arrived from elsewhere: adopt its tags (union with
+any here), and if nothing is at the old path any more it was a move, so drop the old entry; marker for this
+very path on a file the store has nothing for → it came back (Put Back from a Trash, which dropped its
+tags): restore them — only for an *arriving* file (`arrived:`), never while a sync writes out the store's own
+removals; otherwise the store is the record and the marker follows it. **Who writes:** Safe Finder on
+every edit (`TagStore._edit`, so a removal clears the marker at once) and when a folder is opened
 (`check_carried` reads on a thread, applies on the UI thread); the app at each sync for every key whose
-tags changed since the base — all of them the first time (`Base.carried`) — and for files new to the
-index after a walk or patch (`adoptCarriedTags`, diffing old vs new index, only under the patched
-folders for a patch; skipped with no earlier index, so a first-ever walk never reads the whole drive).
-In-place rewrites keep the attributes (`carriedAttributes`/`restoreAttributes` around `replaceItemAt` in
+tags changed since the base — all of them once (`Base.markers`, nil in bases from the Finder-tag build, so
+that pass also takes those Finder tags off) — and for files new to the index after a walk or patch
+(`adoptCarriedTags`, diffing old vs new index, only under the patched folders for a patch; skipped with
+no earlier index, so a first-ever walk never reads the whole drive). In-place rewrites keep the attributes (`carriedAttributes`/`restoreAttributes` around `replaceItemAt` in
 `MediaEditing.replaceInPlace`, the capture-date/location writers, `PhotoEditorIO.promote`); the Mac
 companion's ExifTool now writes with `-overwrite_original_in_place`, which keeps them too. Python has
 no `os.getxattr` on macOS — `shared_tags` calls libc through ctypes (Linux tests use `user.*`).
 
-**Copies carry tags.** The app's copies (Copy to Folder, the viewer's copy, Clean Up's copy) now get
-the original's tags (`Library.copyTags`; a copied folder's files theirs) — the one label that goes with
-a copy. Safe Finder's transfers already did (`carry`). **AirDrop:** `airdrop_to_iphone._add_tags` puts
+**Copies and edits carry tags.** The app's copies (Copy to Folder, the viewer's copy, Clean Up's copy)
+now get the original's tags (`Library.copyTags`; a copied folder's files theirs) — the one label that goes
+with a copy. So do new photos made from one: the photo editor's **Save as New** (`PhotoEditorView.performSave`;
+Overwrite keeps the file, or re-keys it with `itemMoved` on a container change), **Edit / Extend with AI**
+results kept from the review (`AIResultsView.keep`, `.edit(original:)`) or saved later by recovery
+(`resumePendingAIEdits`, which now also marks them AI-generated with model and prompt — it didn't, so
+recovered images had no AI badge), and images saved from the **Astria.ai Browser** whose prompt was an
+edit started here (`astriaPromptSources`: prompt id → original path, noted when Astria accepts the prompt
+in `pendingRecorder`, remapped with moves; prompts from Astria's website, Create, or before Oct 26 have
+no source). Crop/rotate/resize, upscales and metadata writes replace the file in place, so its tags stay. Safe Finder's transfers already did (`carry`). **AirDrop:** `airdrop_to_iphone._add_tags` puts
 `<top>/.photobrowser-tags.json` (the tables' tags + Finder tags, keyed inside the top folder) in the
 `.pbgallery`; `ReceivedArchivesView` → `Library.applyArchiveTags` applies and removes it (`Archiver.peek`
 doesn't count it).
