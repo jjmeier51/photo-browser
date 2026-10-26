@@ -14,8 +14,10 @@ Send a whole star folder and it lands as `<destination>/<Star>/<galleries…>`.
 Why an archive: AirDrop can't hand a folder to an iOS app, and a plain `.zip` is claimed by Files and
 every other zip-capable app as well, so the phone would ask which one each time. Photos and videos are
 stored uncompressed (they're already compressed; AirDrop's speed is the limit anyway) and only the
-small sidecars are deflated. File dates are kept. Skipped: `.DS_Store`, AppleDouble `._*` files,
-`__MACOSX`, and `.part` downloads still in progress.
+small sidecars are deflated. File dates are kept, and so are the files' Photo Browser tags: a hidden
+`.photobrowser-tags.json` in the archive lists them (Safe Finder's and the Finder tags each file
+carries — see shared_tags.py), and the app puts them back on the unpacked files. Skipped: `.DS_Store`,
+AppleDouble `._*` files, `__MACOSX`, and `.part` downloads still in progress.
 
 How the AirDrop window opens: macOS has no command for it, so a tiny Swift program
 (`airdrop_helper.swift`, next to this file) is built once with `swiftc` (Xcode or its Command Line
@@ -36,6 +38,7 @@ Options:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -53,6 +56,7 @@ STORED_EXT = {
 }
 SKIP_NAMES = {".DS_Store", "__MACOSX", "Thumbs.db"}
 SKIP_SUFFIXES = (".part", ".crdownload", ".download")
+TAGS_SIDECAR = ".photobrowser-tags.json"     # the files' Photo Browser tags; the app puts them back on unpacking
 
 
 def default_out_dir() -> Path:
@@ -80,6 +84,22 @@ def _add(zf: zipfile.ZipFile, path: Path, arcname: str) -> int:
     return path.stat().st_size
 
 
+def _add_tags(zf: zipfile.ZipFile, top: str, added: list[tuple[Path, str]]) -> None:
+    """The Photo Browser tags of what went in — Safe Finder's and the Finder tags each file carries —
+    as `<top>/.photobrowser-tags.json` ({"files": {path inside <top>: [tag, …]}}), which the app applies to
+    the unpacked files and then removes. Tags never stop an AirDrop: any trouble just leaves them out."""
+    try:
+        import shared_tags
+        found = shared_tags.tags_for_archive(str(p) for p, _ in added)
+    except Exception:  # noqa: BLE001
+        return
+    where = {str(p): rel for p, rel in added}
+    files = {where[p]: tags for p, tags in found.items()}
+    if files:
+        doc = {"format": shared_tags.FORMAT, "version": shared_tags.VERSION, "files": files}
+        zf.writestr(f"{top}/{TAGS_SIDECAR}", json.dumps(doc, ensure_ascii=False))
+
+
 def archive_folder(folder: Path, out_dir: Path, name: str | None = None, only: set[str] | None = None,
                    progress=None) -> Path:
     """Zip `folder` into `out_dir/<name>.pbgallery` with the folder itself at the archive's top level
@@ -95,6 +115,7 @@ def archive_folder(folder: Path, out_dir: Path, name: str | None = None, only: s
     tmp = dest.with_name(dest.name + ".part")
     total = 0
     count = 0
+    added: list[tuple[Path, str]] = []
     with zipfile.ZipFile(tmp, "w", allowZip64=True, strict_timestamps=False) as zf:
         for root, dirs, files in os.walk(folder):
             rootp = Path(root)
@@ -106,9 +127,12 @@ def archive_folder(folder: Path, out_dir: Path, name: str | None = None, only: s
                     continue
                 rel = p.relative_to(folder).as_posix()
                 total += _add(zf, p, f"{top}/{rel}")
+                added.append((p, rel))
                 count += 1
                 if progress:
                     progress(count, total)
+        if count:
+            _add_tags(zf, top, added)
     if count == 0:
         tmp.unlink(missing_ok=True)
         raise ValueError(f"{folder} has no files to send")
@@ -143,11 +167,13 @@ def _archive_mixed(items: list[Path], out_dir: Path, top: str, progress=None) ->
     dest = out_dir / archive_name(top)
     tmp = dest.with_name(dest.name + ".part")
     total = count = 0
+    added: list[tuple[Path, str]] = []
     with zipfile.ZipFile(tmp, "w", allowZip64=True, strict_timestamps=False) as zf:
         for item in items:
             if item.is_file():
                 if wanted(item):
                     total += _add(zf, item, f"{top}/{item.name}")
+                    added.append((item, item.name))
                     count += 1
                 continue
             for root, dirs, files in os.walk(item):
@@ -159,9 +185,12 @@ def _archive_mixed(items: list[Path], out_dir: Path, top: str, progress=None) ->
                         continue
                     rel = p.relative_to(item.parent).as_posix()
                     total += _add(zf, p, f"{top}/{rel}")
+                    added.append((p, rel))
                     count += 1
                     if progress:
                         progress(count, total)
+        if count:
+            _add_tags(zf, top, added)
     if count == 0:
         tmp.unlink(missing_ok=True)
         raise ValueError("nothing to send")

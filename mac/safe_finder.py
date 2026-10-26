@@ -599,6 +599,44 @@ def expand_files(paths: list[str], then) -> None:
     threading.Thread(target=work, name="tag-expand", daemon=True).start()
 
 
+class _Carried(QObject):
+    done = Signal(object)           # what the folder's files carry (shared_tags.TagStore.read_folder)
+
+
+_CARRYING: set[_Carried] = set()
+_CARRIED_AT: dict[str, float] = {}
+
+
+def check_carried(folder: str) -> None:
+    """A folder was opened: files moved or copied into it by Finder (or the Files app, cp, AirDrop…)
+    bring their tags in the file itself, and tags changed in Finder show up — read on a thread, squared
+    with the tables here (see shared_tags.py, "Tags that travel with the file")."""
+    now = time.monotonic()
+    if now - _CARRIED_AT.get(folder, 0.0) < 3:
+        return
+    _CARRIED_AT[folder] = now
+    store = tag_store()
+    sig = _Carried()
+    _CARRYING.add(sig)
+
+    def finish(found: list) -> None:
+        _CARRYING.discard(sig)
+        if found and store.apply_carried(found):
+            tags_changed()
+
+    sig.done.connect(finish, Qt.ConnectionType.QueuedConnection)
+
+    def work() -> None:
+        try:
+            with os.scandir(folder) as it:
+                files = [e.path for e in it if e.is_file(follow_symlinks=False)]
+        except OSError:
+            files = []
+        sig.done.emit(store.read_folder(files))
+
+    threading.Thread(target=work, name="tags-carried", daemon=True).start()
+
+
 def describe_files(files: list[str], folders: int) -> str:
     """“IMG_4810.JPG” · 12 files · 38 files in 2 folders."""
     if len(files) == 1 and not folders:
@@ -2033,6 +2071,7 @@ class Pane(QWidget):
         # Folder sizes arrive from the worker thread; the listing asks for its folders' as it loads.
         sizer().ready.connect(self._size_ready, Qt.ConnectionType.QueuedConnection)
         self.fs.directoryLoaded.connect(lambda _p: (self._request_sizes(), self._prefetch_thumbs()))
+        self.fs.directoryLoaded.connect(lambda p: check_carried(p) if p == self.location else None)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)

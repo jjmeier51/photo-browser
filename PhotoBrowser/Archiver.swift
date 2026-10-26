@@ -157,7 +157,9 @@ enum Archiver {
         let scoped = archive.startAccessingSecurityScopedResource()
         defer { if scoped { archive.stopAccessingSecurityScopedResource() } }
         let data = try Data(contentsOf: archive, options: .mappedIfSafe)
-        let entries = try centralDirectory(data).filter { !isJunk($0.name) && !$0.name.hasSuffix("/") }
+        let entries = try centralDirectory(data).filter {
+            !isJunk($0.name) && !$0.name.hasSuffix("/") && !$0.name.hasSuffix("/" + SharedTags.archiveSidecar)
+        }
         var photos = 0, videos = 0, bytes: Int64 = 0
         for e in entries {
             bytes += Int64(e.uncompSize)

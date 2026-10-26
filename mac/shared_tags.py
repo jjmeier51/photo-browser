@@ -28,16 +28,37 @@ never in it.
 
 Writing: on APFS through a temp file and a rename (atomic); on the exFAT SSD in place — the Mac tools
 never rename or fsync on exFAT (CLAUDE.md #12). A torn file reads as damaged, is started afresh (a new
-`id`) on the next change, and the app's merge fills it back in.
+`id`) on the next change, and the app's merge fills it back in. Before the first change of a day the
+previous file is kept in ~/Library/Application Support/Safe Finder/Tag Backups/ (the last 14).
+
+Tags that travel with the file
+  The tables are keyed by path, so on their own a file moved or copied by anything else — Finder, the
+  Files app, `cp`, AirDrop between Macs — would leave its tags behind. So each file also *carries* its
+  tags, in two extended attributes (never on exFAT, where macOS would scatter `._` files):
+  - Finder's own tags (`com.apple.metadata:_kMDItemUserTags`) — the tags show in Finder and Spotlight,
+    and every Apple tool keeps them when it copies or moves the file;
+  - a marker (`com.photobrowser.tags`, JSON {"path": key, "tags": [...]}) — where the file was, and what
+    it carried, when Safe Finder or the app last wrote it.
+  Every change writes both. When a folder is looked at (`read_carried` + `apply_carried`), each file is
+  checked against the tables: a marker naming another path means the file arrived from elsewhere — its
+  tags are adopted here, and if the old path is gone (a move, not a copy) its old entry is dropped; Finder
+  tags that differ from the marker mean they were edited in Finder — merged three ways like the app's sync;
+  Finder tags with no marker (put on in Finder) are adopted; a tagged file with nothing on it gets them
+  written. The app does the same for files that turn up in its index (`SharedTags.adoptCarried`).
 
 No Qt here: Safe Finder drives it from the UI thread; it's also usable from scripts.
 """
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import json
 import os
+import plistlib
 import re
+import shutil
+import sys
 import time
 import unicodedata
 import uuid
@@ -53,6 +74,9 @@ FOLDER = ".Photo Browser Metadata"
 FILE_NAME = "shared-tags.json"
 SIDECARS = {"gallery.json", "pornstar.json", "search.json"}     # gallery sidecars the app hides — never tagged
 _RECHECK = 2.0                                                    # seconds between "did the file change?" checks
+FINDER_TAGS = "com.apple.metadata:_kMDItemUserTags"              # Finder's tags: a binary plist of "Name\nColour"
+MARKER = "com.photobrowser.tags"                                  # {"path": key when written, "tags": [...]}
+BACKUPS_KEPT = 14
 
 
 def normalized(raw: str) -> str:
@@ -103,6 +127,114 @@ def taggable(path: str) -> bool:
 
 def _nfc(s: str) -> str:
     return unicodedata.normalize("NFC", s)
+
+
+def merge3(local: list[str], base: list[str], remote: list[str]) -> list[str]:
+    """One file's tags, three ways (the app's `SharedTags.merge`): a side that left the base alone takes
+    the other's; when both changed, what either removed goes and what either added stays."""
+    if local == base:
+        return remote
+    if remote == base:
+        return local
+    in_base = {fold(x) for x in base}
+    removed = (in_base - {fold(x) for x in local}) | (in_base - {fold(x) for x in remote})
+    return clean([x for x in local + remote if fold(x) not in removed])
+
+
+# ---------------------------------------------------------------------------- extended attributes
+# macOS has no os.getxattr — libc through ctypes (path, name, value, size, position, options). On Linux
+# (the tests) the user namespace stands in.
+
+if sys.platform == "darwin":
+    _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    _libc.getxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t,
+                               ctypes.c_uint32, ctypes.c_int]
+    _libc.getxattr.restype = ctypes.c_ssize_t
+    _libc.setxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t,
+                               ctypes.c_uint32, ctypes.c_int]
+    _libc.setxattr.restype = ctypes.c_int
+    _libc.removexattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+    _libc.removexattr.restype = ctypes.c_int
+    _NOFOLLOW, _ENOATTR = 0x0001, 93
+
+    def xattr_get(path: str, name: str) -> bytes | None:
+        p, n = os.fsencode(path), name.encode()
+        size = _libc.getxattr(p, n, None, 0, 0, _NOFOLLOW)
+        if size < 0:
+            return None
+        buf = ctypes.create_string_buffer(max(size, 1))
+        size = _libc.getxattr(p, n, buf, size, 0, _NOFOLLOW)
+        return buf.raw[:size] if size >= 0 else None
+
+    def xattr_set(path: str, name: str, value: bytes) -> None:
+        if _libc.setxattr(os.fsencode(path), name.encode(), value, len(value), 0, _NOFOLLOW) != 0:
+            e = ctypes.get_errno()
+            raise OSError(e, os.strerror(e), path)
+
+    def xattr_remove(path: str, name: str) -> None:
+        if _libc.removexattr(os.fsencode(path), name.encode(), _NOFOLLOW) != 0:
+            e = ctypes.get_errno()
+            if e != _ENOATTR:
+                raise OSError(e, os.strerror(e), path)
+else:
+    def xattr_get(path: str, name: str) -> bytes | None:
+        try:
+            return os.getxattr(path, "user." + name, follow_symlinks=False)
+        except OSError:
+            return None
+
+    def xattr_set(path: str, name: str, value: bytes) -> None:
+        os.setxattr(path, "user." + name, value, follow_symlinks=False)
+
+    def xattr_remove(path: str, name: str) -> None:
+        try:
+            os.removexattr(path, "user." + name, follow_symlinks=False)
+        except OSError as e:
+            if e.errno not in (61, 95):                   # ENODATA, EOPNOTSUPP
+                raise
+
+
+def finder_names(raw: list[str]) -> list[str]:
+    """Finder's "Name\nColour" entries → the names."""
+    return clean(entry.split("\n", 1)[0] for entry in raw if isinstance(entry, str))
+
+
+def read_carried(path: str) -> tuple[list[str] | None, dict | None]:
+    """The tags a file carries: Finder's entries as stored ("Name\nColour"; None when it has none) and the
+    marker (None when absent or unreadable). Blocking — call off the UI thread for many files."""
+    raw = xattr_get(path, FINDER_TAGS)
+    finder = None
+    if raw:
+        try:
+            value = plistlib.loads(raw)
+            finder = [x for x in value if isinstance(x, str)] if isinstance(value, list) else None
+        except Exception:  # noqa: BLE001 — a malformed attribute counts as none
+            finder = None
+    marker = None
+    data = xattr_get(path, MARKER)
+    if data:
+        try:
+            m = json.loads(data.decode("utf-8"))
+            if isinstance(m, dict) and isinstance(m.get("path"), str) and isinstance(m.get("tags"), list):
+                marker = m
+        except (ValueError, UnicodeDecodeError):
+            marker = None
+    return finder, marker
+
+
+def write_carried(path: str, key: str, tags: list[str], finder_before: list[str] | None = None) -> None:
+    """Puts `tags` on the file (Finder's tags + the marker), or takes both off when there are none. A tag
+    that was already there keeps the colour Finder gave it; new ones get none. Raises OSError."""
+    if not tags:
+        xattr_remove(path, FINDER_TAGS)
+        xattr_remove(path, MARKER)
+        return
+    if finder_before is None:
+        finder_before, _ = read_carried(path)
+    colours = {fold(e.split("\n", 1)[0].strip()): (e.split("\n", 1) + ["0"])[1] for e in finder_before or []}
+    entries = [f"{t}\n{colours.get(fold(t), '0')}" for t in tags]
+    xattr_set(path, FINDER_TAGS, plistlib.dumps(entries, fmt=plistlib.FMT_BINARY))
+    xattr_set(path, MARKER, json.dumps({"path": key, "tags": tags}, ensure_ascii=False).encode("utf-8"))
 
 
 class TagFile:
@@ -182,8 +314,28 @@ class TagFile:
         self.files, self.id, self.damaged = files, str(doc.get("id") or ""), False
 
     # -- writing
+    def back_up(self) -> None:
+        """Before the first change of a day, keep the current file in Safe Finder's Tag Backups (the last
+        BACKUPS_KEPT per table) — a copy off the drive of what the app and Safe Finder agreed on."""
+        if not self.file.is_file():
+            return
+        name = "This Mac" if self.base is None else (self.base.name or "drive")
+        folder = backups_dir() / name
+        today = time.strftime("%Y-%m-%d")
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if any(n.startswith(f"tags {today}") for n in os.listdir(folder)):
+                return
+            shutil.copy2(self.file, folder / f"tags {today} {time.strftime('%H%M%S')}.json")
+            old = sorted(n for n in os.listdir(folder) if n.startswith("tags ") and n.endswith(".json"))
+            for n in old[:-BACKUPS_KEPT]:
+                os.remove(folder / n)
+        except OSError:
+            pass                                       # a backup is a nicety; never stop a change for it
+
     def save(self) -> None:
         """Write the whole table back. Raises OSError (drive gone, read-only, full)."""
+        self.back_up()
         if not self.id:
             self.id = str(uuid.uuid4()).upper()
         doc = {"format": FORMAT, "version": VERSION, "id": self.id, "updated": round(time.time(), 3),
@@ -211,8 +363,43 @@ class TagFile:
         self.damaged = False
 
 
+def default_store() -> "TagStore":
+    """A store for scripts without Safe Finder's window (the AirDrop packer): drives are what's mounted
+    under /Volumes (or SAFE_FINDER_VOLUMES)."""
+    volumes_dir = Path(os.environ.get("SAFE_FINDER_VOLUMES", "/Volumes"))
+
+    def volumes() -> list[Path]:
+        try:
+            return [volumes_dir / n for n in sorted(os.listdir(volumes_dir))
+                    if not n.startswith(".") and os.path.realpath(volumes_dir / n) != "/"]
+        except OSError:
+            return []
+
+    def is_drive(path: str) -> bool:
+        root = str(engine.volume_root(Path(path)))
+        return root != "/" and root.startswith(str(volumes_dir) + os.sep)
+    return TagStore(is_drive=is_drive, volumes=volumes)
+
+
+def tags_for_archive(paths: Iterable[str], store: "TagStore | None" = None) -> dict[str, list[str]]:
+    """The tags of files about to leave in an archive (AirDrop): the tables' and the Finder tags each file
+    carries, together. Only files that have any."""
+    store = store or default_store()
+    out: dict[str, list[str]] = {}
+    for p in paths:
+        finder = read_carried(p)[0] if store.carries(p) else None
+        tags = clean(store.tags(p) + finder_names(finder or []))
+        if tags:
+            out[p] = tags
+    return out
+
+
 def mac_store_file() -> Path:
     return Path.home() / "Library" / "Application Support" / "Safe Finder" / "tags.json"
+
+
+def backups_dir() -> Path:
+    return Path.home() / "Library" / "Application Support" / "Safe Finder" / "Tag Backups"
 
 
 class TagStore:
@@ -314,9 +501,22 @@ class TagStore:
         return [t.file for t in self.tables() if t.damaged]
 
     # -- changing (each saves the tables it touched; OSError if a drive can't be written)
+    def carries(self, path: str) -> bool:
+        """Whether files here carry their tags themselves (anywhere but exFAT/FAT)."""
+        return not spare_folders.on_exfat(path)
+
+    def _carry_out(self, writes: list[tuple[str, str, list[str]]]) -> None:
+        for path, key, tags in writes:
+            if self.carries(path):
+                try:
+                    write_carried(path, key, tags)
+                except OSError:
+                    pass                               # best effort: the tables still have them
+
     def _edit(self, paths: Iterable[str], change: Callable[[list[str]], list[str]]) -> int:
         touched: dict[int, TagFile] = {}
         dirty: dict[int, TagFile] = {}
+        writes: list[tuple[str, str, list[str]]] = []
         changed = 0
         for p in paths:
             t = self.table_for(p)
@@ -335,11 +535,13 @@ class TagStore:
             else:
                 t.files.pop(k, None)
             dirty[id(t)] = t
+            writes.append((p, k, after))
             changed += 1
         for t in dirty.values():
             t.save()
         if dirty:
             self.version += 1
+        self._carry_out(writes)
         return changed
 
     def add(self, paths: Iterable[str], tags: list[str]) -> int:
@@ -382,6 +584,67 @@ class TagStore:
             if tags:
                 by_tags.setdefault(tuple(tags), []).append(dst)
         return sum(self.add(dsts, list(tags)) for tags, dsts in by_tags.items())
+
+    def read_folder(self, paths: Iterable[str]) -> list[tuple[str, list[str] | None, dict | None]]:
+        """What each file carries — for `apply_carried`. Only reads; safe on a worker thread. Files on
+        exFAT, hidden ones and sidecars are skipped."""
+        out = []
+        for p in paths:
+            if taggable(p) and os.path.isfile(p) and self.carries(p):
+                finder, marker = read_carried(p)
+                out.append((p, finder, marker))
+        return out
+
+    def apply_carried(self, found: list[tuple[str, list[str] | None, dict | None]]) -> int:
+        """Squares what files carry with the tables (see the module doc) — on the UI thread, with what
+        `read_folder` read. Returns how many files' tags changed in the tables."""
+        dirty: dict[int, TagFile] = {}
+        writes: list[tuple[str, str, list[str], list[str] | None]] = []
+        changed = 0
+        for path, finder, marker in found:
+            t = self.table_for(path)
+            k = t.key(path)
+            if k is None:
+                continue
+            if id(t) not in dirty:
+                t.refresh()
+            have = t.files.get(k, [])
+            on_file = finder_names(finder or [])
+            m_path = _nfc(marker["path"]) if marker else None
+            m_tags = clean(marker["tags"]) if marker else []
+            if marker is None or m_path != k:
+                new = clean(have + on_file)                # put on in Finder, or arrived from elsewhere
+                if marker is not None:
+                    old = self.mac if m_path.startswith("/") else t
+                    if m_path in old.files and not os.path.lexists(old.path(m_path)):
+                        old.files.pop(m_path, None)        # moved, not copied: its old place is gone
+                        dirty[id(old)] = old
+            elif on_file != m_tags:
+                new = merge3(have, m_tags, on_file)        # edited in Finder since it was last written
+            else:
+                new = have
+            if new != have:
+                if new:
+                    t.files[k] = new
+                else:
+                    t.files.pop(k, None)
+                dirty[id(t)] = t
+                changed += 1
+            if (on_file, (m_path, m_tags) if marker else None) != (new, (k, new) if new else None):
+                writes.append((path, k, new, finder))
+        for t in dirty.values():
+            try:
+                t.save()
+            except OSError:
+                pass
+        if dirty:
+            self.version += 1
+        for path, key, tags, finder in writes:
+            try:
+                write_carried(path, key, tags, finder)
+            except OSError:
+                pass
+        return changed
 
     def forget(self, paths: Iterable[str]) -> int:
         """Items that are gone (to the Trash, or moved away): their tags — and, for a folder, the tags of

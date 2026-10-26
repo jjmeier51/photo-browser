@@ -4,8 +4,9 @@ Why ExifTool: it is the only tool that reads *and writes* EXIF/IPTC/XMP consiste
 HEIC, PNG, RAW and QuickTime/MP4 video, and it does it in place while preserving everything it
 doesn't touch. Reads are batched (one process per few hundred files, JSON out); writes go through
 `write()` which builds a single command per file, or one command for a whole batch when every file
-gets the same values (the bulk case), with `-overwrite_original` so no `_original` copies litter
-the drive.
+gets the same values (the bulk case), with `-overwrite_original_in_place` so no `_original` copies
+litter the drive — "in place" so the file keeps its extended attributes, among them the Photo Browser
+tags it carries (Finder tags + marker, see shared_tags.py) and where it was downloaded from.
 
 The `Field` table below is the app's vocabulary: each editable field maps to the ExifTool tag(s)
 written and the flat tag names read back. Captions use the MWG (Metadata Working Group) composite
@@ -131,7 +132,7 @@ class ExifTool:
         paths = [p for p in paths if p]
         if not self.path or not paths or not tags:
             return 0, ["ExifTool not available or nothing to write."]
-        cmd = [self.path, "-overwrite_original", "-m", "-q", "-use", "MWG", "-charset", "filename=utf8",
+        cmd = [self.path, "-overwrite_original_in_place", "-m", "-q", "-use", "MWG", "-charset", "filename=utf8",
                "-api", "largefilesupport=1", "-sep", ", "]
         if preserve_file_date:
             cmd.append("-P")

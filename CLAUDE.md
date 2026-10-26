@@ -89,7 +89,16 @@ actions the app makes no network calls.
   whenever it opens or gets the drive back, returns to the foreground, or a tag changes — base kept
   by the file's id (`tagSyncBase`), so removals cross too and a lost file never wipes anything.
   Every tag change must reach `noteTagsEdited()` (the tag setters and `persistAllPathKeyed` call
-  it). (`SharedTags.swift`, `docs/feature-notes.md` §6h)
+  it). **Tags also travel inside each file** (not on exFAT): Finder's own tag attribute
+  (`com.apple.metadata:_kMDItemUserTags`, so Finder/Spotlight show them and every Apple copy/move
+  keeps them) plus a marker (`com.photobrowser.tags`: path + tags when written). A file new to the
+  index (moved/copied in by Finder or Files) is squared with the store (`adoptCarriedTags` →
+  `SharedTags.reconcile`): its tags are adopted, a move drops the old path's entry, a Finder edit is
+  merged. **Anything that rewrites a file in place must keep these attributes** —
+  `SharedTags.carriedAttributes` before the replace, `restoreAttributes` after (`replaceInPlace`, the
+  metadata writers and `PhotoEditorIO.promote` do). AirDropped `.pbgallery` archives carry a
+  `.photobrowser-tags.json` sidecar (`applyArchiveTags`). Metadata backups sync with the drive first.
+  (`SharedTags.swift`, `docs/feature-notes.md` §6h)
 - **Editing** — crop/rotate saved **in place** over the original (no duplicate),
   preserving EXIF/creation metadata, under a best-effort background-task window;
   bulk **rotate** (180°/left/right, mainly to fix upside-down videos) on a
@@ -111,7 +120,8 @@ actions the app makes no network calls.
   Drive…" re-attaches labels. (`DriveTransferView`, `FileActions`)
 - **Copy** — "Copy to Folder…" (single item via long-press, or bulk via the
   selection bar's More menu) copies into a picked folder; copies are fresh files
-  and intentionally carry *no* labels (the originals keep theirs). (`FileActions.copy`)
+  and carry *no* labels (the originals keep theirs) — except tags, which go with the copy
+  (`Library.copyTags`). (`FileActions.copy`)
 - **Pure File Transfer mode** — a switch on the pre-drive screen (and Settings) that
   turns the app into a plain phone→SSD conduit: thumbnails become memory-only (no
   disk cache), the downloaders / AI / pixel editors are hidden, background jobs are

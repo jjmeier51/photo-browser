@@ -363,11 +363,11 @@ struct FrameCleanupView: View {
         Task { try? await Task.sleep(nanoseconds: 1_200_000_000); if moveToast == text { moveToast = nil } }
     }
 
-    /// Copies the current item to another folder (fresh file, no labels); the item
-    /// stays in the queue.
+    /// Copies the current item to another folder (a fresh file carrying its tags, no other labels);
+    /// the item stays in the queue.
     private func copyCurrent(to dest: URL) {
         guard let item = current else { return }
-        _ = FileActions.copy([item.url], to: dest)
+        library.copyTags(FileActions.copy([item.url], to: dest))
         UIImpactFeedbackGenerator(style: .soft).impactOccurred()
         library.contentDidChange()
     }

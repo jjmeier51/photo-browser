@@ -3919,7 +3919,7 @@ struct FolderView: View {
 
     /// Completes a copy (off the main thread, with a progress bar). `keepConflicts`
     /// copy under a new name; conflicting items the user deselected are skipped as
-    /// duplicates. Copies don't carry labels (the originals keep theirs).
+    /// duplicates. Copies carry the originals' tags; other labels stay with the originals.
     private func finishCopy(to dest: URL, keepConflicts: Set<URL>) {
         moveConflict = nil
         let allURLs = selectedEntries().map(\.url)
@@ -3934,6 +3934,7 @@ struct FolderView: View {
                 Task { @MainActor in editProgress = p }
             }
             library.itemsMoved(outcome.relocated)               // destination files set aside as duplicates keep their labels
+            library.copyTags(outcome.copied)                    // tags travel with the copies
             if !outcome.copied.isEmpty { library.setLastTransferDestination(dest) }
             editProcessing = false; bg.end()
             var msg = "Copied \(outcome.copied.count) item(s)."

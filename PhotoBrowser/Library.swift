@@ -3795,6 +3795,7 @@ final class Library {
             indexBuildInFlight = false
             guard rootURL == root else { return }
             if fullDue { UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "photoBrowser.lastFullIndexWalk") }
+            adoptCarriedTags(before: reusable, after: all)   // files moved or copied in elsewhere bring their tags
             replaceIndex(all)
             self.indexing = false
             Self.saveIndexSnapshot(all, for: root)
@@ -3868,6 +3869,7 @@ final class Library {
             scheduleIndexPatch(after: 200_000_000)
             return
         }
+        adoptCarriedTags(before: snapshot, after: patched, within: rewalk ? nil : folders)
         replaceIndex(patched)
         scheduleIndexSnapshotSave(for: root)
     }

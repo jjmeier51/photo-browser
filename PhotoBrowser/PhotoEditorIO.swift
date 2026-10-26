@@ -276,7 +276,9 @@ enum PhotoEditorIO {
         do {
             DriveWriter.fullSync(tmp)
             if FileManager.default.fileExists(atPath: destURL.path) {
+                let tags = SharedTags.carriedAttributes(of: destURL)   // the tags the file carries stay with it
                 _ = try FileManager.default.replaceItemAt(destURL, withItemAt: tmp)
+                SharedTags.restoreAttributes(tags, to: destURL)
             } else {
                 try FileManager.default.moveItem(at: tmp, to: destURL)
             }

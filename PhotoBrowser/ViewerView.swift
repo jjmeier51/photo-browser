@@ -209,6 +209,7 @@ struct ViewerView: View {
         Task {
             let outcome = await FileActions.copyItems([src], to: dest, skipCollisions: false) { _ in }
             library.itemsMoved(outcome.relocated)
+            library.copyTags(outcome.copied)
             if !outcome.copied.isEmpty { library.setLastTransferDestination(dest) }
             library.contentDidChange(under: dest)   // a copy into the visible folder should appear
             note(outcome.copied.isEmpty ? "Couldn’t copy" : "Copied")

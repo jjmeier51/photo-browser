@@ -72,8 +72,12 @@ enum FileActions {
         guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL, type, 1, nil) else { return false }
         CGImageDestinationAddImageFromSource(dest, src, 0, props as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { try? FileManager.default.removeItem(at: tmp); return false }
-        do { _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp); DriveWriter.fullSyncFileAndParent(url); return true }
-        catch { try? FileManager.default.removeItem(at: tmp); return false }
+        let tags = SharedTags.carriedAttributes(of: url)   // the tags the file carries stay with it
+        do {
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+            SharedTags.restoreAttributes(tags, to: url)
+            DriveWriter.fullSyncFileAndParent(url); return true
+        } catch { try? FileManager.default.removeItem(at: tmp); return false }
     }
 
     /// Rewrites a video's creation date / location via a pass-through export
@@ -121,8 +125,12 @@ enum FileActions {
             export.exportAsynchronously { cont.resume() }
         }
         guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return false }
-        do { _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp); DriveWriter.fullSyncFileAndParent(url); return true }
-        catch { try? FileManager.default.removeItem(at: tmp); return false }
+        let tags = SharedTags.carriedAttributes(of: url)   // the tags the file carries stay with it
+        do {
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+            SharedTags.restoreAttributes(tags, to: url)
+            DriveWriter.fullSyncFileAndParent(url); return true
+        } catch { try? FileManager.default.removeItem(at: tmp); return false }
     }
 
     /// Extracts the audio from one or more videos and writes it — concatenated in `videos`
@@ -473,8 +481,8 @@ enum FileActions {
 
     /// Copies items into `folder`, never colliding (appends " 1", " 2", … on clash,
     /// incl. copy-into-same-folder). Returns each successful (old, new) URL pair.
-    /// Copies are fresh files and intentionally carry no labels — the originals keep
-    /// theirs — so callers must NOT migrate metadata onto the copies.
+    /// Copies are fresh files and carry no labels — the originals keep theirs — so callers must NOT
+    /// migrate metadata onto the copies; the one exception is tags (`Library.copyTags`).
     @discardableResult
     static func copy(_ urls: [URL], to folder: URL) -> [(from: URL, to: URL)] {
         var copied: [(from: URL, to: URL)] = []

@@ -295,6 +295,7 @@ extension Library {
     /// dictionary work); the file copies run detached.
     func backUpMetadata(toDrive: Bool) async -> (entries: Int, container: URL?, drive: URL?) {
         guard let root = rootURL else { return (0, nil, nil) }
+        await syncDriveTags()          // so the backup has the tags added in Safe Finder too
         let snapshot = makeMetadataSnapshot(root: root)
         let covers = coverImagesDirectory, thumbs = itemThumbnailImagesDirectory, messages = textMessageArchivesDirectory
         return await Task.detached(priority: .userInitiated) { () -> (Int, URL?, URL?) in

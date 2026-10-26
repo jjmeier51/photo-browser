@@ -281,10 +281,20 @@ tag, renaming one, or moving a file carries across the same way.
 - **On the tiles:** a tagged file shows a small pill with a coloured dot per tag (each tag always gets
   the same colour) and the first tag's name; the list view shows them as chips beside the name, and
   the status line lists a selected file's tags.
-- **Moving and copying keeps them.** A copy on the SSD gets its original's tags; a moved original's
-  tags go with it. Tags on files still on the Mac are kept on the Mac (in
-  `~/Library/Application Support/Safe Finder/tags.json`) and travel when Safe Finder moves or copies
-  the files onto the drive. A file moved to the Trash loses its tags.
+- **Tags stick to the file — however it's moved or copied.** Each tagged file carries its tags
+  itself, as Finder tags (so you'll see them in Finder and can search them with Spotlight) plus a small
+  hidden note of where it was. Move or copy it with Safe Finder, Finder, the Files app, `cp`, or AirDrop it
+  to the iPhone with "AirDrop to iPhone…", and the tags go with it: Safe Finder picks them up when you
+  open the folder it landed in, the app when it next opens the drive. A move leaves nothing behind at the
+  old place; a copy keeps the original's tags too. Tags you change in Finder come back into Safe Finder
+  and the app the same way — and Finder tags you already had count as Photo Browser tags. (On an exFAT
+  drive files can't carry them without `._` clutter, so there they only travel through Safe Finder.)
+  Tags on files still on the Mac are also listed in `~/Library/Application Support/Safe Finder/tags.json`.
+  A file moved to the Trash loses its tags. Copies made in the iPhone app keep their tags too.
+- **Backed up.** The tags are part of the app's metadata backups (Drive Health ▸ Back Up Metadata Now,
+  and the automatic ones), which now sync with the drive first so tags added here are in them. Safe
+  Finder also keeps a copy of each drive's tag file (and the Mac's) from before the first change of each
+  day in `~/Library/Application Support/Safe Finder/Tag Backups/` — the last 14.
 
 **How they stay in step.** The tags of the files on a drive are saved *on the drive*, in the hidden
 `.Photo Browser Metadata/shared-tags.json` (the folder the app keeps its metadata backups in), by each
@@ -294,8 +304,9 @@ returns to the foreground — and writes its own changes back a couple of second
 on the way to the background). The merge is three-way: a tag added or removed on one side wins over
 one left alone, and additions from both sides are all kept. If the file is ever lost or damaged
 nothing is wiped — the app fills it back in. Drive Health ▸ Sync Tags with Safe Finder syncs on
-demand and shows when it last did. (Tags are only shared for files on the drive the app has open;
-Finder's own coloured tags are separate.)
+demand and shows when it last did. (Tags are only shared for files on the drive the app has open.)
+Each file also carries its own tags (see "Tags stick to the file" above), which is how they survive a
+move or copy that neither app saw.
 
 ### Install it as a Mac app
 

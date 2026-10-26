@@ -249,7 +249,10 @@ struct ReceivedArchivesView: View {
                     return place(item, into: dest)
                 }.value
                 switch outcome {
-                case .folder:       folders += 1; library.discardArchive(item)
+                case .folder(let folder):
+                    folders += 1
+                    await library.applyArchiveTags(in: folder)   // the tags the files had on the Mac
+                    library.discardArchive(item)
                 case .file:         files += 1; library.discardArchive(item)
                 case .alreadyThere: already += 1; library.discardArchive(item)
                 case .failed(let why): failures[item.id] = why
