@@ -1308,6 +1308,32 @@ since that backup came down again — Instagram even saved it beside the origina
   `@handle` folder used to make `@handle/@handle` and download the whole profile again — it now runs
   in place, prefilled ("Get New TikTok Videos" shows there too).
 
+**When Instagram refuses the app's requests — the logged-in browser takes over (Oct 28, 2026).**
+"Couldn’t open @jenselter" for a public profile while logged in: Instagram ties a login to the browser
+that made it, and the app's own `URLSession` calls (fixed cookie header, its own TLS stack, the desktop
+app id with an iPhone UA, an old `X-ASBD-ID`) can be answered 401/403 "log in", or with the login page,
+even though the session is fine. Now:
+- **`apiData` asks again from the browser** when a call is refused (400/401/403, `require_login`,
+  a checkpoint, "useragent mismatch", HTML where JSON belongs): `InstagramWebFetcher` keeps a hidden
+  `WKWebView` (the login's cookie store and UA, parked behind the app like `TikTokWebFetcher`) on
+  `www.instagram.com/robots.txt` — same origin as the API, no Instagram script running — and sends the
+  call with `fetch(…, {credentials: 'include'})` plus the headers the web app adds (CSRF from the
+  cookie, `X-IG-WWW-Claim` kept in sessionStorage, the app id read from the home page Instagram serves
+  that browser). Once the browser is let in, every call goes that way for the rest of the app run
+  (`APIRoute`); the plain path stays first otherwise because it keeps working in the background, which
+  the web view doesn't. All `api/v1` calls (profile, feed, tagged, clips POST, stories, reels tray,
+  highlights, media info) go through `apiData`.
+- **The real reason is shown.** `lookupProfile` returns the profile or a sentence: no such account
+  (`web_profile_info` 404), or Instagram's own message and status with what to do (log in again,
+  finish the "is this you?" check, wait out a limit). `run` puts it in `note`; the import view shows it
+  instead of the generic line, and its login button stays available while logged in ("Log in to
+  Instagram again") since a dead or challenged session still has its cookie.
+- **Exclusive (subscriber-only) content** comes from the same session: posts without a shortcode are
+  keyed by pk, separately-keyed exclusive story reels come from the reels tray, and media that a public
+  profile's anonymous download is refused (subscriber-only media is gated even there) is fetched again
+  with the session — now including the DASH video+audio pair (`dashPair`), so an exclusive video keeps
+  its best rendition rather than dropping to the progressive stream.
+
 ### 7.4c taylorpictures.net — `TaylorGallery.swift` / `TaylorBrowserView.swift` (Oct 21, 2026)
 Listing: the first page's pager gives the page count (`pageCount(in:pattern:)`), and the rest of a
 section's album pages or an album's image pages are fetched six at a time (`fetchPages`) in page

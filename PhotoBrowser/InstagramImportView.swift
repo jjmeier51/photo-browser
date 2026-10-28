@@ -47,14 +47,16 @@ struct InstagramImportView: View {
                     }
                 }
 
-                if !loggedIn {
-                    Section {
-                        Button { showLogin = true } label: {
-                            Label("Log in to Instagram", systemImage: "person.badge.key")
-                        }
-                    } footer: {
-                        Text("You log in inside the app; only the session cookie is kept, on this device.")
+                // Shown logged in too: Instagram can end a session or ask "is this you?" while the
+                // cookie is still here, and this is where that gets answered.
+                Section {
+                    Button { showLogin = true } label: {
+                        Label(loggedIn ? "Log in to Instagram again" : "Log in to Instagram", systemImage: "person.badge.key")
                     }
+                } footer: {
+                    Text(loggedIn
+                         ? "You’re logged in. If a download says Instagram wants you to log in again or confirm it’s you, do it here."
+                         : "You log in inside the app; only the session cookie is kept, on this device.")
                 }
 
                 Section {
@@ -151,7 +153,7 @@ struct InstagramImportView: View {
 
             let n = r.photos + r.videos
             let msg: String
-            if r.profile == nil { msg = "Couldn’t open @\(h) — check the handle and that you’re logged in." }
+            if r.profile == nil { msg = r.note ?? "Couldn’t open @\(h) — check the handle and that you’re logged in." }
             else if n == 0 { msg = r.note ?? "No new posts for @\(h)." }
             else { msg = "@\(h): downloaded \(r.photos) photo\(r.photos == 1 ? "" : "s") and \(r.videos) video\(r.videos == 1 ? "" : "s")." }
             library.endActivity(id, result: msg)

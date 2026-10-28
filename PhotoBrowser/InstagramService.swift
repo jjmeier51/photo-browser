@@ -78,6 +78,9 @@ enum InstagramService {
     }
 
     nonisolated static let appID = "936619743392459"
+    /// The `X-ASBD-ID` Instagram's web client sends (it changes now and then; a stale one is one more
+    /// sign of a script).
+    nonisolated static let asbdID = "359341"
     nonisolated static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
     nonisolated static let session: URLSession = {
@@ -120,11 +123,100 @@ enum InstagramService {
     }
     nonisolated private static let apiPacer = Pacer(baseMS: 170, jitter: 0.5)
 
-    /// Paced GET of a private-API endpoint — every `api/v1/…` fetch goes through here so the one
-    /// global `apiPacer` governs the aggregate rate no matter how many collectors overlap.
-    nonisolated private static func apiData(_ url: URL, handle: String, creds: Credentials) async -> (Data, URLResponse)? {
+    /// Which way API calls go, and what Instagram last said when it refused one. Calls go straight
+    /// through `session` (fast, keeps working with the app in the background) until Instagram refuses
+    /// that route — then through the logged-in browser (`InstagramWebFetcher`) for the rest of the
+    /// app run. Refusals are kept per handle so a failed lookup can say what Instagram answered.
+    private actor APIRoute {
+        private(set) var viaBrowser = false
+        private var refusals: [String: String] = [:]
+        func useBrowser() { viaBrowser = true }
+        func setRefusal(_ text: String?, for handle: String) { refusals[handle.lowercased()] = text }
+        func refusal(for handle: String) -> String? { refusals[handle.lowercased()] }
+    }
+    nonisolated private static let route = APIRoute()
+
+    /// Paced call of a private-API endpoint (GET, or a form POST when `form` is given) — every
+    /// `api/v1/…` fetch goes through here so the one global `apiPacer` governs the aggregate rate no
+    /// matter how many collectors overlap. A refused call (login wanted, wrong browser, a login page
+    /// instead of data) is asked again from the logged-in browser, which then takes over if it's let in.
+    nonisolated private static func apiData(_ url: URL, handle: String, creds: Credentials,
+                                            form: String? = nil) async -> (Data, URLResponse)? {
         await apiPacer.waitTurn()
-        return try? await session.data(for: apiRequest(url, handle: handle, creds: creds))
+        if await route.viaBrowser, let reply = await browserData(url, form: form) {
+            await route.setRefusal(refusalText(reply), for: handle)
+            return reply
+        }
+        var req = apiRequest(url, handle: handle, creds: creds)
+        if let form {
+            req.httpMethod = "POST"
+            req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            req.httpBody = Data(form.utf8)
+        }
+        let direct = try? await session.data(for: req)
+        if let direct, !isRefusal(direct) {
+            await route.setRefusal(refusalText(direct), for: handle)
+            return direct
+        }
+        if let reply = await browserData(url, form: form) {
+            if !isRefusal(reply) {
+                print("[Instagram] app request refused — using the logged-in browser from now on")
+                await route.useBrowser()
+            }
+            await route.setRefusal(refusalText(reply), for: handle)
+            return reply
+        }
+        if let direct { await route.setRefusal(refusalText(direct), for: handle) }
+        return direct
+    }
+
+    /// The same call made from the logged-in instagram.com page, shaped like a URLSession reply.
+    nonisolated private static func browserData(_ url: URL, form: String?) async -> (Data, URLResponse)? {
+        guard let reply = await InstagramWebFetcher.shared.send(url, form: form),
+              let resp = HTTPURLResponse(url: url, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: nil)
+        else { return nil }
+        return (reply.body, resp)
+    }
+
+    /// Whether Instagram turned the call away for who/what was asking (rather than "rate-limited" or
+    /// "no such thing"): 400/401/403, a login or checkpoint flag, or a page instead of JSON.
+    nonisolated private static func isRefusal(_ reply: (Data, URLResponse)) -> Bool {
+        let status = (reply.1 as? HTTPURLResponse)?.statusCode ?? 0
+        if [400, 401, 403].contains(status) { return true }
+        guard let json = try? JSONSerialization.jsonObject(with: reply.0) as? [String: Any] else {
+            return (200...299).contains(status)          // a login page where JSON belongs
+        }
+        return json["require_login"] as? Bool == true || json["checkpoint_url"] != nil
+            || (json["message"] as? String).map { ["checkpoint_required", "challenge_required", "login_required",
+                                                    "useragent mismatch"].contains($0) } == true
+    }
+
+    /// What Instagram said, for a person: nil for a good reply. Its own message when it gave one,
+    /// with what to do about it.
+    nonisolated private static func refusalText(_ reply: (Data, URLResponse)) -> String? {
+        let status = (reply.1 as? HTTPURLResponse)?.statusCode ?? 0
+        let json = try? JSONSerialization.jsonObject(with: reply.0) as? [String: Any]
+        if (200...299).contains(status), let json, json["require_login"] as? Bool != true, json["checkpoint_url"] == nil {
+            return nil
+        }
+        let message = (json?["message"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let said = message.isEmpty
+            ? (json == nil && (200...299).contains(status) ? "Instagram sent its login page instead of data" : "Instagram answered HTTP \(status)")
+            : "Instagram said “\(message)” (HTTP \(status))"
+        let lower = message.lowercased()
+        let advice: String
+        if json?["checkpoint_url"] != nil || lower.contains("checkpoint") || lower.contains("challenge") {
+            advice = "it wants you to confirm it’s you: open Log in to Instagram and finish the check there."
+        } else if status == 429 || lower.contains("wait a few minutes") || json?["spam"] as? Bool == true
+                    || lower.contains("feedback_required") {
+            advice = "Instagram is limiting requests for now. Wait a few minutes and try again; if it keeps saying this, log in again with Log in to Instagram."
+        } else if json?["require_login"] as? Bool == true || lower.contains("login") || status == 401
+                    || (json == nil && (200...299).contains(status)) {
+            advice = "log in again with Log in to Instagram (Instagram ended or doesn’t trust the session)."
+        } else {
+            advice = "try again in a few minutes."
+        }
+        return "\(said) — \(advice)"
     }
 
     // MARK: - Orchestration
@@ -136,7 +228,8 @@ enum InstagramService {
         var result = DownloadResult()
         progress(Progress(phase: "Loading @\(handle)…", fraction: 0, done: 0, total: 0))
         let profile: Profile
-        if let p = await fetchProfile(handle: handle, creds: creds) {
+        let lookup = await lookupProfile(handle: handle, creds: creds)
+        if let p = lookup.profile {
             profile = p
         } else if let knownUserID, !knownUserID.isEmpty {
             // We've downloaded this profile before, so its numeric id is already on record.
@@ -146,7 +239,7 @@ enum InstagramService {
             // Privacy unknown on this id-only update path → assume private (keep the cookie).
             profile = Profile(userID: knownUserID, handle: handle, fullName: "", profilePicURL: "", postCount: 0, isPrivate: true)
         } else {
-            result.note = "Couldn’t load @\(handle). Check the handle, that you’re logged in, and that the profile is public or one you follow."
+            result.note = lookup.problem
             return result
         }
 
@@ -383,32 +476,52 @@ enum InstagramService {
     /// used to fail the whole run for "certain public users". So: retry it through throttling,
     /// then fall back to the topsearch endpoint (a different path that commonly still answers).
     nonisolated static func fetchProfile(handle: String, creds: Credentials) async -> Profile? {
-        if let p = await webProfileInfo(handle: handle, creds: creds) { return p }
-        return await profileViaSearch(handle: handle, creds: creds)
+        await lookupProfile(handle: handle, creds: creds).profile
     }
 
-    /// The primary source (`web_profile_info`), retried through rate-limits/5xx.
-    nonisolated private static func webProfileInfo(handle: String, creds: Credentials) async -> Profile? {
-        guard let url = URL(string: "https://www.instagram.com/api/v1/users/web_profile_info/?username=\(handle)") else { return nil }
+    /// `fetchProfile`, plus — when there's no profile — why, in words for the person: no such
+    /// account, or what Instagram answered when it refused (its own message and what to do).
+    nonisolated static func lookupProfile(handle: String, creds: Credentials) async -> (profile: Profile?, problem: String?) {
+        await route.setRefusal(nil, for: handle)
+        var missing = false
+        switch await webProfileInfo(handle: handle, creds: creds) {
+        case .found(let p): return (p, nil)
+        case .missing: missing = true
+        case .failed: break
+        }
+        if let p = await profileViaSearch(handle: handle, creds: creds) { return (p, nil) }
+        if missing { return (nil, "Instagram has no account named @\(handle) — check the spelling.") }
+        if let why = await route.refusal(for: handle) { return (nil, "Couldn’t open @\(handle). \(why)") }
+        return (nil, "Couldn’t open @\(handle). Check the handle, that you’re logged in, and that the profile is public or one you follow.")
+    }
+
+    nonisolated private enum ProfileAnswer { case found(Profile), missing, failed }
+
+    /// The primary source (`web_profile_info`), retried through rate-limits/5xx. A 404 means there's
+    /// no such account.
+    nonisolated private static func webProfileInfo(handle: String, creds: Credentials) async -> ProfileAnswer {
+        guard let encoded = handle.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://www.instagram.com/api/v1/users/web_profile_info/?username=\(encoded)") else { return .failed }
         for attempt in 0..<3 {
             if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_500_000_000) }
             guard let (data, resp) = await apiData(url, handle: handle, creds: creds) else { continue }
             let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if status == 429 || status >= 500 { await apiPacer.penalize(); continue }   // throttled — back off and retry
+            if status == 404 { return .missing }
             guard (200...299).contains(status),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let user = (json["data"] as? [String: Any])?["user"] as? [String: Any] else { return nil }
+                  let user = (json["data"] as? [String: Any])?["user"] as? [String: Any] else { return .failed }
             let media = user["edge_owner_to_timeline_media"] as? [String: Any]
-            return Profile(userID: idString(user["id"]) ?? idString(user["pk"]) ?? "",
+            return .found(Profile(userID: idString(user["id"]) ?? idString(user["pk"]) ?? "",
                            handle: user["username"] as? String ?? handle,
                            fullName: user["full_name"] as? String ?? "",
                            profilePicURL: (user["profile_pic_url_hd"] as? String) ?? (user["profile_pic_url"] as? String) ?? "",
                            postCount: media?["count"] as? Int ?? 0,
                            // Unknown → assume private (keep the cookie); only a confirmed `false`
                            // switches media downloads to the anonymous public path.
-                           isPrivate: user["is_private"] as? Bool ?? true)
+                           isPrivate: user["is_private"] as? Bool ?? true))
         }
-        return nil
+        return .failed
     }
 
     /// Fallback: resolve the handle via the web topsearch endpoint. It doesn't report a post
@@ -568,12 +681,9 @@ enum InstagramService {
             var json: [String: Any]?
             attempts: for attempt in 0..<3 {
                 if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000) }
-                var req = apiRequest(url, handle: poster, creds: creds)
-                req.httpMethod = "POST"
-                req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-                req.httpBody = body.data(using: .utf8)
-                await apiPacer.waitTurn()
-                guard let (data, resp) = try? await session.data(for: req) else { out.failure = "the network request failed"; continue }
+                guard let (data, resp) = await apiData(url, handle: poster, creds: creds, form: body) else {
+                    out.failure = "the network request failed"; continue
+                }
                 let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 if status == 429 || status >= 500 { await apiPacer.penalize(); out.failure = "Instagram is rate-limiting requests (HTTP \(status))"; continue }
                 if status == 401 || status == 403 { await apiPacer.penalize(); out.failure = "Instagram refused the request (HTTP \(status))"; break attempts }
@@ -815,7 +925,7 @@ enum InstagramService {
         if job.isVideo { print("[Instagram] video \(job.name).mp4 → \(job.quality)") }
 
         if job.isVideo, let audio = job.audioURL,
-           let v = await downloadToTemp(job.url, creds: mediaCreds), let a = await downloadToTemp(audio, creds: mediaCreds) {
+           let (v, a) = await dashPair(job.url, audio, creds: mediaCreds, thenWith: anonymousMedia ? creds : nil) {
             let ok = job.transcode
                 ? await VideoTranscoder.muxTranscode(video: v, audio: a, to: dest, transcode: true, date: job.date, lat: job.lat, lng: job.lng)
                 : await mux(video: v, audio: a, to: dest, date: job.date, lat: job.lat, lng: job.lng)
@@ -842,6 +952,22 @@ enum InstagramService {
         }
         setFileDate(dest, job.date)
         return (true, job.isVideo, dest.path, job.caption, job.poster, job.id)
+    }
+
+    /// A DASH video's two halves as temp files: with `creds` (nil = anonymously, for a public profile),
+    /// then with `thenWith` — a subscriber-only ("Exclusive") video is gated even on a public profile,
+    /// and this keeps its best rendition instead of dropping to the progressive stream. Nothing is left
+    /// behind when either half fails.
+    nonisolated private static func dashPair(_ video: String, _ audio: String, creds: Credentials?,
+                                             thenWith fallback: Credentials?) async -> (URL, URL)? {
+        var tries: [Credentials?] = [creds]
+        if let fallback { tries.append(fallback) }
+        for c in tries {
+            guard let v = await downloadToTemp(video, creds: c) else { continue }
+            if let a = await downloadToTemp(audio, creds: c) { return (v, a) }
+            try? FileManager.default.removeItem(at: v)
+        }
+        return nil
     }
 
     nonisolated private static func downloadFile(_ urlString: String, to dest: URL, creds: Credentials?) async -> Bool {
@@ -1068,11 +1194,12 @@ enum InstagramService {
     /// `i.instagram.com` — hitting the app host with a `www.instagram.com` Referer is a cross-origin
     /// mismatch that Instagram now rejects (so posts *and* stories quietly returned nothing). The
     /// `Sec-Fetch-*` + `X-IG-WWW-Claim` + current `X-ASBD-ID` headers are what the live web app sends.
+    /// When Instagram refuses this request anyway, `apiData` asks again from the logged-in browser.
     nonisolated private static func apiRequest(_ url: URL, handle: String, creds: Credentials) -> URLRequest {
         var req = URLRequest(url: url)
         req.setValue("*/*", forHTTPHeaderField: "Accept")
         req.setValue(appID, forHTTPHeaderField: "X-IG-App-ID")
-        req.setValue("129477", forHTTPHeaderField: "X-ASBD-ID")
+        req.setValue(asbdID, forHTTPHeaderField: "X-ASBD-ID")
         req.setValue("0", forHTTPHeaderField: "X-IG-WWW-Claim")
         req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
         req.setValue(creds.csrf, forHTTPHeaderField: "X-CSRFToken")
