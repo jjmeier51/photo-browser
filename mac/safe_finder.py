@@ -545,6 +545,28 @@ def tags_changed() -> None:
     tag_events().changed.emit()
 
 
+_SIMPCITY_WINDOWS: list = []
+
+
+def open_simpcity(folder: str, parent: QWidget | None = None) -> None:
+    """Right-click a person's folder ▸ "Download from SimpCity…": the downloader window
+    (simpcity_downloader.py). From inside the person's "simpcity" folder, the person is the folder above."""
+    try:
+        import simpcity_downloader
+    except ModuleNotFoundError:
+        QMessageBox.information(parent, "SimpCity", "The SimpCity downloader needs Qt WebEngine (part of PySide6).\n"
+                                "Run mac/run.sh once to set it up, then try again.")
+        return
+    import simpcity
+    person = os.path.dirname(folder) if os.path.basename(folder).lower() == simpcity.FOLDER else folder
+    win = simpcity_downloader.SimpCityWindow(person, tags=tag_store())
+    win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    win.finished.connect(lambda _folder, files: files and tags_changed())
+    win.destroyed.connect(lambda _=None, w=win: _SIMPCITY_WINDOWS.remove(w) if w in _SIMPCITY_WINDOWS else None)
+    _SIMPCITY_WINDOWS.append(win)
+    win.show()
+
+
 def has_tag(path: str, tag: str) -> bool:
     f = shared_tags.fold(tag)
     return any(shared_tags.fold(t) == f for t in tag_store().tags(path, fresh=False))
@@ -2981,6 +3003,8 @@ class Pane(QWidget):
             menu.addAction("Show in Safe Finder", lambda: self.reveal(paths[0]))
             if IS_MAC:
                 menu.addAction("AirDrop to iPhone…", lambda: self.airdrop(paths))
+            if len(paths) == 1 and os.path.isdir(paths[0]):
+                menu.addAction("Download from SimpCity…", lambda: open_simpcity(paths[0], self.window()))
             menu.addSeparator()
             win = self.window()
             if isinstance(win, MainWindow) and self is win.src:
@@ -2999,6 +3023,8 @@ class Pane(QWidget):
             menu.addAction("Look Again", lambda: self.go(self.location))
         else:
             menu.addAction("New Folder", self.new_folder)
+            if not paths and os.path.isdir(self.location):
+                menu.addAction("Download from SimpCity…", lambda: open_simpcity(self.location, self.window()))
         menu.exec(view.viewport().mapToGlobal(pos))
 
     # -- tags (shared with the Photo Browser app — see shared_tags.py)
@@ -4352,6 +4378,8 @@ def main() -> None:
     ap.add_argument("--to", dest="dst", help="folder to show on the right (the SSD)")
     args, _ = ap.parse_known_args()        # launched as an app, Finder may add its own arguments
 
+    # The SimpCity window's browser (Qt WebEngine) needs this set before the app exists.
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Safe Finder")
     app.setApplicationDisplayName("Safe Finder")

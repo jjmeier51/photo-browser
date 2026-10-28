@@ -138,6 +138,14 @@ actions the app makes no network calls.
   `mega.nz/folder/…` link into a subfolder of the current folder, preserving
   structure. Pure-Swift implementation of MEGA's encrypted client protocol (no
   SDK). (`MegaImportView`, `MegaDownloader`, `MegaCrypto`)
+- **Download from SimpCity** — on a person's folder (iPhone download menu; Safe Finder right-click):
+  a simpcity.cr thread's goonbox photos (full size, via goonbox's `/api/images/<id>`) and turbo videos
+  into `<person>/simpcity`, tagged "simpcity", own capture date kept else the post's date. Read in a
+  real browser the person can see (DDoS-Guard/Cloudflare checks and the SimpCity login are answered
+  there). **The record is on the drive** — `<person>/simpcity/.simpcity.json`, shared with Safe
+  Finder — so neither app re-downloads what the other has. Page scripts are identical in Swift and
+  Python. (`SimpCityService`, `SimpCityRecord`, `SimpCityImportView`, `mac/simpcity.py`,
+  `mac/simpcity_downloader.py`; `docs/feature-notes.md` §7.4d)
 - **Receive from the Mac (AirDrop / Share sheet)** — the app opens `.pbgallery` archives (its own
   type, made by `mac/airdrop_to_iphone.py`; also offered by the pornpics browser, the star
   downloader's `--airdrop`, and Safe Finder's context menu) and, as an Alternate handler, **any

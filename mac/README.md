@@ -310,6 +310,26 @@ demand and shows when it last did. (Tags are only shared for files on the drive 
 Each file also carries its own tags (see "Tags stick to the file" above), which is how they survive a
 move or copy that neither app saw.
 
+### Download a SimpCity thread into a person's folder (`simpcity_downloader.py`)
+
+Right-click a person's folder (or the empty area inside it) ▸ **Download from SimpCity…**, paste the
+thread's address (`https://simpcity.cr/threads/…` — any page of it), and press **Download**. Every page
+of the thread is read; each goonbox.cr photo is saved at full size and each turbo.cr video saved, into
+a `simpcity` folder inside the person's folder, tagged **simpcity**. A photo or video that carries its
+own capture date keeps it; one that doesn't gets the date of the post it came from (needs
+[ExifTool](https://exiftool.org) — `brew install exiftool` — otherwise only the file's date is set).
+
+The window is a real browser (Qt WebEngine, with its own saved login): SimpCity shows threads only to
+members, so log in there once (**Log In to SimpCity**); if a site asks whether you're human, answer it
+in the window and the download carries on by itself.
+
+**It remembers.** What was downloaded is kept on the drive, in `<person>/simpcity/.simpcity.json` —
+the same record the Photo Browser app on the iPhone uses — so a thread downloaded here is never
+fetched again on the iPhone, or the other way round. The next time, the button says **Get New** and
+starts at the last page it reached ("Read every page again" to start over); files that failed are tried
+again. Deleting a downloaded file doesn't bring it back next time. Run it on its own with
+`python3 mac/simpcity_downloader.py "/Volumes/SSD/Helen Owen" [thread-address]`.
+
 ### Install it as a Mac app
 
 ```sh

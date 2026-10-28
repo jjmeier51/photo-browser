@@ -1334,6 +1334,50 @@ even though the session is fine. Now:
   with the session — now including the DASH video+audio pair (`dashPair`), so an exclusive video keeps
   its best rendition rather than dropping to the progressive stream.
 
+### 7.4d SimpCity threads — `SimpCityService.swift` / `SimpCityRecord.swift` / `SimpCityImportView.swift`, `mac/simpcity.py` / `mac/simpcity_downloader.py` (Oct 28, 2026)
+"Download from SimpCity…" on a person's folder (iPhone: the download menu; Safe Finder: right-click a
+folder, or the empty area of one): paste a `simpcity.cr/threads/…` address; every page is read, each
+goonbox.cr image is saved full-size and each turbo.cr video saved, into `<person>/simpcity`, tagged
+"simpcity". Neither app ever fetches what the other already has.
+- **One record, on the drive.** `<person>/simpcity/.simpcity.json` (`format: photobrowser-simpcity`):
+  `items` (`goonbox:<id>` / `turbo:<id>` → file, post id, post time), `threads` (address → title, last
+  page read, when), `failed` (not downloaded yet — retried by the next run even when it doesn't re-read
+  that page). Both apps read it before a run and merge it on every save (handled as plain dictionaries,
+  so neither drops the other's fields). Files are `<id>.<ext>`, so a file already in the folder counts as
+  done even if the record lost it; one deleted from the folder stays deleted. "Get New" starts at the
+  last page read ("Read every page again" for all).
+- **Real browser, by necessity.** simpcity.cr sits behind DDoS-Guard and shows thread content only to
+  logged-in members (logged out, a thread is the login page); goonbox.cr is behind Cloudflare; the
+  bunkr-family file servers turn away non-browser clients (§7.1). So pages are read in WebKit (iPhone)
+  / Qt WebEngine (Mac) with a persistent cookie store, in a view the person can see: they log in once and
+  answer any "you're human?" check there. Nothing works around a check — a check a hidden page meets is
+  shown to the person (iPhone: only while the SimpCity screen is open; with it closed, the run stops
+  with the record saved and says so). Files are fetched by the browser too (`WKDownload`; Chromium's
+  `page.download`, with a plain-request fallback that carries the browser's cookies and UA).
+- **Reading a page** (`EXTRACT_POSTS_JS`, kept byte-identical in Swift — a test checks): XenForo
+  `article.message` posts, the post time from `time[data-time]` (else `datetime`, whose `-0400` offset
+  Safari can't parse without a colon), links/`data-url`/`img`/iframes inside `.message-userContent`,
+  skipping quotes and signatures, unwrapping `/redirect/?to=<base64>`; the last page from the page nav.
+  A read only counts once the view is on *that* page (else it can return the page before).
+- **goonbox → full size**: its viewer is a script app over a JSON API — `GET /api/images/<id>` →
+  `image.original_url` (found by the earlier crawler; the post's `img` is a thumbnail with a different
+  UUID, so the full file can't be derived). Asked with `fetch` from a goonbox page in the lane, so one
+  page load serves every image after it. Fallback: what the page shows once built (download link,
+  `og:image`, the largest picture), thumbnails (`.md.`/`.th.`/`/thumbs/`) never taken.
+- **turbo**: posts carry `turbo.cr/embed/<id>`; the player is built by script, so the lane page (muted
+  autoplay allowed) is nudged to play and the mp4 it loads is taken (`<video>`, or the page's resource
+  timing). HLS-only (m3u8) players aren't handled. goonbox albums (`/a/<slug>`) aren't expanded.
+- **Three lanes**, each its own hidden page, so a check shown in the visible view never swaps a page
+  under a lane; an answer is only accepted from the lane's own page (`href` contains the id).
+- **Dates.** A file that carries its own capture date keeps it (the fields the app sorts by:
+  EXIF DateTimeOriginal/Digitized/TIFF DateTime; a video's creation date). Otherwise the post's date is
+  written into it — iPhone: `CGImageDestinationCopyImageSource` (metadata only, no re-encode; JPEG/PNG/
+  HEIC/TIFF — WebP/GIF/AVIF get file dates only) and a passthrough remux for video, on the temp copy
+  before it goes to the drive; Mac: ExifTool (EXIF dates; QuickTime + `Keys:CreationDate` for video),
+  file dates only when ExifTool isn't installed. File dates follow the capture date either way.
+- **Tags**: iPhone `library.addTag("simpcity", to:)` every 20 files and at the end; Safe Finder the
+  shared tag store (`tag_store().add`) the same way.
+
 ### 7.4c taylorpictures.net — `TaylorGallery.swift` / `TaylorBrowserView.swift` (Oct 21, 2026)
 Listing: the first page's pager gives the page count (`pageCount(in:pattern:)`), and the rest of a
 section's album pages or an album's image pages are fetched six at a time (`fetchPages`) in page

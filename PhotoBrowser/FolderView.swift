@@ -171,6 +171,7 @@ struct FolderView: View {
     @State private var showFacebook = false
     @State private var showOF = false
     @State private var showLinkDownload = false
+    @State private var showSimpCity = false
     @State private var showTikTok = false
     @State private var showVSCO = false
     @State private var showYouTube = false
@@ -1542,6 +1543,11 @@ struct FolderView: View {
             .sheet(isPresented: $showLinkDownload, onDismiss: { Task { await reload() } }) {
                 LinkImportView(targetFolder: url) { Task { await reload() } }
             }
+            .fullScreenCover(isPresented: $showSimpCity, onDismiss: { Task { await reload() } }) {
+                // From inside a person's "simpcity" folder, the person is the folder above it.
+                SimpCityImportView(personFolder: url.lastPathComponent.lowercased() == SimpCity.folderName
+                                   ? url.deletingLastPathComponent() : url) { Task { await reload() } }
+            }
             .fullScreenCover(isPresented: $showTikTok, onDismiss: { Task { await reload() } }) {
                 TikTokImportView(targetFolder: url) { Task { await reload() } }
             }
@@ -2877,6 +2883,9 @@ struct FolderView: View {
                             }
                             Button { showLinkDownload = true } label: {
                                 Label("Download from a Link…", systemImage: "link.badge.plus")
+                            }
+                            Button { showSimpCity = true } label: {
+                                Label("Download from SimpCity…", systemImage: "text.bubble")
                             }
                             Button { showGoogleDrive = true } label: {
                                 Label("Download from Google Drive…", systemImage: "arrow.down.doc")
