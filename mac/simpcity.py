@@ -381,6 +381,36 @@ def place(src: str | Path, folder: str | Path, name: str) -> Path:
 # ----------------------------------------------------------------------------- fetching a file
 
 
+# The image servers (simp*.cuckcapital.cr) refuse a request without a Referer — 403 {"message": "not
+# allowed"} — and serve the original to one with goonbox's (checked Oct 28: no signature needed).
+REFERER = "https://goonbox.cr/"
+REFERER_HOSTS = ("cuckcapital.cr",)
+
+_SSL = None
+
+
+def ssl_context():
+    """HTTPS checks against the usual certificates — and, for a Python with none of its own (the
+    python.org installer before "Install Certificates"), the Mac's (`/etc/ssl/cert.pem`)."""
+    global _SSL
+    if _SSL is None:
+        import ssl
+        ctx = ssl.create_default_context()
+        if not ctx.cert_store_stats().get("x509_ca"):
+            for bundle in ("/etc/ssl/cert.pem", "/usr/local/etc/openssl/cert.pem", "/opt/homebrew/etc/openssl@3/cert.pem"):
+                if os.path.exists(bundle):
+                    ctx.load_verify_locations(bundle)
+                    break
+            else:
+                try:
+                    import certifi
+                    ctx.load_verify_locations(certifi.where())
+                except ImportError:
+                    pass
+        _SSL = ctx
+    return _SSL
+
+
 def fetch(url: str, headers: dict[str, str], path: str, connect_timeout: float = 20,
           limit: float = 600) -> tuple[str | None, str]:
     """Downloads `url` to `path` with a plain request (on a worker thread). Returns (path, "") or
@@ -391,7 +421,7 @@ def fetch(url: str, headers: dict[str, str], path: str, connect_timeout: float =
     started = time.monotonic()
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=connect_timeout) as resp:
+        with urllib.request.urlopen(req, timeout=connect_timeout, context=ssl_context()) as resp:
             ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
             if ctype.startswith("text/"):
                 return None, f"the server sent a page ({ctype}), not the file"

@@ -39,7 +39,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,  # noqa: E402
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout, QWidget)
 from PySide6.QtWebEngineCore import (QWebEngineDownloadRequest, QWebEnginePage, QWebEngineProfile,  # noqa: E402
-                                     QWebEngineSettings)
+                                     QWebEngineSettings, QWebEngineUrlRequestInterceptor)
 from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 
 import simpcity as sc  # noqa: E402
@@ -51,6 +51,15 @@ LOGIN = "https://simpcity.cr/login/"
 _PROFILE: QWebEngineProfile | None = None
 
 
+class _Referer(QWebEngineUrlRequestInterceptor):
+    """Gives the image servers' requests goonbox's Referer (they refuse requests without one — see
+    `simpcity.REFERER`); Chromium's own downloads otherwise send none."""
+
+    def interceptRequest(self, info) -> None:  # noqa: N802 — Qt override
+        if info.requestUrl().host().endswith(sc.REFERER_HOSTS):
+            info.setHttpHeader(b"Referer", sc.REFERER.encode())
+
+
 def profile() -> QWebEngineProfile:
     """One persistent browser profile: the SimpCity login and the sites' "you're human" cookies
     survive restarts. Parented to the app so it outlives every page."""
@@ -58,6 +67,8 @@ def profile() -> QWebEngineProfile:
     if _PROFILE is None:
         _PROFILE = QWebEngineProfile("simpcity", QApplication.instance())
         _PROFILE.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
+        _PROFILE._referer = _Referer(_PROFILE)       # kept alive with the profile
+        _PROFILE.setUrlRequestInterceptor(_PROFILE._referer)
     return _PROFILE
 
 
@@ -105,6 +116,7 @@ class SimpCityWindow(QMainWindow):
         self.pending_urls: dict[str, str] = {}      # browser download address → its file name
         self.fail_hosts: dict[str, int] = {}        # server → failed downloads this run
         self.fail_why: dict[str, str] = {}          # server → the last reason
+        self.shown = self.direct_noted = 0          # resolved addresses / direct failures logged so far
         self.cookies: dict[str, dict[str, str]] = {}
         self.bridge = _Bridge()
         self.bridge.done.connect(lambda cb, result: cb(result))
@@ -217,7 +229,7 @@ class SimpCityWindow(QMainWindow):
         self.kept = self.post_dated = 0
         self.fixed = self.converted = self.enlarged = 0
         self.fail_hosts, self.fail_why = {}, {}
-        self.shown = 0
+        self.shown = self.direct_noted = 0
         self.exif = sc.ExifSession(self.exiftool) if self.exiftool else None
         _Runner(self, self._crawl(base, self.full.isChecked()), self._crawled).start()
 
@@ -285,6 +297,8 @@ class SimpCityWindow(QMainWindow):
         self.total = len(left) + len(fixes)
         self.bar.setRange(0, self.total)
         self.bar.setValue(0)
+        self._say(f"Downloading {len(left):,} file{'s' if len(left) != 1 else ''}"
+                  + (f" and bringing {len(fixes):,} earlier one{'s' if len(fixes) != 1 else ''} up to date…" if fixes else "…"))
         self.active = 0
         if fixes:
             self.active += 1
@@ -600,7 +614,8 @@ class SimpCityWindow(QMainWindow):
         name = f"{item.ident}-{int(time.time() * 1000)}.{ext}"
         host = QUrl(url).host()
         # Qt objects belong to this (GUI) thread: everything the worker needs is read here.
-        headers = {"User-Agent": self.ua, "Referer": item.link,
+        referer = sc.REFERER if host.endswith(sc.REFERER_HOSTS) else item.link
+        headers = {"User-Agent": self.ua, "Referer": referer,
                    "Accept": "image/avif,image/webp,image/*,video/*;q=0.9,*/*;q=0.8",
                    "Accept-Language": "en-US,en;q=0.9"}
         cookie = self._cookie_header(host)
@@ -612,6 +627,9 @@ class SimpCityWindow(QMainWindow):
             if path:
                 cb(path)
                 return
+            if self.direct_noted < 3:
+                self.direct_noted += 1
+                self._log(f"{item.ident}: a plain download didn't work ({why}) — trying the browser.")
             self._browser_download(url, item, name, why, cb)
 
         self.handle(("thread", lambda: sc.fetch(url, headers, os.path.join(str(self.tmp), name))), direct_done)
@@ -619,20 +637,27 @@ class SimpCityWindow(QMainWindow):
     def _browser_download(self, url: str, item: sc.Item, name: str, direct_why: str, cb) -> None:
         """Chromium fetches it (for a server that turns plain requests away), started from the window's
         page and matched back by its address as well as its name."""
-        state = {"started": False, "done": False}
+        state = {"started": False, "done": False, "req": None}
+        video = sc.is_video(name)
 
         def finish(path, why: str = "") -> None:
             if state["done"]:
                 return
             state["done"] = True
+            if not path and state["req"] is not None:
+                try:
+                    state["req"].cancel()
+                except RuntimeError:
+                    pass
             self.pending.pop(name, None)
             self.pending_urls.pop(url, None)
             if not path:
                 self._failed(item, url, f"{direct_why}; in the browser: {why or 'failed'}")
             cb(path)
 
-        def requested() -> None:
+        def requested(req) -> None:
             state["started"] = True
+            state["req"] = req
 
         self.pending[name] = (finish, requested)
         self.pending_urls[url] = name
@@ -641,7 +666,11 @@ class SimpCityWindow(QMainWindow):
         def watchdog() -> None:
             if not state["started"]:
                 finish(None, "it never started")
+
+        def too_long() -> None:
+            finish(None, "it took too long")
         QTimer.singleShot(20000, watchdog)
+        QTimer.singleShot((900 if video else 120) * 1000, too_long)
 
     def _failed(self, item: sc.Item, url: str, why: str) -> None:
         host = QUrl(url).host() or "?"
@@ -657,16 +686,20 @@ class SimpCityWindow(QMainWindow):
         if entry is None:
             return                                   # someone's own download in the window — leave it alone
         finish, requested = entry
-        requested()
+        requested(req)
         file = name or req.suggestedFileName() or req.downloadFileName()
         req.setDownloadDirectory(str(self.tmp))
         req.setDownloadFileName(file)
         path = os.path.join(str(self.tmp), req.downloadFileName())
 
-        def changed() -> None:
-            if not req.isFinished():
+        def changed(*_args) -> None:
+            # An interrupted download can stay "resumable" and never count as finished (a 403 did): an
+            # interruption or cancel ends it here too.
+            states = QWebEngineDownloadRequest.DownloadState
+            stopped = req.state() in (states.DownloadInterrupted, states.DownloadCancelled)
+            if not req.isFinished() and not stopped:
                 return
-            ok = req.state() == QWebEngineDownloadRequest.DownloadState.DownloadCompleted
+            ok = req.state() == states.DownloadCompleted
             html = (req.mimeType() or "").startswith("text/")
             if ok and not html and os.path.exists(path) and os.path.getsize(path) > 0:
                 finish(path)
@@ -679,6 +712,7 @@ class SimpCityWindow(QMainWindow):
             finish(None, "it sent a page, not the file" if html else (req.interruptReasonString() or "interrupted"))
 
         req.isFinishedChanged.connect(changed)
+        req.stateChanged.connect(changed)
         req.accept()
 
 

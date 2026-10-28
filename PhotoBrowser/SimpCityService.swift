@@ -298,8 +298,9 @@ final class SimpCityDownloader {
                 continue
             }
             let ext = SimpCity.fileExtension(fileURL.absoluteString, kind: item.kind)
-            // A plain request first — the image server answers them, and it's quick — then WebKit.
-            let referer = item.link
+            // A plain request first — the image server answers them, and it's quick — then WebKit. The
+            // image servers refuse a request without goonbox's Referer (`simpcity.REFERER`).
+            let referer = (fileURL.host ?? "").hasSuffix("cuckcapital.cr") ? "https://goonbox.cr/" : item.link
             let direct = await Task.detached(priority: .utility) { await Self.fetch(fileURL, referer: referer, ext: ext) }.value
             var downloaded = direct.file
             if downloaded == nil { downloaded = await lane.download(fileURL, referer: item.link, ext: ext) }

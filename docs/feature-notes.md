@@ -1386,6 +1386,16 @@ goonbox.cr image is saved full-size and each turbo.cr video saved, into `<person
   nothing in 5 minutes). Everything a worker needs (UA, cookie header) is now read on the GUI thread
   first. A failed download is logged with the address and why (the first three per server), and the
   summary counts failures by server with the last reason. The first three resolved addresses are logged.
+  **The image servers need goonbox's Referer** (checked Oct 28): `simp1/simp2/simp6.cuckcapital.cr`
+  answer a request without one with 403 `{"success": false, "message": "not allowed"}` — even a signed
+  `/panda/…?s=` address — and serve the original (unsigned `original_url`) to one with
+  `Referer: https://goonbox.cr/`. The plain request sends it (`simpcity.REFERER`); Chromium's own
+  downloads send none, so Safe Finder's profile has a request interceptor (`_Referer`) that adds it for
+  those hosts. A browser download that comes back **interrupted** can stay "resumable" and never count
+  as finished — with only a "never started" watchdog that hung the run (Erin Gilfoy, second try) — so an
+  interruption or cancel now ends it, and a started download has a limit too (2 min a photo, 15 a video).
+  HTTPS for the plain request falls back to the Mac's `/etc/ssl/cert.pem` when Python has no
+  certificates of its own (`ssl_context`).
 - **Lanes** (Mac 6, iPhone 4), each its own hidden page, so a check shown in the visible view never swaps
   a page under a lane; an answer is only accepted from the lane's own page (`href` contains the id).
   Polls run every 250 ms (80 ms for the goonbox API answer), and the Mac keeps **one ExifTool open for
