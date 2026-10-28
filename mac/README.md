@@ -337,6 +337,11 @@ ticked, without reading the thread again. filester, fileditch and gofile are rea
 pages in the window's browser (if one asks whether you're human, answer it there); gofile folders go one
 at a time, and if gofile starts limiting requests the rest wait for the next run.
 
+**Long threads.** SimpCity limits how fast pages can be read, so pages are read a couple of seconds
+apart. If it still says "too many requests", the downloader waits (30 s, then longer) and reads that
+page again, going slower from then on. If it keeps saying so, the run downloads what the pages read so
+far hold, and the next **Get New** carries on from the page where it stopped.
+
 **Locked pixeldrain videos.** pixeldrain locks popular files behind a captcha ("hotlinking"). When
 another host has the same video, that copy is downloaded instead. When none does, each one opens in the
 window at the end of the run: press **Download** there and answer pixeldrain's captcha, and the download

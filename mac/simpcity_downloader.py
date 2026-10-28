@@ -31,6 +31,7 @@ Qt calls back rather than blocking, so each run is a generator: it yields a requ
 from __future__ import annotations
 
 import os
+import random
 import shutil
 import sys
 import tempfile
@@ -308,21 +309,44 @@ class SimpCityWindow(QMainWindow):
 
     # ------------------------------------------------------------------ the run
     def _crawl(self, base: str, full: bool):
-        """Reads the thread's pages, then works out what's left to download."""
+        """Reads the thread's pages — `simpcity.PAGE_GAP` apart, waiting out SimpCity's "too many
+        requests" (`LIMIT_WAITS`) — then works out what's left to download. A read cut short (the waits
+        ran out, a page that won't load, Stop) keeps what it found; the next run carries on from there."""
         sc.make_folder(self.dest)
         self.record = sc.Record.load(self.dest)
         first = 1 if full else self.record.start_page(base, self.want_videos)
+        from_start = first == 1 or self.record.full_read(base, self.want_videos)   # a read from page 1, or carrying one on
         had_hosts = int(self.record.threads.get(base, {}).get("hosts") or 0) >= sc.HOSTS_READ
         items: dict[str, sc.Item] = {}
         links: dict[str, fh.Link] = {}
         n, last, title = first, first, ""
+        read_to = first - 1                                # the last page read
         asked_login = False
+        gap, limits, short = sc.PAGE_GAP, 0, ""
         while n <= last and not self.stopping:
+            if n > first or limits:
+                yield ("sleep", gap + random.uniform(0, 1))  # not back to back: SimpCity limits that
+                if self.stopping:
+                    break
             self._say(f"Reading page {n}{f' of {last}' if last > n else ''}… {len(items) + len(links):,} files and links found so far.")
             page = yield ("read", sc.page_url(base, n), n)
+            if page and page.get("limited"):
+                limits += 1
+                if limits > len(sc.LIMIT_WAITS):
+                    short = f"SimpCity kept saying too many requests at page {n}"
+                    break
+                wait = sc.LIMIT_WAITS[limits - 1]
+                gap = min(gap * 2, sc.MAX_GAP)
+                self._log(f"SimpCity is limiting how fast pages are read (page {n}) — waiting {wait} s, then reading a page "
+                          f"every {gap:.0f} s or so.")
+                self._say(f"SimpCity says too many requests — waiting {wait} s before page {n} (pages read so far: "
+                          f"{max(read_to, 0):,})…")
+                yield ("sleep", wait)
+                continue
             if not page:
-                raise RuntimeError(f"Couldn't read page {n} of the thread: {sc.describe_page(self.last_page)}. "
-                                   "Check the address and that you're logged in, then try again.")
+                short = f"page {n} couldn't be read: {sc.describe_page(self.last_page)}"
+                break
+            limits = 0
             found = sum(1 for p in page.get("posts") or [] for u in p.get("urls") or [] if sc.is_link(str(u)))
             if n == first and not found and not page.get("loggedIn") and not asked_login:
                 asked_login = True
@@ -331,19 +355,29 @@ class SimpCityWindow(QMainWindow):
             sc.collect(page.get("posts") or [], items, links)
             last = max(last, int(page.get("last") or 1))
             title = title or str(page.get("title") or "")
+            read_to = n
             n += 1
-        # Every page up to the end read (from page 1, or on top of a full read before): every file-host
-        # link in the thread is in the record now — done, still to do, or kept for later.
-        self.record.note_thread(base, title, min(last, max(n - 1, 1)), hosts=(first == 1 or had_hosts) and not self.stopping)
+        if read_to < first:
+            raise RuntimeError(f"Couldn't read the thread — {short or 'stopped'}. "
+                               + ("Wait a few minutes, then press Get New." if "too many" in short else
+                                  "Check the address and that you're logged in, then try again."))
+        to_end = n > last and not self.stopping and not short
+        if short:
+            self._log(f"Stopped reading at page {n} ({short}). Downloading what pages {first}–{read_to} hold; "
+                      f"the next run carries on from page {read_to}.")
+        # A read from page 1 that got to the end: every file-host link in the thread is in the record now —
+        # done, still to do, or kept for later. One cut short carries on from where it stopped (`resume`).
+        self.record.note_thread(base, title, read_to, hosts=to_end and (from_start or had_hosts),
+                                resume=read_to if from_start and not to_end else 0)
         fixes = self.record.fixes(items, self.dest)
-        self.record.redate(items, read_all=first == 1 and not self.stopping)
+        self.record.redate(items, read_all=from_start and to_end)
         left, adopted = sc.todo(items, self.record, self.dest, self.want_videos)
         to_list = self.record.links_todo(links, self.want_videos, again=full)
         self.dedup.seed(self.record, self.dest)
         self.record.save()
         if adopted:
             self._log(f"{adopted:,} file(s) were already in the folder — counted as done.")
-        self._log(f"“{title}”: {len(items):,} files and {len(links):,} file-host links in pages {first}–{last}; "
+        self._log(f"“{title}”: {len(items):,} files and {len(links):,} file-host links in pages {first}–{read_to}; "
                   f"{len(left):,} to download" + (f", {len(to_list):,} links to list." if to_list else "."))
         if not self.want_videos:
             later = sum(1 for v in self.record.failed.values() if v.get("skipped")) + \
@@ -469,15 +503,15 @@ class SimpCityWindow(QMainWindow):
             self.record.save()
         except OSError as e:
             self._log(f"Couldn't save the download record: {e}")
-        if self.stopping:
-            self._finish()
-            return
-        self._start_downloads(sorted(left + host, key=lambda i: (i.posted or 0, i.key)), fixes)
+        self._start_downloads(sorted(left + host, key=lambda i: (i.posted or 0, i.key)), fixes)   # (a stop keeps them)
 
     # -- downloads
 
     def _start_downloads(self, left: list[sc.Item], fixes) -> None:
         if (not left and not fixes) or self.stopping:
+            for item in left:                       # stopped before downloading: kept for the next run
+                if not self.record.has(item.key):
+                    self.record.note_failed(item)
             self._finish()
             return
         self.queue = deque(left)
@@ -883,6 +917,8 @@ class SimpCityWindow(QMainWindow):
 
         def accept(r: dict) -> bool:
             self.last_page = r
+            if r.get("limited"):
+                return True                                # "too many requests": the crawl waits it out
             if r.get("error") or int(r.get("page") or 1) != n:
                 return False
             return bool(r.get("posts")) or r.get("ready") == "complete" or \

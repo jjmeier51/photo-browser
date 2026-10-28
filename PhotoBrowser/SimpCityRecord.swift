@@ -50,6 +50,13 @@ nonisolated enum SimpCity {
     static let made = 2
     /// Thread mark: its pages were read for file-host links too.
     static let hostsRead = 1
+    /// Reading a thread's pages (`simpcity.PAGE_GAP` …): SimpCity limits how fast one visitor reads, so pages
+    /// are read this many seconds apart (plus jitter); a "too many requests" answer means a wait from
+    /// `limitWaits`, the same page again, and twice the gap from then on (up to `maxGap`). When the waits
+    /// run out, the run keeps what it has read and the next one carries on from there.
+    static let pageGap: Double = 2
+    static let maxGap: Double = 12
+    static let limitWaits: [Double] = [30, 60, 120, 240, 300]
     static let imageExts: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "heic", "avif"]
     static let videoExts: Set<String> = ["mp4", "mov", "m4v", "webm", "mkv"]
 
@@ -369,21 +376,30 @@ nonisolated enum SimpCity {
             }
         }
 
-        mutating func noteThread(_ base: String, title: String, pages: Int, hosts: Bool = false) {
+        /// `resume`: a read from page 1 that stopped short (rate-limited, stopped) — the last page it read,
+        /// where the next run carries on; 0 once a read gets to the end.
+        mutating func noteThread(_ base: String, title: String, pages: Int, hosts: Bool = false, resume: Int = 0) {
             var t = threads[base] ?? [:]
             t["title"] = title.isEmpty ? (t["title"] as? String ?? "") : title
             t["pages"] = max(pages, Int(num(t["pages"])))
             t["checked"] = Int(Date().timeIntervalSince1970)
             if hosts { t["hosts"] = SimpCity.hostsRead }
+            t["resume"] = resume > 0 ? resume : nil
             threads[base] = t
         }
 
-        /// Where a run picks the thread up: the last page read (it may have grown since), else 1 — and 1
-        /// while any entry's date was misread, to read it again, or when the thread was last read before
-        /// file-host links were collected and videos are wanted.
+        /// Whether this run reads the thread from page 1 (or carries on such a read): while any entry's date
+        /// was misread, when the thread was last read before file-host links were collected and videos are
+        /// wanted, or when an earlier read from page 1 stopped short.
+        func fullRead(_ base: String, videos: Bool = false) -> Bool {
+            misdated || num(threads[base]?["resume"]) > 0
+                || (videos && Int(num(threads[base]?["hosts"])) < SimpCity.hostsRead)
+        }
+
+        /// Where a run picks the thread up: the last page read (it may have grown since) — or, for a read
+        /// from page 1 (`fullRead`), page 1, or the page an earlier one stopped at.
         func startPage(_ base: String, videos: Bool = false) -> Int {
-            if misdated { return 1 }
-            if videos, Int(num(threads[base]?["hosts"])) < SimpCity.hostsRead { return 1 }
+            if fullRead(base, videos: videos) { return max(1, Int(num(threads[base]?["resume"]))) }
             return max(1, Int(num(threads[base]?["pages"])))
         }
 

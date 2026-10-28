@@ -199,20 +199,43 @@ final class SimpCityDownloader {
         }.value
         guard var rec = loaded else { return "Couldn’t make the “\(SimpCity.folderName)” folder." }
 
-        // 1. Every page (from the last one read before, unless asked for all of them).
+        // 1. Every page (from the last one read before, unless asked for all of them) — paced, since SimpCity
+        // limits how fast one visitor reads: "too many requests" is waited out (`SimpCity.limitWaits`), and a
+        // read cut short keeps what it found; the next run carries on from there.
         let first = full ? 1 : rec.startPage(base, videos: videos)
+        let fromStart = first == 1 || rec.fullRead(base, videos: videos)
         let hadHosts = ((rec.threads[base]?["hosts"] as? NSNumber)?.intValue ?? 0) >= SimpCity.hostsRead
-        var n = first, last = first, title = ""
+        var n = first, last = first, title = "", readTo = first - 1
         var items: [String: SimpCity.Item] = [:]
         var links: [String: SimpCityHosts.Link] = [:]
         var askedLogin = false
+        var gap = SimpCity.pageGap, limits = 0
+        var short = ""
         while n <= last, !shouldStop {
+            if n > first || limits > 0 {
+                await pause(gap + Double.random(in: 0...1))   // not back to back: SimpCity limits that
+                if shouldStop { break }
+            }
             say("Reading page \(n)\(last > n ? " of \(last)" : "")… \(items.count) files found so far.")
             guard let page = await readPage(SimpCity.pageURL(base, n), n: n) else {
-                return main.challenged
+                short = main.challenged
                     ? "SimpCity is checking that a person is asking. Open Download from SimpCity, answer it there, then tap Get New."
-                    : "Couldn’t read page \(n) of the thread: \(describe(lastPage)). Check the address and that you’re logged in, then try again."
+                    : "Couldn’t read page \(n) of the thread: \(describe(lastPage))."
+                break
             }
+            if (page["limited"] as? Bool) == true {
+                limits += 1
+                guard limits <= SimpCity.limitWaits.count else {
+                    short = "SimpCity kept saying too many requests at page \(n) — tap Get New later to carry on from there."
+                    break
+                }
+                let wait = SimpCity.limitWaits[limits - 1]
+                gap = min(gap * 2, SimpCity.maxGap)
+                say("SimpCity says too many requests — waiting \(Int(wait)) s before page \(n) (pages read so far: \(max(readTo, 0)))…")
+                await pause(wait)
+                continue
+            }
+            limits = 0
             let posts = page["posts"] as? [[String: Any]] ?? []
             var found = 0
             for p in posts {
@@ -226,15 +249,25 @@ final class SimpCityDownloader {
             SimpCity.collect(posts: posts, into: &items, links: &links)
             last = max(last, (page["last"] as? NSNumber)?.intValue ?? 1)
             if title.isEmpty { title = page["title"] as? String ?? "" }
+            readTo = n
             n += 1
         }
-        // Every page up to the end read (from page 1, or on top of a full read before): every file-host link
-        // in the thread is in the record now — done, still to do, or kept for later.
-        rec.noteThread(base, title: title, pages: min(last, max(n - 1, 1)), hosts: (first == 1 || hadHosts) && !shouldStop)
+        if readTo < first {
+            if short.contains("too many") { return "Couldn’t read the thread — SimpCity says too many requests. Wait a few minutes, then tap Get New." }
+            if short.isEmpty { return stopNote }
+            return short + (main.challenged ? "" : " Check the address and that you’re logged in, then try again.")
+        }
+        let toEnd = n > last && !shouldStop && short.isEmpty
+        if !short.isEmpty { print("[SimpCity] stopped reading at page \(n): \(short)") }
+        // A read from page 1 that got to the end: every file-host link in the thread is in the record now — done,
+        // still to do, or kept for later. One cut short carries on from where it stopped (`resume`).
+        rec.noteThread(base, title: title, pages: readTo, hosts: toEnd && (fromStart || hadHosts),
+                       resume: fromStart && !toEnd ? readTo : 0)
+        let shortNote: String? = short.isEmpty ? nil : short
 
         // 2. What's left: not in the record, not already in the folder — and the earlier downloads to
         // bring up to the current rules (a real post date, WebP → JPEG, small photos 2×).
-        let snapshot = rec, all = items, found = links, readAll = first == 1 && !shouldStop
+        let snapshot = rec, all = items, found = links, readAll = fromStart && toEnd
         let wantVideos = videos, again = full, dedup = self.dedup
         let (todo, adopted, fixes, toList, merged) = await Task.detached(priority: .userInitiated) {
             () -> ([SimpCity.Item], Int, [(item: SimpCity.Item, name: String)], [SimpCityHosts.Link], SimpCity.Record) in
@@ -268,7 +301,10 @@ final class SimpCityDownloader {
                 left = (left + more.0).sorted { ($0.posted, $0.key) < ($1.posted, $1.key) }
             }
         }
-        guard !left.isEmpty || !fixes.isEmpty, !shouldStop else { return stopNote }
+        guard !left.isEmpty || !fixes.isEmpty, !shouldStop else {
+            for it in left where record?.has(it.key) != true { record?.noteFailed(it) }   // stopped first: kept for next run
+            return stopNote ?? shortNote
+        }
 
         // 4. Resolve + download, four at a time, with the earlier downloads fixed alongside.
         queue = left
@@ -291,7 +327,13 @@ final class SimpCityDownloader {
                 }
             }
         }
-        return stopNote
+        return stopNote ?? shortNote
+    }
+
+    /// Waits `seconds` (cut short by Stop).
+    private func pause(_ seconds: Double) async {
+        let until = Date().addingTimeInterval(seconds)
+        while Date() < until, !shouldStop { try? await Task.sleep(nanoseconds: 500_000_000) }
     }
 
     /// Earlier downloads brought up to the current rules, one at a time beside the new downloads.
@@ -867,6 +909,7 @@ final class SimpCityDownloader {
         let started = Date()
         return await main.poll(SimpCityPage.extractScript, timeout: 90, patient: showing) { r in
             lastPage = r
+            if (r["limited"] as? Bool) == true { return true }       // "too many requests": the run waits it out
             guard r["error"] == nil, ((r["page"] as? NSNumber)?.intValue ?? 1) == n else { return false }
             let ready = r["ready"] as? String
             return !((r["posts"] as? [Any]) ?? []).isEmpty || ready == "complete"
@@ -877,6 +920,7 @@ final class SimpCityDownloader {
     /// What a thread page showed, for the message when it couldn't be read (`simpcity.describe_page`).
     private func describe(_ r: [String: Any]) -> String {
         if r.isEmpty { return "the page never answered (still loading, or blocked)" }
+        if (r["limited"] as? Bool) == true { return "SimpCity said too many requests" }
         if let e = r["error"] as? String { return "reading it failed: \(e)" }
         let posts = (r["posts"] as? [Any])?.count ?? 0
         return "it showed “\((r["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "no title")” (\(r["href"] as? String ?? "?")), "
@@ -1119,9 +1163,15 @@ final class SimpCityPage: NSObject, WKNavigationDelegate, WKUIDelegate {
     static let extractScript = #"""
 (() => {
   const title = document.title || '';
+  // "Too many requests" — SimpCity limiting how fast pages are read (HTTP 429, or its page saying so).
+  let status = 0;
+  try { const nav = performance.getEntriesByType('navigation')[0]; status = (nav && nav.responseStatus) || 0; } catch (e) {}
+  const said = title + ' ' + ((document.body && document.body.innerText) || '').slice(0, 1500);
+  const limited = !document.querySelector('article.message')
+    && (status === 429 || /too many requests|rate.?limit|error 1015|slow down|must wait at least|request limit/i.test(said));
   const challenge = (/DDoS-Guard|Just a moment|Checking your browser|Attention Required/i.test(title)
     || !!document.querySelector('#challenge-form, #cf-challenge-running, .ddg-captcha, [data-ddg-origin]'))
-    && !document.querySelector('.p-body, article.message');
+    && !document.querySelector('.p-body, article.message') && !limited;
   const html = document.documentElement;
   const loggedIn = html.getAttribute('data-logged-in') === 'true';
   const inQuote = (e) => !!e.closest('blockquote, .bbCodeBlock--quote, .bbCodeQuote, .message-signature');
@@ -1169,7 +1219,7 @@ final class SimpCityPage: NSObject, WKNavigationDelegate, WKUIDelegate {
   });
   const cur = (location.pathname.match(/\/page-(\d+)/) || [0, 1])[1];
   const heading = document.querySelector('h1.p-title-value');
-  return { title: heading ? heading.textContent.trim() : title, challenge, loggedIn, posts, ready: document.readyState, href: location.href,
+  return { title: heading ? heading.textContent.trim() : title, challenge, limited, status, loggedIn, posts, ready: document.readyState, href: location.href,
            last: Math.max(last, parseInt(cur, 10) || 1), page: parseInt(cur, 10) || 1,
            blocked: !!document.querySelector('.blockMessage--error, .p-body-pageContent .blockMessage') && posts.length === 0 };
 })()

@@ -1405,6 +1405,20 @@ posted on several hosts is fetched once.
   and after two failures the run stays one-at-a-time (said once in the log). Every saved file gets a log
   line (name, size, which date, upscaled); a worker step still running after 60 s logs "still working
   on …" with what it is; the progress bar ("N of M") sits beside the status line.
+- **Reading long threads without tripping SimpCity's rate limit** (Oct 28: a 60-page thread read back to
+  back got "too many requests"). Pages are read `PAGE_GAP` (2 s) apart plus up to 1 s of jitter.
+  `EXTRACT_POSTS_JS` reports `limited` — the navigation's HTTP status is 429
+  (`performance` navigation timing `responseStatus`; Chromium only), or the page says "too many
+  requests / rate limited / error 1015 / slow down / must wait at least" with no posts on it (a post
+  that merely mentions a rate limit doesn't count; a DDoS-Guard check is still a check for the person).
+  A limited page is waited out (`LIMIT_WAITS` 30/60/120/240/300 s) and read again, and the gap doubles
+  for the rest of the run (to `MAX_GAP`, 12 s). When the waits run out — or a page won't load, or Stop —
+  the read is **cut short but kept**: what pages first…N hold is downloaded, and a read from page 1
+  records `threads[…].resume = N` so the next run carries on from page N (`full_read` / `fullRead`
+  covers misdated entries, the host-link re-read and a resumed read alike); `hosts` and the misdated
+  clean-up (`redate(read_all)`) only count a read that got to the end. Files found before a Stop are
+  kept in `failed` for the next run (they used to be dropped with the pages they came from). Nothing
+  read at all → "SimpCity says too many requests — wait a few minutes".
 - **Lanes** (Mac 6, iPhone 4), each its own hidden page, so a check shown in the visible view never swaps
   a page under a lane; an answer is only accepted from the lane's own page (`href` contains the id).
   Polls run every 250 ms (80 ms for the goonbox API answer), and the Mac keeps **one ExifTool open for

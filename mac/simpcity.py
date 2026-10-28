@@ -64,6 +64,14 @@ MADE = 2                     # record marker: the file went through the current 
                              # upscale, the post date read right); older entries are brought up to it once
 HOSTS_READ = 1               # thread marker: its pages were read for file-host links too (from Oct 28)
 
+# Reading a thread's pages: SimpCity limits how fast one visitor reads (a 60-page thread read back to back
+# got "too many requests"). Pages are read `PAGE_GAP` seconds apart (plus a little jitter); a limited
+# answer means a wait from `LIMIT_WAITS`, the same page again, and twice the gap from then on (up to
+# `MAX_GAP`). When the waits run out, the run keeps what it has read and carries on from there next time.
+PAGE_GAP = 2.0
+MAX_GAP = 12.0
+LIMIT_WAITS = (30, 60, 120, 240, 300)
+
 
 # ----------------------------------------------------------------------------- addresses
 
@@ -385,22 +393,32 @@ class Record:
             if not e.get("done") and not e.get("why") and not e.get("skipped") and "files" in e:
                 e["done"] = all(f in self.items for f in e["files"])
 
-    def note_thread(self, base: str, title: str, pages: int, hosts: bool = False) -> None:
+    def note_thread(self, base: str, title: str, pages: int, hosts: bool = False, resume: int = 0) -> None:
+        """`resume`: a read from page 1 that stopped short (rate-limited, stopped) — the last page it read,
+        where the next run carries on; 0 once a read gets to the end."""
         t = self.threads.get(base, {})
         self.threads[base] = {**t, "title": title or t.get("title", ""), "pages": max(pages, int(t.get("pages") or 0)),
                               "checked": int(time.time())}
         if hosts:
             self.threads[base]["hosts"] = HOSTS_READ
+        if resume:
+            self.threads[base]["resume"] = int(resume)
+        else:
+            self.threads[base].pop("resume", None)
+
+    def full_read(self, base: str, videos: bool = False) -> bool:
+        """Whether this run reads the thread from page 1 (or carries on such a read): while any entry's date
+        was misread, or when the thread was last read before file-host links were collected and videos
+        are wanted, or when an earlier read from page 1 stopped short."""
+        t = self.threads.get(base, {})
+        return self.misdated() or bool(t.get("resume")) or (videos and int(t.get("hosts") or 0) < HOSTS_READ)
 
     def start_page(self, base: str, videos: bool = False) -> int:
-        """Where a run picks the thread up: the last page read (it may have grown since), else 1 — and 1
-        while any entry's date was misread, to read it again, or when the thread was last read before
-        file-host links were collected and videos are wanted."""
-        if self.misdated():
-            return 1
+        """Where a run picks the thread up: the last page read (it may have grown since) — or, for a read
+        from page 1 (`full_read`), page 1, or the page an earlier one stopped at."""
         t = self.threads.get(base, {})
-        if videos and int(t.get("hosts") or 0) < HOSTS_READ:
-            return 1
+        if self.full_read(base, videos):
+            return max(1, int(t.get("resume") or 1))
         return max(1, int(t.get("pages") or 1))
 
     def last_thread(self) -> str | None:
@@ -1100,9 +1118,15 @@ def replace_file(src: str | Path, dest: Path) -> None:
 EXTRACT_POSTS_JS = r"""
 (() => {
   const title = document.title || '';
+  // "Too many requests" — SimpCity limiting how fast pages are read (HTTP 429, or its page saying so).
+  let status = 0;
+  try { const nav = performance.getEntriesByType('navigation')[0]; status = (nav && nav.responseStatus) || 0; } catch (e) {}
+  const said = title + ' ' + ((document.body && document.body.innerText) || '').slice(0, 1500);
+  const limited = !document.querySelector('article.message')
+    && (status === 429 || /too many requests|rate.?limit|error 1015|slow down|must wait at least|request limit/i.test(said));
   const challenge = (/DDoS-Guard|Just a moment|Checking your browser|Attention Required/i.test(title)
     || !!document.querySelector('#challenge-form, #cf-challenge-running, .ddg-captcha, [data-ddg-origin]'))
-    && !document.querySelector('.p-body, article.message');
+    && !document.querySelector('.p-body, article.message') && !limited;
   const html = document.documentElement;
   const loggedIn = html.getAttribute('data-logged-in') === 'true';
   const inQuote = (e) => !!e.closest('blockquote, .bbCodeBlock--quote, .bbCodeQuote, .message-signature');
@@ -1150,7 +1174,7 @@ EXTRACT_POSTS_JS = r"""
   });
   const cur = (location.pathname.match(/\/page-(\d+)/) || [0, 1])[1];
   const heading = document.querySelector('h1.p-title-value');
-  return { title: heading ? heading.textContent.trim() : title, challenge, loggedIn, posts, ready: document.readyState, href: location.href,
+  return { title: heading ? heading.textContent.trim() : title, challenge, limited, status, loggedIn, posts, ready: document.readyState, href: location.href,
            last: Math.max(last, parseInt(cur, 10) || 1), page: parseInt(cur, 10) || 1,
            blocked: !!document.querySelector('.blockMessage--error, .p-body-pageContent .blockMessage') && posts.length === 0 };
 })()
@@ -1272,6 +1296,8 @@ def describe_page(r: dict | None) -> str:
     """What a thread page showed, for the message when it couldn't be read."""
     if not r:
         return "the page never answered (still loading, or blocked)"
+    if r.get("limited"):
+        return "SimpCity said too many requests"
     if r.get("challenge"):
         return "SimpCity kept showing its “checking your browser” page — answer it in the window"
     if r.get("error"):
