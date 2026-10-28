@@ -15,7 +15,7 @@ import Observation
 /// through WebKit with the app's persistent cookie store: the thread is read in a web view the person
 /// can see (the SimpCity screen shows it — they log in there once, and answer a "you're human?" check
 /// if one appears), the files are found by reading each goonbox/turbo page, and fetched with
-/// `WKDownload`. Three lanes work at once, each with its own web view.
+/// `WKDownload`. Four lanes work at once, each with its own web view.
 ///
 /// **Leaving the screen.** The run carries on with the web views parked behind the app (like
 /// `TikTokWebFetcher`). If a site then asks for a person, the run stops with the record saved and says
@@ -32,6 +32,8 @@ final class SimpCityDownloader {
     private(set) var saved = 0
     private(set) var failed = 0
     private(set) var total = 0
+    /// Files handled so far this run (downloaded, failed, or an earlier one brought up to date).
+    private(set) var done = 0
     /// The person folder of the run in progress.
     private(set) var person: URL?
     /// Whether the SimpCity screen is showing (a check or the login can be answered right there).
@@ -40,11 +42,16 @@ final class SimpCityDownloader {
     /// The page the screen shows: the thread being read, the login, a check waiting for the person.
     @ObservationIgnored let main = SimpCityPage()
     /// The download lanes — their own pages, so a check shown on `main` never swaps a page under one.
-    @ObservationIgnored private let lanes = [SimpCityPage(), SimpCityPage(), SimpCityPage()]
+    @ObservationIgnored private let lanes = [SimpCityPage(), SimpCityPage(), SimpCityPage(), SimpCityPage()]
     @ObservationIgnored private var record: SimpCity.Record?
     @ObservationIgnored private var queue: [SimpCity.Item] = []
     @ObservationIgnored private var lastPage: [String: Any] = [:]
     @ObservationIgnored private var untagged: [URL] = []
+    /// Tagged "upscaled" too, like the app's own upscales.
+    @ObservationIgnored private var upscaledFiles: [URL] = []
+    @ObservationIgnored private var fixedDates = 0
+    @ObservationIgnored private var converted = 0
+    @ObservationIgnored private var enlarged = 0
     @ObservationIgnored private var written: [URL] = []
     @ObservationIgnored private var activity: UUID?
     @ObservationIgnored private var stopRequested = false
@@ -72,8 +79,9 @@ final class SimpCityDownloader {
         guard !running, let base = SimpCity.threadBase(raw) else { return }
         running = true
         stopRequested = false; stopNote = nil
-        saved = 0; failed = 0; total = 0; kept = 0; postDated = 0
-        queue = []; untagged = []; written = []
+        saved = 0; failed = 0; total = 0; done = 0; kept = 0; postDated = 0
+        fixedDates = 0; converted = 0; enlarged = 0
+        queue = []; untagged = []; written = []; upscaledFiles = []
         self.person = person
         self.library = library
         let id = library.beginActivity("SimpCity — \(person.lastPathComponent)", indeterminate: true, cancellable: true)
@@ -98,7 +106,7 @@ final class SimpCityDownloader {
     private func say(_ s: String) {
         status = s
         if let activity, let library {
-            library.setActivity(activity, status: s, fraction: total > 0 ? Double(saved + failed) / Double(total) : nil)
+            library.setActivity(activity, status: s, fraction: total > 0 ? Double(done) / Double(total) : nil)
         }
     }
 
@@ -118,6 +126,9 @@ final class SimpCityDownloader {
             if failed > 0 { s += "; \(failed) failed (tried again next time)" }
             s += "."
             if n > 0 { s += " \(kept) kept their own date; \(postDated) got the post’s date." }
+        }
+        if fixedDates + converted + enlarged > 0 {
+            s += " Earlier downloads: \(fixedDates) got their post’s real date, \(converted) WebP → JPEG, \(enlarged) small photos upscaled 2×."
         }
         if let note { s += " " + note }
         return s
@@ -164,28 +175,91 @@ final class SimpCityDownloader {
         }
         rec.noteThread(base, title: title, pages: min(last, max(n - 1, 1)))
 
-        // 2. What's left: not in the record, not already in the folder.
-        let snapshot = rec, all = items
-        let (left, adopted, merged) = await Task.detached(priority: .userInitiated) { () -> ([SimpCity.Item], Int, SimpCity.Record) in
+        // 2. What's left: not in the record, not already in the folder — and the earlier downloads to
+        // bring up to the current rules (a real post date, WebP → JPEG, small photos 2×).
+        let snapshot = rec, all = items, readAll = first == 1 && !shouldStop
+        let (left, adopted, fixes, merged) = await Task.detached(priority: .userInitiated) {
+            () -> ([SimpCity.Item], Int, [(item: SimpCity.Item, name: String)], SimpCity.Record) in
             var r = snapshot
+            let present = Set((try? FileManager.default.contentsOfDirectory(atPath: dest.path)) ?? [])
+            let fixes = r.fixes(all, present: present)
+            r.redate(all, readAll: readAll)
             let t = SimpCity.todo(all, record: &r, folder: dest)
             try? r.save()
-            return (t.left, t.adopted, r)
+            return (t.left, t.adopted, fixes, r)
         }.value
         record = merged
         if adopted > 0 { print("[SimpCity] \(adopted) file(s) already in the folder — counted as done") }
-        guard !left.isEmpty, !shouldStop else { return stopNote }
+        guard !left.isEmpty || !fixes.isEmpty, !shouldStop else { return stopNote }
 
-        // 3. Resolve + download, three at a time.
+        // 3. Resolve + download, four at a time, with the earlier downloads fixed alongside.
         queue = left
-        total = left.count
-        say("Downloading \(total) file\(total == 1 ? "" : "s")…")
+        total = left.count + fixes.count
+        say("Downloading \(left.count) file\(left.count == 1 ? "" : "s")…")
         await withTaskGroup(of: Void.self) { group in
+            if !fixes.isEmpty { group.addTask { @MainActor in await self.fixEarlier(fixes, in: dest) } }
             for lane in lanes.prefix(min(lanes.count, left.count)) {
                 group.addTask { @MainActor in await self.work(lane, into: dest) }
             }
         }
         return stopNote
+    }
+
+    /// Earlier downloads brought up to the current rules, one at a time beside the new downloads.
+    private func fixEarlier(_ fixes: [(item: SimpCity.Item, name: String)], in dest: URL) async {
+        for (item, name) in fixes {
+            if shouldStop { break }
+            let src = dest.appendingPathComponent(name)
+            let posted = item.posted
+            if let r = await Task.detached(priority: .utility, operation: { await Self.fixFile(src, posted: posted) }).value {
+                if r.url != src {
+                    library?.itemMoved(from: src, to: r.url)     // labels and tags go with the new name
+                    converted += 1
+                }
+                if r.upscaled { enlarged += 1; upscaledFiles.append(r.url) }
+                if r.dated { fixedDates += 1 }
+                record?.add(item, file: r.url.lastPathComponent, upscaled: r.upscaled)
+            }
+            done += 1
+            say("Bringing earlier downloads up to date — \(fixedDates + converted + enlarged) changed.")
+        }
+    }
+
+    /// One file downloaded before the current rules, brought up to them where it lies: a copy in the
+    /// app's temp folder is prepared (WebP → JPEG, the small-photo upscale, the post's date when it has
+    /// no real one of its own — the 1969 a misread time wrote doesn't count) and committed back over it,
+    /// its tag attribute kept, or beside it under the new name (the caller re-keys its labels; the old
+    /// file goes). Returns where it is now and what changed; nil when it couldn't be done.
+    nonisolated private static func fixFile(_ src: URL, posted: Double) async -> (url: URL, dated: Bool, upscaled: Bool)? {
+        let fm = FileManager.default
+        let temp = fm.temporaryDirectory.appendingPathComponent("simpcity-fix-" + UUID().uuidString)
+            .appendingPathExtension(src.pathExtension)
+        guard (try? fm.copyItem(at: src, to: temp)) != nil else { return nil }
+        let prepared = SimpCity.prepareImage(temp)
+        let settled = await SimpCity.settleDate(prepared.url, posted: posted)
+        let dated = settled.date != nil && !settled.own
+        guard prepared.url != temp || prepared.upscaled || dated else {
+            try? fm.removeItem(at: prepared.url)
+            if let d = settled.date { try? fm.setAttributes([.creationDate: d, .modificationDate: d], ofItemAtPath: src.path) }
+            return (src, false, false)
+        }
+        var dest = src
+        if prepared.url.pathExtension.lowercased() != src.pathExtension.lowercased() {
+            let folder = src.deletingLastPathComponent(), stem = src.deletingPathExtension().lastPathComponent
+            let ext = prepared.url.pathExtension
+            dest = folder.appendingPathComponent("\(stem).\(ext)")
+            var k = 2
+            while fm.fileExists(atPath: dest.path) { dest = folder.appendingPathComponent("\(stem) \(k).\(ext)"); k += 1 }
+        }
+        let carried = dest == src ? SharedTags.carriedAttributes(of: src) : []
+        do { try await DriveWriter.shared.commit(prepared.url, to: dest) } catch {
+            try? fm.removeItem(at: prepared.url)
+            return nil
+        }
+        if !carried.isEmpty { SharedTags.restoreAttributes(carried, to: dest) }
+        if let d = settled.date { try? fm.setAttributes([.creationDate: d, .modificationDate: d], ofItemAtPath: dest.path) }
+        if dest != src { try? fm.removeItem(at: src) }
+        return (dest, dated, prepared.upscaled)
     }
 
     /// `/api/images/<id>` asked from a goonbox page — the lane stays on goonbox, so after its first
@@ -200,7 +274,7 @@ final class SimpCityDownloader {
         }
         let scripts = SimpCityPage.goonboxScripts(id: item.id)
         _ = await lane.string("(\(scripts.start), 'started')")
-        let r = await lane.poll(scripts.read, timeout: 25, patient: false) { $0["status"] != nil }
+        let r = await lane.poll(scripts.read, timeout: 25, patient: false, every: 0.08) { $0["status"] != nil }
         guard (r?["status"] as? NSNumber)?.intValue == 200, let s = r?["url"] as? String, !s.isEmpty else { return nil }
         return URL(string: s)
     }
@@ -208,6 +282,7 @@ final class SimpCityDownloader {
     private func work(_ lane: SimpCityPage, into dest: URL) async {
         while !shouldStop, !queue.isEmpty {
             let item = queue.removeFirst()
+            defer { done += 1 }
             guard let fileURL = await resolve(item, on: lane) else {
                 failed += 1
                 record?.noteFailed(item)
@@ -222,11 +297,12 @@ final class SimpCityDownloader {
                 say(progressLine)
                 continue
             }
-            let name = "\(item.id).\(ext)"
-            let outcome = await Task.detached(priority: .utility) { await Self.finish(temp, posted: item.posted, into: dest, name: name) }.value
-            if let (final, ownDate) = outcome {
-                record?.add(item, file: final.lastPathComponent)
+            let id = item.id, posted = item.posted
+            let outcome = await Task.detached(priority: .utility) { await Self.finish(temp, posted: posted, into: dest, id: id) }.value
+            if let (final, ownDate, upscaled) = outcome {
+                record?.add(item, file: final.lastPathComponent, upscaled: upscaled)
                 written.append(final); untagged.append(final)
+                if upscaled { upscaledFiles.append(final) }
                 saved += 1
                 if ownDate { kept += 1 } else { postDated += 1 }
                 if written.count % 20 == 0 { await saveAndTag() }
@@ -242,23 +318,23 @@ final class SimpCityDownloader {
         "Downloading — \(saved) saved, \(failed) failed, \(queue.count) waiting."
     }
 
-    /// The date rule on the downloaded temp file, then into the drive folder (never over a file).
-    /// Returns where it landed and whether it kept its own capture date.
-    nonisolated private static func finish(_ temp: URL, posted: Double, into folder: URL, name: String) async -> (URL, Bool)? {
-        let own = await SimpCity.embeddedDate(temp)
-        var date = own
-        if own == nil { date = await SimpCity.settleDate(temp, posted: posted) }
+    /// The downloaded temp file made ready (WebP → JPEG, a small photo upscaled 2×), the date rule,
+    /// then into the drive folder as `<id>.<ext>` (never over a file). Returns where it landed, whether
+    /// it kept its own capture date, and whether it was upscaled.
+    nonisolated private static func finish(_ temp: URL, posted: Double, into folder: URL, id: String) async -> (URL, Bool, Bool)? {
+        let prepared = SimpCity.prepareImage(temp)
+        let settled = await SimpCity.settleDate(prepared.url, posted: posted)
         let fm = FileManager.default
-        var dest = folder.appendingPathComponent(name)
-        let stem = (name as NSString).deletingPathExtension, ext = (name as NSString).pathExtension
+        let ext = prepared.url.pathExtension.lowercased()
+        var dest = folder.appendingPathComponent("\(id).\(ext)")
         var k = 2
-        while fm.fileExists(atPath: dest.path) { dest = folder.appendingPathComponent("\(stem) \(k).\(ext)"); k += 1 }
-        do { try await DriveWriter.shared.commit(temp, to: dest) } catch {
-            try? fm.removeItem(at: temp)
+        while fm.fileExists(atPath: dest.path) { dest = folder.appendingPathComponent("\(id) \(k).\(ext)"); k += 1 }
+        do { try await DriveWriter.shared.commit(prepared.url, to: dest) } catch {
+            try? fm.removeItem(at: prepared.url)
             return nil
         }
-        if let date { try? fm.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: dest.path) }
-        return (dest, own != nil)
+        if let date = settled.date { try? fm.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: dest.path) }
+        return (dest, settled.own, prepared.upscaled)
     }
 
     /// The record and the new files' tag — every 20 files and at the end.
@@ -266,9 +342,9 @@ final class SimpCityDownloader {
         if let snapshot = record {
             _ = await Task.detached(priority: .utility) { var r = snapshot; try? r.save() }.value
         }
-        if !untagged.isEmpty, let library {
-            library.addTag(SimpCity.tag, to: untagged)
-            untagged = []
+        if let library {
+            if !untagged.isEmpty { library.addTag(SimpCity.tag, to: untagged); untagged = [] }
+            if !upscaledFiles.isEmpty { library.addTag(SimpCity.upscaledTag, to: upscaledFiles); upscaledFiles = [] }
         }
     }
 
@@ -431,15 +507,15 @@ final class SimpCityPage: NSObject {
         }
     }
 
-    /// Runs `script` every 0.8 s until `accept` says its answer is ready (→ the answer) or `timeout`
+    /// Runs `script` every `every` seconds until `accept` says its answer is ready (→ the answer) or `timeout`
     /// seconds pass (→ nil). On a "you're human?" check: when `patient` (the person can see this page)
     /// it waits up to 15 minutes for them to answer; otherwise it gives up after 20 s with `challenged`.
-    func poll(_ script: String, timeout: Double, patient: Bool,
+    func poll(_ script: String, timeout: Double, patient: Bool, every: Double = 0.25,
               accept: ([String: Any]) -> Bool) async -> [String: Any]? {
         challenged = false
         let start = Date()
         var deadline = start.addingTimeInterval(timeout)
-        try? await Task.sleep(nanoseconds: 600_000_000)
+        try? await Task.sleep(nanoseconds: UInt64(min(every, 0.15) * 1_000_000_000))
         while true {
             let r = await json(script) ?? [:]
             if (r["challenge"] as? Bool) == true {
@@ -451,7 +527,7 @@ final class SimpCityPage: NSObject {
                 if accept(r) { return r }
             }
             if Date() > deadline { return nil }
-            try? await Task.sleep(nanoseconds: 800_000_000)
+            try? await Task.sleep(nanoseconds: UInt64((challenged ? 1.0 : every) * 1_000_000_000))
         }
     }
 
@@ -494,11 +570,15 @@ final class SimpCityPage: NSObject {
   const posts = [];
   document.querySelectorAll('article.message, .message--post, li.message').forEach((p) => {
     const id = (p.getAttribute('data-content') || p.id || '').replace(/^(js-)?post-/, '');
-    const t = p.querySelector('.message-attribution time[data-time], time.u-dt[data-time], time[data-time], time[datetime]');
+    const t = p.querySelector('.message-attribution time, time.u-dt, time[data-timestamp], time[datetime], time[data-time]');
     let time = 0;
     if (t) {
-      time = parseInt(t.getAttribute('data-time') || '0', 10)
-        || Math.floor(Date.parse((t.getAttribute('datetime') || '').replace(/([+-]\d\d)(\d\d)$/, '$1:$2')) / 1000) || 0;
+      // XenForo 2.2+: data-timestamp is the time, data-time is a label ("12:34 PM"); older: data-time.
+      const num = (v) => (/^\d{9,}$/.test(v || '') ? parseInt(v, 10) : 0);
+      time = num(t.getAttribute('data-timestamp'))
+        || Math.floor(Date.parse((t.getAttribute('datetime') || '').replace(/([+-]\d\d)(\d\d)$/, '$1:$2')) / 1000)
+        || num(t.getAttribute('data-time')) || 0;
+      if (!(time >= 946684800)) time = 0;
     }
     const body = p.querySelector('.message-userContent') || p.querySelector('.message-body') || p;
     const urls = new Set();

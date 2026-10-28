@@ -1374,14 +1374,31 @@ goonbox.cr image is saved full-size and each turbo.cr video saved, into `<person
 - **turbo**: posts carry `turbo.cr/embed/<id>`; the player is built by script, so the lane page (muted
   autoplay allowed) is nudged to play and the mp4 it loads is taken (`<video>`, or the page's resource
   timing). HLS-only (m3u8) players aren't handled. goonbox albums (`/a/<slug>`) aren't expanded.
-- **Three lanes**, each its own hidden page, so a check shown in the visible view never swaps a page
-  under a lane; an answer is only accepted from the lane's own page (`href` contains the id).
+- **Lanes** (Mac 6, iPhone 4), each its own hidden page, so a check shown in the visible view never swaps
+  a page under a lane; an answer is only accepted from the lane's own page (`href` contains the id).
+  Polls run every 250 ms (80 ms for the goonbox API answer), and the Mac keeps **one ExifTool open for
+  the whole run** (`ExifSession`, `-stay_open`) — a fresh process per read/write had cost about a second
+  a file.
 - **Dates.** A file that carries its own capture date keeps it (the fields the app sorts by:
   EXIF DateTimeOriginal/Digitized/TIFF DateTime; a video's creation date). Otherwise the post's date is
   written into it — iPhone: `CGImageDestinationCopyImageSource` (metadata only, no re-encode; JPEG/PNG/
-  HEIC/TIFF — WebP/GIF/AVIF get file dates only) and a passthrough remux for video, on the temp copy
+  HEIC/TIFF — GIF/AVIF get file dates only) and a passthrough remux for video, on the temp copy
   before it goes to the drive; Mac: ExifTool (EXIF dates; QuickTime + `Keys:CreationDate` for video),
   file dates only when ExifTool isn't installed. File dates follow the capture date either way.
+  **The post time is `data-timestamp`** (XenForo 2.2+), else the ISO `datetime`, else an all-digits
+  `data-time` (older XenForo). The first downloads (Oct 28) read 2.2's `data-time` — a label like
+  "12:34 PM" — as a number and wrote 12 s after 1970 (12/31/1969 in US time) into 33 files. Now a time
+  before 2000 is no date, an embedded date up to 1970 doesn't count as the file's own, and a record with
+  such entries (`misdated`) has the thread read from page 1 again: `fixes` rewrites those files with
+  their post's real date where they lie, and `redate` corrects (or, post gone, zeroes) the record.
+- **Photos: WebP → JPEG, small → 2×.** A WebP becomes a JPEG (quality 95, transparency on white, EXIF
+  and colour profile kept; animated WebP left alone), and a JPEG/PNG/WebP under 250 KB is upscaled 2×
+  with Lanczos (Mac: Pillow `LANCZOS`; iPhone: `CILanczosScaleTransform`) and tagged "upscaled" like the
+  app's own upscales — on the temp copy, before the date rule (`prepare_image` / `prepareImage`).
+  Record entries carry `made: 2` once under these rules; earlier ones still in the folder are brought up
+  to them once, beside the new downloads (`fix_file` / `fixFile`: a copy prepared and committed back,
+  the tag attribute kept; a WebP's new `.jpg` takes its tags — Safe Finder `carry`+`forget`, iPhone
+  `itemMoved` — and the `.webp` goes).
 - **Tags**: iPhone `library.addTag("simpcity", to:)` every 20 files and at the end; Safe Finder the
   shared tag store (`tag_store().add`) the same way.
 

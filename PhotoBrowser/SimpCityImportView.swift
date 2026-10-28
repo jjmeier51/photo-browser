@@ -34,7 +34,7 @@ struct SimpCityImportView: View {
                         .font(.subheadline)
                         .disabled(downloader.running || !readBefore)
                     if downloader.running, downloader.total > 0 {
-                        ProgressView(value: Double(downloader.saved + downloader.failed), total: Double(downloader.total))
+                        ProgressView(value: Double(downloader.done), total: Double(downloader.total))
                     }
                     Text(statusLine)
                         .font(.footnote).foregroundStyle(.secondary)

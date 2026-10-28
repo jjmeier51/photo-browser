@@ -318,6 +318,10 @@ of the thread is read; each goonbox.cr photo is saved at full size and each turb
 a `simpcity` folder inside the person's folder, tagged **simpcity**. A photo or video that carries its
 own capture date keeps it; one that doesn't gets the date of the post it came from (needs
 [ExifTool](https://exiftool.org) — `brew install exiftool` — otherwise only the file's date is set).
+WebP photos are saved as JPEGs, and photos under 250 KB are upscaled 2× (Lanczos) and also tagged
+**upscaled**. Files downloaded before these rules — and the ones that got 12/31/1969 as their date —
+are put right the next time you run it on that folder (it reads the thread from page 1 once to find
+their real post dates).
 
 The window is a real browser (Qt WebEngine, with its own saved login): SimpCity shows threads only to
 members, so log in there once (**Log In to SimpCity**); if a site asks whether you're human, answer it

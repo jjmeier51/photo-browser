@@ -2,6 +2,8 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 import AVFoundation
+import CoreImage
+import CoreImage.CIFilterBuiltins
 
 /// The SimpCity downloader's addresses, its **shared record**, and its date rule — everything that
 /// isn't the browser (that's `SimpCityService`). The Mac side is `mac/simpcity.py`; the two must agree.
@@ -18,11 +20,26 @@ import AVFoundation
 /// **Dates.** A photo or video that carries its own capture date keeps it. One that doesn't gets the
 /// date of the forum post it came from, written into the file (EXIF for photos, the QuickTime creation
 /// date for videos) — on the downloaded copy in the app's temp folder, before it goes to the drive.
+/// A post time is XenForo's `data-timestamp` (2.2+: `data-time` is a label like "12:34 PM" — reading it
+/// as a number dated the first downloads 12/31/1969); anything before 2000 is no date at all, and an
+/// embedded 1969/1970 date (what that misread wrote) doesn't count as the file's own.
+///
+/// **Photos.** A WebP becomes a JPEG and a photo under 250 KB is upscaled 2× (Lanczos) — tagged
+/// "upscaled" like the app's own upscales. Entries written before these rules (no `made` mark) are
+/// brought up to them once, where they lie (`fixes`, `SimpCityDownloader.fixFile`), and a record with
+/// misread post times has its thread read from page 1 again to recover them (`misdated`, `redate`).
 nonisolated enum SimpCity {
     static let folderName = "simpcity"
     static let recordName = ".simpcity.json"
     static let format = "photobrowser-simpcity"
     static let tag = "simpcity"
+    static let upscaledTag = "upscaled"
+    /// 2000-01-01: no post is older — a time below this is a misread, not a date.
+    static let minPost: Double = 946_684_800
+    /// A photo smaller than this is upscaled 2× (Lanczos).
+    static let upscaleUnder = 250 * 1024
+    /// Record mark: the file went through the current rules (WebP → JPEG, the upscale, a real post date).
+    static let made = 2
     static let imageExts: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "heic", "avif"]
     static let videoExts: Set<String> = ["mp4", "mov", "m4v", "webm", "mkv"]
 
@@ -78,7 +95,8 @@ nonisolated enum SimpCity {
     /// earliest post a file appeared in.
     static func collect(posts: [[String: Any]], into out: inout [String: Item]) {
         for p in posts {
-            let when = (p["time"] as? NSNumber)?.doubleValue ?? 0
+            var when = (p["time"] as? NSNumber)?.doubleValue ?? 0
+            if when < minPost { when = 0 }
             let post = (p["id"] as? String) ?? (p["id"] as? NSNumber)?.stringValue ?? ""
             for case let u as String in (p["urls"] as? [Any] ?? []) {
                 guard let k = mediaKey(u) else { continue }
@@ -142,10 +160,48 @@ nonisolated enum SimpCity {
 
         func has(_ key: String) -> Bool { items[key] != nil }
 
-        mutating func add(_ item: Item, file: String) {
-            items[item.key] = ["file": file, "post": item.post, "posted": Int(item.posted),
-                               "at": Int(Date().timeIntervalSince1970)]
+        mutating func add(_ item: Item, file: String, upscaled: Bool = false) {
+            var entry: [String: Any] = ["file": file, "post": item.post, "posted": Int(item.posted),
+                                        "at": Int(Date().timeIntervalSince1970), "made": SimpCity.made]
+            if upscaled || (items[item.key]?["upscaled"] as? Bool) == true { entry["upscaled"] = true }
+            items[item.key] = entry
             failed[item.key] = nil
+        }
+
+        /// Entries written while post times were misread — a full read of the thread recovers them.
+        var misdated: Bool {
+            items.values.contains { let p = num($0["posted"]); return p > 0 && p < SimpCity.minPost }
+        }
+
+        /// After reading the thread: a misread post time is replaced by the real one; when every page was
+        /// read, one still unknown (its post is gone) becomes 0 so the thread isn't read again for it.
+        mutating func redate(_ fresh: [String: Item], readAll: Bool) {
+            for (k, v) in items {
+                let p = num(v["posted"])
+                guard p > 0, p < SimpCity.minPost else { continue }
+                var e = v
+                if let f = fresh[k], f.posted >= SimpCity.minPost { e["posted"] = Int(f.posted) }
+                else if readAll { e["posted"] = 0 } else { continue }
+                items[k] = e
+            }
+        }
+
+        /// Downloaded files still in the folder that predate the current rules (`made`), each with the
+        /// best post date known: the one just read from the thread, else the recorded one if it's real.
+        func fixes(_ fresh: [String: Item], present: Set<String>) -> [(item: Item, name: String)] {
+            var out: [(item: Item, name: String)] = []
+            for (key, entry) in items.sorted(by: { $0.key < $1.key }) {
+                guard let name = entry["file"] as? String, present.contains(name),
+                      Int(num(entry["made"])) < SimpCity.made else { continue }
+                let parts = key.split(separator: ":", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else { continue }
+                let f = fresh[key]
+                let recorded = num(entry["posted"])
+                let posted = (f?.posted ?? 0) >= SimpCity.minPost ? f!.posted : (recorded >= SimpCity.minPost ? recorded : 0)
+                out.append((Item(kind: parts[0], id: parts[1], link: f?.link ?? SimpCity.pageLink(kind: parts[0], id: parts[1]),
+                                 post: f?.post ?? (entry["post"] as? String ?? ""), posted: posted), name))
+            }
+            return out
         }
 
         mutating func noteFailed(_ item: Item) {
@@ -172,8 +228,9 @@ nonisolated enum SimpCity {
                              "checked": Int(Date().timeIntervalSince1970)]
         }
 
-        /// Where a run picks the thread up: the last page read (it may have grown since), else 1.
-        func startPage(_ base: String) -> Int { max(1, Int(num(threads[base]?["pages"]))) }
+        /// Where a run picks the thread up: the last page read (it may have grown since), else 1 — and 1
+        /// while any entry's date was misread, to read it again.
+        func startPage(_ base: String) -> Int { misdated ? 1 : max(1, Int(num(threads[base]?["pages"]))) }
 
         /// The thread most recently read here — what "Get New" offers.
         var lastThread: String? {
@@ -236,12 +293,12 @@ nonisolated enum SimpCity {
         if isVideo(url) {
             let asset = AVURLAsset(url: url)
             if let item = try? await asset.load(.creationDate) {
-                if let d = try? await item.load(.dateValue) { return d }
-                if let s = try? await item.load(.stringValue), let d = ISO8601DateFormatter().date(from: s) { return d }
+                if let d = try? await item.load(.dateValue), real(d) { return d }
+                if let s = try? await item.load(.stringValue), let d = ISO8601DateFormatter().date(from: s), real(d) { return d }
             }
             if let qt = try? await asset.loadMetadata(for: .quickTimeMetadata) {
                 for item in qt where (item.key as? String) == "com.apple.quicktime.creationdate" {
-                    if let s = try? await item.load(.stringValue), let d = ISO8601DateFormatter().date(from: s) { return d }
+                    if let s = try? await item.load(.stringValue), let d = ISO8601DateFormatter().date(from: s), real(d) { return d }
                 }
             }
             return nil
@@ -255,21 +312,24 @@ nonisolated enum SimpCity {
         for case let s? in [exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
                             exif?[kCGImagePropertyExifDateTimeDigitized] as? String,
                             tiff?[kCGImagePropertyTIFFDateTime] as? String] {
-            if let d = f.date(from: s) { return d }
+            if let d = f.date(from: s), real(d) { return d }
         }
         return nil
     }
+
+    /// Unset dates read as 1904/0000, and the 1969-12-31/1970-01-01 a misread post time wrote, are no date.
+    private static func real(_ d: Date) -> Bool { d.timeIntervalSince1970 >= 31_536_000 }
 
     /// Keeps a capture date the downloaded file (a local temp) already has; otherwise writes `posted`
     /// into it. Returns the date the file now stands for (for its file dates), or nil if neither.
     /// Photos: a metadata-only rewrite (`CGImageDestinationCopyImageSource`, no re-encode) for the
     /// formats ImageIO can write; WebP/GIF/AVIF just get file dates. Videos: a passthrough remux.
-    static func settleDate(_ temp: URL, posted: Double) async -> Date? {
-        if let have = await embeddedDate(temp) { return have }
-        guard posted > 0 else { return nil }
+    static func settleDate(_ temp: URL, posted: Double) async -> (date: Date?, own: Bool) {
+        if let have = await embeddedDate(temp) { return (have, true) }
+        guard posted >= minPost else { return (nil, false) }
         let date = Date(timeIntervalSince1970: posted)
         if isVideo(temp) { await stampVideo(temp, date: date) } else { stampPhoto(temp, date: date) }
-        return date
+        return (date, false)
     }
 
     private static func stampPhoto(_ url: URL, date: Date) {
@@ -298,7 +358,11 @@ nonisolated enum SimpCity {
         let asset = AVURLAsset(url: url)
         guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else { return }
         let iso = ISO8601DateFormatter().string(from: date)
-        var meta = (try? await asset.load(.metadata)) ?? []
+        // Any creation date already there (a misread 1970 one) goes, so the new one is the one read.
+        let replaced: Set<AVMetadataIdentifier> = [.commonIdentifierCreationDate, .quickTimeMetadataCreationDate]
+        var meta = ((try? await asset.load(.metadata)) ?? []).filter { item in
+            item.identifier.map { !replaced.contains($0) } ?? true
+        }
         for id in [AVMetadataIdentifier.commonIdentifierCreationDate, .quickTimeMetadataCreationDate] {
             let item = AVMutableMetadataItem(); item.identifier = id; item.value = iso as NSString; meta.append(item)
         }
@@ -311,6 +375,75 @@ nonisolated enum SimpCity {
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in export.exportAsynchronously { c.resume() } }
         guard export.status == .completed else { try? FileManager.default.removeItem(at: tmp); return }
         _ = try? FileManager.default.replaceItemAt(url, withItemAt: tmp)
+    }
+
+    // MARK: - Photos: WebP → JPEG, small → 2×
+
+    /// A downloaded photo (a local temp) made ready: a WebP becomes a JPEG, and one under 250 KB is
+    /// upscaled 2× with Lanczos (`CILanczosScaleTransform`). EXIF/TIFF/GPS and the orientation tag are
+    /// carried over (pixels aren't turned); a transparent WebP is put on white. Returns the file now to
+    /// use (a `.jpg` beside it for a WebP) and whether it was upscaled. Animated images, other formats,
+    /// and anything ImageIO can't read are left as they are. Same rules as `simpcity.prepare_image`.
+    static func prepareImage(_ url: URL) -> (url: URL, upscaled: Bool) {
+        let ext = url.pathExtension.lowercased()
+        guard ["jpg", "jpeg", "png", "webp"].contains(ext) else { return (url, false) }
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? Int.max
+        let small = size < upscaleUnder
+        guard ext == "webp" || small,
+              let src = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(src) == 1,
+              var image = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return (url, false) }
+        var props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        if small {
+            let filter = CIFilter.lanczosScaleTransform()
+            filter.inputImage = CIImage(cgImage: image)
+            filter.scale = 2
+            filter.aspectRatio = 1
+            let rect = CGRect(x: 0, y: 0, width: image.width * 2, height: image.height * 2)
+            guard let out = filter.outputImage,
+                  let scaled = CIContext().createCGImage(out, from: rect) else { return (url, false) }
+            image = scaled
+        }
+        let asPNG = ext == "png"
+        let opaque: [CGImageAlphaInfo] = [CGImageAlphaInfo.none, .noneSkipFirst, .noneSkipLast]
+        if !asPNG, !opaque.contains(image.alphaInfo), let flat = flattened(image) {
+            image = flat
+        }
+        props[kCGImagePropertyPixelWidth] = nil
+        props[kCGImagePropertyPixelHeight] = nil
+        if var exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+            exif[kCGImagePropertyExifPixelXDimension] = image.width
+            exif[kCGImagePropertyExifPixelYDimension] = image.height
+            props[kCGImagePropertyExifDictionary] = exif
+        }
+        if !asPNG { props[kCGImageDestinationLossyCompressionQuality] = 0.95 }
+        let dest = url.deletingPathExtension().appendingPathExtension(asPNG ? "png" : "jpg")
+        let part = url.deletingLastPathComponent().appendingPathComponent(".sc_" + UUID().uuidString)
+            .appendingPathExtension(asPNG ? "png" : "jpg")
+        let type = (asPNG ? UTType.png : UTType.jpeg).identifier as CFString
+        guard let out = CGImageDestinationCreateWithURL(part as CFURL, type, 1, nil) else { return (url, false) }
+        CGImageDestinationAddImage(out, image, props as CFDictionary)
+        guard CGImageDestinationFinalize(out) else { try? FileManager.default.removeItem(at: part); return (url, false) }
+        let fm = FileManager.default
+        if dest == url {
+            guard (try? fm.replaceItemAt(url, withItemAt: part)) != nil else { try? fm.removeItem(at: part); return (url, false) }
+        } else {
+            try? fm.removeItem(at: dest)
+            guard (try? fm.moveItem(at: part, to: dest)) != nil else { try? fm.removeItem(at: part); return (url, false) }
+            try? fm.removeItem(at: url)
+        }
+        return (dest, small)
+    }
+
+    /// The image on white, without alpha (JPEG has none).
+    private static func flattened(_ image: CGImage) -> CGImage? {
+        guard let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(rect)
+        ctx.draw(image, in: rect)
+        return ctx.makeImage()
     }
 
     // MARK: - Helpers

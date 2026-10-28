@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -43,6 +44,12 @@ TAG = "simpcity"
 
 IMAGE_EXTS = {"jpg", "jpeg", "png", "webp", "gif", "heic", "avif"}
 VIDEO_EXTS = {"mp4", "mov", "m4v", "webm", "mkv"}
+
+MIN_POST = 946_684_800       # 2000-01-01: no post is older — a time below this is a misread, not a date
+UPSCALE_UNDER = 250 * 1024   # a photo smaller than this is upscaled 2× (Lanczos)
+UPSCALED_TAG = "upscaled"    # what the app's own upscales are tagged too
+MADE = 2                     # record marker: the file went through the current rules (WebP → JPEG, the
+                             # upscale, the post date read right); older entries are brought up to it once
 
 
 # ----------------------------------------------------------------------------- addresses
@@ -122,6 +129,8 @@ def collect(posts: list[dict], into: dict[str, Item] | None = None) -> dict[str,
     out = into if into is not None else {}
     for p in posts or []:
         when = float(p.get("time") or 0)
+        if when < MIN_POST:
+            when = 0
         for u in p.get("urls") or []:
             k = media_key(str(u))
             if not k:
@@ -182,10 +191,49 @@ class Record:
     def has(self, key: str) -> bool:
         return key in self.items
 
-    def add(self, item: Item, file: str) -> None:
-        self.items[item.key] = {"file": file, "post": item.post, "posted": int(item.posted or 0),
-                                "at": int(time.time())}
+    def add(self, item: Item, file: str, upscaled: bool = False) -> None:
+        entry = {"file": file, "post": item.post, "posted": int(item.posted or 0), "at": int(time.time()), "made": MADE}
+        if upscaled or self.items.get(item.key, {}).get("upscaled"):
+            entry["upscaled"] = True
+        self.items[item.key] = entry
         self.failed.pop(item.key, None)
+
+    def misdated(self) -> bool:
+        """Entries written while post times were misread (Oct 28: XenForo's `data-time` holds "12:34 PM",
+        read as 12 seconds after 1970) — a full read of the thread recovers their dates."""
+        return any(0 < float(v.get("posted") or 0) < MIN_POST for v in self.items.values())
+
+    def redate(self, items: dict[str, Item], read_all: bool) -> None:
+        """After reading the thread: a misread post time is replaced by the real one; when every page
+        was read, one still unknown (its post is gone) becomes 0 — no date — so the thread isn't read
+        from page 1 again for it."""
+        for k, v in self.items.items():
+            if 0 < float(v.get("posted") or 0) < MIN_POST:
+                fresh = items.get(k)
+                if fresh and fresh.posted >= MIN_POST:
+                    v["posted"] = int(fresh.posted)
+                elif read_all:
+                    v["posted"] = 0
+
+    def fixes(self, items: dict[str, Item], folder: str | Path) -> list[tuple[Item, str]]:
+        """Downloaded files still in the folder that predate the current rules (`made`): each with the
+        best post date known — the one just read from the thread, else the recorded one if it's real."""
+        try:
+            present = set(os.listdir(folder))
+        except OSError:
+            return []
+        out: list[tuple[Item, str]] = []
+        for key, entry in sorted(self.items.items()):
+            name = str(entry.get("file") or "")
+            if not name or name not in present or int(entry.get("made") or 0) >= MADE:
+                continue
+            kind, _, ident = key.partition(":")
+            fresh = items.get(key)
+            recorded = float(entry.get("posted") or 0)
+            posted = fresh.posted if fresh and fresh.posted >= MIN_POST else (recorded if recorded >= MIN_POST else 0)
+            out.append((Item(kind, ident, fresh.link if fresh else page_link(kind, ident),
+                             fresh.post if fresh else str(entry.get("post") or ""), posted), name))
+        return out
 
     def note_failed(self, item: Item) -> None:
         """Remembered so a later run tries it again even when it doesn't re-read the page it was on."""
@@ -206,7 +254,10 @@ class Record:
                               "checked": int(time.time())}
 
     def start_page(self, base: str) -> int:
-        """Where a run picks the thread up: the last page read (it may have grown since), else 1."""
+        """Where a run picks the thread up: the last page read (it may have grown since), else 1 — and 1
+        while any entry's date was misread, to read it again."""
+        if self.misdated():
+            return 1
         return max(1, int(self.threads.get(base, {}).get("pages") or 1))
 
     def last_thread(self) -> str | None:
@@ -342,6 +393,52 @@ def find_exiftool() -> str | None:
     return None
 
 
+class ExifSession:
+    """One ExifTool kept running for a whole run (`-stay_open`): starting a fresh one for every read and
+    write cost about a second a file. Each call sends its arguments, one per line, then `-execute`, and
+    reads the answer up to ExifTool's `{ready}`. Thread-safe (the files are settled on worker threads)."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.proc: subprocess.Popen | None = None
+        self.lock = threading.Lock()
+
+    def run(self, *args: str) -> str:
+        if any("\n" in a for a in args):
+            return ""
+        with self.lock:
+            try:
+                if self.proc is None or self.proc.poll() is not None:
+                    self.proc = subprocess.Popen([self.path, "-stay_open", "True", "-@", "-"], stdin=subprocess.PIPE,
+                                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                                 encoding="utf-8", errors="replace")
+                assert self.proc.stdin and self.proc.stdout
+                self.proc.stdin.write("\n".join([*args, "-execute"]) + "\n")
+                self.proc.stdin.flush()
+                out: list[str] = []
+                for line in self.proc.stdout:
+                    if line.rstrip("\r\n") == "{ready}":
+                        break
+                    out.append(line)
+                else:
+                    self.proc = None                       # it died — the next call starts a new one
+                return "".join(out)
+            except (OSError, ValueError, AssertionError):
+                self.proc = None
+                return ""
+
+    def close(self) -> None:
+        with self.lock:
+            if self.proc and self.proc.poll() is None:
+                try:
+                    self.proc.stdin.write("-stay_open\nFalse\n")
+                    self.proc.stdin.flush()
+                    self.proc.wait(timeout=10)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    self.proc.kill()
+            self.proc = None
+
+
 def _parse(s) -> datetime | None:
     if not isinstance(s, str) or not s.strip():
         return None
@@ -349,7 +446,8 @@ def _parse(s) -> datetime | None:
     for fmt in (_DATE_FMT, "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
         try:
             d = datetime.strptime(core, fmt)
-            return d if d.year > 1904 else None          # QuickTime's "0000:00:00" / 1904 epoch = unset
+            # Unset dates read as 0000/1904, and the 1969-12-31/1970-01-01 a misread time wrote are no date.
+            return d if d.year > 1970 else None
         except ValueError:
             continue
     return None
@@ -359,17 +457,16 @@ def is_video(path: str) -> bool:
     return path.rsplit(".", 1)[-1].lower() in VIDEO_EXTS
 
 
-def embedded_date(path: str, exiftool: str | None) -> datetime | None:
+def embedded_date(path: str, tool: ExifSession | None) -> datetime | None:
     """The capture date the file carries itself (what both apps sort by), or None."""
-    if not exiftool:
+    if not tool:
         return None
     tags = ["-Keys:CreationDate", "-QuickTime:CreateDate", "-QuickTime:MediaCreateDate"] if is_video(path) \
         else ["-EXIF:DateTimeOriginal", "-EXIF:CreateDate", "-EXIF:ModifyDate", "-XMP:DateCreated"]
+    out = tool.run("-j", "-q", "-m", "-api", "largefilesupport=1", "-d", _DATE_FMT, *tags, path)
     try:
-        res = subprocess.run([exiftool, "-j", "-q", "-m", "-api", "largefilesupport=1", "-d", _DATE_FMT, *tags, path],
-                             capture_output=True, text=True, timeout=120)
-        meta = (json.loads(res.stdout) or [{}])[0] if res.stdout.strip() else {}
-    except (OSError, subprocess.SubprocessError, ValueError):
+        meta = (json.loads(out) or [{}])[0] if out.strip() else {}
+    except ValueError:
         return None
     # The same fields, in the same order, the iPhone app reads a capture date from.
     for k in ("CreationDate", "DateTimeOriginal", "CreateDate", "ModifyDate", "MediaCreateDate", "DateCreated"):
@@ -379,49 +476,157 @@ def embedded_date(path: str, exiftool: str | None) -> datetime | None:
     return None
 
 
-def apply_date(path: str, posted: float, exiftool: str | None) -> str:
+def apply_date(path: str, posted: float, tool: ExifSession | None) -> str:
     """Keeps a capture date the file already has; otherwise writes the forum post's date into it
     (EXIF for photos; the QuickTime dates Photos/AVFoundation read for videos). The file's own dates
     follow the capture date either way. Returns "kept", "post", or "none" (nothing to go on / no
-    ExifTool — then only the file dates are set)."""
-    have = embedded_date(path, exiftool)
+    ExifTool — then only the file dates are set). Writes keep the file itself (its inode, so its
+    tag attribute), whether it's a temp download or a file already in the drive folder."""
+    have = embedded_date(path, tool)
+    if posted and posted < MIN_POST:
+        posted = 0
     if have:
-        when = have
-        outcome = "kept"
+        when, outcome = have, "kept"
     elif posted:
-        when = datetime.fromtimestamp(posted)
-        outcome = "none"
-        if exiftool:
-            s = when.strftime(_DATE_FMT)
-            if is_video(path):
-                tz = datetime.fromtimestamp(posted).astimezone().strftime("%z")
-                tags = ["-api", "QuickTimeUTC", f"-QuickTime:CreateDate={s}", f"-QuickTime:ModifyDate={s}",
-                        f"-QuickTime:TrackCreateDate={s}", f"-QuickTime:MediaCreateDate={s}",
-                        f"-Keys:CreationDate={s}{tz[:3]}:{tz[3:]}"]
-            else:
-                tags = [f"-EXIF:DateTimeOriginal={s}", f"-EXIF:CreateDate={s}", f"-EXIF:ModifyDate={s}"]
-            try:
-                res = subprocess.run([exiftool, "-q", "-m", "-overwrite_original", "-api", "largefilesupport=1",
-                                      *tags, path], capture_output=True, text=True, timeout=600)
-                if res.returncode == 0:
-                    outcome = "post"
-            except (OSError, subprocess.SubprocessError):
-                pass
+        when, outcome = datetime.fromtimestamp(posted), "none"
     else:
         return "none"
+    s = when.strftime(_DATE_FMT)
+    tags = [f"-FileCreateDate={s}", f"-FileModifyDate={s}"]
+    if outcome == "none" and tool:
+        if is_video(path):
+            tz = when.astimezone().strftime("%z")
+            tags += ["-api", "QuickTimeUTC", f"-QuickTime:CreateDate={s}", f"-QuickTime:ModifyDate={s}",
+                     f"-QuickTime:TrackCreateDate={s}", f"-QuickTime:MediaCreateDate={s}",
+                     f"-Keys:CreationDate={s}{tz[:3]}:{tz[3:]}"]
+        else:
+            tags += [f"-EXIF:DateTimeOriginal={s}", f"-EXIF:CreateDate={s}", f"-EXIF:ModifyDate={s}"]
+    if tool:
+        out = tool.run("-m", "-overwrite_original_in_place", "-api", "largefilesupport=1", *tags, path)
+        if outcome == "none" and "1 image files updated" in out:
+            outcome = "post"
     ts = when.timestamp()
     try:
         os.utime(path, (ts, ts))
     except OSError:
         pass
-    if exiftool:
-        s = when.strftime(_DATE_FMT)
-        try:
-            subprocess.run([exiftool, "-q", "-m", "-overwrite_original", f"-FileCreateDate={s}",
-                            f"-FileModifyDate={s}", path], capture_output=True, timeout=60)
-        except (OSError, subprocess.SubprocessError):
-            pass
     return outcome
+
+
+# ----------------------------------------------------------------------------- photos: WebP → JPEG, small → 2×
+
+
+def prepare_image(path: str) -> tuple[str, bool]:
+    """A downloaded photo made ready: a WebP becomes a JPEG, and one under 250 KB is upscaled 2× with
+    Lanczos. EXIF and the colour profile are carried over (the orientation tag too — pixels aren't
+    turned). Returns the file now to use (a new `.jpg` beside it for a WebP) and whether it was
+    upscaled. Animated WebP/GIF, and anything Pillow can't open, are left as they are."""
+    ext = path.rsplit(".", 1)[-1].lower() if "." in os.path.basename(path) else ""
+    if ext not in ("jpg", "jpeg", "png", "webp"):
+        return path, False
+    try:
+        small = os.path.getsize(path) < UPSCALE_UNDER
+    except OSError:
+        return path, False
+    if ext != "webp" and not small:
+        return path, False
+    try:
+        from PIL import Image
+    except ImportError:
+        return path, False
+    try:
+        with Image.open(path) as img:
+            if getattr(img, "n_frames", 1) > 1:
+                return path, False
+            img.load()
+            exif = img.info.get("exif")
+            icc = img.info.get("icc_profile")
+            out_img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS) if small else img.copy()
+        as_png = ext == "png"
+        if not as_png and out_img.mode not in ("RGB", "L"):
+            # JPEG has no transparency: put it on white.
+            rgba = out_img.convert("RGBA")
+            flat = Image.new("RGB", rgba.size, (255, 255, 255))
+            flat.paste(rgba, mask=rgba.split()[3])
+            out_img = flat
+        dest = path.rsplit(".", 1)[0] + (".png" if as_png else ".jpg")
+        part = dest + ".part"
+        kw = {"icc_profile": icc} if icc else {}
+        if exif:
+            kw["exif"] = exif
+        if as_png:
+            out_img.save(part, "PNG", **kw)
+        else:
+            out_img.save(part, "JPEG", quality=95, subsampling=0, **kw)
+        os.replace(part, dest)
+        if dest != path:
+            os.remove(path)
+        return dest, small
+    except (OSError, ValueError, Image.DecompressionBombError):
+        try:
+            os.remove(path.rsplit(".", 1)[0] + (".png" if ext == "png" else ".jpg") + ".part")
+        except OSError:
+            pass
+        return path, False
+
+
+def fix_file(folder: str | Path, item: Item, name: str, tool: ExifSession | None, tmp: str | Path) -> tuple[str, str, bool]:
+    """Brings a file downloaded before the current rules up to them, where it lies: WebP → JPEG and the
+    small-photo upscale (on a copy in `tmp`, then back into the folder), and the post's date when it
+    has no real one of its own (the 1969 a misread time wrote doesn't count). Returns (its name now,
+    the date outcome, upscaled). A file that changes name (`.webp` → `.jpg`) is a new file beside the
+    old, which is removed — the caller moves its tags across."""
+    folder = Path(folder)
+    path = folder / name
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    try:
+        small = os.path.getsize(path) < UPSCALE_UNDER
+    except OSError:
+        return name, "none", False
+    if ext == "webp" or (small and ext in ("jpg", "jpeg", "png")):
+        work = Path(tmp) / f"fix-{item.ident}-{int(time.time() * 1000)}.{ext}"
+        shutil.copyfile(path, work)
+        made, upscaled = prepare_image(str(work))
+        if made != str(work) or upscaled:
+            outcome = apply_date(made, item.posted, tool)
+            new_ext = made.rsplit(".", 1)[-1]
+            if f".{new_ext}" == os.path.splitext(name)[1].lower():
+                replace_file(made, path)
+                return name, outcome, upscaled
+            final = place(made, folder, f"{os.path.splitext(name)[0]}.{new_ext}")
+            os.remove(path)
+            return final.name, outcome, upscaled
+        try:
+            os.remove(work)
+        except OSError:
+            pass
+    return name, apply_date(str(path), item.posted, tool), False
+
+
+def replace_file(src: str | Path, dest: Path) -> None:
+    """New contents for a file already in the folder, keeping its tag attribute: written in place on
+    exFAT (no rename), else beside it and swapped in with the attribute copied over."""
+    if _on_exfat(str(dest.parent)):
+        shutil.copyfile(src, dest)
+    else:
+        part = dest.parent / f".{dest.name}.part"
+        shutil.copyfile(src, part)
+        with open(part, "rb+") as f:
+            os.fsync(f.fileno())
+        try:
+            import shared_tags
+            marker = shared_tags.xattr_get(str(dest), shared_tags.MARKER)
+            if marker is not None:
+                shared_tags.xattr_set(str(part), shared_tags.MARKER, marker)
+        except Exception:
+            pass
+        os.replace(part, dest)
+    st = os.stat(src)
+    os.utime(dest, (st.st_atime, st.st_mtime))
+    try:
+        os.remove(src)
+    except OSError:
+        pass
 
 
 # ----------------------------------------------------------------------------- page scripts
@@ -453,11 +658,15 @@ EXTRACT_POSTS_JS = r"""
   const posts = [];
   document.querySelectorAll('article.message, .message--post, li.message').forEach((p) => {
     const id = (p.getAttribute('data-content') || p.id || '').replace(/^(js-)?post-/, '');
-    const t = p.querySelector('.message-attribution time[data-time], time.u-dt[data-time], time[data-time], time[datetime]');
+    const t = p.querySelector('.message-attribution time, time.u-dt, time[data-timestamp], time[datetime], time[data-time]');
     let time = 0;
     if (t) {
-      time = parseInt(t.getAttribute('data-time') || '0', 10)
-        || Math.floor(Date.parse((t.getAttribute('datetime') || '').replace(/([+-]\d\d)(\d\d)$/, '$1:$2')) / 1000) || 0;
+      // XenForo 2.2+: data-timestamp is the time, data-time is a label ("12:34 PM"); older: data-time.
+      const num = (v) => (/^\d{9,}$/.test(v || '') ? parseInt(v, 10) : 0);
+      time = num(t.getAttribute('data-timestamp'))
+        || Math.floor(Date.parse((t.getAttribute('datetime') || '').replace(/([+-]\d\d)(\d\d)$/, '$1:$2')) / 1000)
+        || num(t.getAttribute('data-time')) || 0;
+      if (!(time >= 946684800)) time = 0;
     }
     const body = p.querySelector('.message-userContent') || p.querySelector('.message-body') || p;
     const urls = new Set();

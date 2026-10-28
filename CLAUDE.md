@@ -140,7 +140,9 @@ actions the app makes no network calls.
   SDK). (`MegaImportView`, `MegaDownloader`, `MegaCrypto`)
 - **Download from SimpCity** — on a person's folder (iPhone download menu; Safe Finder right-click):
   a simpcity.cr thread's goonbox photos (full size, via goonbox's `/api/images/<id>`) and turbo videos
-  into `<person>/simpcity`, tagged "simpcity", own capture date kept else the post's date. Read in a
+  into `<person>/simpcity`, tagged "simpcity", own capture date kept else the post's date (XenForo's
+  `data-timestamp` — `data-time` is a label); WebP → JPEG, photos under 250 KB upscaled 2× (Lanczos,
+  tagged "upscaled"); earlier downloads brought up to these rules once (`made`). Read in a
   real browser the person can see (DDoS-Guard/Cloudflare checks and the SimpCity login are answered
   there). **The record is on the drive** — `<person>/simpcity/.simpcity.json`, shared with Safe
   Finder — so neither app re-downloads what the other has. Page scripts are identical in Swift and

@@ -12,7 +12,7 @@ A run reads every page of the thread (or, for a thread read before, from the las
 collects each goonbox.cr image and turbo.cr video with the date of the post it came from, skips what the
 shared record (`<person>/simpcity/.simpcity.json`, also used by the iPhone app) says is done, then
 resolves each one to its full-size file (goonbox's own API, `simpcity.GOONBOX_API_START_JS`; for turbo
-the file its player loads) and downloads it with Chromium itself — three at a time, each in
+the file its player loads) and downloads it with Chromium itself — six at a time, each in
 its own hidden page. A download lands in the Mac's temp folder, gets its date (its own capture date if it
 has one, else the post's — see `simpcity.apply_date`), then moves into `<person>/simpcity` as
 `<id>.<ext>` and is tagged "simpcity" in the shared tag store. The record is saved as it goes, so a
@@ -45,7 +45,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 
 import simpcity as sc  # noqa: E402
 
-LANES = 3                 # files resolved + downloaded at once
+LANES = 6                 # files resolved + downloaded at once
 HOME = "https://simpcity.cr/"
 LOGIN = "https://simpcity.cr/login/"
 
@@ -99,6 +99,7 @@ class SimpCityWindow(QMainWindow):
         self.dest = self.person / sc.FOLDER
         self.tags = tags
         self.exiftool = sc.find_exiftool()
+        self.exif: sc.ExifSession | None = None
         self.running = False
         self.stopping = False
         self.pending: dict[str, object] = {}        # download file name → callback
@@ -207,8 +208,12 @@ class SimpCityWindow(QMainWindow):
         self.bar.setRange(0, 0)
         self.written: list[str] = []
         self.untagged: list[str] = []
+        self.upscaled: list[str] = []          # tagged "upscaled" too, like the app's own upscales
+        self.renamed: list[tuple[str, str]] = []
         self.failed = self.processed = 0
         self.kept = self.post_dated = 0
+        self.fixed = self.converted = self.enlarged = 0
+        self.exif = sc.ExifSession(self.exiftool) if self.exiftool else None
         _Runner(self, self._crawl(base, self.full.isChecked()), self._crawled).start()
 
     def stop(self) -> None:
@@ -252,28 +257,59 @@ class SimpCityWindow(QMainWindow):
             title = title or str(page.get("title") or "")
             n += 1
         self.record.note_thread(base, title, min(last, max(n - 1, 1)))
+        fixes = self.record.fixes(items, self.dest)
+        self.record.redate(items, read_all=first == 1 and not self.stopping)
         left, adopted = sc.todo(items, self.record, self.dest)
         self.record.save()
         if adopted:
             self._log(f"{adopted:,} file(s) were already in the folder — counted as done.")
         self._log(f"“{title}”: {len(items):,} files in pages {first}–{last}; {len(left):,} to download.")
-        return left
+        if fixes:
+            self._log(f"Bringing {len(fixes):,} earlier download(s) up to date (dates, WebP → JPEG, small photos 2×).")
+        return left, fixes
 
-    def _crawled(self, error, left) -> None:
+    def _crawled(self, error, result) -> None:
         if error:
             self._end(str(error))
             return
-        if not left or self.stopping:
+        left, fixes = result
+        if (not left and not fixes) or self.stopping:
             self._end()
             return
         self.queue = deque(left)
-        self.total = len(left)
+        self.total = len(left) + len(fixes)
         self.bar.setRange(0, self.total)
         self.bar.setValue(0)
         self.active = 0
+        if fixes:
+            self.active += 1
+            _Runner(self, self._fixer(fixes), self._lane_done).start()
         for lane in self.lanes[:min(LANES, len(left))]:
             self.active += 1
             _Runner(self, self._lane(lane), self._lane_done).start()
+
+    def _fixer(self, fixes: list[tuple[sc.Item, str]]):
+        """Earlier downloads brought up to the current rules, on a worker thread one at a time (alongside
+        the new downloads): the date their post really has, WebP → JPEG, small photos 2×."""
+        for item, name in fixes:
+            if self.stopping:
+                break
+            r = yield ("thread", lambda it=item, n=name: sc.fix_file(self.dest, it, n, self.exif, self.tmp))
+            if isinstance(r, Exception):
+                self._log(f"{name}: couldn't bring it up to date — {r}")
+            else:
+                new_name, outcome, upscaled = r
+                if new_name != name:
+                    self.renamed.append((str(self.dest / name), str(self.dest / new_name)))
+                    self.converted += 1
+                if upscaled:
+                    self.upscaled.append(str(self.dest / new_name))
+                    self.enlarged += 1
+                if outcome == "post":
+                    self.fixed += 1
+                self.record.add(item, new_name, upscaled=upscaled)
+            self.processed += 1
+            self.bar.setValue(min(self.total, self.processed))
 
     def _lane(self, page: QWebEnginePage):
         """Takes files off the queue one by one: resolve → download → date → into the folder."""
@@ -292,15 +328,18 @@ class SimpCityWindow(QMainWindow):
                     self.record.note_failed(item)
                     self._log(f"{item.link}: the download failed.")
                 else:
-                    final = yield ("thread", lambda p=path, it=item, e=ext: self._settle(p, it, e))
-                    if isinstance(final, Exception):
+                    done = yield ("thread", lambda p=path, it=item: self._settle(p, it))
+                    if isinstance(done, Exception):
                         self.failed += 1
                         self.record.note_failed(item)
-                        self._log(f"{item.link}: couldn't save it into the folder — {final}")
+                        self._log(f"{item.link}: couldn't save it into the folder — {done}")
                     else:
-                        self.record.add(item, final.name)
+                        final, upscaled = done
+                        self.record.add(item, final.name, upscaled=upscaled)
                         self.written.append(str(final))
                         self.untagged.append(str(final))
+                        if upscaled:
+                            self.upscaled.append(str(final))
                         if len(self.written) % 20 == 0:
                             self._save_and_tag()
             self.processed += 1
@@ -308,15 +347,17 @@ class SimpCityWindow(QMainWindow):
             self._say(f"Downloading — {len(self.written):,} saved, {self.failed:,} failed, "
                       f"{len(self.queue):,} waiting.")
 
-    def _settle(self, path: str, item: sc.Item, ext: str):
-        """On a worker thread: the date rule, then into the drive folder."""
+    def _settle(self, path: str, item: sc.Item):
+        """On a worker thread: WebP → JPEG and the small-photo upscale, the date rule, then into the
+        drive folder. Returns (where it landed, upscaled)."""
         try:
-            outcome = sc.apply_date(path, item.posted, self.exiftool)
+            path, upscaled = sc.prepare_image(path)
+            outcome = sc.apply_date(path, item.posted, self.exif)
             if outcome == "kept":
                 self.kept += 1
             elif outcome == "post":
                 self.post_dated += 1
-            return sc.place(path, self.dest, f"{item.ident}.{ext}")
+            return sc.place(path, self.dest, f"{item.ident}{os.path.splitext(path)[1].lower()}"), upscaled
         except OSError as e:
             return e
 
@@ -327,12 +368,21 @@ class SimpCityWindow(QMainWindow):
             self.record.save()
         except OSError as e:
             self._log(f"Couldn't save the download record: {e}")
-        if self.tags is not None and self.untagged:
-            try:
+        if self.tags is None:
+            return
+        try:
+            if self.renamed:                       # a converted file takes its tags to its new name
+                self.tags.carry(self.renamed)
+                self.tags.forget([old for old, _new in self.renamed])
+                self.renamed = []
+            if self.untagged:
                 self.tags.add(self.untagged, [sc.TAG])
                 self.untagged = []
-            except OSError as e:
-                self._log(f"Couldn't tag the files: {e}")
+            if self.upscaled:
+                self.tags.add(self.upscaled, [sc.UPSCALED_TAG])
+                self.upscaled = []
+        except OSError as e:
+            self._log(f"Couldn't tag the files: {e}")
 
     def _lane_done(self, error, _returned) -> None:
         if error:
@@ -344,6 +394,8 @@ class SimpCityWindow(QMainWindow):
 
     def _end(self, problem: str | None = None) -> None:
         self.running = False
+        if self.exif:
+            self.exif.close()
         self.go_btn.setEnabled(True)
         self.go_btn.setText("Get New")
         self.stop_btn.setEnabled(False)
@@ -360,6 +412,9 @@ class SimpCityWindow(QMainWindow):
             msg += "."
             if n:
                 msg += f" {self.kept:,} kept their own date; {self.post_dated:,} got the post's date."
+        if not problem and (self.fixed or self.converted or self.enlarged):
+            msg += (f" Earlier downloads: {self.fixed:,} got their post's real date, {self.converted:,} WebP → JPEG, "
+                    f"{self.enlarged:,} small photos upscaled 2×.")
         self._say(msg)
         self._log(msg)
         self.finished.emit(str(self.dest), list(getattr(self, "written", [])))
@@ -388,8 +443,9 @@ class SimpCityWindow(QMainWindow):
         else:
             raise ValueError(kind)
 
-    def _poll(self, page: QWebEnginePage, js: str, accept, cb, timeout: float, on_challenge=None) -> None:
-        """Runs `js` on `page` every 0.8 s until `accept(result)` is true (→ cb(result)) or `timeout`
+    def _poll(self, page: QWebEnginePage, js: str, accept, cb, timeout: float, on_challenge=None,
+              every: int = 250) -> None:
+        """Runs `js` on `page` every `every` ms until `accept(result)` is true (→ cb(result)) or `timeout`
         seconds pass (→ cb(None)). While the page shows a "you're human?" check the clock waits (up to
         15 minutes): the person is answering it."""
         started = time.monotonic()
@@ -415,9 +471,9 @@ class SimpCityWindow(QMainWindow):
             if now > deadline[0] or (self.stopping and now - started > 5):
                 cb(None)
                 return
-            QTimer.singleShot(800, tick)
+            QTimer.singleShot(every if not challenged[0] else 1000, tick)
 
-        QTimer.singleShot(600, tick)
+        QTimer.singleShot(min(every, 150), tick)
 
     def _read(self, url: str, n: int, cb) -> None:
         """Page `n` of the thread in the visible view, read once it's that page and its posts are there
@@ -493,7 +549,8 @@ class SimpCityWindow(QMainWindow):
             if _ready is False:
                 cb(None)
                 return
-            page.runJavaScript(start.strip(), 0, lambda _r: self._poll(page, read, lambda r: "status" in r, answered, 25))
+            page.runJavaScript(start.strip(), 0,
+                               lambda _r: self._poll(page, read, lambda r: "status" in r, answered, 25, every=80))
 
         if page.url().host().endswith("goonbox.cr"):
             ask()
