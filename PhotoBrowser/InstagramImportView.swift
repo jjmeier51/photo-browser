@@ -116,11 +116,18 @@ struct InstagramImportView: View {
             let dest: URL
             if isUpd { dest = target }
             else {
-                dest = target.appendingPathComponent(h, isDirectory: true)
+                // The profile's existing folder here if it has one (any name or case), else a new one.
+                dest = library.resolveIGDestination(person: target, handle: h)
                 try? DriveWriter.createDirectory(at: dest)
             }
             let prior = isUpd ? ex : library.instagramInfo(for: dest)
-            let already = force ? [] : Set(prior?.downloaded ?? [])
+            // Already here: the record's ids AND the posts in the folder — a record restored from an
+            // older backup, or rebuilt, mustn't make it fetch what's on the drive.
+            var already = Set<String>()
+            if !force {
+                let onDisk = await Task.detached(priority: .userInitiated) { Library.postIDsOnDisk(in: dest, tiktok: false) }.value
+                already = Set(prior?.downloaded ?? []).union(onDisk)
+            }
 
             let r = await InstagramService.run(handle: h, into: dest, alreadyDownloaded: already, creds: creds,
                                                replaceExisting: force, includeTagged: !skipT,

@@ -750,6 +750,15 @@ enum InstagramService {
                                              anonymousMedia: Bool = false,
                                              progress: @escaping @Sendable (Progress) -> Void) async -> DownloadResult {
         var result = DownloadResult()
+        // A post whose file is already in its folder (one the record had lost track of — restored from
+        // an older backup, say) is done: recorded as downloaded, not fetched again as "name 1.jpg".
+        var present = Set<String>()
+        let jobs = replace ? jobs : jobs.filter { job in
+            let path = job.folder.appendingPathComponent("\(job.name).\(job.isVideo ? "mp4" : "jpg")").path
+            guard FileManager.default.fileExists(atPath: path) else { return true }
+            present.insert(job.id)
+            return false
+        }
         let total = jobs.count
         var done = 0
         var succeeded = Set<String>(), failedIDs = Set<String>()
@@ -778,7 +787,7 @@ enum InstagramService {
         // Mark a post downloaded only when *every* job for it succeeded, so anything
         // that failed (or a carousel that partly failed) is retried on the next
         // "Get New Posts" instead of being treated as already-done.
-        result.newIDs = Array(succeeded.subtracting(failedIDs))
+        result.newIDs = Array(succeeded.union(present).subtracting(failedIDs))
         // Items were found but *nothing* downloaded — don't let the caller report a bland "no new
         // posts". This is the private-account case (media is auth-gated) and expired-login case; say so.
         if total > 0 && succeeded.isEmpty {

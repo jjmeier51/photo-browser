@@ -2909,7 +2909,8 @@ struct FolderView: View {
                                       systemImage: library.isOFFolder(url) ? "arrow.triangle.2.circlepath" : "lock.circle")
                             }
                             Button { showTikTok = true } label: {
-                                Label(library.lastTikTokHandle(for: url) != nil ? "Get New TikTok Videos" : "Download TikTok Profile…",
+                                Label(library.lastTikTokHandle(for: url) != nil || library.isTikTokFolder(url)
+                                      ? "Get New TikTok Videos" : "Download TikTok Profile…",
                                       systemImage: "music.note")
                             }
                             Button { showVSCO = true } label: {

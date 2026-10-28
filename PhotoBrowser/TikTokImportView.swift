@@ -25,7 +25,9 @@ struct TikTokImportView: View {
     @State private var showChallenge = false       // tikwm's Cloudflare check wants a tap — show it
 
     private var username: String { TikTokService.sanitizeHandle(handle) }
-    private var isUpdate: Bool { library.lastTikTokHandle(for: targetFolder) != nil }
+    private var isUpdate: Bool {
+        library.lastTikTokHandle(for: targetFolder) != nil || library.isTikTokFolder(targetFolder)
+    }
     private var busy: Bool { resolving }
 
     var body: some View {
@@ -38,7 +40,9 @@ struct TikTokImportView: View {
                 } header: {
                     Text("TikTok profile")
                 } footer: {
-                    Text("Downloads this profile's own videos into an “@\(username.isEmpty ? "handle" : username)” folder here, watermark-free at the highest quality offered. Only the public handle is sent out; nothing is uploaded.")
+                    Text(library.isTikTokFolder(targetFolder)
+                         ? "Fetches only the videos that aren’t in this folder yet, watermark-free at the highest quality offered. Only the public handle is sent out; nothing is uploaded."
+                         : "Downloads this profile's own videos into an “@\(username.isEmpty ? "handle" : username)” folder here — or, if it's already downloaded here, just the videos that aren’t yet — watermark-free at the highest quality offered. Only the public handle is sent out; nothing is uploaded.")
                 }
 
                 if resolving {
@@ -69,6 +73,8 @@ struct TikTokImportView: View {
                 }
             }
             .onAppear {
+                // Inside a profile's own folder its handle; elsewhere the one last used here.
+                if handle.isEmpty, let own = library.tiktokInfo(for: targetFolder)?.handle { handle = own }
                 if handle.isEmpty, let last = library.lastTikTokHandle(for: targetFolder) { handle = last }
             }
             // The resolver's bot check couldn't be passed quietly: show it, and once the person taps
@@ -100,19 +106,11 @@ struct TikTokImportView: View {
         guard !user.isEmpty else { return }
         resolving = true; note = nil; queued = 0; remaining = 0
 
-        let dest = targetFolder.appendingPathComponent("@\(user)", isDirectory: true)
-        let parent = targetFolder
-        let prior = library.tiktokInfo(for: dest)
-        let already = Set(prior?.downloaded ?? [])
-        // Already downloaded this profile? Only check for videos newer than the most recent one
-        // we have — the resolver stops paging once it reaches older posts.
-        let since = prior?.newestDate.map { Date(timeIntervalSince1970: $0) }
-        // If the profile isn't fully downloaded yet (an interrupted run left older videos missing
-        // below the downloaded newest ones), scan the WHOLE list so those older videos are found —
-        // the stop-early shortcut would otherwise halt at the downloaded top and say "no new videos".
-        // Unknown count on an existing folder → scan fully once (it also records the count).
-        let fullScan = (prior?.profileVideoCount).map { already.count < $0 } ?? (prior != nil)
-        let didFullList = already.isEmpty || fullScan     // no early stop → totalFound is the whole profile
+        // The one folder this profile downloads into: this folder when it is the profile's own, else
+        // the child already registered to the handle (whatever its name or case), else a new "@handle".
+        // Never a second folder for a profile that's already here.
+        let dest = library.tiktokDestination(in: targetFolder, handle: user)
+        let parent = dest.deletingLastPathComponent()
         batchToken += 1                                          // start the monitor loop
 
         // A background-task window so link resolution keeps going for a few minutes after the app
@@ -121,6 +119,22 @@ struct TikTokImportView: View {
         let bg = BackgroundTaskHolder(); bg.begin(name: "TikTok Resolve")
         Task {
             let destPath = dest.path
+            // Already here: the record's ids AND the videos in the folder — a record restored from an
+            // older backup, or rebuilt, mustn't make it fetch what's on the drive. The record is
+            // brought up to date with what's on disk first.
+            let onDisk = await Task.detached(priority: .userInitiated) { Library.postIDsOnDisk(in: dest, tiktok: true) }.value
+            library.addKnownTikTokIDs(onDisk, for: dest)
+            let prior = library.tiktokInfo(for: dest)
+            let already = Set(prior?.downloaded ?? []).union(onDisk)
+            // Already downloaded this profile? Only check for videos newer than the most recent one
+            // we have — the resolver stops paging once it reaches older posts.
+            let since = prior?.newestDate.map { Date(timeIntervalSince1970: $0) }
+            // If the profile isn't fully downloaded yet (an interrupted run left older videos missing
+            // below the downloaded newest ones), scan the WHOLE list so those older videos are found —
+            // the stop-early shortcut would otherwise halt at the downloaded top and say "no new videos".
+            // Unknown count on an existing folder → scan fully once (it also records the count).
+            let fullScan = (prior?.profileVideoCount).map { already.count < $0 } ?? !already.isEmpty
+            let didFullList = already.isEmpty || fullScan     // no early stop → totalFound is the whole profile
             let result = await TikTokService.enumerateStreaming(
                 username: user, alreadyDownloaded: already, since: since, fullScan: fullScan,
                 onAvatar: { data in
@@ -137,16 +151,20 @@ struct TikTokImportView: View {
                     // A photo/slideshow post → one file per image (`{id}_1.jpg`, …); a video
                     // post → one `{id}.mp4`. Both share the post id so dedup stays per-post.
                     var enqueued = 0
+                    // A file already in the folder is never fetched again.
                     if !v.images.isEmpty {
                         for (n, imgStr) in v.images.enumerated() {
                             guard let url = URL(string: imgStr) else { continue }
-                            let meta = BackgroundDownloader.Meta(dest: dest.appendingPathComponent("\(v.id)_\(n + 1).jpg").path,
+                            let path = dest.appendingPathComponent("\(v.id)_\(n + 1).jpg").path
+                            guard !FileManager.default.fileExists(atPath: path) else { continue }
+                            let meta = BackgroundDownloader.Meta(dest: path,
                                                                  createTime: v.createTime.timeIntervalSince1970,
                                                                  caption: v.desc, folder: destPath, id: v.id, likes: v.likes)
                             BackgroundDownloader.shared.enqueue(url: url, meta: meta)
                             enqueued += 1
                         }
-                    } else if let url = URL(string: v.url) {
+                    } else if let url = URL(string: v.url),
+                              !FileManager.default.fileExists(atPath: dest.appendingPathComponent("\(v.id).mp4").path) {
                         let meta = BackgroundDownloader.Meta(dest: dest.appendingPathComponent("\(v.id).mp4").path,
                                                              createTime: v.createTime.timeIntervalSince1970,
                                                              caption: v.desc, folder: destPath, id: v.id, likes: v.likes)
@@ -161,7 +179,8 @@ struct TikTokImportView: View {
                             try? DriveWriter.createDirectory(at: dest)
                             let info = TTFolderInfo(handle: user, secUid: prior?.secUid ?? "",
                                                     lastUpdated: Date().timeIntervalSince1970,
-                                                    downloaded: prior?.downloaded ?? [], videos: prior?.videos ?? 0,
+                                                    downloaded: prior?.downloaded ?? onDisk.sorted(),
+                                                    videos: prior?.videos ?? onDisk.count,
                                                     newestDate: prior?.newestDate)
                             library.setTikTokInfo(info, for: dest)
                             library.setLastTikTokHandle(user, for: parent)

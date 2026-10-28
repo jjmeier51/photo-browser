@@ -302,6 +302,42 @@ extension Library {
                                   highlights: highlights)
     }
 
+    // MARK: - What a profile folder already holds
+
+    /// The post ids a profile folder already holds on disk — named the way the downloaders name their
+    /// files — in the folder and its subfolders (highlights, "Stories", folders the user sorted things
+    /// into, a DUPLICATES set-aside), three levels down, hidden folders skipped. "Get New" skips these as
+    /// well as the ids in the folder's record: a record restored from an older backup (or rebuilt, or
+    /// missing ids for any other reason) must never make it download what's already there. Both forms of
+    /// a `<stem>_<n>` name are returned (a carousel item, or an Instagram shortcode that itself ends in
+    /// `_<digits>`). Blocking — call off the main actor.
+    nonisolated static func postIDsOnDisk(in folder: URL, tiktok: Bool) -> Set<String> {
+        var ids = Set<String>()
+        let keys: [URLResourceKey] = [.isDirectoryKey]
+        var queue: [(URL, Int)] = [(folder, 0)]
+        var next = 0
+        while next < queue.count, next < 2_000 {
+            let (dir, depth) = queue[next]; next += 1
+            for c in coordinatedContents(of: dir, keys: keys) {
+                let name = c.lastPathComponent
+                guard !name.hasPrefix(".") else { continue }
+                if (try? c.resourceValues(forKeys: Set(keys)))?.isDirectory == true {
+                    if depth < 3, !name.hasPrefix("@") { queue.append((c, depth + 1)) }   // another profile's folder isn't ours
+                    continue
+                }
+                guard let p = postID(of: name) else { continue }
+                let whole = URL(fileURLWithPath: name).deletingPathExtension().lastPathComponent
+                if tiktok {
+                    if isTikTokID(p.id) { ids.insert(p.id) }
+                } else {
+                    ids.insert(p.id)
+                    ids.insert(whole)
+                }
+            }
+        }
+        return ids
+    }
+
     // MARK: - File-name shapes the downloaders leave behind
 
     nonisolated private static let mediaExtensions: Set<String> = ["jpg", "jpeg", "png", "webp", "heic", "mp4", "mov", "m4v", "webm"]

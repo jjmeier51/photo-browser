@@ -765,7 +765,8 @@ nothing, and a fix that doesn't needs help. Three layers now guarantee it:
    folder with `<15–20 digit id>(.mp4|_n.jpg)` files; Instagram = posted-by entries, the handle
    remembered on the parent, a highlight already marked inside, or a handle-shaped name over
    shortcode / story-pk-named files). A rebuilt record carries the ids on disk (so "Get New" dedups
-   and backfills), `lastUpdated` = newest file date, blank user id / secUid (resolved by the next
+   and backfills — and every run also skips whatever is in the folder, so a record from an older
+   backup can't cause re-downloads either: §7.4), `lastUpdated` = newest file date, blank user id / secUid (resolved by the next
    run), subfolders re-marked as highlights, the handle prefilled on the parent. Known profile,
    highlight, Facebook / OF / VSCO folders are never re-classified or entered.
 
@@ -1284,6 +1285,28 @@ via CommonCrypto (bridging header), which CryptoKit can't do.
 ### 7.4 Instagram / Facebook — `InstagramService.swift` / `FacebookService.swift`
 If an account is **public**, downloads without using the user's cookie. Meta anti-automation
 mitigations: human-like pacing/headers while still downloading reasonably fast.
+
+**Only new content, never a second copy (Oct 28, 2026)** — Instagram and TikTok alike. After
+"Reconnect Profile Folders" a record can come back from a backup older than the files in its folder
+(or be rebuilt from them), and "Get New" used to dedup against the record alone: everything downloaded
+since that backup came down again — Instagram even saved it beside the original as "name 1.jpg". Now:
+- **Every run skips the record's ids *and* what's in the folder** — `Library.postIDsOnDisk(in:tiktok:)`
+  (`ProfileReconnect.swift`) reads the post ids from the downloaders' file names in the folder and its
+  subfolders (highlights, Stories, folders the user sorted things into, DUPLICATES), 3 levels, hidden
+  and `@` folders skipped; for Instagram both forms of `<stem>_<n>` are taken (carousel item, or a
+  shortcode that ends in `_<digits>`). Used by the single Instagram run (`InstagramImportView`), the
+  bulk run (`startBulkInstagramDownload`), the stories sweep (`AllStoriesView.fetchStories`) and TikTok
+  (`TikTokImportView`, which also writes the found ids into the record first — `addKnownTikTokIDs`;
+  Instagram's `InstagramApply.apply` already stores `already ∪ newIDs`). The stop-early paging and
+  TikTok's full-scan check see the true set, so a reconnected profile pages only to its newest post.
+- **A file already in place is never fetched again.** Instagram's `download(jobs:)` drops a job whose
+  `<name>.jpg/.mp4` exists (not on Re-download Entire Profile) and records its id as done; TikTok
+  doesn't enqueue a video or slideshow image whose file exists (filing already dropped a landed dupe).
+- **One folder per profile.** Starting a download where the profile already lives reuses its folder,
+  whatever it's called or however it's capitalised: `resolveIGDestination` (now records-only, no drive
+  I/O, also used by the single run) and `tiktokDestination(in:handle:)`; TikTok from *inside* its
+  `@handle` folder used to make `@handle/@handle` and download the whole profile again — it now runs
+  in place, prefilled ("Get New TikTok Videos" shows there too).
 
 ### 7.4c taylorpictures.net — `TaylorGallery.swift` / `TaylorBrowserView.swift` (Oct 21, 2026)
 Listing: the first page's pager gives the page count (`pageCount(in:pattern:)`), and the rest of a

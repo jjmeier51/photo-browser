@@ -425,6 +425,30 @@ final class Library {
         return m
     }()
     func tiktokInfo(for folder: URL) -> TTFolderInfo? { tiktokFolders[folder.path] }
+
+    /// Where `handle`'s TikTok videos go from `folder`: `folder` itself when it is that profile's
+    /// folder; else the child already registered to the handle (any name, any case — a renamed or
+    /// reconnected folder); else a new `@handle` folder. So "Get New" never starts a second folder
+    /// (and a second full download) for a profile that's already here.
+    func tiktokDestination(in folder: URL, handle: String) -> URL {
+        func same(_ info: TTFolderInfo) -> Bool { info.handle.caseInsensitiveCompare(handle) == .orderedSame }
+        if let own = tiktokFolders[folder.path], same(own) { return folder }
+        let prefix = folder.path + "/"
+        let children = tiktokFolders.filter { $0.key.hasPrefix(prefix) && !$0.key.dropFirst(prefix.count).contains("/") && same($0.value) }
+        if let path = children.keys.sorted().first { return URL(fileURLWithPath: path, isDirectory: true) }
+        return folder.appendingPathComponent("@\(handle)", isDirectory: true)
+    }
+
+    /// Adds post ids found on disk to a TikTok folder's record (no-op without a record), so its dedup
+    /// set and count cover everything that's really there.
+    func addKnownTikTokIDs(_ ids: Set<String>, for folder: URL) {
+        guard var info = tiktokFolders[folder.path] else { return }
+        let missing = ids.subtracting(info.downloaded)
+        guard !missing.isEmpty else { return }
+        info.downloaded += missing.sorted()
+        info.videos += missing.count
+        setTikTokInfo(info, for: folder)
+    }
     func isTikTokFolder(_ folder: URL) -> Bool { tiktokFolders[folder.path] != nil }
     func setTikTokInfo(_ info: TTFolderInfo, for folder: URL) {
         tiktokFolders[folder.path] = info
@@ -2483,7 +2507,10 @@ final class Library {
                 let dest = resolveIGDestination(person: job.folder, handle: job.handle)
                 try? DriveWriter.createDirectory(at: dest)
                 let prior = instagramInfo(for: dest)
-                let already = Set(prior?.downloaded ?? [])
+                // The record's ids and what's in the folder (a record from an older backup mustn't
+                // make it fetch what's already there).
+                let onDisk = await Task.detached(priority: .utility) { Self.postIDsOnDisk(in: dest, tiktok: false) }.value
+                let already = Set(prior?.downloaded ?? []).union(onDisk)
                 setActivity(id, status: "@\(job.handle) — \(already.isEmpty ? "downloading" : "checking for new posts") (\(i + 1) of \(jobs.count))",
                             fraction: Double(i) / Double(jobs.count))
                 let r = await InstagramService.run(handle: job.handle, into: dest, alreadyDownloaded: already,
@@ -2536,15 +2563,18 @@ final class Library {
     /// subfolder. Reusing the registered folder is what turns a bulk re-run into an
     /// incremental "new posts only" pass — a parallel folder would have an empty
     /// dedup record and re-download the entire profile.
-    private func resolveIGDestination(person: URL, handle: String) -> URL {
+    /// Where `handle`'s Instagram downloads go from `person`: the child folder registered to the handle
+    /// (any name, any case — a renamed or reconnected folder), `person` itself when it is that profile's
+    /// folder, else a new folder named after the handle. From the records alone (no drive I/O), so a
+    /// profile that's already here is never started again in a second folder.
+    func resolveIGDestination(person: URL, handle: String) -> URL {
+        func same(_ info: IGFolderInfo) -> Bool { info.handle.caseInsensitiveCompare(handle) == .orderedSame }
         let direct = person.appendingPathComponent(handle, isDirectory: true)
         if instagramInfo(for: direct) != nil { return direct }
-        let children = (try? FileManager.default.contentsOfDirectory(
-            at: person, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
-        for child in children where (try? child.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
-            if instagramFolders[child.path]?.handle.caseInsensitiveCompare(handle) == .orderedSame { return child }
-        }
-        if instagramFolders[person.path]?.handle.caseInsensitiveCompare(handle) == .orderedSame { return person }
+        let prefix = person.path + "/"
+        let children = instagramFolders.filter { $0.key.hasPrefix(prefix) && !$0.key.dropFirst(prefix.count).contains("/") && same($0.value) }
+        if let path = children.keys.sorted().first { return URL(fileURLWithPath: path, isDirectory: true) }
+        if let own = instagramFolders[person.path], same(own) { return person }
         return direct
     }
 

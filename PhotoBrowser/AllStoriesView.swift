@@ -200,8 +200,10 @@ struct AllStoriesView: View {
             : await InstagramService.fetchProfilePic(userID: userID, handle: folder.info.handle, creds: creds, fallback: "")
         let storiesFolder = folder.url.appendingPathComponent("Stories", isDirectory: true)
         try? DriveWriter.createDirectory(at: storiesFolder)   // create @handle/Stories on demand
+        // Already here: the record's ids and what's in the folder (Stories, highlights, the posts).
+        let already = Set(folder.info.downloaded).union(Library.postIDsOnDisk(in: folder.url, tiktok: false))
         let r = await InstagramService.runStories(handle: folder.info.handle, userID: userID, into: storiesFolder,
-                                                  already: Set(folder.info.downloaded), creds: creds) { _ in }
+                                                  already: already, creds: creds) { _ in }
         guard r.photos + r.videos > 0 else {
             return ProfileOutcome(url: folder.url, info: folder.info, userID: userID, photos: 0, videos: 0,
                                   captions: [:], postedBy: [:], newIDs: [], files: [], copied: [], picData: picData)
