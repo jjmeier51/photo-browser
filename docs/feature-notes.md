@@ -1334,11 +1334,13 @@ even though the session is fine. Now:
   with the session — now including the DASH video+audio pair (`dashPair`), so an exclusive video keeps
   its best rendition rather than dropping to the progressive stream.
 
-### 7.4d SimpCity threads — `SimpCityService.swift` / `SimpCityRecord.swift` / `SimpCityImportView.swift`, `mac/simpcity.py` / `mac/simpcity_downloader.py` (Oct 28, 2026)
+### 7.4d SimpCity threads — `SimpCityService.swift` / `SimpCityRecord.swift` / `SimpCityHosts.swift` / `SimpCityImportView.swift`, `mac/simpcity.py` / `mac/filehosts.py` / `mac/simpcity_downloader.py` (Oct 28, 2026)
 "Download from SimpCity…" on a person's folder (iPhone: the download menu; Safe Finder: right-click a
 folder, or the empty area of one): paste a `simpcity.cr/threads/…` address; every page is read, each
-goonbox.cr image is saved full-size and each turbo.cr video saved, into `<person>/simpcity`, tagged
-"simpcity". Neither app ever fetches what the other already has.
+goonbox.cr image is saved full-size and — with **Download videos** on — each turbo.cr video and every
+video the posts link on pixeldrain, gofile, cyberdrop, bunkr, filester and fileditch, into
+`<person>/simpcity`, tagged "simpcity". Neither app ever fetches what the other already has, and a video
+posted on several hosts is fetched once.
 - **One record, on the drive.** `<person>/simpcity/.simpcity.json` (`format: photobrowser-simpcity`):
   `items` (`goonbox:<id>` / `turbo:<id>` → file, post id, post time), `threads` (address → title, last
   page read, when), `failed` (not downloaded yet — retried by the next run even when it doesn't re-read
@@ -1428,6 +1430,55 @@ goonbox.cr image is saved full-size and each turbo.cr video saved, into `<person
   to them once, beside the new downloads (`fix_file` / `fixFile`: a copy prepared and committed back,
   the tag attribute kept; a WebP's new `.jpg` takes its tags — Safe Finder `carry`+`forget`, iPhone
   `itemMoved` — and the `.webp` goes).
+- **Videos on file hosts** (Oct 28, `filehosts.py` / `SimpCityHosts.swift`, kept in step — same keys,
+  ids and preference order; the page scripts byte-identical). A post's host link is a `Link` (a file or
+  a folder: `pixeldrain /u/ /l/`, `gofile /d/`, `cyberdrop /a/ /f/ /e/`, `bunkr(.cr/.ws/.ru/…) /a/ /f/ /v/
+  /i/`, `filester(.gg/.me) /d/ /f/`, fileditch `file.php?f=…`, `fileditchstuff` direct links,
+  `fileditchvids.st`). Links are **listed before any download** — the lanes take them first — into the
+  videos in them (`Remote`: name, and for most hosts the exact size; pixeldrain also the SHA-256);
+  photos, archives and anything else in a folder are left alone. Saved as `<host>-<file id>.<ext>`,
+  keyed `<host>:<file id>`. How each host is read: pixeldrain's public API (`/api/file/<id>/info`,
+  `/api/list/<id>`, file `/api/file/<id>?download`); gofile's guest account (`POST
+  api.gofile.io/accounts` — what the site makes for every visitor) + `/contents/<id>` with the site's
+  rotating website token (`sha256(UA::en::token::unix/14400::salt)`, `X-Website-Token`), files fetched
+  with that account's `accountToken` cookie; cyberdrop's album page `/f/<id>` links → `api.<host>/api/
+  file/info/<id>` → `auth_url` (asked just before the download — it doesn't last); bunkr's album
+  `albumFiles` list (or `/f/` links) / a file page's `data-file-id` → `apidl.bunkr.ru/api/_001_v2`
+  (base64 XOR'd with `SECRET_KEY_<ts/3600>`, the maintenance clip refused), also just before the
+  download. **filester and fileditch have no public API** (filester's REST API wants an account key;
+  fileditchfiles.me is behind Cloudflare), so their pages are read in a lane: `HOST_PAGE_JS` takes the
+  video a page plays (muted autoplay), has loaded, or links, and — on a folder — the pages of the files
+  in it; a file page showing nothing gets its **Download button pressed** once (`CLICK_DOWNLOAD_JS`,
+  never "app"/"premium"/sign-up buttons) and the file it then plays, links, or hands the browser is
+  taken by address (Safe Finder: `downloadRequested` from that lane page, cancelled; iPhone: the lane's
+  navigation delegate). A host whose API answers with a check page, or fails, goes the same way (a
+  folder's page is listed; a file's page is read at its turn). The browser download of a host file
+  carries its page as Referer (Safe Finder: the interceptor's `by_url`; iPhone: the request) and gofile's
+  cookie. A dead link (404 / "not found") is done; a folder that couldn't be listed is tried again next
+  run; a failed video's link stays not done and is listed again (a video it no longer holds is done).
+- **One video, one copy** (`Dedup`, both apps; thread-safe). The same clip is routinely posted on
+  gofile + pixeldrain + bunkr at once. Three checks, all by the bytes as downloaded (the record's `size`
+  and `sha256` are taken **before** the date is written into the file, so another host's copy compares
+  equal): (1) **sizes up front** — the hosts that say a size (pixeldrain, gofile, cyberdrop, bunkr albums)
+  are grouped by exact size (≥ 1 MB; two different videos of one exact size that big don't happen), the
+  copy on the preferred host (pixeldrain > gofile > cyberdrop > turbo > filester > fileditch > bunkr) is
+  queued and the others **wait on it**: recorded `same_as` it once it's saved, tried in its place if it
+  fails (and then the failed one is recorded as the mirror that worked); a size equal to a video
+  downloaded before is `same_as` at once; (2) **as a download starts** — the size the server gives
+  (`Content-Length`; Chromium's `totalBytes`; on the iPhone a one-byte `Range` request first, headers
+  only) is checked the same way, which catches turbo and the browser-read hosts; (3) **once it's in** —
+  its SHA-256 against every video kept (pixeldrain's own hash counts too); a match is deleted and recorded
+  `same_as`. Videos recorded before sizes were kept seed the check with their file's size (right whenever
+  their own date was kept). A host link that answers with a photo/archive is `skipped` ("not a video").
+- **Download videos** (Safe Finder checkbox, `QSettings`; iPhone toggle, `photoBrowser.simpCityVideos`;
+  on by default). Off: turbo items are noted in `failed` with `skipped`, host links in `links` with
+  `skipped` — so a later run with it on gets them without reading the thread again. A thread read before
+  host links were collected (`threads[…].hosts` unset) is read from page 1 once when videos are on; a
+  run that reads to the end (from page 1, or on top of such a read) sets it.
+- **Record additions** (both apps merge them; the merge is additive like the rest): `links` (link key
+  `<host>:<file|folder>:<id>` → url, post, posted, `files` (its videos' keys), `done`, `why`/`gone`/
+  `skipped`; done on either side wins), item fields `size`, `sha256`, `via` (the link key), `name`,
+  `same_as`, `skipped`. An older app that drops `links` only costs a re-listing.
 - **Tags**: iPhone `library.addTag("simpcity", to:)` every 20 files and at the end; Safe Finder the
   shared tag store (`tag_store().add`) the same way.
 

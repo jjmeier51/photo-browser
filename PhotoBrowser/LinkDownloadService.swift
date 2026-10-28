@@ -493,7 +493,7 @@ enum LinkDownloadService {
     /// Extracts the first balanced `[ … ]` array assigned to `marker` in `html`
     /// (`marker = [ … ]`, allowing `const`/`let`/`var`/`window.` before it), respecting
     /// quoted strings and escapes (JS arrays aren't cleanly regex-able).
-    nonisolated private static func balancedArray(in html: String, after marker: String) -> String? {
+    nonisolated static func balancedArray(in html: String, after marker: String) -> String? {
         guard let re = try? NSRegularExpression(pattern: "\(marker)\\s*=\\s*\\["),
               let m = re.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
               let full = Range(m.range, in: html) else { return nil }

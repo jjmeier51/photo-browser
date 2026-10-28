@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import CryptoKit
 
 /// The SimpCity downloader's addresses, its **shared record**, and its date rule — everything that
 /// isn't the browser (that's `SimpCityService`). The Mac side is `mac/simpcity.py`; the two must agree.
@@ -28,6 +29,13 @@ import CoreImage.CIFilterBuiltins
 /// "upscaled" like the app's own upscales. Entries written before these rules (no `made` mark) are
 /// brought up to them once, where they lie (`fixes`, `SimpCityDownloader.fixFile`), and a record with
 /// misread post times has its thread read from page 1 again to recover them (`misdated`, `redate`).
+///
+/// **Videos on file hosts** (`SimpCityHosts`): a post's pixeldrain/gofile/cyberdrop/bunkr/filester/
+/// fileditch videos are keyed `<host>:<file id>` and named `<host>-<file id>.<ext>`; the links are kept
+/// under `links` (one done isn't listed again). The same video posted on several hosts is fetched once
+/// (`Dedup`: the hosts' sizes up front, the server's size as a download starts, the SHA-256 once it's in)
+/// and the other copies are recorded `same_as` the one kept. With "Download videos" off, turbo and the
+/// links are noted (`skipped`) so a later run gets them without reading the thread again.
 nonisolated enum SimpCity {
     static let folderName = "simpcity"
     static let recordName = ".simpcity.json"
@@ -40,6 +48,8 @@ nonisolated enum SimpCity {
     static let upscaleUnder = 250 * 1024
     /// Record mark: the file went through the current rules (WebP → JPEG, the upscale, a real post date).
     static let made = 2
+    /// Thread mark: its pages were read for file-host links too.
+    static let hostsRead = 1
     static let imageExts: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "heic", "avif"]
     static let videoExts: Set<String> = ["mp4", "mov", "m4v", "webm", "mkv"]
 
@@ -73,33 +83,56 @@ nonisolated enum SimpCity {
         kind == "goonbox" ? "https://goonbox.cr/img/\(id)" : "https://turbo.cr/embed/\(id)"
     }
 
-    /// The file extension for a resolved file URL (its path, not the query).
-    static func fileExtension(_ url: String, kind: String) -> String {
-        let last = URL(string: url)?.lastPathComponent ?? ""
-        var ext = last.contains(".") ? (last.split(separator: ".").last.map(String.init) ?? "").lowercased() : ""
-        if ext == "jpeg" { ext = "jpg" }
-        if imageExts.contains(ext) || videoExts.contains(ext) { return ext }
-        return kind == "turbo" ? "mp4" : "jpg"
+    /// The file extension for a resolved file URL (its path, not the query) — or, for a file-host video,
+    /// its name there.
+    static func fileExtension(_ url: String, kind: String, name: String = "") -> String {
+        for last in [name, URL(string: url)?.lastPathComponent ?? ""] {
+            var ext = last.contains(".") ? (last.split(separator: ".").last.map(String.init) ?? "").lowercased() : ""
+            if ext == "jpeg" { ext = "jpg" }
+            if imageExts.contains(ext) || videoExts.contains(ext) { return ext }
+        }
+        return kind == "goonbox" ? "jpg" : "mp4"
     }
 
+    /// Something the downloader takes: a goonbox/turbo link or a file-host link.
+    static func isLink(_ url: String) -> Bool { mediaKey(url) != nil || SimpCityHosts.classify(url) != nil }
+
     nonisolated struct Item: Sendable {
+        /// "goonbox" | "turbo" | a file host (`SimpCityHosts.hosts`).
         let kind: String
         let id: String
         let link: String
         var post: String
         var posted: Double
+        /// A file-host video: what the host said about it.
+        var remote: SimpCityHosts.Remote? = nil
+        /// A file-host video: the key of the link it was listed from.
+        var via = ""
         var key: String { "\(kind):\(id)" }
+        /// Its file name without the extension: `<id>`, or `<host>-<id>` for a file-host video.
+        var stem: String { kind == "goonbox" || kind == "turbo" ? id : "\(kind)-\(id)" }
+        var isVideo: Bool { kind != "goonbox" }
     }
 
     /// Items from the posts one page read returned (`[{id, time, urls}]`), one per key, keeping the
-    /// earliest post a file appeared in.
-    static func collect(posts: [[String: Any]], into out: inout [String: Item]) {
+    /// earliest post a file appeared in — and, into `links`, the file-host links, the same way.
+    static func collect(posts: [[String: Any]], into out: inout [String: Item], links: inout [String: SimpCityHosts.Link]) {
         for p in posts {
             var when = (p["time"] as? NSNumber)?.doubleValue ?? 0
             if when < minPost { when = 0 }
             let post = (p["id"] as? String) ?? (p["id"] as? NSNumber)?.stringValue ?? ""
             for case let u as String in (p["urls"] as? [Any] ?? []) {
-                guard let k = mediaKey(u) else { continue }
+                guard let k = mediaKey(u) else {
+                    if var lk = SimpCityHosts.classify(u) {
+                        lk.post = post; lk.posted = when
+                        if let have = links[lk.key] {
+                            if when > 0, have.posted == 0 || when < have.posted { links[lk.key] = lk }
+                        } else {
+                            links[lk.key] = lk
+                        }
+                    }
+                    continue
+                }
                 // goonbox's image page (its API takes the same id); turbo links are kept as posted.
                 let link = k.kind == "goonbox" ? pageLink(kind: k.kind, id: k.id) : u
                 let item = Item(kind: k.kind, id: k.id, link: link, post: post, posted: when)
@@ -122,6 +155,8 @@ nonisolated enum SimpCity {
         private(set) var threads: [String: [String: Any]] = [:]
         /// Not downloaded yet — the next run tries these again even when it doesn't re-read their page.
         private(set) var failed: [String: [String: Any]] = [:]
+        /// File-host links: what each held (its videos' keys), whether it's done.
+        private(set) var links: [String: [String: Any]] = [:]
 
         var file: URL { folder.appendingPathComponent(SimpCity.recordName) }
 
@@ -145,6 +180,16 @@ nonisolated enum SimpCity {
                 if let v = v as? [String: Any], failed[k] == nil { failed[k] = v }
             }
             for k in failed.keys where items[k] != nil { failed[k] = nil }
+            for (k, v) in doc["links"] as? [String: Any] ?? [:] {
+                guard let v = v as? [String: Any] else { continue }
+                // A link done on either side is done; otherwise the newer word on it stands.
+                let theirsDone = (v["done"] as? Bool) == true
+                if let mine = links[k] {
+                    let mineDone = (mine["done"] as? Bool) == true
+                    guard (theirsDone && !mineDone) || (theirsDone == mineDone && num(v["checked"]) > num(mine["checked"])) else { continue }
+                }
+                links[k] = v
+            }
             for (k, v) in doc["threads"] as? [String: Any] ?? [:] {
                 guard let v = v as? [String: Any] else { continue }
                 let mine = threads[k]
@@ -160,12 +205,43 @@ nonisolated enum SimpCity {
 
         func has(_ key: String) -> Bool { items[key] != nil }
 
-        mutating func add(_ item: Item, file: String, upscaled: Bool = false) {
+        /// A file saved into the folder. For a video, `size`/`sha256` are those of the file as downloaded
+        /// (before its date was written into it) — what another host's copy is compared with.
+        mutating func add(_ item: Item, file: String, upscaled: Bool = false, size: Int64 = 0, sha256: String = "") {
             var entry: [String: Any] = ["file": file, "post": item.post, "posted": Int(item.posted),
                                         "at": Int(Date().timeIntervalSince1970), "made": SimpCity.made]
             if upscaled || (items[item.key]?["upscaled"] as? Bool) == true { entry["upscaled"] = true }
+            if size > 0 { entry["size"] = size }
+            if !sha256.isEmpty { entry["sha256"] = sha256 }
+            if !item.via.isEmpty { entry["via"] = item.via }
+            if let name = item.remote?.name, !name.isEmpty { entry["name"] = name }
             items[item.key] = entry
             failed[item.key] = nil
+        }
+
+        /// A video that is one already downloaded (`other`'s key), on another host or link: done, not saved.
+        mutating func addSame(_ item: Item, other: String) {
+            var entry: [String: Any] = ["same_as": other, "post": item.post, "posted": Int(item.posted),
+                                        "at": Int(Date().timeIntervalSince1970), "made": SimpCity.made]
+            if !item.via.isEmpty { entry["via"] = item.via }
+            items[item.key] = entry
+            failed[item.key] = nil
+        }
+
+        /// Nothing to keep (a file-host link that turned out not to be a video): done, never tried again.
+        mutating func addSkipped(_ item: Item, why: String) {
+            var entry: [String: Any] = ["skipped": why, "post": item.post, "posted": Int(item.posted),
+                                        "at": Int(Date().timeIntervalSince1970), "made": SimpCity.made]
+            if !item.via.isEmpty { entry["via"] = item.via }
+            items[item.key] = entry
+            failed[item.key] = nil
+        }
+
+        /// The file a key was saved as — following `same_as` to the copy kept.
+        func fileOf(_ key: String) -> String {
+            let e = items[key] ?? [:]
+            if let f = e["file"] as? String, !f.isEmpty { return f }
+            return (items[(e["same_as"] as? String) ?? ""]?["file"] as? String) ?? ""
         }
 
         /// Entries written while post times were misread — a full read of the thread recovers them.
@@ -204,16 +280,22 @@ nonisolated enum SimpCity {
             return out
         }
 
-        mutating func noteFailed(_ item: Item) {
-            failed[item.key] = ["link": item.link, "post": item.post, "posted": Int(item.posted)]
+        /// Remembered so a later run tries it again. A file-host video is tried again through its link
+        /// (`via`), which stays not done. `skipped`: a video left alone because "Download videos" was off.
+        mutating func noteFailed(_ item: Item, skipped: Bool = false) {
+            var entry: [String: Any] = ["link": item.link, "post": item.post, "posted": Int(item.posted)]
+            if !item.via.isEmpty { entry["via"] = item.via }
+            if skipped { entry["skipped"] = true }
+            failed[item.key] = entry
         }
 
-        /// What failed before, as items to try again.
-        var retryItems: [String: Item] {
+        /// What failed before, as items to try again (turbo's only with videos on).
+        func retryItems(videos: Bool = true) -> [String: Item] {
             var out: [String: Item] = [:]
             for (k, v) in failed where items[k] == nil {
                 let parts = k.split(separator: ":", maxSplits: 1).map(String.init)
                 guard parts.count == 2, ["goonbox", "turbo"].contains(parts[0]), !parts[1].isEmpty else { continue }
+                if parts[0] == "turbo", !videos { continue }
                 out[k] = Item(kind: parts[0], id: parts[1],
                               link: (v["link"] as? String) ?? SimpCity.pageLink(kind: parts[0], id: parts[1]),
                               post: (v["post"] as? String) ?? "", posted: num(v["posted"]))
@@ -221,16 +303,89 @@ nonisolated enum SimpCity {
             return out
         }
 
-        mutating func noteThread(_ base: String, title: String, pages: Int) {
-            let t = threads[base] ?? [:]
-            threads[base] = ["title": title.isEmpty ? (t["title"] as? String ?? "") : title,
-                             "pages": max(pages, Int(num(t["pages"]))),
-                             "checked": Int(Date().timeIntervalSince1970)]
+        // MARK: File-host links
+
+        /// The file-host links to list this run: the ones the pages read hold that aren't done (all of them
+        /// when `again` — a folder can gain files), plus every earlier one not done. With videos off none
+        /// are listed; the ones found are noted (`skipped`) so a later run with videos on gets them.
+        mutating func linksTodo(_ found: [String: SimpCityHosts.Link], videos: Bool, again: Bool) -> [SimpCityHosts.Link] {
+            var out: [String: SimpCityHosts.Link] = [:]
+            for (k, lk) in found {
+                let done = (links[k]?["done"] as? Bool) == true
+                if !videos {
+                    if links[k] == nil {
+                        links[k] = ["url": lk.url, "post": lk.post, "posted": Int(lk.posted), "done": false, "skipped": true,
+                                    "checked": Int(Date().timeIntervalSince1970)]
+                    }
+                    continue
+                }
+                if done, !again { continue }
+                if links[k] == nil || links[k]?["skipped"] != nil {
+                    // Noted now, so a run stopped before it's listed still lists it next time.
+                    links[k] = ["url": lk.url, "post": lk.post, "posted": Int(lk.posted), "done": false,
+                                "checked": Int(Date().timeIntervalSince1970)]
+                }
+                out[k] = lk
+            }
+            if videos {
+                let vias = Set(failed.values.compactMap { $0["via"] as? String })
+                for (k, e) in links where out[k] == nil {
+                    if (e["done"] as? Bool) == true, !vias.contains(k) { continue }
+                    if var lk = SimpCityHosts.classify((e["url"] as? String) ?? ""), lk.key == k {
+                        lk.post = (e["post"] as? String) ?? ""; lk.posted = num(e["posted"])
+                        out[k] = lk
+                    }
+                }
+            }
+            return out.values.sorted { ($0.posted, $0.key) < ($1.posted, $1.key) }
+        }
+
+        /// What a link held (its videos' keys) — done once every one is in `items`; a dead link is done. A
+        /// video that failed before and the link no longer holds (or the link is gone) is done too.
+        mutating func noteLink(_ lk: SimpCityHosts.Link, files: [String], why: String = "", gone: Bool = false) {
+            if why.isEmpty {
+                for (k, v) in failed where (v["via"] as? String) == lk.key && (gone || !files.contains(k)) {
+                    items[k] = ["skipped": gone ? "its link is gone" : "no longer in its link", "via": lk.key,
+                                "post": (v["post"] as? String) ?? "", "posted": Int(num(v["posted"])),
+                                "at": Int(Date().timeIntervalSince1970), "made": SimpCity.made]
+                    failed[k] = nil
+                }
+            }
+            var e: [String: Any] = ["url": lk.url, "post": lk.post, "posted": Int(lk.posted), "files": files,
+                                    "done": gone || (why.isEmpty && files.allSatisfy { items[$0] != nil }),
+                                    "checked": Int(Date().timeIntervalSince1970)]
+            if !why.isEmpty { e["why"] = why }
+            if gone { e["gone"] = true }
+            links[lk.key] = e
+        }
+
+        /// At the end of a run: a link is done when everything it held is.
+        mutating func settleLinks() {
+            for (k, e) in links {
+                guard (e["done"] as? Bool) != true, e["why"] == nil, e["skipped"] == nil, let files = e["files"] as? [String] else { continue }
+                var d = e
+                d["done"] = files.allSatisfy { items[$0] != nil }
+                links[k] = d
+            }
+        }
+
+        mutating func noteThread(_ base: String, title: String, pages: Int, hosts: Bool = false) {
+            var t = threads[base] ?? [:]
+            t["title"] = title.isEmpty ? (t["title"] as? String ?? "") : title
+            t["pages"] = max(pages, Int(num(t["pages"])))
+            t["checked"] = Int(Date().timeIntervalSince1970)
+            if hosts { t["hosts"] = SimpCity.hostsRead }
+            threads[base] = t
         }
 
         /// Where a run picks the thread up: the last page read (it may have grown since), else 1 — and 1
-        /// while any entry's date was misread, to read it again.
-        func startPage(_ base: String) -> Int { misdated ? 1 : max(1, Int(num(threads[base]?["pages"]))) }
+        /// while any entry's date was misread, to read it again, or when the thread was last read before
+        /// file-host links were collected and videos are wanted.
+        func startPage(_ base: String, videos: Bool = false) -> Int {
+            if misdated { return 1 }
+            if videos, Int(num(threads[base]?["hosts"])) < SimpCity.hostsRead { return 1 }
+            return max(1, Int(num(threads[base]?["pages"])))
+        }
 
         /// The thread most recently read here — what "Get New" offers.
         var lastThread: String? {
@@ -242,7 +397,7 @@ nonisolated enum SimpCity {
             merge(read())
             let doc: [String: Any] = ["format": SimpCity.format, "version": 1,
                                       "updated": Int(Date().timeIntervalSince1970), "by": "Photo Browser",
-                                      "threads": threads, "items": items, "failed": failed]
+                                      "threads": threads, "items": items, "failed": failed, "links": links]
             let data = try JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys])
             try DriveWriter.writeDataSync(data, to: file)
         }
@@ -269,18 +424,153 @@ nonisolated enum SimpCity {
 
     /// The items still to download (oldest post first) — what the pages read hold plus what failed
     /// last time — and how many the folder already had without the record knowing (those are added to
-    /// the record, they're done).
-    static func todo(_ items: [String: Item], record: inout Record, folder: URL) -> (left: [Item], adopted: Int) {
+    /// the record, they're done). With videos off, turbo's are noted for later instead.
+    static func todo(_ items: [String: Item], record: inout Record, folder: URL, videos: Bool = true) -> (left: [Item], adopted: Int) {
         var items = items
-        for (k, it) in record.retryItems where items[k] == nil { items[k] = it }
+        for (k, it) in record.retryItems(videos: videos) where items[k] == nil { items[k] = it }
         let onDisk = filesByID(in: folder)
         var left: [Item] = [], adopted = 0
         for item in items.values where !record.has(item.key) {
-            if let name = onDisk[item.id] { record.add(item, file: name); adopted += 1; continue }
+            if let name = onDisk[item.stem] { record.add(item, file: name); adopted += 1; continue }
+            if item.isVideo, !videos {
+                if record.failed[item.key] == nil { record.noteFailed(item, skipped: true) }
+                continue
+            }
             left.append(item)
         }
         left.sort { ($0.posted, $0.key) < ($1.posted, $1.key) }
         return (left, adopted)
+    }
+
+    /// The file-host videos still to download, from the links listed this run (one item per file, the copy
+    /// on the preferred host first). One the record has, or the folder holds, is done; one the host says
+    /// is the same size (or SHA-256) as one already downloaded is recorded as that one; one the same size
+    /// as another to download this run waits on it (`Dedup.wait`) — fetched only if that fails.
+    static func hostItems(_ listed: [(link: SimpCityHosts.Link, remotes: [SimpCityHosts.Remote])], record: inout Record,
+                          folder: URL, dedup: Dedup) -> (left: [Item], adopted: Int, same: Int) {
+        let onDisk = filesByID(in: folder)
+        var seen: [String: Item] = [:]
+        for (lk, remotes) in listed {
+            for r in remotes {
+                let it = Item(kind: r.host, id: r.fid, link: r.page.isEmpty ? (r.url.isEmpty ? lk.url : r.url) : r.page,
+                              post: lk.post, posted: lk.posted, remote: r, via: lk.key)
+                if let have = seen[it.key], !(it.posted > 0 && (have.posted == 0 || it.posted < have.posted)) { continue }
+                seen[it.key] = it
+            }
+        }
+        let ordered = seen.values.sorted {
+            (SimpCityHosts.preference[$0.kind] ?? 9, $0.posted, $0.key) < (SimpCityHosts.preference[$1.kind] ?? 9, $1.posted, $1.key)
+        }
+        var left: [Item] = [], adopted = 0, same = 0
+        for it in ordered where !record.has(it.key) {
+            if let name = onDisk[it.stem] { record.add(it, file: name); adopted += 1; continue }
+            let r = it.remote
+            var other: String?
+            if let sha = r?.sha256, !sha.isEmpty { other = dedup.matchHash(it.key, sha) }
+            if other == nil, let size = r?.size, size > 0 { other = dedup.claim(it.key, size: size) }
+            if let other, record.has(other) { record.addSame(it, other: other); same += 1 }
+            else if let other { _ = dedup.wait(other, it) }
+            else { left.append(it) }
+        }
+        left.sort { ($0.posted, $0.key) < ($1.posted, $1.key) }
+        return (left, adopted, same)
+    }
+
+    /// A download not to keep, known as it starts or once it's in.
+    nonisolated enum Skip: Error {
+        /// The same video as this key (another host's copy, or one downloaded before).
+        case duplicate(String)
+        /// A file-host link that turned out to be something other than a video.
+        case notVideo(String)
+    }
+
+    /// Which videos are which: by the exact size of the file as downloaded, and its SHA-256 (`simpcity.Dedup`).
+    /// A size is only trusted from 1 MB up. Thread-safe. `waiting` holds the copies waiting on another to
+    /// download (`wait`); they're recorded as it if it's saved, and tried themselves if it fails (`settle`).
+    nonisolated final class Dedup: @unchecked Sendable {
+        static let minSize: Int64 = 1 << 20
+        private let lock = NSLock()
+        private var sizes: [Int64: String] = [:]
+        private var hashes: [String: String] = [:]
+        private var waiting: [String: [Item]] = [:]
+        private var lost = Set<String>()
+
+        /// What's downloaded already: the recorded sizes and hashes — and, for videos recorded before these
+        /// were kept, the size of the file in the folder (right whenever its own date was kept).
+        func seed(_ record: Record, folder: URL) {
+            lock.lock(); defer { lock.unlock() }
+            for (k, v) in record.items {
+                guard let name = v["file"] as? String, !name.isEmpty, SimpCity.isVideo(URL(fileURLWithPath: name)) else { continue }
+                var size = SimpCityHosts.int64(v["size"])
+                if size == 0 {
+                    size = Int64((try? folder.appendingPathComponent(name).resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                }
+                if size >= Self.minSize, sizes[size] == nil { sizes[size] = k }
+                if let sha = v["sha256"] as? String, !sha.isEmpty, hashes[sha.lowercased()] == nil { hashes[sha.lowercased()] = k }
+            }
+        }
+
+        /// The key of a video already this size (downloaded or on its way) — else `size` is `key`'s.
+        func claim(_ key: String, size: Int64?) -> String? {
+            guard let size, size >= Self.minSize else { return nil }
+            lock.lock(); defer { lock.unlock() }
+            if let other = sizes[size], other != key { return other }
+            sizes[size] = key
+            return nil
+        }
+
+        func matchHash(_ key: String, _ sha: String) -> String? {
+            guard !sha.isEmpty else { return nil }
+            lock.lock(); defer { lock.unlock() }
+            if let other = hashes[sha.lowercased()], other != key { return other }
+            hashes[sha.lowercased()] = key
+            return nil
+        }
+
+        /// A downloaded video's size, for the copies still to come.
+        func noteSize(_ key: String, _ size: Int64) {
+            guard size >= Self.minSize else { return }
+            lock.lock(); defer { lock.unlock() }
+            if sizes[size] == nil { sizes[size] = key }
+        }
+
+        /// `item` is the same video as `other`, still on its way: it waits for `other`'s outcome. False when
+        /// `other` already failed (then `item` should be tried itself).
+        func wait(_ other: String, _ item: Item) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if lost.contains(other) { return false }
+            waiting[other, default: []].append(item)
+            return true
+        }
+
+        /// `key`'s download ended: the copies that waited on it. When it failed, its size and hash are let
+        /// go — the copies are tried instead.
+        func settle(_ key: String, ok: Bool) -> [Item] {
+            lock.lock(); defer { lock.unlock() }
+            let waiters = waiting.removeValue(forKey: key) ?? []
+            if !ok {
+                lost.insert(key)
+                sizes = sizes.filter { $0.value != key }
+                hashes = hashes.filter { $0.value != key }
+            }
+            return waiters
+        }
+
+        func leftWaiting() -> [Item] {
+            lock.lock(); defer { lock.unlock() }
+            let out = waiting.values.flatMap { $0 }
+            waiting = [:]
+            return out
+        }
+    }
+
+    /// SHA-256 of a file, read in 4 MB pieces.
+    static func fileSHA256(_ url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try? handle.read(upToCount: 4 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Dates

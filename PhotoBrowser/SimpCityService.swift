@@ -22,7 +22,15 @@ import Observation
 /// so; "Get New" on the screen picks up where it stopped. WebKit pauses when the app is in the
 /// background, so a long run needs the app open (the screen stays awake while it runs).
 ///
-/// The page scripts are kept identical to `mac/simpcity.py`'s (`EXTRACT_POSTS_JS`, `RESOLVE_JS`).
+/// **Videos on file hosts.** With "Download videos" on, the posts' pixeldrain / gofile / cyberdrop / bunkr /
+/// filester / fileditch links are listed first (`SimpCityHosts` — their APIs from detached tasks, a lane's
+/// page for the hosts that need a browser) and their videos join the downloads as `<host>-<id>.<ext>`. A
+/// video posted on several hosts is downloaded once (`SimpCity.Dedup`: the hosts' sizes up front, the
+/// server's size as a download starts, the SHA-256 once it's in); the other copies are recorded as the
+/// same video. Off, turbo and the hosts are left for a later run.
+///
+/// The page scripts are kept identical to `mac/simpcity.py`'s (`EXTRACT_POSTS_JS`, `RESOLVE_JS`) and
+/// `mac/filehosts.py`'s (`HOST_PAGE_JS`, `CLICK_DOWNLOAD_JS`).
 @Observable @MainActor
 final class SimpCityDownloader {
     static let shared = SimpCityDownloader()
@@ -61,6 +69,15 @@ final class SimpCityDownloader {
     @ObservationIgnored private var kept = 0
     @ObservationIgnored private var postDated = 0
     @ObservationIgnored private weak var library: Library?
+    @ObservationIgnored private var videos = true
+    @ObservationIgnored private var dedup = SimpCity.Dedup()
+    @ObservationIgnored private var linkQueue: [SimpCityHosts.Link] = []
+    @ObservationIgnored private var linksFailed: [String] = []
+    /// Mirror key → the copies of the same video that failed before it was tried.
+    @ObservationIgnored private var standIns: [String: [SimpCity.Item]] = [:]
+    @ObservationIgnored private var fromHosts = 0
+    @ObservationIgnored private var same = 0
+    @ObservationIgnored private var notVideo = 0
 
     static let loginURL = URL(string: "https://simpcity.cr/login/")!
 
@@ -77,13 +94,16 @@ final class SimpCityDownloader {
         status = "Stopping after the files in hand…"
     }
 
-    func start(person: URL, thread raw: String, full: Bool, library: Library) {
+    func start(person: URL, thread raw: String, full: Bool, videos: Bool, library: Library) {
         guard !running, let base = SimpCity.threadBase(raw) else { return }
         running = true
         stopRequested = false; stopNote = nil
         saved = 0; failed = 0; total = 0; done = 0; kept = 0; postDated = 0
         fixedDates = 0; converted = 0; enlarged = 0; failHosts = [:]; failWhy = [:]
         queue = []; untagged = []; written = []; upscaledFiles = []
+        self.videos = videos
+        dedup = SimpCity.Dedup()
+        linkQueue = []; linksFailed = []; standIns = [:]; fromHosts = 0; same = 0; notVideo = 0
         self.person = person
         self.library = library
         let id = library.beginActivity("SimpCity — \(person.lastPathComponent)", indeterminate: true, cancellable: true)
@@ -92,6 +112,7 @@ final class SimpCityDownloader {
         UIApplication.shared.isIdleTimerDisabled = true
         Task {
             let note = await run(person: person, base: base, full: full)
+            wrapUp()
             await saveAndTag()
             let dest = person.appendingPathComponent(SimpCity.folderName, isDirectory: true)
             if !written.isEmpty { library.contentDidChange(under: dest) }
@@ -135,6 +156,17 @@ final class SimpCityDownloader {
             s += "."
             if n > 0 { s += " \(kept) kept their own date; \(postDated) got the post’s date." }
         }
+        var parts: [String] = []
+        if fromHosts > 0 { parts.append("\(fromHosts) video\(fromHosts == 1 ? "" : "s") came from file hosts") }
+        if same > 0 { parts.append("\(same) were the same video on another host or link (downloaded once)") }
+        if notVideo > 0 { parts.append("\(notVideo) host link\(notVideo == 1 ? " wasn’t a video" : "s weren’t videos")") }
+        if !linksFailed.isEmpty {
+            parts.append("\(linksFailed.count) link\(linksFailed.count == 1 ? "" : "s") couldn’t be listed (\(Set(linksFailed).sorted().joined(separator: ", ")) — tried again next time)")
+        }
+        if !parts.isEmpty {
+            let joined = parts.joined(separator: "; ")
+            s += " " + joined.prefix(1).uppercased() + String(joined.dropFirst()) + "."
+        }
         if fixedDates + converted + enlarged > 0 {
             s += " Earlier downloads: \(fixedDates) got their post’s real date, \(converted) WebP → JPEG, \(enlarged) small photos upscaled 2×."
         }
@@ -155,9 +187,11 @@ final class SimpCityDownloader {
         guard var rec = loaded else { return "Couldn’t make the “\(SimpCity.folderName)” folder." }
 
         // 1. Every page (from the last one read before, unless asked for all of them).
-        let first = full ? 1 : rec.startPage(base)
+        let first = full ? 1 : rec.startPage(base, videos: videos)
+        let hadHosts = ((rec.threads[base]?["hosts"] as? NSNumber)?.intValue ?? 0) >= SimpCity.hostsRead
         var n = first, last = first, title = ""
         var items: [String: SimpCity.Item] = [:]
+        var links: [String: SimpCityHosts.Link] = [:]
         var askedLogin = false
         while n <= last, !shouldStop {
             say("Reading page \(n)\(last > n ? " of \(last)" : "")… \(items.count) files found so far.")
@@ -169,38 +203,61 @@ final class SimpCityDownloader {
             let posts = page["posts"] as? [[String: Any]] ?? []
             var found = 0
             for p in posts {
-                for case let u as String in (p["urls"] as? [Any] ?? []) where SimpCity.mediaKey(u) != nil { found += 1 }
+                for case let u as String in (p["urls"] as? [Any] ?? []) where SimpCity.isLink(u) { found += 1 }
             }
             if n == first, found == 0, (page["loggedIn"] as? Bool) != true, !askedLogin {
                 askedLogin = true
                 if await waitForLogin() { continue }
                 return "SimpCity shows its links only to members. Open Download from SimpCity, log in there, then tap Download."
             }
-            SimpCity.collect(posts: posts, into: &items)
+            SimpCity.collect(posts: posts, into: &items, links: &links)
             last = max(last, (page["last"] as? NSNumber)?.intValue ?? 1)
             if title.isEmpty { title = page["title"] as? String ?? "" }
             n += 1
         }
-        rec.noteThread(base, title: title, pages: min(last, max(n - 1, 1)))
+        // Every page up to the end read (from page 1, or on top of a full read before): every file-host link
+        // in the thread is in the record now — done, still to do, or kept for later.
+        rec.noteThread(base, title: title, pages: min(last, max(n - 1, 1)), hosts: (first == 1 || hadHosts) && !shouldStop)
 
         // 2. What's left: not in the record, not already in the folder — and the earlier downloads to
         // bring up to the current rules (a real post date, WebP → JPEG, small photos 2×).
-        let snapshot = rec, all = items, readAll = first == 1 && !shouldStop
-        let (left, adopted, fixes, merged) = await Task.detached(priority: .userInitiated) {
-            () -> ([SimpCity.Item], Int, [(item: SimpCity.Item, name: String)], SimpCity.Record) in
+        let snapshot = rec, all = items, found = links, readAll = first == 1 && !shouldStop
+        let wantVideos = videos, again = full, dedup = self.dedup
+        let (todo, adopted, fixes, toList, merged) = await Task.detached(priority: .userInitiated) {
+            () -> ([SimpCity.Item], Int, [(item: SimpCity.Item, name: String)], [SimpCityHosts.Link], SimpCity.Record) in
             var r = snapshot
             let present = Set((try? FileManager.default.contentsOfDirectory(atPath: dest.path)) ?? [])
             let fixes = r.fixes(all, present: present)
             r.redate(all, readAll: readAll)
-            let t = SimpCity.todo(all, record: &r, folder: dest)
+            let t = SimpCity.todo(all, record: &r, folder: dest, videos: wantVideos)
+            let toList = r.linksTodo(found, videos: wantVideos, again: again)
+            dedup.seed(r, folder: dest)
             try? r.save()
-            return (t.left, t.adopted, fixes, r)
+            return (t.left, t.adopted, fixes, toList, r)
         }.value
         record = merged
+        var left = todo
         if adopted > 0 { print("[SimpCity] \(adopted) file(s) already in the folder — counted as done") }
+
+        // 3. The file-host links: what's in them, before any download (so a video on two hosts is fetched once).
+        if !toList.isEmpty, !shouldStop {
+            let listed = await listLinks(toList)
+            if let snap = record {
+                let more = await Task.detached(priority: .userInitiated) {
+                    () -> ([SimpCity.Item], Int, SimpCity.Record) in
+                    var r = snap
+                    let h = SimpCity.hostItems(listed, record: &r, folder: dest, dedup: dedup)
+                    try? r.save()
+                    return (h.left, h.same, r)
+                }.value
+                record = more.2
+                same += more.1
+                left = (left + more.0).sorted { ($0.posted, $0.key) < ($1.posted, $1.key) }
+            }
+        }
         guard !left.isEmpty || !fixes.isEmpty, !shouldStop else { return stopNote }
 
-        // 3. Resolve + download, four at a time, with the earlier downloads fixed alongside.
+        // 4. Resolve + download, four at a time, with the earlier downloads fixed alongside.
         queue = left
         total = left.count + fixes.count
         say("Downloading \(left.count) file\(left.count == 1 ? "" : "s")…")
@@ -291,40 +348,296 @@ final class SimpCityDownloader {
         while !shouldStop, !queue.isEmpty {
             let item = queue.removeFirst()
             defer { done += 1 }
-            guard let fileURL = await resolve(item, on: lane) else {
-                failed += 1
-                record?.noteFailed(item)
+            var found: (url: URL, name: String)?
+            if item.remote != nil {
+                found = await hostURL(item, on: lane)
+            } else if let u = await resolve(item, on: lane) {
+                found = (u, "")
+            }
+            guard let (fileURL, name) = found else {
+                lose(item)
                 say(progressLine)
                 continue
             }
-            let ext = SimpCity.fileExtension(fileURL.absoluteString, kind: item.kind)
+            let ext = SimpCity.fileExtension(fileURL.absoluteString, kind: item.kind, name: name)
             // A plain request first — the image server answers them, and it's quick — then WebKit. The
-            // image servers refuse a request without goonbox's Referer (`simpcity.REFERER`).
-            let referer = (fileURL.host ?? "").hasSuffix("cuckcapital.cr") ? "https://goonbox.cr/" : item.link
-            let direct = await Task.detached(priority: .utility) { await Self.fetch(fileURL, referer: referer, ext: ext) }.value
+            // image servers refuse a request without goonbox's Referer (`simpcity.REFERER`); a file host's
+            // download gets the page it came from.
+            let pageReferer = item.remote.map { $0.referer.isEmpty ? item.link : $0.referer } ?? item.link
+            let referer = (fileURL.host ?? "").hasSuffix("cuckcapital.cr") ? "https://goonbox.cr/" : pageReferer
+            let headers = item.remote?.headers ?? [:]
+            let check = checker(item)
+            let direct = await Task.detached(priority: .utility) {
+                await Self.fetch(fileURL, referer: referer, headers: headers, ext: ext, check: check)
+            }.value
+            if let skip = direct.skip { skipped(item, skip); say(progressLine); continue }
             var downloaded = direct.file
-            if downloaded == nil { downloaded = await lane.download(fileURL, referer: item.link, ext: ext) }
+            if downloaded == nil {
+                if let cookies = item.remote?.cookies, !cookies.isEmpty { await setCookies(cookies, for: fileURL) }
+                let web = await lane.download(fileURL, referer: referer, ext: ext, check: check)
+                if let skip = web.skip { skipped(item, skip); say(progressLine); continue }
+                downloaded = web.file
+            }
             guard let temp = downloaded else {
                 noteFailure(fileURL, why: "\(direct.why); in WebKit too")
-                failed += 1
-                record?.noteFailed(item)
+                lose(item)
                 say(progressLine)
                 continue
             }
-            let id = item.id, posted = item.posted
-            let outcome = await Task.detached(priority: .utility) { await Self.finish(temp, posted: posted, into: dest, id: id) }.value
-            if let (final, ownDate, upscaled) = outcome {
-                record?.add(item, file: final.lastPathComponent, upscaled: upscaled)
-                written.append(final); untagged.append(final)
-                if upscaled { upscaledFiles.append(final) }
+            let stem = item.stem, key = item.key, video = item.isVideo, posted = item.posted, dedup = self.dedup
+            let outcome = await Task.detached(priority: .utility) {
+                await Self.finish(temp, posted: posted, into: dest, stem: stem, key: key, video: video, dedup: dedup)
+            }.value
+            switch outcome {
+            case .saved(let landed, let ownDate, let upscaled, let size, let sha):
+                record?.add(item, file: landed.lastPathComponent, upscaled: upscaled, size: size, sha256: sha)
+                written.append(landed); untagged.append(landed)
+                if upscaled { upscaledFiles.append(landed) }
                 saved += 1
+                if item.remote != nil { fromHosts += 1 }
                 if ownDate { kept += 1 } else { postDated += 1 }
+                // The copies that waited on this one — and any that failed before it was tried — are it.
+                let stood = standIns.removeValue(forKey: key) ?? []
+                failed -= stood.count
+                for twin in dedup.settle(key, ok: true) + stood {
+                    record?.addSame(twin, other: key)
+                    same += 1
+                }
                 if written.count % 20 == 0 { await saveAndTag() }
-            } else {
-                failed += 1
-                record?.noteFailed(item)
+            case .skip(let skip):
+                skipped(item, skip)
+            case .failed:
+                lose(item)
             }
             say(progressLine)
+        }
+    }
+
+    /// A file that didn't download: tried again next run — and the copies of a video that waited on it
+    /// are tried now instead.
+    private func lose(_ item: SimpCity.Item) {
+        failed += 1
+        record?.noteFailed(item)
+        guard item.isVideo else { return }
+        let twins = dedup.settle(item.key, ok: false)
+        guard !twins.isEmpty else { return }
+        for t in twins { standIns[t.key, default: []].append(item) }
+        queue.insert(contentsOf: twins, at: 0)
+        total += twins.count
+    }
+
+    /// A download not kept: a video already downloaded (or on its way) — recorded as that one — or a
+    /// file-host link that isn't a video.
+    private func skipped(_ item: SimpCity.Item, _ skip: SimpCity.Skip) {
+        switch skip {
+        case .duplicate(let other):
+            if record?.has(other) == true {
+                record?.addSame(item, other: other)
+                same += 1
+            } else if !dedup.wait(other, item) {
+                queue.insert(item, at: 0)                 // the one it matched failed meanwhile: try it
+                total += 1
+            }
+        case .notVideo(let why):
+            notVideo += 1
+            record?.addSkipped(item, why: why)
+        }
+    }
+
+    /// What a download's first answer is checked against: a file-host link that answers with a photo or an
+    /// archive is no video; a video the size of one already downloaded (or on its way) is that one.
+    private func checker(_ item: SimpCity.Item) -> @Sendable (Int64?, String) -> SimpCity.Skip? {
+        let dedup = self.dedup, key = item.key, video = item.isVideo, fromHost = item.remote != nil
+        return { size, type in
+            let t = type.lowercased()
+            if fromHost, t.hasPrefix("image/") || t.hasPrefix("audio/") || t.hasPrefix("text/")
+                || ["application/zip", "application/x-zip-compressed", "application/x-rar-compressed", "application/vnd.rar",
+                    "application/x-7z-compressed", "application/pdf"].contains(t) {
+                return .notVideo("the host sent \(t)")
+            }
+            if video, let other = dedup.claim(key, size: size) { return .duplicate(other) }
+            return nil
+        }
+    }
+
+    /// The run's end: what a stop left in the queue (and copies still waiting on another) is kept for the
+    /// next run, and each file-host link is marked done if everything in it is.
+    private func wrapUp() {
+        guard record != nil else { return }
+        for item in queue + dedup.leftWaiting() where record?.has(item.key) != true { record?.noteFailed(item) }
+        queue = []
+        record?.settleLinks()
+    }
+
+    // MARK: - File hosts
+
+    /// The videos in the links to list, four lanes at once.
+    private func listLinks(_ toList: [SimpCityHosts.Link]) async -> [(link: SimpCityHosts.Link, remotes: [SimpCityHosts.Remote])] {
+        linkQueue = toList
+        total = toList.count
+        done = 0
+        let hosts = Dictionary(grouping: toList, by: \.host).map { "\($0.key) ×\($0.value.count)" }.sorted().joined(separator: ", ")
+        print("[SimpCity] listing the videos in \(hosts)")
+        var listed: [(link: SimpCityHosts.Link, remotes: [SimpCityHosts.Remote])] = []
+        await withTaskGroup(of: [(link: SimpCityHosts.Link, remotes: [SimpCityHosts.Remote])].self) { group in
+            for lane in lanes.prefix(min(lanes.count, toList.count)) {
+                group.addTask { @MainActor in await self.lister(lane) }
+            }
+            for await part in group { listed += part }
+        }
+        total = 0
+        done = 0
+        return listed
+    }
+
+    /// Takes links off the queue: the host's API from a detached task, else (a check page, no API, a
+    /// failure) a folder's page in this lane — it lists its files' pages.
+    private func lister(_ lane: SimpCityPage) async -> [(link: SimpCityHosts.Link, remotes: [SimpCityHosts.Remote])] {
+        var out: [(link: SimpCityHosts.Link, remotes: [SimpCityHosts.Remote])] = []
+        while !shouldStop, !linkQueue.isEmpty {
+            let lk = linkQueue.removeFirst()
+            say("Listing the videos in \(total) file-host link\(total == 1 ? "" : "s") — \(done) done…")
+            let res: ([SimpCityHosts.Remote], SimpCityHosts.Failure?) = await Task.detached(priority: .utility) {
+                do { return (try await SimpCityHosts.expand(lk), nil) }
+                catch let f as SimpCityHosts.Failure { return ([], f) }
+                catch { return ([], .failed(error.localizedDescription)) }
+            }.value
+            var remotes = res.0
+            var why = res.1.map { "\($0)" } ?? ""
+            var gone = false
+            switch res.1 {
+            case .gone(_)?:
+                gone = true
+            case .needsBrowser(_)? where lk.kind == "file":
+                // One file behind a check page: its page is read when its turn comes.
+                remotes = [SimpCityHosts.Remote(host: lk.host, fid: SimpCityHosts.safeID(lk.ident), page: lk.url, referer: lk.url)]
+                why = ""
+            case .some(_) where lk.kind == "folder":
+                if let page = await hostPage(lk.url, on: lane) {
+                    if (page["gone"] as? Bool) == true {
+                        gone = true
+                    } else {
+                        remotes = SimpCityHosts.fromPage(lk, page: page)
+                        // A page that listed files, none of them videos, is done; one that listed nothing is
+                        // tried again next run.
+                        let listedAny = !((page["files"] as? [Any]) ?? []).isEmpty || !((page["pages"] as? [Any]) ?? []).isEmpty
+                        why = remotes.isEmpty && !listedAny ? (why.isEmpty ? "its page listed nothing" : why) : ""
+                    }
+                } else {
+                    why = why.isEmpty ? "its page didn't load" : why + "; its page didn't load"
+                }
+            default:
+                break
+            }
+            if !gone, !why.isEmpty {
+                linksFailed.append(lk.host)
+                print("[SimpCity] \(lk.url): couldn’t list its videos — \(why)")
+            }
+            record?.noteLink(lk, files: remotes.map(\.key), why: gone ? "" : why, gone: gone)
+            if !remotes.isEmpty { out.append((lk, remotes)) }
+            done += 1
+        }
+        return out
+    }
+
+    /// A file host's folder page, read once its script has listed the files (`SimpCityHosts.hostPageScript`).
+    /// A check it can't pass is shown on the main page when the screen is open.
+    private func hostPage(_ address: String, on lane: SimpCityPage) async -> [String: Any]? {
+        guard let url = URL(string: address) else { return nil }
+        for _ in 0..<2 {
+            lane.load(url)
+            let started = Date()
+            let r = await lane.poll(SimpCityHosts.hostPageScript, timeout: 60, patient: false) { r in
+                // Only the folder asked for counts (the lane can still show another one).
+                guard let href = r["href"] as? String, URL(string: href)?.path == url.path else { return false }
+                let listed = !((r["files"] as? [Any]) ?? []).isEmpty || !((r["pages"] as? [Any]) ?? []).isEmpty || (r["gone"] as? Bool) == true
+                let t = Date().timeIntervalSince(started)
+                return (listed && t > 3) || ((r["ready"] as? String) == "complete" && t > 12)
+            }
+            if r != nil || !lane.challenged { return r }
+            guard await clearCheck(url) else { return nil }
+        }
+        return nil
+    }
+
+    /// The video a file's page plays or links — and when it shows none, its download button pressed: the
+    /// page then plays it, links it, or hands WebKit a file, whose address is taken (`SimpCityPage.captured`).
+    private func hostFile(_ item: SimpCity.Item, on lane: SimpCityPage) async -> (url: String, name: String)? {
+        guard let r = item.remote, let page = URL(string: r.page) else { return nil }
+        let script = SimpCityHosts.hostPageScript
+        let mark = String(r.fid.lowercased().prefix(8))
+        var x: [String: Any]?
+        for _ in 0..<2 {
+            lane.load(page)
+            let started = Date()
+            // Only this file's own page counts (the lane can still show the file before it, on the same host).
+            x = await lane.poll(script, timeout: 45, patient: false) { r in
+                guard ((r["href"] as? String) ?? "").lowercased().contains(mark) else { return false }
+                return !((r["files"] as? [Any]) ?? []).isEmpty || (r["gone"] as? Bool) == true
+                    || ((r["ready"] as? String) == "complete" && Date().timeIntervalSince(started) > 8)
+            }
+            if x != nil || !lane.challenged { break }
+            guard await clearCheck(page) else { break }
+        }
+        guard let x else { return nil }
+        if let best = SimpCityHosts.bestFile(x) { return best }
+        guard (x["gone"] as? Bool) != true else { return nil }
+        lane.capturing = true
+        defer { lane.capturing = false; lane.captured = nil }
+        guard (await lane.json(SimpCityHosts.clickDownloadScript)?["clicked"] as? Bool) == true else { return nil }
+        let pressed = Date()
+        let y = await lane.poll(script, timeout: 30, patient: false) { r in
+            lane.captured != nil || !((r["files"] as? [Any]) ?? []).isEmpty || (r["gone"] as? Bool) == true
+                || ((r["ready"] as? String) == "complete" && Date().timeIntervalSince(pressed) > 15)
+        }
+        if let got = lane.captured { return (got.url, got.name.isEmpty ? ((x["name"] as? String) ?? "") : got.name) }
+        if let y, let best = SimpCityHosts.bestFile(y) { return best }
+        return nil
+    }
+
+    /// A file-host video's address: from its host's API just before the download (cyberdrop's and bunkr's
+    /// don't last), else what its page plays or links. Returns it with the file's name, when known.
+    private func hostURL(_ item: SimpCity.Item, on lane: SimpCityPage) async -> (url: URL, name: String)? {
+        guard let r = item.remote else { return nil }
+        let res: (String, SimpCityHosts.Failure?) = await Task.detached(priority: .utility) {
+            do { return (try await SimpCityHosts.directURL(r), nil) }
+            catch let f as SimpCityHosts.Failure { return ("", f) }
+            catch { return ("", .failed(error.localizedDescription)) }
+        }.value
+        if !res.0.isEmpty, let u = URL(string: res.0) { return (u, r.name) }
+        if let f = res.1 {
+            if case .needsBrowser(_) = f {} else { print("[SimpCity] \(item.stem): \(item.kind) didn’t give the file (\(f))") }
+        }
+        guard !r.page.isEmpty, let got = await hostFile(item, on: lane), let u = URL(string: got.url) else { return nil }
+        return (u, r.name.isEmpty ? got.name : r.name)
+    }
+
+    /// A check a lane can't pass, shown on the visible page while the screen is open: waits for the person
+    /// to answer it (the cookie it leaves lets every lane through). False when nobody can answer it.
+    private func clearCheck(_ url: URL) async -> Bool {
+        guard showing else {
+            stopNote = "\(url.host ?? "A site") is checking that a person is asking. Open Download from SimpCity, tap Get New, and answer it there."
+            return false
+        }
+        main.load(url)
+        say("\(url.host ?? "The site") is checking that a person is asking — answer it on this screen; the download carries on by itself.")
+        // Answered once the page itself shows (not the check, nor the page before it).
+        let r = await main.poll(SimpCityHosts.hostPageScript, timeout: 900, patient: true) { r in
+            (r["challenge"] as? Bool) != true && (r["ready"] as? String) == "complete"
+                && URL(string: (r["href"] as? String) ?? "")?.host == url.host
+        }
+        return r != nil
+    }
+
+    /// A host's cookies (gofile's guest account) into WebKit's store, for its own download.
+    private func setCookies(_ cookies: [String: String], for url: URL) async {
+        guard let host = url.host else { return }
+        let domain = "." + host.split(separator: ".").suffix(2).joined(separator: ".")
+        let store = WKWebsiteDataStore.default().httpCookieStore
+        for (k, v) in cookies {
+            guard let c = HTTPCookie(properties: [.domain: domain, .path: "/", .name: k, .value: v, .secure: "TRUE",
+                                                  .expires: Date().addingTimeInterval(86400)]) else { continue }
+            await store.setCookie(c)
         }
     }
 
@@ -338,14 +651,35 @@ final class SimpCityDownloader {
     }
 
     /// Downloads `url` with a plain request into the app's temp folder. nil and why when it's refused
-    /// (an HTTP status, a page where a file belongs, no answer).
-    nonisolated private static func fetch(_ url: URL, referer: String, ext: String) async -> (file: URL?, why: String) {
-        var req = URLRequest(url: url, timeoutInterval: 20)
-        req.setValue(referer, forHTTPHeaderField: "Referer")
-        req.setValue(fetchAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("image/avif,image/webp,image/*,video/*;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+    /// (an HTTP status, a page where a file belongs, no answer). For a video, `check` first sees its size
+    /// and type (a one-byte request) and may stop it there (`skip`): one already downloaded, or a file-host
+    /// link that isn't a video. A file host's own headers (gofile's account cookie) go with the request.
+    nonisolated private static func fetch(_ url: URL, referer: String, headers: [String: String] = [:], ext: String,
+                                          check: (@Sendable (Int64?, String) -> SimpCity.Skip?)? = nil) async
+        -> (file: URL?, why: String, skip: SimpCity.Skip?) {
+        func request() -> URLRequest {
+            var req = URLRequest(url: url, timeoutInterval: 20)
+            req.setValue(referer, forHTTPHeaderField: "Referer")
+            req.setValue(fetchAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("image/avif,image/webp,image/*,video/*;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+            return req
+        }
+        if let check, SimpCity.videoExts.contains(ext) {
+            var probe = request()
+            probe.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+            // Only the answer's headers are read (a server that ignores the range would send it all).
+            if let (bytes, resp) = try? await fetchSession.bytes(for: probe), let http = resp as? HTTPURLResponse,
+               (200...299).contains(http.statusCode) {
+                bytes.task.cancel()
+                let range = http.value(forHTTPHeaderField: "Content-Range") ?? ""
+                let total = range.split(separator: "/").last.flatMap { Int64($0) }
+                    ?? (http.statusCode == 200 && http.expectedContentLength > 0 ? http.expectedContentLength : nil)
+                if let skip = check(total, resp.mimeType ?? "") { return (nil, "", skip) }
+            }
+        }
         do {
-            let (tmp, resp) = try await fetchSession.download(for: req)
+            let (tmp, resp) = try await fetchSession.download(for: request())
             let fm = FileManager.default
             let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let mime = resp.mimeType ?? ""
@@ -353,12 +687,12 @@ final class SimpCityDownloader {
             let why = !(200...299).contains(status) ? "HTTP \(status)"
                 : mime.hasPrefix("text/") ? "the server sent a page (\(mime)), not the file"
                 : size < 64 ? "an empty file" : ""
-            guard why.isEmpty else { try? fm.removeItem(at: tmp); return (nil, why) }
+            guard why.isEmpty else { try? fm.removeItem(at: tmp); return (nil, why, nil) }
             let out = fm.temporaryDirectory.appendingPathComponent("simpcity-" + UUID().uuidString).appendingPathExtension(ext)
-            guard (try? fm.moveItem(at: tmp, to: out)) != nil else { try? fm.removeItem(at: tmp); return (nil, "couldn’t keep it") }
-            return (out, "")
+            guard (try? fm.moveItem(at: tmp, to: out)) != nil else { try? fm.removeItem(at: tmp); return (nil, "couldn’t keep it", nil) }
+            return (out, "", nil)
         } catch {
-            return (nil, error.localizedDescription)
+            return (nil, error.localizedDescription, nil)
         }
     }
 
@@ -376,23 +710,42 @@ final class SimpCityDownloader {
         "Downloading — \(saved) saved, \(failed) failed, \(queue.count) waiting."
     }
 
-    /// The downloaded temp file made ready (WebP → JPEG, a small photo upscaled 2×), the date rule,
-    /// then into the drive folder as `<id>.<ext>` (never over a file). Returns where it landed, whether
-    /// it kept its own capture date, and whether it was upscaled.
-    nonisolated private static func finish(_ temp: URL, posted: Double, into folder: URL, id: String) async -> (URL, Bool, Bool)? {
+    nonisolated enum Finished: Sendable {
+        /// Where it landed, whether it kept its own capture date, whether it was upscaled, and — for a
+        /// video — its size and SHA-256 as downloaded.
+        case saved(URL, Bool, Bool, Int64, String)
+        case skip(SimpCity.Skip)
+        case failed
+    }
+
+    /// The downloaded temp file: for a video, its size and SHA-256 first (the same video from another host
+    /// is dropped here); WebP → JPEG and a small photo upscaled 2×, the date rule, then into the drive
+    /// folder as `<stem>.<ext>` (never over a file).
+    nonisolated private static func finish(_ temp: URL, posted: Double, into folder: URL, stem: String, key: String,
+                                           video: Bool, dedup: SimpCity.Dedup) async -> Finished {
+        let fm = FileManager.default
+        var size: Int64 = 0, sha = ""
+        if video || SimpCity.isVideo(temp) {
+            size = Int64((try? temp.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            sha = SimpCity.fileSHA256(temp) ?? ""
+            if let other = dedup.matchHash(key, sha) {
+                try? fm.removeItem(at: temp)
+                return .skip(.duplicate(other))
+            }
+            dedup.noteSize(key, size)
+        }
         let prepared = SimpCity.prepareImage(temp)
         let settled = await SimpCity.settleDate(prepared.url, posted: posted)
-        let fm = FileManager.default
         let ext = prepared.url.pathExtension.lowercased()
-        var dest = folder.appendingPathComponent("\(id).\(ext)")
+        var dest = folder.appendingPathComponent("\(stem).\(ext)")
         var k = 2
-        while fm.fileExists(atPath: dest.path) { dest = folder.appendingPathComponent("\(id) \(k).\(ext)"); k += 1 }
+        while fm.fileExists(atPath: dest.path) { dest = folder.appendingPathComponent("\(stem) \(k).\(ext)"); k += 1 }
         do { try await DriveWriter.shared.commit(prepared.url, to: dest) } catch {
             try? fm.removeItem(at: prepared.url)
-            return nil
+            return .failed
         }
         if let date = settled.date { try? fm.setAttributes([.creationDate: date, .modificationDate: date], ofItemAtPath: dest.path) }
-        return (dest, settled.own, prepared.upscaled)
+        return .saved(dest, settled.own, prepared.upscaled, size, sha)
     }
 
     /// The record and the new files' tag — every 20 files and at the end.
@@ -496,11 +849,15 @@ final class SimpCityDownloader {
 /// fetches files with `WKDownload` (WebKit's own network stack, cookies and all). Hidden pages sit in the
 /// key window behind the app's views, full size — a web view outside a window has its page suspended.
 @MainActor
-final class SimpCityPage: NSObject {
+final class SimpCityPage: NSObject, WKNavigationDelegate, WKUIDelegate {
     let webView: WKWebView
     /// The last poll ended on a "you're human?" check that wasn't answered.
     private(set) var challenged = false
     private var downloads: Set<SimpCityFileDownload> = []
+    /// While a file page's download button has been pressed: a file the page hands WebKit (an attachment,
+    /// or a type it can't show) is taken by its address (`captured`) instead of being saved.
+    var capturing = false
+    var captured: (url: String, name: String)?
 
     override init() {
         let cfg = WKWebViewConfiguration()
@@ -510,6 +867,28 @@ final class SimpCityPage: NSObject {
         webView = WKWebView(frame: .zero, configuration: cfg)
         webView.isUserInteractionEnabled = false
         super.init()
+        webView.navigationDelegate = self
+        webView.uiDelegate = self
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        let http = navigationResponse.response as? HTTPURLResponse
+        let disposition = (http?.value(forHTTPHeaderField: "Content-Disposition") ?? "").lowercased()
+        if capturing, disposition.contains("attachment") || !navigationResponse.canShowMIMEType,
+           let url = navigationResponse.response.url?.absoluteString {
+            captured = (url, navigationResponse.response.suggestedFilename ?? "")
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    /// A download button that opens a new tab: its page loads here instead (keeping its Referer).
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if capturing, navigationAction.request.url != nil { webView.load(navigationAction.request) }
+        return nil
     }
 
     /// Park the web view behind everything in the key window (so its page runs).
@@ -590,14 +969,17 @@ final class SimpCityPage: NSObject {
     }
 
     /// Downloads `url` through WebKit into a temp file (nil on failure, an error page, or an empty file).
-    func download(_ url: URL, referer: String, ext: String) async -> URL? {
+    /// `check` sees the answer's size and type first and may stop it (`skip`).
+    func download(_ url: URL, referer: String, ext: String,
+                  check: (@Sendable (Int64?, String) -> SimpCity.Skip?)? = nil) async -> (file: URL?, skip: SimpCity.Skip?) {
         if webView.window == nil { attachHidden() }
-        let job = SimpCityFileDownload(ext: ext)
+        let job = SimpCityFileDownload(ext: ext, check: check)
         downloads.insert(job)
         defer { downloads.remove(job) }
         var req = URLRequest(url: url)
         req.setValue(referer, forHTTPHeaderField: "Referer")
-        return await job.run(on: webView, request: req)
+        let file = await job.run(on: webView, request: req)
+        return (file, job.skip)
     }
 
     // MARK: - Page scripts (kept identical to mac/simpcity.py)
@@ -750,12 +1132,18 @@ final class SimpCityPage: NSObject {
 @MainActor
 private final class SimpCityFileDownload: NSObject, WKDownloadDelegate {
     private let ext: String
+    private let check: (@Sendable (Int64?, String) -> SimpCity.Skip?)?
     private var cont: CheckedContinuation<URL?, Never>?
     private var temp: URL?
     private var download: WKDownload?
     private var settled = false
+    /// Why it was stopped as it started (a video already downloaded, a host link that isn't a video).
+    private(set) var skip: SimpCity.Skip?
 
-    init(ext: String) { self.ext = ext }
+    init(ext: String, check: (@Sendable (Int64?, String) -> SimpCity.Skip?)? = nil) {
+        self.ext = ext
+        self.check = check
+    }
 
     func run(on webView: WKWebView, request: URLRequest) async -> URL? {
         await withCheckedContinuation { c in
@@ -782,6 +1170,12 @@ private final class SimpCityFileDownload: NSObject, WKDownloadDelegate {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 200
         if !(200...299).contains(status) || (response.mimeType ?? "").hasPrefix("text/") {
             completionHandler(nil)                    // cancels it
+            finish(nil)
+            return
+        }
+        if let check, let skip = check(response.expectedContentLength > 0 ? response.expectedContentLength : nil, response.mimeType ?? "") {
+            self.skip = skip
+            completionHandler(nil)
             finish(nil)
             return
         }

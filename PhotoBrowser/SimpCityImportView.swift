@@ -2,7 +2,9 @@ import SwiftUI
 import UIKit
 
 /// "Download from SimpCity…" on a person's folder: paste a thread address and download its goonbox
-/// photos and turbo videos into the folder's "simpcity" subfolder (see `SimpCityDownloader`). The
+/// photos — and, with "Download videos" on, its turbo videos and the videos its posts link on pixeldrain,
+/// gofile, cyberdrop, bunkr, filester and fileditch — into the folder's "simpcity" subfolder (see
+/// `SimpCityDownloader`). The
 /// screen shows the downloader's own browser — log in to SimpCity there once, and answer a "you're
 /// human?" check there if a site asks. "Hide" leaves the run going in the background (its progress is
 /// at the bottom of the app like any download); a person folder downloaded before offers "Get New",
@@ -17,6 +19,7 @@ struct SimpCityImportView: View {
     @State private var thread = ""
     @State private var full = false
     @State private var readBefore = false
+    @AppStorage("photoBrowser.simpCityVideos") private var videos = true
 
     private var downloader: SimpCityDownloader { SimpCityDownloader.shared }
     private var base: String? { SimpCity.threadBase(thread) }
@@ -29,6 +32,9 @@ struct SimpCityImportView: View {
                     TextField("https://simpcity.cr/threads/…", text: $thread)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .keyboardType(.URL).textFieldStyle(.roundedBorder)
+                        .disabled(downloader.running)
+                    Toggle("Download videos", isOn: $videos)
+                        .font(.subheadline)
                         .disabled(downloader.running)
                     Toggle("Read every page again", isOn: $full)
                         .font(.subheadline)
@@ -85,13 +91,13 @@ struct SimpCityImportView: View {
     private var statusLine: String {
         if otherRun { return "A SimpCity download for “\(downloader.person?.lastPathComponent ?? "")” is running — this one can start when it’s done." }
         if downloader.running || !downloader.status.isEmpty, downloader.person == personFolder { return downloader.status }
-        return "Saves into “\(personFolder.lastPathComponent)/\(SimpCity.folderName)”, tagged “\(SimpCity.tag)”. Log in to SimpCity below if you haven’t; if a site asks whether you’re human, answer it below."
+        return "Saves into “\(personFolder.lastPathComponent)/\(SimpCity.folderName)”, tagged “\(SimpCity.tag)”. Videos come from turbo and the posts’ pixeldrain, gofile, cyberdrop, bunkr, filester and fileditch links — each video once, wherever it’s posted. Log in to SimpCity below if you haven’t; if a site asks whether you’re human, answer it below."
     }
 
     private func start() {
         guard let base, !downloader.running else { return }
         thread = base
-        downloader.start(person: personFolder, thread: base, full: full, library: library)
+        downloader.start(person: personFolder, thread: base, full: full, videos: videos, library: library)
         readBefore = true
         onFinished()
     }

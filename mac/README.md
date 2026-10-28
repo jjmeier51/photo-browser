@@ -323,6 +323,19 @@ WebP photos are saved as JPEGs, and photos under 250 KB are upscaled 2× (Lanczo
 are put right the next time you run it on that folder (it reads the thread from page 1 once to find
 their real post dates).
 
+**Videos.** With **Download videos** ticked (it remembers the setting), the turbo.cr videos come too,
+and so do the videos the posts link on **pixeldrain, gofile, cyberdrop, bunkr** (.cr/.ws/.ru…),
+**filester** (.gg/.me) and **fileditch** (fileditchfiles.me, fileditchvids.st) — single files and whole
+folders/albums, videos only. They're saved as `<host>-<id>.mp4` (or `.mov`…), dated and tagged like the
+rest. **The same video is downloaded once**, however many hosts it's posted on: hosts that say a
+file's size up front are matched by it before anything is fetched (the preferred host's copy is the one
+downloaded — pixeldrain, then gofile, cyberdrop, turbo, filester, fileditch, bunkr — and the next copy
+is tried if that fails), a download whose size matches a video you already have is stopped as it
+starts, and a finished one whose contents (SHA-256) match is dropped. The log says which ("= … is the
+same video as …"). Untick it for photos only — the videos are remembered and come the next time it's
+ticked, without reading the thread again. filester and fileditch have no public API, so their pages are
+opened in the window's browser (if one asks whether you're human, answer it there).
+
 The window is a real browser (Qt WebEngine, with its own saved login): SimpCity shows threads only to
 members, so log in there once (**Log In to SimpCity**); if a site asks whether you're human, answer it
 in the window and the download carries on by itself.

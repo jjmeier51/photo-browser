@@ -17,6 +17,15 @@ the file and merges,
 so neither app drops what the other added. The record also keeps each thread's address and the last
 page read, so "Get New" starts where the thread had got to.
 
+**Videos on file hosts.** A post's pixeldrain, gofile, cyberdrop, bunkr, filester or fileditch link is
+listed (`filehosts.py`) and its videos downloaded beside the rest, keyed `<host>:<file id>` and named
+`<host>-<file id>.<ext>`; the links are kept in the record too (`links`), so one done isn't listed again.
+The same video is often posted on two or three hosts at once, so it's fetched once (`Dedup`): by its
+exact size when the hosts say it up front (and the size of what's already downloaded), by the size the
+server gives as a download starts, and by its SHA-256 once it's in — a copy found any of these ways is
+recorded as the same as the one kept (`same_as`), never saved twice. "Download videos" off leaves turbo
+and the hosts alone (noted, so turning it on later gets them without reading the thread again).
+
 Both sites check that a real browser is asking (DDoS-Guard on simpcity.cr, Cloudflare on goonbox.cr),
 so the pages are read in a real browser the person can see and answer — Qt WebEngine here, WebKit on
 the iPhone. The JavaScript that reads a page (`EXTRACT_POSTS_JS`, `RESOLVE_JS`) is kept identical to
@@ -24,6 +33,7 @@ the Swift copy in `SimpCityService.swift`.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -35,6 +45,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
+
+import filehosts as fh
 
 FOLDER = "simpcity"
 RECORD = ".simpcity.json"
@@ -50,6 +62,7 @@ UPSCALE_UNDER = 250 * 1024   # a photo smaller than this is upscaled 2× (Lanczo
 UPSCALED_TAG = "upscaled"    # what the app's own upscales are tagged too
 MADE = 2                     # record marker: the file went through the current rules (WebP → JPEG, the
                              # upscale, the post date read right); older entries are brought up to it once
+HOSTS_READ = 1               # thread marker: its pages were read for file-host links too (from Oct 28)
 
 
 # ----------------------------------------------------------------------------- addresses
@@ -96,15 +109,16 @@ def page_link(kind: str, ident: str) -> str:
     return f"https://goonbox.cr/img/{ident}" if kind == "goonbox" else f"https://turbo.cr/embed/{ident}"
 
 
-def extension(url: str, kind: str) -> str:
-    """The file extension for a resolved full-size URL (its path, not the query)."""
-    path = urlsplit(url).path
-    ext = path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
-    if ext == "jpeg":
-        ext = "jpg"
-    if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
-        return ext
-    return "mp4" if kind == "turbo" else "jpg"
+def extension(url: str, kind: str, name: str = "") -> str:
+    """The file extension for a resolved full-size URL (its path, not the query) — or, for a file-host
+    video, its name there."""
+    for path in (name, urlsplit(url).path):
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
+        if ext == "jpeg":
+            ext = "jpg"
+        if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
+            return ext
+    return "jpg" if kind == "goonbox" else "mp4"
 
 
 # ----------------------------------------------------------------------------- what a thread holds
@@ -112,31 +126,54 @@ def extension(url: str, kind: str) -> str:
 
 @dataclass
 class Item:
-    kind: str           # "goonbox" | "turbo"
+    kind: str           # "goonbox" | "turbo" | a file host ("pixeldrain", "gofile", … — see filehosts.HOSTS)
     ident: str
     link: str           # the page the forum linked (resolved to the file at download time)
     post: str = ""      # forum post id it came from (the earliest, when posted more than once)
     posted: float = 0   # that post's time (unix)
+    remote: fh.Remote | None = None     # a file-host video: what the host said about it
+    via: str = ""       # a file-host video: the key of the link it was listed from
 
     @property
     def key(self) -> str:
         return f"{self.kind}:{self.ident}"
 
+    @property
+    def stem(self) -> str:
+        """Its file name without the extension: `<id>`, or `<host>-<id>` for a file-host video."""
+        return self.ident if self.kind in ("goonbox", "turbo") else f"{self.kind}-{self.ident}"
 
-def collect(posts: list[dict], into: dict[str, Item] | None = None) -> dict[str, Item]:
+    @property
+    def video(self) -> bool:
+        return self.kind != "goonbox"
+
+
+def is_link(url: str) -> bool:
+    """Something the downloader takes: a goonbox/turbo link or a file-host link."""
+    return bool(media_key(url) or fh.classify(url))
+
+
+def collect(posts: list[dict], into: dict[str, Item] | None = None,
+            links: dict[str, fh.Link] | None = None) -> dict[str, Item]:
     """Items from the posts a page read returned (`[{id, time, urls}]`), one per key, keeping the
-    earliest post a file appeared in."""
+    earliest post a file appeared in — and, into `links`, the file-host links, the same way."""
     out = into if into is not None else {}
     for p in posts or []:
         when = float(p.get("time") or 0)
         if when < MIN_POST:
             when = 0
+        post = str(p.get("id") or "")
         for u in p.get("urls") or []:
             k = media_key(str(u))
             if not k:
+                if links is not None and (lk := fh.classify(str(u))):
+                    lk.post, lk.posted = post, when
+                    have_link = links.get(lk.key)
+                    if have_link is None or (when and (not have_link.posted or when < have_link.posted)):
+                        links[lk.key] = lk
                 continue
             link = page_link(*k) if k[0] == "goonbox" else str(u)
-            item = Item(k[0], k[1], link, str(p.get("id") or ""), when)
+            item = Item(k[0], k[1], link, post, when)
             have = out.get(item.key)
             if have is None or (when and (not have.posted or when < have.posted)):
                 out[item.key] = item
@@ -153,6 +190,7 @@ class Record:
     items: dict[str, dict] = field(default_factory=dict)
     threads: dict[str, dict] = field(default_factory=dict)
     failed: dict[str, dict] = field(default_factory=dict)    # not downloaded yet: tried again by the next run
+    links: dict[str, dict] = field(default_factory=dict)     # file-host links: what each held, whether it's done
 
     @property
     def file(self) -> Path:
@@ -180,6 +218,14 @@ class Record:
                 self.failed[k] = v
         for k in [k for k in self.failed if k in self.items]:
             del self.failed[k]
+        for k, v in (doc.get("links") or {}).items():
+            if not isinstance(v, dict):
+                continue
+            mine = self.links.get(k)
+            # A link done on either side is done; otherwise the newer word on it stands.
+            if mine is None or (v.get("done") and not mine.get("done")) or \
+                    (bool(v.get("done")) == bool(mine.get("done")) and float(v.get("checked") or 0) > float(mine.get("checked") or 0)):
+                self.links[k] = v
         for k, v in (doc.get("threads") or {}).items():
             if not isinstance(v, dict):
                 continue
@@ -191,12 +237,41 @@ class Record:
     def has(self, key: str) -> bool:
         return key in self.items
 
-    def add(self, item: Item, file: str, upscaled: bool = False) -> None:
+    def add(self, item: Item, file: str, upscaled: bool = False, size: int = 0, sha256: str = "") -> None:
+        """A file saved into the folder. For a video, `size`/`sha256` are those of the file as it was
+        downloaded (before its date was written into it) — what another host's copy is compared with."""
         entry = {"file": file, "post": item.post, "posted": int(item.posted or 0), "at": int(time.time()), "made": MADE}
         if upscaled or self.items.get(item.key, {}).get("upscaled"):
             entry["upscaled"] = True
+        if size:
+            entry["size"] = int(size)
+        if sha256:
+            entry["sha256"] = sha256
+        if item.via:
+            entry["via"] = item.via
+        if item.remote and item.remote.name:
+            entry["name"] = item.remote.name
         self.items[item.key] = entry
         self.failed.pop(item.key, None)
+
+    def add_same(self, item: Item, other: str) -> None:
+        """A video that is one already downloaded (`other`'s key), on another host or link: done, not saved."""
+        entry = {"same_as": other, "post": item.post, "posted": int(item.posted or 0), "at": int(time.time()), "made": MADE}
+        if item.via:
+            entry["via"] = item.via
+        self.items[item.key] = entry
+        self.failed.pop(item.key, None)
+
+    def add_skipped(self, item: Item, why: str) -> None:
+        """Nothing to keep (a file-host link that turned out not to be a video): done, never tried again."""
+        self.items[item.key] = {"skipped": why, "post": item.post, "posted": int(item.posted or 0),
+                                "at": int(time.time()), "made": MADE, **({"via": item.via} if item.via else {})}
+        self.failed.pop(item.key, None)
+
+    def file_of(self, key: str) -> str:
+        """The file a key was saved as — following `same_as` to the copy kept."""
+        e = self.items.get(key) or {}
+        return str(e.get("file") or (self.items.get(str(e.get("same_as") or "")) or {}).get("file") or "")
 
     def misdated(self) -> bool:
         """Entries written while post times were misread (Oct 28: XenForo's `data-time` holds "12:34 PM",
@@ -235,30 +310,98 @@ class Record:
                              fresh.post if fresh else str(entry.get("post") or ""), posted), name))
         return out
 
-    def note_failed(self, item: Item) -> None:
-        """Remembered so a later run tries it again even when it doesn't re-read the page it was on."""
-        self.failed[item.key] = {"link": item.link, "post": item.post, "posted": int(item.posted or 0)}
+    def note_failed(self, item: Item, skipped: bool = False) -> None:
+        """Remembered so a later run tries it again even when it doesn't re-read the page it was on. A
+        file-host video is tried again through its link (`via`), which stays not done. `skipped`: a video
+        left alone because "Download videos" was off."""
+        entry = {"link": item.link, "post": item.post, "posted": int(item.posted or 0)}
+        if item.via:
+            entry["via"] = item.via
+        if skipped:
+            entry["skipped"] = True
+        self.failed[item.key] = entry
 
-    def retry_items(self) -> dict[str, Item]:
+    def retry_items(self, videos: bool = True) -> dict[str, Item]:
         out: dict[str, Item] = {}
         for k, v in self.failed.items():
             kind, _, ident = k.partition(":")
+            if kind == "turbo" and not videos:
+                continue
             if kind in ("goonbox", "turbo") and ident and k not in self.items:
                 out[k] = Item(kind, ident, str(v.get("link") or page_link(kind, ident)), str(v.get("post") or ""),
                               float(v.get("posted") or 0))
         return out
 
-    def note_thread(self, base: str, title: str, pages: int) -> None:
-        t = self.threads.get(base, {})
-        self.threads[base] = {"title": title or t.get("title", ""), "pages": max(pages, int(t.get("pages") or 0)),
-                              "checked": int(time.time())}
+    # -- file-host links
 
-    def start_page(self, base: str) -> int:
+    def links_todo(self, found: dict[str, fh.Link], videos: bool, again: bool) -> list[fh.Link]:
+        """The file-host links to list this run: the ones the pages read hold that aren't done (all of
+        them when `again` — a folder can gain files), plus every earlier one not done. With videos off
+        none are listed; the ones found are noted (`skipped`) so a later run with videos on gets them."""
+        out: dict[str, fh.Link] = {}
+        for k, lk in found.items():
+            e = self.links.get(k)
+            if not videos:
+                if e is None:
+                    self.links[k] = {"url": lk.url, "post": lk.post, "posted": int(lk.posted or 0), "done": False,
+                                     "skipped": True, "checked": int(time.time())}
+                continue
+            if e and e.get("done") and not again:
+                continue
+            if e is None or e.get("skipped"):
+                # Noted now, so a run stopped before it's listed still lists it next time.
+                self.links[k] = {"url": lk.url, "post": lk.post, "posted": int(lk.posted or 0), "done": False,
+                                 "checked": int(time.time())}
+            out[k] = lk
+        if videos:
+            vias = {str(v.get("via")) for v in self.failed.values() if v.get("via")}
+            for k, e in self.links.items():
+                if k in out or (e.get("done") and k not in vias):
+                    continue
+                lk = fh.classify(str(e.get("url") or ""))
+                if lk and lk.key == k:
+                    lk.post, lk.posted = str(e.get("post") or ""), float(e.get("posted") or 0)
+                    out[k] = lk
+        return sorted(out.values(), key=lambda lk: (lk.posted or 0, lk.key))
+
+    def note_link(self, lk: fh.Link, files: list[str], why: str = "", gone: bool = False) -> None:
+        """What a link held (its videos' keys) — done once every one is in `items`; a dead link is done.
+        A video that failed before and the link no longer holds (or the link is gone) is done too: there's
+        nothing left to fetch."""
+        if not why:
+            for k, v in list(self.failed.items()):
+                if v.get("via") == lk.key and (gone or k not in files):
+                    self.items[k] = {"skipped": "its link is gone" if gone else "no longer in its link", "via": lk.key,
+                                     "post": str(v.get("post") or ""), "posted": int(v.get("posted") or 0),
+                                     "at": int(time.time()), "made": MADE}
+                    del self.failed[k]
+        self.links[lk.key] = {"url": lk.url, "post": lk.post, "posted": int(lk.posted or 0), "files": files,
+                              "done": gone or (not why and all(f in self.items for f in files)),
+                              "checked": int(time.time()), **({"why": why} if why else {}), **({"gone": True} if gone else {})}
+
+    def settle_links(self) -> None:
+        """At the end of a run: a link is done when everything it held is."""
+        for e in self.links.values():
+            if not e.get("done") and not e.get("why") and not e.get("skipped") and "files" in e:
+                e["done"] = all(f in self.items for f in e["files"])
+
+    def note_thread(self, base: str, title: str, pages: int, hosts: bool = False) -> None:
+        t = self.threads.get(base, {})
+        self.threads[base] = {**t, "title": title or t.get("title", ""), "pages": max(pages, int(t.get("pages") or 0)),
+                              "checked": int(time.time())}
+        if hosts:
+            self.threads[base]["hosts"] = HOSTS_READ
+
+    def start_page(self, base: str, videos: bool = False) -> int:
         """Where a run picks the thread up: the last page read (it may have grown since), else 1 — and 1
-        while any entry's date was misread, to read it again."""
+        while any entry's date was misread, to read it again, or when the thread was last read before
+        file-host links were collected and videos are wanted."""
         if self.misdated():
             return 1
-        return max(1, int(self.threads.get(base, {}).get("pages") or 1))
+        t = self.threads.get(base, {})
+        if videos and int(t.get("hosts") or 0) < HOSTS_READ:
+            return 1
+        return max(1, int(t.get("pages") or 1))
 
     def last_thread(self) -> str | None:
         if not self.threads:
@@ -271,7 +414,7 @@ class Record:
         self._merge(self._read())
         doc = {"format": FORMAT, "version": VERSION, "updated": int(time.time()), "by": "Safe Finder",
                "threads": dict(sorted(self.threads.items())), "items": dict(sorted(self.items.items())),
-               "failed": dict(sorted(self.failed.items()))}
+               "failed": dict(sorted(self.failed.items())), "links": dict(sorted(self.links.items()))}
         write_file(self.file, json.dumps(doc, ensure_ascii=False, indent=1).encode("utf-8"))
 
 
@@ -291,10 +434,11 @@ def files_by_id(folder: str | Path) -> dict[str, str]:
     return out
 
 
-def todo(items: dict[str, Item], record: Record, folder: str | Path) -> tuple[list[Item], int]:
+def todo(items: dict[str, Item], record: Record, folder: str | Path, videos: bool = True) -> tuple[list[Item], int]:
     """The items still to download — what the pages read hold plus what failed last time — and how many
-    the folder already had without the record knowing (those are added to the record — they're done)."""
-    for k, it in record.retry_items().items():
+    the folder already had without the record knowing (those are added to the record — they're done).
+    With videos off, turbo's are noted for later instead."""
+    for k, it in record.retry_items(videos).items():
         items.setdefault(k, it)
     on_disk = files_by_id(folder)
     left: list[Item] = []
@@ -302,13 +446,172 @@ def todo(items: dict[str, Item], record: Record, folder: str | Path) -> tuple[li
     for item in items.values():
         if record.has(item.key):
             continue
-        if item.ident in on_disk:
-            record.add(item, on_disk[item.ident])
+        if item.stem in on_disk:
+            record.add(item, on_disk[item.stem])
             adopted += 1
+            continue
+        if item.video and not videos:
+            if item.key not in record.failed:
+                record.note_failed(item, skipped=True)
             continue
         left.append(item)
     left.sort(key=lambda i: (i.posted or 0, i.key))
     return left, adopted
+
+
+def host_items(listed: list[tuple[fh.Link, list[fh.Remote]]], record: Record, folder: str | Path,
+               dedup: "Dedup") -> tuple[list[Item], int, int]:
+    """The file-host videos still to download, from the links listed this run (one item per file, the
+    copy on the preferred host first). A video the record has, or the folder holds, is done; one the
+    host says is the same size (or SHA-256) as one already downloaded is recorded as that one; one the
+    same size as another to download this run waits on it (`Dedup.wait`) — fetched only if that fails.
+    Returns (to download, already in the folder, same as another)."""
+    on_disk = files_by_id(folder)
+    seen: dict[str, Item] = {}
+    for lk, remotes in listed:
+        for r in remotes:
+            it = Item(r.host, r.fid, r.page or r.url or lk.url, lk.post, lk.posted, remote=r, via=lk.key)
+            have = seen.get(it.key)
+            if have is None or (it.posted and (not have.posted or it.posted < have.posted)):
+                seen[it.key] = it
+    ordered = sorted(seen.values(), key=lambda i: (fh.PREFERENCE.get(i.kind, 9), i.posted or 0, i.key))
+    left: list[Item] = []
+    adopted = same = 0
+    for it in ordered:
+        if record.has(it.key):
+            continue
+        if it.stem in on_disk:
+            record.add(it, on_disk[it.stem])
+            adopted += 1
+            continue
+        r = it.remote
+        other = (dedup.match_hash(it.key, r.sha256) if r and r.sha256 else None) or \
+                (dedup.claim(it.key, r.size) if r and r.size else None)
+        if other and record.has(other):
+            record.add_same(it, other)
+            same += 1
+        elif other:
+            dedup.wait(other, it)
+        else:
+            left.append(it)
+    left.sort(key=lambda i: (i.posted or 0, i.key))
+    return left, adopted, same
+
+
+class Skip(Exception):
+    """A download not to keep, known as it starts or once it's in."""
+
+
+class Duplicate(Skip):
+    """The same video as `other` (another host's copy, or one downloaded before)."""
+
+    def __init__(self, other: str) -> None:
+        super().__init__(f"the same video as {other}")
+        self.other = other
+
+
+class NotVideo(Skip):
+    """A file-host link that turned out to be something other than a video."""
+
+
+class Dedup:
+    """Which videos are which: by the exact size of the file as downloaded, and its SHA-256. A size is
+    only trusted from 1 MB up (two different videos of one exact size that big don't happen). Thread-
+    safe — the download lanes check sizes as downloads start, on worker threads. `waiting` holds the
+    copies waiting on another to download (`wait`); they're recorded as it if it's saved, and tried
+    themselves if it fails (`release`)."""
+
+    MIN_SIZE = 1 << 20
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.sizes: dict[int, str] = {}
+        self.hashes: dict[str, str] = {}
+        self.waiting: dict[str, list[Item]] = {}
+        self.lost: set[str] = set()          # downloads that failed this run
+
+    def seed(self, record: Record, folder: str | Path) -> None:
+        """What's downloaded already: the recorded sizes and hashes — and, for videos recorded before
+        these were kept, the size of the file in the folder (right whenever its own date was kept)."""
+        folder = Path(folder)
+        for k, v in record.items.items():
+            name = str(v.get("file") or "")
+            if not name or not is_video(name):
+                continue
+            size = int(v.get("size") or 0)
+            if not size:
+                try:
+                    size = os.path.getsize(folder / name)
+                except OSError:
+                    size = 0
+            if size >= self.MIN_SIZE:
+                self.sizes.setdefault(size, k)
+            if v.get("sha256"):
+                self.hashes.setdefault(str(v["sha256"]).lower(), k)
+
+    def claim(self, key: str, size: int | None) -> str | None:
+        """The key of a video already this size (downloaded or on its way) — else `size` is `key`'s."""
+        if not size or size < self.MIN_SIZE:
+            return None
+        with self.lock:
+            other = self.sizes.get(int(size))
+            if other and other != key:
+                return other
+            self.sizes[int(size)] = key
+            return None
+
+    def match_hash(self, key: str, sha: str) -> str | None:
+        if not sha:
+            return None
+        with self.lock:
+            other = self.hashes.get(sha.lower())
+            if other and other != key:
+                return other
+            self.hashes[sha.lower()] = key
+            return None
+
+    def note_size(self, key: str, size: int) -> None:
+        """A downloaded video's size, for the copies still to come (a match found once it's in is by its
+        hash, never its size alone)."""
+        if size >= self.MIN_SIZE:
+            with self.lock:
+                self.sizes.setdefault(int(size), key)
+
+    def wait(self, other: str, item: Item) -> bool:
+        """`item` is the same video as `other`, still on its way: it waits for `other`'s outcome. False
+        when `other` already failed (then `item` should be tried itself)."""
+        with self.lock:
+            if other in self.lost:
+                return False
+            self.waiting.setdefault(other, []).append(item)
+            return True
+
+    def settle(self, key: str, ok: bool) -> list[Item]:
+        """`key`'s download ended: the copies that waited on it. When it failed, its size and hash are
+        let go — the copies are tried instead (the first one to start takes them)."""
+        with self.lock:
+            waiters = self.waiting.pop(key, [])
+            if not ok:
+                self.lost.add(key)
+                for s in [s for s, k in self.sizes.items() if k == key]:
+                    del self.sizes[s]
+                for h in [h for h, k in self.hashes.items() if k == key]:
+                    del self.hashes[h]
+            return waiters
+
+    def left_waiting(self) -> list[Item]:
+        with self.lock:
+            out = [it for its in self.waiting.values() for it in its]
+            self.waiting.clear()
+            return out
+
+
+def file_sha256(path: str | Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(4 << 20):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 # ----------------------------------------------------------------------------- writing to the drive
@@ -424,10 +727,12 @@ def ssl_context():
 
 
 def fetch(url: str, headers: dict[str, str], path: str, connect_timeout: float = 20,
-          limit: float = 600) -> tuple[str | None, str]:
+          limit: float = 600, check=None) -> tuple[str | None, str]:
     """Downloads `url` to `path` with a plain request (on a worker thread). Returns (path, "") or
     (None, why): an HTTP status, a page where a file belongs, no connection, too slow. `connect_timeout`
-    bounds the wait for an answer and each read; `limit` the whole transfer."""
+    bounds the wait for an answer and each read; `limit` the whole transfer. `check(size, type)` sees
+    the answer before any of it is read and may raise `Skip` (a video already downloaded), which is
+    passed on."""
     import urllib.error
     import urllib.request
     started = time.monotonic()
@@ -437,6 +742,9 @@ def fetch(url: str, headers: dict[str, str], path: str, connect_timeout: float =
             ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
             if ctype.startswith("text/"):
                 return None, f"the server sent a page ({ctype}), not the file"
+            if check:
+                length = resp.headers.get("Content-Length")
+                check(int(length) if length and length.isdigit() else None, ctype)
             with open(path, "wb") as f:
                 while chunk := resp.read(1 << 20):
                     f.write(chunk)
