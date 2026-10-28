@@ -117,6 +117,7 @@ class SimpCityWindow(QMainWindow):
         self.fail_hosts: dict[str, int] = {}        # server → failed downloads this run
         self.fail_why: dict[str, str] = {}          # server → the last reason
         self.shown = self.direct_noted = 0          # resolved addresses / direct failures logged so far
+        self.exif_noted = False
         self.cookies: dict[str, dict[str, str]] = {}
         self.bridge = _Bridge()
         self.bridge.done.connect(lambda cb, result: cb(result))
@@ -170,16 +171,22 @@ class SimpCityWindow(QMainWindow):
         self.status.setWordWrap(True)
         self.bar = QProgressBar()
         self.bar.setVisible(False)
+        self.bar.setFixedWidth(260)
+        self.bar.setFormat("%v of %m")
+        self.bar.setTextVisible(True)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
-        self.log.setMaximumHeight(130)
+        self.log.setMaximumHeight(170)
+        self.log.setMaximumBlockCount(5000)
 
         box = QWidget()
         lay = QVBoxLayout(box)
         lay.addLayout(top)
         lay.addLayout(row2)
-        lay.addWidget(self.status)
-        lay.addWidget(self.bar)
+        progress = QHBoxLayout()                     # status and bar side by side: neither can squeeze the other
+        progress.addWidget(self.status, 1)
+        progress.addWidget(self.bar, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addLayout(progress)
         lay.addWidget(self.view, 1)
         lay.addWidget(self.log)
         self.setCentralWidget(box)
@@ -230,6 +237,7 @@ class SimpCityWindow(QMainWindow):
         self.fixed = self.converted = self.enlarged = 0
         self.fail_hosts, self.fail_why = {}, {}
         self.shown = self.direct_noted = 0
+        self.exif_noted = False
         self.exif = sc.ExifSession(self.exiftool) if self.exiftool else None
         _Runner(self, self._crawl(base, self.full.isChecked()), self._crawled).start()
 
@@ -349,13 +357,20 @@ class SimpCityWindow(QMainWindow):
                     self.failed += 1
                     self.record.note_failed(item)
                 else:
-                    done = yield ("thread", lambda p=path, it=item: self._settle(p, it))
+                    done = yield ("thread", lambda p=path, it=item: self._settle(p, it),
+                                  f"{item.ident} (dating it and saving it into the folder)")
+                    if self.exif and self.exif.note and not self.exif_noted:
+                        self.exif_noted = True
+                        self._log(self.exif.note)
                     if isinstance(done, Exception):
                         self.failed += 1
                         self.record.note_failed(item)
                         self._log(f"{item.link}: couldn't save it into the folder — {done}")
                     else:
-                        final, upscaled = done
+                        final, upscaled, outcome = done
+                        self._log(f"✓ {final.name} — {sc.human_size(final)}"
+                                  + {"kept": ", its own date", "post": ", the post's date"}.get(outcome, "")
+                                  + (", upscaled 2×" if upscaled else ""))
                         self.record.add(item, final.name, upscaled=upscaled)
                         self.written.append(str(final))
                         self.untagged.append(str(final))
@@ -378,7 +393,7 @@ class SimpCityWindow(QMainWindow):
                 self.kept += 1
             elif outcome == "post":
                 self.post_dated += 1
-            return sc.place(path, self.dest, f"{item.ident}{os.path.splitext(path)[1].lower()}"), upscaled
+            return sc.place(path, self.dest, f"{item.ident}{os.path.splitext(path)[1].lower()}"), upscaled, outcome
         except OSError as e:
             return e
 
@@ -456,13 +471,21 @@ class SimpCityWindow(QMainWindow):
             self._download(*req[1:], cb=cb)
         elif kind == "thread":
             fn = req[1]
+            label = req[2] if len(req) > 2 else ""
+            state = {"done": False}
+            if label:
+                # A step that takes this long is worth a line — a stuck one used to leave the log silent.
+                QTimer.singleShot(60000, lambda: None if state["done"] else self._log(f"still working on {label}…"))
+            def answered(result, cb=cb) -> None:
+                state["done"] = True
+                cb(result)
 
             def work() -> None:
                 try:
                     result = fn()
                 except Exception as e:  # noqa: BLE001
                     result = e
-                self.bridge.done.emit(cb, result)
+                self.bridge.done.emit(answered, result)
             threading.Thread(target=work, daemon=True).start()
         else:
             raise ValueError(kind)
@@ -632,7 +655,8 @@ class SimpCityWindow(QMainWindow):
                 self._log(f"{item.ident}: a plain download didn't work ({why}) — trying the browser.")
             self._browser_download(url, item, name, why, cb)
 
-        self.handle(("thread", lambda: sc.fetch(url, headers, os.path.join(str(self.tmp), name))), direct_done)
+        self.handle(("thread", lambda: sc.fetch(url, headers, os.path.join(str(self.tmp), name)),
+                     f"{item.ident} (downloading {url[:90]})"), direct_done)
 
     def _browser_download(self, url: str, item: sc.Item, name: str, direct_why: str, cb) -> None:
         """Chromium fetches it (for a server that turns plain requests away), started from the window's

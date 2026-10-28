@@ -1396,6 +1396,13 @@ goonbox.cr image is saved full-size and each turbo.cr video saved, into `<person
   interruption or cancel now ends it, and a started download has a limit too (2 min a photo, 15 a video).
   HTTPS for the plain request falls back to the Mac's `/etc/ssl/cert.pem` when Python has no
   certificates of its own (`ssl_context`).
+  **Nothing may wait forever, and the log says what's happening** (third Erin Gilfoy try: files resolved,
+  0% for minutes, nothing logged — the lanes were most likely queued behind a kept-open ExifTool that
+  never answered, the one piece only tested against a stand-in). `ExifSession` now reads with `select`
+  and a 30 s limit (`TIMEOUT`); a silent ExifTool is killed and the call made with a one-off ExifTool,
+  and after two failures the run stays one-at-a-time (said once in the log). Every saved file gets a log
+  line (name, size, which date, upscaled); a worker step still running after 60 s logs "still working
+  on …" with what it is; the progress bar ("N of M") sits beside the status line.
 - **Lanes** (Mac 6, iPhone 4), each its own hidden page, so a check shown in the visible view never swaps
   a page under a lane; an answer is only accepted from the lane's own page (`href` contains the id).
   Polls run every 250 ms (80 ms for the goonbox API answer), and the Mac keeps **one ExifTool open for

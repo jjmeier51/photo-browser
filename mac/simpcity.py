@@ -350,6 +350,18 @@ def write_file(dest: Path, data: bytes) -> None:
     os.replace(tmp, dest)
 
 
+def human_size(path: str | Path) -> str:
+    try:
+        n = float(os.path.getsize(path))
+    except OSError:
+        return "?"
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{int(n)} bytes" if unit == "bytes" else f"{n:.1f} {unit}"
+        n /= 1024
+    return "?"
+
+
 def place(src: str | Path, folder: str | Path, name: str) -> Path:
     """Moves a finished download from the Mac's temp folder into the drive folder under `name`
     (never over an existing file). Copy-then-delete: the temp folder is on another volume."""
@@ -461,49 +473,96 @@ def find_exiftool() -> str | None:
     return None
 
 
+_READY = re.compile(rb"\{ready\d*\}\r?\n")
+
+
 class ExifSession:
     """One ExifTool kept running for a whole run (`-stay_open`): starting a fresh one for every read and
     write cost about a second a file. Each call sends its arguments, one per line, then `-execute`, and
-    reads the answer up to ExifTool's `{ready}`. Thread-safe (the files are settled on worker threads)."""
+    reads the answer up to ExifTool's `{ready}` — **within `timeout` seconds**: an ExifTool that doesn't
+    answer is killed and the call made the old way, one ExifTool for it; after two such failures the run
+    stays with one-at-a-time (`broken`, said once in `note`). A kept-open ExifTool that never answered had
+    stalled a whole run with nothing logged. Thread-safe (the files are settled on worker threads)."""
+
+    TIMEOUT = 30.0                                       # seconds an answer may take
 
     def __init__(self, path: str) -> None:
         self.path = path
         self.proc: subprocess.Popen | None = None
         self.lock = threading.Lock()
+        self.buf = b""
+        self.failures = 0
+        self.broken = False
+        self.note = ""                                   # set once when it falls back, for the log
 
-    def run(self, *args: str) -> str:
+    def run(self, *args: str, timeout: float | None = None) -> str:
         if any("\n" in a for a in args):
             return ""
+        timeout = timeout or self.TIMEOUT
         with self.lock:
+            if not self.broken:
+                try:
+                    return self._kept_open(args, timeout)
+                except (OSError, ValueError, TimeoutError, EOFError) as e:
+                    self._kill()
+                    self.failures += 1
+                    if self.failures >= 2:
+                        self.broken = True
+                        self.note = (f"ExifTool didn't answer when kept open ({type(e).__name__}) — running it "
+                                     "once per file instead.")
+            return self._once(args, timeout)
+
+    def _kept_open(self, args: tuple[str, ...], timeout: float) -> str:
+        import select
+        if self.proc is None or self.proc.poll() is not None:
+            self.proc = subprocess.Popen([self.path, "-stay_open", "True", "-@", "-"], stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            self.buf = b""
+        if self.proc.stdin is None or self.proc.stdout is None:
+            raise OSError("no pipes")
+        self.proc.stdin.write(("\n".join([*args, "-execute"]) + "\n").encode("utf-8"))
+        self.proc.stdin.flush()
+        fd = self.proc.stdout.fileno()
+        deadline = time.monotonic() + timeout
+        while not (m := _READY.search(self.buf)):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError("no answer")
+            ready, _, _ = select.select([fd], [], [], left)
+            if ready:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    raise EOFError("ExifTool quit")
+                self.buf += chunk
+        out, self.buf = self.buf[:m.start()], self.buf[m.end():]
+        return out.decode("utf-8", "replace")
+
+    def _once(self, args: tuple[str, ...], timeout: float) -> str:
+        try:
+            res = subprocess.run([self.path, *args], capture_output=True, timeout=timeout * 4)
+            return res.stdout.decode("utf-8", "replace")
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    def _kill(self) -> None:
+        if self.proc is not None:
             try:
-                if self.proc is None or self.proc.poll() is not None:
-                    self.proc = subprocess.Popen([self.path, "-stay_open", "True", "-@", "-"], stdin=subprocess.PIPE,
-                                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                                                 encoding="utf-8", errors="replace")
-                assert self.proc.stdin and self.proc.stdout
-                self.proc.stdin.write("\n".join([*args, "-execute"]) + "\n")
-                self.proc.stdin.flush()
-                out: list[str] = []
-                for line in self.proc.stdout:
-                    if line.rstrip("\r\n") == "{ready}":
-                        break
-                    out.append(line)
-                else:
-                    self.proc = None                       # it died — the next call starts a new one
-                return "".join(out)
-            except (OSError, ValueError, AssertionError):
-                self.proc = None
-                return ""
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        self.proc = None
+        self.buf = b""
 
     def close(self) -> None:
         with self.lock:
             if self.proc and self.proc.poll() is None:
                 try:
-                    self.proc.stdin.write("-stay_open\nFalse\n")
+                    self.proc.stdin.write(b"-stay_open\nFalse\n")
                     self.proc.stdin.flush()
                     self.proc.wait(timeout=10)
                 except (OSError, ValueError, subprocess.SubprocessError):
-                    self.proc.kill()
+                    self._kill()
             self.proc = None
 
 
