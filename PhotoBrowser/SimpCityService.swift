@@ -52,6 +52,8 @@ final class SimpCityDownloader {
     @ObservationIgnored private var fixedDates = 0
     @ObservationIgnored private var converted = 0
     @ObservationIgnored private var enlarged = 0
+    @ObservationIgnored private var failHosts: [String: Int] = [:]
+    @ObservationIgnored private var failWhy: [String: String] = [:]
     @ObservationIgnored private var written: [URL] = []
     @ObservationIgnored private var activity: UUID?
     @ObservationIgnored private var stopRequested = false
@@ -80,7 +82,7 @@ final class SimpCityDownloader {
         running = true
         stopRequested = false; stopNote = nil
         saved = 0; failed = 0; total = 0; done = 0; kept = 0; postDated = 0
-        fixedDates = 0; converted = 0; enlarged = 0
+        fixedDates = 0; converted = 0; enlarged = 0; failHosts = [:]; failWhy = [:]
         queue = []; untagged = []; written = []; upscaledFiles = []
         self.person = person
         self.library = library
@@ -123,7 +125,13 @@ final class SimpCityDownloader {
         if n == 0 && failed == 0 { s = "Nothing new in the thread." }
         else {
             s = "Saved \(n) file\(n == 1 ? "" : "s") into “\(person?.lastPathComponent ?? "")/\(SimpCity.folderName)”"
-            if failed > 0 { s += "; \(failed) failed (tried again next time)" }
+            if failed > 0 {
+                s += "; \(failed) failed (tried again next time)"
+                let worst = failHosts.sorted { $0.value > $1.value }.prefix(3)
+                if !worst.isEmpty {
+                    s += " — " + worst.map { "\($0.key) ×\($0.value) (\(failWhy[$0.key] ?? ""))" }.joined(separator: ", ")
+                }
+            }
             s += "."
             if n > 0 { s += " \(kept) kept their own date; \(postDated) got the post’s date." }
         }
@@ -290,8 +298,13 @@ final class SimpCityDownloader {
                 continue
             }
             let ext = SimpCity.fileExtension(fileURL.absoluteString, kind: item.kind)
-            guard let temp = await lane.download(fileURL, referer: item.link, ext: ext) else {
-                print("[SimpCity] download failed: \(item.link)")
+            // A plain request first — the image server answers them, and it's quick — then WebKit.
+            let referer = item.link
+            let direct = await Task.detached(priority: .utility) { await Self.fetch(fileURL, referer: referer, ext: ext) }.value
+            var downloaded = direct.file
+            if downloaded == nil { downloaded = await lane.download(fileURL, referer: item.link, ext: ext) }
+            guard let temp = downloaded else {
+                noteFailure(fileURL, why: "\(direct.why); in WebKit too")
                 failed += 1
                 record?.noteFailed(item)
                 say(progressLine)
@@ -313,6 +326,50 @@ final class SimpCityDownloader {
             say(progressLine)
         }
     }
+
+    /// A failed download, counted by server for the summary (with the last reason), so a host that
+    /// won't serve is visible.
+    private func noteFailure(_ url: URL, why: String) {
+        let host = url.host ?? "?"
+        failHosts[host, default: 0] += 1
+        failWhy[host] = why
+        if failHosts[host] ?? 0 <= 3 { print("[SimpCity] couldn’t download \(url.absoluteString.prefix(120)) — \(why)") }
+    }
+
+    /// Downloads `url` with a plain request into the app's temp folder. nil and why when it's refused
+    /// (an HTTP status, a page where a file belongs, no answer).
+    nonisolated private static func fetch(_ url: URL, referer: String, ext: String) async -> (file: URL?, why: String) {
+        var req = URLRequest(url: url, timeoutInterval: 20)
+        req.setValue(referer, forHTTPHeaderField: "Referer")
+        req.setValue(fetchAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue("image/avif,image/webp,image/*,video/*;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        do {
+            let (tmp, resp) = try await fetchSession.download(for: req)
+            let fm = FileManager.default
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let mime = resp.mimeType ?? ""
+            let size = (try? tmp.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            let why = !(200...299).contains(status) ? "HTTP \(status)"
+                : mime.hasPrefix("text/") ? "the server sent a page (\(mime)), not the file"
+                : size < 64 ? "an empty file" : ""
+            guard why.isEmpty else { try? fm.removeItem(at: tmp); return (nil, why) }
+            let out = fm.temporaryDirectory.appendingPathComponent("simpcity-" + UUID().uuidString).appendingPathExtension(ext)
+            guard (try? fm.moveItem(at: tmp, to: out)) != nil else { try? fm.removeItem(at: tmp); return (nil, "couldn’t keep it") }
+            return (out, "")
+        } catch {
+            return (nil, error.localizedDescription)
+        }
+    }
+
+    nonisolated private static let fetchAgent =
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    nonisolated private static let fetchSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 20                 // no answer for this long: try WebKit instead
+        cfg.timeoutIntervalForResource = 600
+        cfg.httpMaximumConnectionsPerHost = 6
+        return URLSession(configuration: cfg)
+    }()
 
     private var progressLine: String {
         "Downloading — \(saved) saved, \(failed) failed, \(queue.count) waiting."

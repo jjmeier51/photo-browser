@@ -1374,6 +1374,18 @@ goonbox.cr image is saved full-size and each turbo.cr video saved, into `<person
 - **turbo**: posts carry `turbo.cr/embed/<id>`; the player is built by script, so the lane page (muted
   autoplay allowed) is nudged to play and the mp4 it loads is taken (`<video>`, or the page's resource
   timing). HLS-only (m3u8) players aren't handled. goonbox albums (`/a/<slug>`) aren't expanded.
+- **Downloads: a plain request first, the browser second** (Oct 28). The image server
+  (`simp*.cuckcapital.cr`) answers plain requests — the earlier crawler fetched it with `requests`, no
+  Referer or login — so `simpcity.fetch` / `SimpCityDownloader.fetch` (20 s to answer, 10 min a file)
+  goes first, with the goonbox page as Referer; only a refusal falls back to the browser (Chromium
+  `page.download` from the window's page, matched by address as well as name, 20 s to start; WebKit
+  `WKDownload` on the iPhone). The first Safe Finder runs had it the other way round: Chromium's
+  download never reported back from a view-less lane page, so every file waited out a 30 s watchdog
+  ("pretty slow"), and the fallback then asked the browser profile for its User-Agent **from a worker
+  thread** — Qt WebEngine objects belong to the GUI thread, and the call hung (Erin Gilfoy: 809 files,
+  nothing in 5 minutes). Everything a worker needs (UA, cookie header) is now read on the GUI thread
+  first. A failed download is logged with the address and why (the first three per server), and the
+  summary counts failures by server with the last reason. The first three resolved addresses are logged.
 - **Lanes** (Mac 6, iPhone 4), each its own hidden page, so a check shown in the visible view never swaps
   a page under a lane; an answer is only accepted from the lane's own page (`href` contains the id).
   Polls run every 250 ms (80 ms for the goonbox API answer), and the Mac keeps **one ExifTool open for

@@ -378,6 +378,44 @@ def place(src: str | Path, folder: str | Path, name: str) -> Path:
     return dest
 
 
+# ----------------------------------------------------------------------------- fetching a file
+
+
+def fetch(url: str, headers: dict[str, str], path: str, connect_timeout: float = 20,
+          limit: float = 600) -> tuple[str | None, str]:
+    """Downloads `url` to `path` with a plain request (on a worker thread). Returns (path, "") or
+    (None, why): an HTTP status, a page where a file belongs, no connection, too slow. `connect_timeout`
+    bounds the wait for an answer and each read; `limit` the whole transfer."""
+    import urllib.error
+    import urllib.request
+    started = time.monotonic()
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=connect_timeout) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
+            if ctype.startswith("text/"):
+                return None, f"the server sent a page ({ctype}), not the file"
+            with open(path, "wb") as f:
+                while chunk := resp.read(1 << 20):
+                    f.write(chunk)
+                    if time.monotonic() - started > limit:
+                        raise TimeoutError(f"still downloading after {int(limit)} s")
+        if os.path.getsize(path) < 64:
+            raise ValueError("an empty file")
+        return path, ""
+    except urllib.error.HTTPError as e:
+        why = f"HTTP {e.code}"
+    except urllib.error.URLError as e:
+        why = f"couldn't connect ({e.reason})"
+    except (OSError, ValueError, TimeoutError) as e:
+        why = str(e) or type(e).__name__
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return None, why
+
+
 # ----------------------------------------------------------------------------- dates
 
 _DATE_FMT = "%Y:%m:%d %H:%M:%S"

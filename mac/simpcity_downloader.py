@@ -29,7 +29,6 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.request
 from collections import deque
 from pathlib import Path
 
@@ -102,7 +101,10 @@ class SimpCityWindow(QMainWindow):
         self.exif: sc.ExifSession | None = None
         self.running = False
         self.stopping = False
-        self.pending: dict[str, object] = {}        # download file name → callback
+        self.pending: dict[str, object] = {}        # browser download file name → callbacks
+        self.pending_urls: dict[str, str] = {}      # browser download address → its file name
+        self.fail_hosts: dict[str, int] = {}        # server → failed downloads this run
+        self.fail_why: dict[str, str] = {}          # server → the last reason
         self.cookies: dict[str, dict[str, str]] = {}
         self.bridge = _Bridge()
         self.bridge.done.connect(lambda cb, result: cb(result))
@@ -111,6 +113,7 @@ class SimpCityWindow(QMainWindow):
         self.resize(1180, 900)
 
         prof = profile()
+        self.ua = prof.httpUserAgent()               # read here: Qt objects can't be asked from a worker thread
         prof.downloadRequested.connect(self._download_requested)
         store = prof.cookieStore()
         store.cookieAdded.connect(self._cookie_added)
@@ -213,6 +216,8 @@ class SimpCityWindow(QMainWindow):
         self.failed = self.processed = 0
         self.kept = self.post_dated = 0
         self.fixed = self.converted = self.enlarged = 0
+        self.fail_hosts, self.fail_why = {}, {}
+        self.shown = 0
         self.exif = sc.ExifSession(self.exiftool) if self.exiftool else None
         _Runner(self, self._crawl(base, self.full.isChecked()), self._crawled).start()
 
@@ -316,6 +321,9 @@ class SimpCityWindow(QMainWindow):
         while self.queue and not self.stopping:
             item = self.queue.popleft()
             url = yield ("resolve", page, item)
+            if url and self.shown < 3:                 # what the first files resolve to, for the log
+                self.shown += 1
+                self._log(f"{item.ident} → {url[:140]}")
             if not url:
                 self.failed += 1
                 self.record.note_failed(item)
@@ -326,7 +334,6 @@ class SimpCityWindow(QMainWindow):
                 if not path:
                     self.failed += 1
                     self.record.note_failed(item)
-                    self._log(f"{item.link}: the download failed.")
                 else:
                     done = yield ("thread", lambda p=path, it=item: self._settle(p, it))
                     if isinstance(done, Exception):
@@ -409,6 +416,9 @@ class SimpCityWindow(QMainWindow):
             msg = f"Saved {n:,} file{'s' if n != 1 else ''} into “{self.person.name}/{sc.FOLDER}”"
             if self.failed:
                 msg += f"; {self.failed:,} failed (they'll be tried again next time)"
+                if self.fail_hosts:
+                    msg += " — " + ", ".join(f"{h} ×{n} ({self.fail_why.get(h, '')})"
+                                             for h, n in sorted(self.fail_hosts.items(), key=lambda kv: -kv[1])[:3])
             msg += "."
             if n:
                 msg += f" {self.kept:,} kept their own date; {self.post_dated:,} got the post's date."
@@ -584,37 +594,73 @@ class SimpCityWindow(QMainWindow):
                    on_challenge=lambda: self._show_check(item.link))
 
     def _download(self, page: QWebEnginePage, url: str, item: sc.Item, ext: str, cb) -> None:
-        """Chromium downloads it (the CDNs turn non-browser clients away) into the temp folder."""
+        """Into the Mac's temp folder: fetched directly first — the image server answers plain requests,
+        and this is quick — then, if that's refused, by Chromium itself. A failure is logged with why
+        and where (`_failed`), so a host that won't serve is visible."""
         name = f"{item.ident}-{int(time.time() * 1000)}.{ext}"
+        host = QUrl(url).host()
+        # Qt objects belong to this (GUI) thread: everything the worker needs is read here.
+        headers = {"User-Agent": self.ua, "Referer": item.link,
+                   "Accept": "image/avif,image/webp,image/*,video/*;q=0.9,*/*;q=0.8",
+                   "Accept-Language": "en-US,en;q=0.9"}
+        cookie = self._cookie_header(host)
+        if cookie:
+            headers["Cookie"] = cookie
+
+        def direct_done(result) -> None:
+            path, why = result if isinstance(result, tuple) else (None, str(result))
+            if path:
+                cb(path)
+                return
+            self._browser_download(url, item, name, why, cb)
+
+        self.handle(("thread", lambda: sc.fetch(url, headers, os.path.join(str(self.tmp), name))), direct_done)
+
+    def _browser_download(self, url: str, item: sc.Item, name: str, direct_why: str, cb) -> None:
+        """Chromium fetches it (for a server that turns plain requests away), started from the window's
+        page and matched back by its address as well as its name."""
         state = {"started": False, "done": False}
 
-        def finish(path) -> None:
-            if not state["done"]:
-                state["done"] = True
-                self.pending.pop(name, None)
-                cb(path)
+        def finish(path, why: str = "") -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            self.pending.pop(name, None)
+            self.pending_urls.pop(url, None)
+            if not path:
+                self._failed(item, url, f"{direct_why}; in the browser: {why or 'failed'}")
+            cb(path)
 
         def requested() -> None:
             state["started"] = True
 
         self.pending[name] = (finish, requested)
-        page.download(QUrl(url), name)
+        self.pending_urls[url] = name
+        self.view.page().download(QUrl(url), name)
 
         def watchdog() -> None:
-            if not state["started"] and not state["done"]:
-                self._log(f"{item.ident}: the browser didn't start the download — trying directly.")
-                self.pending.pop(name, None)
-                self.handle(("thread", lambda: self._direct(url, item, name)), finish)
-        QTimer.singleShot(30000, watchdog)
+            if not state["started"]:
+                finish(None, "it never started")
+        QTimer.singleShot(20000, watchdog)
+
+    def _failed(self, item: sc.Item, url: str, why: str) -> None:
+        host = QUrl(url).host() or "?"
+        self.fail_hosts[host] = self.fail_hosts.get(host, 0) + 1
+        self.fail_why[host] = why
+        if self.fail_hosts[host] <= 3:                 # the first few per server; the summary counts the rest
+            self._log(f"{item.ident}: couldn't download {url[:120]} — {why}")
 
     def _download_requested(self, req: QWebEngineDownloadRequest) -> None:
-        entry = self.pending.get(req.downloadFileName()) or self.pending.get(req.suggestedFileName())
+        name = self.pending_urls.get(req.url().toString())
+        entry = self.pending.get(req.downloadFileName()) or self.pending.get(req.suggestedFileName()) \
+            or (self.pending.get(name) if name else None)
         if entry is None:
             return                                   # someone's own download in the window — leave it alone
         finish, requested = entry
         requested()
+        file = name or req.suggestedFileName() or req.downloadFileName()
         req.setDownloadDirectory(str(self.tmp))
-        req.setDownloadFileName(req.suggestedFileName() or req.downloadFileName())
+        req.setDownloadFileName(file)
         path = os.path.join(str(self.tmp), req.downloadFileName())
 
         def changed() -> None:
@@ -622,42 +668,18 @@ class SimpCityWindow(QMainWindow):
                 return
             ok = req.state() == QWebEngineDownloadRequest.DownloadState.DownloadCompleted
             html = (req.mimeType() or "").startswith("text/")
-            if ok and not html and os.path.getsize(path) > 0:
+            if ok and not html and os.path.exists(path) and os.path.getsize(path) > 0:
                 finish(path)
-            else:
-                if ok:
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
-                finish(None)
+                return
+            if ok:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            finish(None, "it sent a page, not the file" if html else (req.interruptReasonString() or "interrupted"))
 
         req.isFinishedChanged.connect(changed)
         req.accept()
-
-    def _direct(self, url: str, item: sc.Item, name: str) -> str | None:
-        """Fallback on a worker thread: the same request outside the browser, with its cookies and
-        User-Agent and the page as Referer."""
-        host = QUrl(url).host()
-        headers = {"User-Agent": profile().httpUserAgent(), "Referer": item.link, "Accept": "*/*"}
-        cookie = self._cookie_header(host)
-        if cookie:
-            headers["Cookie"] = cookie
-        path = os.path.join(str(self.tmp), name)
-        try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120) as resp, \
-                    open(path, "wb") as f:
-                if (resp.headers.get("Content-Type") or "").startswith("text/"):
-                    raise OSError("the server sent a page, not the file")
-                while chunk := resp.read(1 << 20):
-                    f.write(chunk)
-            return path if os.path.getsize(path) > 0 else None
-        except (OSError, ValueError):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-            return None
 
 
 def main() -> None:
