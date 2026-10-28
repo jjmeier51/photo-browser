@@ -333,8 +333,15 @@ downloaded — pixeldrain, then gofile, cyberdrop, turbo, filester, fileditch, b
 is tried if that fails), a download whose size matches a video you already have is stopped as it
 starts, and a finished one whose contents (SHA-256) match is dropped. The log says which ("= … is the
 same video as …"). Untick it for photos only — the videos are remembered and come the next time it's
-ticked, without reading the thread again. filester and fileditch have no public API, so their pages are
-opened in the window's browser (if one asks whether you're human, answer it there).
+ticked, without reading the thread again. filester, fileditch and gofile are read through their own
+pages in the window's browser (if one asks whether you're human, answer it there); gofile folders go one
+at a time, and if gofile starts limiting requests the rest wait for the next run.
+
+**Locked pixeldrain videos.** pixeldrain locks popular files behind a captcha ("hotlinking"). When
+another host has the same video, that copy is downloaded instead. When none does, each one opens in the
+window at the end of the run: press **Download** there and answer pixeldrain's captcha, and the download
+is saved like the rest. If nobody presses it within a few minutes, the remaining ones wait for the next
+run.
 
 The window is a real browser (Qt WebEngine, with its own saved login): SimpCity shows threads only to
 members, so log in there once (**Log In to SimpCity**); if a site asks whether you're human, answer it

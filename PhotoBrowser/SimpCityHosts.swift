@@ -13,10 +13,16 @@ import CryptoKit
 /// links are the same video before fetching either. A file's own address is asked just before its
 /// download (`directURL`): cyberdrop's and bunkr's don't last.
 ///
-/// pixeldrain, gofile (a guest account, what the site makes for every visitor, plus its rotating website
-/// token), cyberdrop and bunkr are read with plain requests, like `LinkDownloadService`. filester and
-/// fileditch have no public API, so their pages are read in a downloader web view (`hostPageScript`);
-/// a host that answers with a "you're human?" check (`Failure.needsBrowser`) goes the same way.
+/// pixeldrain, cyberdrop and bunkr are read with plain requests, like `LinkDownloadService`. A pixeldrain
+/// file marked as hotlinked (`availability: file_rate_limited_captcha_required` — a plain download gets
+/// 403) is `locked`: another host's copy is fetched instead, else the person presses Download on its page
+/// and answers pixeldrain's captcha. **gofile is read only through its own site**: its API wants a token
+/// made by the site's script with a secret gofile rotates, and a request signed with a retired one gets
+/// the IP banned on the spot (the site's `core/wt.js` says so) — so nothing here signs one. The folder
+/// page loads in a web view, `captureScript` (injected before the page's scripts) keeps the `/contents/`
+/// answers the site fetches for itself, and `hostPageScript` lists the videos in them. filester and
+/// fileditch have no public API either, so their pages are read the same way; a host that answers with a
+/// "you're human?" check (`Failure.needsBrowser`) too. Nothing here answers a check or a captcha.
 /// Everything here is `nonisolated` and called from detached tasks — network and parsing stay off main.
 nonisolated enum SimpCityHosts {
     static let hosts = ["pixeldrain", "gofile", "cyberdrop", "bunkr", "filester", "fileditch"]
@@ -26,8 +32,6 @@ nonisolated enum SimpCityHosts {
     static let userAgent =
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
     static let bunkrAPI = "https://apidl.bunkr.ru/api/_001_v2"
-    static let gofileAPI = "https://api.gofile.io"
-    static let gofileSalt = "5d4f7g8sd45fsd"
 
     nonisolated enum Failure: Error, CustomStringConvertible {
         /// A "you're human?" check, or no plain way in — read it in a web view.
@@ -67,11 +71,13 @@ nonisolated enum SimpCityHosts {
         var page = ""
         var referer = ""
         var headers: [String: String] = [:]
-        /// Set in WebKit too, for its download (gofile's guest account).
+        /// A host's own cookies, set in WebKit too for its download.
         var cookies: [String: String] = [:]
-        /// bunkr: "id" + "hub"; cyberdrop: "auth".
+        /// bunkr: "id" + "hub"; cyberdrop: "auth"; pixeldrain: "locked" (its hotlink captcha).
         var extra: [String: String] = [:]
         var key: String { "\(host):\(fid)" }
+        /// Only a person can fetch it (pixeldrain's captcha): another host's copy is preferred.
+        var locked: Bool { !(extra["locked"] ?? "").isEmpty }
     }
 
     // MARK: - Links in posts
@@ -132,7 +138,7 @@ nonisolated enum SimpCityHosts {
     static func expand(_ link: Link, ua: String = userAgent) async throws -> [Remote] {
         switch link.host {
         case "pixeldrain": return try await pixeldrain(link, ua: ua)
-        case "gofile": return try await gofile(link, ua: ua)
+        case "gofile": throw Failure.needsBrowser("gofile is read through its own site")
         case "cyberdrop": return try await cyberdrop(link, ua: ua)
         case "bunkr": return try await bunkr(link, ua: ua)
         case "filester":
@@ -207,7 +213,10 @@ nonisolated enum SimpCityHosts {
         if isCheckPage(text) || ([403, 429, 503].contains(status) && text.prefix(2000).lowercased().contains("<html")) {
             throw Failure.needsBrowser("\(host) answered with a check page")
         }
-        if status == 404 || status == 410 { throw Failure.gone("\(url) isn't there any more") }
+        if status == 404 || status == 410 {
+            let removed = groups(text, #"(removed by the original uploader|has been removed|been deleted)"#) != nil
+            throw Failure.gone("\(removed ? "deleted" : "not found") on \(host) (\(status))")
+        }
         if status >= 400 { throw Failure.failed("HTTP \(status) from \(host)") }
         return text
     }
@@ -253,10 +262,11 @@ nonisolated enum SimpCityHosts {
         let name = (f["name"] as? String) ?? fid
         let mime = (f["mime_type"] as? String) ?? ""
         guard !fid.isEmpty, mime.hasPrefix("video/") || isVideoName(name) else { return nil }
+        let locked = (f["availability"] as? String) ?? ""
         return Remote(host: "pixeldrain", fid: fid, name: name, size: int64(f["size"]),
                       sha256: ((f["hash_sha256"] as? String) ?? "").lowercased(),
                       url: "https://pixeldrain.com/api/file/\(fid)?download", page: "https://pixeldrain.com/u/\(fid)",
-                      referer: "https://pixeldrain.com/u/\(fid)")
+                      referer: "https://pixeldrain.com/u/\(fid)", extra: locked.isEmpty ? [:] : ["locked": locked])
     }
 
     private static func pixeldrain(_ link: Link, ua: String) async throws -> [Remote] {
@@ -267,66 +277,6 @@ nonisolated enum SimpCityHosts {
         var j = try await json("https://pixeldrain.com/api/file/\(link.ident)/info", ua: ua)
         if (j["id"] as? String)?.isEmpty ?? true { j["id"] = link.ident }
         return pixeldrainRemote(j).map { [$0] } ?? []
-    }
-
-    // MARK: - gofile
-
-    private static let gofileLock = NSLock()
-    nonisolated(unsafe) private static var gofileToken = ""
-    nonisolated(unsafe) private static var gofileTokenAt = Date.distantPast
-
-    /// `sha256(userAgent::en::accountToken::(unix time / 4 h)::salt)` — gofile's own client token.
-    static func gofileWebsiteToken(ua: String, token: String, now: Date = Date()) -> String {
-        let window = Int(now.timeIntervalSince1970) / 14400
-        return SHA256.hash(data: Data("\(ua)::en::\(token)::\(window)::\(gofileSalt)".utf8)).map { String(format: "%02x", $0) }.joined()
-    }
-
-    /// A guest account for this run (what the site makes for every visitor), kept for an hour.
-    private static func gofileGuest(ua: String) async throws -> String {
-        gofileLock.lock()
-        let kept = Date().timeIntervalSince(gofileTokenAt) < 3600 ? gofileToken : ""
-        gofileLock.unlock()
-        if !kept.isEmpty { return kept }
-        let j = try await json("\(gofileAPI)/accounts", ua: ua, method: "POST", body: Data("{}".utf8),
-                               headers: ["Content-Type": "application/json"])
-        guard (j["status"] as? String) == "ok", let token = (j["data"] as? [String: Any])?["token"] as? String, !token.isEmpty else {
-            throw Failure.failed("gofile didn't open a guest session (\((j["status"] as? String) ?? "no token"))")
-        }
-        gofileLock.lock(); gofileToken = token; gofileTokenAt = Date(); gofileLock.unlock()
-        return token
-    }
-
-    private static func gofile(_ link: Link, ua: String) async throws -> [Remote] {
-        let token = try await gofileGuest(ua: ua)
-        var out: [Remote] = []
-        try await gofileWalk(link.ident, token: token, ua: ua, into: &out, depth: 0)
-        return out
-    }
-
-    private static func gofileWalk(_ content: String, token: String, ua: String, into out: inout [Remote], depth: Int) async throws {
-        guard depth <= 5 else { return }
-        let wt = gofileWebsiteToken(ua: ua, token: token)
-        let id = content.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? content
-        let j = try await json("\(gofileAPI)/contents/\(id)?wt=\(wt)", ua: ua,
-                               headers: ["Authorization": "Bearer \(token)", "X-Website-Token": wt])
-        let status = (j["status"] as? String) ?? ""
-        if status == "error-notFound" { throw Failure.gone("gofile: not found") }
-        guard status == "ok" else { throw Failure.failed("gofile said \(status.isEmpty ? "nothing" : status)") }
-        let data = (j["data"] as? [String: Any]) ?? [:]
-        let nodes: [[String: Any]] = (data["type"] as? String) == "file"
-            ? [data] : ((data["children"] as? [String: Any]) ?? [:]).values.compactMap { $0 as? [String: Any] }
-        for c in nodes {
-            if (c["type"] as? String) == "folder", let sub = c["id"] as? String {
-                try await gofileWalk(sub, token: token, ua: ua, into: &out, depth: depth + 1)
-                continue
-            }
-            let name = (c["name"] as? String) ?? "", mime = (c["mimetype"] as? String) ?? ""
-            let fid = safeID((c["id"] as? String) ?? "")
-            guard !fid.isEmpty, let dl = c["link"] as? String, mime.hasPrefix("video/") || isVideoName(name) else { continue }
-            out.append(Remote(host: "gofile", fid: fid, name: name, size: int64(c["size"]), url: dl,
-                              page: "https://gofile.io/d/\(content)", referer: "https://gofile.io/",
-                              headers: ["Cookie": "accountToken=\(token)"], cookies: ["accountToken": token]))
-        }
     }
 
     // MARK: - cyberdrop
@@ -453,8 +403,10 @@ nonisolated enum SimpCityHosts {
         for f in (page["files"] as? [[String: Any]]) ?? [] {
             let url = (f["url"] as? String) ?? "", name = (f["name"] as? String) ?? ""
             guard url.hasPrefix("http") else { continue }
-            let r = Remote(host: link.host, fid: fileID(host: link.host, url: url),
-                           name: name.isEmpty ? ((URL(string: url)?.lastPathComponent) ?? "") : name, url: url, page: href, referer: href)
+            let id = safeID((f["id"] as? String) ?? "")
+            let r = Remote(host: link.host, fid: id.isEmpty ? fileID(host: link.host, url: url) : id,
+                           name: name.isEmpty ? ((URL(string: url)?.lastPathComponent) ?? "") : name, size: int64(f["size"]),
+                           url: url, page: href, referer: href)
             if seen.insert(r.key).inserted { out.append(r) }
         }
         for p in (page["pages"] as? [[String: Any]]) ?? [] {
@@ -471,6 +423,19 @@ nonisolated enum SimpCityHosts {
             if seen.insert(r.key).inserted { out.append(r) }
         }
         return out
+    }
+
+    /// What the site's own API calls ran into (`hostPageScript` → `api`, from `captureScript`): "rate" when
+    /// it was rate-limited, the API's status when it was turned down, "" when all is well.
+    static func apiTrouble(_ page: [String: Any]?) -> String {
+        for a in (page?["api"] as? [[String: Any]]) ?? [] {
+            let status = Int(int64(a["status"])), said = (a["api"] as? String) ?? ""
+            if status == 429 || said == "error-rateLimit" { return "rate" }
+            if [401, 403].contains(status) || ["error-notPremium", "error-token", "error-wrongToken", "error-banned"].contains(said) {
+                return said.isEmpty ? "HTTP \(status)" : said
+            }
+        }
+        return ""
     }
 
     /// The file a single file's page plays or links: (address, name).
@@ -519,6 +484,21 @@ nonisolated enum SimpCityHosts {
   });
   document.querySelectorAll('meta[property="og:video"], meta[property="og:video:url"], meta[property="og:video:secure_url"]')
     .forEach((m) => add(m.getAttribute('content'), '', 70));
+  // What the site's own API calls answered (CAPTURE_JS — gofile's folder listings): its videos, exactly.
+  const api = [];
+  (window.__pbCaptured || []).forEach((c) => {
+    const j = (c && c.json) || {};
+    api.push({ status: c.status || 0, api: j.status || '' });
+    const d = j.data;
+    if (!d || d.canAccess === false) return;
+    const kids = d.type === 'file' ? [d] : Object.values(d.children || {});
+    kids.forEach((k) => {
+      if (!k || k.type === 'folder' || !k.link || seen.has(k.link)) return;
+      if (!(VIDEO.test(k.name || '') || /^video\//i.test(k.mimetype || ''))) return;
+      seen.add(k.link);
+      files.push({ url: k.link, name: clean(k.name), w: 110, size: k.size || 0, id: k.id || '' });
+    });
+  });
   files.sort((a, b) => b.w - a.w);
   const here = location.href.split('#')[0];
   const pages = [];
@@ -535,8 +515,42 @@ nonisolated enum SimpCityHosts {
   const name = clean((h1 && h1.textContent) || (og && og.getAttribute('content')) || title);
   const gone = files.length === 0 && /not found|404|removed|deleted|does ?n[o']t exist|no longer available|expired/i.test(title + ' ' + text.slice(0, 600));
   return { challenge: checking && files.length === 0, files: files.slice(0, 500), pages: pages.slice(0, 1000), name: name,
-           title: title, gone: gone, ready: document.readyState, href: location.href };
+           title: title, gone: gone, api: api, ready: document.readyState, href: location.href };
 })()
+"""#
+
+    /// Injected into every downloader page before its own scripts (a user script at document start). On
+    /// gofile only, it keeps the answers of the site's own `/contents/` calls in `window.__pbCaptured` for
+    /// `hostPageScript`. It only watches; it never sends anything.
+    static let captureScript = #"""
+(() => {
+  if (window.__pbCapture || !/(^|\.)gofile\.io$/.test(location.hostname)) return;
+  window.__pbCapture = true;
+  window.__pbCaptured = [];
+  const wanted = (u) => /^https:\/\/api[^\/]*\.gofile\.io\/contents\//.test(String(u || ''));
+  const keep = (u, status, text) => {
+    let json = null;
+    try { json = JSON.parse(text); } catch (e) {}
+    window.__pbCaptured.push({ url: String(u), status: status, json: json });
+    if (window.__pbCaptured.length > 40) window.__pbCaptured.shift();
+  };
+  const realFetch = window.fetch;
+  if (realFetch) {
+    window.fetch = function (input, init) {
+      const u = (input && input.url) || input;
+      const p = realFetch.apply(this, arguments);
+      if (wanted(u)) p.then((r) => r.clone().text().then((t) => keep(u, r.status, t))).catch(() => {});
+      return p;
+    };
+  }
+  const open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (m, u) { this.__pbUrl = u; return open.apply(this, arguments); };
+  const send = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function () {
+    if (wanted(this.__pbUrl)) this.addEventListener('load', () => { try { keep(this.__pbUrl, this.status, this.responseText); } catch (e) {} });
+    return send.apply(this, arguments);
+  };
+})();
 """#
 
     /// A file page that shows its file only behind a button: press the one that says "download".

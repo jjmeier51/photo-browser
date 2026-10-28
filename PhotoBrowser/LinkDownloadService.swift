@@ -8,7 +8,7 @@ import CryptoKit
 /// page into a list of direct media URLs, which are then streamed to disk (12-wide,
 /// byte-for-byte so EXIF and HDR survive), exactly like the OF downloader.
 ///
-/// Supported, with a tailored resolver: **pixeldrain**, **gofile**, **bunkr**
+/// Supported, with a tailored resolver: **pixeldrain**, **bunkr**
 /// (+ its `.cr`/`.pk`/… mirrors and the bunkr-family `turbo.cr` / `goonbox.cr`),
 /// **cyberdrop**, and **pixl** (Chevereto). Anything else — `cyberfile.me`,
 /// `filester.gg`, or a host that moved — falls back to a generic page scrape
@@ -24,7 +24,7 @@ enum LinkDownloadService {
         var note: String?
     }
     /// One resolved file, ready to stream. `referer`/`cookie` carry any host-specific
-    /// headers the CDN needs (gofile wants an `accountToken` cookie; bunkr wants a Referer).
+    /// headers the CDN needs (bunkr wants a Referer).
     struct MediaItem: Sendable {
         let url: String
         let filename: String
@@ -291,67 +291,17 @@ enum LinkDownloadService {
         return ([], nil, "Unrecognized Pixeldrain link.")
     }
 
-    // MARK: - gofile (guest token + dynamic website token)
+    // MARK: - gofile
 
+    /// Not fetched here any more. gofile's API wants a website token made by the site's own script with a
+    /// secret gofile rotates, and a request signed with a retired secret gets the IP banned on the spot
+    /// (the site's `core/wt.js` says so) — the token this resolver used to compute (a fixed salt) was
+    /// already being refused (`error-notPremium`). The SimpCity downloader reads gofile through its own
+    /// site in a web view instead (`SimpCityHosts`).
     nonisolated private static func gofile(_ link: String, log: DownloadLog? = nil) async -> ([MediaItem], String?, String?) {
-        guard let contentID = firstMatch(link, "gofile\\.io/(?:d|w)/([A-Za-z0-9\\-]+)")
-            ?? firstMatch(link, "[?&]c=([A-Za-z0-9\\-]+)") else {
-            await log?.log("gofile: unrecognized link shape")
-            return ([], nil, "Unrecognized Gofile link.")
-        }
-        await log?.log("gofile: contentID=\(contentID); requesting guest account token")
-        // A guest account token is required for the contents API and the download cookie.
-        guard let acc = await getJSON("https://api.gofile.io/accounts", method: "POST") as? [String: Any],
-              let data = acc["data"] as? [String: Any], let token = data["token"] as? String else {
-            await log?.log("gofile: FAILED to obtain guest token (accounts API blocked or changed)")
-            return ([], nil, "Couldn’t start a Gofile session.")
-        }
-        let wt = gofileWebsiteToken(token: token)
-        await log?.log("gofile: got token; wt=\(wt.prefix(12))…; walking contents")
-        var items: [MediaItem] = []
-        var albumName: String?
-        await gofileCollect(contentID, token: token, wt: wt, cookie: "accountToken=\(token)", items: &items, albumName: &albumName, log: log)
-        await log?.log("gofile: collected \(items.count) file(s) from '\(albumName ?? "?")'")
-        return (items, albumName, items.isEmpty ? "No files found (the Gofile link may be private or expired)." : nil)
-    }
-
-    /// `sha256(userAgent::language::accountToken::(unixTime/14400)::salt)` — Gofile's
-    /// client-side website token, rotating every 4 hours (matches their wt.obf.js).
-    nonisolated private static func gofileWebsiteToken(token: String) -> String {
-        let window = Int(Date().timeIntervalSince1970) / 14400
-        let raw = "\(userAgent)::en::\(token)::\(window)::5d4f7g8sd45fsd"
-        let digest = SHA256.hash(data: Data(raw.utf8))
-        return digest.map { String(format: "%02x", $0) }.joined()
-    }
-
-    nonisolated private static func gofileCollect(_ contentID: String, token: String, wt: String, cookie: String,
-                                                  items: inout [MediaItem], albumName: inout String?, depth: Int = 0,
-                                                  log: DownloadLog? = nil) async {
-        guard depth < 6 else { return }
-        let headers = ["Authorization": "Bearer \(token)", "X-Website-Token": wt]
-        guard let json = await getJSON("https://api.gofile.io/contents/\(contentID)?wt=\(wt)", headers: headers) as? [String: Any],
-              let data = json["data"] as? [String: Any] else {
-            await log?.log("gofile: contents/\(contentID) returned no data (token/wt rejected or empty)")
-            return
-        }
-        if albumName == nil { albumName = data["name"] as? String }
-        // A single-file link resolves to a file node directly (no children).
-        if (data["type"] as? String) == "file", let dl = data["link"] as? String {
-            let name = (data["name"] as? String) ?? URL(string: dl)?.lastPathComponent ?? "gofile"
-            items.append(MediaItem(url: dl, filename: name, referer: "https://gofile.io/", cookie: cookie))
-            return
-        }
-        guard let children = data["children"] as? [String: Any] else { return }
-        for (_, value) in children {
-            guard let child = value as? [String: Any] else { continue }
-            let type = child["type"] as? String
-            if type == "folder", let sub = child["id"] as? String {
-                await gofileCollect(sub, token: token, wt: wt, cookie: cookie, items: &items, albumName: &albumName, depth: depth + 1, log: log)
-            } else if let dl = child["link"] as? String {
-                let name = (child["name"] as? String) ?? URL(string: dl)?.lastPathComponent ?? "gofile"
-                items.append(MediaItem(url: dl, filename: name, referer: "https://gofile.io/", cookie: cookie))
-            }
-        }
+        await log?.log("gofile: not fetched — its API would need a token signed by gofile's own site")
+        return ([], nil, "Gofile links can’t be downloaded here: gofile only serves them to its own website now (and bans "
+                + "apps that try). Open the link in a browser, or use Download from SimpCity, which reads gofile through its site.")
     }
 
     // MARK: - bunkr family (album JSON + per-file CDN resolve)

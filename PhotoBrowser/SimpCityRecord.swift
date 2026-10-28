@@ -458,13 +458,26 @@ nonisolated enum SimpCity {
                 seen[it.key] = it
             }
         }
-        let ordered = seen.values.sorted {
-            (SimpCityHosts.preference[$0.kind] ?? 9, $0.posted, $0.key) < (SimpCityHosts.preference[$1.kind] ?? 9, $1.posted, $1.key)
-        }
+        // A locked pixeldrain file (its hotlink captcha) comes last: any other host's copy is fetched instead.
+        func rank(_ i: Item) -> Int { i.remote?.locked == true ? 99 : (SimpCityHosts.preference[i.kind] ?? 9) }
+        let ordered = seen.values.sorted { (rank($0), $0.posted, $0.key) < (rank($1), $1.posted, $1.key) }
         var left: [Item] = [], adopted = 0, same = 0
+        var lockedSizes: [Int64: String] = [:]
         for it in ordered where !record.has(it.key) {
             if let name = onDisk[it.stem] { record.add(it, file: name); adopted += 1; continue }
             let r = it.remote
+            if let r, r.locked {
+                // Never claims a size: a copy that turns up elsewhere (turbo, a browser-read host) still wins.
+                let other = dedup.peekHash(r.sha256) ?? dedup.peek(r.size)
+                    ?? (r.size >= Dedup.minSize ? lockedSizes[r.size] : nil)
+                if let other, record.has(other) { record.addSame(it, other: other); same += 1 }
+                else if let other { _ = dedup.wait(other, it) }
+                else {
+                    if r.size >= Dedup.minSize { lockedSizes[r.size] = it.key }
+                    left.append(it)
+                }
+                continue
+            }
             var other: String?
             if let sha = r?.sha256, !sha.isEmpty { other = dedup.matchHash(it.key, sha) }
             if other == nil, let size = r?.size, size > 0 { other = dedup.claim(it.key, size: size) }
@@ -525,6 +538,19 @@ nonisolated enum SimpCity {
             if let other = hashes[sha.lowercased()], other != key { return other }
             hashes[sha.lowercased()] = key
             return nil
+        }
+
+        /// The key of a video already this size, without claiming the size.
+        func peek(_ size: Int64) -> String? {
+            guard size >= Self.minSize else { return nil }
+            lock.lock(); defer { lock.unlock() }
+            return sizes[size]
+        }
+
+        func peekHash(_ sha: String) -> String? {
+            guard !sha.isEmpty else { return nil }
+            lock.lock(); defer { lock.unlock() }
+            return hashes[sha.lowercased()]
         }
 
         /// A downloaded video's size, for the copies still to come.

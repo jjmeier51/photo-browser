@@ -1438,10 +1438,8 @@ posted on several hosts is fetched once.
   videos in them (`Remote`: name, and for most hosts the exact size; pixeldrain also the SHA-256);
   photos, archives and anything else in a folder are left alone. Saved as `<host>-<file id>.<ext>`,
   keyed `<host>:<file id>`. How each host is read: pixeldrain's public API (`/api/file/<id>/info`,
-  `/api/list/<id>`, file `/api/file/<id>?download`); gofile's guest account (`POST
-  api.gofile.io/accounts` — what the site makes for every visitor) + `/contents/<id>` with the site's
-  rotating website token (`sha256(UA::en::token::unix/14400::salt)`, `X-Website-Token`), files fetched
-  with that account's `accountToken` cookie; cyberdrop's album page `/f/<id>` links → `api.<host>/api/
+  `/api/list/<id>`, file `/api/file/<id>?download`); **gofile only through its own site** (below);
+  cyberdrop's album page `/f/<id>` links → `api.<host>/api/
   file/info/<id>` → `auth_url` (asked just before the download — it doesn't last); bunkr's album
   `albumFiles` list (or `/f/` links) / a file page's `data-file-id` → `apidl.bunkr.ru/api/_001_v2`
   (base64 XOR'd with `SECRET_KEY_<ts/3600>`, the maintenance clip refused), also just before the
@@ -1456,10 +1454,39 @@ posted on several hosts is fetched once.
   carries its page as Referer (Safe Finder: the interceptor's `by_url`; iPhone: the request) and gofile's
   cookie. A dead link (404 / "not found") is done; a folder that couldn't be listed is tried again next
   run; a failed video's link stays not done and is listed again (a video it no longer holds is done).
+- **gofile: the site's own listing, never our own request** (Oct 28, after the first real run: every
+  folder answered `401 error-notPremium`, then `429 error-rateLimit`). The website token is made by the
+  site's `wt.obf.js` with a secret gofile **rotates server-side**, and its `core/wt.js` says a request
+  signed with a retired secret gets the **IP banned on the spot** (the page itself refuses to sign after 6
+  hours open). A re-implemented token (the fixed salt `LinkDownloadService` also had — now removed there
+  too; its gofile links return a note) is exactly that. So: `CAPTURE_JS` / `captureScript` is injected
+  before the page's own scripts (Safe Finder: a profile `QWebEngineScript` at DocumentCreation, main
+  world; iPhone: a `WKUserScript` at document start) and, on gofile only, keeps the answers of the site's
+  own `/contents/` calls (`fetch` and XHR; it only reads them — the site still gets its answer, tested in
+  Chromium); `HOST_PAGE_JS` turns them into files with name, exact size and id (and reports each call's
+  status as `api`). gofile folders get **one lane, one folder at a time, 2 s apart**; a `429`/
+  `error-rateLimit` means one 60 s wait and one more try, then gofile is left for the next run; a refusal
+  (`401`, `error-notPremium`, …) stops gofile at once (`api_trouble` / `apiTrouble`). Downloads carry the
+  site's own `accountToken` cookie (the browser profile's cookie jar). A folder over 100 files only gets
+  what the site lists on its first page.
+- **pixeldrain's hotlink lock.** pixeldrain marks much-downloaded files `availability:
+  file_rate_limited_captcha_required` and answers a plain (or Chromium) download with 403 "hotlinking is
+  only supported when either the uploader or the downloader has a paid subscription". Such a file is
+  `locked`: it is ranked last when grouping copies and never claims its size, so any other host's copy
+  (or turbo, or a browser-read host) is downloaded instead and the pixeldrain one recorded `same_as`. One
+  no other host has is never fetched directly; after the lanes finish, each opens **in the visible
+  window** (Safe Finder) / on the SimpCity screen (iPhone, only while it's open — otherwise the run's note
+  says to open it), the person presses Download and answers pixeldrain's captcha, and the download that
+  starts there is taken as it is (its `cap_response` address works once) — Safe Finder: the view page's
+  `downloadRequested`; iPhone: the page's navigation delegate turns it into a `WKDownload` that
+  `SimpCityFileDownload.adopt` saves. Nobody pressing Download within 4 minutes ends the step; that video
+  and the rest are kept for the next run (reported as waiting, not failed).
+- **Gone means gone**: a 404 page that says "removed by the original uploader / an Admin" (bunkr) is
+  reported as deleted, not retried.
 - **One video, one copy** (`Dedup`, both apps; thread-safe). The same clip is routinely posted on
   gofile + pixeldrain + bunkr at once. Three checks, all by the bytes as downloaded (the record's `size`
   and `sha256` are taken **before** the date is written into the file, so another host's copy compares
-  equal): (1) **sizes up front** — the hosts that say a size (pixeldrain, gofile, cyberdrop, bunkr albums)
+  equal): (1) **sizes up front** — the hosts that say a size (pixeldrain, gofile's listing, cyberdrop, bunkr albums)
   are grouped by exact size (≥ 1 MB; two different videos of one exact size that big don't happen), the
   copy on the preferred host (pixeldrain > gofile > cyberdrop > turbo > filester > fileditch > bunkr) is
   queued and the others **wait on it**: recorded `same_as` it once it's saved, tried in its place if it

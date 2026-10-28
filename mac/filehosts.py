@@ -10,10 +10,17 @@ its name, and for most hosts its exact size (pixeldrain also its SHA-256) — wh
 knows two links are the same video before fetching either. The file's own address comes just before its
 download (`direct_url`): cyberdrop's and bunkr's are short-lived.
 
-How each host is read (all plain requests on a worker thread, like the iPhone's `LinkDownloadService`):
+How each host is read (plain requests on a worker thread unless said otherwise):
 - **pixeldrain** — its public API: `/api/file/<id>/info`, `/api/list/<id>`; the file is `/api/file/<id>`.
-- **gofile** — a guest account (`POST api.gofile.io/accounts`, what the site makes for every visitor),
-  then `/contents/<id>` with the site's rotating website token; the files carry that account's cookie.
+  A file pixeldrain has marked as hotlinked (`availability: file_rate_limited_captcha_required` — it
+  answers 403 to a plain download) is `locked`: another host's copy is fetched instead when there is
+  one, else the person presses Download on its page in the window and answers pixeldrain's captcha.
+- **gofile** — **only through its own site, in the browser.** Its API wants a website token made by the
+  site's script with a secret gofile rotates, and a request signed with a retired secret gets the IP
+  banned on the spot (the site's own `core/wt.js` says so) — so nothing here signs a request. The folder
+  page is loaded in a lane, `CAPTURE_JS` (injected before the page's own scripts) keeps the
+  `/contents/` answers the site fetches for itself, and `HOST_PAGE_JS` lists the videos in them. One
+  folder at a time, and a rate-limit answer stops gofile for the run.
 - **cyberdrop** — the album page's `/f/<id>` links, `api.<host>/api/file/info/<id>`, then its `auth_url`.
 - **bunkr** — the album page's `albumFiles` list (or its `/f/` links) / a file page's `data-file-id`,
   then `apidl.bunkr.ru` for the file's address (base64, XOR'd with an hourly key).
@@ -21,6 +28,8 @@ How each host is read (all plain requests on a worker thread, like the iPhone's 
   Cloudflare), so their pages are read in the downloader's browser: `HOST_PAGE_JS` finds the video a page
   plays or links, or — in a folder — the pages of the files in it. A host whose API answer is a "you're
   human?" check (`NeedsBrowser`), or that fails, goes the same way.
+
+Nothing here answers a check or a captcha: the person does, in the window.
 
 The page scripts are kept identical to the Swift copies in PhotoBrowser/SimpCityHosts.swift.
 """
@@ -31,10 +40,8 @@ import concurrent.futures
 import hashlib
 import json
 import re
-import threading
-import time
 from dataclasses import dataclass, field
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 HOSTS = ("pixeldrain", "gofile", "cyberdrop", "bunkr", "filester", "fileditch")
 # Which copy is fetched when the same video is on several hosts (lower first): the quick, plain APIs
@@ -46,8 +53,7 @@ _NOT_VIDEO = re.compile(r"\.(?:jpe?g|png|gif|webp|heic|avif|bmp|tiff?|zip|rar|7z
 WORKERS = 6               # file-info requests at once inside one folder
 
 BUNKR_API = "https://apidl.bunkr.ru/api/_001_v2"
-GOFILE_API = "https://api.gofile.io"
-GOFILE_SALT = "5d4f7g8sd45fsd"         # the site's website-token salt (wt.obf.js; LinkDownloadService has it too)
+LOCKED = "file_rate_limited_captcha_required"     # pixeldrain's hotlink lock
 
 
 class HostError(Exception):
@@ -139,11 +145,17 @@ class Remote:
     referer: str = ""
     headers: dict = field(default_factory=dict)
     cookies: dict = field(default_factory=dict)     # set in the browser too, for its download
-    extra: dict = field(default_factory=dict)       # bunkr: numeric id + hub; cyberdrop: auth address
+    extra: dict = field(default_factory=dict)       # bunkr: numeric id + hub; cyberdrop: auth address;
+                                                    # pixeldrain: "locked" (its hotlink captcha)
 
     @property
     def key(self) -> str:
         return f"{self.host}:{self.fid}"
+
+    @property
+    def locked(self) -> bool:
+        """Only a person can fetch it (pixeldrain's captcha): another host's copy is preferred."""
+        return bool(self.extra.get("locked"))
 
 
 def is_video_name(name: str) -> bool:
@@ -161,7 +173,7 @@ def expand(link: Link, ua: str) -> list[Remote]:
     if link.host == "pixeldrain":
         return _pixeldrain(link, ua)
     if link.host == "gofile":
-        return _gofile(link, ua)
+        raise NeedsBrowser("gofile is read through its own site")
     if link.host == "cyberdrop":
         return _cyberdrop(link, ua)
     if link.host == "bunkr":
@@ -231,7 +243,8 @@ def _text(url: str, ua: str, headers: dict | None = None) -> str:
     if is_check_page(text) or status in (403, 429, 503) and "<html" in text[:2000].lower():
         raise NeedsBrowser(f"{urlsplit(url).hostname} answered with a check page")
     if status == 404 or status == 410:
-        raise Gone(f"{url} isn't there any more")
+        removed = re.search(r"removed by the original uploader|has been removed|been deleted", text, re.I)
+        raise Gone(f"{'deleted' if removed else 'not found'} on {urlsplit(url).hostname} ({status})")
     if status >= 400:
         raise HostError(f"HTTP {status} from {urlsplit(url).hostname}")
     return text
@@ -282,9 +295,10 @@ def _pixeldrain_remote(f: dict) -> Remote | None:
     mime = str(f.get("mime_type") or "")
     if not fid or not (mime.startswith("video/") or is_video_name(name)):
         return None
+    locked = str(f.get("availability") or "")
     return Remote("pixeldrain", fid, name=name, size=int(f.get("size") or 0), sha256=str(f.get("hash_sha256") or "").lower(),
                   url=f"https://pixeldrain.com/api/file/{fid}?download", page=f"https://pixeldrain.com/u/{fid}",
-                  referer=f"https://pixeldrain.com/u/{fid}")
+                  referer=f"https://pixeldrain.com/u/{fid}", extra={"locked": locked} if locked else {})
 
 
 def _pixeldrain(link: Link, ua: str) -> list[Remote]:
@@ -294,67 +308,6 @@ def _pixeldrain(link: Link, ua: str) -> list[Remote]:
     j = _json(f"https://pixeldrain.com/api/file/{link.ident}/info", ua)
     r = _pixeldrain_remote({**j, "id": j.get("id") or link.ident})
     return [r] if r else []
-
-
-# ----------------------------------------------------------------------------- gofile
-
-_GOFILE_TOKEN: dict[str, object] = {"token": "", "at": 0.0}
-_GOFILE_LOCK = threading.Lock()
-
-
-def gofile_website_token(ua: str, token: str, now: float | None = None) -> str:
-    """`sha256(userAgent::en::accountToken::(unix time / 4 h)::salt)` — gofile's own client token."""
-    window = int((now if now is not None else time.time()) // 14400)
-    return hashlib.sha256(f"{ua}::en::{token}::{window}::{GOFILE_SALT}".encode()).hexdigest()
-
-
-def _gofile_token(ua: str) -> str:
-    """A guest account for this run (what the site makes for every visitor), kept for an hour."""
-    with _GOFILE_LOCK:
-        if _GOFILE_TOKEN["token"] and time.time() - float(_GOFILE_TOKEN["at"]) < 3600:
-            return str(_GOFILE_TOKEN["token"])
-        j = _json(f"{GOFILE_API}/accounts", ua, method="POST", body=b"{}", headers={"Content-Type": "application/json"})
-        token = str((j.get("data") or {}).get("token") or "")
-        if j.get("status") != "ok" or not token:
-            raise HostError(f"gofile didn't open a guest session ({j.get('status') or 'no token'})")
-        _GOFILE_TOKEN.update(token=token, at=time.time())
-        return token
-
-
-def _gofile(link: Link, ua: str) -> list[Remote]:
-    token = _gofile_token(ua)
-    out: list[Remote] = []
-    _gofile_walk(link.ident, token, ua, out, 0)
-    return out
-
-
-def _gofile_walk(content: str, token: str, ua: str, out: list[Remote], depth: int) -> None:
-    if depth > 5:
-        return
-    wt = gofile_website_token(ua, token)
-    j = _json(f"{GOFILE_API}/contents/{quote(content)}?wt={wt}", ua,
-              headers={"Authorization": f"Bearer {token}", "X-Website-Token": wt})
-    status = str(j.get("status") or "")
-    if status == "error-notFound":
-        raise Gone("gofile: not found")
-    if status != "ok":
-        raise HostError(f"gofile said {status or 'nothing'}")
-    data = j.get("data") or {}
-    nodes = [data] if data.get("type") == "file" else list((data.get("children") or {}).values())
-    for c in nodes:
-        if not isinstance(c, dict):
-            continue
-        if c.get("type") == "folder" and c.get("id"):
-            _gofile_walk(str(c["id"]), token, ua, out, depth + 1)
-            continue
-        name = str(c.get("name") or "")
-        mime = str(c.get("mimetype") or "")
-        fid = safe_id(str(c.get("id") or ""))
-        if not fid or not c.get("link") or not (mime.startswith("video/") or is_video_name(name)):
-            continue
-        out.append(Remote("gofile", fid, name=name, size=int(c.get("size") or 0), url=str(c["link"]),
-                          page=f"https://gofile.io/d/{content}", referer="https://gofile.io/",
-                          headers={"Cookie": f"accountToken={token}"}, cookies={"accountToken": token}))
 
 
 # ----------------------------------------------------------------------------- cyberdrop
@@ -523,7 +476,8 @@ def from_page(link: Link, page: dict) -> list[Remote]:
         url, name = str(f.get("url") or ""), str(f.get("name") or "")
         if not url.startswith("http"):
             continue
-        r = Remote(link.host, file_id_from_url(link.host, url), name=name or url.rsplit("/", 1)[-1].split("?")[0],
+        r = Remote(link.host, safe_id(str(f.get("id") or "")) or file_id_from_url(link.host, url),
+                   name=name or url.rsplit("/", 1)[-1].split("?")[0], size=int(f.get("size") or 0),
                    url=url, page=str(page.get("href") or link.url), referer=str(page.get("href") or link.url))
         out.setdefault(r.key, r)
     for p in page.get("pages") or []:
@@ -537,6 +491,18 @@ def from_page(link: Link, page: dict) -> list[Remote]:
         r = Remote(sub.host, safe_id(sub.ident), name=name if is_video_name(name) else "", page=sub.url, referer=sub.url)
         out.setdefault(r.key, r)
     return list(out.values())
+
+
+def api_trouble(page: dict | None) -> str:
+    """What the site's own API calls ran into (`HOST_PAGE_JS` → `api`, from `CAPTURE_JS`): "rate" when it
+    was rate-limited, the API's status when it was turned down, "" when all is well (or nothing called)."""
+    for a in (page or {}).get("api") or []:
+        status, said = int(a.get("status") or 0), str(a.get("api") or "")
+        if status == 429 or said == "error-rateLimit":
+            return "rate"
+        if status in (401, 403) or said in ("error-notPremium", "error-token", "error-wrongToken", "error-banned"):
+            return said or f"HTTP {status}"
+    return ""
 
 
 def best_file(page: dict) -> tuple[str, str] | None:
@@ -582,6 +548,21 @@ HOST_PAGE_JS = r"""
   });
   document.querySelectorAll('meta[property="og:video"], meta[property="og:video:url"], meta[property="og:video:secure_url"]')
     .forEach((m) => add(m.getAttribute('content'), '', 70));
+  // What the site's own API calls answered (CAPTURE_JS — gofile's folder listings): its videos, exactly.
+  const api = [];
+  (window.__pbCaptured || []).forEach((c) => {
+    const j = (c && c.json) || {};
+    api.push({ status: c.status || 0, api: j.status || '' });
+    const d = j.data;
+    if (!d || d.canAccess === false) return;
+    const kids = d.type === 'file' ? [d] : Object.values(d.children || {});
+    kids.forEach((k) => {
+      if (!k || k.type === 'folder' || !k.link || seen.has(k.link)) return;
+      if (!(VIDEO.test(k.name || '') || /^video\//i.test(k.mimetype || ''))) return;
+      seen.add(k.link);
+      files.push({ url: k.link, name: clean(k.name), w: 110, size: k.size || 0, id: k.id || '' });
+    });
+  });
   files.sort((a, b) => b.w - a.w);
   const here = location.href.split('#')[0];
   const pages = [];
@@ -598,9 +579,45 @@ HOST_PAGE_JS = r"""
   const name = clean((h1 && h1.textContent) || (og && og.getAttribute('content')) || title);
   const gone = files.length === 0 && /not found|404|removed|deleted|does ?n[o']t exist|no longer available|expired/i.test(title + ' ' + text.slice(0, 600));
   return { challenge: checking && files.length === 0, files: files.slice(0, 500), pages: pages.slice(0, 1000), name: name,
-           title: title, gone: gone, ready: document.readyState, href: location.href };
+           title: title, gone: gone, api: api, ready: document.readyState, href: location.href };
 })()
 """
+
+# Injected into every page before its own scripts (Safe Finder: a profile script at document creation;
+# iPhone: a user script at document start). On gofile only, it keeps the answers of the site's own
+# `/contents/` API calls — the folder listing, signed by gofile's own script — in `window.__pbCaptured`
+# for `HOST_PAGE_JS`. It only watches; it never sends anything. Kept identical to the Swift copy.
+CAPTURE_JS = r"""
+(() => {
+  if (window.__pbCapture || !/(^|\.)gofile\.io$/.test(location.hostname)) return;
+  window.__pbCapture = true;
+  window.__pbCaptured = [];
+  const wanted = (u) => /^https:\/\/api[^\/]*\.gofile\.io\/contents\//.test(String(u || ''));
+  const keep = (u, status, text) => {
+    let json = null;
+    try { json = JSON.parse(text); } catch (e) {}
+    window.__pbCaptured.push({ url: String(u), status: status, json: json });
+    if (window.__pbCaptured.length > 40) window.__pbCaptured.shift();
+  };
+  const realFetch = window.fetch;
+  if (realFetch) {
+    window.fetch = function (input, init) {
+      const u = (input && input.url) || input;
+      const p = realFetch.apply(this, arguments);
+      if (wanted(u)) p.then((r) => r.clone().text().then((t) => keep(u, r.status, t))).catch(() => {});
+      return p;
+    };
+  }
+  const open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (m, u) { this.__pbUrl = u; return open.apply(this, arguments); };
+  const send = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function () {
+    if (wanted(this.__pbUrl)) this.addEventListener('load', () => { try { keep(this.__pbUrl, this.status, this.responseText); } catch (e) {} });
+    return send.apply(this, arguments);
+  };
+})();
+"""
+
 
 # A file page that shows its file only behind a button: press the one that says "download" (not an app,
 # premium or sign-up button). The page then plays it, links it, or hands the browser a download.

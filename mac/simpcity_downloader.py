@@ -46,7 +46,7 @@ from PySide6.QtCore import QDateTime, QObject, QSettings, Qt, QTimer, QUrl, Sign
 from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,  # noqa: E402
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout, QWidget)
 from PySide6.QtWebEngineCore import (QWebEngineDownloadRequest, QWebEnginePage, QWebEngineProfile,  # noqa: E402
-                                     QWebEngineSettings, QWebEngineUrlRequestInterceptor)
+                                     QWebEngineScript, QWebEngineSettings, QWebEngineUrlRequestInterceptor)
 from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 
 import filehosts as fh  # noqa: E402
@@ -87,6 +87,14 @@ def profile() -> QWebEngineProfile:
         _PROFILE.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
         _PROFILE._referer = _Referer(_PROFILE)       # kept alive with the profile
         _PROFILE.setUrlRequestInterceptor(_PROFILE._referer)
+        # gofile's folder listings, as its own site fetches them (see `filehosts.CAPTURE_JS`).
+        capture = QWebEngineScript()
+        capture.setName("photobrowser-capture")
+        capture.setSourceCode(fh.CAPTURE_JS)
+        capture.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+        capture.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+        capture.setRunsOnSubFrames(False)
+        _PROFILE.scripts().insert(capture)
     return _PROFILE
 
 
@@ -138,6 +146,7 @@ class SimpCityWindow(QMainWindow):
         self.exif_noted = False
         self.dedup = sc.Dedup()
         self.click_wait: dict[int, object] = {}     # lane page (id) → takes a download its button started
+        self.person_wait: dict | None = None
         self.cookies: dict[str, dict[str, str]] = {}
         self.bridge = _Bridge()
         self.bridge.done.connect(lambda cb, result: cb(result))
@@ -274,6 +283,10 @@ class SimpCityWindow(QMainWindow):
         self.from_hosts = self.same = self.not_video = 0
         self.links_failed: list[str] = []
         self.stand_ins: dict[str, list[sc.Item]] = {}   # mirror key → the copies that failed before it was tried
+        self.person_queue: list[sc.Item] = []           # locked pixeldrain videos: a person fetches them
+        self.person_left = 0                            # … and how many of them were left for next time
+        self.person_wait: dict | None = None            # the one the window waits on
+        self.gofile_stopped = ""                        # why gofile is left alone for the rest of the run
         self.exif = sc.ExifSession(self.exiftool) if self.exiftool else None
         _Runner(self, self._crawl(base, self.full.isChecked()), self._crawled).start()
 
@@ -358,7 +371,11 @@ class SimpCityWindow(QMainWindow):
         for lk in to_list:
             hosts[lk.host] = hosts.get(lk.host, 0) + 1
         self._log("Listing the videos in " + ", ".join(f"{h} ×{c}" for h, c in sorted(hosts.items(), key=lambda kv: -kv[1])) + "…")
-        self.link_queue = deque(to_list)
+        # gofile gets one lane of its own — one folder at a time, a pause between them — so its site never
+        # sees a burst from here (it rate-limits, and bans).
+        self.link_queue = deque(lk for lk in to_list if lk.host != "gofile")
+        gofile = deque(lk for lk in to_list if lk.host == "gofile")
+        self.gofile_stopped = ""
         self.links_total, self.links_done = len(to_list), 0
         self.listed: list[tuple[fh.Link, list[fh.Remote]]] = []
         self.bar.setRange(0, self.links_total)
@@ -371,15 +388,25 @@ class SimpCityWindow(QMainWindow):
             self.active -= 1
             if self.active <= 0:
                 self._listed(left, fixes)
-        for lane in self.lanes[:min(LANES, len(to_list))]:
+        lanes = list(self.lanes)
+        if gofile:
             self.active += 1
-            _Runner(self, self._lister(lane), lister_done).start()
+            _Runner(self, self._lister(lanes.pop(0), gofile, one_by_one=True), lister_done).start()
+        for lane in lanes[:min(len(lanes), len(self.link_queue))]:
+            self.active += 1
+            _Runner(self, self._lister(lane, self.link_queue), lister_done).start()
 
-    def _lister(self, page: QWebEnginePage):
-        """Takes links off the queue: the host's API on a worker thread, else (a check page, no API, a
-        failure) the link's page in this lane — a folder's page lists its files' pages."""
-        while self.link_queue and not self.stopping:
-            lk = self.link_queue.popleft()
+    def _lister(self, page: QWebEnginePage, queue: deque, one_by_one: bool = False):
+        """Takes links off `queue`: the host's API on a worker thread, else (a check page, no API, a
+        failure) the link's page in this lane — a folder's page lists its files' pages. `one_by_one`
+        (gofile): a pause after each folder, and a rate limit stops it for the run."""
+        while queue and not self.stopping:
+            lk = queue.popleft()
+            if one_by_one and self.gofile_stopped:
+                self.links_failed.append(lk.host)
+                self.record.note_link(lk, [], why=self.gofile_stopped)
+                self.links_done += 1
+                continue
             self._say(f"Listing the videos in {self.links_total:,} file-host link{'s' if self.links_total != 1 else ''} — "
                       f"{self.links_done:,} done…")
             res = yield ("thread", lambda lk=lk: fh.expand(lk, self.ua), f"{lk.url} (listing its videos)")
@@ -393,6 +420,19 @@ class SimpCityWindow(QMainWindow):
                 if not isinstance(res, fh.NeedsBrowser):
                     self._log(f"{lk.url}: {why} — reading its page instead.")
                 shown = yield ("hostpage", page, lk.url)
+                trouble = fh.api_trouble(shown)
+                if trouble == "rate" and one_by_one and not self.stopping:
+                    self._log(f"{lk.host} is limiting requests — waiting a minute, then trying once more.")
+                    yield ("sleep", 60)
+                    shown = yield ("hostpage", page, lk.url)
+                    trouble = fh.api_trouble(shown)
+                if trouble and one_by_one:
+                    self.gofile_stopped = ("gofile is limiting requests — the rest are tried next run" if trouble == "rate"
+                                           else f"gofile turned down its own site's request ({trouble}) — the rest are "
+                                                "tried next run; open gofile.io in the window to see why")
+                    self._log(self.gofile_stopped + ".")
+                    shown = None
+                    why = self.gofile_stopped
                 if shown and not shown.get("gone"):
                     remotes = fh.from_page(lk, shown)
                     # A page that listed files, none of them videos, is done; one that listed nothing
@@ -403,17 +443,20 @@ class SimpCityWindow(QMainWindow):
                 else:
                     why = f"{why}; its page didn't load" if why else "its page didn't load"
             if gone:
-                self._log(f"{lk.url}: gone ({why or 'not found'}).")
+                self._log(f"{lk.url}: gone — {why or 'not found'}.")
             elif why:
                 self.links_failed.append(lk.host)
                 self._log(f"{lk.url}: couldn't list its videos — {why}")
             elif not remotes:
-                self._log(f"{lk.url}: no videos in it.")
+                self._log(f"{lk.url}: " + ("not a video (a photo or another kind of file) — left alone."
+                                           if lk.kind == "file" else "no videos in it."))
             self.record.note_link(lk, [r.key for r in remotes], why="" if gone else why, gone=gone)
             if remotes:
                 self.listed.append((lk, remotes))
             self.links_done += 1
             self.bar.setValue(min(self.links_total, self.links_done))
+            if one_by_one and queue and not self.stopping:
+                yield ("sleep", 2)
 
     def _listed(self, left: list[sc.Item], fixes) -> None:
         host, adopted, same = sc.host_items(self.listed, self.record, self.dest, self.dedup)
@@ -475,9 +518,13 @@ class SimpCityWindow(QMainWindow):
             self.bar.setValue(min(self.total, self.processed))
 
     def _lane(self, page: QWebEnginePage):
-        """Takes files off the queue one by one: resolve → download → date → into the folder."""
+        """Takes files off the queue one by one: resolve → download → date → into the folder. A locked
+        pixeldrain video (its hotlink captcha) is set aside for the person (`_person`)."""
         while self.queue and not self.stopping:
             item = self.queue.popleft()
+            if item.remote and item.remote.locked:
+                self.person_queue.append(item)
+                continue
             if item.remote:
                 url = yield from self._host_url(page, item)
             else:
@@ -495,44 +542,81 @@ class SimpCityWindow(QMainWindow):
                     self._log(f"↓ {item.stem}" + (f" “{item.remote.name}”" if item.remote.name else "")
                               + (f", {item.remote.size / 1048576:,.0f} MB" if item.remote.size else "") + f" from {item.kind}…")
                 path = yield ("download", page, url, item, ext)
-                if isinstance(path, sc.Skip):
-                    self._skipped(item, path)
-                elif not path:
-                    self._lost(item)
-                else:
-                    done = yield ("thread", lambda p=path, it=item: self._settle(p, it),
-                                  f"{item.stem} (dating it and saving it into the folder)")
-                    if self.exif and self.exif.note and not self.exif_noted:
-                        self.exif_noted = True
-                        self._log(self.exif.note)
-                    if isinstance(done, sc.Skip):
-                        self._skipped(item, done)
-                    elif isinstance(done, Exception):
-                        self._log(f"{item.link}: couldn't save it into the folder — {done}")
-                        self._lost(item)
-                    else:
-                        final, upscaled, outcome, size, sha = done
-                        self._log(f"✓ {final.name} — {sc.human_size(final)}"
-                                  + {"kept": ", its own date", "post": ", the post's date"}.get(outcome, "")
-                                  + (", upscaled 2×" if upscaled else ""))
-                        self.record.add(item, final.name, upscaled=upscaled, size=size, sha256=sha)
-                        if item.remote:
-                            self.from_hosts += 1
-                        stood_in = self.stand_ins.pop(item.key, [])
-                        self.failed -= len(stood_in)          # a copy that failed first is done: it's this
-                        for twin in self.dedup.settle(item.key, ok=True) + stood_in:
-                            self.record.add_same(twin, item.key)
-                            self.same += 1
-                        self.written.append(str(final))
-                        self.untagged.append(str(final))
-                        if upscaled:
-                            self.upscaled.append(str(final))
-                        if len(self.written) % 20 == 0:
-                            self._save_and_tag()
+                yield from self._keep(item, path)
             self.processed += 1
             self.bar.setValue(min(self.total, self.processed))
             self._say(f"Downloading — {len(self.written):,} saved, {self.failed:,} failed, "
                       f"{len(self.queue):,} waiting.")
+
+    def _keep(self, item: sc.Item, path):
+        """A download's outcome: a file to date and put in the folder, a copy of a video already in (or
+        not a video at all), or nothing (failed)."""
+        if isinstance(path, sc.Skip):
+            self._skipped(item, path)
+            return
+        if not path:
+            self._lost(item)
+            return
+        done = yield ("thread", lambda p=path, it=item: self._settle(p, it),
+                      f"{item.stem} (dating it and saving it into the folder)")
+        if self.exif and self.exif.note and not self.exif_noted:
+            self.exif_noted = True
+            self._log(self.exif.note)
+        if isinstance(done, sc.Skip):
+            self._skipped(item, done)
+        elif isinstance(done, Exception):
+            self._log(f"{item.link}: couldn't save it into the folder — {done}")
+            self._lost(item)
+        else:
+            final, upscaled, outcome, size, sha = done
+            self._log(f"✓ {final.name} — {sc.human_size(final)}"
+                      + {"kept": ", its own date", "post": ", the post's date"}.get(outcome, "")
+                      + (", upscaled 2×" if upscaled else ""))
+            self.record.add(item, final.name, upscaled=upscaled, size=size, sha256=sha)
+            if item.remote:
+                self.from_hosts += 1
+            stood_in = self.stand_ins.pop(item.key, [])
+            self.failed -= len(stood_in)          # a copy that failed first is done: it's this
+            for twin in self.dedup.settle(item.key, ok=True) + stood_in:
+                self.record.add_same(twin, item.key)
+                self.same += 1
+            self.written.append(str(final))
+            self.untagged.append(str(final))
+            if upscaled:
+                self.upscaled.append(str(final))
+            if len(self.written) % 20 == 0:
+                self._save_and_tag()
+
+    def _person(self):
+        """The locked pixeldrain videos no other host had: each opens in the window, the person presses
+        Download and answers pixeldrain's captcha, and the download it starts is taken (`_ask_person`).
+        One nobody starts within a few minutes ends the step — the rest are tried next run."""
+        items = [it for it in self.person_queue if not self.record.has(it.key)]
+        self.person_queue = []
+        if items:
+            self._log(f"{len(items):,} pixeldrain video(s) are locked behind pixeldrain's captcha (marked as hotlinked) and no "
+                      "other host has them: each opens in the window — press Download there and answer the captcha.")
+        for n, item in enumerate(items):
+            if self.stopping:
+                break
+            r = item.remote
+            other = self.dedup.peek(r.size) or self.dedup.peek_hash(r.sha256)
+            if self.record.has(item.key) or (other and self.record.has(other)):
+                if other and not self.record.has(item.key):
+                    self.record.add_same(item, other)
+                    self.same += 1
+                continue
+            path = yield ("person", item, len(items) - n - 1)
+            if path is None and not self.stopping:          # nobody pressed Download: the rest wait too
+                self._log(f"No download started for {item.stem} — leaving the locked pixeldrain videos for next time.")
+                for rest in items[n:]:
+                    if not self.record.has(rest.key):
+                        self.record.note_failed(rest)
+                        self.person_left += 1
+                break
+            yield from self._keep(item, path)
+            self.processed += 1
+            self.bar.setValue(min(self.total, self.processed))
 
     def _host_url(self, page: QWebEnginePage, item: sc.Item):
         """A file-host video's address: from its host's API just before the download (cyberdrop's and
@@ -641,16 +725,25 @@ class SimpCityWindow(QMainWindow):
         if error:
             self._log(f"Stopped a download lane: {error}")
         self.active -= 1
-        if self.active <= 0:
-            self._finish()
+        if self.active > 0:
+            return
+        if self.person_queue and not self.stopping:
+            def person_done(err, _r) -> None:
+                if err:
+                    self._log(f"Stopped the pixeldrain step: {err}")
+                self._finish()
+            _Runner(self, self._person(), person_done).start()
+            return
+        self._finish()
 
     def _finish(self) -> None:
         """The run's end: what a stop left in the queue (and copies still waiting on another) is kept for
         the next run, each file-host link is marked done if everything in it is, then the record and tags."""
-        for item in list(self.queue) + self.dedup.left_waiting():
+        for item in list(self.queue) + self.person_queue + self.dedup.left_waiting():
             if not self.record.has(item.key):
                 self.record.note_failed(item)
         self.queue.clear()
+        self.person_queue = []
         self.record.settle_links()
         self._save_and_tag()
         self._end()
@@ -667,7 +760,7 @@ class SimpCityWindow(QMainWindow):
         self.videos.setEnabled(True)
         if problem:
             msg = problem
-        elif n == 0 and not self.failed:
+        elif n == 0 and not self.failed and not getattr(self, "person_left", 0):
             msg = "Nothing new in the thread."
         else:
             msg = f"Saved {n:,} file{'s' if n != 1 else ''} into “{self.person.name}/{sc.FOLDER}”"
@@ -679,6 +772,9 @@ class SimpCityWindow(QMainWindow):
             msg += "."
             if n:
                 msg += f" {self.kept:,} kept their own date; {self.post_dated:,} got the post's date."
+        if not problem and self.person_left:
+            msg += (f" {self.person_left:,} locked pixeldrain video{'s wait' if self.person_left != 1 else ' waits'} for you to "
+                    "press Download on pixeldrain — run Get New again when you're at the Mac.")
         if not problem and (self.from_hosts or self.same or self.not_video or self.links_failed):
             parts = []
             if self.from_hosts:
@@ -713,6 +809,17 @@ class SimpCityWindow(QMainWindow):
             self._host_page(req[1], req[2], cb)
         elif kind == "hostfile":
             self._host_file(req[1], req[2], cb)
+        elif kind == "person":
+            self._ask_person(req[1], req[2], cb)
+        elif kind == "sleep":
+            until = time.monotonic() + float(req[1])
+
+            def tick(cb=cb) -> None:
+                if self.stopping or time.monotonic() >= until:
+                    cb(None)
+                else:
+                    QTimer.singleShot(500, tick)
+            QTimer.singleShot(500, tick)
         elif kind == "thread":
             fn = req[1]
             label = req[2] if len(req) > 2 else ""
@@ -1066,6 +1173,65 @@ class SimpCityWindow(QMainWindow):
         if self.fail_hosts[host] <= 3:                 # the first few per server; the summary counts the rest
             self._log(f"{item.stem}: couldn't download {url[:120]} — {why}")
 
+    def _ask_person(self, item: sc.Item, left: int, cb) -> None:
+        """A locked pixeldrain video's page in the window, for the person to press Download and answer
+        pixeldrain's captcha; the download that starts there is taken (`_download_requested`) — accepted
+        as it is, since the address it carries works once. → the file, a `simpcity.Skip`, or None when
+        nobody started one within four minutes (or Stop)."""
+        r = item.remote
+        ext = sc.extension(r.url, item.kind, r.name)
+        name = f"{item.stem}-{int(time.time() * 1000)}.{ext}"
+        state = {"done": False, "req": None, "got": -1}
+
+        def finish(path, why: str = "") -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            self.person_wait = None
+            if not path and state["req"] is not None:
+                try:
+                    state["req"].cancel()
+                except RuntimeError:
+                    pass
+            if why:
+                self._log(f"{item.stem}: {why}")
+            # None: nobody started a download; False: one started and failed.
+            cb(path or (False if state["req"] is not None else None))
+
+        clock = {"since": time.monotonic()}          # when it was asked for, or last moved
+
+        def started(req) -> None:
+            state["req"] = req
+            clock["since"] = time.monotonic()
+            self._log(f"↓ {item.stem} “{r.name or item.stem}” — the download you started on pixeldrain…")
+
+        self.person_wait = {"item": item, "name": name, "finish": finish, "started": started}
+        self.view.load(QUrl(r.page))
+        self._say(f"pixeldrain locks “{r.name or item.stem}” behind a captcha (it's marked as hotlinked, and no other "
+                  f"host has it): press Download in the window below and answer the captcha"
+                  + (f" — {left:,} more after this." if left else ".") + " Stop leaves them for next time.")
+
+        def watch() -> None:
+            if state["done"]:
+                return
+            if self.stopping:
+                finish(None)
+                return
+            req, now = state["req"], time.monotonic()
+            if req is None:
+                if now - clock["since"] > 240:
+                    finish(None)
+                    return
+            else:
+                got = req.receivedBytes()
+                if got > state["got"]:
+                    state["got"], clock["since"] = got, now
+                elif now - clock["since"] > 120:
+                    finish(None, "the download stopped moving")
+                    return
+            QTimer.singleShot(1000, watch)
+        QTimer.singleShot(1000, watch)
+
     def _download_requested(self, req: QWebEngineDownloadRequest) -> None:
         page = req.page() if hasattr(req, "page") else None
         take = self.click_wait.pop(id(page), None) if page is not None else None
@@ -1075,6 +1241,12 @@ class SimpCityWindow(QMainWindow):
             req.cancel()
             take(url, file)
             return
+        person = self.person_wait
+        if person is not None and "pixeldrain" in req.url().host() and (page is None or page is self.view.page()):
+            # The person pressed Download on the locked pixeldrain video in the window.
+            person["started"](req)
+            self._take(req, person["name"], person["finish"], self._checker(person["item"]))
+            return
         name = self.pending_urls.get(req.url().toString())
         entry = self.pending.get(req.downloadFileName()) or self.pending.get(req.suggestedFileName()) \
             or (self.pending.get(name) if name else None)
@@ -1082,6 +1254,11 @@ class SimpCityWindow(QMainWindow):
             return                                   # someone's own download in the window — leave it alone
         finish, requested, check = entry
         requested(req)
+        self._take(req, name or req.suggestedFileName() or req.downloadFileName(), finish, check)
+
+    def _take(self, req: QWebEngineDownloadRequest, file: str, finish, check) -> None:
+        """Chromium's download into the Mac's temp folder as `file` — after `check` has seen its size and
+        type — reporting the file (or why not) to `finish` once it ends."""
         if check is not None:
             try:
                 total = req.totalBytes()
@@ -1089,7 +1266,6 @@ class SimpCityWindow(QMainWindow):
             except sc.Skip as skip:
                 finish(skip)
                 return
-        file = name or req.suggestedFileName() or req.downloadFileName()
         req.setDownloadDirectory(str(self.tmp))
         req.setDownloadFileName(file)
         path = os.path.join(str(self.tmp), req.downloadFileName())

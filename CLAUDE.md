@@ -142,7 +142,9 @@ actions the app makes no network calls.
   a simpcity.cr thread's goonbox photos (full size, via goonbox's `/api/images/<id>`) and — with
   "Download videos" on — turbo videos plus the videos its posts link on pixeldrain, gofile, cyberdrop,
   bunkr, filester and fileditch (`SimpCityHosts` / `mac/filehosts.py`: host APIs, else the host's page in
-  the browser) into `<person>/simpcity`, tagged "simpcity", own capture date kept else the post's date
+  the browser; **gofile only through its own site** — never sign a gofile API request yourself, a stale
+  token gets the IP banned; pixeldrain's hotlink-locked files come from another host or the person
+  presses Download in the window) into `<person>/simpcity`, tagged "simpcity", own capture date kept else the post's date
   (XenForo's `data-timestamp` — `data-time` is a label); WebP → JPEG, photos under 250 KB upscaled 2×
   (Lanczos, tagged "upscaled"); earlier downloads brought up to these rules once (`made`). **A video
   posted on several hosts is downloaded once** (`Dedup`: hosts' sizes up front, the server's size as a

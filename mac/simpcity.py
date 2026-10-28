@@ -474,9 +474,12 @@ def host_items(listed: list[tuple[fh.Link, list[fh.Remote]]], record: Record, fo
             have = seen.get(it.key)
             if have is None or (it.posted and (not have.posted or it.posted < have.posted)):
                 seen[it.key] = it
-    ordered = sorted(seen.values(), key=lambda i: (fh.PREFERENCE.get(i.kind, 9), i.posted or 0, i.key))
+    # A locked pixeldrain file (its hotlink captcha) comes last: any other host's copy is fetched instead.
+    ordered = sorted(seen.values(), key=lambda i: (99 if i.remote and i.remote.locked else fh.PREFERENCE.get(i.kind, 9),
+                                                   i.posted or 0, i.key))
     left: list[Item] = []
     adopted = same = 0
+    locked_sizes: dict[int, str] = {}
     for it in ordered:
         if record.has(it.key):
             continue
@@ -485,6 +488,20 @@ def host_items(listed: list[tuple[fh.Link, list[fh.Remote]]], record: Record, fo
             adopted += 1
             continue
         r = it.remote
+        if r and r.locked:
+            # Never claims a size: a copy that turns up elsewhere (turbo, a browser-read host) still wins.
+            other = dedup.peek_hash(r.sha256) or dedup.peek(r.size) or \
+                (locked_sizes.get(r.size) if r.size >= Dedup.MIN_SIZE else None)
+            if other and record.has(other):
+                record.add_same(it, other)
+                same += 1
+            elif other:
+                dedup.wait(other, it)
+            else:
+                if r.size >= Dedup.MIN_SIZE:
+                    locked_sizes[r.size] = it.key
+                left.append(it)
+            continue
         other = (dedup.match_hash(it.key, r.sha256) if r and r.sha256 else None) or \
                 (dedup.claim(it.key, r.size) if r and r.size else None)
         if other and record.has(other):
@@ -569,6 +586,19 @@ class Dedup:
                 return other
             self.hashes[sha.lower()] = key
             return None
+
+    def peek(self, size: int | None) -> str | None:
+        """The key of a video already this size, without claiming the size."""
+        if not size or size < self.MIN_SIZE:
+            return None
+        with self.lock:
+            return self.sizes.get(int(size))
+
+    def peek_hash(self, sha: str) -> str | None:
+        if not sha:
+            return None
+        with self.lock:
+            return self.hashes.get(sha.lower())
 
     def note_size(self, key: str, size: int) -> None:
         """A downloaded video's size, for the copies still to come (a match found once it's in is by its
