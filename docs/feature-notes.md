@@ -1359,6 +1359,13 @@ goonbox.cr image is saved full-size and each turbo.cr video saved, into `<person
   Safari can't parse without a colon), links/`data-url`/`img`/iframes inside `.message-userContent`,
   skipping quotes and signatures, unwrapping `/redirect/?to=<base64>`; the last page from the page nav.
   A read only counts once the view is on *that* page (else it can return the page before).
+  **Answers travel as JSON text** (`json_call`: `JSON.stringify` inside a try, `{error}` when the script
+  throws) — an object handed through Qt's `runJavaScript` can arrive as nothing, which made every read
+  time out ("Couldn't read page 1", Oct 28). **A page still loading after 12 s is read as it stands**:
+  SimpCity's tracking scripts can keep a page from ever reaching `complete`. Posts are
+  `article.message, .message--post, li.message` (the old crawler's proven selector). A "checking your
+  browser" page counts only when no forum page (`.p-body`) is under it. A failed read says what the page
+  showed (title, address, posts, page, load state — `describe_page`).
 - **goonbox → full size**: its viewer is a script app over a JSON API — `GET /api/images/<id>` →
   `image.original_url` (found by the earlier crawler; the post's `img` is a thumbnail with a different
   UUID, so the full file can't be derived). Asked with `fetch` from a goonbox page in the lane, so one

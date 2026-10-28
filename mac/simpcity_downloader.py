@@ -240,7 +240,8 @@ class SimpCityWindow(QMainWindow):
             self._say(f"Reading page {n}{f' of {last}' if last > n else ''}… {len(items):,} files found so far.")
             page = yield ("read", sc.page_url(base, n), n)
             if not page:
-                raise RuntimeError(f"Couldn't read page {n} of the thread — check the address, then try again.")
+                raise RuntimeError(f"Couldn't read page {n} of the thread: {sc.describe_page(self.last_page)}. "
+                                   "Check the address and that you're logged in, then try again.")
             found = sum(1 for p in page.get("posts") or [] for u in p.get("urls") or [] if sc.media_key(str(u)))
             if n == first and not found and not page.get("loggedIn") and not asked_login:
                 asked_login = True
@@ -394,12 +395,13 @@ class SimpCityWindow(QMainWindow):
         started = time.monotonic()
         deadline = [started + timeout]
         challenged = [False]
+        script = sc.json_call(js)
 
         def tick() -> None:
-            page.runJavaScript(js, 0, got)
+            page.runJavaScript(script, 0, got)
 
-        def got(result) -> None:
-            result = result if isinstance(result, dict) else {}
+        def got(raw) -> None:
+            result = sc.parse_result(raw)
             now = time.monotonic()
             if result.get("challenge"):
                 if not challenged[0]:
@@ -419,13 +421,25 @@ class SimpCityWindow(QMainWindow):
 
     def _read(self, url: str, n: int, cb) -> None:
         """Page `n` of the thread in the visible view, read once it's that page and its posts are there
-        (until then the view can still hold the page before)."""
+        (until then the view can still hold the page before). SimpCity's tracking scripts can keep a
+        page from ever finishing loading, so one still loading after a while is read as it stands."""
         self.view.load(QUrl(url))
-        self._poll(self.view.page(), sc.EXTRACT_POSTS_JS,
-                   lambda r: int(r.get("page") or 1) == n and (r.get("ready") == "complete" or bool(r.get("posts"))),
-                   cb, 60,
-                   on_challenge=lambda: self._say("SimpCity is checking that a person is asking — answer it in the "
-                                                  "window below; the download carries on by itself."))
+        self.last_page: dict = {}
+        t0 = time.monotonic()
+
+        def accept(r: dict) -> bool:
+            self.last_page = r
+            if r.get("error") or int(r.get("page") or 1) != n:
+                return False
+            return bool(r.get("posts")) or r.get("ready") == "complete" or \
+                (r.get("ready") == "interactive" and time.monotonic() - t0 > 12)
+
+        def checking() -> None:
+            self.last_page = {"challenge": True}
+            self._say("SimpCity is checking that a person is asking — answer it in the window below; the download "
+                      "carries on by itself.")
+
+        self._poll(self.view.page(), sc.EXTRACT_POSTS_JS, accept, cb, 90, on_challenge=checking)
 
     def _ask_login(self, cb) -> None:
         """No links on the first page and not logged in: SimpCity shows links to members only."""
@@ -436,7 +450,7 @@ class SimpCityWindow(QMainWindow):
         saw_login = [False]
 
         def check() -> None:
-            self.view.page().runJavaScript(sc.LOGGED_IN_JS, 0, answer)
+            self.view.page().runJavaScript(sc.LOGGED_IN_JS.strip(), 0, answer)
 
         def answer(v) -> None:
             if v == "login-page":
@@ -479,7 +493,7 @@ class SimpCityWindow(QMainWindow):
             if _ready is False:
                 cb(None)
                 return
-            page.runJavaScript(start, 0, lambda _r: self._poll(page, read, lambda r: "status" in r, answered, 25))
+            page.runJavaScript(start.strip(), 0, lambda _r: self._poll(page, read, lambda r: "status" in r, answered, 25))
 
         if page.url().host().endswith("goonbox.cr"):
             ask()

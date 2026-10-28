@@ -43,6 +43,7 @@ final class SimpCityDownloader {
     @ObservationIgnored private let lanes = [SimpCityPage(), SimpCityPage(), SimpCityPage()]
     @ObservationIgnored private var record: SimpCity.Record?
     @ObservationIgnored private var queue: [SimpCity.Item] = []
+    @ObservationIgnored private var lastPage: [String: Any] = [:]
     @ObservationIgnored private var untagged: [URL] = []
     @ObservationIgnored private var written: [URL] = []
     @ObservationIgnored private var activity: UUID?
@@ -144,7 +145,7 @@ final class SimpCityDownloader {
             guard let page = await readPage(SimpCity.pageURL(base, n), n: n) else {
                 return main.challenged
                     ? "SimpCity is checking that a person is asking. Open Download from SimpCity, answer it there, then tap Get New."
-                    : "Couldn’t read page \(n) of the thread — check the address, then try again."
+                    : "Couldn’t read page \(n) of the thread: \(describe(lastPage)). Check the address and that you’re logged in, then try again."
             }
             let posts = page["posts"] as? [[String: Any]] ?? []
             var found = 0
@@ -274,15 +275,31 @@ final class SimpCityDownloader {
     // MARK: - Reading pages
 
     /// Page `n` of the thread, once it is that page and its posts are there (until then the view can
-    /// still show the page before). nil when it can't be read — or a check is waiting for a person
-    /// who isn't looking (`main.challenged`).
+    /// still show the page before). SimpCity's tracking scripts can keep a page from ever finishing
+    /// loading, so one still loading after a while is read as it stands. nil when it can't be read —
+    /// or a check is waiting for a person who isn't looking (`main.challenged`); `lastPage` is what it
+    /// showed, for the message.
     private func readPage(_ address: String, n: Int) async -> [String: Any]? {
         guard let url = URL(string: address) else { return nil }
         main.load(url)
-        return await main.poll(SimpCityPage.extractScript, timeout: 60, patient: showing) { r in
-            ((r["page"] as? NSNumber)?.intValue ?? 1) == n
-                && ((r["ready"] as? String) == "complete" || !((r["posts"] as? [Any]) ?? []).isEmpty)
+        lastPage = [:]
+        let started = Date()
+        return await main.poll(SimpCityPage.extractScript, timeout: 90, patient: showing) { r in
+            lastPage = r
+            guard r["error"] == nil, ((r["page"] as? NSNumber)?.intValue ?? 1) == n else { return false }
+            let ready = r["ready"] as? String
+            return !((r["posts"] as? [Any]) ?? []).isEmpty || ready == "complete"
+                || (ready == "interactive" && Date().timeIntervalSince(started) > 12)
         }
+    }
+
+    /// What a thread page showed, for the message when it couldn't be read (`simpcity.describe_page`).
+    private func describe(_ r: [String: Any]) -> String {
+        if r.isEmpty { return "the page never answered (still loading, or blocked)" }
+        if let e = r["error"] as? String { return "reading it failed: \(e)" }
+        let posts = (r["posts"] as? [Any])?.count ?? 0
+        return "it showed “\((r["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "no title")” (\(r["href"] as? String ?? "?")), "
+            + "\(posts) post\(posts == 1 ? "" : "s"), page \((r["page"] as? NSNumber)?.intValue ?? 0), \(r["ready"] as? String ?? "?")"
     }
 
     /// SimpCity hides links from guests: show its login page and wait (while the screen is open) for
@@ -399,9 +416,12 @@ final class SimpCityPage: NSObject {
         webView.load(URLRequest(url: url))
     }
 
-    /// Runs `script` (an expression) and returns its value as a dictionary.
+    /// Runs `script` (an expression) and returns its value as a dictionary — passed as JSON text, and
+    /// `{error}` when the script throws (same wrapper as `simpcity.json_call`).
     func json(_ script: String) async -> [String: Any]? {
-        guard let text = await string("JSON.stringify(\(script))"), let data = text.data(using: .utf8) else { return nil }
+        let call = "(() => { try { return JSON.stringify(\(script.trimmingCharacters(in: .whitespacesAndNewlines))); } "
+            + "catch (e) { return JSON.stringify({ error: String(e) }); } })()"
+        guard let text = await string(call), let data = text.data(using: .utf8) else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
@@ -451,8 +471,9 @@ final class SimpCityPage: NSObject {
     static let extractScript = #"""
 (() => {
   const title = document.title || '';
-  const challenge = /DDoS-Guard|Just a moment|Checking your browser|Attention Required/i.test(title)
-    || !!document.querySelector('#challenge-form, #cf-challenge-running, .ddg-captcha, [data-ddg-origin]');
+  const challenge = (/DDoS-Guard|Just a moment|Checking your browser|Attention Required/i.test(title)
+    || !!document.querySelector('#challenge-form, #cf-challenge-running, .ddg-captcha, [data-ddg-origin]'))
+    && !document.querySelector('.p-body, article.message');
   const html = document.documentElement;
   const loggedIn = html.getAttribute('data-logged-in') === 'true';
   const inQuote = (e) => !!e.closest('blockquote, .bbCodeBlock--quote, .bbCodeQuote, .message-signature');
@@ -471,7 +492,7 @@ final class SimpCityPage: NSObject {
     } catch (e) { return ''; }
   };
   const posts = [];
-  document.querySelectorAll('article.message[data-content^="post-"], article.message--post').forEach((p) => {
+  document.querySelectorAll('article.message, .message--post, li.message').forEach((p) => {
     const id = (p.getAttribute('data-content') || p.id || '').replace(/^(js-)?post-/, '');
     const t = p.querySelector('.message-attribution time[data-time], time.u-dt[data-time], time[data-time], time[datetime]');
     let time = 0;
@@ -496,7 +517,7 @@ final class SimpCityPage: NSObject {
   });
   const cur = (location.pathname.match(/\/page-(\d+)/) || [0, 1])[1];
   const heading = document.querySelector('h1.p-title-value');
-  return { title: heading ? heading.textContent.trim() : title, challenge, loggedIn, posts, ready: document.readyState,
+  return { title: heading ? heading.textContent.trim() : title, challenge, loggedIn, posts, ready: document.readyState, href: location.href,
            last: Math.max(last, parseInt(cur, 10) || 1), page: parseInt(cur, 10) || 1,
            blocked: !!document.querySelector('.blockMessage--error, .p-body-pageContent .blockMessage') && posts.length === 0 };
 })()
@@ -547,7 +568,7 @@ final class SimpCityPage: NSObject {
 (() => {
   const KIND = "__KIND__";
   const title = document.title || '';
-  const challenge = /Just a moment|DDoS-Guard|Checking your browser|Attention Required|Verify you are human/i.test(title)
+  const checking = /Just a moment|DDoS-Guard|Checking your browser|Attention Required|Verify you are human/i.test(title)
     || !!document.querySelector('#challenge-form, #cf-challenge-running, .cf-turnstile, [data-ddg-origin]');
   const abs = (v) => { try { return new URL(v, location.href).href; } catch (e) { return ''; } };
   const thumb = (u) => !u || /^(data|blob):/i.test(u) || /\.(md|th|thumb|sm|small)\.[a-z0-9]+(\?|$)|\/thumbs?\/|favicon|logo|avatar|\.svg(\?|$)/i.test(u);
@@ -580,6 +601,7 @@ final class SimpCityPage: NSObject {
   if (best && area >= 120000) push(best, 75);
   cands.sort((a, b) => b[1] - a[1]);
   const gone = /not found|404|removed|deleted/i.test(title) && cands.length === 0;
+  const challenge = checking && cands.length === 0;
   return { challenge, url: cands.length ? cands[0][0] : '', title, gone, ready: document.readyState, href: location.href };
 })()
 """#

@@ -430,8 +430,9 @@ def apply_date(path: str, posted: float, exiftool: str | None) -> str:
 EXTRACT_POSTS_JS = r"""
 (() => {
   const title = document.title || '';
-  const challenge = /DDoS-Guard|Just a moment|Checking your browser|Attention Required/i.test(title)
-    || !!document.querySelector('#challenge-form, #cf-challenge-running, .ddg-captcha, [data-ddg-origin]');
+  const challenge = (/DDoS-Guard|Just a moment|Checking your browser|Attention Required/i.test(title)
+    || !!document.querySelector('#challenge-form, #cf-challenge-running, .ddg-captcha, [data-ddg-origin]'))
+    && !document.querySelector('.p-body, article.message');
   const html = document.documentElement;
   const loggedIn = html.getAttribute('data-logged-in') === 'true';
   const inQuote = (e) => !!e.closest('blockquote, .bbCodeBlock--quote, .bbCodeQuote, .message-signature');
@@ -450,7 +451,7 @@ EXTRACT_POSTS_JS = r"""
     } catch (e) { return ''; }
   };
   const posts = [];
-  document.querySelectorAll('article.message[data-content^="post-"], article.message--post').forEach((p) => {
+  document.querySelectorAll('article.message, .message--post, li.message').forEach((p) => {
     const id = (p.getAttribute('data-content') || p.id || '').replace(/^(js-)?post-/, '');
     const t = p.querySelector('.message-attribution time[data-time], time.u-dt[data-time], time[data-time], time[datetime]');
     let time = 0;
@@ -475,7 +476,7 @@ EXTRACT_POSTS_JS = r"""
   });
   const cur = (location.pathname.match(/\/page-(\d+)/) || [0, 1])[1];
   const heading = document.querySelector('h1.p-title-value');
-  return { title: heading ? heading.textContent.trim() : title, challenge, loggedIn, posts, ready: document.readyState,
+  return { title: heading ? heading.textContent.trim() : title, challenge, loggedIn, posts, ready: document.readyState, href: location.href,
            last: Math.max(last, parseInt(cur, 10) || 1), page: parseInt(cur, 10) || 1,
            blocked: !!document.querySelector('.blockMessage--error, .p-body-pageContent .blockMessage') && posts.length === 0 };
 })()
@@ -489,7 +490,7 @@ RESOLVE_JS = r"""
 (() => {
   const KIND = "__KIND__";
   const title = document.title || '';
-  const challenge = /Just a moment|DDoS-Guard|Checking your browser|Attention Required|Verify you are human/i.test(title)
+  const checking = /Just a moment|DDoS-Guard|Checking your browser|Attention Required|Verify you are human/i.test(title)
     || !!document.querySelector('#challenge-form, #cf-challenge-running, .cf-turnstile, [data-ddg-origin]');
   const abs = (v) => { try { return new URL(v, location.href).href; } catch (e) { return ''; } };
   const thumb = (u) => !u || /^(data|blob):/i.test(u) || /\.(md|th|thumb|sm|small)\.[a-z0-9]+(\?|$)|\/thumbs?\/|favicon|logo|avatar|\.svg(\?|$)/i.test(u);
@@ -522,6 +523,7 @@ RESOLVE_JS = r"""
   if (best && area >= 120000) push(best, 75);
   cands.sort((a, b) => b[1] - a[1]);
   const gone = /not found|404|removed|deleted/i.test(title) && cands.length === 0;
+  const challenge = checking && cands.length === 0;
   return { challenge, url: cands.length ? cands[0][0] : '', title, gone, ready: document.readyState, href: location.href };
 })()
 """
@@ -570,3 +572,36 @@ LOGGED_IN_JS = r"""
   return document.readyState === 'complete' ? 'left-login' : 'loading';
 })()
 """
+
+
+def json_call(expr: str) -> str:
+    """A page script made to answer with JSON text — the one form every browser bridge hands back intact
+    (an object can arrive as nothing at all) — and to say what went wrong when it throws."""
+    return ("(() => { try { return JSON.stringify(" + expr.strip() + "); } "
+            "catch (e) { return JSON.stringify({ error: String(e) }); } })()")
+
+
+def parse_result(raw) -> dict:
+    """The answer of a `json_call` script as a dict ({} for nothing / not an object)."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (str, bytes)):
+        try:
+            v = json.loads(raw)
+        except ValueError:
+            return {}
+        return v if isinstance(v, dict) else {}
+    return {}
+
+
+def describe_page(r: dict | None) -> str:
+    """What a thread page showed, for the message when it couldn't be read."""
+    if not r:
+        return "the page never answered (still loading, or blocked)"
+    if r.get("challenge"):
+        return "SimpCity kept showing its “checking your browser” page — answer it in the window"
+    if r.get("error"):
+        return f"reading it failed: {r['error']}"
+    posts = len(r.get("posts") or [])
+    return (f"it showed “{r.get('title') or 'no title'}” ({r.get('href') or '?'}), {posts} post{'s' if posts != 1 else ''}, "
+            f"page {r.get('page') or '?'}, {r.get('ready') or '?'}")
