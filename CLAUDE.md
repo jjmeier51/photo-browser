@@ -118,7 +118,11 @@ actions the app makes no network calls.
   a video upscale first asks for the frame rate (30 / 60 / source — the composition is retimed,
   no interpolation), everything that comes out upscaled gets the "upscaled" tag, and the outcome
   is an activity popup. Duplicate copies the original's metadata (labels, caption, tags) to the copy
-  via `duplicateMetadata`.
+  via `duplicateMetadata`. **Batch crop** (selection ▸ More ▸ Crop…, `BatchCrop.swift`): one crop drawn
+  on a photo goes on every selected photo in place — as fractions of each photo (a fixed ratio keeps its
+  shape) — and each gets the "cropped" tag; the Edit screen and the photo editor tag their crops too and
+  remember them for "Last Crop". Safe Finder's twin: right-click ▸ Crop… (`mac/batch_crop.py`,
+  `mac/crop_window.py`, same arithmetic — `docs/feature-notes.md` §6i).
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,
   "Add from iOS Album" (import then delete the iOS originals), save drive media
   to Photos, capture/export HDR-preserving video frames. (`PhotosLibraryView`,

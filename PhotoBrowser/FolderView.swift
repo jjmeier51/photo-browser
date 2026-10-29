@@ -28,6 +28,12 @@ final class CellFrameStore {
     var frames: [URL: CGRect] = [:]
 }
 
+/// Carries the selected photos into the batch Crop screen.
+struct CropRequest: Identifiable {
+    let id = UUID()
+    let photos: [Entry]
+}
+
 /// Carries the selected videos into the combine-order sheet (an array isn't `Identifiable`).
 struct CombineRequest: Identifiable {
     let id = UUID()
@@ -147,6 +153,7 @@ struct FolderView: View {
     @State private var exportTarget: Entry?
     @State private var trimTarget: Entry?
     @State private var combineRequest: CombineRequest?
+    @State private var cropRequest: CropRequest?
     @State private var frameExportRequest: FrameExportRequest?
     @State private var showAIOnly = false
     @State private var aiEntries: [Entry] = []
@@ -1461,6 +1468,12 @@ struct FolderView: View {
                 }
             }
             .fullScreenCover(item: $studioEntry) { e in PhotoEditorView(entry: e) }
+            .fullScreenCover(item: $cropRequest) { req in
+                BatchCropView(photos: req.photos) {
+                    selecting = false; selection.removeAll()
+                    Task { await reload() }
+                }
+            }
             .fullScreenCover(item: $trimTarget) { e in VideoTrimView(url: e.url) { Task { await reload() } } }
             .sheet(item: $combineRequest) { req in
                 VideoCombineView(videos: req.videos) { ordered in runCombine(ordered) }
@@ -3221,6 +3234,9 @@ struct FolderView: View {
                     Button { bulkRotate(1) } label: { Label("Rotate Right", systemImage: "rotate.right") }
                 } label: { Label("Rotate", systemImage: "rotate.right") }
                 Button { startRotatePhotos() } label: { Label("Rotate… (preview)", systemImage: "crop.rotate") }
+                if selected.contains(where: { $0.kind == .image }) {
+                    Button { startBatchCrop() } label: { Label("Crop…", systemImage: "crop") }
+                }
                 if library.copiedLook != nil || !library.editPresets.isEmpty {
                     Menu {
                         Button {
@@ -3316,6 +3332,16 @@ struct FolderView: View {
         guard !media.isEmpty else { resultMessage = "Select one or more photos or videos."; return }
         rotateTargets = media
         DispatchQueue.main.async { showRotatePreview = true }
+    }
+
+    /// Opens the Crop screen on the selected photos: one crop, drawn on the first, goes on all of them
+    /// (BatchCrop.swift). GIFs and RAWs are left out. Deferred so presenting from the More menu isn't
+    /// swallowed.
+    private func startBatchCrop() {
+        let photos = selectedEntries().filter { $0.kind == .image && BatchCrop.canCrop($0.url) }
+        guard !photos.isEmpty else { resultMessage = "Select one or more photos (GIFs and RAWs can’t be cropped here)."; return }
+        let req = CropRequest(photos: photos)
+        DispatchQueue.main.async { cropRequest = req }
     }
 
     /// Rotates each selected item the same way, in place — the original file is replaced,

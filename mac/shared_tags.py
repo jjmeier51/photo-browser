@@ -148,7 +148,18 @@ if sys.platform == "darwin":
     _libc.setxattr.restype = ctypes.c_int
     _libc.removexattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
     _libc.removexattr.restype = ctypes.c_int
+    _libc.listxattr.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    _libc.listxattr.restype = ctypes.c_ssize_t
     _NOFOLLOW, _ENOATTR = 0x0001, 93
+
+    def xattr_names(path: str) -> list[str]:
+        p = os.fsencode(path)
+        size = _libc.listxattr(p, None, 0, _NOFOLLOW)
+        if size <= 0:
+            return []
+        buf = ctypes.create_string_buffer(size)
+        size = _libc.listxattr(p, buf, size, _NOFOLLOW)
+        return [n.decode("utf-8", "surrogateescape") for n in buf.raw[:max(size, 0)].split(b"\0") if n]
 
     def xattr_get(path: str, name: str) -> bytes | None:
         p, n = os.fsencode(path), name.encode()
@@ -170,6 +181,12 @@ if sys.platform == "darwin":
             if e != _ENOATTR:
                 raise OSError(e, os.strerror(e), path)
 else:
+    def xattr_names(path: str) -> list[str]:
+        try:
+            return [n[5:] for n in os.listxattr(path, follow_symlinks=False) if n.startswith("user.")]
+        except OSError:
+            return []
+
     def xattr_get(path: str, name: str) -> bytes | None:
         try:
             return os.getxattr(path, "user." + name, follow_symlinks=False)

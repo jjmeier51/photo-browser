@@ -120,7 +120,10 @@ center‑zero track for bipolar controls. Implemented with Core Image
 ## 6. Crop & geometry (`FR-CROP-01`, `FR-CROP-02`)
 
 - **Crop** — Freeform drag, plus fixed ratios **1:1, 4:5, 3:2, 16:9, Original**.
-  Interactive box on the preview (drag interior to move, corners to resize).
+  Interactive box on the preview (drag interior to move, corners to resize, and in Freeform the
+  side handles to trim one side). The box (`CropOverlay`) is shared with the batch Crop screen
+  (`BatchCrop.swift`). A save whose crop trims the frame tags the photo "cropped"; a plain crop
+  (no turn/flip/straighten/keystone) becomes the batch Crop screen's "Last Crop".
 - **Rotate** 90° left/right; **Flip** horizontal/vertical.
 - **Straighten** — fine angle slider ±45° with auto‑crop to valid bounds (largest inscribed
   rectangle, no blank corners).

@@ -310,6 +310,22 @@ demand and shows when it last did. (Tags are only shared for files on the drive 
 Each file also carries its own tags (see "Tags stick to the file" above), which is how they survive a
 move or copy that neither app saw.
 
+### Crop photos — one crop on many (`crop_window.py`, `batch_crop.py`)
+
+Select photos, right-click ▸ **Crop…** (or **Crop N Photos…**). Draw the crop on the first: drag inside
+the box to move it, a corner to resize, a side to trim just that side (Freeform), or pick a ratio —
+Original, 1:1, 4:5, 3:2, 16:9 — and turn it a quarter left or right. **‹ ›** (or the arrow keys) show
+the same crop on each of the other photos; **Last Crop** puts back the crop you saved last. **Crop N
+Photos** crops them all in place, one at a time (**Stop** ends it after the photo in hand), and tags
+every one "cropped" — the same tag, and the same arithmetic, as the iPhone app's Crop screen.
+
+The crop is kept as fractions of the photo, so it lands on the same spot of photos of another size; a
+fixed ratio keeps its shape on photos shaped differently. Each photo keeps its format, EXIF (capture
+date, location — pixel size updated), colour profile, XMP, tags and dates. JPEG, HEIC (with
+pillow-heif), PNG, WebP, TIFF and BMP can be cropped; GIFs and RAW files can't. HDR photos come out
+standard range here (the iPhone app keeps HDR). A photo that can't be read is left as it was and
+listed at the end.
+
 ### Download a SimpCity thread into a person's folder (`simpcity_downloader.py`)
 
 Right-click a person's folder (or the empty area inside it) ▸ **Download from SimpCity…**, paste the

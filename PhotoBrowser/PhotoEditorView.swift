@@ -1776,9 +1776,15 @@ struct PhotoEditorView: View {
         let placed = editStickers() + editTexts()
         let strokes = retouchStrokes
         let title = upscale == .none ? "Saving edited photo…" : "Saving & upscaling photo…"
+        let keepShape = cropAspect.fixedRatio != nil
         let id = library.beginActivity(title, indeterminate: true)
         dismiss()
         Task.detached(priority: .userInitiated) {
+            // A plain crop (no turn, flip, straighten or keystone) can be put on other photos ("Last
+            // Crop" in the batch Crop screen); the source's size is read before an overwrite replaces it.
+            let simpleCrop = r.cropRect.map { CropSpec.isTrim($0) } == true && r.rotationQuarters % 4 == 0
+                && !r.flipH && !r.flipV && r.straighten == 0 && r.perspectiveH == 0 && r.perspectiveV == 0
+            let refSize = simpleCrop ? BatchCrop.uprightSize(of: src) : nil
             // Format policy: PNG stays PNG, always (and a transparent cut-out forces
             // PNG — it needs alpha). Any other *genuinely* HDR source (gain map,
             // PQ/HLG — the detector no longer misfires on SDR files) saves as 10-bit
@@ -1807,6 +1813,12 @@ struct PhotoEditorView: View {
                 if ok {
                     if overwrite, dest != src { library.itemMoved(from: src, to: dest) }
                     if !overwrite { library.copyTags([(from: src, to: dest)]) }   // Save as New: the photo's tags come along
+                    if let cr = r.cropRect, CropSpec.isTrim(cr) { library.addTag(CropSpec.croppedTag, to: dest) }
+                    if let cr = r.cropRect, let refSize {
+                        library.rememberCrop(CropSpec(quarters: 0, rect: cr,
+                                                      refWidth: Double(refSize.width), refHeight: Double(refSize.height),
+                                                      keepsShape: keepShape, source: src.lastPathComponent))
+                    }
                     library.markEditedInApp(dest)
                     library.contentDidChange(under: dest.deletingLastPathComponent())
                 }
@@ -1817,14 +1829,17 @@ struct PhotoEditorView: View {
 
 /// Interactive crop rectangle drawn over the (uncropped) preview. Edits a normalized **top-left** rect
 /// (`box`, 0…1 within the image). Drag the interior to move, drag a corner to resize; when
-/// `normalizedRatio` is set the box keeps that width/height (fixed-ratio chips), otherwise it's free.
-private struct CropOverlay: View {
+/// `normalizedRatio` is set the box keeps that width/height (fixed-ratio chips), otherwise it's free
+/// and the edge handles move one side alone (trim just the top, say). Shared with the batch Crop
+/// screen (`BatchCropView`).
+struct CropOverlay: View {
     @Binding var box: CGRect
     let imageSize: CGSize
     let normalizedRatio: CGFloat?
     let onBegin: () -> Void
 
     private enum Corner: CaseIterable { case topLeft, topRight, bottomLeft, bottomRight }
+    private enum Side: CaseIterable { case top, bottom, left, right }
     @State private var startBox: CGRect?
 
     var body: some View {
@@ -1848,11 +1863,26 @@ private struct CropOverlay: View {
                     .frame(width: r.width, height: r.height).position(x: r.midX, y: r.midY)
                     .gesture(moveGesture(frame: frame))
 
+                if normalizedRatio == nil {
+                    ForEach(Side.allCases, id: \.self) { side in
+                        sideHandle(side).position(point(of: side, in: r))
+                            .gesture(sideGesture(side, frame: frame))
+                    }
+                }
                 ForEach(Corner.allCases, id: \.self) { c in
                     cornerHandle.position(point(of: c, in: r))
                         .gesture(resizeGesture(c, frame: frame))
                 }
             }
+        }
+    }
+
+    private func sideHandle(_ side: Side) -> some View {
+        let across = side == .top || side == .bottom
+        return ZStack {
+            Color.clear.frame(width: 44, height: 44).contentShape(Rectangle())
+            Capsule().fill(Color.white)
+                .frame(width: across ? 24 : 5, height: across ? 5 : 24).shadow(radius: 1)
         }
     }
 
@@ -1892,6 +1922,15 @@ private struct CropOverlay: View {
                width: box.width * frame.width, height: box.height * frame.height)
     }
 
+    private func point(of side: Side, in r: CGRect) -> CGPoint {
+        switch side {
+        case .top:    return CGPoint(x: r.midX, y: r.minY)
+        case .bottom: return CGPoint(x: r.midX, y: r.maxY)
+        case .left:   return CGPoint(x: r.minX, y: r.midY)
+        case .right:  return CGPoint(x: r.maxX, y: r.midY)
+        }
+    }
+
     private func point(of c: Corner, in r: CGRect) -> CGPoint {
         switch c {
         case .topLeft:     return CGPoint(x: r.minX, y: r.minY)
@@ -1926,6 +1965,33 @@ private struct CropOverlay: View {
                 let dx = v.translation.width / frame.width
                 let dy = v.translation.height / frame.height
                 box = resized(corner: c, start: s, dx: dx, dy: dy)
+            }
+            .onEnded { _ in startBox = nil }
+    }
+
+    /// Moves one side of a free box; the opposite side stays put.
+    private func sideGesture(_ side: Side, frame: CGRect) -> some Gesture {
+        DragGesture()
+            .onChanged { v in
+                if startBox == nil { startBox = box; onBegin() }
+                guard let s = startBox, frame.width > 0, frame.height > 0 else { return }
+                let minS: CGFloat = 0.08
+                let dx = v.translation.width / frame.width
+                let dy = v.translation.height / frame.height
+                switch side {
+                case .top:
+                    let y = min(max(s.minY + dy, 0), s.maxY - minS)
+                    box = CGRect(x: s.minX, y: y, width: s.width, height: s.maxY - y)
+                case .bottom:
+                    let y = max(min(s.maxY + dy, 1), s.minY + minS)
+                    box = CGRect(x: s.minX, y: s.minY, width: s.width, height: y - s.minY)
+                case .left:
+                    let x = min(max(s.minX + dx, 0), s.maxX - minS)
+                    box = CGRect(x: x, y: s.minY, width: s.maxX - x, height: s.height)
+                case .right:
+                    let x = max(min(s.maxX + dx, 1), s.minX + minS)
+                    box = CGRect(x: s.minX, y: s.minY, width: x - s.minX, height: s.height)
+                }
             }
             .onEnded { _ in startBox = nil }
     }

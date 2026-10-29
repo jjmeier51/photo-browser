@@ -30,6 +30,8 @@ enum CropAspect: String, CaseIterable, Identifiable {
 /// the original's EXIF/creation metadata along so capture date, location and Age
 /// survive. The save runs under a background-task window so it keeps going if the
 /// app is briefly backgrounded (iOS still can't finish it once the app is killed).
+/// A save that trims the frame tags the file "cropped", and a photo's crop becomes the
+/// batch Crop screen's "Last Crop" (BatchCrop.swift).
 struct MediaEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(Library.self) private var library
@@ -121,6 +123,12 @@ struct MediaEditorView: View {
         let q = quarters
         let url = entry.url
         let isImage = entry.kind == .image
+        // What the batch Crop screen's "Last Crop" needs to put this crop on other photos.
+        let odd = q % 2 != 0
+        let spec = CropSpec(quarters: q, rect: crop,
+                            refWidth: Double((odd ? poster?.size.height : poster?.size.width) ?? 1),
+                            refHeight: Double((odd ? poster?.size.width : poster?.size.height) ?? 1),
+                            keepsShape: aspect != .original, source: entry.name)
         working = true; progress = 0
         let bg = BackgroundTaskHolder()
         bg.begin(name: "Save Edit")   // best-effort: keep saving if the app is backgrounded
@@ -136,6 +144,10 @@ struct MediaEditorView: View {
             working = false
             bg.end()
             if ok {
+                if spec.trims {
+                    library.addTag(CropSpec.croppedTag, to: url)
+                    if isImage { library.rememberCrop(spec) }
+                }
                 library.contentDidChange(under: url.deletingLastPathComponent())   // reload folder → new mtime/size → fresh thumbnail
                 dismiss()
             } else {

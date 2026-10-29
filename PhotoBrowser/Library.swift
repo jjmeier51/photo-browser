@@ -1279,6 +1279,14 @@ final class Library {
         Self.saveBulk(editPresets, "editPresets")
     }
 
+    // MARK: - Last crop (batch crop)
+
+    /// The last crop saved from the Crop screen, the Edit screen or the photo editor — "Last Crop" in
+    /// the Crop screen puts it on other photos (see BatchCrop.swift).
+    var lastCrop: CropSpec? = Library.loadBulk("lastCrop", as: CropSpec.self)
+
+    func rememberCrop(_ spec: CropSpec) { lastCrop = spec; Self.saveBulk(spec, "lastCrop") }
+
     // MARK: - HTML checkbox state (viewable .html files remember their ticked boxes)
 
     /// Checked checkbox indices for a viewable `.html` file, keyed by its path. Boxes are identified

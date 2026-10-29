@@ -24,6 +24,9 @@ drive are saved on the drive, where the iPhone app syncs with them; a tag added 
 here. The sidebar's Tags list opens every file carrying a tag; tags go along when files are moved or
 copied.
 
+Crop: select photos, right-click ▸ Crop… — one crop, drawn on the first, goes on all of them in place
+and each is tagged "cropped" (crop_window.py / batch_crop.py, the iPhone app's Crop screen on the Mac).
+
 Run:  double-click "Safe Finder.command" next to this file, or
       mac/.venv/bin/python mac/safe_finder.py [--from FOLDER] [--to FOLDER]
       — or build it into /Applications with "sh mac/build_safe_finder_app.sh" (see mac/README.md).
@@ -74,6 +77,7 @@ except ModuleNotFoundError:
              "  python3 -m venv mac/.venv && mac/.venv/bin/pip install -r mac/requirements.txt")
 
 import airdrop_to_iphone as airdrop
+import batch_crop
 import safe_transfer as engine
 import shared_tags
 import spare_folders
@@ -887,6 +891,21 @@ class Thumbnails(QObject):
         while self._cache and (len(self._cache) > 3000 or self._bytes > 600 * 1024 * 1024):
             _k, old = self._cache.popitem(last=False)
             self._bytes -= self._size(old)
+        self._tick.start()
+
+    def forget(self, paths: list[str]) -> None:
+        """Files rewritten in place keeping their modified date (a crop): their thumbnails, in memory and
+        on disk, go, so they're made again from the new pixels."""
+        for path in paths:
+            try:
+                key = thumb_key(path, os.stat(path).st_mtime)
+            except OSError:
+                continue
+            self._bytes -= self._size(self._cache.pop(key, None))
+            try:
+                thumb_file(key).unlink()
+            except OSError:
+                pass
         self._tick.start()
 
     @staticmethod
@@ -3011,6 +3030,10 @@ class Pane(QWidget):
                 menu.addAction(win.copy_btn.text(), lambda: win.transfer_selection(False))
                 menu.addAction(win.move_btn.text(), lambda: win.transfer_selection(True))
             self._tags_menu(menu, paths)
+            photos = [p for p in paths if os.path.splitext(p)[1].lower() in batch_crop.CROPPABLE]
+            if photos:
+                menu.addAction("Crop…" if len(photos) == 1 else f"Crop {len(photos)} Photos…",
+                               lambda: self.crop_photos(photos))
             menu.addAction("Move to Trash", self.delete_selection).setShortcut(QKeySequence("Ctrl+Backspace"))
             menu.addSeparator()
         if self.location == VIDEOS:
@@ -3026,6 +3049,36 @@ class Pane(QWidget):
             if not paths and os.path.isdir(self.location):
                 menu.addAction("Download from SimpCity…", lambda: open_simpcity(self.location, self.window()))
         menu.exec(view.viewport().mapToGlobal(pos))
+
+    # -- crop (crop_window.py / batch_crop.py — the iPhone app's Crop screen, on the Mac)
+    def crop_photos(self, paths: list[str]) -> None:
+        """Right-click ▸ Crop…: one crop, drawn on the first photo, put on all of them in place; each
+        cropped photo gets the "cropped" tag."""
+        photos = [p for p in paths if batch_crop.can_crop(p)]
+        if not photos:
+            QMessageBox.information(self.window(), "Crop", "None of these can be cropped here — JPEG, HEIC, PNG, "
+                                    "WebP, TIFF and BMP photos can (HEIC needs pillow-heif; run mac/run.sh once).")
+            return
+        import crop_window
+
+        def done(cropped: list[str], trimmed: bool, failed: int) -> None:
+            if cropped and trimmed:
+                try:
+                    tag_store().add(cropped, [batch_crop.CROPPED_TAG])
+                except OSError as e:
+                    QMessageBox.warning(self.window(), "Crop", f"Couldn't save the “cropped” tag: {e}")
+                tags_changed()
+            if THUMBS is not None:
+                THUMBS.forget(cropped)
+            self.grid.viewport().update()
+            self.list.viewport().update()
+            n = len(cropped)
+            note = f"{'Cropped' if trimmed else 'Turned'} {n:,} photo{'s' if n != 1 else ''}"
+            self._airdrop_noted(note + (f"; {failed:,} couldn't be." if failed else "."))
+
+        dlg = crop_window.CropDialog(self.window(), photos, self.settings, done)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.open()
 
     # -- tags (shared with the Photo Browser app — see shared_tags.py)
     def _tags_menu(self, menu: QMenu, paths: list[str]) -> None:

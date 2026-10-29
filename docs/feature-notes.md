@@ -1098,6 +1098,40 @@ This Mac>/` (last 14).
 
 ---
 
+## 6i. Batch crop — `BatchCrop.swift`, `mac/batch_crop.py`, `mac/crop_window.py` (Oct 29, 2026)
+
+Crop one photo, put the same crop on many, and tag every one of them "cropped" — on the iPhone and in
+Safe Finder.
+
+- **iPhone.** Select photos ▸ More ▸ **Crop…** opens `BatchCropView`: the crop box (`CropOverlay`, the
+  photo editor's — now shared, with side handles in Freeform so one side can be trimmed alone) over the
+  first photo, the editor's ratios (Freeform, Original, 1:1, 4:5, 3:2, 16:9), quarter turns, **Last
+  Crop**, and a strip of the selection — tap one to see the same crop on it. **Crop All** writes each in
+  place through `MediaEditing.applyPhotoInPlace` (EXIF, capture date, HDR and the carried tag attribute
+  kept, as for any crop), tags them "cropped", and remembers the crop. GIFs (animation) and RAWs (no RAW
+  writer) are left out.
+- **The crop travels as fractions** (`CropSpec`: turn + normalized top-left rect within the turned
+  photo, the convention of `applyPhotoInPlace` and `EditRecipe.cropRect`), so it lands on the same spot
+  of a photo of another size. A fixed ratio (`keepsShape`) keeps its own pixel shape on a photo shaped
+  differently from the one it was drawn on: same center, as large as the fractions allow, kept inside.
+  `CropSpec.rect(forWidth:height:)` and `batch_crop.CropSpec.rect_for` are the same arithmetic — change
+  both or neither.
+- **"cropped" everywhere a crop is saved.** The Edit screen (`MediaEditorView`, photos and videos) and
+  the photo editor (overwrite or Save as New) also tag a file "cropped" when the crop trims something
+  (a box within 0.4% of every edge is no crop), and a photo's crop becomes `Library.lastCrop` (bulk
+  store `lastCrop`). The photo editor only offers a crop with no turn, flip, straighten or keystone as
+  the Last Crop — its own turn runs the other way round in Core Image's Y-up space, so it isn't carried.
+- **Safe Finder.** Right-click photos ▸ **Crop…** / **Crop N Photos…**: the same box, ratios, turns and
+  Last Crop (kept in Safe Finder's settings), ‹ › to step through the selection. Pillow (pillow-heif for
+  HEIC) rewrites each photo: upright first (EXIF orientation baked in, then 1), turn, crop, saved in its
+  own format with its EXIF (pixel size updated), ICC profile and XMP (orientation and size fixed); a
+  TIFF keeps its descriptive tags. The new bytes are made and decoded again in memory first, so a photo
+  that can't be read or encoded is untouched. APFS: hidden temp beside it + its extended attributes
+  (the carried tags, "where from") + rename; exFAT: written into the file in place (no rename on exFAT,
+  CLAUDE.md #12). The modified and created dates are put back, so Safe Finder drops those thumbnails
+  itself (`Thumbnails.forget` — its cache key is path + modified date). Not carried by Pillow: HDR gain
+  maps (HDR photos come out standard range on the Mac) and a JPEG's extra MPF pictures.
+
 ## 6a. WebM playback — `WebMPlayer.swift`
 
 AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,
@@ -1724,6 +1758,7 @@ AirDrop off/unavailable → exit 2 → Finder fallback. The custom UTI must stay
 | Storage / Drive Health | `StorageView.swift`, `DriveHealthView.swift`, `DriveRepair.swift` (rebuild, header probe), `MetadataSnapshot.swift` (backup/restore, orphan audit) |
 | Directory reading / large folders | `Library.swift` (`coordinatedContents`, `listing`) |
 | Folder filters | `Models.swift` (`FormatFilter`), `FolderView.swift` |
+| Batch crop (one crop on many, "cropped" tag, Last Crop) | `BatchCrop.swift` (`CropSpec`, `BatchCropView`), `PhotoEditorView.swift` (`CropOverlay`), `mac/batch_crop.py`, `mac/crop_window.py` |
 | Folder Birthdays mapping (bulk) | `BirthdayMappingView.swift`, `Library.setBirthdays` |
 | Move/copy duplicate detection | `DuplicateDetection.swift`, `FileActions.moveItems/copyItems`, `PhotoBrowserTests/` |
 | Pure File Transfer mode | `Library.pureTransferMode`, `ContentView.swift` (`PureTransferToggle`), `Thumbnailer.diskCacheEnabled` |
