@@ -78,7 +78,8 @@ actions the app makes no network calls.
   long-press again to turn off). **Right-edge thumb zone** (outer ~22% of the width, between the top
   buttons and the bottom bars — one-handed use): single tap = play/pause (a double tap there is still
   +15 s, so the tap waits out the double-tap); drag up/down = a truly invisible fine scrubber — nothing
-  drawn on the video, only haptic ticks per second (up = forward, ~1 frame per point, up to 4× on a quick
+  drawn on the video, only haptic ticks per second, and the player controls and viewer buttons fade away
+  as it starts (a tap brings them back) (up = forward, ~1 frame per point, up to 4× on a quick
   flick; pauses while dragging, resumes after); a hold there does nothing; swipe up/down stand aside there, swipe
   left/right and the double-taps still work (`inThumbZone`, `handleThumbScrub` in `VideoPage`; AVPlayer
   pages only, not WebM). The camera button saves the frame to a "Screenshots" folder beside the video

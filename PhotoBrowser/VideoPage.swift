@@ -561,7 +561,8 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
     /// moves about a frame per point (fine control); a quicker one covers up to `thumbMaxBoost` times as
     /// much. Playback pauses while scrubbing and picks up again after if it was playing. Nothing shows on
     /// the video — it's felt, not seen: a light tick marks each whole second crossed, a firmer one the
-    /// start or the end (the scrubber bar follows along when the controls happen to be up).
+    /// start or the end. The player's controls and the viewer's buttons fade away as a scrub starts and
+    /// stay away after it (a tap brings them back).
     @objc private func handleThumbScrub(_ g: UIPanGestureRecognizer) {
         guard let item = player.currentItem else { return }
         let dur = item.duration.seconds
@@ -572,6 +573,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
             playButton.setImage(UIImage(systemName: "play.fill"), for: .normal)
             scrubbing = true
             hideWork?.cancel()
+            if !controlsHidden { setControls(hidden: true) }   // the bottom bars and buttons go too
             let now = player.currentTime().seconds
             thumbStart = now.isFinite ? max(0, now) : 0
             thumbTarget = thumbStart
@@ -603,7 +605,6 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
                 // (Not when the page has gone meanwhile — a drag cut short by closing it.)
                 if resume, let self, self.appeared, !self.overlayPaused { self.resumePlayback() }
             }
-            if !controlsHidden { scheduleHide() }
         default:
             break
         }
