@@ -5,7 +5,8 @@ import CoreImage
 
 /// A video page that behaves like the Photos player: pinch / double-tap to zoom
 /// and pan, a simple scrubber, plus a resolution/HDR badge. Swipe up = info,
-/// swipe down = dismiss (when not zoomed).
+/// swipe down = dismiss (when not zoomed). For one-handed use, the right edge is a
+/// thumb zone: press and hold = play/pause, drag up/down = an invisible fine scrubber.
 struct VideoPage: View {
     let url: URL
     /// The grid's thumbnail of this video: shown over the player until its first frame is ready,
@@ -151,6 +152,21 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
     /// True while a left/right side is held during Slo-Mo, playing 1.5× slower until the finger lifts.
     private var tempPeek = false
     private let sloMoBadge = UILabel()
+
+    /// The right-edge thumb zone's drag: an invisible scrubber (see `handleThumbScrub`).
+    private let thumbPan = UIPanGestureRecognizer()
+    private let thumbHUD = UILabel()
+    private var thumbStart: Double = 0              // player time when the drag began
+    private var thumbTarget: Double = 0             // where the drag has taken it
+    private var thumbTravel: CGFloat = 0            // points moved, for the dead zone
+    private var thumbWasPlaying = false
+    private var thumbTick = 0                       // whole second last ticked (haptic)
+    /// Seconds per point of thumb travel at a slow drag — about a frame per point — and how many times
+    /// that a quick flick may cover.
+    private static let thumbSecondsPerPoint = 1.0 / 30
+    private static let thumbMaxBoost: CGFloat = 4
+    /// Travel ignored at the start of a drag, so a thumb that wobbles while holding to pause doesn't seek.
+    private static let thumbDeadZone: CGFloat = 12
 
     init(url: URL, poster: UIImage? = nil) {
         self.url = url
@@ -356,6 +372,16 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         sloMoBadge.layer.masksToBounds = true
         sloMoBadge.isHidden = true
         view.addSubview(sloMoBadge)
+
+        // What the thumb scrubber is doing (time and how far it has moved), shown only while dragging.
+        thumbHUD.textColor = .white
+        thumbHUD.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
+        thumbHUD.textAlignment = .center
+        thumbHUD.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        thumbHUD.layer.cornerRadius = 10
+        thumbHUD.layer.masksToBounds = true
+        thumbHUD.alpha = 0
+        view.addSubview(thumbHUD)
     }
 
     private func layoutControls() {
@@ -397,8 +423,16 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
                            (.right, #selector(swipeRight))] {
             let g = UISwipeGestureRecognizer(target: self, action: sel)
             g.direction = dir
+            g.delegate = self                    // up/down stand aside in the thumb zone (`shouldReceive`)
             scrollView.addGestureRecognizer(g)
         }
+
+        // The right-edge thumb zone's up/down drag: the invisible scrubber. (Its press-and-hold is the
+        // long-press below, which checks the zone first.)
+        thumbPan.addTarget(self, action: #selector(handleThumbScrub(_:)))
+        thumbPan.maximumNumberOfTouches = 1
+        thumbPan.delegate = self
+        scrollView.addGestureRecognizer(thumbPan)
 
         // Long-press to control Slo-Mo (see `handleLongPress`). Its delegate lets it recognize
         // alongside the scroll view's pan/zoom, so Slo-Mo also works on a zoomed-in video
@@ -412,10 +446,40 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
     /// Allow the Slo-Mo long-press to coexist with the scroll view's pan/zoom gestures, so a
     /// zoomed video can still be panned while Slo-Mo is toggled or a side is held for a peek.
     /// (A real pan drags past the long-press's movement threshold and fails it, so the two don't
-    /// fight: a still hold = Slo-Mo, a drag = pan.)
+    /// fight: a still hold = Slo-Mo, a drag = pan.) The thumb scrubber runs alongside the scroll
+    /// view's own pan, which has nothing to move at 1× — and it only starts at 1× (`shouldReceive`).
+    /// With the long-press it gives "hold to pause, then slide to scrub" in one touch.
     func gestureRecognizer(_ g: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        g is UILongPressGestureRecognizer || other is UILongPressGestureRecognizer
+        if g is UILongPressGestureRecognizer || other is UILongPressGestureRecognizer { return true }
+        return (g === thumbPan && other === scrollView.panGestureRecognizer)
+            || (other === thumbPan && g === scrollView.panGestureRecognizer)
+    }
+
+    /// The thumb zone takes a touch that starts there: the scrubber only sees those (and only at 1× —
+    /// zoomed in, a drag there pans the video as anywhere else), and swipe up/down (info / close) stand
+    /// aside for them. Swipe left/right still work from the edge.
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        let inZone = inThumbZone(touch.location(in: view))
+        if g === thumbPan { return inZone && atRest }
+        if let swipe = g as? UISwipeGestureRecognizer, swipe.direction == .up || swipe.direction == .down {
+            return !inZone
+        }
+        return true
+    }
+
+    /// The scrubber starts only on an up/down drag; a sideways swipe from the edge still pages videos.
+    func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+        guard g === thumbPan else { return true }
+        let v = thumbPan.velocity(in: view)
+        return abs(v.y) > abs(v.x)
+    }
+
+    /// The right-edge thumb zone for one-handed use: the outer ~22% of the width, between the viewer's
+    /// top buttons and its bottom bars (so none of those are covered).
+    private func inThumbZone(_ p: CGPoint) -> Bool {
+        let w = view.bounds.width, h = view.bounds.height
+        return p.x >= w * 0.78 && p.y >= h * 0.14 && p.y <= h * 0.82
     }
 
     private var atRest: Bool { scrollView.zoomScale <= 1.001 }
@@ -490,13 +554,93 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         scrollView.zoom(to: CGRect(x: p.x - w / 2, y: p.y - h / 2, width: w, height: h), animated: true)
     }
 
+    // MARK: - Thumb zone (right edge, one-handed)
+
+    /// Press and hold the right edge: play ↔ pause, with a tap of haptic and a flash saying which.
+    private func thumbHoldToggle() {
+        togglePlay()
+        Haptics.medium()
+        flashCapture(player.rate != 0 ? "▶ Playing" : "❚❚ Paused")
+    }
+
+    /// Drag up/down on the right edge: an invisible scrubber — up = forward, down = back. A slow drag
+    /// moves about a frame per point (fine control); a quicker one covers up to `thumbMaxBoost` times as
+    /// much. Playback pauses while scrubbing and picks up again after if it was playing. The current
+    /// time shows in a small HUD (and on the scrubber bar when the controls are up); a light tick marks
+    /// each whole second crossed.
+    @objc private func handleThumbScrub(_ g: UIPanGestureRecognizer) {
+        guard let item = player.currentItem else { return }
+        let dur = item.duration.seconds
+        switch g.state {
+        case .began:
+            thumbWasPlaying = player.rate != 0
+            player.pause()
+            playButton.setImage(UIImage(systemName: "play.fill"), for: .normal)
+            scrubbing = true
+            hideWork?.cancel()
+            let now = player.currentTime().seconds
+            thumbStart = now.isFinite ? max(0, now) : 0
+            thumbTarget = thumbStart
+            thumbTravel = 0
+            thumbTick = Int(thumbStart)
+            Haptics.prepare()
+            captureFlash?.removeFromSuperview()
+            showThumbHUD()
+        case .changed:
+            let step = -g.translation(in: view).y             // finger up = forward
+            g.setTranslation(.zero, in: view)
+            thumbTravel += abs(step)
+            guard thumbTravel > Self.thumbDeadZone else { return }
+            let speed = abs(g.velocity(in: view).y)
+            let boost = min(Self.thumbMaxBoost, max(1, speed / 600))
+            let wanted = thumbTarget + Double(step * boost) * Self.thumbSecondsPerPoint
+            let end = dur.isFinite && dur > 0 ? dur : max(wanted, 0)
+            let target = min(max(wanted, 0), end)
+            if target != wanted, target != thumbTarget { Haptics.rigid() }   // just reached the start / the end
+            thumbTarget = target
+            if Int(target) != thumbTick { thumbTick = Int(target); Haptics.selection() }
+            slider.value = Float(target)
+            currentLabel.text = Self.fmt(target, ms: true)
+            smoothSeek(to: Float(target))
+            showThumbHUD()
+        case .ended, .cancelled, .failed:
+            scrubbing = false
+            pendingSeekValue = nil
+            let final = CMTime(seconds: thumbTarget, preferredTimescale: 600)
+            let resume = thumbWasPlaying
+            player.seek(to: final, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+                // (Not when the page has gone meanwhile — a drag cut short by closing it.)
+                if resume, let self, self.appeared, !self.overlayPaused { self.resumePlayback() }
+            }
+            UIView.animate(withDuration: 0.3, delay: 0.6, options: []) { self.thumbHUD.alpha = 0 }
+            if !controlsHidden { scheduleHide() }
+        default:
+            break
+        }
+    }
+
+    /// The scrub HUD: where the video is now, and how far the drag has moved it.
+    private func showThumbHUD() {
+        let delta = thumbTarget - thumbStart
+        let sign = delta >= 0 ? "+" : "−"
+        let arrow = delta >= 0 ? "▲" : "▼"
+        thumbHUD.text = "  \(arrow) \(sign)\(String(format: "%.1f", abs(delta))) s · \(Self.fmt(thumbTarget, ms: true))  "
+        thumbHUD.sizeToFit()
+        let w = thumbHUD.bounds.width, h: CGFloat = 38
+        thumbHUD.frame = CGRect(x: (view.bounds.width - w) / 2, y: (view.bounds.height - h) / 2, width: w, height: h)
+        thumbHUD.layer.removeAllAnimations()
+        thumbHUD.alpha = 1
+    }
+
     // MARK: - Slo-Mo mode
 
     /// Long-press the center of the video to toggle Slo-Mo. When it's off, offer 2×/4×/8× slower;
     /// when it's on, a center long-press turns it off (no confirmation prompt — just a flash).
     /// Restricted to the center region so it can't be mistaken for a skip/zoom/frame-step tap.
     /// Works whether or not the video is zoomed in — the recognizer coexists with the pan gesture,
-    /// so a still hold controls Slo-Mo while a drag still pans a zoomed video.
+    /// so a still hold controls Slo-Mo while a drag still pans a zoomed video. A hold in the right-edge
+    /// thumb zone is play/pause instead (`thumbHoldToggle`) — the Slo-Mo side peek keeps the rest of
+    /// the sides.
     @objc private func handleLongPress(_ g: UILongPressGestureRecognizer) {
         let loc = g.location(in: view)
         let w = view.bounds.width, h = view.bounds.height
@@ -504,7 +648,9 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         let onSide = loc.x < w / 3 || loc.x > w * 2 / 3
         switch g.state {
         case .began:
-            if inCenter {
+            if inThumbZone(loc) {
+                thumbHoldToggle()
+            } else if inCenter {
                 if sloMoRate > 0 { disableSloMo() } else { presentSloMoOptions(at: loc) }
             } else if onSide, sloMoRate > 0 {
                 beginTempPeek()                     // hold a side during Slo-Mo → 1.5× slower until released

@@ -75,7 +75,12 @@ actions the app makes no network calls.
   ∓15s, center = zoom, lower-third left/right corners = step one frame
   back/forward (via `AVPlayerItem.step(byCount:)`; the lower-middle is excluded).
   Long-press the video center = Slo-Mo mode (4×/8× slower via `player.rate`;
-  long-press again to turn off). Slideshow mode. **WebM** (`.webm`) — which AVFoundation can't
+  long-press again to turn off). **Right-edge thumb zone** (outer ~22% of the width, between the top
+  buttons and the bottom bars — one-handed use): press and hold = play/pause; drag up/down = an
+  invisible fine scrubber (up = forward, ~1 frame per point, up to 4× on a quick flick; pauses while
+  dragging, resumes after; hold-then-slide works in one touch); swipe up/down stand aside there, swipe
+  left/right and the double-taps still work (`inThumbZone`, `handleThumbScrub` in `VideoPage`; AVPlayer
+  pages only, not WebM). Slideshow mode. **WebM** (`.webm`) — which AVFoundation can't
   open — plays in a `WKWebView` `<video>` fed by a Range-capable `pbmedia://` scheme handler,
   and gets WebKit-drawn grid posters. (`ViewerView`, `ZoomableImageView`, `VideoPage`,
   `WebMPlayer`)
