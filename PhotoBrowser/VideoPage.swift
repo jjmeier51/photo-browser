@@ -155,7 +155,6 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
 
     /// The right-edge thumb zone's drag: an invisible scrubber (see `handleThumbScrub`).
     private let thumbPan = UIPanGestureRecognizer()
-    private let thumbHUD = UILabel()
     private var thumbStart: Double = 0              // player time when the drag began
     private var thumbTarget: Double = 0             // where the drag has taken it
     private var thumbTravel: CGFloat = 0            // points moved, for the dead zone
@@ -165,7 +164,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
     /// that a quick flick may cover.
     private static let thumbSecondsPerPoint = 1.0 / 30
     private static let thumbMaxBoost: CGFloat = 4
-    /// Travel ignored at the start of a drag, so a thumb that wobbles while holding to pause doesn't seek.
+    /// Travel ignored at the start of a drag, so a thumb that wobbles as it taps doesn't seek.
     private static let thumbDeadZone: CGFloat = 12
 
     init(url: URL, poster: UIImage? = nil) {
@@ -377,16 +376,6 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         sloMoBadge.layer.masksToBounds = true
         sloMoBadge.isHidden = true
         view.addSubview(sloMoBadge)
-
-        // What the thumb scrubber is doing (time and how far it has moved), shown only while dragging.
-        thumbHUD.textColor = .white
-        thumbHUD.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
-        thumbHUD.textAlignment = .center
-        thumbHUD.backgroundColor = UIColor.black.withAlphaComponent(0.6)
-        thumbHUD.layer.cornerRadius = 10
-        thumbHUD.layer.masksToBounds = true
-        thumbHUD.alpha = 0
-        view.addSubview(thumbHUD)
     }
 
     private func layoutControls() {
@@ -415,7 +404,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
     // MARK: - Gestures
 
     private func setupGestures() {
-        let single = UITapGestureRecognizer(target: self, action: #selector(toggleControls))
+        let single = UITapGestureRecognizer(target: self, action: #selector(handleSingleTap(_:)))
         let double = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
         double.numberOfTapsRequired = 2
         single.require(toFail: double)
@@ -432,8 +421,8 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
             scrollView.addGestureRecognizer(g)
         }
 
-        // The right-edge thumb zone's up/down drag: the invisible scrubber. (Its press-and-hold is the
-        // long-press below, which checks the zone first.)
+        // The right-edge thumb zone's up/down drag: the invisible scrubber. (A single tap there is
+        // play/pause — `handleSingleTap`.)
         thumbPan.addTarget(self, action: #selector(handleThumbScrub(_:)))
         thumbPan.maximumNumberOfTouches = 1
         thumbPan.delegate = self
@@ -453,7 +442,6 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
     /// (A real pan drags past the long-press's movement threshold and fails it, so the two don't
     /// fight: a still hold = Slo-Mo, a drag = pan.) The thumb scrubber runs alongside the scroll
     /// view's own pan, which has nothing to move at 1× — and it only starts at 1× (`shouldReceive`).
-    /// With the long-press it gives "hold to pause, then slide to scrub" in one touch.
     func gestureRecognizer(_ g: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         if g is UILongPressGestureRecognizer || other is UILongPressGestureRecognizer { return true }
@@ -561,8 +549,9 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
 
     // MARK: - Thumb zone (right edge, one-handed)
 
-    /// Press and hold the right edge: play ↔ pause, with a tap of haptic and a flash saying which.
-    private func thumbHoldToggle() {
+    /// Tap the right edge: play ↔ pause, with a tap of haptic and a flash saying which. (A double tap
+    /// there still skips 15 s forward, so the single tap waits out the double-tap like any other.)
+    private func thumbTapToggle() {
         togglePlay()
         Haptics.medium()
         flashCapture(player.rate != 0 ? "▶ Playing" : "❚❚ Paused")
@@ -570,9 +559,9 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
 
     /// Drag up/down on the right edge: an invisible scrubber — up = forward, down = back. A slow drag
     /// moves about a frame per point (fine control); a quicker one covers up to `thumbMaxBoost` times as
-    /// much. Playback pauses while scrubbing and picks up again after if it was playing. The current
-    /// time shows in a small HUD (and on the scrubber bar when the controls are up); a light tick marks
-    /// each whole second crossed.
+    /// much. Playback pauses while scrubbing and picks up again after if it was playing. Nothing shows on
+    /// the video — it's felt, not seen: a light tick marks each whole second crossed, a firmer one the
+    /// start or the end (the scrubber bar follows along when the controls happen to be up).
     @objc private func handleThumbScrub(_ g: UIPanGestureRecognizer) {
         guard let item = player.currentItem else { return }
         let dur = item.duration.seconds
@@ -589,8 +578,6 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
             thumbTravel = 0
             thumbTick = Int(thumbStart)
             Haptics.prepare()
-            captureFlash?.removeFromSuperview()
-            showThumbHUD()
         case .changed:
             let step = -g.translation(in: view).y             // finger up = forward
             g.setTranslation(.zero, in: view)
@@ -607,7 +594,6 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
             slider.value = Float(target)
             currentLabel.text = Self.fmt(target, ms: true)
             smoothSeek(to: Float(target))
-            showThumbHUD()
         case .ended, .cancelled, .failed:
             scrubbing = false
             pendingSeekValue = nil
@@ -617,24 +603,10 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
                 // (Not when the page has gone meanwhile — a drag cut short by closing it.)
                 if resume, let self, self.appeared, !self.overlayPaused { self.resumePlayback() }
             }
-            UIView.animate(withDuration: 0.3, delay: 0.6, options: []) { self.thumbHUD.alpha = 0 }
             if !controlsHidden { scheduleHide() }
         default:
             break
         }
-    }
-
-    /// The scrub HUD: where the video is now, and how far the drag has moved it.
-    private func showThumbHUD() {
-        let delta = thumbTarget - thumbStart
-        let sign = delta >= 0 ? "+" : "−"
-        let arrow = delta >= 0 ? "▲" : "▼"
-        thumbHUD.text = "  \(arrow) \(sign)\(String(format: "%.1f", abs(delta))) s · \(Self.fmt(thumbTarget, ms: true))  "
-        thumbHUD.sizeToFit()
-        let w = thumbHUD.bounds.width, h: CGFloat = 38
-        thumbHUD.frame = CGRect(x: (view.bounds.width - w) / 2, y: (view.bounds.height - h) / 2, width: w, height: h)
-        thumbHUD.layer.removeAllAnimations()
-        thumbHUD.alpha = 1
     }
 
     // MARK: - Slo-Mo mode
@@ -644,8 +616,8 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
     /// Restricted to the center region so it can't be mistaken for a skip/zoom/frame-step tap.
     /// Works whether or not the video is zoomed in — the recognizer coexists with the pan gesture,
     /// so a still hold controls Slo-Mo while a drag still pans a zoomed video. A hold in the right-edge
-    /// thumb zone is play/pause instead (`thumbHoldToggle`) — the Slo-Mo side peek keeps the rest of
-    /// the sides.
+    /// thumb zone does nothing (a tap there is play/pause, a drag scrubs) — the Slo-Mo side peek keeps
+    /// the rest of the sides.
     @objc private func handleLongPress(_ g: UILongPressGestureRecognizer) {
         let loc = g.location(in: view)
         let w = view.bounds.width, h = view.bounds.height
@@ -654,7 +626,7 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         switch g.state {
         case .began:
             if inThumbZone(loc) {
-                thumbHoldToggle()
+                break                               // the thumb zone: tap = play/pause, drag = scrub
             } else if inCenter {
                 if sloMoRate > 0 { disableSloMo() } else { presentSloMoOptions(at: loc) }
             } else if onSide, sloMoRate > 0 {
@@ -750,7 +722,12 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         player.currentItem?.audioTimePitchAlgorithm = .spectral
     }
 
-    @objc private func toggleControls() { setControls(hidden: !controlsHidden) }
+    /// A single tap: play/pause in the right-edge thumb zone, else show or hide the controls.
+    @objc private func handleSingleTap(_ g: UITapGestureRecognizer) {
+        if inThumbZone(g.location(in: view)) { thumbTapToggle() } else { toggleControls() }
+    }
+
+    private func toggleControls() { setControls(hidden: !controlsHidden) }
 
     private func setControls(hidden: Bool) {
         controlsHidden = hidden

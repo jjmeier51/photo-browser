@@ -76,9 +76,10 @@ actions the app makes no network calls.
   back/forward (via `AVPlayerItem.step(byCount:)`; the lower-middle is excluded).
   Long-press the video center = Slo-Mo mode (4×/8× slower via `player.rate`;
   long-press again to turn off). **Right-edge thumb zone** (outer ~22% of the width, between the top
-  buttons and the bottom bars — one-handed use): press and hold = play/pause; drag up/down = an
-  invisible fine scrubber (up = forward, ~1 frame per point, up to 4× on a quick flick; pauses while
-  dragging, resumes after; hold-then-slide works in one touch); swipe up/down stand aside there, swipe
+  buttons and the bottom bars — one-handed use): single tap = play/pause (a double tap there is still
+  +15 s, so the tap waits out the double-tap); drag up/down = a truly invisible fine scrubber — nothing
+  drawn on the video, only haptic ticks per second (up = forward, ~1 frame per point, up to 4× on a quick
+  flick; pauses while dragging, resumes after); a hold there does nothing; swipe up/down stand aside there, swipe
   left/right and the double-taps still work (`inThumbZone`, `handleThumbScrub` in `VideoPage`; AVPlayer
   pages only, not WebM). The camera button saves the frame to a "Screenshots" folder beside the video
   (HDR video → 10-bit HDR HEIC); **press and hold it for a standard-range PNG** instead — never HDR or
