@@ -360,6 +360,11 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         captureButton.tintColor = .white
         captureButton.setImage(UIImage(systemName: "camera.fill"), for: .normal)
         captureButton.addTarget(self, action: #selector(captureFrame), for: .touchUpInside)
+        // Press and hold: a standard-range PNG instead (`captureStandardRangePNG`). The recognizer cancels
+        // the button's touch once it fires, so a hold never also takes the ordinary screenshot.
+        let pngHold = UILongPressGestureRecognizer(target: self, action: #selector(captureStandardRangePNG(_:)))
+        pngHold.minimumPressDuration = 0.5
+        captureButton.addGestureRecognizer(pngHold)
         controlsBar.addSubview(captureButton)
 
         // Persistent "SLO MO" indicator (top-center) so the slowed playback is never a mystery.
@@ -806,6 +811,30 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
                 let saved = await Self.saveViaGenerator(asset: asset, at: time, props: props, in: folder)
                 await MainActor.run { self.finishCapture(saved) }
             }
+        }
+    }
+
+    /// Press and hold the camera button: the frame as a **standard-range PNG** — never HDR, never HEIC —
+    /// for wherever an HDR screenshot won't do (`FileActions.saveStandardRangePNG`: AVFoundation's SDR
+    /// tone mapping for HDR video). Same Screenshots folder as the tap. With a video delay set (Settings
+    /// → Playback) the player shows the file's frame from `delay` seconds earlier, so that's the one taken.
+    @objc private func captureStandardRangePNG(_ g: UILongPressGestureRecognizer) {
+        guard g.state == .began else { return }
+        let plainFile = (player.currentItem?.asset as? AVURLAsset)?.url == url
+        let seconds = player.currentTime().seconds - (plainFile ? 0 : PlaybackSettings.videoDelay)
+        guard seconds.isFinite else { return }
+        Haptics.medium()
+        flashCapture("Saving PNG…")
+        if !controlsHidden { scheduleHide() }
+        let fileURL = url
+        Task { [weak self] in
+            let saved = await Task.detached(priority: .userInitiated) { () -> URL? in
+                guard let folder = FileActions.screenshotsFolder(beside: fileURL) else { return nil }
+                return await FileActions.saveStandardRangePNG(videoURL: fileURL, at: seconds, in: folder)
+            }.value
+            guard let self else { return }
+            self.flashCapture(saved != nil ? "Saved PNG to Screenshots" : "Couldn’t save")
+            if saved != nil { self.onCaptured() }
         }
     }
 

@@ -1291,7 +1291,7 @@ enum FileActions {
         return writeScreenshot(data, in: folder)
     }
 
-    private static func writeScreenshot(_ data: Data, in folder: URL) -> URL? {
+    nonisolated private static func writeScreenshot(_ data: Data, in folder: URL) -> URL? {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
@@ -1299,6 +1299,51 @@ enum FileActions {
         let dest = uniqueDestination(for: "Screenshot \(f.string(from: Date())).\(ext)", in: folder)
         // Temp → fsync → rename → flush: the screenshot only ever appears complete on the drive.
         return (try? DriveWriter.writeDataSync(data, to: dest)) != nil ? dest : nil
+    }
+
+    // MARK: - Standard-range PNG screenshot (the camera button's long press)
+
+    /// The frame of `videoURL` at `seconds` as a **standard-range PNG** in `folder` — never HDR, never
+    /// HEIC: for wherever an HDR HEIC won't do. `AVAssetImageGenerator` renders the frame upright and,
+    /// for HDR video, tone-maps it to SDR with AVFoundation's own mapping (the look of an SDR export —
+    /// highlights eased, not clipped); should it ever hand back an HDR image, it's tone-mapped here
+    /// (iOS 18+). Saved as 8-bit sRGB, doubled like the other screenshots but only up to a 4K long side
+    /// (a PNG that size is already tens of MB), with the video's capture date, device and place
+    /// embedded. Runs off the main thread (call it from a detached task). Returns the file, or nil.
+    nonisolated static func saveStandardRangePNG(videoURL: URL, at seconds: Double, in folder: URL) async -> URL? {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: videoURL))
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let time = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
+        guard let frame = try? await generator.image(at: time).image else { return nil }
+        let props = await MetadataLoader.exifProperties(forVideo: videoURL)
+        guard let data = standardRangePNG(frame, properties: props) else { return nil }
+        return writeScreenshot(data, in: folder)
+    }
+
+    /// `frame` as 8-bit sRGB PNG data (tone-mapped first if it's HDR), metadata embedded.
+    nonisolated static func standardRangePNG(_ frame: CGImage, properties: [String: Any]) -> Data? {
+        var ci = CIImage(cgImage: frame)
+        if let cs = frame.colorSpace, CGColorSpaceUsesITUR_2100TF(cs) || CGColorSpaceUsesExtendedRange(cs) {
+            if #available(iOS 18.0, *) {
+                let tone = CIFilter.toneMapHeadroom()
+                tone.inputImage = ci
+                tone.sourceHeadroom = 4.93                 // HLG: 1,000 nits over 203-nit reference white
+                tone.targetHeadroom = 1                    // standard range
+                ci = tone.outputImage ?? ci
+            }
+        }
+        let longSide = CGFloat(max(frame.width, frame.height))
+        ci = upscaled(ci, by: max(1, min(2, 3840 / max(longSide, 1))))
+        guard let srgb = CGColorSpace(name: CGColorSpace.sRGB),
+              let cg = CIContext().createCGImage(ci, from: ci.extent, format: .RGBA8, colorSpace: srgb) else { return nil }
+        let out = NSMutableData()
+        if let dest = CGImageDestinationCreateWithData(out, UTType.png.identifier as CFString, 1, nil) {
+            CGImageDestinationAddImage(dest, cg, properties as CFDictionary)
+            if CGImageDestinationFinalize(dest) { return out as Data }
+        }
+        return UIImage(cgImage: cg).pngData()                  // (without the metadata)
     }
 
     // MARK: - Export-progress persistence (resume after a crash/suspension)
@@ -1613,7 +1658,7 @@ enum FileActions {
 
     /// High-quality (Lanczos) rescale of a CIImage by `scale`, preserving its colorspace and
     /// extent shape. Returns the image unchanged for scale ≤ 1. Used to double saved screenshots.
-    private static func upscaled(_ ci: CIImage, by scale: CGFloat) -> CIImage {
+    nonisolated private static func upscaled(_ ci: CIImage, by scale: CGFloat) -> CIImage {
         guard scale > 1, ci.extent.width > 0, ci.extent.height > 0, !ci.extent.isInfinite else { return ci }
         let e = ci.extent
         return ci.clampedToExtent()

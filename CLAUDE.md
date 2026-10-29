@@ -80,7 +80,10 @@ actions the app makes no network calls.
   invisible fine scrubber (up = forward, ~1 frame per point, up to 4× on a quick flick; pauses while
   dragging, resumes after; hold-then-slide works in one touch); swipe up/down stand aside there, swipe
   left/right and the double-taps still work (`inThumbZone`, `handleThumbScrub` in `VideoPage`; AVPlayer
-  pages only, not WebM). Slideshow mode. **WebM** (`.webm`) — which AVFoundation can't
+  pages only, not WebM). The camera button saves the frame to a "Screenshots" folder beside the video
+  (HDR video → 10-bit HDR HEIC); **press and hold it for a standard-range PNG** instead — never HDR or
+  HEIC (`AVAssetImageGenerator`'s SDR tone mapping, 8-bit sRGB, up to 4K, metadata kept;
+  `FileActions.saveStandardRangePNG`). Slideshow mode. **WebM** (`.webm`) — which AVFoundation can't
   open — plays in a `WKWebView` `<video>` fed by a Range-capable `pbmedia://` scheme handler,
   and gets WebKit-drawn grid posters. (`ViewerView`, `ZoomableImageView`, `VideoPage`,
   `WebMPlayer`)
