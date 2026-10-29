@@ -18,8 +18,9 @@ iOS-safe names; never overwrites; originals go to the Trash only after their cop
 and is confirmed first in a sheet that lists exactly what will happen. The Mac is kept awake while
 it runs, and "Eject" flushes and unmounts the SSD properly.
 
-Tags are the Photo Browser app's own (see shared_tags.py): select files — or folders, for everything
-inside them — and press ⌘T (or right-click ▸ Tags, or drop them on a tag in the sidebar). Tags on a
+Tags are the Photo Browser app's own (see shared_tags.py): select files or folders and press ⌘T (or
+right-click ▸ Tags, or drop them on a tag in the sidebar). A folder gets the tag itself, and you're asked
+whether the files inside it get it too. Tags on a
 drive are saved on the drive, where the iPhone app syncs with them; a tag added in the app shows up
 here. The sidebar's Tags list opens every file carrying a tag; tags go along when files are moved or
 copied.
@@ -36,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -48,7 +50,7 @@ import threading
 import time
 import unicodedata
 import zlib
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -655,7 +657,7 @@ def check_carried(folder: str) -> None:
     def work() -> None:
         try:
             with os.scandir(folder) as it:
-                files = [e.path for e in it if e.is_file(follow_symlinks=False)]
+                files = [e.path for e in it if e.is_file(follow_symlinks=False) or e.is_dir(follow_symlinks=False)]
         except OSError:
             files = []
         sig.done.emit(store.read_folder(files))
@@ -663,21 +665,46 @@ def check_carried(folder: str) -> None:
     threading.Thread(target=work, name="tags-carried", daemon=True).start()
 
 
-def describe_files(files: list[str], folders: int) -> str:
-    """“IMG_4810.JPG” · 12 files · 38 files in 2 folders."""
-    if len(files) == 1 and not folders:
-        return f"“{os.path.basename(files[0])}”"
-    text = f"{len(files):,} file{'s' if len(files) != 1 else ''}"
-    if folders:
-        text += f" in {folders} folder{'s' if folders != 1 else ''}"
+def describe_items(items: list[str], inside: int = 0) -> str:
+    """“Kelsey” · 3 folders and 12 files · “Kelsey” and the 1,284 files inside."""
+    folders = sum(1 for p in items if os.path.isdir(p))
+    files = len(items) - folders
+    if len(items) == 1:
+        text = f"“{os.path.basename(items[0].rstrip(os.sep))}”"
+    else:
+        parts = ([f"{folders:,} folder{'s' if folders != 1 else ''}"] if folders else []) + \
+                ([f"{files:,} file{'s' if files != 1 else ''}"] if files else [])
+        text = " and ".join(parts)
+    if inside:
+        text += f" and the {inside:,} file{'s' if inside != 1 else ''} inside"
     return text
+
+
+def ask_inside(parent: QWidget | None, folders: list[str], inside: int, question: str, title: str) -> bool | None:
+    """Folders are being tagged: do the files inside them go too? True (folder and files), False (the
+    folder only) or None (cancelled)."""
+    one = len(folders) == 1
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle(title)
+    box.setText(question)
+    box.setInformativeText(f"{'It holds' if one else 'They hold'} {inside:,} file{'s' if inside != 1 else ''} "
+                           "(in subfolders too).")
+    both = box.addButton("Folder and Files Inside" if one else "Folders and Files Inside",
+                         QMessageBox.ButtonRole.YesRole)
+    only = box.addButton("Folder Only" if one else "Folders Only", QMessageBox.ButtonRole.NoRole)
+    box.addButton(QMessageBox.StandardButton.Cancel)
+    box.setDefaultButton(both)
+    box.exec()
+    clicked = box.clickedButton()
+    return True if clicked is both else False if clicked is only else None
 
 
 # ============================================================================ thumbnails
 
 
 THUMB_PX = 512          # one master thumbnail per file; icons of every size are drawn from it
-_QL_BATCH = 12          # files per qlmanage run — one process for a dozen, not one each
+_QL_BATCH = 4           # files per qlmanage run: few, so results come in as they're made, not all at the end
 
 
 def thumb_cache_dir() -> Path:
@@ -779,14 +806,238 @@ class _QuickLookRunner:
                 self.signals.done.emit(key, img)
 
 
+def thumb_helper_source() -> Path | None:
+    """thumb_helper.swift: next to this file, or inside Safe Finder.app's Resources when frozen."""
+    candidates = [HERE / "thumb_helper.swift"]
+    if getattr(sys, "frozen", False):
+        contents = Path(sys.executable).resolve().parent.parent
+        candidates += [contents / "Resources" / "thumb_helper.swift",
+                       Path(getattr(sys, "_MEIPASS", HERE)) / "thumb_helper.swift"]
+    return next((c for c in candidates if c.is_file()), None)
+
+
+def build_thumb_helper() -> list[str] | None:
+    """The command that runs the thumbnail helper, building it (once, into ~/Library/Caches/PhotoBrowser)
+    when it's missing or older than its source. None without Xcode's tools — Quick Look does it all then.
+    SAFE_FINDER_THUMB_HELPER names a stand-in command (tests)."""
+    env = os.environ.get("SAFE_FINDER_THUMB_HELPER")
+    if env:
+        return env.split("\x1f") if "\x1f" in env else [env]
+    src = thumb_helper_source()
+    if not IS_MAC or src is None:
+        return None
+    out = Path.home() / "Library" / "Caches" / "PhotoBrowser" / "thumb_helper"
+    if out.is_file() and out.stat().st_mtime >= src.stat().st_mtime:
+        return [str(out)]
+    # Don't call swiftc when the Command Line Tools aren't installed: the stub would pop an installer.
+    if subprocess.run(["xcode-select", "-p"], capture_output=True).returncode != 0:
+        return None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(["xcrun", "swiftc", "-O", "-swift-version", "5", "-o", str(out), str(src)],
+                           capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return [str(out)] if r.returncode == 0 and out.is_file() else None
+
+
+class _FrameRunner:
+    """Video frames, and previews of images Qt and Pillow can't read (RAW mostly), from
+    thumb_helper.swift: AVFoundation/ImageIO in one long-running helper process, a few at a time
+    (IN_FLIGHT), each shown the moment it's made. The tiles on screen go first, the newest of them
+    first (where the user is looking now); prefetches follow, and those for a listing that's been left
+    are dropped. A prefetch waits a moment (HOLD) first, so the first paint of a listing gets its tiles
+    in ahead of a prefetch that arrived before it. Anything the helper can't do, or takes too long over,
+    goes on to Quick Look — and everything does when the helper can't be built (no Xcode tools). When
+    the helper dies, what it had in hand is tried again one at a time ("suspects"), so only the file
+    that brought it down goes without."""
+    IN_FLIGHT = 4
+    HOLD = 0.2                  # seconds a prefetch waits, for the visible tiles of a fresh listing
+    TIMEOUT = 30.0              # seconds before a file that's stuck is handed to Quick Look
+    RESTARTS = 10               # helper deaths before giving up on it for this run
+
+    def __init__(self, signals: _ThumbSignals, ql: "_QuickLookRunner | None", owner: "Thumbnails") -> None:
+        self.signals, self.ql, self.owner = signals, ql, owner
+        self._now: list[tuple[str, str]] = []                      # on screen; taken from the end
+        self._later: deque[tuple[str, str, int, float]] = deque() # prefetches (+ gen, queued at), oldest first
+        self._urgent: set[str] = set()                             # keys wanted on screen
+        self._suspects: list[tuple[str, str]] = []                 # in flight when a helper died: alone next
+        self._suspected: set[str] = set()
+        self._busy: dict[str, tuple[str, str, float, subprocess.Popen]] = {}   # id → key, path, started, helper
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._proc: subprocess.Popen | None = None
+        self._cmd: list[str] | None = None
+        self._ready = False                      # built (or found) — until then Quick Look stands in
+        self._deaths = 0
+        self._dead = False
+        self._ids = 0
+        threading.Thread(target=self._build, name="thumb-helper-build", daemon=True).start()
+        threading.Thread(target=self._run, name="thumb-helper", daemon=True).start()
+
+    def _build(self) -> None:
+        cmd = build_thumb_helper()                 # seconds the first time (swiftc), instant after
+        with self._lock:
+            self._cmd, self._dead, self._ready = cmd, cmd is None, True
+        self._wake.set()
+
+    def enqueue(self, key: str, path: str, gen: int | None) -> None:
+        with self._lock:
+            if gen is None or key in self._urgent:
+                self._now.append((key, path))
+            else:
+                self._later.append((key, path, gen, time.monotonic()))
+        self._wake.set()
+
+    def promote(self, key: str) -> None:
+        """A tile asked for again (it's on screen): if its prefetch is still waiting, it moves to the
+        front; if it hasn't reached the queue yet, it'll go to the front when it does."""
+        with self._lock:
+            if key in self._urgent:
+                return
+            self._urgent.add(key)
+            for item in self._later:
+                if item[0] == key:
+                    self._later.remove(item)
+                    self._now.append((key, item[1]))
+                    break
+        self._wake.set()
+
+    def _next(self) -> tuple[str, str] | float | None:
+        """Under the lock: what to send next — suspects alone, then on-screen (newest first), then
+        prefetches still wanted. A number means: nothing yet, look again in that many seconds."""
+        if self._suspects:
+            return self._suspects.pop(0) if not self._busy else None
+        if self._now:
+            return self._now.pop()
+        while self._later:
+            key, path, gen, at = self._later[0]
+            if gen != self.owner.generation:
+                self._later.popleft()
+                self.signals.skipped.emit(key)                     # a listing that's been left
+                continue
+            wait = at + self.HOLD - time.monotonic()
+            if wait > 0:
+                return wait
+            self._later.popleft()
+            return key, path
+        return None
+
+    def _fallback(self, key: str, path: str) -> None:
+        if self.ql is not None:
+            self.ql.enqueue(key, path)
+        else:
+            self.signals.done.emit(key, QImage())
+
+    def _run(self) -> None:
+        pause = 1.0
+        while True:
+            self._wake.wait(timeout=pause)
+            self._wake.clear()
+            self._expire()
+            pause = 1.0
+            while True:
+                with self._lock:
+                    helper = self._ready and not self._dead
+                    alone = any(job[0] in self._suspected for job in self._busy.values())
+                    if helper and (len(self._busy) >= self.IN_FLIGHT or alone):
+                        break
+                    item = self._next()
+                    if item is None:
+                        break
+                    if isinstance(item, float):
+                        pause = min(pause, item)
+                        break
+                if not helper or not self._send(self._cmd, *item):
+                    self._fallback(*item)
+
+    def _send(self, cmd: list[str] | None, key: str, path: str) -> bool:
+        if cmd is None:
+            return False
+        if self._proc is None or self._proc.poll() is not None:
+            try:
+                self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                              stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            except OSError:
+                self._dead = True
+                return False
+            threading.Thread(target=self._read, args=(self._proc,), name="thumb-helper-out", daemon=True).start()
+        self._ids += 1
+        rid = str(self._ids)
+        with self._lock:
+            self._busy[rid] = (key, path, time.monotonic(), self._proc)
+        line = json.dumps({"id": rid, "path": path, "out": str(thumb_file(key)), "px": THUMB_PX,
+                           "video": kind_of(path) == "video"}, ensure_ascii=False)
+        try:
+            self._proc.stdin.write(line + "\n")
+            self._proc.stdin.flush()
+        except (OSError, ValueError):
+            with self._lock:
+                self._busy.pop(rid, None)
+            return False
+        return True
+
+    def _read(self, proc: subprocess.Popen) -> None:
+        for line in proc.stdout:
+            try:
+                answer = json.loads(line)
+            except ValueError:
+                continue
+            with self._lock:
+                job = self._busy.pop(str(answer.get("id")), None)
+            if job is None:
+                continue                                           # timed out and handed on already
+            key, path = job[0], job[1]
+            with self._lock:
+                self._urgent.discard(key)
+                self._suspected.discard(key)
+            img = QImage(str(thumb_file(key))) if answer.get("ok") else QImage()
+            if img.isNull():
+                self._fallback(key, path)
+            else:
+                self.signals.done.emit(key, img)
+            self._wake.set()
+        # The helper ended (crashed, or was killed). What it had in hand is tried again, each alone, with
+        # a new one; a file that takes it down on its own goes on to Quick Look.
+        with self._lock:
+            mine = [(rid, job) for rid, job in self._busy.items() if job[3] is proc]
+            for rid, _job in mine:
+                del self._busy[rid]
+            self._deaths += 1
+            if self._deaths >= self.RESTARTS:
+                self._dead = True
+            give_up = []
+            for _rid, job in mine:
+                if job[0] in self._suspected or self._dead:
+                    self._suspected.discard(job[0])
+                    give_up.append(job)
+                else:
+                    self._suspected.add(job[0])
+                    self._suspects.append((job[0], job[1]))
+        for job in give_up:
+            self._fallback(job[0], job[1])
+        self._wake.set()
+
+    def _expire(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            stuck = [(rid, job) for rid, job in self._busy.items() if now - job[2] > self.TIMEOUT]
+            for rid, job in stuck:
+                del self._busy[rid]
+                self._suspected.discard(job[0])
+        for _rid, job in stuck:
+            self._fallback(job[0], job[1])
+
+
 class _ThumbJob(QRunnable):
     """One thumbnail: the disk cache first, else rendered from the file (PIL, then Qt), else handed
     to Quick Look's batch runner. A prefetch job from a listing the user has left is skipped."""
 
     def __init__(self, key: str, path: str, signals: _ThumbSignals, ql: "_QuickLookRunner | None",
-                 owner: "Thumbnails", gen: int | None) -> None:
+                 owner: "Thumbnails", gen: int | None, frames: "_FrameRunner | None" = None) -> None:
         super().__init__()
         self.key, self.path, self.signals, self.ql, self.owner, self.gen = key, path, signals, ql, owner, gen
+        self.frames = frames
         self.setAutoDelete(True)
 
     def run(self) -> None:
@@ -800,9 +1051,13 @@ class _ThumbJob(QRunnable):
                 img = QImage(str(f))
             if img.isNull():
                 img = self._load()
-                if img.isNull() and self.ql is not None and kind_of(self.path) in ("image", "video"):
-                    self.ql.enqueue(self.key, self.path)        # Quick Look answers later
-                    return
+                if img.isNull() and kind_of(self.path) in ("image", "video"):
+                    if self.frames is not None:
+                        self.frames.enqueue(self.key, self.path, self.gen)   # the helper answers later
+                        return
+                    if self.ql is not None:
+                        self.ql.enqueue(self.key, self.path)                  # Quick Look answers later
+                        return
                 if not img.isNull():
                     _save_thumb(img, f)
         except Exception:  # noqa: BLE001 — a bad file just keeps its icon
@@ -854,6 +1109,8 @@ class Thumbnails(QObject):
         self._signals.done.connect(self._done, Qt.ConnectionType.QueuedConnection)
         self._signals.skipped.connect(self._pending.discard, Qt.ConnectionType.QueuedConnection)
         self._ql = _QuickLookRunner(self._signals) if IS_MAC and shutil.which("qlmanage") else None
+        self._frames = _FrameRunner(self._signals, self._ql, self) \
+            if IS_MAC or os.environ.get("SAFE_FINDER_THUMB_HELPER") else None
         self._tick = QTimer(self)
         self._tick.setSingleShot(True)
         self._tick.setInterval(60)
@@ -879,9 +1136,11 @@ class Thumbnails(QObject):
 
     def _request(self, key: str, path: str, gen: int | None, priority: int) -> None:
         if key in self._pending:
+            if gen is None and self._frames is not None:
+                self._frames.promote(key)                  # on screen now: ahead of the prefetches
             return
         self._pending.add(key)
-        self._pool.start(_ThumbJob(key, path, self._signals, self._ql, self, gen), priority)
+        self._pool.start(_ThumbJob(key, path, self._signals, self._ql, self, gen, self._frames), priority)
 
     def _done(self, key: str, img: QImage) -> None:
         self._pending.discard(key)
@@ -960,10 +1219,9 @@ class GridDelegate(QStyledItemDelegate):
         else:
             shown = icon_rect.adjusted(2, 2, -2, -2)
             model.fileIcon(index).paint(p, shown)
-        if not is_dir:
-            tags = tag_store().tags(path, fresh=False)
-            if tags:
-                self._draw_tags(p, tags, shown, option.font, kind_of(path) == "video" and thumb is not None)
+        tags = tag_store().tags(path, fresh=False)
+        if tags:
+            self._draw_tags(p, tags, shown, option.font, not is_dir and kind_of(path) == "video" and thumb is not None)
         # name
         fm = QFontMetrics(option.font)
         width = r.width() - 2 * inset
@@ -1063,7 +1321,7 @@ class ListDelegate(QStyledItemDelegate):
             p.restore()
             option.palette.setColor(QPalette.ColorRole.Text, QColor("white"))
         tags = []
-        if index.column() == 0 and not self.pane.model.isDir(index):
+        if index.column() == 0:
             tags = tag_store().tags(self.pane.model.filePath(index), fresh=False)
         if not tags:
             super().paint(p, option, index)
@@ -2826,7 +3084,7 @@ class Pane(QWidget):
         chosen = self._selection_bytes(selected) if sel else 0
         size_note = f" · {human(chosen)}" if chosen else ""
         tag_note = ""
-        if sel == 1 and not os.path.isdir(selected[0]):
+        if sel == 1:
             tags = tag_store().tags(selected[0], fresh=False)
             if tags:
                 tag_note = "  ·  " + ", ".join(f"#{t}" for t in tags[:4]) + (f" +{len(tags) - 4}" if len(tags) > 4 else "")
@@ -2836,7 +3094,7 @@ class Pane(QWidget):
             what = {VIDEOS: "video", EMPTY: "empty folder"}.get(self.location, "result")
             text = f"{sel} of {n} selected{size_note}" if sel else f"{n} {what}{'s' if n != 1 else ''}"
             if self.location.startswith(TAG) and not sel:
-                text = f"{n} file{'s' if n != 1 else ''} tagged “{self.location[len(TAG):]}”"
+                text = f"{n} item{'s' if n != 1 else ''} tagged “{self.location[len(TAG):]}”"
             if shown != n:
                 text += f" ({shown} shown)"
             if self.scanner is not None:
@@ -3082,76 +3340,128 @@ class Pane(QWidget):
 
     # -- tags (shared with the Photo Browser app — see shared_tags.py)
     def _tags_menu(self, menu: QMenu, paths: list[str]) -> None:
-        """Right-click ▸ Tags: "Add Tags…", then every tag — ticked when every selected file has it; choosing
-        one puts it on all of them, or takes it off when they all have it. For a folder, the files inside."""
+        """Right-click ▸ Tags: "Add Tags…", then every tag — ticked when every selected item has it; choosing
+        one puts it on all of them, or takes it off when they all have it. A folder gets the tag itself,
+        and is asked whether the files inside go too."""
         sub = menu.addMenu(glyph("tag", THEME.secondary, 16), "Tags")
         sub.addAction("Add Tags…", self.edit_tags).setShortcut(QKeySequence("Ctrl+T"))
-        files = [p for p in paths if not os.path.isdir(p)]
-        folders = len(paths) - len(files)
-        have = tag_counts(files)
+        items = [p for p in paths if shared_tags.taggable(p)]
+        have = tag_counts(items)
         names = tag_store().names()
         if names:
             sub.addSeparator()
             for name in names[:80]:
                 n = have.get(shared_tags.fold(name), (name, 0))[1]
-                label = name + (f"  ({n} of {len(files)})" if 0 < n < len(files) else "")
+                label = name + (f"  ({n} of {len(items)})" if 0 < n < len(items) else "")
                 act = sub.addAction(tag_dot(name), label)
                 act.setCheckable(True)
-                act.setChecked(bool(files) and not folders and n == len(files))
-                act.triggered.connect(lambda _=False, name=name: self.toggle_tag(paths, name))
+                act.setChecked(bool(items) and n == len(items))
+                act.triggered.connect(lambda _=False, name=name: self.tag_items(paths, name))
             if len(names) > 80:
                 sub.addAction(f"… {len(names) - 80} more — Add Tags…", self.edit_tags)
-        if have or folders:
+        if have or any(os.path.isdir(p) for p in items):
             sub.addSeparator()
             sub.addAction("Remove All Tags…", lambda: self.clear_tags(paths))
 
+    def _with_inside(self, paths: list[str], then, ask) -> None:
+        """Folders among `paths`: find the files inside them (on a thread), let `ask(folders, inside)` put
+        the question — it returns the files that go too, or None to cancel — then `then(items, inside)`.
+        No folders: straight to `then(items, [])`."""
+        items = [p for p in paths if shared_tags.taggable(p)]
+        folders = [p for p in items if os.path.isdir(p)]
+        if not folders:
+            then(items, [])
+            return
+        self._airdrop_noted(f"Finding the files in {describe_items(folders)}…")
+
+        def found(inside: list[str], _n: int) -> None:
+            self.update_status()
+            chosen = ask(folders, inside)
+            if chosen is not None:
+                then(items, chosen)
+        expand_files(folders, found)
+
     def edit_tags(self) -> None:
-        """⌘T: the Tags window for the selection (folders: everything inside them)."""
+        """⌘T: the Tags window for the selection. Folders get tags themselves — and, if wanted, so do the
+        files inside them (asked first)."""
         paths = self.selected_paths()
         if not paths:
             self._airdrop_noted("Select files or folders to tag, then press ⌘T.")
             return
-        folders = sum(1 for p in paths if os.path.isdir(p))
-        if folders:
-            self._airdrop_noted(f"Finding the files in {folders} folder{'s' if folders != 1 else ''}…")
-        expand_files(paths, self._open_tags)
 
-    def _open_tags(self, files: list[str], folders: int) -> None:
-        if not files:
-            QMessageBox.information(self.window(), "Tags", "There are no files to tag in what's selected.")
+        def ask(folders: list[str], inside: list[str]) -> list[str] | None:
+            if not inside:
+                return []
+            what = describe_items(folders)
+            yes = ask_inside(self.window(), folders, len(inside),
+                             f"Tag {what} only, or {'it' if len(folders) == 1 else 'them'} and the files inside?",
+                             "Tags")
+            return None if yes is None else inside if yes else []
+        self._with_inside(paths, self._open_tags, ask)
+
+    def _open_tags(self, items: list[str], inside: list[str]) -> None:
+        if not items:
+            QMessageBox.information(self.window(), "Tags", "There's nothing to tag in what's selected.")
             return
-        TagDialog(self.window(), files, describe_files(files, folders)).open()
+        TagDialog(self.window(), items + inside, describe_items(items, len(inside))).open()
         self.update_status()
 
-    def toggle_tag(self, paths: list[str], name: str) -> None:
-        """Puts `name` on every file (and every file inside the folders), or takes it off them all when
-        they all have it already."""
-        def apply(files: list[str], _folders: int) -> None:
-            if not files:
+    def tag_items(self, paths: list[str], name: str, remove: bool | None = None) -> None:
+        """Puts `name` on every selected item — folders themselves included — or takes it off when they all
+        have it (`remove` None), or as told. For folders, asks whether the files inside go too."""
+        items = [p for p in paths if shared_tags.taggable(p)]
+        if remove is None:
+            remove = bool(items) and all(has_tag(p, name) for p in items)
+
+        def ask(folders: list[str], inside: list[str]) -> list[str] | None:
+            inside = [f for f in inside if has_tag(f, name) == remove]      # the ones it would change
+            if not inside:
+                return []
+            what = describe_items(folders)
+            q = (f"Also take “{name}” off the files inside {what} that have it?" if remove else
+                 f"Also tag the files inside {what} “{name}”?")
+            yes = ask_inside(self.window(), folders, len(inside), q, "Remove Tag" if remove else "Tag")
+            return None if yes is None else inside if yes else []
+
+        def apply(items: list[str], inside: list[str]) -> None:
+            targets = items + inside
+            if not targets:
                 return
             try:
-                if all(has_tag(f, name) for f in files):
-                    n = tag_store().remove(files, [name])
-                    note = f"Removed “{name}” from {n:,} file{'s' if n != 1 else ''}."
-                else:
-                    n = tag_store().add(files, [name])
-                    note = f"Tagged {n:,} file{'s' if n != 1 else ''} “{name}”."
+                n = tag_store().remove(targets, [name]) if remove else tag_store().add(targets, [name])
             except OSError as e:
                 QMessageBox.warning(self.window(), "Tags", f"Couldn't save the tags: {e}")
                 return
             tags_changed()
-            self._airdrop_noted(note)
-        expand_files(paths, apply)
+            what = f"{n:,} item{'s' if n != 1 else ''}"
+            self._airdrop_noted((f"Removed “{name}” from {what}." if remove else f"Tagged {what} “{name}”.") if n else
+                                (f"None of those have “{name}”." if remove else f"Those already have “{name}”."))
+        self._with_inside(paths, apply, ask)
+
+    def toggle_tag(self, paths: list[str], name: str) -> None:
+        self.tag_items(paths, name)
 
     def clear_tags(self, paths: list[str]) -> None:
-        def apply(files: list[str], _folders: int) -> None:
-            tagged = [f for f in files if tag_store().tags(f, fresh=False)]
+        """Every tag off the selected items; for folders, asked whether the files inside lose theirs too."""
+        asked = []
+
+        def ask(folders: list[str], inside: list[str]) -> list[str] | None:
+            inside = [f for f in inside if tag_store().tags(f, fresh=False)]
+            if not inside:
+                return []
+            asked.append(True)
+            yes = ask_inside(self.window(), folders, len(inside),
+                             f"Also take every tag off the files inside {describe_items(folders)}?", "Remove All Tags")
+            return None if yes is None else inside if yes else []
+
+        def apply(items: list[str], inside: list[str]) -> None:
+            tagged = [p for p in items if tag_store().tags(p, fresh=False)] + inside
             if not tagged:
-                self._airdrop_noted("None of these files has tags.")
+                self._airdrop_noted("None of these has tags.")
                 return
-            if len(tagged) > 1 and QMessageBox.question(
+            if len(tagged) > 1 and not asked and QMessageBox.question(
                     self.window(), "Remove All Tags",
-                    f"Take every tag off these {len(tagged):,} files?") != QMessageBox.StandardButton.Yes:
+                    f"Take every tag off these {len(tagged):,} items?") != QMessageBox.StandardButton.Yes:
                 return
             try:
                 n = tag_store().clear(tagged)
@@ -3159,8 +3469,8 @@ class Pane(QWidget):
                 QMessageBox.warning(self.window(), "Tags", f"Couldn't save the tags: {e}")
                 return
             tags_changed()
-            self._airdrop_noted(f"Removed the tags from {n:,} file{'s' if n != 1 else ''}.")
-        expand_files(paths, apply)
+            self._airdrop_noted(f"Removed the tags from {n:,} item{'s' if n != 1 else ''}.")
+        self._with_inside(paths, apply, ask)
 
     def on_tags_changed(self) -> None:
         """Tags changed (here, in the other pane, the sidebar or a transfer): repaint; a tag's collection
@@ -3242,14 +3552,15 @@ class _TagCompleter(QCompleter):
 
 
 class TagDialog(QDialog):
-    """The tags of a set of files (⌘T). Type new ones — several at once with commas, suggestions as you
-    type — and press Return; or click any tag below to put it on every file, and click it again to take
-    it off (a tag only some of the files have shows "3/12" and goes on all of them). Every change is saved
-    at once: on a drive to its tag file, which Photo Browser on the iPhone syncs with."""
+    """The tags of a set of files and folders (⌘T). Type new ones — several at once with commas,
+    suggestions as you type — and press Return; or click any tag below to put it on every item, and click
+    it again to take it off (a tag only some of them have shows "3/12" and goes on all of them). Every
+    change is saved at once: on a drive to its tag file, which Photo Browser on the iPhone syncs with."""
 
     def __init__(self, parent: QWidget, files: list[str], what: str) -> None:
         super().__init__(parent)
-        self.files = files
+        self.files = files                                 # files and folders — each gets the tags itself
+        self.noun = "item" if any(os.path.isdir(f) for f in files) else "file"
         self._have: dict[str, tuple[str, int]] | None = None
         self.setWindowTitle("Tags")
         self.setMinimumWidth(480)
@@ -3308,8 +3619,8 @@ class TagDialog(QDialog):
         if drives:
             return (f"Saved on “{'”, “'.join(drives)}” — Photo Browser on the iPhone picks them up the next time "
                     "it opens the drive, and tags added there show up here.")
-        return ("These files are on this Mac: their tags go along when Safe Finder moves or copies them onto the "
-                "drive, and from there to the iPhone.")
+        return (f"These {self.noun}s are on this Mac: their tags go along when Safe Finder moves or copies them onto "
+                "the drive, and from there to the iPhone.")
 
     def _fill(self) -> None:
         while self.flow.count():
@@ -3335,15 +3646,15 @@ class TagDialog(QDialog):
             if n == total:
                 b.setText(f"{name}  ✕")
                 b.setProperty("state", "on")
-                b.setToolTip(f"Remove “{name}”" + ("" if total == 1 else f" from all {total:,} files"))
+                b.setToolTip(f"Remove “{name}”" + ("" if total == 1 else f" from all {total:,} {self.noun}s"))
             elif n:
                 b.setText(f"{name}  {n}/{total}")
                 b.setProperty("state", "part")
-                b.setToolTip(f"{n:,} of the {total:,} files have “{name}” — click to put it on all of them")
+                b.setToolTip(f"{n:,} of the {total:,} {self.noun}s have “{name}” — click to put it on all of them")
             else:
                 b.setText(name)
                 b.setProperty("state", "off")
-                b.setToolTip(f"Add “{name}”" + ("" if total == 1 else f" to all {total:,} files"))
+                b.setToolTip(f"Add “{name}”" + ("" if total == 1 else f" to all {total:,} {self.noun}s"))
             b.clicked.connect(lambda _=False, name=name, all_on=(n == total): self._toggle(name, all_on))
             self.flow.addWidget(b)
             shown += 1
@@ -3351,7 +3662,7 @@ class TagDialog(QDialog):
             empty = QLabel("No tags yet — type one above and press Return." if not typed else
                            "No tag like that yet — press Return to add it.", objectName="TagHint")
             self.flow.addWidget(empty)
-        self.hint.setText("Click a tag to put it on every file — ✕ takes it off:" if have else
+        self.hint.setText(f"Click a tag to put it on every {self.noun} — ✕ takes it off:" if have else
                           "Click a tag to add it:" if others else "")
         self.hint.setVisible(bool(have or others))
         self.clear_btn.setEnabled(bool(have))
@@ -3388,7 +3699,7 @@ class TagDialog(QDialog):
 
     def _clear(self) -> None:
         if len(self.files) > 1 and QMessageBox.question(
-                self, "Remove All Tags", f"Take every tag off these {len(self.files):,} files?") \
+                self, "Remove All Tags", f"Take every tag off these {len(self.files):,} {self.noun}s?") \
                 != QMessageBox.StandardButton.Yes:
             return
         self._apply(lambda: tag_store().clear(self.files))
@@ -4125,19 +4436,9 @@ class MainWindow(QMainWindow):
             pane.on_tags_changed()
 
     def _tag_dropped(self, tag: str, paths: list[str]) -> None:
-        """Files (or folders: everything inside them) dropped on a tag in the sidebar get it."""
-        pane = self.active_pane
-
-        def apply(files: list[str], _folders: int) -> None:
-            try:
-                n = tag_store().add(files, [tag])
-            except OSError as e:
-                QMessageBox.warning(self, "Tags", f"Couldn't save the tags: {e}")
-                return
-            tags_changed()
-            pane._airdrop_noted(f"Tagged {n:,} file{'s' if n != 1 else ''} “{tag}”." if n else
-                                f"Those already have “{tag}”.")
-        expand_files(paths, apply)
+        """Files and folders dropped on a tag in the sidebar get it (a folder: asked whether the files
+        inside it do too)."""
+        self.active_pane.tag_items(paths, tag, remove=False)
 
     def _tag_renamed(self, old: str, new: str) -> None:
         for pane in (self.src, self.dst):
@@ -4344,7 +4645,7 @@ class MainWindow(QMainWindow):
             self.panel.log.appendPlainText(f"   couldn't carry the tags over: {e}")
             return
         if n:
-            self.panel.log.appendPlainText(f"   tags went along with {n:,} file{'s' if n != 1 else ''}")
+            self.panel.log.appendPlainText(f"   tags went along with {n:,} item{'s' if n != 1 else ''}")
         tags_changed()
 
     def stop_transfer(self) -> None:

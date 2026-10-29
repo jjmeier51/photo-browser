@@ -286,7 +286,7 @@ def trash_with_finder(path: Path) -> bool:
 class Transfer:
     """Runs one plan on a worker thread. Callbacks are called from that thread:
     log(str), progress(dict), finished(dict). The finished dict also says where every file ended up
-    ("placed": [(original, copy)], so Photo Browser tags can follow it) and which originals went to
+    ("placed": [(original, copy)] for files and folders, so Photo Browser tags can follow) and which originals went to
     the Trash ("trashed_paths")."""
 
     def __init__(self, plan: Plan, move: bool, verify: bool,
@@ -308,7 +308,7 @@ class Transfer:
         self.spare_dirs = 0                      # new folders made from spares (their lists sit below 2.2 TB)
         self.plain_dirs = 0                      # new folders made the usual way (no spare left)
         self.spare_miss = ""                     # why (spare_folders.last_miss)
-        self.placed: list[tuple[str, str]] = []  # (original, where its copy is) for every file that made it
+        self.placed: list[tuple[str, str]] = []  # (original, where its copy is) for every file and folder that made it
         self.trashed: list[str] = []             # originals that went to the Trash
         self._landed: Path | None = None         # where _copy_one put (or found) the last file
 
@@ -392,10 +392,18 @@ class Transfer:
                         if final != top.dst:
                             self.log(f"   “{top.dst.name}” appeared meanwhile — this one is “{final.name}”")
                         placed_here = [(s, final / d.relative_to(root)) for s, d in placed_here]
+                        landed_top = final
                 else:
                     os.sync()
                 if not building or not (failed_here or self.stop.is_set()):    # a hidden unfinished copy isn't placed yet
                     self.placed.extend((str(s), str(d)) for s, d in placed_here)
+                    if top.is_dir:                       # the folders too, so a folder's own tags go along
+                        landed = landed_top if building else top.dst
+                        self.placed.append((str(top.src), str(landed)))
+                        for d in top.dirs:
+                            rel = d.relative_to(top.dst)
+                            if (top.src / rel).is_dir() and (landed / rel).is_dir():
+                                self.placed.append((str(top.src / rel), str(landed / rel)))
                 if self.move and not self.stop.is_set():
                     if failed_here:
                         st["kept"] += 1

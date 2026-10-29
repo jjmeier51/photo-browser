@@ -235,9 +235,13 @@ whatever icon size the slider is on — so resizing is instant, nothing re-rende
 on disk in `~/Library/Caches/PhotoBrowser/SafeFinderThumbs/` (keyed by path and date, so an edited
 file gets a fresh one) and come straight back on the next launch. Opening a folder renders what's on
 screen first and then the rest of the listing in the background, so scrolling finds them ready.
-Videos, and formats Qt and Pillow can't read, go through Quick Look a dozen at a time instead of one
-process per file. The system may clear the Caches folder under disk pressure; the thumbnails just
-render again.
+Videos — and RAW and other formats Qt and Pillow can't read — come from a small helper,
+`thumb_helper.swift`, that uses the Mac's own AVFoundation and ImageIO: it stays running, makes a few
+at once, and each thumbnail appears the moment it's ready, the ones on screen first (the newest first
+as you scroll). Safe Finder builds it once with Xcode's `swiftc` (the same way as the AirDrop helper),
+into `~/Library/Caches/PhotoBrowser/`. Until it's built, without Xcode's tools, or for a file it can't
+read, Quick Look does those thumbnails, four at a time. The system may clear the Caches folder under
+disk pressure; the thumbnails just render again.
 
 ### Sizes, a size filter, empty folders, and the Trash
 
@@ -265,7 +269,14 @@ Safe Finder's tags *are* the app's tags: tag a file here and it has that tag in 
 iPhone (the Tags filter, the info panel, "No Tags"); tag it there and it shows up here. Removing a
 tag, renaming one, or moving a file carries across the same way.
 
-- **One file or a thousand.** Select files — or folders, which tags every file inside them — and press
+- **Folders have tags too.** A folder gets the tag itself — it shows the pill on its tile, it's listed
+  under the tag in the sidebar, and on the iPhone it shows up in the Tags filter. Whenever you tag a
+  folder (⌘T, the right-click menu, dropping it on a sidebar tag) Safe Finder asks whether the files
+  inside it — in its subfolders too — get the tag as well: **Folder and Files Inside**, **Folder Only**,
+  or Cancel. Taking a tag off a folder, or Remove All Tags, asks the same about the files inside that
+  have it. Nothing is asked when no file inside would change. A folder carries its tags like a file
+  does, so they go along when it's moved or copied.
+- **One file or a thousand.** Select files or folders and press
   **⌘T** (or the tag button in the pane's header, or right-click ▸ Tags ▸ Add Tags…). Type a tag, or
   several separated by commas, and press Return; suggestions come from the tags you already use. Every
   existing tag is listed below as a chip: click one to put it on every selected file, click it again
@@ -278,9 +289,9 @@ tag, renaming one, or moving a file carries across the same way.
   there. **Drag files or folders onto a tag** in the sidebar to tag them. Right-click a tag to rename it
   or take it off every file. Typing `tag:beach` (or `#beach`) in a search field does the same as
   clicking it.
-- **On the tiles:** a tagged file shows a small pill with a coloured dot per tag (each tag always gets
-  the same colour) and the first tag's name; the list view shows them as chips beside the name, and
-  the status line lists a selected file's tags.
+- **On the tiles:** a tagged file or folder shows a small pill with a coloured dot per tag (each tag
+  always gets the same colour) and the first tag's name; the list view shows them as chips beside the
+  name, and the status line lists a selected item's tags.
 - **Tags stick to the file — however it's moved or copied.** Each tagged file carries its tags itself,
   in a small private field (with a note of where it was) that Finder doesn't show — Finder's own tags
   are a separate thing and are left alone. Move or copy it with Safe Finder, Finder, the Files app or

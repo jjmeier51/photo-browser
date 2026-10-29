@@ -5,11 +5,13 @@ import SwiftUI
 /// suggestions from tags already in use anywhere (prefix-matched to what's typed). Emits its
 /// three rows as a `Group`, so inside a `Section` they are separate rows and inside a stack they
 /// are stacked. `onDark` styles the field and chips for a dark, non-list surface (the clean-up
-/// card's gradient).
+/// card's gradient). `onChange`, when set, makes each add/remove instead of the editor — a folder's
+/// Get Info uses it to ask about the items inside (FolderTags.swift).
 struct TagEditor: View {
     @Environment(Library.self) private var library
     let url: URL
     var onDark = false
+    var onChange: ((_ tag: String, _ remove: Bool) -> Void)? = nil
     @State private var draft = ""
 
     private var tagsHere: [String] { library.tags(for: url) }
@@ -24,8 +26,14 @@ struct TagEditor: View {
     private func addFromDraft() {
         let tag = Library.normalizedTag(draft)
         guard !tag.isEmpty else { return }
-        library.addTag(tag, to: url)
+        apply(tag, remove: false)
         draft = ""
+    }
+
+    private func apply(_ tag: String, remove: Bool) {
+        if let onChange { onChange(tag, remove) }
+        else if remove { library.removeTag(tag, from: url) }
+        else { library.addTag(tag, to: url) }
     }
 
     var body: some View {
@@ -36,7 +44,7 @@ struct TagEditor: View {
                         ForEach(tagsHere, id: \.self) { tag in
                             HStack(spacing: 4) {
                                 Text(tag).font(.subheadline)
-                                Button { library.removeTag(tag, from: url) } label: {
+                                Button { apply(tag, remove: true) } label: {
                                     Image(systemName: "xmark.circle.fill").font(.caption)
                                         .foregroundStyle(onDark ? Color.white.opacity(0.7) : Color.secondary)
                                 }
@@ -65,7 +73,7 @@ struct TagEditor: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(suggestions, id: \.self) { tag in
-                            Button(tag) { library.addTag(tag, to: url); draft = "" }
+                            Button(tag) { apply(tag, remove: false); draft = "" }
                                 .buttonStyle(.bordered).controlSize(.small)
                         }
                     }

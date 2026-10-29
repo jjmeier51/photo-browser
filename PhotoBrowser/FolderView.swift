@@ -110,7 +110,8 @@ struct FolderView: View {
     @State private var tagFilters: Set<String> = []                // selected tags (a file must carry all of them)
     @State private var noTagsFilter = false                        // photos/videos under here with no tag yet
     @State private var tagMatchAny = false                         // Tags filter: any of the chosen tags (OR), not all of them
-    @State private var tagTargets: [URL]? = nil                    // "Add Tag…" prompt targets from a long-press (else the selection)
+    @State private var tagTargets: [Entry]? = nil                  // "Add Tag…" prompt targets from a long-press (else the selection)
+    @State private var folderTagQuestion: FolderTagQuestion?        // a tag on folders: the items inside too?
     @State private var pendingUpscale: PendingUpscale? = nil       // an upscale waiting on the frame-rate choice
     @State private var showFrameRateChoice = false
     @State private var deepMemo = Memo<[Entry]>()                  // Home: the whole drive's media, for drive-wide filters
@@ -1069,6 +1070,7 @@ struct FolderView: View {
                 Label(library.isFavorite(entry.url) ? "Unfavorite" : "Favorite",
                       systemImage: library.isFavorite(entry.url) ? "heart.slash" : "heart")
             }
+            tagMenu(for: [entry])
             Button {
                 library.setFolderHidden(!library.isHiddenFolder(entry.url), for: entry.url)
             } label: {
@@ -1137,7 +1139,7 @@ struct FolderView: View {
                 Button { library.toggleAI(entry.url) } label: {
                     Label(library.isAI(entry.url) ? "Remove To AI" : "To AI", systemImage: "sparkles")
                 }
-                tagMenu(for: [entry.url])
+                tagMenu(for: [entry])
                 Button { saveSingleToPhotos(entry) } label: {
                     Label("Save to Photos", systemImage: "photo.on.rectangle")
                 }
@@ -1375,7 +1377,7 @@ struct FolderView: View {
                 Button("Create") { createFolder() }
                 Button("Cancel", role: .cancel) { newFolderName = "" }
             }
-            .alert("Add Tag to \(tagTargetURLs.count) Item\(tagTargetURLs.count == 1 ? "" : "s")", isPresented: $showBulkTag) {
+            .alert("Add Tag to \(tagTargetEntries.count) Item\(tagTargetEntries.count == 1 ? "" : "s")", isPresented: $showBulkTag) {
                 TextField("Tag", text: $bulkTagDraft)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -1384,6 +1386,7 @@ struct FolderView: View {
             } message: {
                 Text("One tag at a time. Items that already have it are left as they are.")
             }
+            .folderTagPrompt($folderTagQuestion) { resultMessage = $0 }
             // Every 1080p / 4K upscale asks this first, then runs in the background (see UpscaleQueue).
             .alert("Frame Rate", isPresented: $showFrameRateChoice) {
                 Button("Keep Source Rate") { startUpscale(frameRate: nil) }
@@ -2712,32 +2715,32 @@ struct FolderView: View {
         }
     }
 
-    /// Adds one tag to every target item (the "Add Tag…" prompt); one save for the batch.
+    /// Adds one tag to every target item (the "Add Tag…" prompt); one save for the batch. Folders get
+    /// it themselves, and are asked about the items inside (`changeTag`).
     private func bulkAddTag(_ raw: String) {
         let tag = Library.normalizedTag(raw)
-        let urls = tagTargetURLs
+        let targets = tagTargetEntries
         bulkTagDraft = ""; tagTargets = nil
         guard !tag.isEmpty else { return }
-        let n = library.addTag(tag, to: urls)
-        resultMessage = n == 0 ? "Every selected item already has “\(tag)”."
-            : "Tagged \(n) item\(n == 1 ? "" : "s") “\(tag)”" + (n < urls.count ? " (\(urls.count - n) already had it)." : ".")
+        changeTag(tag, on: targets, remove: false)
     }
 
     /// The Tags submenu, for one item (long-press) or the selection: "Add Tag…" first, then every tag
     /// in use, alphabetically, checked when all the targets carry it — tap adds it to all, or takes it
-    /// off all when they all have it already. `.menuOrder(.fixed)` keeps "Add Tag…" on top even when
-    /// the menu opens upward from the selection bar.
-    @ViewBuilder private func tagMenu(for urls: [URL]) -> some View {
+    /// off all when they all have it already. Folders carry tags of their own (FolderTags.swift).
+    /// `.menuOrder(.fixed)` keeps "Add Tag…" on top even when the menu opens upward from the selection bar.
+    @ViewBuilder private func tagMenu(for entries: [Entry]) -> some View {
+        let urls = entries.map(\.url)
         Menu {
             Button {
-                bulkTagDraft = ""; tagTargets = urls
+                bulkTagDraft = ""; tagTargets = entries
                 // Defer so the Menu's dismissal doesn't swallow the alert (constraint #4).
                 DispatchQueue.main.async { showBulkTag = true }
             } label: { Label("Add Tag…", systemImage: "plus") }
             if !library.allTags.isEmpty {
                 Divider()
                 ForEach(library.allTags, id: \.self) { tag in
-                    Button { toggleTag(tag, on: urls) } label: {
+                    Button { toggleTag(tag, on: entries) } label: {
                         check(tag, !urls.isEmpty && urls.allSatisfy { library.hasTag(tag, $0) })
                     }
                 }
@@ -2747,18 +2750,31 @@ struct FolderView: View {
     }
 
     /// The items the "Add Tag…" prompt applies to: a long-pressed item, else the selection.
-    private var tagTargetURLs: [URL] { tagTargets ?? selectedEntries().map(\.url) }
+    private var tagTargetEntries: [Entry] { tagTargets ?? selectedEntries() }
 
     /// A tag row in `tagMenu`: adds the tag to every target, or removes it from all of them when they
     /// already all carry it.
-    private func toggleTag(_ tag: String, on urls: [URL]) {
-        guard !urls.isEmpty else { return }
-        if urls.allSatisfy({ library.hasTag(tag, $0) }) {
-            let n = library.removeTag(tag, from: urls)
-            resultMessage = "Removed “\(tag)” from \(n) item\(n == 1 ? "" : "s")."
-        } else {
-            let n = library.addTag(tag, to: urls)
-            resultMessage = "Tagged \(n) item\(n == 1 ? "" : "s") “\(tag)”."
+    private func toggleTag(_ tag: String, on entries: [Entry]) {
+        guard !entries.isEmpty else { return }
+        changeTag(tag, on: entries, remove: entries.allSatisfy { library.hasTag(tag, $0.url) })
+    }
+
+    /// Puts `tag` on the items (or takes it off). With folders among them, first asks whether the items
+    /// inside change too — unless none of those would (`Library.folderTagQuestion`).
+    private func changeTag(_ tag: String, on entries: [Entry], remove: Bool) {
+        let targets = entries.map(\.url)
+        let folders = entries.filter(\.isFolder).map(\.url)
+        guard !folders.isEmpty else {
+            resultMessage = library.applyTag(tag, remove: remove, targets: targets)
+            return
+        }
+        Task {
+            guard let q = await library.folderTagQuestion(tag, remove: remove, targets: targets, folders: folders) else {
+                resultMessage = library.applyTag(tag, remove: remove, targets: targets)
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(350))     // let a menu or the Add Tag alert finish closing
+            folderTagQuestion = q
         }
     }
 
@@ -3226,7 +3242,7 @@ struct FolderView: View {
                         }
                     } label: { Label(customLabelMenuTitle, systemImage: "tag") }
                 }
-                tagMenu(for: selected.map(\.url))
+                tagMenu(for: selected)
                 if !library.pureTransferMode {   // pixel editing — not offered in Pure File Transfer
                 Menu {
                     Button { bulkRotate(2) } label: { Label("Rotate 180°", systemImage: "arrow.clockwise") }

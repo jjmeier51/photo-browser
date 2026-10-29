@@ -91,6 +91,9 @@ actions the app makes no network calls.
   reverse-geocoded place, "Saved from" (xattrs), Age, inline caption edit, tags (one at a
   time, with suggestions). Tags are also applied from a thumbnail's long-press menu and the
   selection bar (`tagMenu`: "Add Tag…" first, then every tag alphabetically, `.menuOrder(.fixed)`).
+  **Folders carry tags of their own** (long-press Tags menu, selection bar, folder Get Info): tagging or
+  untagging a folder asks whether the items inside change too (`FolderTags.swift`; Safe Finder asks the
+  same, `ask_inside`) — `docs/feature-notes.md` §6j.
 - **Tags shared with Safe Finder** — the drive's `.Photo Browser Metadata/shared-tags.json` holds
   the tags by drive-relative path; Safe Finder (`mac/shared_tags.py`, ⌘T / sidebar Tags) edits it
   directly while the drive is on the Mac, and the app three-way merges it with `Library.tags`

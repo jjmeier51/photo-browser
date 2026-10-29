@@ -1132,6 +1132,48 @@ Safe Finder.
   itself (`Thumbnails.forget` — its cache key is path + modified date). Not carried by Pillow: HDR gain
   maps (HDR photos come out standard range on the Mac) and a JPEG's extra MPF pictures.
 
+## 6j. Folder tags — `FolderTags.swift`, `mac/safe_finder.py` (Oct 29, 2026)
+
+A folder carries tags of its own. Its path is a key in `Library.tags` and in the drive's shared tag file
+like any file's, so nothing new had to be built for it to sync, re-key on move/rename (`itemsMoved`
+re-keys a folder's own path as well as its subtree), survive the trash, or show up in the Tags filter
+(`taggedPaths` → `labeledEntries` hands back folder entries from the index; tap one to open it).
+
+- **The question.** Whenever a tag goes on folders — or comes off — the person is asked whether the files
+  inside them (any depth; hidden files and the downloaders' sidecars left out) change too: "Folder and
+  Items Inside" / "Folder Only" / Cancel. Only the files the change would touch are counted, and when there
+  are none nothing is asked. iPhone: `Library.folderTagQuestion` + the `folderTagPrompt` alert, from the
+  folder long-press Tags menu, the selection bar, "Add Tag…" and the folder's Get Info (`TagEditor`'s
+  `onChange`); files inside come from the drive index (`filesInside`), else a walk. Safe Finder:
+  `ask_inside` from the right-click Tags menu, ⌘T (asked before the window opens — it then works on the
+  folder, or the folder and its files), Remove All Tags and drops on a sidebar tag.
+- **Carried.** A folder carries the `com.photobrowser.tags` marker like a file (not on exFAT), so a folder
+  moved by Finder or Files keeps its tags: Safe Finder squares folders too when a folder is opened
+  (`check_carried`, `read_folder`), and the app's `adoptCarriedTags` now includes folders new to the
+  index. Safe Finder's transfers report placed folders (`Transfer.placed`), so a moved or copied folder
+  — and its subfolders — keep their own tags.
+- **Shown.** Safe Finder: the tag pill on folder tiles, chips in the list view, the status line, the
+  sidebar counts and tag collections. iPhone: checked in the Tags menu, in folder Get Info, counted in
+  the Tags chip, and listed in the Tags filter. (iPhone tiles show no tags for files either.)
+
+## 6k. Safe Finder video thumbnails — `mac/thumb_helper.swift` (Oct 29, 2026)
+
+Video thumbnails used to come only from `qlmanage`, a dozen files per run on one thread: Quick Look
+started afresh for every run and nothing appeared until the whole dozen was done, so a folder of videos
+filled in slowly. Now `_FrameRunner` keeps `thumb_helper.swift` running (built once with `xcrun swiftc
+-swift-version 5` into `~/Library/Caches/PhotoBrowser/`, like the AirDrop helper; bundled as a resource in
+the .app) and talks to it in JSON lines: AVFoundation frames (a tenth of the way in, at most 1 s; HDR
+tone-mapped) and ImageIO previews (RAW), written as JPEGs straight into the thumbnail cache.
+
+- At most 4 in flight; each result shows at once. On-screen requests go first, newest first; prefetches
+  wait 0.2 s (so a fresh listing's first paint beats a prefetch queued before it) and are dropped once
+  their listing is left. A prefetch that becomes visible is promoted.
+- Fallbacks to Quick Look (now 4 files a run, so it streams too): while the helper builds, without
+  Xcode's tools, for a file the helper can't read, after 30 s on one file, or when the helper keeps dying
+  (10 restarts). Files in flight when it died are retried one at a time, so only the culprit goes without.
+- Tested with a stand-in speaking the same protocol (`SAFE_FINDER_THUMB_HELPER` names one); the Swift
+  itself is built on first use on the Mac.
+
 ## 6a. WebM playback — `WebMPlayer.swift`
 
 AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,
@@ -1758,6 +1800,7 @@ AirDrop off/unavailable → exit 2 → Finder fallback. The custom UTI must stay
 | Storage / Drive Health | `StorageView.swift`, `DriveHealthView.swift`, `DriveRepair.swift` (rebuild, header probe), `MetadataSnapshot.swift` (backup/restore, orphan audit) |
 | Directory reading / large folders | `Library.swift` (`coordinatedContents`, `listing`) |
 | Folder filters | `Models.swift` (`FormatFilter`), `FolderView.swift` |
+| Folder tags (+ "also the items inside?") | `FolderTags.swift`, `FolderView.tagMenu`, `FolderInfoView`, `mac/safe_finder.py` (`ask_inside`, `tag_items`) |
 | Batch crop (one crop on many, "cropped" tag, Last Crop) | `BatchCrop.swift` (`CropSpec`, `BatchCropView`), `PhotoEditorView.swift` (`CropOverlay`), `mac/batch_crop.py`, `mac/crop_window.py` |
 | Folder Birthdays mapping (bulk) | `BirthdayMappingView.swift`, `Library.setBirthdays` |
 | Move/copy duplicate detection | `DuplicateDetection.swift`, `FileActions.moveItems/copyItems`, `PhotoBrowserTests/` |

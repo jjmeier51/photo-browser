@@ -1,10 +1,12 @@
 import SwiftUI
 
-/// "Get Info" for a folder: counts, size, dates, labels, and content year span.
+/// "Get Info" for a folder: counts, size, dates, labels, its own tags, and content year span.
 struct FolderInfoView: View {
     @Environment(Library.self) private var library
     let folder: URL
     @State private var stats: FolderStats?
+    @State private var tagQuestion: FolderTagQuestion?
+    @State private var tagNote: String?
 
     var body: some View {
         NavigationStack {
@@ -32,6 +34,14 @@ struct FolderInfoView: View {
                                       library.isAI(folder) ? "To AI" : nil].compactMap { $0 }
                         row("Labels", labels.isEmpty ? "None" : labels.joined(separator: ", "))
                     }
+                    Section {
+                        TagEditor(url: folder, onChange: changeTag)
+                    } header: {
+                        Text("Tags")
+                    } footer: {
+                        Text(tagNote ?? "The folder's own tags — it shows up under them in the Tags filter. "
+                             + "You're asked whether the items inside get them too.")
+                    }
                 } else {
                     HStack(spacing: 10) {
                         ProgressView()
@@ -39,6 +49,7 @@ struct FolderInfoView: View {
                     }
                 }
             }
+            .folderTagPrompt($tagQuestion) { tagNote = $0 }
             .navigationTitle("Folder Info")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -55,6 +66,17 @@ struct FolderInfoView: View {
         }
         .presentationDetents([.medium, .large])
         .task { stats = await library.folderStats(of: folder) }
+    }
+
+    /// A tag added or removed here: on the folder, and — asked — on the items inside.
+    private func changeTag(_ tag: String, remove: Bool) {
+        Task {
+            if let q = await library.folderTagQuestion(tag, remove: remove, targets: [folder], folders: [folder]) {
+                tagQuestion = q
+            } else {
+                tagNote = library.applyTag(tag, remove: remove, targets: [folder])
+            }
+        }
     }
 
     private func row(_ key: String, _ value: String) -> some View {

@@ -32,6 +32,8 @@ never rename or fsync on exFAT (CLAUDE.md #12). A torn file reads as damaged, is
 previous file is kept in ~/Library/Application Support/Safe Finder/Tag Backups/ (the last 14).
 
 Tags that travel with the file
+  (Folders carry tags of their own the same way — their path is a key like a file's, and they carry
+  the marker too.)
   The tables are keyed by path, so on their own a file moved or copied by anything else — Finder, the
   Files app, `cp` — would leave its tags behind. So each file also *carries* its tags, in a private
   extended attribute, `com.photobrowser.tags` (JSON {"path": key, "tags": [...]}: where the file was, and
@@ -125,7 +127,7 @@ def clean(tags: Iterable) -> list[str]:
 
 
 def taggable(path: str) -> bool:
-    """A file Safe Finder tags: not hidden, not a gallery sidecar."""
+    """A file or folder Safe Finder tags: not hidden, not a gallery sidecar."""
     name = os.path.basename(path)
     return bool(name) and not name.startswith(".") and name not in SIDECARS
 
@@ -596,11 +598,11 @@ class TagStore:
         return sum(self.add(dsts, list(tags)) for tags, dsts in by_tags.items())
 
     def read_folder(self, paths: Iterable[str]) -> list[tuple[str, list[str] | None, dict | None]]:
-        """What each file carries — for `apply_carried`. Only reads; safe on a worker thread. Files on
-        exFAT, hidden ones and sidecars are skipped."""
+        """What each file (or folder — a folder carries its own tags too) carries — for `apply_carried`.
+        Only reads; safe on a worker thread. Items on exFAT, hidden ones and sidecars are skipped."""
         out = []
         for p in paths:
-            if taggable(p) and os.path.isfile(p) and self.carries(p):
+            if taggable(p) and (os.path.isfile(p) or os.path.isdir(p)) and self.carries(p):
                 finder, marker = read_carried(p)
                 out.append((p, finder, marker))
         return out

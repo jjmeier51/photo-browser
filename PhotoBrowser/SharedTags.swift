@@ -226,8 +226,8 @@ nonisolated enum SharedTags {
         return (r.tags, r.movedFrom)
     }
 
-    /// Files that turned up in the index since the last walk — moved or copied in by Finder or the Files
-    /// app — bring the tags they carry. `store` is the store's tags (keys spelled under `root.path`).
+    /// Files and folders that turned up in the index since the last walk — moved or copied in by Finder
+    /// or the Files app — bring the tags they carry. `store` is the store's tags (keys spelled under `root.path`).
     static func adoptCarried(newFiles: [String], root: URL, store: [String: [String]]) -> Adoption {
         var out = Adoption()
         let fm = FileManager.default
@@ -428,8 +428,7 @@ extension Library {
         let store = tags
         Task {
             let found = await Task.detached(priority: .utility) { () -> SharedTags.Adoption in
-                func inScope(_ e: Entry) -> Bool {
-                    guard !e.isFolder else { return false }
+                func inScope(_ e: Entry) -> Bool {          // files and folders: a folder carries its own tags
                     guard let folders else { return true }
                     let p = e.url.path
                     return folders.contains { p.hasPrefix($0 + "/") }
