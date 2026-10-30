@@ -170,6 +170,12 @@ path bar. Select files
 or folders on the left and press **Move to “Extreme SSD”** (or Copy), or drag them onto the right
 pane — onto a folder there to put them inside it. Drags from the real Finder work too.
 
+**Selecting with a box**, as in Finder: drag from anywhere that isn't a picture or a name — the space
+around a thumbnail or beside its name, a list row's other columns or the space after its name, the
+empty space past the last item — and a box selects everything it touches (⇧ adds to the selection,
+⌘ toggles). Dragging past the top or bottom scrolls. A drag that starts on a picture or a name still
+drags those files, and a click in a tile's blank space still selects that tile.
+
 Before anything happens a sheet shows exactly what will: how many files and how much space, names
 that will be adjusted for iOS, macOS junk left behind, folders that would get very large, and
 whether there's room. Then:

@@ -1219,6 +1219,21 @@ against a 22,500-key table: 4 s → 44 ms, on the UI thread at the end of a move
 Checked and ruled out offscreen: the thumbnail pool and the GIL switch interval made no measurable
 difference.
 
+## 6n. Safe Finder selection box — `BoxSelect` in `mac/safe_finder.py` (Oct 30, 2026)
+
+Qt only starts a rubber band where `indexAt` finds nothing, and a grid tile's item rect is its whole cell,
+so with tiles reaching their neighbours the only place a box could start was the leftover strip at the
+right edge (and the list view, a QTreeView, never draws one). `BoxSelect` (a mixin on `GridView` and
+`ListView`) takes left presses off the item's *body* — for a tile, where `GridDelegate` last drew its
+picture and name (`bodies`, relative to the cell; the icon-and-name column until painted); for a row,
+the name column up to the end of the name — and draws its own `QRubberBand`, selecting whole rows whose
+`box_rect` it touches (a tile's picture-and-name column; a row's full width), ⇧ = Select / ⌘ = Toggle
+against the selection at the press, auto-scrolling past the edges. Item rects are cached once per box
+(content coordinates via `horizontalOffset`/`verticalOffset`; re-cached if the row count changes).
+A press in a tile's blank space that never becomes a box is replayed to Qt as a click, so it still
+selects that tile; double-click, the context menu, drops (whole cell) and drags from a body are Qt's.
+Not overriding `indexAt` is deliberate: `QTreeView::setSelection` and drop targeting call it.
+
 ## 6a. WebM playback — `WebMPlayer.swift`
 
 AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,

@@ -60,17 +60,18 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 try:
-    from PySide6.QtCore import (QDateTime, QDir, QFileInfo, QFileSystemWatcher, QLocale, QMimeData, QModelIndex,
-                                QObject, QPoint, QRect, QRectF, QRunnable, QSettings, QSize, QSortFilterProxyModel,
-                                QStringListModel, Qt, QThreadPool, QTimer, QUrl, Signal)
-    from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage,
-                               QImageReader, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap,
-                               QShortcut, QStandardItem, QStandardItemModel)
+    from PySide6.QtCore import (QDateTime, QDir, QFileInfo, QFileSystemWatcher, QItemSelection, QItemSelectionModel,
+                                QLocale, QMimeData, QModelIndex, QObject, QPersistentModelIndex, QPoint, QRect,
+                                QRectF, QRunnable, QSettings, QSize, QSortFilterProxyModel, QStringListModel, Qt,
+                                QThreadPool, QTimer, QUrl, Signal)
+    from PySide6.QtGui import (QAction, QActionGroup, QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QIcon,
+                               QImage, QImageReader, QKeySequence, QMouseEvent, QPainter, QPainterPath, QPalette,
+                               QPen, QPixmap, QShortcut, QStandardItem, QStandardItemModel)
     from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
                                    QCompleter, QFileIconProvider, QFileSystemModel, QFrame, QHBoxLayout,
                                    QHeaderView, QInputDialog, QLabel, QLayout, QLineEdit, QListView, QMainWindow,
-                                   QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
-                                   QSizePolicy,
+                                   QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QRubberBand,
+                                   QScrollArea, QSizePolicy,
                                    QSlider, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
                                    QStyleOptionViewItem, QToolButton, QTreeView, QTreeWidget,
                                    QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -1187,11 +1188,14 @@ THUMBS: Thumbnails | None = None
 
 class GridDelegate(QStyledItemDelegate):
     """Finder icon view: thumbnail or icon on a rounded backdrop when selected, two-line name with
-    a blue pill when selected."""
+    a blue pill when selected. Notes where each tile's picture and name were drawn (`bodies`, relative to
+    the tile): only they are the item — the rest of the tile is background, where a drag draws a
+    selection box (BoxSelect)."""
 
     def __init__(self, pane: "Pane") -> None:
         super().__init__(pane)
         self.pane = pane
+        self.bodies: dict[str, tuple[QRect, QRect]] = {}
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802
         return self.pane.cell_size()
@@ -1245,6 +1249,11 @@ class GridDelegate(QStyledItemDelegate):
         for i, line in enumerate(lines):
             p.drawText(QRect(r.x() + inset, top + i * lh, width, lh), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, line)
         p.restore()
+        w = max(fm.horizontalAdvance(line) for line in lines) + 10
+        name = QRect(r.x() + (r.width() - w) // 2, top - 1, w, lh * len(lines) + 2)
+        if len(self.bodies) > 20000:
+            self.bodies.clear()
+        self.bodies[path] = (shown.translated(-r.topLeft()), name.translated(-r.topLeft()))
 
     @staticmethod
     def _draw_tags(p: QPainter, tags: list[str], rect: QRect, font: QFont, video: bool) -> None:
@@ -1437,10 +1446,165 @@ class DropMixin:
             QTimer.singleShot(0, lambda: self.pane.dropped.emit(paths, target))
 
 
-class GridView(DropMixin, QListView):
+class BoxSelect:
+    """Finder's selection box. A drag that starts on the background draws a box and selects what it
+    touches (⇧ adds to the selection, ⌘ toggles) — and the background is everywhere but an item's picture
+    or name: the space around a thumbnail and beside its name, the other columns of a list row, the empty
+    space past the last item. Without it a box could only be started in the sliver of space at the right
+    edge, since every tile reaches its neighbours. A plain click in a tile's blank space still picks that
+    tile, and a drag from a picture or a name drags the files, as before. The box scrolls the view when
+    it's dragged past the top or bottom. Each view says where an item's body is (`on_body`) and what part
+    of it a box has to touch (`box_rect`)."""
+
+    pane: "Pane"
+
+    def _box_init(self) -> None:
+        self._band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())   # type: ignore[attr-defined]
+        self._box_origin: QPoint | None = None        # where the press was, in content coordinates
+        self._box_active = False
+        self._box_click: QMouseEvent | None = None     # a press in a tile's blank space: a click if no box comes
+        self._box_base = QItemSelection()
+        self._box_mods = Qt.KeyboardModifier.NoModifier
+        self._box_items: list[tuple[QPersistentModelIndex, QRect]] = []
+        self._box_rows: list[int] = []
+        self._box_last = QPoint()
+        self._box_scroll = QTimer(self)                                       # type: ignore[arg-type]
+        self._box_scroll.setInterval(30)
+        self._box_scroll.timeout.connect(self._box_autoscroll)
+
+    def on_body(self, idx: QModelIndex, pos: QPoint) -> bool:
+        raise NotImplementedError
+
+    def box_rect(self, idx: QModelIndex) -> QRect:
+        raise NotImplementedError
+
+    def _offset(self) -> QPoint:
+        return QPoint(self.horizontalOffset(), self.verticalOffset())      # type: ignore[attr-defined]
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            idx = self.indexAt(pos)                                         # type: ignore[attr-defined]
+            if not idx.isValid() or not self.on_body(idx, pos):
+                self._box_origin = pos + self._offset()
+                self._box_active = False
+                self._box_mods = event.modifiers()
+                self._box_click = QMouseEvent(event.type(), event.position(), event.globalPosition(),
+                                              event.button(), event.buttons(), event.modifiers()) \
+                    if idx.isValid() else None
+                sm = self.selectionModel()                                  # type: ignore[attr-defined]
+                self._box_base = QItemSelection(sm.selection())
+                if not idx.isValid() and not self._box_mods & (Qt.KeyboardModifier.ShiftModifier
+                                                               | Qt.KeyboardModifier.ControlModifier):
+                    sm.clearSelection()                                     # a click on the background
+                event.accept()
+                return
+        super().mousePressEvent(event)                                      # type: ignore[misc]
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._box_origin is None:
+            super().mouseMoveEvent(event)                                   # type: ignore[misc]
+            return
+        self._box_last = event.position().toPoint()
+        if not self._box_active:
+            if (self._box_last + self._offset() - self._box_origin).manhattanLength() \
+                    < QApplication.startDragDistance():
+                return
+            self._box_start()
+        self._box_update()
+        vp = self.viewport().rect()                                         # type: ignore[attr-defined]
+        outside = self._box_last.y() < vp.top() + 2 or self._box_last.y() > vp.bottom() - 2
+        if outside and not self._box_scroll.isActive():
+            self._box_scroll.start()
+        elif not outside:
+            self._box_scroll.stop()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._box_origin is None:
+            super().mouseReleaseEvent(event)                                # type: ignore[misc]
+            return
+        active, click = self._box_active, self._box_click
+        self._box_end()
+        if not active and click is not None:                                # a click in a tile's blank space
+            super().mousePressEvent(click)                                  # type: ignore[misc]
+            super().mouseReleaseEvent(event)                                # type: ignore[misc]
+
+    def _box_start(self) -> None:
+        self._box_active = True
+        self._box_click = None
+        self._box_cache()
+
+    def _box_cache(self) -> None:
+        """Every item's box target, in content coordinates — made once per box, not per mouse move."""
+        model, root, off = self.model(), self.rootIndex(), self._offset()   # type: ignore[attr-defined]
+        self._box_items = []
+        for row in range(model.rowCount(root)):
+            idx = model.index(row, 0, root)
+            self._box_items.append((QPersistentModelIndex(idx), self.box_rect(idx).translated(off)))
+
+    def _box_update(self) -> None:
+        off = self._offset()
+        box = QRect(self._box_origin, self._box_last + off).normalized()
+        self._band.setGeometry(box.translated(-off))
+        self._band.show()
+        if len(self._box_items) != self.model().rowCount(self.rootIndex()):   # type: ignore[attr-defined]
+            self._box_cache()                                               # files came or went meanwhile
+        rows = [i for i, (_p, r) in enumerate(self._box_items) if r.intersects(box)]
+        if rows == self._box_rows:
+            return
+        self._box_rows = rows
+        hits = QItemSelection()
+        start = prev = None
+        for i in rows + [None]:                                             # runs of rows → one range each
+            if i is not None and prev is not None and i == prev + 1:
+                prev = i
+                continue
+            if start is not None:
+                a, b = QModelIndex(self._box_items[start][0]), QModelIndex(self._box_items[prev][0])
+                if a.isValid() and b.isValid():                         # whole rows, as the selection holds them
+                    hits.select(a, b.siblingAtColumn(b.model().columnCount(b.parent()) - 1))
+            start = prev = i
+        sm = self.selectionModel()                                          # type: ignore[attr-defined]
+        flags = QItemSelectionModel.SelectionFlag
+        if self._box_mods & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier):
+            merged = QItemSelection(self._box_base)
+            merged.merge(hits, flags.Select if self._box_mods & Qt.KeyboardModifier.ShiftModifier else flags.Toggle)
+            sm.select(merged, flags.ClearAndSelect | flags.Rows)
+        else:
+            sm.select(hits, flags.ClearAndSelect | flags.Rows)
+
+    def _box_autoscroll(self) -> None:
+        if not self._box_active:
+            self._box_scroll.stop()
+            return
+        pos = self.viewport().mapFromGlobal(QCursor.pos())                  # type: ignore[attr-defined]
+        vp = self.viewport().rect()                                         # type: ignore[attr-defined]
+        dy = pos.y() - vp.bottom() if pos.y() > vp.bottom() else pos.y() - vp.top() if pos.y() < vp.top() else 0
+        if not dy:
+            self._box_scroll.stop()
+            return
+        bar = self.verticalScrollBar()                                      # type: ignore[attr-defined]
+        per_pixel = self.verticalScrollMode() == QAbstractItemView.ScrollMode.ScrollPerPixel   # type: ignore[attr-defined]
+        step = max(2, min(abs(dy), 60)) if per_pixel else 1
+        bar.setValue(bar.value() + (step if dy > 0 else -step))
+        self._box_last = pos
+        self._box_update()
+
+    def _box_end(self) -> None:
+        self._box_scroll.stop()
+        self._band.hide()
+        self._box_origin = None
+        self._box_active = False
+        self._box_click = None
+        self._box_items = []
+        self._box_rows = []
+
+
+class GridView(BoxSelect, DropMixin, QListView):
     def __init__(self, pane: "Pane") -> None:
         super().__init__(pane)
         self.pane = pane
+        self._box_init()
         self.setViewMode(QListView.ViewMode.IconMode)
         self.setMovement(QListView.Movement.Static)
         self.setResizeMode(QListView.ResizeMode.Adjust)
@@ -1457,11 +1621,30 @@ class GridView(DropMixin, QListView):
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
+    def _column(self, idx: QModelIndex) -> QRect:
+        """A tile's picture-and-name column: the thumbnail's square and the two lines under it."""
+        r = self.visualRect(idx)
+        s, pad = self.pane.icon_px, self.pane.tile_pad()
+        return QRect(r.x() + (r.width() - s) // 2, r.y() + pad, s, r.height() - 2 * pad)
 
-class ListView(DropMixin, QTreeView):
+    def on_body(self, idx: QModelIndex, pos: QPoint) -> bool:
+        r = self.visualRect(idx)
+        drawn = self.itemDelegate().bodies.get(self.pane.model.filePath(idx))
+        if drawn is None:                                    # not painted yet: its column
+            return self._column(idx).contains(pos)
+        rel = pos - r.topLeft()
+        picture, name = drawn
+        return picture.adjusted(-2, -2, 2, 2).contains(rel) or name.contains(rel)
+
+    def box_rect(self, idx: QModelIndex) -> QRect:
+        return self._column(idx)
+
+
+class ListView(BoxSelect, DropMixin, QTreeView):
     def __init__(self, pane: "Pane") -> None:
         super().__init__(pane)
         self.pane = pane
+        self._box_init()
         self.setRootIsDecorated(False)
         self.setItemsExpandable(False)
         self.setUniformRowHeights(True)
@@ -1475,6 +1658,19 @@ class ListView(DropMixin, QTreeView):
         self.setDefaultDropAction(Qt.DropAction.CopyAction)
         self.setIconSize(QSize(18, 18))
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+    def on_body(self, idx: QModelIndex, pos: QPoint) -> bool:
+        """A row's icon and name are the item; its other columns and the space after the name are not."""
+        if idx.column() != 0:
+            return False
+        r = self.visualRect(idx)
+        name = self.pane.model.fileName(idx)
+        return pos.x() <= r.x() + self.iconSize().width() + 16 + QFontMetrics(self.font()).horizontalAdvance(name)
+
+    def box_rect(self, idx: QModelIndex) -> QRect:
+        """A box takes every row it reaches, wherever across the row it is."""
+        r = self.visualRect(idx)
+        return QRect(-(1 << 24), r.y(), 1 << 25, r.height())
 
 
 # ============================================================================ search & collections
