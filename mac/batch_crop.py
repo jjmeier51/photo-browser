@@ -398,9 +398,61 @@ def write_in_place(path: str, data: bytes) -> None:
     restore_dates(path, st)
 
 
-def copy_xattrs(src: str, dst: str) -> None:
+def write_beside(path: str, data: bytes, label: str) -> str:
+    """A new photo beside `path` holding `data` — “name (label).ext”, or “name (label 2).ext” when that's
+    taken — with the original's extended attributes (not its tag marker: the new photo's tags go through
+    the tag store) and its created and modified dates. Never replaces anything. Returns the new path."""
+    st = os.stat(path)
+    folder, name = os.path.split(path)
+    stem, ext = os.path.splitext(name)
+
+    def names():
+        n = 1
+        while True:
+            yield os.path.join(folder, f"{stem} ({label}{'' if n == 1 else f' {n}'}){ext}")
+            n += 1
+
+    if spare_folders.on_exfat(path):
+        for new in names():                       # created under its name and written straight in; no
+            try:                                  # attributes copied — they'd be "._" files on exFAT
+                with open(new, "xb") as f:
+                    f.write(data)
+                    f.flush()
+                break
+            except FileExistsError:
+                continue
+    else:
+        tmp = os.path.join(folder, f".{stem}.new-{uuid.uuid4().hex[:8]}")
+        try:
+            with open(tmp, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            copy_xattrs(path, tmp, skip={shared_tags.MARKER})
+            os.chmod(tmp, stat.S_IMODE(st.st_mode))
+            for new in names():
+                try:
+                    os.link(tmp, new)             # fails, rather than replaces, if the name was just taken
+                    break
+                except FileExistsError:
+                    continue
+                except OSError:                   # no hard links here: the name was free a moment ago
+                    if os.path.lexists(new):
+                        continue
+                    os.rename(tmp, new)
+                    break
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    restore_dates(new, st)
+    return new
+
+
+def copy_xattrs(src: str, dst: str, skip: set[str] = frozenset()) -> None:
     for name in shared_tags.xattr_names(src):
-        if name in _SKIP_XATTRS:
+        if name in _SKIP_XATTRS or name in skip:
             continue
         value = shared_tags.xattr_get(src, name)
         if value is not None:

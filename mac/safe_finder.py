@@ -3673,8 +3673,10 @@ class Pane(QWidget):
 
     # -- AI upscale (ai_upscale.py / upscale_window.py — Real-ESRGAN on this Mac)
     def ai_upscale(self, paths: list[str]) -> None:
-        """Right-click ▸ AI Upscale 2×: each photo upscaled 2× by Real-ESRGAN, in place, tagged "upscaled".
-        Without an engine on this Mac yet, says how to get one (or lets one be picked)."""
+        """Right-click ▸ AI Upscale 2×: each photo upscaled 2× by Real-ESRGAN — in place, or saved as a new
+        photo beside it with the same metadata, dates and tags (asked each time; last answer first) — and
+        the result tagged "upscaled". Without an engine on this Mac yet, says how to get one (or lets one
+        be picked)."""
         import ai_upscale
         import upscale_window
         photos = [p for p in paths if ai_upscale.can_upscale(p)]
@@ -3689,35 +3691,37 @@ class Pane(QWidget):
                 return
             engine, chosen = picked
             self.settings.setValue("upscale/engine", chosen)
-        n = len(photos)
-        what = f"“{os.path.basename(photos[0])}”" if n == 1 else f"these {n:,} photos"
-        if QMessageBox.question(
-                self.window(), "AI Upscale",
-                f"Upscale {what} 2× with AI?\n\n{'It is' if n == 1 else 'They are'} replaced in place — format, "
-                f"capture date, location, tags and dates kept — and tagged “{ai_upscale.UPSCALED_TAG}”. Uses "
-                f"{engine.describe()} on this Mac; nothing is uploaded. Photos over 12 MP are left as they are.") \
-                != QMessageBox.StandardButton.Yes:
+        how = upscale_window.ask_how(self.window(), photos, engine, str(self.settings.value("upscale/save", "new")))
+        if how is None:
             return
+        self.settings.setValue("upscale/save", how)
+        as_new = how == "new"
 
-        def done(upscaled: list[str], skipped: list[tuple[str, str]], failed: list[tuple[str, str]]) -> None:
+        def done(upscaled: list[tuple[str, str]], skipped: list[tuple[str, str]],
+                 failed: list[tuple[str, str]]) -> None:
+            made = [result for _photo, result in upscaled]
             if upscaled:
                 try:
-                    tag_store().add(upscaled, [ai_upscale.UPSCALED_TAG])
+                    if as_new:
+                        tag_store().carry(upscaled)                # a new photo has its original's tags…
+                    tag_store().add(made, [ai_upscale.UPSCALED_TAG])   # …and "upscaled"
                 except OSError as e:
-                    QMessageBox.warning(self.window(), "AI Upscale", f"Couldn't save the “upscaled” tag: {e}")
+                    QMessageBox.warning(self.window(), "AI Upscale", f"Couldn't save the tags: {e}")
                 tags_changed()
-            if THUMBS is not None:
-                THUMBS.forget(upscaled)
+            if THUMBS is not None and not as_new:
+                THUMBS.forget(made)
             self.grid.viewport().update()
             self.list.viewport().update()
             note = f"Upscaled {len(upscaled):,} photo{'s' if len(upscaled) != 1 else ''} 2×"
+            if as_new and upscaled:
+                note += " — saved beside the original" + ("s" if len(upscaled) != 1 else "")
             if skipped:
                 note += f"; {len(skipped):,} already large"
             if failed:
                 note += f"; {len(failed):,} couldn't be"
             self._airdrop_noted(note + ".")
 
-        run = upscale_window.UpscaleRun(self.window(), photos, engine, done)
+        run = upscale_window.UpscaleRun(self.window(), photos, engine, done, as_new=as_new)
         run.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         run.open()
 

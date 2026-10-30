@@ -13,9 +13,15 @@ The models are 4× networks: the photo is upscaled 4× by the network and brough
 — the usual way to get 2× out of them, and sharper than running the network on a halved photo. The best
 general-photo model found is used (`PREFERRED`); anime and digital-art models are passed over.
 
-Each photo is saved like a crop (batch_crop.encode_like / write_in_place): its format, EXIF (pixel size
-updated), ICC profile, XMP, tags and dates kept. Photos over ~12 MP are left alone (2× would be ~50 MP and
-the network's pass ~200 MP). GIFs and RAW files are left out, as for crops; HDR comes out standard range.
+Each photo is saved like a crop (batch_crop.encode_like): its format, EXIF (pixel size updated), ICC
+profile, XMP, tags and dates kept — in place (write_in_place), or as a new photo beside it, "name
+(upscaled).ext" (write_beside: the same metadata, extended attributes and created/modified dates; its tags
+are the caller's to carry over). Photos over ~12 MP are left alone (2× would be ~50 MP and the network's
+pass ~200 MP). GIFs and RAW files are left out, as for crops; HDR comes out standard range.
+
+Progress: the engine prints how far its pass is, a percentage per tile ("42.50%"), as Upscayl's own app
+reads it; `upscale` reports each photo in stages — reading, the network's pass (most of the time), saving —
+so a window can show a real bar. Stop kills the engine mid-pass and leaves the photo as it was.
 No Qt here (upscale_window.py is the window), so it's testable on its own.
 """
 from __future__ import annotations
@@ -27,8 +33,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, NamedTuple
 
 import batch_crop
 
@@ -43,6 +52,9 @@ PREFERRED = ("upscayl-standard-4x", "realesrgan-x4plus", "high-fidelity-4x", "up
              "realesr-general-x4v3", "realesrnet-x4plus")
 AVOID = ("anime", "digital-art", "digital_art", "cartoon")
 APP_DIRS = [Path("/Applications"), Path.home() / "Applications"]
+NEW_LABEL = "upscaled"                       # a new photo is "name (upscaled).ext"
+READ_DONE, ENGINE_DONE = 0.04, 0.92          # of one photo: reading it, then the network's pass, then saving
+_PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "Safe Finder" / "Real-ESRGAN"
 
 
@@ -52,6 +64,19 @@ class UpscaleError(Exception):
 
 class Skipped(UpscaleError):
     """A photo that doesn't need it (already large)."""
+
+
+class Stopped(UpscaleError):
+    """Stopped during the network's pass: the photo is left as it was."""
+
+
+class Upscaled(NamedTuple):
+    path: str                   # the photo itself, or the new one beside it
+    width: int
+    height: int
+
+
+Progress = Callable[[str, float], None]     # stage ("read", "engine", "save"), how much of this photo is done
 
 
 @dataclass(frozen=True)
@@ -162,25 +187,57 @@ def can_upscale(path: str) -> bool:
     return batch_crop.can_crop(path)
 
 
-def run_engine(engine: Engine, src_png: str, out_png: str) -> None:
-    """One pass of the network. Raises UpscaleError with what the engine said when it fails."""
+def run_engine(engine: Engine, src_png: str, out_png: str, on_percent: Callable[[float], None] | None = None,
+               stop: threading.Event | None = None) -> None:
+    """One pass of the network. Its percentages (a line per tile) go to `on_percent`, 0–1, as they come;
+    `stop` kills it (Stopped). Raises UpscaleError with what the engine said when it fails."""
     cmd = [engine.binary, "-i", src_png, "-o", out_png, "-s", str(engine.scale), "-m", engine.models,
            "-n", engine.model, "-f", "png"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT,
-                           cwd=os.path.dirname(engine.binary) or None)
-    except subprocess.TimeoutExpired as e:
-        raise UpscaleError(f"the engine took over {TIMEOUT // 60} minutes") from e
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+                                cwd=os.path.dirname(engine.binary) or None)
     except OSError as e:
         raise UpscaleError(f"the engine wouldn't start ({e})") from e
-    if r.returncode != 0 or not os.path.isfile(out_png):
-        said = [line.strip() for line in (r.stderr + "\n" + r.stdout).splitlines() if line.strip()]
-        raise UpscaleError("the engine failed" + (f": {said[-1]}" if said else f" (exit {r.returncode})"))
+    said: list[str] = []
+
+    def read() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:                   # "\r"-updated lines split too (universal newlines)
+            line = line.strip()
+            m = _PERCENT.fullmatch(line)
+            if m:
+                if on_percent is not None:
+                    on_percent(min(1.0, float(m.group(1)) / 100))
+            elif line:
+                said.append(line)
+                del said[:-20]
+
+    reader = threading.Thread(target=read, name="esrgan-output", daemon=True)
+    reader.start()
+    deadline = time.monotonic() + TIMEOUT
+    try:
+        while reader.is_alive():
+            reader.join(0.1)
+            if stop is not None and stop.is_set():
+                raise Stopped("stopped")
+            if time.monotonic() > deadline:
+                raise UpscaleError(f"the engine took over {TIMEOUT // 60} minutes")
+        code = proc.wait()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    if code != 0 or not os.path.isfile(out_png):
+        raise UpscaleError("the engine failed" + (f": {said[-1]}" if said else f" (exit {code})"))
 
 
-def upscale(engine: Engine, path: str, factor: int = FACTOR) -> tuple[int, int]:
-    """Upscales one photo `factor`× in place. Returns its new size. Raises Skipped (already large),
-    UpscaleError or OSError, and leaves the photo as it was then."""
+def upscale(engine: Engine, path: str, factor: int = FACTOR, *, as_new: bool = False,
+            progress: Progress | None = None, stop: threading.Event | None = None) -> Upscaled:
+    """Upscales one photo `factor`× — in place, or (`as_new`) into a new photo beside it. Returns where it
+    went and its size. `progress` hears how far along it is; `stop` ends the network's pass (Stopped).
+    Raises Skipped (already large), UpscaleError or OSError, and leaves the photo as it was then."""
+    report = progress or (lambda _stage, _done: None)
+    report("read", 0.0)
     try:
         src = batch_crop.open_upright(path)
     except batch_crop.CropError as e:
@@ -194,7 +251,9 @@ def upscale(engine: Engine, path: str, factor: int = FACTOR) -> tuple[int, int]:
     with tempfile.TemporaryDirectory(prefix="safe-finder-upscale-") as td:
         inp, out = os.path.join(td, "in.png"), os.path.join(td, "out.png")
         src.image.convert("RGBA" if alpha else "RGB").save(inp)
-        run_engine(engine, inp, out)
+        report("engine", READ_DONE)
+        run_engine(engine, inp, out, lambda p: report("engine", READ_DONE + (ENGINE_DONE - READ_DONE) * p), stop)
+        report("save", ENGINE_DONE)
         try:
             with batch_crop.Image.open(out) as made:
                 made.load()
@@ -209,16 +268,24 @@ def upscale(engine: Engine, path: str, factor: int = FACTOR) -> tuple[int, int]:
         data = batch_crop.encode_like(src, big)
     except batch_crop.CropError as e:
         raise UpscaleError(str(e)) from e
-    batch_crop.write_in_place(path, data)
-    return target
+    report("save", (ENGINE_DONE + 1) / 2)
+    if as_new:
+        made = batch_crop.write_beside(path, data, NEW_LABEL)
+    else:
+        batch_crop.write_in_place(path, data)
+        made = path
+    report("save", 1.0)
+    return Upscaled(made, *target)
 
 
-if __name__ == "__main__":                   # python3 mac/ai_upscale.py photo.jpg … — upscale from the shell
+if __name__ == "__main__":                   # python3 mac/ai_upscale.py [--new] photo.jpg … — from the shell
     e = find_engine()
     if e is None:
         sys.exit(f"No Real-ESRGAN engine found — install Upscayl ({UPSCAYL_URL}) and try again.")
-    for p in sys.argv[1:]:
+    new = "--new" in sys.argv[1:]
+    for p in (a for a in sys.argv[1:] if a != "--new"):
         try:
-            print(p, "→", "×".join(map(str, upscale(e, p))), "with", e.describe())
+            r = upscale(e, p, as_new=new)
+            print(p, "→", r.path if new else "", f"{r.width}×{r.height}", "with", e.describe())
         except UpscaleError as err:
             print(p, "— left as it was:", err)

@@ -1184,7 +1184,22 @@ only. The engine isn't shipped — it's found in the free Upscayl app (searched 
 digital-art. The network's 4× result is Lanczos'd to exactly 2× (`-s` must match the model's own factor).
 Saved through `batch_crop.open_upright` / `encode_like` / `write_in_place` (split out of the crop's
 `render` for this), so format, EXIF, ICC, XMP, the tag marker and dates are kept; tagged "upscaled".
-Over 12.3 MP is skipped (the 4× pass would be ~200 MP). Asked first (in place is irreversible).
+Over 12.3 MP is skipped (the 4× pass would be ~200 MP).
+
+Asked first (`upscale_window.ask_how`, QSettings `upscale/save`, Save as New the first time): **Replace** (in
+place) or **Save as New** — `batch_crop.write_beside` writes "name (upscaled).ext" / "(upscaled 2)" next to the
+original, never replacing anything (temp + fsync + `os.link`, which fails on a taken name; exFAT: created
+under its name, no attributes copied since they'd become `._` files), with the original's xattrs *except* the
+tag marker, its mode and its created/modified dates; Safe Finder then `carry`s the original's tags to it
+and adds "upscaled" (the marker is rewritten by the store for the new path).
+
+Progress (Oct 30): the engine runs under `Popen` with stderr read line by line — realesrgan-ncnn-vulkan /
+upscayl-bin print "NN.NN%" per tile (what Upscayl's own UI reads). `upscale` reports stages per photo —
+read (0–4%), the pass (4–92%, by those percentages), save — and the window's bar (0–1000) shows
+(photos done + this one's fraction) / n, never backwards within a photo, with the time left after 3 s.
+An engine that prints no percentages gets a time-based estimate (mean of the passes timed so far, 30 s
+for the first, capped at 95% of the pass). Stop kills the engine at once (`Stopped`, photo untouched)
+instead of waiting for the photo in hand.
 
 Considered and not used: Apple's VideoToolbox ML super-resolution (`VTSuperResolutionScalerConfiguration`,
 input type image) — built in, but stills are limited to 1920 px tall on macOS (tiling needed) and its API

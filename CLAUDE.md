@@ -128,8 +128,9 @@ actions the app makes no network calls.
   shape) — and each gets the "cropped" tag; the Edit screen and the photo editor tag their crops too and
   remember them for "Last Crop". Safe Finder's twin: right-click ▸ Crop… (`mac/batch_crop.py`,
   `mac/crop_window.py`, same arithmetic — `docs/feature-notes.md` §6i). Safe Finder also has
-  right-click ▸ **AI Upscale 2×** — real Real-ESRGAN (Upscayl's engine) on the Mac, in place, tagged
-  "upscaled" (`mac/ai_upscale.py`, §6l); the iPhone's "AI Upscale" is Lanczos + denoise + sharpen.
+  right-click ▸ **AI Upscale 2×** — real Real-ESRGAN (Upscayl's engine) on the Mac, in place or saved as a
+  new "name (upscaled)" photo with the same metadata, dates and tags, tagged "upscaled" (`mac/ai_upscale.py`,
+  §6l); the iPhone's "AI Upscale" is Lanczos + denoise + sharpen.
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,
   "Add from iOS Album" (import then delete the iOS originals), save drive media
   to Photos, capture/export HDR-preserving video frames. (`PhotosLibraryView`,
