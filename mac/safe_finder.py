@@ -27,6 +27,8 @@ copied.
 
 Crop: select photos, right-click ▸ Crop… — one crop, drawn on the first, goes on all of them in place
 and each is tagged "cropped" (crop_window.py / batch_crop.py, the iPhone app's Crop screen on the Mac).
+AI Upscale 2×: right-click ▸ AI Upscale 2×… — Real-ESRGAN on this Mac (Upscayl's engine), in place, tagged
+"upscaled" (ai_upscale.py / upscale_window.py).
 
 Run:  double-click "Safe Finder.command" next to this file, or
       mac/.venv/bin/python mac/safe_finder.py [--from FOLDER] [--to FOLDER]
@@ -3292,6 +3294,8 @@ class Pane(QWidget):
             if photos:
                 menu.addAction("Crop…" if len(photos) == 1 else f"Crop {len(photos)} Photos…",
                                lambda: self.crop_photos(photos))
+                menu.addAction("AI Upscale 2×…" if len(photos) == 1 else f"AI Upscale {len(photos)} Photos 2×…",
+                               lambda: self.ai_upscale(photos))
             menu.addAction("Move to Trash", self.delete_selection).setShortcut(QKeySequence("Ctrl+Backspace"))
             menu.addSeparator()
         if self.location == VIDEOS:
@@ -3337,6 +3341,56 @@ class Pane(QWidget):
         dlg = crop_window.CropDialog(self.window(), photos, self.settings, done)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.open()
+
+    # -- AI upscale (ai_upscale.py / upscale_window.py — Real-ESRGAN on this Mac)
+    def ai_upscale(self, paths: list[str]) -> None:
+        """Right-click ▸ AI Upscale 2×: each photo upscaled 2× by Real-ESRGAN, in place, tagged "upscaled".
+        Without an engine on this Mac yet, says how to get one (or lets one be picked)."""
+        import ai_upscale
+        import upscale_window
+        photos = [p for p in paths if ai_upscale.can_upscale(p)]
+        if not photos:
+            QMessageBox.information(self.window(), "AI Upscale", "None of these can be upscaled here — JPEG, HEIC, "
+                                    "PNG, WebP, TIFF and BMP photos can (HEIC needs pillow-heif; run mac/run.sh once).")
+            return
+        engine = ai_upscale.find_engine(self.settings.value("upscale/engine") or None)
+        if engine is None:
+            picked = upscale_window.ask_for_engine(self.window())
+            if picked is None:
+                return
+            engine, chosen = picked
+            self.settings.setValue("upscale/engine", chosen)
+        n = len(photos)
+        what = f"“{os.path.basename(photos[0])}”" if n == 1 else f"these {n:,} photos"
+        if QMessageBox.question(
+                self.window(), "AI Upscale",
+                f"Upscale {what} 2× with AI?\n\n{'It is' if n == 1 else 'They are'} replaced in place — format, "
+                f"capture date, location, tags and dates kept — and tagged “{ai_upscale.UPSCALED_TAG}”. Uses "
+                f"{engine.describe()} on this Mac; nothing is uploaded. Photos over 12 MP are left as they are.") \
+                != QMessageBox.StandardButton.Yes:
+            return
+
+        def done(upscaled: list[str], skipped: list[tuple[str, str]], failed: list[tuple[str, str]]) -> None:
+            if upscaled:
+                try:
+                    tag_store().add(upscaled, [ai_upscale.UPSCALED_TAG])
+                except OSError as e:
+                    QMessageBox.warning(self.window(), "AI Upscale", f"Couldn't save the “upscaled” tag: {e}")
+                tags_changed()
+            if THUMBS is not None:
+                THUMBS.forget(upscaled)
+            self.grid.viewport().update()
+            self.list.viewport().update()
+            note = f"Upscaled {len(upscaled):,} photo{'s' if len(upscaled) != 1 else ''} 2×"
+            if skipped:
+                note += f"; {len(skipped):,} already large"
+            if failed:
+                note += f"; {len(failed):,} couldn't be"
+            self._airdrop_noted(note + ".")
+
+        run = upscale_window.UpscaleRun(self.window(), photos, engine, done)
+        run.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        run.open()
 
     # -- tags (shared with the Photo Browser app — see shared_tags.py)
     def _tags_menu(self, menu: QMenu, paths: list[str]) -> None:

@@ -237,8 +237,21 @@ def upright_size(path: str) -> tuple[int, int]:
 _TURNS = {1: "ROTATE_270", 2: "ROTATE_180", 3: "ROTATE_90"}    # PIL's ROTATE_n is counter-clockwise
 
 
-def render(spec: CropSpec, path: str) -> bytes:
-    """The cropped photo, encoded like the original, checked by decoding it again. Raises CropError."""
+@dataclass
+class Source:
+    """A photo opened for rewriting: its pixels upright (EXIF orientation applied), and what saving new
+    pixels "like it" needs — its format and metadata. Shared with ai_upscale.py."""
+    image: "Image.Image"
+    fmt: str
+    info: dict
+    exif: "Image.Exif"
+    sampling: int                   # a JPEG's chroma subsampling, else -1
+    text: dict                      # a PNG's text chunks
+    tiff_tags: dict                 # a TIFF's descriptive tags
+
+
+def open_upright(path: str) -> Source:
+    """The photo, read and turned upright. Raises CropError."""
     try:
         src = Image.open(path)
         src.load()
@@ -251,8 +264,15 @@ def render(spec: CropSpec, path: str) -> bytes:
     exif = src.getexif()
     sampling = JpegImagePlugin.get_sampling(src) if fmt == "JPEG" else -1
     text = {k: v for k, v in info.items() if isinstance(v, str)} if fmt == "PNG" else {}
+    tags = getattr(src, "tag_v2", {}) if fmt == "TIFF" else {}
+    tiff_tags = {t: tags[t] for t in _TIFF_KEPT if t in tags}
+    return Source(ImageOps.exif_transpose(src) or src, fmt, info, exif, sampling, text, tiff_tags)
 
-    im = ImageOps.exif_transpose(src) or src
+
+def render(spec: CropSpec, path: str) -> bytes:
+    """The cropped photo, encoded like the original, checked by decoding it again. Raises CropError."""
+    src = open_upright(path)
+    im = src.image
     q = spec.quarters % 4
     if q:
         im = im.transpose(getattr(Image.Transpose, _TURNS[q]))
@@ -260,8 +280,15 @@ def render(spec: CropSpec, path: str) -> bytes:
     box = pixel_box(spec.rect_for(w, h), w, h)
     if box != (0, 0, w, h):
         im = im.crop(box)
-    w, h = im.size
+    return encode_like(src, im)
 
+
+def encode_like(src: Source, im: "Image.Image") -> bytes:
+    """New pixels for `src`'s photo, saved in its format with its metadata — EXIF (orientation 1, the
+    new pixel size), ICC profile, XMP, a PNG's text, a TIFF's tags — and checked by decoding them again.
+    Raises CropError."""
+    fmt, info, exif, sampling, text = src.fmt, src.info, src.exif, src.sampling, src.text
+    w, h = im.size
     if _ORIENTATION in exif:
         exif[_ORIENTATION] = 1
     sub = exif.get_ifd(_EXIF_IFD)
@@ -271,8 +298,7 @@ def render(spec: CropSpec, path: str) -> bytes:
         sub[_PIXEL_Y] = h
     params: dict = {}
     if fmt == "TIFF":                              # its metadata is its own tag directory: the descriptive tags
-        tags = getattr(src, "tag_v2", {})
-        params["tiffinfo"] = {t: tags[t] for t in _TIFF_KEPT if t in tags}
+        params["tiffinfo"] = dict(src.tiff_tags)
     elif len(exif):
         params["exif"] = exif.tobytes()
     if info.get("icc_profile"):

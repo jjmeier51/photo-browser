@@ -337,6 +337,26 @@ pillow-heif), PNG, WebP, TIFF and BMP can be cropped; GIFs and RAW files can't. 
 standard range here (the iPhone app keeps HDR). A photo that can't be read is left as it was and
 listed at the end.
 
+### AI Upscale 2× (`ai_upscale.py`, `upscale_window.py`)
+
+Select photos, right-click ▸ **AI Upscale 2×…** (or **AI Upscale N Photos 2×…**). Each photo is upscaled
+by **Real-ESRGAN** — a real super-resolution neural network, not a resize — running on your Mac's graphics
+chip; nothing is uploaded. Safe Finder asks first, then upscales them one at a time (**Stop** ends after the
+photo in hand), replaces each in place — same format, capture date, location, colour profile, tags and
+dates — and tags it "upscaled" (the iPhone app's tag for its upscales).
+
+Real-ESRGAN isn't part of macOS. The easy way to get it is the free **Upscayl** app
+([upscayl.org](https://upscayl.org), or `brew install --cask upscayl`): install it and Safe Finder finds
+its engine and models on its own. A `realesrgan-ncnn-vulkan` release works too — unzip it into
+`~/Library/Application Support/Safe Finder/Real-ESRGAN` — or point Safe Finder at either with **Choose
+Engine…** the first time (remembered). The best general-photo model found is used (Upscayl's standard
+model, else `realesrgan-x4plus`; anime and digital-art models are passed over). The models are 4×: the
+network upscales 4× and the result is brought to exactly 2× with Lanczos. Photos over 12 MP are left as they
+are; GIFs and RAW files can't be upscaled; HDR photos come out standard range. From the shell:
+`python3 mac/ai_upscale.py photo.jpg …`.
+
+(The iPhone app's "AI Upscale" is not a neural network — it's Lanczos with denoise and sharpen.)
+
 ### Download a SimpCity thread into a person's folder (`simpcity_downloader.py`)
 
 Right-click a person's folder (or the empty area inside it) ▸ **Download from SimpCity…**, paste the

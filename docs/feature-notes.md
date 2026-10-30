@@ -1174,6 +1174,23 @@ tone-mapped) and ImageIO previews (RAW), written as JPEGs straight into the thum
 - Tested with a stand-in speaking the same protocol (`SAFE_FINDER_THUMB_HELPER` names one); the Swift
   itself is built on first use on the Mac.
 
+## 6l. Safe Finder AI Upscale 2× — `mac/ai_upscale.py`, `mac/upscale_window.py` (Oct 30, 2026)
+
+True AI upscaling on the Mac: Real-ESRGAN (realesrgan-ncnn-vulkan, Vulkan via MoltenVK on the GPU), local
+only. The engine isn't shipped — it's found in the free Upscayl app (searched inside the bundle for
+`upscayl-bin` and any folder of `.param`/`.bin` models, since Upscayl's layout isn't documented), in
+`~/Library/Application Support/Safe Finder/Real-ESRGAN`, on the PATH, or picked by hand (QSettings
+`upscale/engine`). Model: `PREFERRED` order (upscayl-standard-4x, realesrgan-x4plus, …), never anime /
+digital-art. The network's 4× result is Lanczos'd to exactly 2× (`-s` must match the model's own factor).
+Saved through `batch_crop.open_upright` / `encode_like` / `write_in_place` (split out of the crop's
+`render` for this), so format, EXIF, ICC, XMP, the tag marker and dates are kept; tagged "upscaled".
+Over 12.3 MP is skipped (the 4× pass would be ~200 MP). Asked first (in place is irreversible).
+
+Considered and not used: Apple's VideoToolbox ML super-resolution (`VTSuperResolutionScalerConfiguration`,
+input type image) — built in, but stills are limited to 1920 px tall on macOS (tiling needed) and its API
+couldn't be checked from the sandbox this was written in; worth revisiting for a no-install path (and for
+the iPhone, whose "AI Upscale" is Lanczos + denoise + sharpen, not a network).
+
 ## 6a. WebM playback — `WebMPlayer.swift`
 
 AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,
