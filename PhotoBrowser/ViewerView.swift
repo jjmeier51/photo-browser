@@ -13,6 +13,11 @@ struct ViewerView: View {
     @State private var index: Int
     @State private var isZoomed = false
     @State private var chromeHidden = false      // single-tap hides all overlays
+    /// Moved on from the item the viewer opened on. Only that first page gets a video poster (the grid
+    /// tile, so the open lands on a picture); after a swipe a video starts on black and its own first
+    /// frame, as it always did — the small tile stretched full-screen and cross-faded into a different
+    /// frame made every swipe look smeared.
+    @State private var hasPaged = false
     @State private var showInfo = false
     @State private var headerDate: Date?
     @State private var coverSource = CoverFrameSource()
@@ -56,6 +61,7 @@ struct ViewerView: View {
             if let item = current {
                 PageView(item: item,
                          coverSource: coverSource,
+                         usePoster: !hasPaged,
                          infoShown: showInfo,
                          onDismiss: { dismiss() },
                          onInfo: { showInfo = true },
@@ -72,7 +78,7 @@ struct ViewerView: View {
             if let actionNote { toast(actionNote) }
         }
         .statusBarHidden(true)
-        .onChange(of: index) { isZoomed = false; if !slideshow { chromeHidden = false } }
+        .onChange(of: index) { isZoomed = false; hasPaged = true; if !slideshow { chromeHidden = false } }
         .sheet(isPresented: $showInfo) {
             if let current { InfoPanel(entry: current) }
         }
@@ -406,6 +412,7 @@ private struct PageView: View {
     @Environment(Library.self) private var library
     let item: Entry
     let coverSource: CoverFrameSource
+    var usePoster = true                    // a video's grid tile as its first picture (see `hasPaged`)
     var infoShown: Bool = false
     let onDismiss: () -> Void
     let onInfo: () -> Void
@@ -421,7 +428,7 @@ private struct PageView: View {
             WebMPage(url: item.url, onDismiss: onDismiss, onInfo: onInfo, onPrev: onPrev, onNext: onNext)
                 .ignoresSafeArea()
         } else if item.kind == .video {
-            VideoPage(url: item.url, poster: Thumbnailer.shared.cached(for: item),
+            VideoPage(url: item.url, poster: usePoster ? Thumbnailer.shared.cached(for: item) : nil,
                       coverSource: coverSource, infoShown: infoShown,
                       onDismiss: onDismiss, onInfo: onInfo,
                       onZoomChanged: onZoomChanged, onControlsHidden: onControlsHidden,

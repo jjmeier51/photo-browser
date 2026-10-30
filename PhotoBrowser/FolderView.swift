@@ -63,6 +63,7 @@ struct FolderView: View {
     @State private var filteredMemo = Memo<[Entry]>()
     @State private var bubblesMemo = Memo<[Entry]>()
     @State private var tagsMemo = Memo<[Library.TagCount]>()
+    @State private var tagNamesMemo = Memo<[String]>()
     @State private var locationsMemo = Memo<[LocationOption]>()
     @State private var yearsMemo = Memo<[Int]>()
     @State private var categoriesMemo = Memo<[CategoryOption]>()
@@ -2737,9 +2738,9 @@ struct FolderView: View {
                 // Defer so the Menu's dismissal doesn't swallow the alert (constraint #4).
                 DispatchQueue.main.async { showBulkTag = true }
             } label: { Label("Add Tag…", systemImage: "plus") }
-            if !library.allTags.isEmpty {
+            if !tagNames.isEmpty {
                 Divider()
-                ForEach(library.allTags, id: \.self) { tag in
+                ForEach(tagNames, id: \.self) { tag in
                     Button { toggleTag(tag, on: entries) } label: {
                         check(tag, !urls.isEmpty && urls.allSatisfy { library.hasTag(tag, $0) })
                     }
@@ -2747,6 +2748,13 @@ struct FolderView: View {
             }
         } label: { Label("Tags", systemImage: "number") }
         .menuOrder(.fixed)
+    }
+
+    /// Every tag in use, for the Tags menus — worked out once per tag change. SwiftUI builds a tile's
+    /// long-press menu each time it builds the tile, so `library.allTags` there (a pass over every
+    /// tagged file, twice) ran for every tile that scrolled into view.
+    private var tagNames: [String] {
+        tagNamesMemo.value(for: "\(library.labelsVersion)") { library.allTags }
     }
 
     /// The items the "Add Tag…" prompt applies to: a long-pressed item, else the selection.

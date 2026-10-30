@@ -1298,8 +1298,15 @@ Implemented from the improvement report's top items.
   setters (`setFavorite(_:for:)`, `setAI`, `setCaptions`); the remaining `UserDefaults` stores moved to
   `FilePrefs`.
 - **Viewer.** Opens on the grid tile, decodes at the screen's native size (`fitPixels`), and swaps in
-  a sharper decode (≤ 24 MP) once a zoom settles past 1.3×; videos show the tile as a poster until
-  `isReadyForDisplay`. A bottom bar carries Share, Favorite, Info and Delete.
+  a sharper decode (≤ 24 MP) once a zoom settles past 1.3×; the video the viewer opens on shows its
+  tile as a poster until `isReadyForDisplay` — only that one (Oct 30): after a swipe a video starts on
+  black and its own first frame, because the small tile (a frame Quick Look picked, not the first)
+  stretched full-screen and cross-faded into a different picture made every swipe look smeared. A
+  bottom bar carries Share, Favorite, Info and Delete.
+- **Tile menus are built with the tile** (Oct 30). SwiftUI evaluates `.contextMenu`'s items whenever it
+  builds a tile, not when the menu opens — so the Tags submenu's `library.allTags` (a pass over every
+  tagged file, twice) ran for each tile that scrolled into view, and grew with every tagged download.
+  The tag names are memoized on `labelsVersion` (`FolderView.tagNames`); keep per-tile menu work O(1).
 - **Status.** Confirmations are toasts (`showToast`); failures are notices titled with what failed;
   the activity pill opens a sheet with each job's progress and Stop (upscales); a "Drive disconnected"
   banner shows when the drive vanishes mid-session (checked every 4 s) and clears when it returns.
