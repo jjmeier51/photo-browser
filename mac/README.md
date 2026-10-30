@@ -397,6 +397,29 @@ are; GIFs and RAW files can't be upscaled; HDR photos come out standard range. F
 
 (The iPhone app's "AI Upscale" is not a neural network — it's Lanczos with denoise and sharpen.)
 
+### Erase Area — take a watermark off photos (`erase_window.py`, `retouch.py`)
+
+Select photos, right-click ▸ **Erase Area…** (or **Erase Area on N Photos…**). Drag a box over what should
+go — a watermark you added by mistake, a date stamp, a blemish; several boxes are fine (drag one to move
+it, a corner to resize, Delete or right-click to remove it). The boxes are fractions of the photo, like a
+crop, so one set fits every selected photo; ‹ › steps through them to check each.
+
+- **Just the Mark** (the default) erases only what stands out inside the boxes — the letters or the logo
+  — and keeps the photo between and under them. A see-through watermark (white or black text, a grey logo
+  at some opacity) is *taken back out*, so the real photo under it comes back, detail and all; its soft
+  edges, and any opaque or coloured mark, are filled from around it. **Sensitivity** sets how faint a mark
+  still counts — higher also takes more of the photo, so check **Original**, which shows what will go in
+  red.
+- **Whole Box** replaces everything inside the boxes, filled from around them with the photo's own grain
+  laid over it. Best for an opaque logo on a plain area; across a sharp edge (a face, a horizon) it can only
+  blur.
+
+The result shows as soon as a box is drawn. **Save as New** writes "name (retouched).jpg" beside each
+photo with the same metadata, dates and tags; **Replace** rewrites them in place. The results are tagged
+"retouched"; **Last Area** brings back the boxes used last. Photos where Just the Mark finds nothing in the
+boxes are left alone (and counted). It erases what you box; it doesn't look for watermarks on its own.
+(Needs numpy — `Safe Finder.command` installs it; rebuild the app with `build_safe_finder_app.sh`.)
+
 ### Download a SimpCity thread into a person's folder (`simpcity_downloader.py`)
 
 Right-click a person's folder (or the empty area inside it) ▸ **Download from SimpCity…**, paste the

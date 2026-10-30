@@ -26,7 +26,7 @@ INSTALL=1
 [ "${1:-}" = "--no-install" ] && INSTALL=0
 
 # 1. The virtual environment, with PyInstaller.
-if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c "import PySide6" 2>/dev/null; then
+if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c "import PySide6, numpy" 2>/dev/null; then
   echo "Setting up mac/.venv (once) …"
   python3 -m venv .venv
   .venv/bin/pip install --quiet --upgrade pip

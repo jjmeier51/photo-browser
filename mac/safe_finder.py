@@ -3625,6 +3625,8 @@ class Pane(QWidget):
                                lambda: self.crop_photos(photos))
                 menu.addAction("AI Upscale 2×…" if len(photos) == 1 else f"AI Upscale {len(photos)} Photos 2×…",
                                lambda: self.ai_upscale(photos))
+                menu.addAction("Erase Area…" if len(photos) == 1 else f"Erase Area on {len(photos)} Photos…",
+                               lambda: self.erase_area(photos))
             menu.addAction("Move to Trash", self.delete_selection).setShortcut(QKeySequence("Ctrl+Backspace"))
             menu.addSeparator()
         if self.location == VIDEOS:
@@ -3668,6 +3670,51 @@ class Pane(QWidget):
             self._airdrop_noted(note + (f"; {failed:,} couldn't be." if failed else "."))
 
         dlg = crop_window.CropDialog(self.window(), photos, self.settings, done)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.open()
+
+    def erase_area(self, paths: list[str]) -> None:
+        """Right-click ▸ Erase Area…: a watermark (or anything else) boxed on one photo, erased from all of
+        them — replaced, or saved as new photos with the originals' tags; the results tagged "retouched"."""
+        try:
+            import retouch
+        except ImportError:                      # numpy, added for this, not in an older mac/.venv yet
+            QMessageBox.information(self.window(), "Erase Area", "Erase Area needs numpy. Quit Safe Finder and open "
+                                    "“Safe Finder.command” again — it installs it — or run: "
+                                    "mac/.venv/bin/pip install numpy")
+            return
+        photos = [p for p in paths if retouch.can_erase(p)]
+        if not photos:
+            QMessageBox.information(self.window(), "Erase Area", "None of these can be retouched here — JPEG, HEIC, "
+                                    "PNG, WebP, TIFF and BMP photos can (HEIC needs pillow-heif; run mac/run.sh once).")
+            return
+        import erase_window
+
+        def done(erased: list[tuple[str, str]], as_new: bool, untouched: int, failed: int) -> None:
+            made = [result for _photo, result in erased]
+            if erased:
+                try:
+                    if as_new:
+                        tag_store().carry(erased)                  # a new photo has its original's tags…
+                    tag_store().add(made, [retouch.ERASED_TAG])    # …and "retouched"
+                except OSError as e:
+                    QMessageBox.warning(self.window(), "Erase Area", f"Couldn't save the tags: {e}")
+                tags_changed()
+            if THUMBS is not None and not as_new:
+                THUMBS.forget(made)
+            self.grid.viewport().update()
+            self.list.viewport().update()
+            n = len(erased)
+            note = f"Erased the area on {n:,} photo{'s' if n != 1 else ''}"
+            if as_new and n:
+                note += " — saved beside the original" + ("s" if n != 1 else "")
+            if untouched:
+                note += f"; no mark found on {untouched:,}"
+            if failed:
+                note += f"; {failed:,} couldn't be"
+            self._airdrop_noted(note + ".")
+
+        dlg = erase_window.EraseDialog(self.window(), photos, self.settings, done)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.open()
 

@@ -1260,6 +1260,35 @@ A press in a tile's blank space that never becomes a box is replayed to Qt as a 
 selects that tile; double-click, the context menu, drops (whole cell) and drags from a body are Qt's.
 Not overriding `indexAt` is deliberate: `QTreeView::setSelection` and drop targeting call it.
 
+## 6o. Safe Finder Erase Area — `mac/retouch.py`, `mac/erase_window.py` (Oct 30, 2026)
+
+For watermarks the person added by mistake (and stamps, blemishes): boxes as fractions (`EraseSpec`, like
+`CropSpec`), so one set fits a batch. It erases what's boxed — there's deliberately no detection of
+watermarks on its own.
+
+**Finding the mark** (`_find`): luminance vs a background median taken at 1/`_scale` (side // 300) over 9 coarse
+pixels (~36 px at 1200 px — a median at full scale with a stroke-sized window missed bold strokes'
+centres); only the dominant sign counts (a white mark is lighter; a photo edge strays both ways); then up to
+4 rounds of re-estimating the background from what isn't the mark (membrane fill across it, box-blurred so a
+missed island stands out — unblurred, a known pixel is its own background and the loop does nothing), grown
+by side // 400 px for the soft edges. Threshold 40 − 32 × sensitivity, default 0.35: on a busy synthetic
+photo 0.5 took 17 % of the box as "mark" vs 11 % at 0.35, with the whole mark caught either way.
+
+**Taking it out** (`_take_out`): a one-colour mark at opacity α left `(1 − α)·photo + α·ink` (ink 255 or 0 by
+the sign); α = median of (pixel − bg)/(ink − bg) over the stroke centres (eroded 1 px), kept when
+0.06 < α < 0.85 and the un-blended centres sit closer to the background than the marked ones did — those
+pixels are then the photo itself, not a fill. Measured on synthetic white 59 % text: mean error in the box
+15.5 → 1.5 with fill only → 0.8 with un-blending.
+
+**Filling** (`fill`): membrane (Laplace) fill, coarse to fine — 2×2 averages of known pixels down, the
+coarse answer up, 30 Jacobi passes per level — on the area around the marks only; then the photo's own grain
+(`_grain`: high-pass beside the hole, above/below/sides, clipped to 2.5× its robust spread so no edge comes
+along). Synthetic noise of the right strength still looked plastic; copied grain doesn't.
+
+Saving through `batch_crop` (`encode_like`, `write_in_place` / `write_beside` "… (retouched)"); Safe Finder
+carries tags to new photos and adds "retouched". numpy is new in `mac/requirements.txt` (the launchers now
+check for it; the menu says how to install it into an older `.venv`).
+
 ## 6a. WebM playback — `WebMPlayer.swift`
 
 AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,

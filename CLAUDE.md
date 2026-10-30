@@ -130,7 +130,9 @@ actions the app makes no network calls.
   `mac/crop_window.py`, same arithmetic — `docs/feature-notes.md` §6i). Safe Finder also has
   right-click ▸ **AI Upscale 2×** — real Real-ESRGAN (Upscayl's engine) on the Mac, in place or saved as a
   new "name (upscaled)" photo with the same metadata, dates and tags, tagged "upscaled" (`mac/ai_upscale.py`,
-  §6l); the iPhone's "AI Upscale" is Lanczos + denoise + sharpen.
+  §6l); the iPhone's "AI Upscale" is Lanczos + denoise + sharpen. And right-click ▸ **Erase Area…** — boxes
+  drawn once over a watermark/stamp on one photo, erased from every selected one (see-through marks taken
+  back out, the rest filled; Save as New or Replace; tagged "retouched" — `mac/retouch.py`, §6o).
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,
   "Add from iOS Album" (import then delete the iOS originals), save drive media
   to Photos, capture/export HDR-preserving video frames. (`PhotosLibraryView`,
