@@ -1193,6 +1193,17 @@ under its name, no attributes copied since they'd become `._` files), with the o
 tag marker, its mode and its created/modified dates; Safe Finder then `carry`s the original's tags to it
 and adds "upscaled" (the marker is rewritten by the store for the new path).
 
+Options (Oct 30, `UpscaleOptions`; QSettings `upscale/model`, `upscale/texture`): the model (`photo_models`,
+`MODEL_NOTES`, `with_model`) and **Keep texture** — `Image.blend` of the network's 2× with a Lanczos 2× of
+the original (default 0.25): the networks are trained to denoise, so grain goes; blending puts that share of
+the original's grain back while keeping most of the hallucinated sharpness (adding only the original's
+high-pass instead would double edges). Speed: the 4× intermediate comes back as `-f jpg` (stb, quality 100,
+no chroma subsampling) for opaque photos — PNG write + read of 192 MP was as slow as the pass — and
+`draft()` decodes it at half size (= the 2× target) in the JPEG decoder; the input PNG is `compress_level=1`;
+`-t` 256/400/512 by RAM (the engine's auto pick tops out at 200), retried once at auto (`_tile_failed`, for
+the session) on failure or a black result (`_looks_blank`); `lanes()` = 2 with ≥ 15 GB and several photos —
+`UpscaleRun` runs that many worker threads off one queue, the bar sums the photos in hand.
+
 Progress (Oct 30): the engine runs under `Popen` with stderr read line by line — realesrgan-ncnn-vulkan /
 upscayl-bin print "NN.NN%" per tile (what Upscayl's own UI reads). `upscale` reports stages per photo —
 read (0–4%), the pass (4–92%, by those percentages), save — and the window's bar (0–1000) shows

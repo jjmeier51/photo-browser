@@ -3691,11 +3691,21 @@ class Pane(QWidget):
                 return
             engine, chosen = picked
             self.settings.setValue("upscale/engine", chosen)
-        how = upscale_window.ask_how(self.window(), photos, engine, str(self.settings.value("upscale/save", "new")))
-        if how is None:
+        try:
+            texture = float(self.settings.value("upscale/texture", upscale_window.TEXTURE))
+        except (TypeError, ValueError):
+            texture = upscale_window.TEXTURE
+        choice = upscale_window.ask_options(self.window(), photos, engine,
+                                            str(self.settings.value("upscale/save", "new")),
+                                            self.settings.value("upscale/model") or None, texture)
+        if choice is None:
             return
-        self.settings.setValue("upscale/save", how)
-        as_new = how == "new"
+        self.settings.setValue("upscale/save", choice.how)
+        self.settings.setValue("upscale/model", choice.model)
+        self.settings.setValue("upscale/texture", choice.texture)
+        engine = ai_upscale.with_model(engine, choice.model)
+        as_new = choice.how == "new"
+        started = time.monotonic()
 
         def done(upscaled: list[tuple[str, str]], skipped: list[tuple[str, str]],
                  failed: list[tuple[str, str]]) -> None:
@@ -3715,13 +3725,16 @@ class Pane(QWidget):
             note = f"Upscaled {len(upscaled):,} photo{'s' if len(upscaled) != 1 else ''} 2×"
             if as_new and upscaled:
                 note += " — saved beside the original" + ("s" if len(upscaled) != 1 else "")
+            secs = time.monotonic() - started
+            note += f" in {secs / 60:.0f} min {secs % 60:.0f} s" if secs >= 60 else f" in {secs:.0f} s"
             if skipped:
                 note += f"; {len(skipped):,} already large"
             if failed:
                 note += f"; {len(failed):,} couldn't be"
             self._airdrop_noted(note + ".")
 
-        run = upscale_window.UpscaleRun(self.window(), photos, engine, done, as_new=as_new)
+        run = upscale_window.UpscaleRun(self.window(), photos, engine, done, as_new=as_new, texture=choice.texture,
+                                        lanes=ai_upscale.lanes(len(photos)))
         run.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         run.open()
 

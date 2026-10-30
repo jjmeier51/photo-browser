@@ -356,7 +356,15 @@ listed at the end.
 
 Select photos, right-click ▸ **AI Upscale 2×…** (or **AI Upscale N Photos 2×…**). Each photo is upscaled
 by **Real-ESRGAN** — a real super-resolution neural network, not a resize — running on your Mac's graphics
-chip; nothing is uploaded. Safe Finder asks first how to save them:
+chip; nothing is uploaded. Safe Finder asks first, with three choices (each remembered for next time):
+
+- **Model** — the photo models beside the engine, each with a note on what it's like. They differ a lot:
+  Upscayl Standard is clean and smooth; Remacri and High Fidelity keep more natural texture; UltraSharp is
+  very crisp and cleans noise away.
+- **Keep texture** (0–100 %, 25 % to start) — these networks are trained to clean noise away, and grain and
+  fine texture go with it. This blends that much of a plain enlargement of the original back in: the
+  original's grain at that strength, most of the AI sharpness kept. 20–40 % looks natural on most photos.
+- **Save as New** or **Replace**:
 
 - **Save as New** (the first time's default) puts each upscale beside its photo as "name (upscaled).jpg"
   ("(upscaled 2)" if that's taken) and leaves the original as it is. The new photo carries everything the
@@ -365,9 +373,17 @@ chip; nothing is uploaded. Safe Finder asks first how to save them:
 - **Replace** rewrites each photo in place, keeping all of that.
 
 Either way the result is tagged "upscaled" (the iPhone app's tag for its upscales), and the answer is
-offered first next time. The photos go one at a time, and the bar follows the network as it works
-through each one (Real-ESRGAN reports its progress tile by tile), with the time left; **Stop** ends at
-once and leaves the photo in hand as it was.
+offered first next time. The bar follows the network as it works through each photo (Real-ESRGAN reports
+its progress tile by tile), with the time left; **Stop** ends at once and leaves the photos in hand as they
+were. The status line says how long it took.
+
+**Speed.** The network runs on the Mac's GPU. What's done around it to go faster: the network's 4× result
+comes back as a quality-100 JPEG rather than a PNG (for a 12 MP photo that's a 192 MP image, and PNG made
+handing it over about as slow as the network itself) and is decoded straight at the 2× size; Macs with
+more memory use bigger tiles than the engine picks on its own (fewer, larger GPU jobs — if that ever fails
+or comes out black, the photo is done again at the engine's size and the rest follow); and with 16 GB or
+more, two photos are upscaled at once, so the GPU works on one while the other is read or saved.
+`SAFE_FINDER_UPSCALE_TILE=200` (or `0` for the engine's own pick) overrides the tile size.
 
 Real-ESRGAN isn't part of macOS. The easy way to get it is the free **Upscayl** app
 ([upscayl.org](https://upscayl.org), or `brew install --cask upscayl`): install it and Safe Finder finds
