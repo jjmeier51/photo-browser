@@ -54,6 +54,7 @@ import unicodedata
 import zlib
 from collections import OrderedDict, deque
 from pathlib import Path
+from typing import NamedTuple
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -635,12 +636,16 @@ class _Carried(QObject):
 
 _CARRYING: set[_Carried] = set()
 _CARRIED_AT: dict[str, float] = {}
+TRANSFERRING = False                # a move or copy is running: folders are re-checked once it's done
 
 
 def check_carried(folder: str) -> None:
     """A folder was opened: files moved or copied into it by Finder (or the Files app, cp, AirDrop…)
     bring their tags in the file itself, and tags changed in Finder show up — read on a thread, squared
-    with the tables here (see shared_tags.py, "Tags that travel with the file")."""
+    with the tables here (see shared_tags.py, "Tags that travel with the file"). Not while a transfer
+    runs — its folders change by the second, and the transfer carries its own files' tags at the end."""
+    if TRANSFERRING:
+        return
     now = time.monotonic()
     if now - _CARRIED_AT.get(folder, 0.0) < 3:
         return
@@ -1908,7 +1913,8 @@ class FolderSizer(QObject):
 
     def request(self, paths: list[str]) -> None:
         with self._lock:
-            wanted = [p for p in paths if p not in self.sizes and p not in self._queue]
+            queued = set(self._queue)
+            wanted = [p for p in paths if p not in self.sizes and p not in queued]
             self._queue = wanted + self._queue              # what's on screen now goes first
         if wanted:
             self._wake.set()
@@ -2189,6 +2195,12 @@ class PaneModel(QSortFilterProxyModel):
         self.size_filter: tuple[int | None, int | None] | None = None
         self.root_path = ""                          # the folder listed — only its own rows are filtered
         self.setDynamicSortFilter(True)
+        # Sizes come in one folder at a time: the order (by size) and the size filter catch up a few
+        # times a second, not once per folder — a full re-sort per folder was quadratic in a big listing.
+        self._resort = QTimer(self)
+        self._resort.setSingleShot(True)
+        self._resort.setInterval(200)
+        self._resort.timeout.connect(self.invalidate)
 
     def set_size_filter(self, bounds: tuple[int | None, int | None] | None) -> None:
         self.size_filter = bounds
@@ -2232,8 +2244,8 @@ class PaneModel(QSortFilterProxyModel):
         if not src_idx.isValid():
             return
         self._keys.pop(src_idx.internalId(), None)
-        if self.key == "size" or self.size_filter is not None:
-            self.invalidate()
+        if (self.key == "size" or self.size_filter is not None) and not self._resort.isActive():
+            self._resort.start()
         idx = self.mapFromSource(src_idx)
         if idx.isValid():
             cell = idx.siblingAtColumn(1)
@@ -2312,6 +2324,53 @@ class PaneModel(QSortFilterProxyModel):
 # ============================================================================ pane
 
 
+class Selection(NamedTuple):
+    """What's selected in a pane, read from the listing in one pass (no disk access)."""
+    paths: list[str]
+    files: int
+    file_bytes: int                  # the files' sizes, as the listing has them
+    folders: list[str]
+
+
+class FolderViews:
+    """How each place was last shown — as icons or as a list, and sorted how — so Back, Forward or
+    opening it again (after a relaunch too) shows it that way again, as Finder does: a folder of folders
+    left as a list by name is still a list by name after a look inside one of them as icons. A place
+    never shown before takes the view on screen. Shared by both panes; the most recent LIMIT places are
+    kept in the settings (a search's results only for the session)."""
+
+    LIMIT = 1000
+
+    def __init__(self, settings: QSettings) -> None:
+        self.settings = settings
+        self.views: OrderedDict[str, tuple[str, str, str]] = OrderedDict()
+        try:
+            raw = json.loads(str(settings.value("views", "") or "{}"))
+        except ValueError:
+            raw = {}
+        for loc, v in (raw.items() if isinstance(raw, dict) else ()):
+            if isinstance(v, list) and len(v) == 3 and v[0] in ("grid", "list") and v[1] in dict(SORT_KEYS) \
+                    and v[2] in ("asc", "desc"):
+                self.views[loc] = (v[0], v[1], v[2])
+
+    def get(self, loc: str) -> tuple[str, str, Qt.SortOrder] | None:
+        v = self.views.get(loc)
+        if v is None:
+            return None
+        return v[0], v[1], Qt.SortOrder.DescendingOrder if v[2] == "desc" else Qt.SortOrder.AscendingOrder
+
+    def put(self, loc: str, mode: str, key: str, order: Qt.SortOrder) -> None:
+        v = (mode, key, "desc" if order == Qt.SortOrder.DescendingOrder else "asc")
+        if self.views.get(loc) == v and next(reversed(self.views)) == loc:
+            return
+        self.views.pop(loc, None)
+        self.views[loc] = v
+        while len(self.views) > self.LIMIT:
+            self.views.popitem(last=False)
+        self.settings.setValue("views", json.dumps({k: list(x) for k, x in self.views.items()
+                                                    if not k.startswith(SEARCH)}))
+
+
 class Pane(QWidget):
     """One Finder window's worth: header (back/forward, title, sort, search, view toggle), the
     views, path bar and status bar. Besides folders it shows two kinds of collection in the same
@@ -2324,10 +2383,13 @@ class Pane(QWidget):
     selection_changed = Signal()
     airdrop_note = Signal(str)           # lines from the AirDrop thread → the status line
 
-    def __init__(self, role: str, settings: QSettings) -> None:
+    def __init__(self, role: str, settings: QSettings, views: FolderViews | None = None) -> None:
         super().__init__()
         self.role = role                 # "From" | "To"
         self.settings = settings
+        self.views = views or FolderViews(settings)     # each place's own list/icons and sort
+        self._volume = ""                # the location's volume (a folder's)
+        self._free = ("", 0.0, 0)        # (volume, when, bytes): its free space, read now and then
         self.location = ""
         self.folder = ""                 # the last real folder: where a search starts, and returns to
         self.history: list[str] = []
@@ -2371,7 +2433,14 @@ class Pane(QWidget):
         self.scanner: FileScanner | EmptyFolderScanner | TagScanner | None = None
         # Folder sizes arrive from the worker thread; the listing asks for its folders' as it loads.
         sizer().ready.connect(self._size_ready, Qt.ConnectionType.QueuedConnection)
-        self.fs.directoryLoaded.connect(lambda _p: (self._request_sizes(), self._prefetch_thumbs()))
+        # A folder files are pouring into is re-listed (directoryLoaded) many times a second: its sizes and
+        # thumbnails are asked for at most a few times a second — once a second while a transfer runs —
+        # not on every one.
+        self._listing_soon = QTimer(self)
+        self._listing_soon.setSingleShot(True)
+        self._listing_soon.timeout.connect(lambda: (self._request_sizes(), self._prefetch_thumbs()))
+        self.fs.directoryLoaded.connect(lambda _p: None if self._listing_soon.isActive()
+                                        else self._listing_soon.start(1000 if TRANSFERRING else 150))
         self.fs.directoryLoaded.connect(lambda p: check_carried(p) if p == self.location else None)
 
         root = QVBoxLayout(self)
@@ -2467,7 +2536,15 @@ class Pane(QWidget):
         self.grid.setModel(self.model)
         self.list.setModel(self.model)
         self.list.setSelectionModel(self.grid.selectionModel())
-        self.grid.selectionModel().selectionChanged.connect(lambda *_: self.selection_changed.emit())
+        # Told once per burst, not per change: when a move takes selected originals away one by one,
+        # each removal changes the selection, and re-reading a selection of thousands that often froze
+        # the window.
+        self._sel_soon = QTimer(self)
+        self._sel_soon.setSingleShot(True)
+        self._sel_soon.setInterval(60)
+        self._sel_soon.timeout.connect(self.selection_changed.emit)
+        self.grid.selectionModel().selectionChanged.connect(
+            lambda *_: None if self._sel_soon.isActive() else self._sel_soon.start())
         hdr = self.list.header()
         hdr.setSectionsClickable(True)
         hdr.setSortIndicatorShown(True)
@@ -2750,6 +2827,9 @@ class Pane(QWidget):
         self.settings.setValue(f"{self.role}/gap", px)
         self._relayout()
 
+    def mode(self) -> str:
+        return "grid" if self.stack.currentIndex() == 0 else "list"
+
     def set_mode(self, mode: str) -> None:
         self.stack.setCurrentIndex(0 if mode == "grid" else 1)
         self.grid_btn.setChecked(mode == "grid")
@@ -2757,6 +2837,23 @@ class Pane(QWidget):
         for w in self.view_controls:
             w.setVisible(mode == "grid")
         self.settings.setValue(f"{self.role}/mode", mode)
+        self._remember_view()
+
+    def _remember_view(self) -> None:
+        """This place is shown this way: keep it for when it's shown again (FolderViews)."""
+        if self.location:
+            self.views.put(self.location, self.mode(), *self.current_sort())
+
+    def _restore_view(self) -> None:
+        """Arrived somewhere shown before: back to the way it was shown then."""
+        saved = self.views.get(self.location)
+        if saved is None:
+            return
+        mode, key, order = saved
+        if mode != self.mode():
+            self.set_mode(mode)
+        if (key, order) != self.current_sort():
+            self.set_sort(key, order)
 
     # -- sorting
     def current_sort(self) -> tuple[str, Qt.SortOrder]:
@@ -2774,6 +2871,7 @@ class Pane(QWidget):
             self.settings.setValue(f"{self.role}/sort", key)
             self.settings.setValue(f"{self.role}/order", "desc" if order == Qt.SortOrder.DescendingOrder else "asc")
         self._apply_sort(key, order)
+        self._remember_view()
 
     def _apply_sort(self, key: str, order: Qt.SortOrder) -> None:
         self.model.set_sort(key, order)
@@ -2805,6 +2903,8 @@ class Pane(QWidget):
         path = os.path.abspath(path)
         if not os.path.isdir(path):
             return
+        if self.location and self.location != path:
+            self._remember_view()
         if record and self.location and self.location != path:
             self.history.append(self.location)
             self.future.clear()
@@ -2820,6 +2920,7 @@ class Pane(QWidget):
             self.search.blockSignals(False)
         self.location = self.folder = path
         self.model.root_path = path
+        self._restore_view()
         if THUMBS is not None:
             THUMBS.new_listing()
         idx = self.model.mapFromSource(self.fs.setRootPath(path))
@@ -2829,7 +2930,8 @@ class Pane(QWidget):
         self.grid.scrollToTop()
         self.list.scrollToTop()
         name = os.path.basename(path.rstrip(os.sep))
-        if engine.volume_root(Path(path)) == Path(path):
+        self._volume = str(engine.volume_root(Path(path)))
+        if self._volume == path:
             name = volume_name(Path(path))
         self.title.setText(name or path)
         self.title.setToolTip(path)
@@ -2881,6 +2983,8 @@ class Pane(QWidget):
         if self.location == loc:
             self._rescan()                                   # opening it again looks afresh
             return
+        if self.location:
+            self._remember_view()
         if record and self.location:
             self.history.append(self.location)
             self.future.clear()
@@ -2893,6 +2997,7 @@ class Pane(QWidget):
         self.grid.setRootIndex(QModelIndex())
         self.list.setRootIndex(QModelIndex())
         self._apply_sort(*self.results_sort)
+        self._restore_view()
         self.grid.clearSelection()
         self.grid.scrollToTop()
         self.list.scrollToTop()
@@ -3081,9 +3186,10 @@ class Pane(QWidget):
     def update_status(self) -> None:
         if not self.location or time.monotonic() - self._note_at < 1.5:
             return
-        selected = self.selected_paths()
+        picked = self.selection()
+        selected = picked.paths
         sel = len(selected)
-        chosen = self._selection_bytes(selected) if sel else 0
+        chosen = picked.file_bytes + sum(folder_size(p) or 0 for p in picked.folders)
         size_note = f" · {human(chosen)}" if chosen else ""
         tag_note = ""
         if sel == 1:
@@ -3107,14 +3213,24 @@ class Pane(QWidget):
         root = self.fs.index(self.location)
         n = self.fs.rowCount(root)
         shown = self.model.rowCount(self.model.mapFromSource(root))
-        free = engine.free_space(Path(self.location))
+        free = self._free_space()
         text = f"{sel} of {n} selected{size_note}" if sel else f"{n} item{'s' if n != 1 else ''}"
         if self.size_filter_key and shown != n:
             text += f" ({shown} shown — {dict(SIZE_FILTERS)[self.size_filter_key].lower()})"
         self.status.setText(f"{text}, {human(free)} available{tag_note}")
-        fs = MOUNTS.get(str(engine.volume_root(Path(self.location))), "")
+        fs = MOUNTS.get(self._volume, "")
         self.fs_chip.setText(FS_NAMES.get(fs, fs))
         self.fs_chip.setVisible(bool(fs))
+
+    def _free_space(self) -> int:
+        """The volume's free space, read again every few seconds at most: while files pour in, the status
+        line is redrawn many times a second, and a busy drive needn't be asked each time."""
+        now = time.monotonic()
+        vol, when, free = self._free
+        if vol != self._volume or now - when > 3:
+            free = engine.free_space(Path(self._volume or self.location))
+            self._free = (self._volume, now, free)
+        return free
 
     # -- selection / actions
     @staticmethod
@@ -3132,14 +3248,31 @@ class Pane(QWidget):
         return total
 
     def selected_paths(self) -> list[str]:
-        rows = self.grid.selectionModel().selectedIndexes()
-        seen, out = set(), []
-        for idx in rows:
-            path = self.model.filePath(idx.siblingAtColumn(0))
-            if path not in seen:
+        return self.selection().paths
+
+    def selection(self) -> Selection:
+        """The selected items in one pass over the selection's row ranges, kinds and sizes from the
+        listing itself — a selection of thousands is read in milliseconds, without touching the disk."""
+        src = self.model.sourceModel()
+        seen: set[str] = set()
+        paths: list[str] = []
+        folders: list[str] = []
+        files = nbytes = 0
+        for rng in self.grid.selectionModel().selection():
+            parent = rng.parent()
+            for row in range(rng.top(), rng.bottom() + 1):
+                idx = self.model.mapToSource(self.model.index(row, 0, parent))
+                path = src.filePath(idx)
+                if not path or path in seen:
+                    continue
                 seen.add(path)
-                out.append(path)
-        return out
+                paths.append(path)
+                if src.isDir(idx):
+                    folders.append(path)
+                else:
+                    files += 1
+                    nbytes += src.size(idx)
+        return Selection(paths, files, nbytes, folders)
 
     def open_index(self, idx: QModelIndex) -> None:
         path = self.model.filePath(idx.siblingAtColumn(0))
@@ -4391,7 +4524,7 @@ class MainWindow(QMainWindow):
         self.sidebar.tag_drop.connect(self._tag_dropped)
         self.sidebar.tag_renamed.connect(self._tag_renamed)
         self.src = Pane("From", self.settings)
-        self.dst = Pane("To", self.settings)
+        self.dst = Pane("To", self.settings, self.src.views)
         for pane in (self.src, self.dst):
             pane.activated.connect(self.set_active)
             pane.dropped.connect(lambda paths, dest: self.confirm_transfer(
@@ -4442,9 +4575,18 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self.bridge = _Bridge()
-        self.bridge.log.connect(self.panel.log.appendPlainText)
+        self.bridge.log.connect(self._log)
         self.bridge.progress.connect(self._progress)
         self.bridge.finished.connect(self._finished)
+        # The transfer reports every file (twice, when verifying); the panel shows the latest a few
+        # times a second and the log takes its lines in batches, so a run of thousands of small files
+        # never queues more work for the window than it can do.
+        self._log_lines: list[str] = []
+        self._latest: dict | None = None
+        self._panel_soon = QTimer(self)
+        self._panel_soon.setSingleShot(True)
+        self._panel_soon.setInterval(200)
+        self._panel_soon.timeout.connect(self._show_progress)
         THUMBS.ready.connect(lambda: (self.src.grid.viewport().update(), self.dst.grid.viewport().update()))
         tag_events().changed.connect(self._tags_changed)
 
@@ -4528,7 +4670,8 @@ class MainWindow(QMainWindow):
         else:
             self.copy_btn.setText("Copy")
             self.move_btn.setText("Move")
-        paths = self.src.selected_paths()
+        picked = self.src.selection()
+        paths, folders = picked.paths, picked.folders
         enabled = bool(paths) and bool(dest)
         self.copy_btn.setEnabled(enabled)
         self.move_btn.setEnabled(enabled)
@@ -4538,13 +4681,10 @@ class MainWindow(QMainWindow):
         if not dest:
             self.summary.setText("Open a folder on the right to move or copy into — the right pane is showing search results.")
             return
-        files = [p for p in paths if os.path.isfile(p)]
-        folders = [p for p in paths if p not in files]
-        size = sum(os.path.getsize(p) for p in files)
         known = [folder_size(p) for p in folders]
         bits = [f"{len(paths)} item{'s' if len(paths) != 1 else ''} selected"]
-        if files:
-            bits.append(f"{len(files)} file{'s' if len(files) != 1 else ''} · {human(size)}")
+        if picked.files:
+            bits.append(f"{picked.files} file{'s' if picked.files != 1 else ''} · {human(picked.file_bytes)}")
         if folders:
             folder_bytes = sum(k for k in known if k is not None)
             note = f" · {human(folder_bytes)}" if all(k is not None for k in known) else (f" · {human(folder_bytes)}+" if folder_bytes else "")
@@ -4571,6 +4711,8 @@ class MainWindow(QMainWindow):
             verb = "Moving" if sheet.move else "Copying"
             title = f"{verb} {what} to “{Path(dest).name or volume_name(Path(dest))}”"
             self.queue.append((sheet.plan, sheet.move, sheet.verify.isChecked(), title))
+            if sheet.move:
+                self._deselect(paths)
             if self.current is None:
                 self._start_next()
             else:
@@ -4579,9 +4721,19 @@ class MainWindow(QMainWindow):
         sheet.accepted.connect(accepted)
         sheet.open()
 
+    def _deselect(self, paths: list[str]) -> None:
+        """A move is starting: its originals leave the selection now, at once, rather than one by one
+        as each goes to the Trash."""
+        going = set(paths)
+        for pane in (self.src, self.dst):
+            if going.intersection(pane.selected_paths()):
+                pane.grid.clearSelection()
+
     def _start_next(self) -> None:
+        global TRANSFERRING
         if not self.queue:
             return
+        TRANSFERRING = True
         if self.current is None and not getattr(self, "_in_batch", False):
             self._batch: list[tuple[bool, str, str]] = []
             self._in_batch = True
@@ -4606,7 +4758,26 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QFile
         return bool(QFile.moveToTrash(str(p))) or engine.trash_with_finder(p)
 
+    def _log(self, line: str) -> None:
+        self._log_lines.append(line)
+        if not self._panel_soon.isActive():
+            self._panel_soon.start()
+
+    def _flush_log(self) -> None:
+        if self._log_lines:
+            self.panel.log.appendPlainText("\n".join(self._log_lines))
+            self._log_lines.clear()
+
     def _progress(self, d: dict) -> None:
+        self._latest = d
+        if not self._panel_soon.isActive():
+            self._panel_soon.start()
+
+    def _show_progress(self) -> None:
+        self._flush_log()
+        d, self._latest = self._latest, None
+        if d is None or self.current is None:
+            return
         now = time.time()
         t_last, b_last = self._last
         if now - t_last >= 0.5:
@@ -4617,6 +4788,10 @@ class MainWindow(QMainWindow):
                             d.get("name", ""), d.get("phase", ""), self._speed)
 
     def _finished(self, st: dict) -> None:
+        global TRANSFERRING
+        self._panel_soon.stop()
+        self._flush_log()
+        self._latest = None
         self.current = None
         self._carry_tags(st)
         sizer().clear()                                   # folder sizes on both sides changed
@@ -4677,6 +4852,11 @@ class MainWindow(QMainWindow):
             self.caffeinate.terminate()
             self.caffeinate = None
         self._in_batch = False
+        TRANSFERRING = False
+        for pane in (self.src, self.dst):                 # what check_carried passed over meanwhile
+            if not pane.is_virtual and pane.location:
+                _CARRIED_AT.pop(pane.location, None)
+                check_carried(pane.location)
         if len(self._batch) > 1:
             bad = sum(1 for r in self._batch if not r[0])
             ok = bad == 0

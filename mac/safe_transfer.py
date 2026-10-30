@@ -402,7 +402,7 @@ class Transfer:
                         self.placed.append((str(top.src), str(landed)))
                         for d in top.dirs:
                             rel = d.relative_to(top.dst)
-                            if (top.src / rel).is_dir() and (landed / rel).is_dir():
+                            if rel != Path(".") and (top.src / rel).is_dir() and (landed / rel).is_dir():
                                 self.placed.append((str(top.src / rel), str(landed / rel)))
                 if self.move and not self.stop.is_set():
                     if failed_here:

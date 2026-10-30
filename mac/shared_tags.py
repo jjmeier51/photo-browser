@@ -126,6 +126,16 @@ def clean(tags: Iterable) -> list[str]:
     return out
 
 
+def _within(key: str, roots: set[str]) -> bool:
+    """Whether a table key is one of `roots` or inside one of them."""
+    while key not in roots:
+        cut = key.rfind("/")
+        if cut <= 0:
+            return False
+        key = key[:cut]
+    return True
+
+
 def taggable(path: str) -> bool:
     """A file or folder Safe Finder tags: not hidden, not a gallery sidecar."""
     name = os.path.basename(path)
@@ -661,13 +671,19 @@ class TagStore:
 
     def forget(self, paths: Iterable[str]) -> int:
         """Items that are gone (to the Trash, or moved away): their tags — and, for a folder, the tags of
-        everything inside it — are dropped."""
-        dirty: dict[int, TagFile] = {}
-        n = 0
+        everything inside it — are dropped. One pass over each table however many went (a move of
+        thousands of loose files sends thousands)."""
+        gone: dict[int, tuple[TagFile, set[str]]] = {}
         for p in paths:
             t = self.table_for(p)
+            k = t.key(p)
+            if k is not None:
+                gone.setdefault(id(t), (t, set()))[1].add(k.rstrip("/"))
+        dirty: dict[int, TagFile] = {}
+        n = 0
+        for t, roots in gone.values():
             t.refresh(force=True)
-            keys = t.keys_under(p)
+            keys = [x for x in t.files if _within(x, roots)]
             for k in keys:
                 t.files.pop(k, None)
                 n += 1

@@ -197,12 +197,21 @@ whether there's room. Then:
   stops cleanly if the drive is unplugged.
 - **Eject** (sidebar ⏏ or the button after a transfer) flushes everything and unmounts the SSD
   properly.
+- **The window stays usable while it runs**, however many files: the files being moved leave the
+  selection as the move starts, and the progress bar, the log and the folders' listings catch up a few
+  times a second rather than once per file.
 
 **Sort** (the ≡ button in each pane's header) orders a folder by Name, Kind, Date Modified, Date
 Created, Date Added or Size, ascending or descending — folders first, names in Finder's natural
 order (IMG_2 before IMG_10). Clicking a list-view column does the same. Date Added is the day a
 file arrived in its folder, which macOS keeps per file on APFS; on the exFAT SSD it falls back to
-the creation date. Each pane remembers its sort.
+the creation date.
+
+**Each folder keeps its own look**, as in Finder: icons or list, and its sort. A folder full of folders
+left as a list by size is still a list by size when you come back to it with Back (or Forward, the path
+bar, or by opening it again — even after quitting), however the folder you were just in was shown. A
+folder you've never opened takes the look of the one you came from. All Videos, Empty Folders and a
+tag's files keep theirs too; the last 1,000 places are remembered, in either pane.
 
 **Search** (the field in each pane's header, or ⌘F) finds files by words in the name, by extension
 (`.heic`, `*.mov`, `ext:mp4,mov`) or by kind (`kind:video`, or the Kind menu — Images, Videos, RAW

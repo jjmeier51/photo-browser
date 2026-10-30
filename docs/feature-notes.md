@@ -1191,6 +1191,34 @@ input type image) — built in, but stills are limited to 1920 px tall on macOS 
 couldn't be checked from the sandbox this was written in; worth revisiting for a no-install path (and for
 the iPhone, whose "AI Upscale" is Lanczos + denoise + sharpen, not a network).
 
+## 6m. Safe Finder: each folder's own look, and the freeze in big moves — `mac/safe_finder.py` (Oct 30, 2026)
+
+**View memory (`FolderViews`).** Every place a pane shows keeps the look it was last shown in — mode
+(icons/list) and sort — recorded when a pane leaves it (and on every explicit change), restored when a
+pane arrives (`Pane.go` / `_show_results` → `_restore_view`). Recording on *leave* is the point: a folder
+whose look was only inherited still has to come back that way after Back, which "remember explicit
+choices only" gets wrong. A place never shown inherits the look on screen. One store for both panes,
+in QSettings `views` (JSON, last 1,000, LRU; search results session-only); collections keep the
+results sort, folders the folder sort. `{role}/mode` / `{role}/sort` stay as the pane's current look.
+
+**The freeze.** Moving many *loose* selected files: each top is trashed as it finishes, every removal
+shrank the selection, and each `selectionChanged` ran `update_actions` + `update_status` synchronously
+— both re-reading the whole selection (`os.path.isfile`/`getsize` per item, plus an O(n²)
+`p not in files`). Measured offscreen, 1,500 selected 2 KB files: the window couldn't take an event for
+**44.8 s** (the copy itself took 14 s); now the longest stall is ~0.3–0.9 s and the run takes ~6 s.
+Fixes: `selection_changed` is coalesced (60 ms); `Pane.selection()` reads paths, kinds and sizes from
+the model in one pass over the selection's row ranges (no disk); a move clears its originals from the
+selection when it starts (`MainWindow._deselect`); transfer progress and log lines are batched to the
+panel (200 ms — `QProgressBar.setValue` repaints the whole window synchronously); free space is read
+at most every 3 s; a folder's sizes/thumbnail prefetch run once per burst of `directoryLoaded` (which
+QFileSystemModel emits on every re-list of a changing folder — once a second while `TRANSFERRING`);
+folder-size results re-sort/re-filter once per burst, not per folder; `check_carried` stands aside
+while a transfer runs (re-run after); `TagStore.forget` makes one pass per table (5,000 trashed paths
+against a 22,500-key table: 4 s → 44 ms, on the UI thread at the end of a move). What's left under a
+~300 files/s stress is Qt re-listing and repainting both panes; real photos arrive far slower.
+Checked and ruled out offscreen: the thumbnail pool and the GIL switch interval made no measurable
+difference.
+
 ## 6a. WebM playback — `WebMPlayer.swift`
 
 AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,
