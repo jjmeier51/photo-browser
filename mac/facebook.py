@@ -42,7 +42,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 import social
 
@@ -204,13 +204,36 @@ def clean_name(s: str) -> str:
     return re.sub(r"^\(\d+\)\s*", "", s).strip()
 
 
+_FB_HOST = re.compile(r"^(?:[a-z0-9-]+\.)?(?:facebook\.com|fb\.com)$", re.I)
+_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*://", re.I)
+
+
 def start_url(link: str) -> str:
-    s = link.strip()
-    if not s.startswith("http"):
-        s = HOST + s.strip("/")
-    for m in ("m.facebook.com", "mbasic.facebook.com", "web.facebook.com", "touch.facebook.com"):
-        s = s.replace(m, "www.facebook.com")
-    return s
+    """The profile's address on www.facebook.com, however it was typed or pasted: "facebook.com/name",
+    "https://m.facebook.com/name?mibextid=…", "fb.com/name", "www.facebook.com/profile.php?id=…", "name",
+    "@name", a bare id. It has to be www: the pages are read from a page there, and a read of any other host
+    (even facebook.com without www) is one the browser refuses — and "facebook.com/name" mustn't become
+    www.facebook.com/facebook.com/name. Tracking parameters are dropped (`?id=` of profile.php is kept)."""
+    s = link.strip().strip("<>\"'").strip()
+    s = s[1:] if s.startswith("@") else s
+    if not s:
+        return HOST
+    if re.fullmatch(r"\d{5,}", s):
+        return f"{HOST}profile.php?id={s}"
+    if not _SCHEME.match(s):
+        head = s.split("/", 1)[0].split("?", 1)[0].split(":", 1)[0]
+        if not _FB_HOST.match(head):
+            return HOST + s.lstrip("/")                # a bare name or path
+        s = "https://" + s
+    parts = urlsplit(s)
+    if not _FB_HOST.match(parts.hostname or "") or (parts.hostname or "").lower().startswith("l."):
+        return s                                       # not a Facebook page: read as it is, and fail saying so
+    path = parts.path or "/"
+    query = ""
+    if path.rstrip("/").endswith("profile.php"):
+        pid = parse_qs(parts.query).get("id", [""])[0]
+        query = f"id={pid}" if pid else ""
+    return urlunsplit(("https", "www.facebook.com", path, query, ""))
 
 
 def profile_from(page: str, final_url: str) -> Profile | None:
@@ -343,7 +366,15 @@ class _Reader:
             yield ("sleep", GAP * (1 + random.uniform(-JITTER, JITTER)) + self.penalty)
             self.penalty = max(0.0, self.penalty - GAP)
             status, html, final = yield ("page", url)
-            if status == 429 or status >= 500 or status == 0:
+            if status == 0:
+                # The request never got an answer: the network, or a read the browser refused (another host).
+                why = (html or "no answer").strip()[:160]
+                if attempt == 0:
+                    yield ("note", f"   couldn't reach {url} ({why}) — trying again in 5 s")
+                    yield ("sleep", 5)
+                    continue
+                return None, f"couldn't reach it: {why}"
+            if status == 429 or status >= 500:
                 if attempt < len(BACKOFF):
                     self.penalty = min(self.penalty + 2.0, 10.0)
                     yield ("note", f"   Facebook asked to slow down (HTTP {status}) — waiting {BACKOFF[attempt]} s")
@@ -447,8 +478,11 @@ def run(link: str, person: Path, already_for, opts: social.Options):
     page, final = yield from reader.read(start_url(link))
     if page is None or reader.wall:
         out.login_wall = reader.wall
+        url = start_url(link)
         out.problem = ("Facebook asked for a login — log in in the window above, then press Download again."
-                       if reader.wall else f"Couldn’t open that profile ({final}). Check the link.")
+                       if reader.wall else
+                       f"Facebook has no page at {url} — check the profile address." if final == "HTTP 404" else
+                       f"Couldn’t open {url} ({final}).")
         return out
     profile = profile_from(page, final)
     if profile is None:

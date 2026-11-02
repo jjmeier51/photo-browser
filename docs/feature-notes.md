@@ -1559,6 +1559,15 @@ window shows the login page and waits for the session cookie (`sessionid` / `c_u
 `sleep`, `note`, `profile`, and `emit` (items handed to the four download lanes while the crawl goes on). The
 window's `_Runner` answers them; tests drive the same generators with canned answers.
 
+**The profile address (Nov 2, 2026).** `start_url` turns whatever is typed or pasted into
+`https://www.facebook.com/<path>` — "facebook.com/name" without a scheme used to be glued onto the host
+(www.facebook.com/facebook.com/name → 404), and "https://facebook.com/name" (no www) was read cross-origin from
+the www page, which the browser refuses (status 0, which the reader called "slow down"). Any facebook.com /
+fb.com host becomes www, tracking parameters go (profile.php keeps `id`), a bare id becomes profile.php?id=.
+The iPhone's `FacebookService.normalizedProfileURL` does the same. Status 0 is now "couldn't reach it" with the
+browser's error, retried once; a 404 says there's no page at that address; the hidden page counts as ready
+only when it's on the site's own host (a failed load is retried).
+
 **Facebook: every photo, small ones 2×, upload dates (Nov 2, 2026).** The tagged set (`t.`) is always walked
 — the "Tagged posts" option is Instagram's only (hidden for Facebook). A photo page that comes back without
 an image, a video or a next pointer is a rate-limit shell: read again after 5/15/45 s (`BACKOFF`) before the

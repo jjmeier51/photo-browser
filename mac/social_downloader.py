@@ -217,13 +217,25 @@ class SocialWindow(QMainWindow):
 
     # ------------------------------------------------------------------ small helpers
     def _log(self, line: str) -> None:
+        if line == getattr(self, "_last_line", None):
+            return                                   # the same line twice in a row (a problem, then the summary)
+        self._last_line = line
         self.log.appendPlainText(time.strftime("%H:%M:%S ") + line)
 
     def _say(self, line: str) -> None:
         self.status.setText(line)
 
     def _api_loaded(self, ok: bool) -> None:
-        self.api_ready = bool(ok)
+        """The hidden page is ready once it's on the site itself — reads made from anywhere else are ones the
+        browser refuses. A load that failed (the network) is tried again a few times."""
+        self.api_ready = bool(ok) and self.api.url().host() == QUrl(self.k["robots"]).host()
+        if not self.api_ready:
+            self._api_tries = getattr(self, "_api_tries", 0) + 1
+            if self._api_tries <= 5:
+                QTimer.singleShot(3000, lambda: self.api.load(QUrl(self.k["robots"])))
+            elif self._api_tries == 6:
+                self._log(f"Couldn't open {self.k['robots']} — check the Mac's internet connection, then press "
+                          "Download again.")
 
     def _cookie_added(self, cookie) -> None:
         domain = cookie.domain().lstrip(".")
@@ -248,6 +260,8 @@ class SocialWindow(QMainWindow):
         text = self.field.text().strip()
         if self.kind == "instagram":
             text = ig.clean_handle(text)
+        elif text:
+            text = fb.start_url(text)                   # shown as it's read: https://www.facebook.com/…
         if not text:
             QMessageBox.information(self, self.k["name"], f"Type the {self.k['field']} to download.")
             return

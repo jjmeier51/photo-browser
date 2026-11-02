@@ -320,14 +320,45 @@ enum FacebookService {
 
     // MARK: - Profile
 
+    /// The profile's address on www.facebook.com however it was typed or pasted — "facebook.com/name",
+    /// "https://m.facebook.com/name?mibextid=…", "fb.com/name", "profile.php?id=…", "name", "@name", a bare
+    /// id (Safe Finder's `facebook.start_url` does the same). Without a scheme, "facebook.com/name" used to be
+    /// glued onto the host — www.facebook.com/facebook.com/name, a 404. Tracking parameters are dropped
+    /// (profile.php keeps its `id`).
+    nonisolated static func normalizedProfileURL(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "<>\"'"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("@") { s.removeFirst() }
+        guard !s.isEmpty else { return host }
+        if s.range(of: #"^\d{5,}$"#, options: .regularExpression) != nil { return host + "profile.php?id=" + s }
+        func isFacebook(_ h: String) -> Bool {
+            h.lowercased().range(of: #"^(?:[a-z0-9-]+\.)?(?:facebook\.com|fb\.com)$"#, options: .regularExpression) != nil
+        }
+        if s.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*://"#, options: .regularExpression) == nil {
+            let head = String(s.prefix { $0 != "/" && $0 != "?" && $0 != ":" })
+            guard isFacebook(head) else { return host + String(s.drop { $0 == "/" }) }     // a bare name or path
+            s = "https://" + s
+        }
+        guard var c = URLComponents(string: s), let h = c.host, isFacebook(h), !h.lowercased().hasPrefix("l.") else { return s }
+        c.scheme = "https"
+        c.host = "www.facebook.com"
+        c.port = nil
+        c.fragment = nil
+        if c.path.isEmpty { c.path = "/" }
+        if c.path.hasSuffix("profile.php") || c.path.hasSuffix("profile.php/") {
+            let id = c.queryItems?.first(where: { $0.name == "id" })?.value
+            c.queryItems = id.map { [URLQueryItem(name: "id", value: $0)] }
+        } else {
+            c.query = nil
+        }
+        return c.string ?? s
+    }
+
     /// Resolves a profile/share URL to its id, vanity name, display name, and picture,
     /// from the www page's stable markers (`fb://` deep-link metas, `og:` metas).
     nonisolated static func resolveProfile(_ profileURL: String, creds: Credentials) async -> Profile? {
-        var start = profileURL.trimmingCharacters(in: .whitespaces)
-        if !start.hasPrefix("http") { start = host + start.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
-        for m in ["m.facebook.com", "mbasic.facebook.com", "web.facebook.com", "touch.facebook.com"] {
-            start = start.replacingOccurrences(of: m, with: "www.facebook.com")
-        }
+        let start = normalizedProfileURL(profileURL)
         guard let (html, finalURL) = await fetchHTML(start, creds: creds), !looksLikeLogin(html, finalURL) else { return nil }
 
         // Numeric id: the fb:// app deep-link metas are the most stable marker; the
