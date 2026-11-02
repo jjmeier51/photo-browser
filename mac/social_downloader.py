@@ -49,6 +49,7 @@ import social  # noqa: E402
 LANES = 4                     # files downloaded at once
 SAVE_EVERY = 25               # the record is saved (and the files tagged) after this many files
 CALL_TIMEOUT = 75.0           # seconds an API call / page read may take in the browser
+SMALL_PHOTO = 200 * 1024      # Facebook: photos under this are always upscaled 2×
 
 KINDS = {
     "instagram": dict(module=ig, name="Instagram", home=ig.HOME, robots=ig.ROBOTS, login_cookie="sessionid",
@@ -151,7 +152,14 @@ class SocialWindow(QMainWindow):
         self.stories = option("Stories and highlights", "stories", True, "Current stories into “Stories”, each "
                               "highlight into its own folder")
         self.stories.setVisible(kind == "instagram")
-        self.photos_2x = option("Upscale photos 2×", "photos2x", False, "Each photo twice the size, in place")
+        self.tagged.setVisible(kind == "instagram")     # Facebook: every tagged photo, always
+        self.full = QCheckBox("Check every photo again")
+        self.full.setToolTip("Read every uploaded and tagged photo, even where an earlier run already got to the "
+                             "end — finds an old photo tagged since. Slower.")
+        self.full.setVisible(kind == "facebook")
+        self.photos_2x = option("Upscale photos 2×", "photos2x", False,
+                                "Each photo twice the size, in place" +
+                                (" (photos under 200 KB always are)" if kind == "facebook" else ""))
         self.ai = option("with Real-ESRGAN (AI)", "ai", False, "Slower, and sharper than Lanczos — needs Upscayl "
                          "(see AI Upscale)")
         self.videos_1080 = option("Upscale videos to 1080p", "video1080", False, "Videos below 1080p made 1080p")
@@ -162,8 +170,8 @@ class SocialWindow(QMainWindow):
         except Exception:  # noqa: BLE001 — no engine just means no AI option
             self.engine = None
         self.ai.setVisible(self.engine is not None)
-        self.ai.setEnabled(self.photos_2x.isChecked())
-        self.photos_2x.toggled.connect(self.ai.setEnabled)
+        self.ai.setEnabled(self._ai_usable())
+        self.photos_2x.toggled.connect(lambda _on: self.ai.setEnabled(self._ai_usable()))
         login = QPushButton(f"Log In to {self.k['name']}")
         login.clicked.connect(lambda: self.view.load(QUrl(self.k["login"])))
 
@@ -173,7 +181,7 @@ class SocialWindow(QMainWindow):
         top.addWidget(self.go_btn)
         top.addWidget(self.stop_btn)
         row2 = QHBoxLayout()
-        for w in (self.tagged, self.stories, self.photos_2x, self.ai, self.videos_1080):
+        for w in (self.tagged, self.stories, self.full, self.photos_2x, self.ai, self.videos_1080):
             row2.addWidget(w)
         row2.addStretch(1)
         row2.addWidget(login)
@@ -246,15 +254,19 @@ class SocialWindow(QMainWindow):
         self.field.setText(text)
         self.settings.setValue(f"{self.kind}/last/{self.person}", text)
         self.running, self.stopping = True, False
-        self.opts = social.Options(photos_2x=self.photos_2x.isChecked(), ai=self.ai.isChecked() and self.engine is not None,
-                                   videos_1080=self.videos_1080.isChecked(), tagged=self.tagged.isChecked(),
-                                   stories=self.stories.isChecked())
-        for w in (self.go_btn, self.tagged, self.stories, self.photos_2x, self.ai, self.videos_1080, self.field):
+        fbk = self.kind == "facebook"
+        self.opts = social.Options(photos_2x=self.photos_2x.isChecked(),
+                                   ai=self.ai.isChecked() and self.engine is not None and self._ai_usable(),
+                                   videos_1080=self.videos_1080.isChecked(), tagged=self.tagged.isChecked() or fbk,
+                                   stories=self.stories.isChecked(), upscale_under=SMALL_PHOTO if fbk else 0,
+                                   full=fbk and self.full.isChecked())
+        for w in (self.go_btn, self.tagged, self.stories, self.full, self.photos_2x, self.ai, self.videos_1080, self.field):
             w.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.bar.setVisible(True)
         self.bar.setRange(0, 0)
         self.queued = self.settled_n = self.failed = self.present = 0
+        self.small_n = self.undated = 0
         self.photos = self.videos = 0
         self.written: list[str] = []
         self.to_tag: list[str] = []
@@ -286,6 +298,26 @@ class SocialWindow(QMainWindow):
             gen = fb.run(text, self.person, self._fb_already, self.opts)
         self._say(f"Reading {self.k['name']}…")
         self._when_ready(lambda: _Runner(self, gen, self._crawled).start())
+
+    def _ai_usable(self) -> bool:
+        """Real-ESRGAN applies when photos are upscaled: all of them (the box), or — on Facebook — always the
+        small ones."""
+        return self.kind == "facebook" or self.photos_2x.isChecked()
+
+    def _walked(self, outcome) -> dict:
+        """The record's `walked` after this run (facebook.py notes): a set walked to its end with every one
+        of its photos in is marked; one cut short, or with a photo that didn't download, is cleared — the
+        next run reads that whole set again. A run that never got going clears both."""
+        old = self.record.get("walked") if self.record is not None else None
+        walked = dict(old) if isinstance(old, dict) else {}
+        if outcome is None:
+            return {}
+        for name, (finished, keys) in (getattr(outcome, "sets", None) or {}).items():
+            if finished and keys <= self.done_keys:
+                walked[name] = int(time.time())
+            else:
+                walked.pop(name, None)
+        return walked
 
     def _video_note(self, _v) -> None:
         import video_tools
@@ -449,6 +481,10 @@ class SocialWindow(QMainWindow):
                         self.photos += 1
                     if s.upscaled:
                         self.to_upscale_tag.append(s.path)
+                    if s.small:
+                        self.small_n += 1
+                    if not s.item.date:
+                        self.undated += 1
                 self.to_tag.append(s.path)
                 self.done_keys.add(s.item.key)
             else:
@@ -506,10 +542,12 @@ class SocialWindow(QMainWindow):
         self.running = False
         if getattr(self, "pool", None):
             self.pool.shutdown(wait=False, cancel_futures=True)
+        outcome = getattr(self, "outcome", None)
+        if self.kind == "facebook" and self.record is not None:
+            self.info["walked"] = self._walked(outcome)
         self._save()
         if self.exif is not None:
             self.exif.close()
-        outcome = getattr(self, "outcome", None)
         name = self.info.get("handle") and f"@{self.info['handle']}" or self.info.get("profile_name") or self.field.text()
         if problem:
             line = problem
@@ -520,11 +558,16 @@ class SocialWindow(QMainWindow):
         else:
             line = f"{name}: downloaded {self.photos} photo{'s' if self.photos != 1 else ''} and {self.videos} " \
                    f"video{'s' if self.videos != 1 else ''}" + (f" · {self.failed} couldn't be" if self.failed else "") + "."
+            if self.small_n:
+                line += f" {self.small_n} small photo{'s' if self.small_n != 1 else ''} (under 200 KB) upscaled 2×."
+            if self.undated:
+                line += (f" {self.undated} had no upload date on {self.k['name']}'s page — "
+                         f"{'they keep' if self.undated != 1 else 'it keeps'} the download date.")
         self._log(line)
         self._say(line)
-        for w in (self.go_btn, self.tagged, self.stories, self.photos_2x, self.videos_1080, self.field):
+        for w in (self.go_btn, self.tagged, self.stories, self.full, self.photos_2x, self.videos_1080, self.field):
             w.setEnabled(True)
-        self.ai.setEnabled(self.photos_2x.isChecked())
+        self.ai.setEnabled(self._ai_usable())
         self.stop_btn.setEnabled(False)
         self.bar.setVisible(False)
         if self.record is not None and self.record.exists:

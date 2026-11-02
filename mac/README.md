@@ -432,8 +432,15 @@ what you see (private profiles you follow included), and never fills in a login 
 - **Instagram**: the posts, the posts it's tagged in, its reels, its current stories (into `Stories`) and
   highlights (a folder each) — the same as the iPhone app. Videos come at the best quality offered: when
   Instagram has a sharper version in two halves (picture and sound), they're put together on the Mac.
-- **Facebook**: every album (profile and cover pictures included), the uploads, the photos it's tagged in,
-  and its videos.
+- **Facebook**: every album (profile and cover pictures included), every photo it uploaded, **every photo
+  it's tagged in** (always — whoever posted it), and its videos. The first run reads every uploaded and
+  tagged photo; later runs stop once they reach 30 already downloaded in a row — but only after a run got
+  all the way through with everything downloaded. A run that was stopped, hit a login wall, or had a photo
+  fail reads the whole set again next time, and **Check every photo again** always does (it finds an old
+  photo someone tagged since). If Facebook answers a photo's page empty (it does when it's being asked too
+  fast), it waits and reads it again rather than taking it for the end. **Photos under 200 KB are upscaled
+  2× automatically** (tagged **upscaled**). Every photo and video gets **the date it was uploaded to
+  Facebook** — written into it with its time zone and set as the file's dates.
 - **Upscale photos 2×** (Lanczos with a light sharpen — or Real-ESRGAN when Upscayl is installed and
   "with Real-ESRGAN" is ticked) and **Upscale videos to 1080p**, as each file comes in. Upscaled files are
   tagged "upscaled" too.

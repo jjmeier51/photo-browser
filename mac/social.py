@@ -35,6 +35,7 @@ UPSCALED_TAG = "upscaled"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/122.0.0.0 Safari/537.36")
 MIN_BYTES = 512                       # anything smaller is an error page, not a photo or a video
+MIN_DATE = 1_072_915_200              # 2004-01-01: no post is older; a time below this is a misread
 _DATE = "%Y:%m:%d %H:%M:%S"
 
 
@@ -66,8 +67,10 @@ class Options:
     photos_2x: bool = False           # upscale photos 2×
     ai: bool = False                  # …with Real-ESRGAN (ai_upscale.py) rather than Lanczos
     videos_1080: bool = False         # upscale videos below 1080p to 1080p
-    tagged: bool = True               # posts the profile is tagged in
+    tagged: bool = True               # Instagram: posts the profile is tagged in (Facebook always takes them)
     stories: bool = True              # Instagram: current stories and highlights
+    upscale_under: int = 0            # photos smaller than this (bytes) are upscaled 2× whatever photos_2x says
+    full: bool = False                # Facebook: walk every set to its end, even one read before
 
 
 @dataclass
@@ -77,6 +80,7 @@ class Settled:
     upscaled: bool = False
     why: str = ""                     # why it didn't
     present: bool = False             # a file of that name was already there: done, not fetched again
+    small: bool = False               # upscaled because it was under `Options.upscale_under`
 
 
 # ----------------------------------------------------------------------------- the shared record
@@ -240,10 +244,11 @@ def upscale_photo(path: str, engine=None) -> bool:
 # ----------------------------------------------------------------------------- what goes into the file
 
 def write_meta(path: str, item: Item, tool) -> None:
-    """The post's date (and place, caption, poster) into the file — EXIF/IPTC for a photo, QuickTime for
-    a video, as the iPhone app writes them — and the file's own dates set to the post's. A caption goes
+    """The post's date (and place, caption, poster) into the file — EXIF (with its time zone)/IPTC for a
+    photo, QuickTime for a video, as the iPhone app writes them — and the file's own dates set to the
+    post's (an earlier modification date moves a Mac file's creation date back with it). A caption goes
     through a file (ExifTool takes one argument per line, and captions have line breaks)."""
-    when = item.date if item.date and item.date >= sc.MIN_POST else 0
+    when = item.date if item.date and item.date >= MIN_DATE else 0
     args: list[str] = []
     caption_file = ""
     if tool is not None:
@@ -265,7 +270,10 @@ def write_meta(path: str, item: Item, tool) -> None:
         else:
             if when:
                 s = time.strftime(_DATE, time.localtime(when))
-                args += [f"-EXIF:DateTimeOriginal={s}", f"-EXIF:CreateDate={s}", f"-EXIF:ModifyDate={s}"]
+                z = time.strftime("%z", time.localtime(when))
+                z = f"{z[:3]}:{z[3:]}"
+                args += [f"-EXIF:DateTimeOriginal={s}", f"-EXIF:CreateDate={s}", f"-EXIF:ModifyDate={s}",
+                         f"-EXIF:OffsetTimeOriginal={z}", f"-EXIF:OffsetTimeDigitized={z}", f"-EXIF:OffsetTime={z}"]
             if valid_place(item.lat, item.lng):
                 args += [f"-GPSLatitude={abs(item.lat)}", f"-GPSLatitudeRef={'N' if item.lat >= 0 else 'S'}",
                          f"-GPSLongitude={abs(item.lng)}", f"-GPSLongitudeRef={'E' if item.lng >= 0 else 'W'}"]
@@ -337,11 +345,12 @@ def settle(item: Item, tries: list[dict[str, str]], opts: Options, tool=None, en
         path, why = download(item, tmp, tries)
         if not path:
             return Settled(item, why=why)
-        upscaled = False
+        upscaled = small = False
         if not item.video:
             if (item.ext or "jpg") == "jpg":
                 path = as_jpeg(path)
-            if opts.photos_2x:
+            small = bool(opts.upscale_under) and os.path.getsize(path) < opts.upscale_under
+            if opts.photos_2x or small:
                 with heavy or _NoLock():
                     upscaled = upscale_photo(path, engine if opts.ai else None)
         elif opts.videos_1080:
@@ -352,7 +361,7 @@ def settle(item: Item, tries: list[dict[str, str]], opts: Options, tool=None, en
         dest = place(path, item.folder, item.filename)
         if dest is None:
             return Settled(item, str(item.folder / item.filename), present=True)
-        return Settled(item, dest, upscaled)
+        return Settled(item, dest, upscaled, small=small and upscaled)
     except OSError as e:
         return Settled(item, why=str(e))
     finally:

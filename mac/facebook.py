@@ -5,11 +5,22 @@ the same things under the same names and neither fetches what the other has.
 **How it reads Facebook.** Facebook's pages embed the JSON its own app runs on; a run reads that, the way
 maintained scrapers do since the old `mbasic` site went. Coverage is the profile's real albums (Timeline
 and Mobile Uploads, Profile Pictures, Cover Photos, the rest — found on its albums tab), the uploads set
-(`pb.`, which alone stops around 100 photos), the photos it's tagged in (`t.`) and its videos tab. A set is
-walked photo by photo: each photo's page holds the full-size file's address, its time, its caption, who
-posted it — and the id of the next photo, so no GraphQL ids go stale. A walk of the uploads or tagged set
-stops after 30 photos in a row already done (they're newest first); albums are walked to the end (they
-can be oldest first).
+(`pb.`, which alone stops around 100 photos), **every photo it's tagged in** (`t.` — always, whoever posted
+it) and its videos tab. A set is walked photo by photo: each photo's page holds the full-size file's
+address, when it was uploaded, its caption, who posted it — and the id of the next photo, so no GraphQL ids
+go stale. A page Facebook answers empty (a rate-limit shell) is read again after a pause, not taken for the
+end of the set.
+
+**Nothing missed.** A walk of the uploads or tagged set may stop early — after 30 photos in a row already
+done (they're newest first) — only once that set has been walked to its end with every photo of it
+downloaded; the record keeps that (`walked`: set → when). A walk cut short (Stop, a login wall, a page that
+stays empty) or one whose photos didn't all download clears it, so the next run walks the whole set again;
+`Options.full` ("Check every photo again") always does. Albums are walked to the end every time (they can be
+oldest first).
+
+**Upload dates.** A photo's time is the one in its own node on its page (`created`: the `created_time` /
+`creation_time` / `publish_time` nearest its id — a page also holds comments' and other posts' times); a
+page without one is read in its other form for it.
 
 **Through the logged-in browser.** Every page is a `fetch()` from a page on www.facebook.com (`PAGE_JS`):
 the browser's own cookies, so it's what Facebook's site gets. The run is a generator: it yields
@@ -28,7 +39,8 @@ import json
 import os
 import random
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -127,9 +139,28 @@ def caption(s: str) -> str:
     return text[:800]
 
 
-def created(s: str) -> float:
-    v = first(s, r'"(?:created_time|creation_time|publish_time)":(\d{9,11})')
-    return float(v) if v else 0.0
+_TIME = re.compile(r'"(?:created_time|creation_time|publish_time)":(\d{9,11})')
+NEAR = 4000                       # how far (characters) from the media's own id its time may sit
+
+
+def created(s: str, media_id: str | None = None) -> float:
+    """When the photo or video was uploaded (unix time), 0 when the page doesn't say. With `media_id`, the
+    time nearest one of its `"id":"<id>"` — inside its own node — wins: the page also carries the times of
+    its comments and of other posts, and the first one on the page isn't necessarily the photo's."""
+    now = time.time() + 86_400
+    times = [(m.start(), int(m.group(1))) for m in _TIME.finditer(s) if social.MIN_DATE <= int(m.group(1)) <= now]
+    if not times:
+        return 0.0
+    if media_id:
+        best: tuple[int, int] | None = None
+        for a in re.finditer(rf'"id":"{re.escape(media_id)}"', s):
+            for pos, t in times:
+                d = abs(pos - a.start())
+                if d <= NEAR and (best is None or d < best[0]):
+                    best = (d, t)
+        if best is not None:
+            return float(best[1])
+    return float(times[0][1])
 
 
 def image_ext(url: str) -> str:
@@ -294,6 +325,9 @@ class Outcome:
     found: int = 0
     problem: str = ""
     login_wall: bool = False
+    # The uploads / tagged sets walked this run: name → (walked to its end, the media ids handed to the
+    # downloads) — what the window turns into the record's `walked` once it knows they all downloaded.
+    sets: dict = field(default_factory=dict)
 
 
 class _Reader:
@@ -328,32 +362,56 @@ class _Reader:
 
 
 def _walk(reader: _Reader, token: str, first_id: str | None, skip: set[str], seen: set[str], folder: Path,
-          poster_from_page: bool, early_stop: bool, label: str, name: str):
-    """yield from: one media set, photo by photo (module notes); emits what's new; returns how many."""
+          poster_from_page: bool, early_stop: bool, label: str, name: str, keys: set[str] | None = None):
+    """yield from: one media set, photo by photo (module notes); emits what's new (their ids into `keys`).
+    Returns (how many, whether the walk got to the end of the set — or caught up, when `early_stop`)."""
     nid = first_id
     if nid is None:
         page, final = yield from reader.read(f"{HOST}media/set/?set={token}")
         if page is None or reader.wall:
-            return 0
+            return 0, False
         nid = first_media_id(page)
+    if not nid:
+        # No first photo: an empty set — or a page Facebook didn't fill. Not counted as read to the end, so
+        # a set with photos is never marked done by a bad answer (an empty one costs two reads next time).
+        yield ("note", f"   {label}: no photos found")
+        return 0, False
     visited: set[str] = set()
     known = emitted = 0
-    while nid and nid not in visited and len(visited) < MAX_ITEMS and not reader.wall:
+    finished = False
+    while not reader.wall:
+        if not nid or nid in visited:
+            finished = True                    # no next photo, or back round to one already read: the end
+            break
+        if len(visited) >= MAX_ITEMS:
+            break
         visited.add(nid)
-        page = None
-        for form in (f"photo/?fbid={nid}&set={token}", f"photo.php?fbid={nid}&set={token}"):
-            got, _final = yield from reader.read(HOST + form)
-            if got is None:
-                continue
-            page = got
-            if complete(got) or reader.wall:
+        forms = (f"photo/?fbid={nid}&set={token}", f"photo.php?fbid={nid}&set={token}")
+        page, used = None, None
+        for attempt in range(len(BACKOFF) + 1):
+            for form in forms:
+                got, _final = yield from reader.read(HOST + form)
+                if got is None:
+                    continue
+                page, used = got, form
+                if complete(got) or reader.wall:
+                    break
+            if page is None or reader.wall or complete(page):
                 break
+            if attempt < len(BACKOFF):         # an empty shell (rate limit): not the end of the set
+                yield ("note", f"   {label}: photo {nid} came back empty — reading it again in {BACKOFF[attempt]} s")
+                yield ("sleep", BACKOFF[attempt])
         if page is None or reader.wall:
+            break
+        if not complete(page):
+            yield ("note", f"   {label}: stopped at photo {nid} — Facebook kept answering with an empty page "
+                           "(the next run reads the whole set again)")
             break
         if nid in skip or nid in seen:
             known += 1
             if early_stop and known >= KNOWN_RUN:
                 yield ("note", f"   {label}: caught up (30 already downloaded in a row)")
+                finished = True
                 break
         else:
             known = 0
@@ -362,14 +420,22 @@ def _walk(reader: _Reader, token: str, first_id: str | None, skip: set[str], see
             img = image_url(page)
             vid = None if img else video_url(page)
             if img or vid:
+                when = created(page, nid)
+                if not when:                   # the other form of the page may carry it
+                    other = forms[1] if used == forms[0] else forms[0]
+                    alt, _f = yield from reader.read(HOST + other)
+                    if alt and not reader.wall:
+                        when = created(alt, nid)
                 item = social.Item(nid, folder, f"FB_{nid}", bool(vid), img or vid,
-                                   ext="mp4" if vid else image_ext(img), date=created(page),
+                                   ext="mp4" if vid else image_ext(img), date=when,
                                    caption=caption(page), poster=who)
                 yield ("emit", [item])
                 emitted += 1
+                if keys is not None:
+                    keys.add(nid)
         nid = next_media_id(page)
-    yield ("note", f"   {label}: {len(visited)} page(s) read, {emitted} new")
-    return emitted
+    yield ("note", f"   {label}: {len(visited)} page(s) read, {emitted} new" + ("" if finished else " (not to the end)"))
+    return emitted, finished
 
 
 def run(link: str, person: Path, already_for, opts: social.Options):
@@ -393,6 +459,8 @@ def run(link: str, person: Path, already_for, opts: social.Options):
     out.folder = folder
     yield ("profile", (profile, folder))
     skip = set(already_for(folder))
+    walked = record(folder).get("walked")
+    walked = walked if isinstance(walked, dict) else {}
     seen: set[str] = set()
     count = [0]
 
@@ -419,10 +487,10 @@ def run(link: str, person: Path, already_for, opts: social.Options):
     for token in tokens:
         yield from counting(_walk(reader, token, None, skip, seen, folder, False, False, f"album {token}",
                                   profile.name))
-    # Uploads, then (unless left out) the photos it's tagged in — credited to whoever posted them.
-    sets = [("photos_by", f"pb.{profile.id}.-2207520000", ["pb.", "a."], False)]
-    if opts.tagged:
-        sets.append(("photos_of", f"t.{profile.id}", ["t."], True))
+    # Uploads, then every photo it's tagged in — credited to whoever posted them. Each stops early only when
+    # it was walked to its end before (module notes).
+    sets = [("photos_by", f"pb.{profile.id}.-2207520000", ["pb.", "a."], False),
+            ("photos_of", f"t.{profile.id}", ["t."], True)]
     for name, fallback, prefixes, from_page in sets:
         if reader.wall:
             break
@@ -436,7 +504,14 @@ def run(link: str, person: Path, already_for, opts: social.Options):
             if t:
                 token = decode(t)
             first_id = first_media_id(tab_page)
-        yield from counting(_walk(reader, token, first_id, skip, seen, folder, from_page, True, name, profile.name))
+        early = not opts.full and bool(walked.get(name))
+        if not early:
+            yield ("note", f"   {'uploads' if name == 'photos_by' else 'tagged photos'}: reading every one "
+                           + ("(as asked)" if opts.full else "(the set hasn't been read to its end before)"))
+        keys: set[str] = set()
+        _n, finished = yield from counting(_walk(reader, token, first_id, skip, seen, folder, from_page, early,
+                                                 name, profile.name, keys))
+        out.sets[name] = (finished, keys)
     # Videos: the tab lists them; each watch page holds the file's address.
     if not reader.wall:
         yield ("note", "Finding videos…")
@@ -457,7 +532,7 @@ def run(link: str, person: Path, already_for, opts: social.Options):
             if url:
                 seen.add(vid)
                 count[0] += 1
-                yield ("emit", [social.Item(vid, folder, f"FB_{vid}", True, url, ext="mp4", date=created(watch),
+                yield ("emit", [social.Item(vid, folder, f"FB_{vid}", True, url, ext="mp4", date=created(watch, vid),
                                             caption=caption(watch), poster=profile.name)])
     out.found = count[0]
     out.login_wall = reader.wall

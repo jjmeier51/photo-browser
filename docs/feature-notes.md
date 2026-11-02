@@ -1559,6 +1559,24 @@ window shows the login page and waits for the session cookie (`sessionid` / `c_u
 `sleep`, `note`, `profile`, and `emit` (items handed to the four download lanes while the crawl goes on). The
 window's `_Runner` answers them; tests drive the same generators with canned answers.
 
+**Facebook: every photo, small ones 2×, upload dates (Nov 2, 2026).** The tagged set (`t.`) is always walked
+— the "Tagged posts" option is Instagram's only (hidden for Facebook). A photo page that comes back without
+an image, a video or a next pointer is a rate-limit shell: read again after 5/15/45 s (`BACKOFF`) before the
+walk gives up — and then the walk is "not to the end". `_walk` returns (how many, finished): finished = no
+next photo, back round to one read, or caught up. Early stop (30 known in a row) applies only to a set the
+record's `walked` names; the window (`_walked`, at the end of a run) sets it when the set finished *and* every
+id it handed over is in `done_keys`, and clears it otherwise (stopped, login wall, a download that failed, a
+crash) — so an interrupted or partly failed run is followed by a full walk, never by an early stop above
+the gap. A set page with no first photo isn't "finished" (a bad answer mustn't mark a set done).
+"Check every photo again" (`Options.full`) disables early stop for a run. `created(page, id)` takes the
+`created_time`/`creation_time`/`publish_time` nearest the media's own `"id":"<id>"` (within 4000 characters;
+comments' and other posts' times come first on some pages), ignoring anything before 2004 or in the future;
+with none, the photo's other page form (`photo.php`) is read for it. `write_meta` adds `OffsetTime*` to the
+EXIF dates; the file's mtime is the upload time (macOS moves the creation date back with it).
+`Options.upscale_under` (Facebook: 200 KB, `SMALL_PHOTO`) upscales smaller photos 2× whatever "Upscale
+photos 2×" says — Real-ESRGAN when "with Real-ESRGAN" is ticked (enabled for Facebook always), else Lanczos —
+tagged "upscaled" and counted in the closing line (`Settled.small`), as are files whose page had no date.
+
 **A download** (`social.settle`, worker thread): temp folder → (DASH halves → `video_tools.mux`) → WebP/HEIC
 → JPEG for Instagram's `.jpg` names → optional 2× (Lanczos + UnsharpMask, or `ai_upscale` when chosen) / 1080p
 (`video_tools.upscale_1080`; the heavy ones one at a time) → ExifTool: EXIF dates, GPS, Artist, IPTC

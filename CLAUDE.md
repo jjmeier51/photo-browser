@@ -185,7 +185,10 @@ Python. (`SimpCityService`,
 - **Instagram / Facebook profiles in Safe Finder too** — right-click a folder ▸ Download Instagram/Facebook
   Profile… (`mac/social_downloader.py`, `mac/instagram.py`, `mac/facebook.py`, `mac/social.py` — ports of
   `InstagramService`/`FacebookService` reading the sites through `fetch()` from a hidden page in a logged-in
-  Qt WebEngine browser). Same file names and folders as the iPhone; files tagged "instagram"/"facebook"
+  Qt WebEngine browser). Facebook takes every uploaded and **every tagged** photo (walks stop early only after a
+  full walk recorded in the record's `walked`; empty pages are re-read), upscales photos under 200 KB 2×
+  automatically, and dates each file with its own upload time (`created(page, id)`, with the time zone). Same
+  file names and folders as the iPhone; files tagged "instagram"/"facebook"
   on **both** apps now; options to upscale photos 2× and videos to 1080p (`mac/video_tools.py`,
   `mac/video_helper.swift` = the iPhone's mux/upscale code, ffmpeg fallback). **The profile folder's
   `.instagram.json` / `.facebook.json` is the shared record** (`SocialRecord.swift` / `social.Record`):
