@@ -1003,6 +1003,26 @@ def ssl_context():
     return _SSL
 
 
+BUSY_WAITS = (5, 15, 40)          # seconds before asking a busy server again (503, 429, 502, 504)
+
+
+def is_busy(why: str) -> bool:
+    """A plain download refused because the server is busy or limiting — worth asking again shortly."""
+    return why.startswith(("HTTP 503", "HTTP 429", "HTTP 502", "HTTP 504"))
+
+
+def is_gone(why: str) -> bool:
+    """A plain download the server says isn't there (HTTP 404)."""
+    return why.startswith("HTTP 404")
+
+
+def referer_origin(url: str) -> str:
+    """A page's address cut to its site (`https://bunkr.cr/v/x` → `https://bunkr.cr/`) — the most a browser
+    sends as the Referer of a request to another site."""
+    parts = urlsplit(url or "")
+    return f"{parts.scheme}://{parts.netloc}/" if parts.scheme and parts.netloc else url
+
+
 def fetch(url: str, headers: dict[str, str], path: str, connect_timeout: float = 20,
           limit: float = 600, check=None) -> tuple[str | None, str]:
     """Downloads `url` to `path` with a plain request (on a worker thread). Returns (path, "") or
@@ -1173,7 +1193,7 @@ class ExifSession:
     stays with one-at-a-time (`broken`, said once in `note`). A kept-open ExifTool that never answered had
     stalled a whole run with nothing logged. Thread-safe (the files are settled on worker threads)."""
 
-    TIMEOUT = 30.0                                       # seconds an answer may take
+    TIMEOUT = 60.0                                       # seconds an answer may take (a big video's write)
 
     def __init__(self, path: str) -> None:
         self.path = path
@@ -1191,11 +1211,13 @@ class ExifSession:
         with self.lock:
             if not self.broken:
                 try:
-                    return self._kept_open(args, timeout)
+                    out = self._kept_open(args, timeout)
+                    self.failures = 0                    # a slow answer now and then doesn't end the session
+                    return out
                 except (OSError, ValueError, TimeoutError, EOFError) as e:
                     self._kill()
                     self.failures += 1
-                    if self.failures >= 2:
+                    if self.failures >= 3:
                         self.broken = True
                         self.note = (f"ExifTool didn't answer when kept open ({type(e).__name__}) — running it "
                                      "once per file instead.")

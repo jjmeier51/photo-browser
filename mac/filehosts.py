@@ -53,6 +53,7 @@ _NOT_VIDEO = re.compile(r"\.(?:jpe?g|png|gif|webp|heic|avif|bmp|tiff?|zip|rar|7z
 WORKERS = 6               # file-info requests at once inside one folder
 
 BUNKR_API = "https://apidl.bunkr.ru/api/_001_v2"
+BUNKR_HUB = "https://get.bunkrr.su"   # bunkr's download site: the Referer/Origin its API and file servers expect
 LOCKED = "file_rate_limited_captcha_required"     # pixeldrain's hotlink lock
 
 
@@ -203,7 +204,7 @@ def direct_url(remote: Remote, ua: str) -> str:
             return url
         raise HostError("cyberdrop didn't give the file's address")
     if remote.host == "bunkr" and remote.extra.get("id"):
-        return bunkr_file_url(str(remote.extra["id"]), str(remote.extra.get("hub") or "https://dl.bunkr.cr"), ua)
+        return bunkr_file_url(str(remote.extra["id"]), BUNKR_HUB, ua)
     raise NeedsBrowser(f"{remote.host} shows the file only on its page")
 
 
@@ -420,7 +421,7 @@ def bunkr_file_url(fid: str, hub: str, ua: str) -> str:
 
 def _bunkr(link: Link, ua: str) -> list[Remote]:
     host = urlsplit(link.url).hostname or "bunkr.cr"
-    origin, hub = f"https://{host}", f"https://dl.{host}"
+    origin, hub = f"https://{host}", BUNKR_HUB
 
     def remote(fid: str, slug: str, name: str, size: int) -> Remote:
         return Remote("bunkr", safe_id(slug or fid), name=name, size=size, page=f"{origin}/f/{slug}" if slug else link.url,

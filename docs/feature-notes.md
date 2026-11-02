@@ -1819,6 +1819,20 @@ posted on several hosts is fetched once.
 - **Tags**: iPhone `library.addTag("simpcity", to:)` every 20 files and at the end; Safe Finder the
   shared tag store (`tag_store().add`) the same way.
 
+**Download failures fixed (Nov 3, 2026).** Every browser fallback for a file-host or turbo video failed
+"The file was blocked due to local policy": that's Chromium's `net::ERR_BLOCKED_BY_CLIENT` → `FILE_BLOCKED`,
+which the network stack raises when a request's Referer says more than its referrer policy allows — a full
+page address (`https://bunkr.cr/v/…`, `https://gofile.io/d/…`) on a cross-site request. goonbox's
+`https://goonbox.cr/` (an origin) always passed. The interceptor now gets `simpcity.referer_origin(referer)`;
+plain requests keep the full page. Also: a plain download refused as busy (503 — turbo's CDN under load —
+429, 502, 504) is asked again after 5/15/40 s (`BUSY_WAITS`) before the browser; a file whose server answers
+404 to the plain request and fails in the browser too is recorded `skipped: "gone from its server (HTTP 404)"`
+instead of being retried every run (`gone_keys`); the saved cookies are asked for again as a run starts (gofile's
+guest-account cookie was missing from plain downloads, which got its page); a host folder page that didn't load
+is read once more after 10 s; the ExifTool session allows 60 s an answer and falls back to one-per-file only
+after three failures in a row (a success resets the count); bunkr's Referer/Origin are `get.bunkrr.su` (its
+download site, as gallery-dl uses — `dl.<domain>` got the file server's 403), on both apps.
+
 **pixhost (Nov 2, 2026).** pixhost.cc (also .to, .org and pixho.st — the API serves all three) is read with plain
 requests, no browser. A posted image is its show page `/show/<dir>/<id>_<name>`, usually wrapping its thumbnail
 `t<N>.<domain>/thumbs/<dir>/<id>_<name>`; the original is `img<N>.<domain>/images/<dir>/<id>_<name>` on the

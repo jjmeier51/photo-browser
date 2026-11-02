@@ -68,9 +68,12 @@ _PROFILE: QWebEngineProfile | None = None
 
 class _Referer(QWebEngineUrlRequestInterceptor):
     """Gives the image servers' requests goonbox's Referer (they refuse requests without one — see
-    `simpcity.REFERER`), and a file-host download the page it came from (`by_url`, set just before it
-    starts); Chromium's own downloads otherwise send none. Called on Chromium's network thread — a plain
-    dict lookup is all it does."""
+    `simpcity.REFERER`), and a file-host download the site it came from (`by_url`, set just before it
+    starts); Chromium's own downloads otherwise send none. **Only the site's origin** (`https://bunkr.cr/`),
+    never the page's full address: Chromium cancels a cross-site request whose Referer says more than its
+    referrer policy allows (net::ERR_BLOCKED_BY_CLIENT — a download then fails "blocked due to local
+    policy"), which had every browser download of a file-host or turbo video fail. Called on Chromium's
+    network thread — a plain dict lookup is all it does."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -257,6 +260,12 @@ class SimpCityWindow(QMainWindow):
     def _say(self, line: str) -> None:
         self.status.setText(line)
 
+    def _ask_cookies_again(self) -> None:
+        """The saved cookies (gofile's guest account, the sites' "you're human" passes) asked for again as a
+        run starts: asked only as the window opened, before any page had loaded, the store may not have read
+        them yet — and a plain download then goes without them (gofile answered with its page)."""
+        profile().cookieStore().loadAllCookies()
+
     def _cookie_added(self, cookie) -> None:
         domain = cookie.domain().lstrip(".")
         self.cookies.setdefault(domain, {})[cookie.name().data().decode("latin-1")] = cookie.value().data().decode("latin-1")
@@ -281,6 +290,7 @@ class SimpCityWindow(QMainWindow):
                                     "https://simpcity.cr/threads/helen-owen-ig-helenowen.64622/")
             return
         self.address.setText(base)
+        self._ask_cookies_again()
         self.running, self.stopping = True, False
         self.want_videos = self.videos.isChecked()
         self.go_btn.setEnabled(False)
@@ -298,6 +308,8 @@ class SimpCityWindow(QMainWindow):
         self.webm = sc.can_convert_webm()            # WebM → MP4 (it takes ffmpeg)
         self.webm_done, self.webm_failed = 0, []
         self.fail_hosts, self.fail_why = {}, {}
+        self.gone_keys: set[str] = set()                # failed with a 404 from their server: recorded gone
+        self.gone = 0
         self.shown = self.direct_noted = 0
         self.exif_noted = False
         self.dedup = sc.Dedup()
@@ -611,6 +623,9 @@ class SimpCityWindow(QMainWindow):
                 if not isinstance(res, fh.NeedsBrowser):
                     self._log(f"{lk.url}: {why} — reading its page instead.")
                 shown = yield ("hostpage", page, lk.url)
+                if shown is None and not self.stopping:
+                    yield ("sleep", 10)                    # a page that didn't load: once more, after a pause
+                    shown = yield ("hostpage", page, lk.url)
                 trouble = fh.api_trouble(shown)
                 if trouble == "rate" and one_by_one and not self.stopping:
                     self._log(f"{lk.host} is limiting requests — waiting a minute, then trying once more.")
@@ -841,10 +856,14 @@ class SimpCityWindow(QMainWindow):
         return url
 
     def _lost(self, item: sc.Item) -> None:
-        """A file that didn't download: tried again next run — and the copies of a video that waited on
-        it are tried now instead."""
-        self.failed += 1
-        self.record.note_failed(item)
+        """A file that didn't download: tried again next run — unless its server said it's gone (HTTP 404),
+        then it's recorded as such — and the copies of a video that waited on it are tried now instead."""
+        if item.key in self.gone_keys:
+            self.gone += 1
+            self.record.add_skipped(item, "gone from its server (HTTP 404)")
+        else:
+            self.failed += 1
+            self.record.note_failed(item)
         if item.video:
             twins = self.dedup.settle(item.key, ok=False)
             if twins:
@@ -978,6 +997,9 @@ class SimpCityWindow(QMainWindow):
             msg += "."
             if n:
                 msg += f" {self.kept:,} kept their own date; {self.post_dated:,} got the post's date."
+        if not problem and getattr(self, "gone", 0):
+            msg += (f" {self.gone:,} file{'s were' if self.gone != 1 else ' was'} gone from {'their' if self.gone != 1 else 'its'} "
+                    "server (HTTP 404) — not tried again.")
         if not problem and self.person_left:
             msg += (f" {self.person_left:,} locked pixeldrain video{'s wait' if self.person_left != 1 else ' waits'} for you to "
                     "press Download on pixeldrain — run Get New again when you're at the Mac.")
@@ -1305,8 +1327,18 @@ class SimpCityWindow(QMainWindow):
             self._browser_download(url, item, name, why, referer, check, cb)
 
         limit = 4 * 3600 if item.video else 600
-        self.handle(("thread", lambda: sc.fetch(url, headers, os.path.join(str(self.tmp), name), limit=limit, check=check),
-                     f"{item.stem} (downloading {url[:90]})"), direct_done)
+        target = os.path.join(str(self.tmp), name)
+
+        def fetch() -> tuple:
+            # A busy server (turbo's CDN answers 503 under load) is asked again after a pause, before the
+            # browser is tried.
+            for wait in (*sc.BUSY_WAITS, None):
+                got = sc.fetch(url, headers, target, limit=limit, check=check)
+                if got[0] or wait is None or self.stopping or not sc.is_busy(got[1]):
+                    return got
+                time.sleep(wait)
+            return got
+        self.handle(("thread", fetch, f"{item.stem} (downloading {url[:90]})"), direct_done)
 
     def _checker(self, item: sc.Item):
         """What a download's first answer is checked against (on a worker thread, or here for Chromium's)."""
@@ -1348,6 +1380,8 @@ class SimpCityWindow(QMainWindow):
                 return
             if not path:
                 self._failed(item, url, f"{direct_why}; in the browser: {why or 'failed'}")
+                if sc.is_gone(direct_why):
+                    self.gone_keys.add(item.key)       # the server says it isn't there: not tried every run
             cb(path)
 
         def requested(req) -> None:
@@ -1357,7 +1391,7 @@ class SimpCityWindow(QMainWindow):
         self.pending[name] = (finish, requested, check)
         self.pending_urls[url] = name
         if referer:
-            self.referer.by_url[url] = referer
+            self.referer.by_url[url] = sc.referer_origin(referer)
         if item.remote and item.remote.cookies:
             self._set_cookies(url, item.remote.cookies)
         self.view.page().download(QUrl(url), name)

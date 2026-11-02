@@ -32,6 +32,8 @@ nonisolated enum SimpCityHosts {
     static let userAgent =
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
     static let bunkrAPI = "https://apidl.bunkr.ru/api/_001_v2"
+    /// bunkr's download site: the Referer/Origin its API and file servers expect (a `dl.<domain>` one got 403s).
+    static let bunkrHub = "https://get.bunkrr.su"
 
     nonisolated enum Failure: Error, CustomStringConvertible {
         /// A "you're human?" check, or no plain way in — read it in a web view.
@@ -166,7 +168,7 @@ nonisolated enum SimpCityHosts {
             return url
         }
         if remote.host == "bunkr", let id = remote.extra["id"], !id.isEmpty {
-            return try await bunkrFileURL(id, hub: remote.extra["hub"] ?? "https://dl.bunkr.cr", ua: ua)
+            return try await bunkrFileURL(id, hub: bunkrHub, ua: ua)
         }
         throw Failure.needsBrowser("\(remote.host) shows the file only on its page")
     }
@@ -350,7 +352,7 @@ nonisolated enum SimpCityHosts {
 
     private static func bunkr(_ link: Link, ua: String) async throws -> [Remote] {
         let host = URL(string: link.url)?.host ?? "bunkr.cr"
-        let origin = "https://\(host)", hub = "https://dl.\(host)"
+        let origin = "https://\(host)", hub = bunkrHub
         let url = link.url
         let remote: @Sendable (String, String, String, Int64) -> Remote = { fid, slug, name, size in
             Remote(host: "bunkr", fid: safeID(slug.isEmpty ? fid : slug), name: name, size: size,
