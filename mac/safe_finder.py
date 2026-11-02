@@ -577,6 +577,35 @@ def open_simpcity(folder: str, parent: QWidget | None = None) -> None:
     win.show()
 
 
+_SOCIAL_WINDOWS: list = []
+
+
+def social_label(folder: str, kind: str) -> str:
+    """The menu line: "Get New Instagram Posts" on a folder that's already a profile's, else "Download …"."""
+    name = "Instagram" if kind == "instagram" else "Facebook"
+    record = os.path.join(folder, ".instagram.json" if kind == "instagram" else ".facebook.json")
+    return f"Get New {name} Posts" if os.path.isfile(record) else f"Download {name} Profile…"
+
+
+def open_social(kind: str, folder: str, parent: QWidget | None = None) -> None:
+    """Right-click a folder ▸ "Download Instagram Profile…" / "Download Facebook Profile…": the downloader
+    window (social_downloader.py). The profile gets its own folder inside this one — or this folder, when
+    it already is that profile's (then the menu says "Get New … Posts")."""
+    try:
+        import social_downloader
+    except ModuleNotFoundError:
+        QMessageBox.information(parent, "Instagram" if kind == "instagram" else "Facebook",
+                                "The downloader needs Qt WebEngine (part of PySide6).\n"
+                                "Run mac/run.sh once to set it up, then try again.")
+        return
+    win = social_downloader.SocialWindow(kind, folder, tags=tag_store())
+    win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    win.finished.connect(lambda _folder, files: files and tags_changed())
+    win.destroyed.connect(lambda _=None, w=win: _SOCIAL_WINDOWS.remove(w) if w in _SOCIAL_WINDOWS else None)
+    _SOCIAL_WINDOWS.append(win)
+    win.show()
+
+
 def has_tag(path: str, tag: str) -> bool:
     f = shared_tags.fold(tag)
     return any(shared_tags.fold(t) == f for t in tag_store().tags(path, fresh=False))
@@ -3613,6 +3642,9 @@ class Pane(QWidget):
                 menu.addAction("AirDrop to iPhone…", lambda: self.airdrop(paths))
             if len(paths) == 1 and os.path.isdir(paths[0]):
                 menu.addAction("Download from SimpCity…", lambda: open_simpcity(paths[0], self.window()))
+                for kind in ("instagram", "facebook"):
+                    menu.addAction(social_label(paths[0], kind),
+                                   lambda _=False, kind=kind: open_social(kind, paths[0], self.window()))
             menu.addSeparator()
             win = self.window()
             if isinstance(win, MainWindow) and self is win.src:
@@ -3641,6 +3673,9 @@ class Pane(QWidget):
             menu.addAction("New Folder", self.new_folder)
             if not paths and os.path.isdir(self.location):
                 menu.addAction("Download from SimpCity…", lambda: open_simpcity(self.location, self.window()))
+                for kind in ("instagram", "facebook"):
+                    menu.addAction(social_label(self.location, kind),
+                                   lambda _=False, kind=kind: open_social(kind, self.location, self.window()))
         menu.exec(view.viewport().mapToGlobal(pos))
 
     # -- crop (crop_window.py / batch_crop.py — the iPhone app's Crop screen, on the Mac)

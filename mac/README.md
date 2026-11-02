@@ -420,6 +420,40 @@ photo with the same metadata, dates and tags; **Replace** rewrites them in place
 boxes are left alone (and counted). It erases what you box; it doesn't look for watermarks on its own.
 (Needs numpy — `Safe Finder.command` installs it; rebuild the app with `build_safe_finder_app.sh`.)
 
+### Download an Instagram or Facebook profile (`social_downloader.py`, `instagram.py`, `facebook.py`)
+
+Right-click a person's folder ▸ **Download Instagram Profile…** or **Download Facebook Profile…** (on a
+profile's own folder it says **Get New Instagram Posts** / **Get New Facebook Posts**). Type the handle (or
+paste the profile link) and press Download. The window holds a real browser: log in to Instagram or
+Facebook there once — it stays logged in — and if the site asks "is this you?", answer it there. Safe Finder
+then reads the profile *from inside that logged-in browser*, exactly as the site's own pages do, so it sees
+what you see (private profiles you follow included), and never fills in a login or answers a check itself.
+
+- **Instagram**: the posts, the posts it's tagged in, its reels, its current stories (into `Stories`) and
+  highlights (a folder each) — the same as the iPhone app. Videos come at the best quality offered: when
+  Instagram has a sharper version in two halves (picture and sound), they're put together on the Mac.
+- **Facebook**: every album (profile and cover pictures included), the uploads, the photos it's tagged in,
+  and its videos.
+- **Upscale photos 2×** (Lanczos with a light sharpen — or Real-ESRGAN when Upscayl is installed and
+  "with Real-ESRGAN" is ticked) and **Upscale videos to 1080p**, as each file comes in. Upscaled files are
+  tagged "upscaled" too.
+
+Every file is tagged **instagram** or **facebook**, gets the post's date (and place, caption and poster
+when ExifTool is installed), and lands in a folder for the profile inside the one you right-clicked —
+`<person>/<handle>` for Instagram, `<person>/<name>` for Facebook — with the iPhone app's file names
+(`<shortcode>.jpg`, `<shortcode>_2.mp4`, `FB_<id>.jpg`).
+
+**Nothing is downloaded twice, by either app.** The profile's folder keeps a hidden record
+(`.instagram.json` / `.facebook.json`) of every post downloaded into it — by Safe Finder *or* the iPhone,
+which reads and writes the same file — and both apps also take the post ids in the folder's file names as
+done. A post you delete from the folder stays deleted. "Get New" reads newest first and stops once it
+reaches what's already there.
+
+Videos are put together and upscaled with AVFoundation — a small helper Safe Finder builds the first time
+(it needs Xcode's Command Line Tools: `xcode-select --install`), the iPhone app's own code — or with ffmpeg
+when that's installed instead (`brew install ffmpeg`). Neither: videos come in their one-file version, not
+upscaled (the log says so). The browser needs Qt WebEngine (part of PySide6, set up by `run.sh`).
+
 ### Download a SimpCity thread into a person's folder (`simpcity_downloader.py`)
 
 Right-click a person's folder (or the empty area inside it) ▸ **Download from SimpCity…**, paste the

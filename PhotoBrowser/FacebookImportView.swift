@@ -133,7 +133,10 @@ struct FacebookImportView: View {
                 bg.end(); return
             }
 
-            let r = await FacebookService.run(profileURL: link, into: dest, alreadyDownloaded: already,
+            // The folder's shared record: Safe Finder's downloads (and ones deleted since) aren't fetched again.
+            let shared = await Task.detached(priority: .userInitiated) { SocialRecord.snapshot(.facebook, in: dest) }.value
+            let known = already.union(shared.ids)
+            let r = await FacebookService.run(profileURL: link, into: dest, alreadyDownloaded: known,
                                               creds: creds, upscalePhotos: upscale,
                                               skipTagged: skipT, includeSubscriberHub: subHub) { p in
                 Task { @MainActor in
@@ -146,10 +149,17 @@ struct FacebookImportView: View {
             if let picData = r.profilePic, let img = UIImage(data: picData) { library.setCover(img, for: dest) }
             else if library.coverURL(for: dest) == nil, let cover = await firstItemThumbnail(in: dest) { library.setCover(cover, for: dest) }
 
+            // Every file tagged "facebook", as Safe Finder tags its downloads.
+            library.addTag(SocialRecord.Kind.facebook.tag, to: r.postedBy.keys.map { URL(fileURLWithPath: $0) })
             if let profile = r.profile {
+                let done = known.union(r.newIDs), photos = r.photos, videos = r.videos
+                let fields = ["profile_name": profile.name, "profile_id": profile.id, "profile_url": profile.url]
+                await Task.detached(priority: .utility) {
+                    SocialRecord.save(.facebook, in: dest, done: done, photos: photos, videos: videos, info: fields)
+                }.value
                 let info = FBFolderInfo(profileName: profile.name, profileID: profile.id, profileURL: profile.url,
                                         lastUpdated: Date().timeIntervalSince1970,
-                                        downloaded: Array(already.union(r.newIDs)),
+                                        downloaded: Array(known.union(r.newIDs)),
                                         photos: (prior?.photos ?? 0) + r.photos,
                                         videos: (prior?.videos ?? 0) + r.videos)
                 library.setFacebookInfo(info, for: dest)

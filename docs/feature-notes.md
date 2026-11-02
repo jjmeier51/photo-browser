@@ -1532,6 +1532,56 @@ even though the session is fine. Now:
   with the session — now including the DASH video+audio pair (`dashPair`), so an exclusive video keeps
   its best rendition rather than dropping to the progressive stream.
 
+### 7.4e Instagram / Facebook in Safe Finder — `mac/social_downloader.py`, `mac/instagram.py`, `mac/facebook.py`, `mac/social.py`, `mac/video_tools.py`, `mac/video_helper.swift`, `SocialRecord.swift` (Nov 2, 2026)
+
+**Ports, not new designs.** `instagram.py` is `InstagramService` (feed / usertags — only the tagged carousel
+items — / clips / stories from every reel source incl. the subscriber reel in the tray / highlights; the
+15-in-a-row + two-weeks-before-the-last-run stop; DASH taller than progressive → mux, else best progressive;
+largest image candidate; `<code>` / `<code>_<n>` / pk names; `Stories/`, a sanitized folder per highlight).
+`facebook.py` is `FacebookService` (albums tab tokens walked to the end, `pb.`/`t.` walked with the 30-known
+early stop, the videos tab, the photo page's `nextMediaAfterNodeId` chain, the alternate `photo.php` form for a
+shell page, one `window.location.replace` hop; `FB_<id>.<ext>`). `ids_on_disk` = `postIDsOnDisk` (3 deep, `@`
+and hidden folders skipped, id and whole stem) / `existingMediaIDs`. Destination = the iPhone's: `<person>/<handle>`
+(`resolveIGDestination`) / `<person>/<sanitize(name)>` — plus "the folder whose record names the profile". A
+person folder merely named like the handle ("Jane" for @jane) is *not* the profile's (that was a bug in the
+first cut); one named so that already holds post files is (pre-record iPhone folders).
+
+**Transport: the logged-in browser.** Every call is a `fetch(..., {credentials:'include'})` from a hidden
+`QWebEnginePage` on `robots.txt` of the site (same origin, no site script) — Instagram with the web app's
+headers (`API_JS`, the iPhone's `InstagramWebFetcher` script; the app id read from the home page), Facebook a
+plain HTML GET (`PAGE_JS`). `runJavaScript` can't await, so a start script stores the answer under an id and a
+result script is polled. Media comes from the CDN with `urllib` (the browser's UA, the site as Referer) —
+logged out first, with the cookie store's cookies on refusal (private profiles). Calls are spaced (≈0.6 s IG,
+≈0.35 s FB, jittered) and back off on 429/5xx (5/15/45 s). Nothing answers a check or fills a login: the
+window shows the login page and waits for the session cookie (`sessionid` / `c_user`).
+
+**Generators.** `instagram.run` / `facebook.run` yield `api`/`page` (answered `(status, text[, final url])`),
+`sleep`, `note`, `profile`, and `emit` (items handed to the four download lanes while the crawl goes on). The
+window's `_Runner` answers them; tests drive the same generators with canned answers.
+
+**A download** (`social.settle`, worker thread): temp folder → (DASH halves → `video_tools.mux`) → WebP/HEIC
+→ JPEG for Instagram's `.jpg` names → optional 2× (Lanczos + UnsharpMask, or `ai_upscale` when chosen) / 1080p
+(`video_tools.upscale_1080`; the heavy ones one at a time) → ExifTool: EXIF dates, GPS, Artist, IPTC
+Caption-Abstract (through a file — ExifTool's `-@` takes one argument per line) / By-line / Keywords
+"Instagram"; for video QuickTime dates, `Keys:GPSCoordinates`, `Keys:Description` → file dates → placed (temp →
+fsync → rename; never over an existing file — that one counts as done). A post is recorded done only when every
+file of it settled (a carousel's last item may still be downloading); the record and tags are saved every 25
+files and at the end.
+
+**The shared record** (`.instagram.json` / `.facebook.json`): `{format, version, handle|profile_name,
+user_id|profile_id, profile_url, full_name, last_updated, downloaded: [ids], photos, videos}`; a save re-reads,
+unions ids, adds this run's counts, keeps unknown fields. iOS (`SocialRecord.swift`): the single, bulk and
+stories-sweep Instagram runs and the Facebook run union its ids into `already` (read off-main) and save after;
+a folder with no phone record takes `instagramInfo` / `facebookInfo` from it (the profile id and last update),
+so "Get New" from the phone is incremental on a Mac-made folder. Both apps tag "instagram"/"facebook" now
+(`InstagramApply.apply`, the stories sweep, `FacebookImportView`). Not adopted: the phone doesn't list a
+Mac-made folder as an Instagram folder (bubbles, sweep) until it has downloaded into it once.
+
+**Video helper**: `video_helper.swift` = `InstagramService.mux` + `MediaEditing.upscaleVideo` as a CLI
+(`-parse-as-library`, async `@main`), built like `thumb_helper` into ~/Library/Caches/PhotoBrowser. ffmpeg
+fallback: `-c copy` mux; `scale=1080:-2` / `-2:1080` + libx264 CRF 17 (videotoolbox if libx264 is missing),
+`-map_metadata 0`. Not covered offscreen: the Swift helper and real Qt WebEngine (the tests stand them in).
+
 ### 7.4d SimpCity threads — `SimpCityService.swift` / `SimpCityRecord.swift` / `SimpCityHosts.swift` / `SimpCityImportView.swift`, `mac/simpcity.py` / `mac/filehosts.py` / `mac/simpcity_downloader.py` (Oct 28, 2026)
 "Download from SimpCity…" on a person's folder (iPhone: the download menu; Safe Finder: right-click a
 folder, or the empty area of one): paste a `simpcity.cr/threads/…` address; every page is read, each

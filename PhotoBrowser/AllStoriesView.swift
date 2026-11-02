@@ -149,6 +149,13 @@ struct AllStoriesView: View {
                         updated.photos += o.photos
                         updated.videos += o.videos
                         library.setInstagramInfo(updated, for: o.url)
+                        library.addTag(SocialRecord.Kind.instagram.tag, to: o.files.map { URL(fileURLWithPath: $0) })
+                        let (folderURL, newIDs, handle, userID) = (o.url, Set(o.newIDs), o.info.handle, o.userID)
+                        let (photos, videos) = (o.photos, o.videos)
+                        Task.detached(priority: .utility) {
+                            SocialRecord.save(.instagram, in: folderURL, done: newIDs, photos: photos, videos: videos,
+                                              info: ["handle": handle, "user_id": userID])
+                        }
                         library.setStoryLinks(o.copied, to: o.url.appendingPathComponent("Stories", isDirectory: true))
                         summary.append(StorySummary(handle: o.info.handle, count: o.photos + o.videos))
                         for f in o.files {
@@ -202,6 +209,7 @@ struct AllStoriesView: View {
         try? DriveWriter.createDirectory(at: storiesFolder)   // create @handle/Stories on demand
         // Already here: the record's ids and what's in the folder (Stories, highlights, the posts).
         let already = Set(folder.info.downloaded).union(Library.postIDsOnDisk(in: folder.url, tiktok: false))
+            .union(SocialRecord.snapshot(.instagram, in: folder.url).ids)
         let r = await InstagramService.runStories(handle: folder.info.handle, userID: userID, into: storiesFolder,
                                                   already: already, creds: creds) { _ in }
         guard r.photos + r.videos > 0 else {

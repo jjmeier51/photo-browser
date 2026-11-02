@@ -38,6 +38,8 @@ enum InstagramApply {
                 library.setCover(cover, for: dir)
             }
         }
+        // Every file tagged "instagram", as Safe Finder tags its downloads.
+        library.addTag(SocialRecord.Kind.instagram.tag, to: r.files.map { URL(fileURLWithPath: $0) })
         if let profile = r.profile {
             let info = IGFolderInfo(handle: profile.handle, userID: profile.userID,
                                     lastUpdated: Date().timeIntervalSince1970,
@@ -45,6 +47,12 @@ enum InstagramApply {
                                     photos: forceFull ? r.photos : (prior?.photos ?? 0) + r.photos,
                                     videos: forceFull ? r.videos : (prior?.videos ?? 0) + r.videos)
             library.setInstagramInfo(info, for: dest)
+            // The folder's shared record, so Safe Finder skips what this run (and the phone before it) has.
+            let done = already.union(r.newIDs), photos = r.photos, videos = r.videos
+            let fields = ["handle": profile.handle, "user_id": profile.userID, "full_name": profile.fullName]
+            await Task.detached(priority: .utility) {
+                SocialRecord.save(.instagram, in: dest, done: done, photos: photos, videos: videos, info: fields)
+            }.value
         }
     }
 

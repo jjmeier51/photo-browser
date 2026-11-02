@@ -61,6 +61,7 @@ rm -rf "dist/Safe Finder" "dist/Safe Finder.app"
   --add-data "$PWD/airdrop_to_iphone.py:." \
   --add-data "$PWD/airdrop_helper.swift:." \
   --add-data "$PWD/thumb_helper.swift:." \
+  --add-data "$PWD/video_helper.swift:." \
   --workpath build/pyinstaller --distpath dist --specpath build \
   safe_finder.py
 

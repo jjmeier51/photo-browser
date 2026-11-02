@@ -2514,11 +2514,12 @@ final class Library {
                 setLastIGHandle(job.handle, for: job.folder)      // remember the mapping
                 let dest = resolveIGDestination(person: job.folder, handle: job.handle)
                 try? DriveWriter.createDirectory(at: dest)
-                let prior = instagramInfo(for: dest)
-                // The record's ids and what's in the folder (a record from an older backup mustn't
-                // make it fetch what's already there).
+                let shared = await Task.detached(priority: .utility) { SocialRecord.snapshot(.instagram, in: dest) }.value
+                let prior = instagramInfo(for: dest) ?? shared.instagramInfo
+                // The record's ids, the shared record's (Safe Finder's too), and what's in the folder (a
+                // record from an older backup mustn't make it fetch what's already there).
                 let onDisk = await Task.detached(priority: .utility) { Self.postIDsOnDisk(in: dest, tiktok: false) }.value
-                let already = Set(prior?.downloaded ?? []).union(onDisk)
+                let already = Set(prior?.downloaded ?? []).union(onDisk).union(shared.ids)
                 setActivity(id, status: "@\(job.handle) — \(already.isEmpty ? "downloading" : "checking for new posts") (\(i + 1) of \(jobs.count))",
                             fraction: Double(i) / Double(jobs.count))
                 let r = await InstagramService.run(handle: job.handle, into: dest, alreadyDownloaded: already,

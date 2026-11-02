@@ -122,13 +122,16 @@ struct InstagramImportView: View {
                 dest = library.resolveIGDestination(person: target, handle: h)
                 try? DriveWriter.createDirectory(at: dest)
             }
-            let prior = isUpd ? ex : library.instagramInfo(for: dest)
+            // The folder's shared record (Safe Finder's downloads too — `SocialRecord`); for a folder
+            // only Safe Finder has downloaded into, it's where the profile's id and last update come from.
+            let shared = await Task.detached(priority: .userInitiated) { SocialRecord.snapshot(.instagram, in: dest) }.value
+            let prior = isUpd ? ex : (library.instagramInfo(for: dest) ?? shared.instagramInfo)
             // Already here: the record's ids AND the posts in the folder — a record restored from an
             // older backup, or rebuilt, mustn't make it fetch what's on the drive.
             var already = Set<String>()
             if !force {
                 let onDisk = await Task.detached(priority: .userInitiated) { Library.postIDsOnDisk(in: dest, tiktok: false) }.value
-                already = Set(prior?.downloaded ?? []).union(onDisk)
+                already = Set(prior?.downloaded ?? []).union(onDisk).union(shared.ids)
             }
 
             let r = await InstagramService.run(handle: h, into: dest, alreadyDownloaded: already, creds: creds,
