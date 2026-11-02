@@ -209,6 +209,7 @@ final class SimpCityDownloader {
         var items: [String: SimpCity.Item] = [:]
         var links: [String: SimpCityHosts.Link] = [:]
         var scores: [String: Int] = [:]                    // post → reaction score, noted in the record
+        var gals: [String: [String: Any]] = [:]             // pixhost galleries the posts link
         var askedLogin = false
         var gap = SimpCity.pageGap, limits = 0
         var short = ""
@@ -249,6 +250,7 @@ final class SimpCityDownloader {
             }
             SimpCity.collect(posts: posts, into: &items, links: &links)
             scores.merge(SimpCity.reactions(posts)) { _, fresh in fresh }
+            SimpCity.collectGalleries(posts: posts, into: &gals)
             last = max(last, (page["last"] as? NSNumber)?.intValue ?? 1)
             if title.isEmpty { title = page["title"] as? String ?? "" }
             readTo = n
@@ -266,6 +268,27 @@ final class SimpCityDownloader {
         rec.noteThread(base, title: title, pages: readTo, hosts: toEnd && (fromStart || hadHosts),
                        resume: fromStart && !toEnd ? readTo : 0)
         rec.noteReactions(scores)
+
+        // pixhost galleries: their images join the thread's, dated by the post that linked the gallery. One
+        // that can't be listed is noted and tried again next run.
+        for (gid, g) in rec.galleriesTodo(gals) where !shouldStop {
+            say("Listing the pixhost gallery \(gid)…")
+            let r = await SimpCity.pixhostGalleryItems(id: gid, url: (g["url"] as? String) ?? "",
+                                                       post: (g["post"] as? String) ?? "",
+                                                       posted: (g["posted"] as? NSNumber)?.doubleValue ?? 0)
+            for it in r.items {
+                if let have = items[it.key] {
+                    if it.link.contains("/images/"), !have.link.contains("/images/") {
+                        items[it.key] = SimpCity.Item(kind: have.kind, id: have.id, link: it.link, post: have.post, posted: have.posted)
+                    }
+                } else {
+                    items[it.key] = it
+                }
+            }
+            rec.noteGallery(gid, g, files: r.items.map(\.key), why: r.why)
+            if !r.why.isEmpty { print("[SimpCity] pixhost gallery \(gid): \(r.why)") }
+            await pause(0.5)
+        }
         let shortNote: String? = short.isEmpty ? nil : short
 
         // 2. What's left: not in the record, not already in the folder — and the earlier downloads to
@@ -955,6 +978,11 @@ final class SimpCityDownloader {
     /// A check the lane can't pass is shown on the main (visible) page when the screen is open — the
     /// cookie it leaves lets every lane through; with the screen closed, the run stops and says so.
     private func resolve(_ item: SimpCity.Item, on lane: SimpCityPage) async -> URL? {
+        if item.kind == "pixhost" {                         // no browser needed (SimpCityPixhost.swift)
+            let r = await SimpCity.pixhostResolve(item.link)
+            if r.url == nil { print("[SimpCity] pixhost \(item.id): \(r.why)") }
+            return r.url
+        }
         guard let page = URL(string: item.link) else { return nil }
         if item.kind == "goonbox", let url = await goonboxOriginal(item, page: page, on: lane) { return url }
         let script = SimpCityPage.resolveScript(kind: item.kind)

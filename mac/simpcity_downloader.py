@@ -478,10 +478,12 @@ class SimpCityWindow(QMainWindow):
         items: dict[str, sc.Item] = {}
         links: dict[str, fh.Link] = {}
         scores: dict[str, int] = {}
+        gals: dict[str, dict] = {}
 
         def on_page(_n: int, page: dict) -> None:
             posts = page.get("posts") or []
             sc.collect(posts, items, links)
+            sc.galleries(posts, gals)
             scores.update(sc.reactions(posts))
 
         read_to, last, title, short, n = yield from self._pages(
@@ -499,6 +501,26 @@ class SimpCityWindow(QMainWindow):
         # done, still to do, or kept for later. One cut short carries on from where it stopped (`resume`).
         self.record.note_thread(base, title, read_to, hosts=to_end and (from_start or had_hosts),
                                 resume=read_to if from_start and not to_end else 0)
+        # pixhost galleries: their images join the thread's (dated by the post that linked the gallery).
+        to_list_g = self.record.galleries_todo(gals)
+        if to_list_g:
+            self._log(f"Listing {len(to_list_g):,} pixhost galler{'ies' if len(to_list_g) != 1 else 'y'}…")
+        headers = self._pixhost_headers()
+        for gid, g in to_list_g:
+            if self.stopping:
+                break
+            got = yield ("thread", lambda gid=gid, g=g: sc.pixhost_gallery_items(gid, g, headers), f"pixhost gallery {gid}")
+            found, why = got if isinstance(got, tuple) else ([], str(got))
+            for it in found:
+                have = items.get(it.key)
+                if have is None:
+                    items[it.key] = it
+                elif "/images/" in it.link and "/images/" not in have.link:
+                    have.link = it.link
+            self.record.note_gallery(gid, g, [it.key for it in found], why)
+            if why:
+                self._log(f"pixhost gallery {g['url']}: couldn't list it ({why}) — tried again next time.")
+            yield ("sleep", 0.5)
         fixes = self.record.fixes(items, self.dest, webm=self.webm)
         self.record.redate(items, read_all=from_start and to_end)
         left, adopted = sc.todo(items, self.record, self.dest, self.want_videos)
@@ -1110,9 +1132,25 @@ class SimpCityWindow(QMainWindow):
 
         QTimer.singleShot(1500, check)
 
+    def _pixhost_headers(self) -> dict[str, str]:
+        return {"User-Agent": self.ua, "Referer": sc.PIXHOST_REFERER, "Accept-Language": "en-US,en;q=0.9"}
+
     def _resolve(self, page: QWebEnginePage, item: sc.Item, cb) -> None:
         """The full-size file behind a goonbox/turbo link, worked out in this lane's hidden page:
-        goonbox's own API first (`original_url`), else what the page shows once its script has built it."""
+        goonbox's own API first (`original_url`), else what the page shows once its script has built it.
+        A pixhost image needs no browser: its address from its thumbnail, else its show page
+        (`simpcity.pixhost_resolve`, on a worker thread)."""
+        if item.kind == "pixhost":
+            headers = self._pixhost_headers()
+
+            def work() -> None:
+                url, why = sc.pixhost_resolve(item.link, headers)
+                if not url:
+                    self.bridge.done.emit(lambda _v: (self._log(f"pixhost {item.ident}: {why}"), cb(None)), None)
+                else:
+                    self.bridge.done.emit(cb, url)
+            threading.Thread(target=work, daemon=True).start()
+            return
         if item.kind == "goonbox":
             self._goonbox_api(page, item, lambda url: cb(url) if url else self._resolve_page(page, item, cb))
         else:

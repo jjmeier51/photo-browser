@@ -44,6 +44,7 @@ the Swift copy in `SimpCityService.swift`.
 from __future__ import annotations
 
 import hashlib
+import html as htmllib
 import json
 import os
 import re
@@ -112,18 +113,63 @@ _GOONBOX = re.compile(r"^https?://(?:www\.)?goonbox\.[a-z]+/(?:img|i|image|v|f)/
 _TURBO = re.compile(r"^https?://(?:www\.)?turbo\.[a-z]+/(?:v|d|e|embed|f)/([A-Za-z0-9_-]{4,})", re.I)
 
 
+IMAGE_KINDS = ("goonbox", "pixhost")      # kinds whose files are photos (the rest are videos)
+
+# pixhost (pixhost.cc — also pixhost.to, pixhost.org, pixho.st): an image's show page
+# `/show/<dir>/<id>_<name>`, its thumbnail `t<N>.<domain>/thumbs/<dir>/<id>_<name>` and the full-size file
+# `img<N>.<domain>/images/<dir>/<id>_<name>` — the same server number N as the thumbnail. `<id>` is the key.
+PIXHOST_DOMAIN = r"(pixhost\.(?:cc|to|org)|pixho\.st)"
+_PIX_SHOW = re.compile(rf"^https?://(?:www\.)?{PIXHOST_DOMAIN}/show/(\d+)/((\d+)_[^/?#\s\"'<>]+)", re.I)
+_PIX_FILE = re.compile(rf"^https?://(?:t|img)(\d+)\.{PIXHOST_DOMAIN}/(?:thumbs|images)/(\d+)/((\d+)_[^/?#\s\"'<>]+)", re.I)
+_PIX_GALLERY = re.compile(rf"^https?://(?:www\.)?{PIXHOST_DOMAIN}/gallery/([A-Za-z0-9]+)", re.I)
+
+
+def pixhost_link(url: str) -> tuple[str, str] | None:
+    """(id, link) for a pixhost image: its full-size address when the post had the thumbnail or the file
+    itself (`t<N>…/thumbs/` → `img<N>…/images/`), else its show page."""
+    u = (url or "").strip()
+    if m := _PIX_FILE.match(u):
+        server, domain, folder, file, ident = m.groups()
+        return ident, f"https://img{server}.{domain.lower()}/images/{folder}/{file}"
+    if m := _PIX_SHOW.match(u):
+        domain, folder, file, ident = m.groups()
+        return ident, f"https://{domain.lower()}/show/{folder}/{file}"
+    return None
+
+
+def pixhost_show(link: str) -> str:
+    """The show page of a pixhost image link (its own, or the one a full-size address belongs to)."""
+    if m := _PIX_FILE.match(link):
+        _server, domain, folder, file, _ident = m.groups()
+        return f"https://{domain.lower()}/show/{folder}/{file}"
+    return link
+
+
+def pixhost_gallery(url: str) -> tuple[str, str] | None:
+    """(id, address) of a pixhost gallery link."""
+    if m := _PIX_GALLERY.match((url or "").strip()):
+        return m.group(2), f"https://{m.group(1).lower()}/gallery/{m.group(2)}"
+    return None
+
+
 def media_key(url: str) -> tuple[str, str] | None:
-    """(kind, id) for a link the downloader takes: a goonbox.cr image page or a turbo.cr video."""
+    """(kind, id) for a link the downloader takes: a goonbox.cr image page, a turbo.cr video, a pixhost
+    image (its show page, thumbnail or file)."""
     u = (url or "").strip()
     if m := _GOONBOX.match(u):
         return ("goonbox", m.group(1))
     if m := _TURBO.match(u):
         return ("turbo", m.group(1))
+    if p := pixhost_link(u):
+        return ("pixhost", p[0])
     return None
 
 
 def page_link(kind: str, ident: str) -> str:
-    """goonbox's image page for an id (its API takes the same id). turbo links are kept as posted."""
+    """goonbox's image page for an id (its API takes the same id). turbo links are kept as posted, and a
+    pixhost link can't be rebuilt from its id alone ("")."""
+    if kind == "pixhost":
+        return ""
     return f"https://goonbox.cr/img/{ident}" if kind == "goonbox" else f"https://turbo.cr/embed/{ident}"
 
 
@@ -136,7 +182,7 @@ def extension(url: str, kind: str, name: str = "") -> str:
             ext = "jpg"
         if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
             return ext
-    return "jpg" if kind == "goonbox" else "mp4"
+    return "jpg" if kind in IMAGE_KINDS else "mp4"
 
 
 # ----------------------------------------------------------------------------- what a thread holds
@@ -163,12 +209,12 @@ class Item:
 
     @property
     def video(self) -> bool:
-        return self.kind != "goonbox"
+        return self.kind not in IMAGE_KINDS
 
 
 def is_link(url: str) -> bool:
-    """Something the downloader takes: a goonbox/turbo link or a file-host link."""
-    return bool(media_key(url) or fh.classify(url))
+    """Something the downloader takes: a goonbox/turbo/pixhost link, a pixhost gallery or a file-host link."""
+    return bool(media_key(url) or pixhost_gallery(url) or fh.classify(url))
 
 
 def collect(posts: list[dict], into: dict[str, Item] | None = None,
@@ -190,11 +236,37 @@ def collect(posts: list[dict], into: dict[str, Item] | None = None,
                     if have_link is None or (when and (not have_link.posted or when < have_link.posted)):
                         links[lk.key] = lk
                 continue
-            link = page_link(*k) if k[0] == "goonbox" else str(u)
+            if k[0] == "goonbox":
+                link = page_link(*k)
+            elif k[0] == "pixhost":
+                link = pixhost_link(str(u))[1]
+            else:
+                link = str(u)
             item = Item(k[0], k[1], link, post, when)
             have = out.get(item.key)
             if have is None or (when and (not have.posted or when < have.posted)):
+                if have is not None and k[0] == "pixhost" and "/images/" in have.link and "/images/" not in link:
+                    item.link = have.link              # keep the full-size address over a show page
                 out[item.key] = item
+            elif k[0] == "pixhost" and "/images/" in link and "/images/" not in have.link:
+                have.link = link                       # the thumbnail beside a show link: the file's address
+    return out
+
+
+def galleries(posts: list[dict], into: dict[str, dict] | None = None) -> dict[str, dict]:
+    """The pixhost galleries the posts link (id → url, post, posted — the earliest post that has it); their
+    images are listed before the downloads (`pixhost_gallery_items`)."""
+    out = into if into is not None else {}
+    for p in posts or []:
+        when = float(p.get("time") or 0)
+        when = when if when >= MIN_POST else 0
+        for u in p.get("urls") or []:
+            g = pixhost_gallery(str(u))
+            if not g:
+                continue
+            have = out.get(g[0])
+            if have is None or (when and (not have["posted"] or when < have["posted"])):
+                out[g[0]] = {"url": g[1], "post": str(p.get("id") or ""), "posted": when}
     return out
 
 
@@ -226,6 +298,7 @@ class Record:
     failed: dict[str, dict] = field(default_factory=dict)    # not downloaded yet: tried again by the next run
     links: dict[str, dict] = field(default_factory=dict)     # file-host links: what each held, whether it's done
     reactions: dict[str, dict] = field(default_factory=dict) # post id → {"score": n, "checked": when read}
+    galleries: dict[str, dict] = field(default_factory=dict) # pixhost gallery id → url, post, posted, files (once listed)
 
     @property
     def file(self) -> Path:
@@ -261,6 +334,14 @@ class Record:
             if mine is None or (v.get("done") and not mine.get("done")) or \
                     (bool(v.get("done")) == bool(mine.get("done")) and float(v.get("checked") or 0) > float(mine.get("checked") or 0)):
                 self.links[k] = v
+        for k, v in (doc.get("galleries") or {}).items():
+            if not isinstance(v, dict):
+                continue
+            mine = self.galleries.get(k)
+            # A gallery listed on either side is listed; otherwise the newer word on it stands.
+            if mine is None or ("files" in v and "files" not in mine) or \
+                    (("files" in v) == ("files" in mine) and float(v.get("checked") or 0) > float(mine.get("checked") or 0)):
+                self.galleries[k] = v
         for k, v in (doc.get("reactions") or {}).items():
             if not isinstance(v, dict):
                 continue
@@ -384,9 +465,9 @@ class Record:
             kind, _, ident = k.partition(":")
             if kind == "turbo" and not videos:
                 continue
-            if kind in ("goonbox", "turbo") and ident and k not in self.items:
-                out[k] = Item(kind, ident, str(v.get("link") or page_link(kind, ident)), str(v.get("post") or ""),
-                              float(v.get("posted") or 0))
+            link = str(v.get("link") or page_link(kind, ident))
+            if kind in ("goonbox", "turbo", "pixhost") and ident and link and k not in self.items:
+                out[k] = Item(kind, ident, link, str(v.get("post") or ""), float(v.get("posted") or 0))
         return out
 
     # -- file-host links
@@ -470,6 +551,31 @@ class Record:
             return max(1, int(t.get("resume") or 1))
         return max(1, int(t.get("pages") or 1))
 
+    # -- pixhost galleries
+
+    def galleries_todo(self, found: dict[str, dict]) -> list[tuple[str, dict]]:
+        """The galleries to list this run: the ones the pages read link that were never listed, plus every
+        earlier one whose listing failed (it's tried again even when its page isn't read again)."""
+        out: dict[str, dict] = {}
+        for k, g in found.items():
+            if "files" not in self.galleries.get(k, {}):
+                out[k] = g
+        for k, g in self.galleries.items():
+            if "files" not in g and k not in out:
+                out[k] = {"url": g.get("url") or f"https://pixhost.cc/gallery/{k}", "post": str(g.get("post") or ""),
+                          "posted": float(g.get("posted") or 0)}
+        return sorted(out.items(), key=lambda kv: (kv[1].get("posted") or 0, kv[0]))
+
+    def note_gallery(self, gid: str, g: dict, files: list[str] | None, why: str = "") -> None:
+        """What a gallery held (its images' keys) — or, when it couldn't be listed, why (listed next run)."""
+        entry = {"url": g.get("url", ""), "post": str(g.get("post") or ""), "posted": int(g.get("posted") or 0),
+                 "checked": int(time.time())}
+        if files is not None and not why:
+            entry["files"] = list(files)
+        else:
+            entry["why"] = why or "couldn't be listed"
+        self.galleries[gid] = entry
+
     # -- reaction scores
 
     def note_reactions(self, scores: dict[str, int], when: float | None = None) -> None:
@@ -511,7 +617,7 @@ class Record:
         doc = {"format": FORMAT, "version": VERSION, "updated": int(time.time()), "by": "Safe Finder",
                "threads": dict(sorted(self.threads.items())), "items": dict(sorted(self.items.items())),
                "failed": dict(sorted(self.failed.items())), "links": dict(sorted(self.links.items())),
-               "reactions": dict(sorted(self.reactions.items()))}
+               "reactions": dict(sorted(self.reactions.items())), "galleries": dict(sorted(self.galleries.items()))}
         write_file(self.file, json.dumps(doc, ensure_ascii=False, indent=1).encode("utf-8"))
 
 
@@ -935,6 +1041,110 @@ def fetch(url: str, headers: dict[str, str], path: str, connect_timeout: float =
     except OSError:
         pass
     return None, why
+
+
+# ----------------------------------------------------------------------------- pixhost: reading it
+
+PIXHOST_REFERER = "https://pixhost.cc/"
+_PIX_IMG_TAGS = (re.compile(r'<img\b[^>]*\bclass="[^"]*\bimage-img\b[^"]*"[^>]*\bsrc="([^"]+)"', re.I),
+                 re.compile(r'<img\b[^>]*\bsrc="([^"]+)"[^>]*\bclass="[^"]*\bimage-img\b', re.I),
+                 re.compile(r'<img\b[^>]*\bid="image"[^>]*\bsrc="([^"]+)"', re.I))
+
+
+def _no_redirect_opener():
+    import urllib.request
+
+    class Refuse(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):           # a redirect is an answer here, not something to follow
+            return None
+    return urllib.request.build_opener(Refuse, urllib.request.HTTPSHandler(context=ssl_context()))
+
+
+def _answers_image(url: str, headers: dict[str, str]) -> bool:
+    """Whether `url` answers with an image itself (headers only). pixhost sends a wrong guess of the server
+    to a "removed" picture by a redirect — that's a no, never a picture to keep."""
+    import urllib.error
+    import urllib.request
+    try:
+        with _no_redirect_opener().open(urllib.request.Request(url, headers=headers), timeout=20) as r:
+            return r.status == 200 and (r.headers.get("Content-Type") or "").startswith("image/")
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def _page_text(url: str, headers: dict[str, str]) -> tuple[str | None, str]:
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=25,
+                                    context=ssl_context()) as r:
+            return r.read(4 << 20).decode("utf-8", "replace"), ""
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}"
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return None, f"couldn't connect ({getattr(e, 'reason', e)})"
+
+
+def pixhost_image(page: str, show: str) -> str | None:
+    """The full-size file a pixhost show page shows: its main picture (`class="image-img"`), checked to be
+    an `/images/` original — never a logo, an ad or a thumbnail."""
+    for rx in _PIX_IMG_TAGS:
+        if m := rx.search(page):
+            url = htmllib.unescape(m.group(1)).strip()
+            if url.startswith("//"):
+                url = "https:" + url
+            if _PIX_FILE.match(url) and "/images/" in url:
+                return url
+    want = urlsplit(show).path.split("/show/", 1)[-1]
+    if m := re.search(rf"https?://img\d+\.{PIXHOST_DOMAIN}/images/{re.escape(want)}", page, re.I):
+        return m.group(0)
+    return None
+
+
+def pixhost_resolve(link: str, headers: dict[str, str]) -> tuple[str | None, str]:
+    """The full-size file for a pixhost link (on a worker thread): the address worked out from its thumbnail
+    when the server answers it with the image, else the one its show page shows. (None, why) when neither
+    does — a removed image's page is a 404."""
+    if _PIX_FILE.match(link) and "/images/" in link and _answers_image(link, headers):
+        return link, ""
+    show = pixhost_show(link)
+    page, why = _page_text(show, headers)
+    if page is None:
+        return None, f"its page ({show}) answered {why}" if why.startswith("HTTP") else why
+    url = pixhost_image(page, show)
+    return (url, "") if url else (None, f"its page ({show}) shows no image — removed?")
+
+
+def pixhost_gallery_items(gid: str, g: dict, headers: dict[str, str]) -> tuple[list[Item], str]:
+    """The images of a pixhost gallery (on a worker thread), as items dated by the post that linked it — each
+    at its full-size address worked out from its thumbnail, else its show page. Follows the gallery's own
+    `?page=` links, should a big one be split. ([], why) when it can't be read."""
+    out: dict[str, Item] = {}
+    url, seen = g["url"], set()
+    while url and url not in seen and len(seen) < 50:
+        seen.add(url)
+        page, why = _page_text(url, headers)
+        if page is None:
+            return ([], why) if not out else (list(out.values()), "")
+        for raw in re.findall(r'(?:href|src|data-src)="([^"]+)"', page):
+            u = htmllib.unescape(raw)
+            if (p := pixhost_link(u)) is None:
+                continue
+            ident, link = p
+            have = out.get(ident)
+            if have is None:
+                out[ident] = Item("pixhost", ident, link, str(g.get("post") or ""), float(g.get("posted") or 0))
+            elif "/images/" in link and "/images/" not in have.link:
+                have.link = link
+        nxt = None
+        for m in re.finditer(r'href="([^"]*/gallery/' + re.escape(gid) + r'[^"]*[?&]page=\d+[^"]*)"', page):
+            cand = htmllib.unescape(m.group(1))
+            cand = cand if cand.startswith("http") else f"https://{urlsplit(g['url']).hostname}{cand}"
+            if cand not in seen:
+                nxt = cand
+                break
+        url = nxt
+    return list(out.values()), ""
 
 
 # ----------------------------------------------------------------------------- dates

@@ -477,6 +477,12 @@ are converted the next time you run it on that folder; their tags move to the MP
 are put right the next time you run it on that folder (it reads the thread from page 1 once to find
 their real post dates).
 
+**pixhost images.** Photos posted from pixhost (pixhost.cc — and pixhost.to, pixhost.org, pixho.st) come
+too, full size: a post's pixhost thumbnail or its link to the image's page, and every image of a pixhost
+**gallery** a post links. They're saved as `pixhost-<number>.<ext>`, tagged **simpcity**, dated like the
+rest (a gallery's images get the date of the post that linked it), and kept in the same record, so neither
+app downloads one twice. They're photos, so they come with **Download videos** off too.
+
 **Videos.** With **Download videos** ticked (it remembers the setting), the turbo.cr videos come too,
 and so do the videos the posts link on **pixeldrain, gofile, cyberdrop, bunkr** (.cr/.ws/.ru…),
 **filester** (.gg/.me) and **fileditch** (fileditchfiles.me, fileditchvids.st) — single files and whole

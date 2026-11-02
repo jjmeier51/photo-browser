@@ -161,7 +161,9 @@ actions the app makes no network calls.
   structure. Pure-Swift implementation of MEGA's encrypted client protocol (no
   SDK). (`MegaImportView`, `MegaDownloader`, `MegaCrypto`)
 - **Download from SimpCity** — on a person's folder (iPhone download menu; Safe Finder right-click):
-  a simpcity.cr thread's goonbox photos (full size, via goonbox's `/api/images/<id>`) and — with
+  a simpcity.cr thread's goonbox photos (full size, via goonbox's `/api/images/<id>`), **pixhost** photos (thumbnail
+  `t<N>`→`img<N>` when that server answers, else the show page's `image-img`; gallery links listed into their
+  images — `SimpCityPixhost.swift` / `simpcity.pixhost_*`; kind "pixhost", `pixhost-<id>.<ext>`) and — with
   "Download videos" on — turbo videos plus the videos its posts link on pixeldrain, gofile, cyberdrop,
   bunkr, filester and fileditch (`SimpCityHosts` / `mac/filehosts.py`: host APIs, else the host's page in
   the browser; **gofile only through its own site** — never sign a gofile API request yourself, a stale

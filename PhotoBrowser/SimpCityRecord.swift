@@ -66,6 +66,8 @@ nonisolated enum SimpCity {
     static let limitWaits: [Double] = [30, 60, 120, 240, 300]
     static let imageExts: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "heic", "avif"]
     static let videoExts: Set<String> = ["mp4", "mov", "m4v", "webm", "mkv"]
+    /// Kinds whose files are photos (the rest are videos).
+    static let imageKinds: Set<String> = ["goonbox", "pixhost"]
 
     // MARK: - Addresses
 
@@ -82,7 +84,8 @@ nonisolated enum SimpCity {
 
     static func pageURL(_ base: String, _ n: Int) -> String { n <= 1 ? base : "\(base)page-\(n)" }
 
-    /// (kind, id) for a link the downloader takes: a goonbox.cr image page or a turbo.cr video.
+    /// (kind, id) for a link the downloader takes: a goonbox.cr image page, a turbo.cr video, a pixhost
+    /// image (its show page, thumbnail or file).
     static func mediaKey(_ url: String) -> (kind: String, id: String)? {
         if let m = firstGroups(url, #"^https?://(?:www\.)?goonbox\.[a-z]+/(?:img|i|image|v|f)/([A-Za-z0-9_-]{4,})"#) {
             return ("goonbox", m[0])
@@ -90,11 +93,50 @@ nonisolated enum SimpCity {
         if let m = firstGroups(url, #"^https?://(?:www\.)?turbo\.[a-z]+/(?:v|d|e|embed|f)/([A-Za-z0-9_-]{4,})"#) {
             return ("turbo", m[0])
         }
+        if let p = pixhostLink(url) { return ("pixhost", p.id) }
         return nil
     }
 
     static func pageLink(kind: String, id: String) -> String {
-        kind == "goonbox" ? "https://goonbox.cr/img/\(id)" : "https://turbo.cr/embed/\(id)"
+        if kind == "pixhost" { return "" }               // a pixhost link can't be rebuilt from its id alone
+        return kind == "goonbox" ? "https://goonbox.cr/img/\(id)" : "https://turbo.cr/embed/\(id)"
+    }
+
+    // MARK: pixhost (same rules as `mac/simpcity.py`)
+
+    /// pixhost.cc (also pixhost.to, pixhost.org, pixho.st): an image's show page `/show/<dir>/<id>_<name>`,
+    /// its thumbnail `t<N>.<domain>/thumbs/<dir>/<id>_<name>` and the full-size file
+    /// `img<N>.<domain>/images/<dir>/<id>_<name>` — the same server number N as the thumbnail.
+    static let pixhostDomain = #"(pixhost\.(?:cc|to|org)|pixho\.st)"#
+    static let pixhostShowPattern = #"^https?://(?:www\.)?"# + pixhostDomain + #"/show/(\d+)/((\d+)_[^/?#\s"'<>]+)"#
+    static let pixhostFilePattern = #"^https?://(?:t|img)(\d+)\."# + pixhostDomain + #"/(?:thumbs|images)/(\d+)/((\d+)_[^/?#\s"'<>]+)"#
+    static let pixhostGalleryPattern = #"^https?://(?:www\.)?"# + pixhostDomain + #"/gallery/([A-Za-z0-9]+)"#
+
+    /// (id, link) for a pixhost image: its full-size address when the post had the thumbnail or the file
+    /// (`t<N>…/thumbs/` → `img<N>…/images/`), else its show page.
+    static func pixhostLink(_ url: String) -> (id: String, link: String)? {
+        let u = url.trimmingCharacters(in: .whitespaces)
+        if let m = firstGroups(u, pixhostFilePattern), m.count == 5 {
+            return (m[4], "https://img\(m[0]).\(m[1].lowercased())/images/\(m[2])/\(m[3])")
+        }
+        if let m = firstGroups(u, pixhostShowPattern), m.count == 4 {
+            return (m[3], "https://\(m[0].lowercased())/show/\(m[1])/\(m[2])")
+        }
+        return nil
+    }
+
+    /// The show page of a pixhost image link (its own, or the one a full-size address belongs to).
+    static func pixhostShow(_ link: String) -> String {
+        if let m = firstGroups(link, pixhostFilePattern), m.count == 5 {
+            return "https://\(m[1].lowercased())/show/\(m[2])/\(m[3])"
+        }
+        return link
+    }
+
+    /// (id, address) of a pixhost gallery link.
+    static func pixhostGallery(_ url: String) -> (id: String, url: String)? {
+        guard let m = firstGroups(url.trimmingCharacters(in: .whitespaces), pixhostGalleryPattern), m.count == 2 else { return nil }
+        return (m[1], "https://\(m[0].lowercased())/gallery/\(m[1])")
     }
 
     /// The file extension for a resolved file URL (its path, not the query) — or, for a file-host video,
@@ -105,11 +147,13 @@ nonisolated enum SimpCity {
             if ext == "jpeg" { ext = "jpg" }
             if imageExts.contains(ext) || videoExts.contains(ext) { return ext }
         }
-        return kind == "goonbox" ? "jpg" : "mp4"
+        return imageKinds.contains(kind) ? "jpg" : "mp4"
     }
 
     /// Something the downloader takes: a goonbox/turbo link or a file-host link.
-    static func isLink(_ url: String) -> Bool { mediaKey(url) != nil || SimpCityHosts.classify(url) != nil }
+    static func isLink(_ url: String) -> Bool {
+        mediaKey(url) != nil || pixhostGallery(url) != nil || SimpCityHosts.classify(url) != nil
+    }
 
     nonisolated struct Item: Sendable {
         /// "goonbox" | "turbo" | a file host (`SimpCityHosts.hosts`).
@@ -125,7 +169,7 @@ nonisolated enum SimpCity {
         var key: String { "\(kind):\(id)" }
         /// Its file name without the extension: `<id>`, or `<host>-<id>` for a file-host video.
         var stem: String { kind == "goonbox" || kind == "turbo" ? id : "\(kind)-\(id)" }
-        var isVideo: Bool { kind != "goonbox" }
+        var isVideo: Bool { !SimpCity.imageKinds.contains(kind) }
     }
 
     /// Items from the posts one page read returned (`[{id, time, urls}]`), one per key, keeping the
@@ -147,11 +191,21 @@ nonisolated enum SimpCity {
                     }
                     continue
                 }
-                // goonbox's image page (its API takes the same id); turbo links are kept as posted.
-                let link = k.kind == "goonbox" ? pageLink(kind: k.kind, id: k.id) : u
-                let item = Item(kind: k.kind, id: k.id, link: link, post: post, posted: when)
-                if let have = out[item.key] {
-                    if when > 0, have.posted == 0 || when < have.posted { out[item.key] = item }
+                // goonbox's image page (its API takes the same id); a pixhost image's full-size address when the
+                // thumbnail is there, else its show page; turbo links are kept as posted.
+                let link = k.kind == "goonbox" ? pageLink(kind: k.kind, id: k.id)
+                    : k.kind == "pixhost" ? (pixhostLink(u)?.link ?? u) : u
+                var item = Item(kind: k.kind, id: k.id, link: link, post: post, posted: when)
+                if var have = out[item.key] {
+                    if when > 0, have.posted == 0 || when < have.posted {
+                        if k.kind == "pixhost", have.link.contains("/images/"), !link.contains("/images/") {
+                            item = Item(kind: k.kind, id: k.id, link: have.link, post: post, posted: when)
+                        }
+                        out[item.key] = item
+                    } else if k.kind == "pixhost", link.contains("/images/"), !have.link.contains("/images/") {
+                        have = Item(kind: have.kind, id: have.id, link: link, post: have.post, posted: have.posted)
+                        out[item.key] = have
+                    }
                 } else {
                     out[item.key] = item
                 }
@@ -172,6 +226,23 @@ nonisolated enum SimpCity {
         return out
     }
 
+    /// The pixhost galleries the posts link (id → url, post, posted — the earliest post that has it); their
+    /// images are listed before the downloads (`pixhostGalleryItems`).
+    static func collectGalleries(posts: [[String: Any]], into out: inout [String: [String: Any]]) {
+        for p in posts {
+            var when = (p["time"] as? NSNumber)?.doubleValue ?? 0
+            if when < minPost { when = 0 }
+            let post = (p["id"] as? String) ?? (p["id"] as? NSNumber)?.stringValue ?? ""
+            for case let u as String in (p["urls"] as? [Any] ?? []) {
+                guard let g = pixhostGallery(u) else { continue }
+                let have = (out[g.id]?["posted"] as? Double) ?? -1
+                if have < 0 || (when > 0 && (have == 0 || when < have)) {
+                    out[g.id] = ["url": g.url, "post": post, "posted": when]
+                }
+            }
+        }
+    }
+
     // MARK: - The shared record
 
     /// `<person>/simpcity/.simpcity.json` (see the type notes). Plain dictionaries, merged on save; a
@@ -186,6 +257,8 @@ nonisolated enum SimpCity {
         private(set) var links: [String: [String: Any]] = [:]
         /// Post id → `{"score": n, "checked": when read}`.
         private(set) var reactions: [String: [String: Any]] = [:]
+        /// pixhost gallery id → url, post, posted, and `files` (its images' keys) once listed.
+        private(set) var galleries: [String: [String: Any]] = [:]
 
         var file: URL { folder.appendingPathComponent(SimpCity.recordName) }
 
@@ -218,6 +291,15 @@ nonisolated enum SimpCity {
                     guard (theirsDone && !mineDone) || (theirsDone == mineDone && num(v["checked"]) > num(mine["checked"])) else { continue }
                 }
                 links[k] = v
+            }
+            for (k, v) in doc["galleries"] as? [String: Any] ?? [:] {
+                guard let v = v as? [String: Any] else { continue }
+                // A gallery listed on either side is listed; otherwise the newer word on it stands.
+                if let mine = galleries[k] {
+                    let theirs = v["files"] != nil, ours = mine["files"] != nil
+                    guard (theirs && !ours) || (theirs == ours && num(v["checked"]) > num(mine["checked"])) else { continue }
+                }
+                galleries[k] = v
             }
             for (k, v) in doc["reactions"] as? [String: Any] ?? [:] {
                 guard let v = v as? [String: Any] else { continue }
@@ -329,10 +411,11 @@ nonisolated enum SimpCity {
             var out: [String: Item] = [:]
             for (k, v) in failed where items[k] == nil {
                 let parts = k.split(separator: ":", maxSplits: 1).map(String.init)
-                guard parts.count == 2, ["goonbox", "turbo"].contains(parts[0]), !parts[1].isEmpty else { continue }
+                guard parts.count == 2, ["goonbox", "turbo", "pixhost"].contains(parts[0]), !parts[1].isEmpty else { continue }
                 if parts[0] == "turbo", !videos { continue }
-                out[k] = Item(kind: parts[0], id: parts[1],
-                              link: (v["link"] as? String) ?? SimpCity.pageLink(kind: parts[0], id: parts[1]),
+                let link = (v["link"] as? String) ?? SimpCity.pageLink(kind: parts[0], id: parts[1])
+                guard !link.isEmpty else { continue }
+                out[k] = Item(kind: parts[0], id: parts[1], link: link,
                               post: (v["post"] as? String) ?? "", posted: num(v["posted"]))
             }
             return out
@@ -431,6 +514,26 @@ nonisolated enum SimpCity {
             return max(1, Int(num(threads[base]?["pages"])))
         }
 
+        /// The galleries to list this run: the ones the pages read link that were never listed, plus every
+        /// earlier one whose listing failed.
+        func galleriesTodo(_ found: [String: [String: Any]]) -> [(id: String, info: [String: Any])] {
+            var out: [String: [String: Any]] = [:]
+            for (k, g) in found where galleries[k]?["files"] == nil { out[k] = g }
+            for (k, g) in galleries where g["files"] == nil && out[k] == nil {
+                out[k] = ["url": (g["url"] as? String) ?? "https://pixhost.cc/gallery/\(k)",
+                          "post": (g["post"] as? String) ?? "", "posted": num(g["posted"])]
+            }
+            return out.map { ($0.key, $0.value) }.sorted { (num($0.info["posted"]), $0.id) < (num($1.info["posted"]), $1.id) }
+        }
+
+        /// What a gallery held (its images' keys) — or, when it couldn't be listed, why (listed next run).
+        mutating func noteGallery(_ id: String, _ g: [String: Any], files: [String]?, why: String = "") {
+            var e: [String: Any] = ["url": (g["url"] as? String) ?? "", "post": (g["post"] as? String) ?? "",
+                                    "posted": Int(num(g["posted"])), "checked": Int(Date().timeIntervalSince1970)]
+            if let files, why.isEmpty { e["files"] = files } else { e["why"] = why.isEmpty ? "couldn't be listed" : why }
+            galleries[id] = e
+        }
+
         /// Post id → score, as just read from the thread.
         mutating func noteReactions(_ scores: [String: Int], at when: Double = Date().timeIntervalSince1970) {
             for (post, n) in scores { reactions[post] = ["score": n, "checked": Int(when)] }
@@ -462,7 +565,7 @@ nonisolated enum SimpCity {
             let doc: [String: Any] = ["format": SimpCity.format, "version": 1,
                                       "updated": Int(Date().timeIntervalSince1970), "by": "Photo Browser",
                                       "threads": threads, "items": items, "failed": failed, "links": links,
-                                      "reactions": reactions]
+                                      "reactions": reactions, "galleries": galleries]
             let data = try JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys])
             try DriveWriter.writeDataSync(data, to: file)
         }
@@ -829,7 +932,7 @@ nonisolated enum SimpCity {
 
     // MARK: - Helpers
 
-    private static func firstGroups(_ s: String, _ pattern: String) -> [String]? {
+    static func firstGroups(_ s: String, _ pattern: String) -> [String]? {
         guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
               let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) else { return nil }
         return (1..<m.numberOfRanges).map { i in

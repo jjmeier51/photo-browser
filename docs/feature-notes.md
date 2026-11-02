@@ -1819,6 +1819,23 @@ posted on several hosts is fetched once.
 - **Tags**: iPhone `library.addTag("simpcity", to:)` every 20 files and at the end; Safe Finder the
   shared tag store (`tag_store().add`) the same way.
 
+**pixhost (Nov 2, 2026).** pixhost.cc (also .to, .org and pixho.st — the API serves all three) is read with plain
+requests, no browser. A posted image is its show page `/show/<dir>/<id>_<name>`, usually wrapping its thumbnail
+`t<N>.<domain>/thumbs/<dir>/<id>_<name>`; the original is `img<N>.<domain>/images/<dir>/<id>_<name>` on the
+same server N (checked live: t80 → img80). Kind `pixhost`, key `pixhost:<id>` (the numeric token), file
+`pixhost-<id>.<ext>`; a photo kind (`IMAGE_KINDS` / `imageKinds`), so "Download videos" off doesn't hold it
+back and the photo rules (WebP → JPEG, 2× under 250 KB) apply. `collect` keeps one item per image and the
+file's address when a thumbnail or file link is in the post (`pixhost_link`), else the show page. Resolving
+(`pixhost_resolve` / `pixhostResolve`): the file address is used only when it answers 200 with an `image/*`
+type to a request that **refuses redirects** — a wrong server redirects to `pixhost.to/image/removed.png`,
+which would otherwise be saved as the photo; else the show page's `<img id="image" class="image-img" src>`,
+accepted only as an `/images/` original (a logo, an ad or a thumbnail is never taken); a removed image's show
+page is a 404. Galleries (`/gallery/<id>`, collected by `galleries` / `collectGalleries`) are listed before the
+downloads: every show link and thumbnail on the page (and its `?page=` links, should a big gallery be split)
+becomes an item with the post that linked the gallery; the record keeps them under `galleries` (`files` once
+listed, else `why` — retried next run even when its page isn't read again; listed on either side wins a
+merge). Checked against gallery-dl's public test image and gallery.
+
 **Reaction scores (Nov 2, 2026).** `EXTRACT_POSTS_JS` (both copies) also reads each post's reactions from
 XenForo's reactions bar: the `<bdi>` names shown, plus a bare "You" (the visitor isn't a `<bdi>`), plus
 "and N others" (thousands separators stripped); a bar without the link is 0; no bar at all is -1 (not a
