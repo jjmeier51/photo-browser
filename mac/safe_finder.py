@@ -530,6 +530,7 @@ def tag_dot(name: str, size: int = 12) -> QIcon:
 
 class _TagEvents(QObject):
     changed = Signal()              # a tag was added or removed somewhere: views repaint, the sidebar recounts
+    scores = Signal()               # SimpCity reaction scores were written: a view sorted by them re-sorts
 
 
 _TAGS: shared_tags.TagStore | None = None
@@ -558,9 +559,20 @@ def tags_changed() -> None:
 _SIMPCITY_WINDOWS: list = []
 
 
-def open_simpcity(folder: str, parent: QWidget | None = None) -> None:
+def simpcity_scores_folder(folder: str) -> str | None:
+    """The SimpCity download folder a right-click on `folder` gets reaction scores for: the folder itself
+    when it holds a SimpCity record, or its "simpcity" folder when that does — else None (no menu line)."""
+    for cand in (folder, os.path.join(folder, "simpcity")):
+        if os.path.isfile(os.path.join(cand, ".simpcity.json")):
+            return cand
+    return None
+
+
+def open_simpcity(folder: str, parent: QWidget | None = None, scores_only: bool = False) -> None:
     """Right-click a person's folder ▸ "Download from SimpCity…": the downloader window
-    (simpcity_downloader.py). From inside the person's "simpcity" folder, the person is the folder above."""
+    (simpcity_downloader.py). From inside the person's "simpcity" folder, the person is the folder above.
+    `scores_only`: ▸ "Get Reaction Scores" — the same window reading the folder's threads again for the
+    posts' reaction scores alone."""
     try:
         import simpcity_downloader
     except ModuleNotFoundError:
@@ -569,9 +581,10 @@ def open_simpcity(folder: str, parent: QWidget | None = None) -> None:
         return
     import simpcity
     person = os.path.dirname(folder) if os.path.basename(folder).lower() == simpcity.FOLDER else folder
-    win = simpcity_downloader.SimpCityWindow(person, tags=tag_store())
+    win = simpcity_downloader.SimpCityWindow(person, tags=tag_store(), scores_only=scores_only)
     win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
     win.finished.connect(lambda _folder, files: files and tags_changed())
+    win.finished.connect(lambda folder, _files: (simpcity.forget_scores(folder), tag_events().scores.emit()))
     win.destroyed.connect(lambda _=None, w=win: _SIMPCITY_WINDOWS.remove(w) if w in _SIMPCITY_WINDOWS else None)
     _SIMPCITY_WINDOWS.append(win)
     win.show()
@@ -1262,6 +1275,10 @@ class GridDelegate(QStyledItemDelegate):
         tags = tag_store().tags(path, fresh=False)
         if tags:
             self._draw_tags(p, tags, shown, option.font, not is_dir and kind_of(path) == "video" and thumb is not None)
+        if not is_dir and self.pane.current_sort()[0] == "reactions":
+            score = reaction_score(path)
+            if score is not None:
+                self._draw_score(p, score, shown, option.font)
         # name
         fm = QFontMetrics(option.font)
         width = r.width() - 2 * inset
@@ -1320,6 +1337,26 @@ class GridDelegate(QStyledItemDelegate):
         p.restore()
 
     @staticmethod
+    def _draw_score(p: QPainter, score: int, rect: QRect, font: QFont) -> None:
+        """A SimpCity download's reaction score, top left of its tile (while sorting by it)."""
+        f = QFont(font)
+        f.setPointSizeF(max(7.0, f.pointSizeF() - 2.5))
+        f.setWeight(QFont.Weight.Bold)
+        fm = QFontMetrics(f)
+        text = f"\u2665 {compact_count(score)}"
+        h = fm.height() + 4
+        w = fm.horizontalAdvance(text) + 10
+        r = QRectF(rect.x() + 4, rect.y() + 4, min(w, max(rect.width() - 8, 0)), h)
+        p.save()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 170))
+        p.drawRoundedRect(r, h / 2, h / 2)
+        p.setFont(f)
+        p.setPen(QColor("white"))
+        p.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
+        p.restore()
+
+    @staticmethod
     def _draw_thumb(p: QPainter, pm: QPixmap, rect: QRect, video: bool) -> QRect:
         size = pm.size().scaled(rect.size() - QSize(6, 6), Qt.AspectRatioMode.KeepAspectRatio)
         target = QRect(rect.x() + (rect.width() - size.width()) // 2, rect.y() + (rect.height() - size.height()) // 2,
@@ -1366,22 +1403,32 @@ class ListDelegate(QStyledItemDelegate):
             p.restore()
             option.palette.setColor(QPalette.ColorRole.Text, QColor("white"))
         tags = []
+        score = None
         if index.column() == 0:
-            tags = tag_store().tags(self.pane.model.filePath(index), fresh=False)
-        if not tags:
+            path = self.pane.model.filePath(index)
+            tags = tag_store().tags(path, fresh=False)
+            if self.pane.current_sort()[0] == "reactions" and not self.pane.model.isDir(index):
+                score = reaction_score(path)
+        if not tags and score is None:
             super().paint(p, option, index)
             return
-        self._paint_with_tags(p, option, index, tags)
+        self._paint_with_tags(p, option, index, tags, score)
 
-    def _paint_with_tags(self, p: QPainter, option: QStyleOptionViewItem, index: QModelIndex, tags: list[str]) -> None:
+    def _paint_with_tags(self, p: QPainter, option: QStyleOptionViewItem, index: QModelIndex, tags: list[str],
+                         score: int | None = None) -> None:
         """The name column with the file's tags as small chips at its right end (as many as fit in half
-        the column, then "+N"); the name is elided before them."""
+        the column, then "+N") — and, while sorting by it, its reaction score first; the name is elided
+        before them."""
         f = QFont(option.font)
         f.setPointSizeF(max(7.0, f.pointSizeF() - 1.5))
         fm = QFontMetrics(f)
         room = option.rect.width() // 2
         chips: list[tuple[str, int, str | None]] = []
         total = 0
+        if score is not None:
+            text = f"\u2665 {compact_count(score)}"
+            chips.append((text, fm.horizontalAdvance(text) + 12, None))
+            total += chips[-1][1] + 4
         for i, t in enumerate(tags):
             w = fm.horizontalAdvance(t) + 22
             if total + w > room and chips:
@@ -1733,8 +1780,30 @@ _SKIP_ANYWHERE = {"node_modules"}
 _BUNDLE_EXT = {".app", ".photoslibrary", ".imovielibrary", ".fcpbundle", ".fcpcache", ".tvlibrary",
                ".musiclibrary", ".bundle", ".framework", ".xcarchive", ".playground", ".pkg", ".lrlibrary"}
 SORT_KEYS = [("name", "Name"), ("kind", "Kind"), ("modified", "Date Modified"), ("created", "Date Created"),
-             ("added", "Date Added"), ("size", "Size")]
+             ("added", "Date Added"), ("size", "Size"), ("reactions", "Reaction Score")]
 DATE_KEYS = {"modified", "created", "added"}
+HIGH_FIRST = DATE_KEYS | {"reactions"}            # keys the menu sorts highest / newest first
+
+
+def reaction_score(path: str) -> int | None:
+    """A SimpCity download's reaction score (from its folder's `.simpcity.json` — simpcity.folder_scores),
+    or None for anything else."""
+    try:
+        import simpcity
+    except ImportError:
+        return None
+    return simpcity.score_of(path)
+
+
+def compact_count(n: int) -> str:
+    """1234 → "1.2K", 1500000 → "1.5M" (a tile has little room)."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    if n >= 10_000:
+        return f"{n // 1000}K"
+    if n >= 1000:
+        return f"{n / 1000:.1f}".rstrip("0").rstrip(".") + "K"
+    return str(n)
 _COLUMN_KEY = {0: "name", 1: "size", 2: "kind", 3: "modified"}      # the list view's columns
 _KEY_COLUMN = {v: k for k, v in _COLUMN_KEY.items()}
 SIZE_FILTERS = [("", "Any size"), ("empty", "Empty (0 KB)"), ("<1m", "Under 1 MB"), (">=1m", "1 MB or more"),
@@ -2543,6 +2612,9 @@ class PaneModel(QSortFilterProxyModel):
         if key in ("created", "added"):
             created, added = file_times(src.filePath(idx))
             return (group, added if key == "added" else created, nat)
+        if key == "reactions":                         # no score: below every score (last, highest first)
+            score = None if is_dir else reaction_score(src.filePath(idx))
+            return (group, -1 if score is None else score, nat)
         return (group, nat)
 
 
@@ -3085,8 +3157,9 @@ class Pane(QWidget):
         return self.results_sort if self.is_virtual else self.folder_sort
 
     def choose_sort(self, key: str) -> None:
-        """From the menu: a date reads newest first, everything else A to Z / smallest first."""
-        self.set_sort(key, Qt.SortOrder.DescendingOrder if key in DATE_KEYS else Qt.SortOrder.AscendingOrder)
+        """From the menu: a date reads newest first, reaction scores highest first, everything else A to Z /
+        smallest first."""
+        self.set_sort(key, Qt.SortOrder.DescendingOrder if key in HIGH_FIRST else Qt.SortOrder.AscendingOrder)
 
     def set_sort(self, key: str, order: Qt.SortOrder) -> None:
         if self.is_virtual:
@@ -3642,6 +3715,9 @@ class Pane(QWidget):
                 menu.addAction("AirDrop to iPhone…", lambda: self.airdrop(paths))
             if len(paths) == 1 and os.path.isdir(paths[0]):
                 menu.addAction("Download from SimpCity…", lambda: open_simpcity(paths[0], self.window()))
+                if (scored := simpcity_scores_folder(paths[0])) is not None:
+                    menu.addAction("Get Reaction Scores",
+                                   lambda: open_simpcity(scored, self.window(), scores_only=True))
                 for kind in ("instagram", "facebook"):
                     menu.addAction(social_label(paths[0], kind),
                                    lambda _=False, kind=kind: open_social(kind, paths[0], self.window()))
@@ -3673,6 +3749,9 @@ class Pane(QWidget):
             menu.addAction("New Folder", self.new_folder)
             if not paths and os.path.isdir(self.location):
                 menu.addAction("Download from SimpCity…", lambda: open_simpcity(self.location, self.window()))
+                if (scored := simpcity_scores_folder(self.location)) is not None:
+                    menu.addAction("Get Reaction Scores",
+                                   lambda: open_simpcity(scored, self.window(), scores_only=True))
                 for kind in ("instagram", "facebook"):
                     menu.addAction(social_label(self.location, kind),
                                    lambda _=False, kind=kind: open_social(kind, self.location, self.window()))
@@ -3953,6 +4032,15 @@ class Pane(QWidget):
             tags_changed()
             self._airdrop_noted(f"Removed the tags from {n:,} item{'s' if n != 1 else ''}.")
         self._with_inside(paths, apply, ask)
+
+    def on_scores_changed(self) -> None:
+        """Reaction scores were written (Get Reaction Scores, a SimpCity download): a view sorted by them
+        sorts again with the new ones; the tiles' scores repaint."""
+        if self.current_sort()[0] == "reactions":
+            self.model.forget_keys()
+            self.model.invalidate()
+        self.grid.viewport().update()
+        self.list.viewport().update()
 
     def on_tags_changed(self) -> None:
         """Tags changed (here, in the other pane, the sidebar or a transfer): repaint; a tag's collection
@@ -4884,6 +4972,7 @@ class MainWindow(QMainWindow):
         self._panel_soon.timeout.connect(self._show_progress)
         THUMBS.ready.connect(lambda: (self.src.grid.viewport().update(), self.dst.grid.viewport().update()))
         tag_events().changed.connect(self._tags_changed)
+        tag_events().scores.connect(lambda: [pane.on_scores_changed() for pane in (self.src, self.dst)])
 
         home = str(Path.home())
         start_src = start_from or self.settings.value("From/location") or str(Path.home() / "Downloads")

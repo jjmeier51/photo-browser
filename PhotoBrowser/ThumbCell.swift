@@ -15,7 +15,7 @@ struct EntryCell: View, Equatable {
             && lhs.favorited == rhs.favorited && lhs.aiLabeled == rhs.aiLabeled && lhs.isLive == rhs.isLive
             && lhs.isAIGenerated == rhs.isAIGenerated && lhs.coverURL == rhs.coverURL
             && lhs.thumbnailOverrideURL == rhs.thumbnailOverrideURL && lhs.likeCount == rhs.likeCount
-            && lhs.reviewsFolder == rhs.reviewsFolder
+            && lhs.reactionScore == rhs.reactionScore && lhs.reviewsFolder == rhs.reviewsFolder
     }
 
     let entry: Entry
@@ -28,6 +28,7 @@ struct EntryCell: View, Equatable {
     var coverURL: URL? = nil
     var thumbnailOverrideURL: URL? = nil        // custom "Set as Thumbnail" image for this item
     var likeCount: Int? = nil
+    var reactionScore: Int? = nil               // a SimpCity download's reactions (shown while sorting by them)
     var reviewsFolder: Bool = false             // a "Reviews" folder — marked with a green outline/glow
     /// Fired once when the cell's visual content is finalized (cover/thumbnail loaded, or an icon
     /// that needs no load) — drives the home-screen launch haze, which lifts once tiles have settled.
@@ -60,6 +61,13 @@ struct EntryCell: View, Equatable {
                 VStack(alignment: .leading, spacing: 2) {
                     if let likeCount {
                         Label(InfoPanel.compactCount(likeCount), systemImage: "heart.fill")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(.black.opacity(0.5), in: Capsule())
+                    }
+                    if let reactionScore {
+                        Label(InfoPanel.compactCount(reactionScore), systemImage: "hand.thumbsup.fill")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 4).padding(.vertical, 1)

@@ -17,6 +17,14 @@ the file and merges,
 so neither app drops what the other added. The record also keeps each thread's address and the last
 page read, so "Get New" starts where the thread had got to.
 
+**Reaction scores.** Each page read also notes how many reactions each post holding a file or link has
+(XenForo's reactions bar: the names it shows plus "and N others" — the post's own count, not the "Reaction
+score" beside a member's name, which is that member's lifetime total). They're kept in the record by post
+(`reactions`: post id → score and when it was read; the newer reading wins a merge), so both apps can sort
+a folder's downloads by them (`folder_scores`, `Record.scores`): a file takes its post's score — the
+highest, when the same file came from several posts. Safe Finder's "Get Reaction Scores" reads every page
+of the folder's threads again for them alone (scores change after a download).
+
 **Videos on file hosts.** A post's pixeldrain, gofile, cyberdrop, bunkr, filester or fileditch link is
 listed (`filehosts.py`) and its videos downloaded beside the rest, keyed `<host>:<file id>` and named
 `<host>-<file id>.<ext>`; the links are kept in the record too (`links`), so one done isn't listed again.
@@ -188,6 +196,22 @@ def collect(posts: list[dict], into: dict[str, Item] | None = None,
     return out
 
 
+def reactions(posts: list[dict]) -> dict[str, int]:
+    """Post id → reaction score, for the posts a page read returned that hold something the downloader
+    takes (a chatty thread's other posts aren't worth keeping). A post without a reactions bar (-1: the
+    page didn't show one) is left out — that's not a score of 0."""
+    out: dict[str, int] = {}
+    for p in posts or []:
+        post = str(p.get("id") or "")
+        try:
+            n = int(p.get("reactions"))
+        except (TypeError, ValueError):
+            continue
+        if post and n >= 0 and any(is_link(str(u)) for u in p.get("urls") or []):
+            out[post] = n
+    return out
+
+
 # ----------------------------------------------------------------------------- the shared record
 
 
@@ -199,6 +223,7 @@ class Record:
     threads: dict[str, dict] = field(default_factory=dict)
     failed: dict[str, dict] = field(default_factory=dict)    # not downloaded yet: tried again by the next run
     links: dict[str, dict] = field(default_factory=dict)     # file-host links: what each held, whether it's done
+    reactions: dict[str, dict] = field(default_factory=dict) # post id → {"score": n, "checked": when read}
 
     @property
     def file(self) -> Path:
@@ -234,6 +259,12 @@ class Record:
             if mine is None or (v.get("done") and not mine.get("done")) or \
                     (bool(v.get("done")) == bool(mine.get("done")) and float(v.get("checked") or 0) > float(mine.get("checked") or 0)):
                 self.links[k] = v
+        for k, v in (doc.get("reactions") or {}).items():
+            if not isinstance(v, dict):
+                continue
+            mine = self.reactions.get(k)
+            if mine is None or float(v.get("checked") or 0) > float(mine.get("checked") or 0):
+                self.reactions[k] = v                  # the newer reading of a post stands
         for k, v in (doc.get("threads") or {}).items():
             if not isinstance(v, dict):
                 continue
@@ -421,6 +452,35 @@ class Record:
             return max(1, int(t.get("resume") or 1))
         return max(1, int(t.get("pages") or 1))
 
+    # -- reaction scores
+
+    def note_reactions(self, scores: dict[str, int], when: float | None = None) -> None:
+        """Post id → score, as just read from the thread."""
+        at = int(when if when is not None else time.time())
+        for post, n in scores.items():
+            self.reactions[str(post)] = {"score": int(n), "checked": at}
+
+    def scores(self) -> dict[str, int]:
+        """File name → reaction score: its post's — the highest, when the same file came from more than one
+        post (a video on two hosts, posted twice). A file whose post wasn't read has none."""
+        out: dict[str, int] = {}
+        for key, entry in self.items.items():
+            r = self.reactions.get(str(entry.get("post") or ""))
+            name = self.file_of(key) if r else ""
+            if not name:
+                continue
+            try:
+                n = int(r.get("score") or 0)
+            except (TypeError, ValueError):
+                continue
+            if n > out.get(name, -1):
+                out[name] = n
+        return out
+
+    def posts(self) -> set[str]:
+        """The posts the downloads came from (what "Get Reaction Scores" wants a score for)."""
+        return {str(e.get("post")) for e in self.items.values() if e.get("post") and (e.get("file") or e.get("same_as"))}
+
     def last_thread(self) -> str | None:
         if not self.threads:
             return None
@@ -432,8 +492,53 @@ class Record:
         self._merge(self._read())
         doc = {"format": FORMAT, "version": VERSION, "updated": int(time.time()), "by": "Safe Finder",
                "threads": dict(sorted(self.threads.items())), "items": dict(sorted(self.items.items())),
-               "failed": dict(sorted(self.failed.items())), "links": dict(sorted(self.links.items()))}
+               "failed": dict(sorted(self.failed.items())), "links": dict(sorted(self.links.items())),
+               "reactions": dict(sorted(self.reactions.items()))}
         write_file(self.file, json.dumps(doc, ensure_ascii=False, indent=1).encode("utf-8"))
+
+
+_scores: dict[str, tuple[tuple | None, float, dict[str, int]]] = {}
+_scores_lock = threading.Lock()
+SCORES_RECHECK = 2.0          # seconds a folder's scores are trusted before its record is looked at again
+
+
+def folder_scores(folder: str | Path) -> dict[str, int]:
+    """File name → reaction score for the files in `folder`, from its SimpCity record ({} when it has none)
+    — read once, and again only when the record changes (looked at no more than every `SCORES_RECHECK` s,
+    so sorting a big folder doesn't stat the record per file)."""
+    key = str(folder)
+    now = time.monotonic()
+    with _scores_lock:
+        hit = _scores.get(key)
+    if hit and now - hit[1] < SCORES_RECHECK:
+        return hit[2]
+    try:
+        st = os.stat(os.path.join(key, RECORD))
+        stamp: tuple | None = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = None
+    if hit and hit[0] == stamp:
+        scores = hit[2]
+    else:
+        scores = Record.load(key).scores() if stamp else {}
+    with _scores_lock:
+        _scores[key] = (stamp, now, scores)
+    return scores
+
+
+def score_of(path: str | Path) -> int | None:
+    """A downloaded file's reaction score, or None when there's none (not from SimpCity, or not read)."""
+    folder, name = os.path.split(str(path))
+    return folder_scores(folder).get(name)
+
+
+def forget_scores(folder: str | Path | None = None) -> None:
+    """Read the record again next time (after a run wrote it)."""
+    with _scores_lock:
+        if folder is None:
+            _scores.clear()
+        else:
+            _scores.pop(str(folder), None)
 
 
 def files_by_id(folder: str | Path) -> dict[str, str]:
@@ -1144,6 +1249,24 @@ EXTRACT_POSTS_JS = r"""
       return x.href;
     } catch (e) { return ''; }
   };
+  // A post's reactions, from XenForo's reactions bar: the names it shows ("You" isn't one of the <bdi>s)
+  // plus "and N others". -1 when the post has no reactions bar at all (not a reading of 0).
+  const reactionsOf = (p) => {
+    const holder = p.querySelector('.reactionsBar, .js-reactionsList');
+    const bar = p.querySelector('.reactionsBar-link, .reactionsBar a[href*="/reactions"]');
+    if (!bar) return holder ? 0 : -1;
+    const text = (bar.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text) return 0;
+    const more = text.match(/\band ([\d.,]+) others?\b/i);
+    const others = more ? (parseInt(more[1].replace(/\D/g, ''), 10) || 0) : 0;
+    const head = more ? text.slice(0, more.index) : text;
+    const names = [...bar.querySelectorAll('bdi')].map((b) => (b.textContent || '').trim()).filter(Boolean);
+    let named = names.length || head.split(/,\s*|\s+and\s+/).filter((x) => x.trim()).length;
+    // The visitor shows as a bare "You" — text of the bar itself, not inside a name.
+    const loose = [...bar.childNodes].filter((x) => x.nodeType === 3).map((x) => x.textContent).join('');
+    if (names.length && /^\s*you\b/i.test(loose)) named += 1;
+    return named + others;
+  };
   const posts = [];
   document.querySelectorAll('article.message, .message--post, li.message').forEach((p) => {
     const id = (p.getAttribute('data-content') || p.id || '').replace(/^(js-)?post-/, '');
@@ -1165,7 +1288,7 @@ EXTRACT_POSTS_JS = r"""
     body.querySelectorAll('img').forEach((i) => ['data-url', 'data-src', 'src'].forEach((k) => add(i, i.getAttribute(k))));
     body.querySelectorAll('iframe, embed, video, video source').forEach((e) => add(e, e.getAttribute('src') || e.getAttribute('data-src') || e.getAttribute('data-url')));
     body.querySelectorAll('[data-s9e-mediaembed-src]').forEach((e) => add(e, e.getAttribute('data-s9e-mediaembed-src')));
-    posts.push({ id, time, urls: [...urls].filter(Boolean) });
+    posts.push({ id, time, urls: [...urls].filter(Boolean), reactions: reactionsOf(p) });
   });
   let last = 1;
   document.querySelectorAll('.pageNav-main a, .pageNav-page a, a.pageNav-jump, .pageNavSimple a').forEach((a) => {

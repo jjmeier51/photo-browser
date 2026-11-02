@@ -208,6 +208,7 @@ final class SimpCityDownloader {
         var n = first, last = first, title = "", readTo = first - 1
         var items: [String: SimpCity.Item] = [:]
         var links: [String: SimpCityHosts.Link] = [:]
+        var scores: [String: Int] = [:]                    // post → reaction score, noted in the record
         var askedLogin = false
         var gap = SimpCity.pageGap, limits = 0
         var short = ""
@@ -247,6 +248,7 @@ final class SimpCityDownloader {
                 return "SimpCity shows its links only to members. Open Download from SimpCity, log in there, then tap Download."
             }
             SimpCity.collect(posts: posts, into: &items, links: &links)
+            scores.merge(SimpCity.reactions(posts)) { _, fresh in fresh }
             last = max(last, (page["last"] as? NSNumber)?.intValue ?? 1)
             if title.isEmpty { title = page["title"] as? String ?? "" }
             readTo = n
@@ -263,6 +265,7 @@ final class SimpCityDownloader {
         // still to do, or kept for later. One cut short carries on from where it stopped (`resume`).
         rec.noteThread(base, title: title, pages: readTo, hosts: toEnd && (fromStart || hadHosts),
                        resume: fromStart && !toEnd ? readTo : 0)
+        rec.noteReactions(scores)
         let shortNote: String? = short.isEmpty ? nil : short
 
         // 2. What's left: not in the record, not already in the folder — and the earlier downloads to
@@ -1189,6 +1192,24 @@ final class SimpCityPage: NSObject, WKNavigationDelegate, WKUIDelegate {
       return x.href;
     } catch (e) { return ''; }
   };
+  // A post's reactions, from XenForo's reactions bar: the names it shows ("You" isn't one of the <bdi>s)
+  // plus "and N others". -1 when the post has no reactions bar at all (not a reading of 0).
+  const reactionsOf = (p) => {
+    const holder = p.querySelector('.reactionsBar, .js-reactionsList');
+    const bar = p.querySelector('.reactionsBar-link, .reactionsBar a[href*="/reactions"]');
+    if (!bar) return holder ? 0 : -1;
+    const text = (bar.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text) return 0;
+    const more = text.match(/\band ([\d.,]+) others?\b/i);
+    const others = more ? (parseInt(more[1].replace(/\D/g, ''), 10) || 0) : 0;
+    const head = more ? text.slice(0, more.index) : text;
+    const names = [...bar.querySelectorAll('bdi')].map((b) => (b.textContent || '').trim()).filter(Boolean);
+    let named = names.length || head.split(/,\s*|\s+and\s+/).filter((x) => x.trim()).length;
+    // The visitor shows as a bare "You" — text of the bar itself, not inside a name.
+    const loose = [...bar.childNodes].filter((x) => x.nodeType === 3).map((x) => x.textContent).join('');
+    if (names.length && /^\s*you\b/i.test(loose)) named += 1;
+    return named + others;
+  };
   const posts = [];
   document.querySelectorAll('article.message, .message--post, li.message').forEach((p) => {
     const id = (p.getAttribute('data-content') || p.id || '').replace(/^(js-)?post-/, '');
@@ -1210,7 +1231,7 @@ final class SimpCityPage: NSObject, WKNavigationDelegate, WKUIDelegate {
     body.querySelectorAll('img').forEach((i) => ['data-url', 'data-src', 'src'].forEach((k) => add(i, i.getAttribute(k))));
     body.querySelectorAll('iframe, embed, video, video source').forEach((e) => add(e, e.getAttribute('src') || e.getAttribute('data-src') || e.getAttribute('data-url')));
     body.querySelectorAll('[data-s9e-mediaembed-src]').forEach((e) => add(e, e.getAttribute('data-s9e-mediaembed-src')));
-    posts.push({ id, time, urls: [...urls].filter(Boolean) });
+    posts.push({ id, time, urls: [...urls].filter(Boolean), reactions: reactionsOf(p) });
   });
   let last = 1;
   document.querySelectorAll('.pageNav-main a, .pageNav-page a, a.pageNav-jump, .pageNavSimple a').forEach((a) => {

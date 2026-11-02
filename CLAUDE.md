@@ -173,7 +173,11 @@ actions the app makes no network calls.
   download starts, SHA-256 once in; other copies recorded `same_as`). Read in a real browser the person
   can see (DDoS-Guard/Cloudflare checks and the SimpCity login are answered there). **The record is on
   the drive** — `<person>/simpcity/.simpcity.json`, shared with Safe Finder — so neither app
-  re-downloads what the other has. Page scripts are identical in Swift and Python. (`SimpCityService`,
+  re-downloads what the other has. **Reaction scores**: each page read notes every media post's reaction
+count (its reactions bar, not the member's sidebar "Reaction score") into the record by post; sort by
+"Reaction Score" (Safe Finder) / "Most reactions" (iPhone, `SimpCityScores`); Safe Finder's right-click ▸
+Get Reaction Scores re-reads a folder's threads for them alone. Page scripts are identical in Swift and
+Python. (`SimpCityService`,
   `SimpCityRecord`, `SimpCityHosts`, `SimpCityImportView`, `mac/simpcity.py`, `mac/filehosts.py`,
   `mac/simpcity_downloader.py`; `docs/feature-notes.md` §7.4d)
 - **Instagram / Facebook profiles in Safe Finder too** — right-click a folder ▸ Download Instagram/Facebook

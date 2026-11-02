@@ -25,6 +25,11 @@ hosts is downloaded once (`simpcity.Dedup`: the hosts' sizes up front, the serve
 starts, the SHA-256 once it's in); the other copies are recorded as the same video. Off, turbo and the
 hosts are left for a later run.
 
+Each page read also notes its posts' reaction scores into the record (`simpcity.reactions`). "Get Reaction
+Scores" (`scores_only`, Safe Finder's right-click on a SimpCity folder) reads every page of each thread the
+record knows for those alone — nothing is downloaded — so files downloaded earlier get scores too, and
+scores read long ago are brought up to date; a read stopped short carries on from its page next time.
+
 Qt calls back rather than blocking, so each run is a generator: it yields a request ("read this page",
 "resolve this link", "download this", "do this on a thread") and `_Runner` resumes it with the answer.
 """
@@ -54,6 +59,7 @@ import filehosts as fh  # noqa: E402
 import simpcity as sc  # noqa: E402
 
 LANES = 6                 # files resolved + downloaded at once
+SCORE_SAVE = 20           # Get Reaction Scores: the record is saved every this many pages
 HOME = "https://simpcity.cr/"
 LOGIN = "https://simpcity.cr/login/"
 
@@ -130,9 +136,10 @@ class SimpCityWindow(QMainWindow):
 
     finished = Signal(str, list)       # (simpcity folder, files written) — Safe Finder refreshes + tags
 
-    def __init__(self, person: str, thread: str | None = None, tags=None, parent=None) -> None:
+    def __init__(self, person: str, thread: str | None = None, tags=None, parent=None, scores_only: bool = False) -> None:
         super().__init__(parent)
         self.person = Path(person)
+        self.scores_only = scores_only               # "Get Reaction Scores": read the threads again for them alone
         self.dest = self.person / sc.FOLDER
         self.tags = tags
         self.exiftool = sc.find_exiftool()
@@ -152,7 +159,7 @@ class SimpCityWindow(QMainWindow):
         self.bridge = _Bridge()
         self.bridge.done.connect(lambda cb, result: cb(result))
         self.tmp = Path(tempfile.mkdtemp(prefix="simpcity-"))
-        self.setWindowTitle(f"SimpCity — {self.person.name}")
+        self.setWindowTitle(f"SimpCity — {self.person.name}" + (" — Reaction Scores" if scores_only else ""))
         self.resize(1180, 900)
 
         prof = profile()
@@ -174,7 +181,7 @@ class SimpCityWindow(QMainWindow):
         rec = sc.Record.load(self.dest) if self.dest.is_dir() else None
         self.address = QLineEdit(thread or (rec.last_thread() if rec else "") or "")
         self.address.setPlaceholderText("https://simpcity.cr/threads/…")
-        self.go_btn = QPushButton("Get New" if rec and rec.threads else "Download")
+        self.go_btn = QPushButton("Get Reaction Scores" if scores_only else "Get New" if rec and rec.threads else "Download")
         self.go_btn.setDefault(True)
         self.go_btn.clicked.connect(self.start)
         self.stop_btn = QPushButton("Stop")
@@ -229,6 +236,16 @@ class SimpCityWindow(QMainWindow):
         lay.addWidget(self.log)
         self.setCentralWidget(box)
         self.view.load(QUrl(sc.thread_base(self.address.text()) or HOME))
+        if scores_only:
+            self.address.setReadOnly(True)
+            self.full.setVisible(False)
+            self.videos.setVisible(False)
+            n = len(rec.threads) if rec else 0
+            self.address.setText(", ".join(sorted(rec.threads)) if rec else "")
+            self.status.setText(f"Reads every page of the {n} thread{'s' if n != 1 else ''} “{self.person.name}/{sc.FOLDER}” "
+                                "was downloaded from, for each post's reactions — nothing is downloaded. Log in to "
+                                "SimpCity below if you haven't.")
+            QTimer.singleShot(400, self.start)       # chosen from the menu: under way at once
         if not self.exiftool:
             self._log("ExifTool isn't installed, so a file without its own date only gets the post's date as its "
                       "file date (install it with: brew install exiftool).")
@@ -254,6 +271,9 @@ class SimpCityWindow(QMainWindow):
     # ------------------------------------------------------------------ run / stop
     def start(self) -> None:
         if self.running:
+            return
+        if self.scores_only:
+            self._start_scores()
             return
         base = sc.thread_base(self.address.text())
         if not base:
@@ -291,6 +311,97 @@ class SimpCityWindow(QMainWindow):
         self.exif = sc.ExifSession(self.exiftool) if self.exiftool else None
         _Runner(self, self._crawl(base, self.full.isChecked()), self._crawled).start()
 
+    # -- Get Reaction Scores
+
+    def _resume_key(self, base: str) -> str:
+        return "scores/" + str(self.dest).replace("/", "|") + "|" + sc.thread_id(base)
+
+    def _start_scores(self) -> None:
+        rec = sc.Record.load(self.dest) if self.dest.is_dir() else None
+        bases = sorted(rec.threads) if rec else []
+        if not bases:
+            QMessageBox.information(self, "SimpCity", f"Nothing in “{self.person.name}/{sc.FOLDER}” was downloaded from a "
+                                    "SimpCity thread here or on the iPhone, so there are no scores to get.")
+            return
+        self.running, self.stopping = True, False
+        self.go_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.bar.setVisible(True)
+        self.bar.setRange(0, 0)
+        _Runner(self, self._score_crawl(bases), self._scored).start()
+
+    def _score_crawl(self, bases: list[str]):
+        """Every page of each thread the folder's record knows, read only for the posts' reaction scores
+        (`simpcity.reactions`) — nothing is downloaded. The record is saved every `SCORE_SAVE` pages, so a
+        stop keeps what was read; a thread stopped short carries on from that page next time."""
+        self.record = sc.Record.load(self.dest)
+        wanted = self.record.posts()
+        scored: dict[str, int] = {}
+        problems: list[str] = []
+        for i, base in enumerate(bases):
+            if self.stopping:
+                break
+            first = max(1, int(self.settings.value(self._resume_key(base), 1) or 1))
+            if first > 1:
+                self._log(f"Carrying on from page {first} of {base}.")
+            fresh: dict[str, int] = {}
+            pages = [0]
+
+            def on_page(_n: int, page: dict, fresh=fresh, pages=pages) -> None:
+                got = sc.reactions(page.get("posts") or [])
+                fresh.update(got)
+                self.record.note_reactions(got)
+                pages[0] += 1
+                if pages[0] % SCORE_SAVE == 0:
+                    self._save_scores()
+
+            label = f"thread {i + 1} of {len(bases)}: " if len(bases) > 1 else ""
+            read_to, last, title, short, n = yield from self._pages(
+                base, first, on_page,
+                lambda fresh=fresh, label=label: f"{label}{len(fresh):,} posts' reactions read so far.")
+            scored.update(fresh)
+            done = n > last and not self.stopping and not short
+            if done:
+                self.settings.remove(self._resume_key(base))
+            elif read_to >= first:
+                self.settings.setValue(self._resume_key(base), read_to)
+            if short:
+                problems.append(f"{title or base}: {short}")
+            self._log(f"“{title or base}”: pages {first}–{max(read_to, first - 1)}"
+                      + ("" if done else " (not to the end — the next run carries on there)")
+                      + f", {len(fresh):,} posts' reactions.")
+        self._save_scores()
+        have = sum(1 for p in wanted if p in self.record.reactions)
+        return len(scored), have, len(wanted), problems
+
+    def _save_scores(self) -> None:
+        try:
+            self.record.save()
+        except OSError as e:
+            self._log(f"Couldn't save the download record: {e}")
+        sc.forget_scores(self.dest)
+
+    def _scored(self, error, result) -> None:
+        self.running = False
+        self.go_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.bar.setVisible(False)
+        if error:
+            msg = f"Getting the reaction scores stopped: {error}"
+        else:
+            read, have, wanted, problems = result
+            if read == 0 and not problems:
+                msg = ("No reactions were read — stopped before the first page." if self.stopping else
+                       "The pages showed no reactions to read (SimpCity may have changed how it shows them).")
+            else:
+                msg = (f"Read the reactions of {read:,} post{'s' if read != 1 else ''}; {have:,} of the {wanted:,} posts "
+                       f"the downloads came from now have a score. In Safe Finder, sort “{sc.FOLDER}” by Reaction Score.")
+            if problems:
+                msg += " Stopped short — " + "; ".join(problems) + " (press Get Reaction Scores again to carry on)."
+        self._say(msg)
+        self._log(msg)
+        self.finished.emit(str(self.dest), [])
+
     def stop(self) -> None:
         if self.running:
             self.stopping = True
@@ -308,17 +419,11 @@ class SimpCityWindow(QMainWindow):
         super().closeEvent(event)
 
     # ------------------------------------------------------------------ the run
-    def _crawl(self, base: str, full: bool):
-        """Reads the thread's pages — `simpcity.PAGE_GAP` apart, waiting out SimpCity's "too many
-        requests" (`LIMIT_WAITS`) — then works out what's left to download. A read cut short (the waits
-        ran out, a page that won't load, Stop) keeps what it found; the next run carries on from there."""
-        sc.make_folder(self.dest)
-        self.record = sc.Record.load(self.dest)
-        first = 1 if full else self.record.start_page(base, self.want_videos)
-        from_start = first == 1 or self.record.full_read(base, self.want_videos)   # a read from page 1, or carrying one on
-        had_hosts = int(self.record.threads.get(base, {}).get("hosts") or 0) >= sc.HOSTS_READ
-        items: dict[str, sc.Item] = {}
-        links: dict[str, fh.Link] = {}
+    def _pages(self, base: str, first: int, on_page, progress):
+        """Reads the thread's pages from `first` to its end — `simpcity.PAGE_GAP` apart, waiting out
+        SimpCity's "too many requests" (`LIMIT_WAITS`), asking for a login when the first page shows no
+        links to a visitor — handing each to `on_page(n, page)`. Returns (last page read, the thread's last
+        page, its title, why it stopped short or "", the page it stopped at)."""
         n, last, title = first, first, ""
         read_to = first - 1                                # the last page read
         asked_login = False
@@ -328,7 +433,7 @@ class SimpCityWindow(QMainWindow):
                 yield ("sleep", gap + random.uniform(0, 1))  # not back to back: SimpCity limits that
                 if self.stopping:
                     break
-            self._say(f"Reading page {n}{f' of {last}' if last > n else ''}… {len(items) + len(links):,} files and links found so far.")
+            self._say(f"Reading page {n}{f' of {last}' if last > n else ''}… {progress()}")
             page = yield ("read", sc.page_url(base, n), n)
             if page and page.get("limited"):
                 limits += 1
@@ -352,11 +457,34 @@ class SimpCityWindow(QMainWindow):
                 asked_login = True
                 yield ("login",)
                 continue                                   # read the page again, logged in
-            sc.collect(page.get("posts") or [], items, links)
+            on_page(n, page)
             last = max(last, int(page.get("last") or 1))
             title = title or str(page.get("title") or "")
             read_to = n
             n += 1
+        return read_to, last, title, short, n
+
+    def _crawl(self, base: str, full: bool):
+        """Reads the thread's pages (`_pages`), then works out what's left to download. A read cut short (the
+        waits ran out, a page that won't load, Stop) keeps what it found; the next run carries on from there.
+        The posts' reaction scores are noted on the way (`simpcity.reactions`)."""
+        sc.make_folder(self.dest)
+        self.record = sc.Record.load(self.dest)
+        first = 1 if full else self.record.start_page(base, self.want_videos)
+        from_start = first == 1 or self.record.full_read(base, self.want_videos)   # a read from page 1, or carrying one on
+        had_hosts = int(self.record.threads.get(base, {}).get("hosts") or 0) >= sc.HOSTS_READ
+        items: dict[str, sc.Item] = {}
+        links: dict[str, fh.Link] = {}
+        scores: dict[str, int] = {}
+
+        def on_page(_n: int, page: dict) -> None:
+            posts = page.get("posts") or []
+            sc.collect(posts, items, links)
+            scores.update(sc.reactions(posts))
+
+        read_to, last, title, short, n = yield from self._pages(
+            base, first, on_page, lambda: f"{len(items) + len(links):,} files and links found so far.")
+        self.record.note_reactions(scores)
         if read_to < first:
             raise RuntimeError(f"Couldn't read the thread — {short or 'stopped'}. "
                                + ("Wait a few minutes, then press Get New." if "too many" in short else
@@ -826,6 +954,7 @@ class SimpCityWindow(QMainWindow):
                     f"{self.enlarged:,} small photos upscaled 2×.")
         self._say(msg)
         self._log(msg)
+        sc.forget_scores(self.dest)
         self.finished.emit(str(self.dest), list(getattr(self, "written", [])))
 
     # ------------------------------------------------------------------ carrying out requests

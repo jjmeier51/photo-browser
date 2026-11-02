@@ -1771,6 +1771,26 @@ posted on several hosts is fetched once.
 - **Tags**: iPhone `library.addTag("simpcity", to:)` every 20 files and at the end; Safe Finder the
   shared tag store (`tag_store().add`) the same way.
 
+**Reaction scores (Nov 2, 2026).** `EXTRACT_POSTS_JS` (both copies) also reads each post's reactions from
+XenForo's reactions bar: the `<bdi>` names shown, plus a bare "You" (the visitor isn't a `<bdi>`), plus
+"and N others" (thousands separators stripped); a bar without the link is 0; no bar at all is -1 (not a
+reading — left out, so a markup change can't write zeros). This is the *post's* count, not the "Reaction
+score" in the member sidebar (that member's lifetime total). `reactions(posts)` keeps only posts holding a
+link the downloader takes (a chatty thread's other posts would bloat the record); the record stores them by
+post under `reactions` (`{"score", "checked"}`; merge: newer `checked` wins per post), and
+`Record.scores()` gives file → score (a `same_as` copy's post counts for the kept file; the highest wins).
+Every page read (download runs on both apps) notes the scores it saw. **Get Reaction Scores** (Safe
+Finder's right-click on a person folder or its `simpcity` folder, shown only where a record is —
+`simpcity_scores_folder`) opens the window with `scores_only`: `_score_crawl` reads every page of every
+thread in the record through the same paced loop as a download (`_pages`, which `_crawl` now uses too),
+saves every 20 pages, and keeps a stopped thread's page in QSettings (`scores/<folder>|<thread id>`) to
+carry on there. **Sorting:** Safe Finder's "Reaction Score" sort key (highest first from the menu; unscored
+files last) reads `simpcity.folder_scores` (parsed once per record change, re-stat at most every 2 s) and
+draws the score on tiles and list rows while it's the sort; a finished run emits `tag_events().scores` and
+panes sorted by it re-sort. The iPhone's "Most reactions" (`SortKey.reactionsDesc`, offered in a folder
+holding a record) loads `SimpCityScores.scores(for:)` off-main for the files shown (`reactionsVersion`
+keys the memo) and shows a 👍 count on tiles while sorting by it.
+
 ### 7.4c taylorpictures.net — `TaylorGallery.swift` / `TaylorBrowserView.swift` (Oct 21, 2026)
 Listing: the first page's pager gives the page count (`pageCount(in:pattern:)`), and the rest of a
 section's album pages or an album's image pages are fetched six at a time (`fetchPages`) in page

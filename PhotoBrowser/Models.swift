@@ -189,6 +189,7 @@ enum SortKey: String, CaseIterable, Identifiable {
     case likesDesc    = "Most liked"
     case durationDesc = "Longest first"
     case durationAsc  = "Shortest first"
+    case reactionsDesc = "Most reactions"
     var id: String { rawValue }
     /// Age sorting is applied in the folder view (it needs per-file ages).
     var isAge: Bool { self == .ageAsc || self == .ageDesc }
@@ -196,6 +197,9 @@ enum SortKey: String, CaseIterable, Identifiable {
     var isLikes: Bool { self == .likesDesc }
     /// Length sorting is applied in the folder view (needs per-file video durations).
     var isDuration: Bool { self == .durationDesc || self == .durationAsc }
+    /// Reaction-score sorting (SimpCity downloads) is applied in the folder view (scores come from the
+    /// folder's `.simpcity.json` — `SimpCityScores`).
+    var isReactions: Bool { self == .reactionsDesc }
 }
 
 /// Video container extensions that don't reliably resolve to a movie UTType from the extension

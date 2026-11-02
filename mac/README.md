@@ -503,6 +503,17 @@ starts at the last page it reached ("Read every page again" to start over); file
 again. Deleting a downloaded file doesn't bring it back next time. Run it on its own with
 `python3 mac/simpcity_downloader.py "/Volumes/SSD/Helen Owen" [thread-address]`.
 
+**Reaction scores.** Every page read also notes how many reactions each post with a photo or video has
+(the names under the post plus "and N others" — the post's own count, not the "Reaction score" next to a
+member's name, which is their lifetime total). They're kept in the same record, so the iPhone reads them
+too. Sort a `simpcity` folder by **Reaction Score** (sort menu; highest first) to see the most-reacted
+downloads first — the score shows on each tile while you do; the iPhone app's sort is **Most reactions**.
+For things downloaded before scores were kept — or to bring old scores up to date — right-click the
+person's folder (or its `simpcity` folder) ▸ **Get Reaction Scores**: it reads every page of the threads
+the folder was downloaded from, for the scores alone (nothing is downloaded). A big thread takes a while
+(pages are read a couple of seconds apart, as SimpCity wants); stop it any time — the next run carries
+on from the page it reached.
+
 ### Install it as a Mac app
 
 ```sh

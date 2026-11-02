@@ -30,6 +30,13 @@ import CryptoKit
 /// brought up to them once, where they lie (`fixes`, `SimpCityDownloader.fixFile`), and a record with
 /// misread post times has its thread read from page 1 again to recover them (`misdated`, `redate`).
 ///
+/// **Reaction scores.** Each page read notes how many reactions each post holding a file or link has
+/// (XenForo's reactions bar: the names shown plus "and N others" — the post's own count, not the "Reaction
+/// score" beside a member's name, which is the member's lifetime total), kept by post under `reactions`
+/// (post id → score and when it was read; the newer reading wins a merge). A file takes its post's score
+/// (`Record.scores`), and the folder can be sorted by it (`SimpCityScores`, the Reaction Score sort). Safe
+/// Finder's "Get Reaction Scores" reads a folder's threads again for them alone.
+///
 /// **Videos on file hosts** (`SimpCityHosts`): a post's pixeldrain/gofile/cyberdrop/bunkr/filester/
 /// fileditch videos are keyed `<host>:<file id>` and named `<host>-<file id>.<ext>`; the links are kept
 /// under `links` (one done isn't listed again). The same video posted on several hosts is fetched once
@@ -152,6 +159,19 @@ nonisolated enum SimpCity {
         }
     }
 
+    /// Post id → reaction score, for the posts a page read returned that hold something the downloader
+    /// takes. A post without a reactions bar (-1: the page didn't show one) is left out — not a 0.
+    static func reactions(_ posts: [[String: Any]]) -> [String: Int] {
+        var out: [String: Int] = [:]
+        for p in posts {
+            let post = (p["id"] as? String) ?? (p["id"] as? NSNumber)?.stringValue ?? ""
+            guard !post.isEmpty, let n = (p["reactions"] as? NSNumber)?.intValue, n >= 0 else { continue }
+            let urls = (p["urls"] as? [Any] ?? []).compactMap { $0 as? String }
+            if urls.contains(where: { isLink($0) }) { out[post] = n }
+        }
+        return out
+    }
+
     // MARK: - The shared record
 
     /// `<person>/simpcity/.simpcity.json` (see the type notes). Plain dictionaries, merged on save; a
@@ -164,6 +184,8 @@ nonisolated enum SimpCity {
         private(set) var failed: [String: [String: Any]] = [:]
         /// File-host links: what each held (its videos' keys), whether it's done.
         private(set) var links: [String: [String: Any]] = [:]
+        /// Post id → `{"score": n, "checked": when read}`.
+        private(set) var reactions: [String: [String: Any]] = [:]
 
         var file: URL { folder.appendingPathComponent(SimpCity.recordName) }
 
@@ -196,6 +218,12 @@ nonisolated enum SimpCity {
                     guard (theirsDone && !mineDone) || (theirsDone == mineDone && num(v["checked"]) > num(mine["checked"])) else { continue }
                 }
                 links[k] = v
+            }
+            for (k, v) in doc["reactions"] as? [String: Any] ?? [:] {
+                guard let v = v as? [String: Any] else { continue }
+                // The newer reading of a post stands.
+                if let mine = reactions[k], num(v["checked"]) <= num(mine["checked"]) { continue }
+                reactions[k] = v
             }
             for (k, v) in doc["threads"] as? [String: Any] ?? [:] {
                 guard let v = v as? [String: Any] else { continue }
@@ -403,6 +431,26 @@ nonisolated enum SimpCity {
             return max(1, Int(num(threads[base]?["pages"])))
         }
 
+        /// Post id → score, as just read from the thread.
+        mutating func noteReactions(_ scores: [String: Int], at when: Double = Date().timeIntervalSince1970) {
+            for (post, n) in scores { reactions[post] = ["score": n, "checked": Int(when)] }
+        }
+
+        /// File name → reaction score: its post's — the highest, when the same file came from more than one
+        /// post. A file whose post wasn't read has none.
+        func scores() -> [String: Int] {
+            var out: [String: Int] = [:]
+            for (key, entry) in items {
+                let post = (entry["post"] as? String) ?? (entry["post"] as? NSNumber)?.stringValue ?? ""
+                guard let r = reactions[post] else { continue }
+                let name = fileOf(key)
+                guard !name.isEmpty else { continue }
+                let n = Int(num(r["score"]))
+                if n > (out[name] ?? -1) { out[name] = n }
+            }
+            return out
+        }
+
         /// The thread most recently read here — what "Get New" offers.
         var lastThread: String? {
             threads.max { num($0.value["checked"]) < num($1.value["checked"]) }?.key
@@ -413,7 +461,8 @@ nonisolated enum SimpCity {
             merge(read())
             let doc: [String: Any] = ["format": SimpCity.format, "version": 1,
                                       "updated": Int(Date().timeIntervalSince1970), "by": "Photo Browser",
-                                      "threads": threads, "items": items, "failed": failed, "links": links]
+                                      "threads": threads, "items": items, "failed": failed, "links": links,
+                                      "reactions": reactions]
             let data = try JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys])
             try DriveWriter.writeDataSync(data, to: file)
         }

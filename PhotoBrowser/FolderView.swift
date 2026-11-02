@@ -204,6 +204,11 @@ struct FolderView: View {
     @State private var imageRes: ImageRes = .all
     @State private var hdrOnly = false
     @State private var fileSpecs: [URL: MediaSpec] = [:]
+    /// SimpCity downloads' reaction scores (from the folders' `.simpcity.json`), loaded while sorting by
+    /// them; `reactionsVersion` bumps with each load (the scores can change without the count changing).
+    @State private var reactionScores: [URL: Int] = [:]
+    @State private var reactionsVersion = 0
+    @State private var hasSimpCityRecord = false          // this folder holds one: "Most reactions" is offered
     @State private var infoEntry: Entry?
     @State private var folderInfoItem: PreviewItem?
     @State private var birthdayFolderItem: PreviewItem?
@@ -481,10 +486,11 @@ struct FolderView: View {
     }
 
     private var filtered: [Entry] {
-        filteredMemo.value(for: filterKey) {
+        filteredMemo.value(for: filterKey + "|r\(reactionsVersion)") {
             let list = applyFormat(filteredRaw)
             if library.sort.isAge { return sortByAge(list) }
             if library.sort.isLikes { return sortByLikes(list) }
+            if library.sort.isReactions { return sortByReactions(list) }
             if library.sort.isDuration { return sortByDuration(list) }
             return list
         }
@@ -516,6 +522,17 @@ struct FolderView: View {
             if let x = la, let y = lb { return x != y ? x > y : a.name.localizedStandardCompare(b.name) == .orderedAscending }
             if la == nil && lb == nil { return a.name.localizedStandardCompare(b.name) == .orderedAscending }
             return la != nil      // items with a like count come first
+        }
+    }
+
+    /// Sorts by SimpCity reaction score, most first (folders first; items without a score last, by name).
+    private func sortByReactions(_ list: [Entry]) -> [Entry] {
+        list.sorted { a, b in
+            if a.isFolder != b.isFolder { return a.isFolder }
+            let ra = reactionScores[a.url], rb = reactionScores[b.url]
+            if let x = ra, let y = rb { return x != y ? x > y : a.name.localizedStandardCompare(b.name) == .orderedAscending }
+            if ra == nil && rb == nil { return a.name.localizedStandardCompare(b.name) == .orderedAscending }
+            return ra != nil      // items with a score come first
         }
     }
 
@@ -897,6 +914,7 @@ struct FolderView: View {
                   coverURL: entry.isFolder ? library.coverURL(for: entry.url) : nil,
                   thumbnailOverrideURL: entry.isFolder ? nil : library.itemThumbnailURL(for: entry.url),
                   likeCount: entry.kind == .video ? library.tiktokLikeCount(for: entry.url) : nil,
+                  reactionScore: library.sort.isReactions && !entry.isFolder ? reactionScores[entry.url] : nil,
                   reviewsFolder: entry.isFolder && library.isReviewsFolder(entry.url),
                   onReady: { homeCellReady() })
             .equatable()            // redraw only tiles whose inputs changed (see `EntryCell`)
@@ -1931,6 +1949,21 @@ struct FolderView: View {
                 if Task.isCancelled { return }
                 fileSpecs.merge(more) { $1 }
             }
+            // SimpCity reaction scores: whether this folder has a record (the sort is offered), and — while
+            // sorting by them — the score of every file shown, from the record of the folder each is in.
+            .task(id: "reactions-\(url.path)-\(library.changeToken)-\(library.sort.isReactions ? filterKey : "")") {
+                let folder = url, wanted = library.sort.isReactions
+                let files = wanted ? applyFormat(filteredRaw).filter { !$0.isFolder }.map(\.url) : []
+                let (has, scores) = await Task.detached(priority: .utility) { () -> (Bool, [URL: Int]) in
+                    (SimpCityScores.hasRecord(in: folder), wanted ? SimpCityScores.scores(for: files) : [:])
+                }.value
+                if Task.isCancelled { return }
+                hasSimpCityRecord = has
+                if wanted || !reactionScores.isEmpty {
+                    reactionScores = scores
+                    reactionsVersion += 1
+                }
+            }
             // Compute ages (folder + subfolders) only when actually engaged — an age
             // sort/filter, a numeric (age) search, or the Age menu being opened. The
             // pass is a recursive walk + EXIF read of the whole subtree, far too heavy
@@ -2520,8 +2553,10 @@ struct FolderView: View {
                 // Sort lives here, not in the toolbar: on a phone the toolbar overflowed it into "…".
                 Menu {
                     ForEach(SortKey.allCases) { key in
-                        // Age sorting only where a birthday is in context; "Most liked" only in TikTok folders.
-                        if (!key.isAge || library.hasBirthdayContext(url)) && (!key.isLikes || library.isTikTokFolder(url)) {
+                        // Age sorting only where a birthday is in context; "Most liked" only in TikTok folders;
+                        // "Most reactions" only in a SimpCity download folder (or while it's the sort).
+                        if (!key.isAge || library.hasBirthdayContext(url)) && (!key.isLikes || library.isTikTokFolder(url))
+                            && (!key.isReactions || hasSimpCityRecord || library.sort == key) {
                             Button { library.sort = key } label: { check(key.rawValue, key == library.sort) }
                         }
                     }

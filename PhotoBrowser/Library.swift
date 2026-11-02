@@ -5120,7 +5120,7 @@ final class Library {
             case .dateAsc:  return a.modified < b.modified
             case .sizeDesc: return a.size > b.size
             case .sizeAsc:  return a.size < b.size
-            case .smart, .kind, .ageAsc, .ageDesc, .likesDesc, .durationDesc, .durationAsc:
+            case .smart, .kind, .ageAsc, .ageDesc, .likesDesc, .durationDesc, .durationAsc, .reactionsDesc:
                 return nameAsc(a, b)   // handled above / in the view
             }
         }
