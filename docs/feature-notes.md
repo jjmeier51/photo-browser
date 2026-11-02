@@ -1568,6 +1568,14 @@ The iPhone's `FacebookService.normalizedProfileURL` does the same. Status 0 is n
 browser's error, retried once; a 404 says there's no page at that address; the hidden page counts as ready
 only when it's on the site's own host (a failed load is retried).
 
+**"Waiting for a login" when logged in (Nov 2, 2026).** The window knew a login only from the cookie
+store's `cookieAdded` — and the one `loadAllCookies()` made as the window opened, before any page had
+loaded with the profile, didn't report the cookies saved in an earlier session (a login made in that very
+window worked, which is why the first run did). Now `loadAllCookies()` is asked again once the hidden page is
+up and every 3 s while waiting, and the site's own page is asked too (`_check_page_login`: Facebook's
+`c_user` and Instagram's `ds_user_id` are readable by the page; `KINDS[..]["page_cookie"]`). After 30 s of
+waiting the log says which of the two (the hidden page, the login) it's still missing.
+
 **Facebook: every photo, small ones 2×, upload dates (Nov 2, 2026).** The tagged set (`t.`) is always walked
 — the "Tagged posts" option is Instagram's only (hidden for Facebook). A photo page that comes back without
 an image, a video or a next pointer is a rate-limit shell: read again after 5/15/45 s (`BACKOFF`) before the

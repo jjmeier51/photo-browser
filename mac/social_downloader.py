@@ -53,9 +53,11 @@ SMALL_PHOTO = 200 * 1024      # Facebook: photos under this are always upscaled 
 
 KINDS = {
     "instagram": dict(module=ig, name="Instagram", home=ig.HOME, robots=ig.ROBOTS, login_cookie="sessionid",
+                      page_cookie="ds_user_id",
                       domain="instagram.com", referer="https://www.instagram.com/", field="@handle or profile link",
                       login="https://www.instagram.com/accounts/login/"),
     "facebook": dict(module=fb, name="Facebook", home=fb.HOST, robots=fb.ROBOTS, login_cookie="c_user",
+                     page_cookie="c_user",
                      domain="facebook.com", referer="https://www.facebook.com/", field="profile link",
                      login="https://www.facebook.com/login/"),
 }
@@ -125,6 +127,8 @@ class SocialWindow(QMainWindow):
         store = prof.cookieStore()
         store.cookieAdded.connect(self._cookie_added)
         store.loadAllCookies()
+        self.store = store
+        self.page_login = False                         # the site's own page says it's logged in (see logged_in)
         self.view = QWebEngineView()
         self.view.setPage(QWebEnginePage(prof, self.view))
         self.api = QWebEnginePage(prof, self)          # hidden: the reads are made from it
@@ -229,6 +233,11 @@ class SocialWindow(QMainWindow):
         """The hidden page is ready once it's on the site itself — reads made from anywhere else are ones the
         browser refuses. A load that failed (the network) is tried again a few times."""
         self.api_ready = bool(ok) and self.api.url().host() == QUrl(self.k["robots"]).host()
+        if self.api_ready:
+            # The saved logins: asked for again now the browser is up — asked for before any page had loaded,
+            # the store may not have read them yet, and a login made in an earlier session goes unseen.
+            self.store.loadAllCookies()
+            self._check_page_login()
         if not self.api_ready:
             self._api_tries = getattr(self, "_api_tries", 0) + 1
             if self._api_tries <= 5:
@@ -250,8 +259,24 @@ class SocialWindow(QMainWindow):
         return "; ".join(f"{k}={v}" for k, v in pairs.items())
 
     def logged_in(self) -> bool:
-        return any(jar.get(self.k["login_cookie"]) for d, jar in self.cookies.items()
-                   if d == self.k["domain"] or d.endswith("." + self.k["domain"]))
+        """A login cookie the cookie store reported — or the site's page itself showing one (`page_login`),
+        for when the store didn't report a login saved in an earlier session."""
+        return self.page_login or any(jar.get(self.k["login_cookie"]) for d, jar in self.cookies.items()
+                                      if d == self.k["domain"] or d.endswith("." + self.k["domain"]))
+
+    def _check_page_login(self) -> None:
+        """Asks the hidden page (and the visible one, when it's on the site) whether the site's login cookie
+        is there: Facebook's `c_user` and Instagram's `ds_user_id` are readable by the page."""
+        name = self.k["page_cookie"]
+        js = f"(document.cookie || '').split(/;\\s*/).some(c => c.startsWith('{name}=') && c.length > {len(name) + 1})"
+
+        def got(v) -> None:
+            if v is True:
+                self.page_login = True
+        if self.api_ready:
+            self.api.runJavaScript(js, 0, got)
+        if self.view.page().url().host().endswith(self.k["domain"]):
+            self.view.page().runJavaScript(js, 0, got)
 
     # ------------------------------------------------------------------ run / stop
     def start(self) -> None:
@@ -365,6 +390,13 @@ class SocialWindow(QMainWindow):
                     self._log("Logged in — starting.")
                 go()
                 return
+            if int(waited[0] * 2) % 6 == 0:             # every 3 s: the store and the page asked again
+                self.store.loadAllCookies()
+                self._check_page_login()
+            if waited[0] == 30:
+                self._log(f"Still waiting — the hidden {self.k['name']} page is "
+                          f"{'ready' if self.api_ready else 'not loaded yet'}, and "
+                          f"{'a login was seen' if self.logged_in() else 'no login has been seen yet'}.")
             if not asked[0] and waited[0] >= 3:
                 asked[0] = True
                 self.view.load(QUrl(self.k["login"]))
