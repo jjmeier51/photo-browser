@@ -12,7 +12,9 @@ and write the same list: a thread downloaded on the Mac is never fetched again o
 other way round. Keys are `goonbox:<id>` / `turbo:<id>`; files are named `<id>.<ext>`, so a file
 already in the folder counts as done even if the record was lost. Something deleted from the folder
 stays deleted: the record, not the folder, says what's done. A file that failed is listed too
-("failed"), so the next run tries it again even when it doesn't re-read that page. Each save re-reads
+("failed"), so the next run tries it again even when it doesn't re-read that page. A WebM video becomes
+an MP4 (H.264 + AAC, `prepare_video`) when ffmpeg is installed — Apple's players don't open WebM — and
+WebMs already in the folder (the iPhone's too: it can't convert them) are converted by the next run. Each save re-reads
 the file and merges,
 so neither app drops what the other added. The record also keeps each thread's address and the last
 page read, so "Get New" starts where the thread had got to.
@@ -293,6 +295,19 @@ class Record:
         self.items[item.key] = entry
         self.failed.pop(item.key, None)
 
+    def refile(self, item: Item, file: str, upscaled: bool = False) -> None:
+        """An earlier download brought up to the current rules (`fixes`): its name now, its post and date,
+        the `made` mark — the rest of its entry (the size and hash it was downloaded with, the link it
+        came from) kept, so the same video on another host is still recognised."""
+        entry = dict(self.items.get(item.key) or {})
+        entry.update({"file": file, "post": item.post or str(entry.get("post") or ""), "posted": int(item.posted or 0),
+                      "made": MADE})
+        entry.setdefault("at", int(time.time()))
+        if upscaled:
+            entry["upscaled"] = True
+        self.items[item.key] = entry
+        self.failed.pop(item.key, None)
+
     def add_same(self, item: Item, other: str) -> None:
         """A video that is one already downloaded (`other`'s key), on another host or link: done, not saved."""
         entry = {"same_as": other, "post": item.post, "posted": int(item.posted or 0), "at": int(time.time()), "made": MADE}
@@ -329,9 +344,10 @@ class Record:
                 elif read_all:
                     v["posted"] = 0
 
-    def fixes(self, items: dict[str, Item], folder: str | Path) -> list[tuple[Item, str]]:
-        """Downloaded files still in the folder that predate the current rules (`made`): each with the
-        best post date known — the one just read from the thread, else the recorded one if it's real."""
+    def fixes(self, items: dict[str, Item], folder: str | Path, webm: bool = False) -> list[tuple[Item, str]]:
+        """Downloaded files still in the folder that predate the current rules (`made`) — and, when `webm`
+        (WebM can be converted here), every WebM, whichever app downloaded it: each with the best post
+        date known — the one just read from the thread, else the recorded one if it's real."""
         try:
             present = set(os.listdir(folder))
         except OSError:
@@ -339,7 +355,9 @@ class Record:
         out: list[tuple[Item, str]] = []
         for key, entry in sorted(self.items.items()):
             name = str(entry.get("file") or "")
-            if not name or name not in present or int(entry.get("made") or 0) >= MADE:
+            if not name or name not in present or \
+                    (int(entry.get("made") or 0) >= MADE and
+                     not (webm and name.lower().endswith(".webm") and entry.get("mp4") != "failed")):
                 continue
             kind, _, ident = key.partition(":")
             fresh = items.get(key)
@@ -1158,15 +1176,53 @@ def prepare_image(path: str) -> tuple[str, bool]:
         return path, False
 
 
-def fix_file(folder: str | Path, item: Item, name: str, tool: ExifSession | None, tmp: str | Path) -> tuple[str, str, bool]:
+# ----------------------------------------------------------------------------- videos: WebM → MP4
+
+
+def can_convert_webm() -> bool:
+    """Whether WebM downloads can be made MP4s here (it takes ffmpeg — `video_tools.webm_to_mp4`)."""
+    import video_tools
+    return bool(video_tools.ffmpeg())
+
+
+def prepare_video(path: str, out: str | None = None) -> tuple[str, str]:
+    """A downloaded WebM made into an MP4 (`video_tools.webm_to_mp4`: H.264 + AAC, which Apple's players
+    open — WebM only plays in a browser), written to `out` or beside it as `<name>.mp4` (the WebM is
+    removed then). Returns the file to use now and the outcome ("converted", "renamed", "no-tool",
+    "failed", or "" for anything that isn't a WebM — left alone, as is a WebM that couldn't be made one)."""
+    if not path.lower().endswith(".webm"):
+        return path, ""
+    import video_tools
+    dest = out or os.path.splitext(path)[0] + ".mp4"
+    how = video_tools.webm_to_mp4(path, dest)
+    if how not in ("converted", "renamed"):
+        return path, how
+    if out is None:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return dest, how
+
+
+def fix_file(folder: str | Path, item: Item, name: str, tool: ExifSession | None, tmp: str | Path,
+             webm: bool = False) -> tuple[str, str, bool]:
     """Brings a file downloaded before the current rules up to them, where it lies: WebP → JPEG and the
-    small-photo upscale (on a copy in `tmp`, then back into the folder), and the post's date when it
-    has no real one of its own (the 1969 a misread time wrote doesn't count). Returns (its name now,
-    the date outcome, upscaled). A file that changes name (`.webp` → `.jpg`) is a new file beside the
-    old, which is removed — the caller moves its tags across."""
+    small-photo upscale (on a copy in `tmp`, then back into the folder), WebM → MP4 when `webm` (made in
+    `tmp`, then into the folder), and the post's date when it has no real one of its own (the 1969 a
+    misread time wrote doesn't count). Returns (its name now, the date outcome, upscaled). A file that
+    changes name (`.webp` → `.jpg`, `.webm` → `.mp4`) is a new file beside the old, which is removed — the
+    caller moves its tags across."""
     folder = Path(folder)
     path = folder / name
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if webm and ext == "webm":
+        made, how = prepare_video(str(path), str(Path(tmp) / f"fix-{item.ident}-{int(time.time() * 1000)}.mp4"))
+        if how in ("converted", "renamed"):
+            outcome = apply_date(made, item.posted, tool)
+            final = place(made, folder, f"{os.path.splitext(name)[0]}.mp4")
+            os.remove(path)
+            return final.name, outcome, False
     try:
         small = os.path.getsize(path) < UPSCALE_UNDER
     except OSError:

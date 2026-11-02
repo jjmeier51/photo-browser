@@ -463,7 +463,10 @@ a `simpcity` folder inside the person's folder, tagged **simpcity**. A photo or 
 own capture date keeps it; one that doesn't gets the date of the post it came from (needs
 [ExifTool](https://exiftool.org) — `brew install exiftool` — otherwise only the file's date is set).
 WebP photos are saved as JPEGs, and photos under 250 KB are upscaled 2× (Lanczos) and also tagged
-**upscaled**. Files downloaded before these rules — and the ones that got 12/31/1969 as their date —
+**upscaled**. **WebM videos are made into MP4s** (H.264 + AAC, same size and length — the iPhone, Photos
+and QuickTime don't play WebM); this needs ffmpeg (`brew install ffmpeg`) — without it they stay WebM and
+the log says so. WebMs already in the folder, the iPhone's downloads included (it can't convert them),
+are converted the next time you run it on that folder; their tags move to the MP4. Files downloaded before these rules — and the ones that got 12/31/1969 as their date —
 are put right the next time you run it on that folder (it reads the thread from page 1 once to find
 their real post dates).
 

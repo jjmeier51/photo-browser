@@ -1692,6 +1692,19 @@ posted on several hosts is fetched once.
   to them once, beside the new downloads (`fix_file` / `fixFile`: a copy prepared and committed back,
   the tag attribute kept; a WebP's new `.jpg` takes its tags — Safe Finder `carry`+`forget`, iPhone
   `itemMoved` — and the `.webp` goes).
+- **Videos: WebM → MP4 (Mac only, Nov 2, 2026).** `simpcity.prepare_video` → `video_tools.webm_to_mp4`:
+  ffmpeg, `-map 0:v:0 -map 0:a:0?`, `scale=trunc(iw/2)*2:trunc(ih/2)*2` (H.264 needs even sizes), libx264
+  `veryfast` CRF 18 `yuv420p` (else `h264_videotoolbox -q:v 65`), AAC 192k, `-map_metadata 0`, `+faststart`;
+  one conversion at a time (a semaphore — each uses every core). A file named `.webm` that's really an MP4
+  (`ftyp`, no EBML header) is just renamed. In `_settle` it runs *after* the size/SHA-256 are taken — the
+  record keeps the host's file's, so the same video on another host still matches — and before the date
+  rule (ExifTool can write an MP4's QuickTime dates, not a WebM's). Earlier WebMs in the folder (either
+  app's) go through `fixes(webm=True)` → `fix_file(webm=True)` (converted from the drive into the temp
+  folder, dated, placed as `<stem>.mp4`, the WebM removed, tags `carry`+`forget`); `Record.refile` updates
+  the entry keeping its `size`/`sha256`/`via`/`name` (the old `add` dropped them). One that won't convert
+  is kept and marked `mp4: "failed"` so it isn't retried every run. No ffmpeg: nothing changes, one log line.
+  The iPhone can't do this — AVFoundation has no WebM reader (the app plays WebM through WebKit) — so its
+  WebM downloads wait for Safe Finder's next run on that folder.
 - **Videos on file hosts** (Oct 28, `filehosts.py` / `SimpCityHosts.swift`, kept in step — same keys,
   ids and preference order; the page scripts byte-identical). A post's host link is a `Link` (a file or
   a folder: `pixeldrain /u/ /l/`, `gofile /d/`, `cyberdrop /a/ /f/ /e/`, `bunkr(.cr/.ws/.ru/…) /a/ /f/ /v/

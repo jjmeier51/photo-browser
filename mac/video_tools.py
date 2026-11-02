@@ -1,5 +1,6 @@
-"""Video work for Safe Finder's Instagram and Facebook downloads: putting a DASH video's two halves together
-(`mux`) and upscaling a video to 1080p (`upscale_1080`), in place, its metadata and dates kept.
+"""Video work for Safe Finder's downloaders: putting a DASH video's two halves together (`mux`), upscaling a
+video to 1080p (`upscale_1080`), in place, its metadata and dates kept — and turning a WebM into an MP4
+(`webm_to_mp4`, the SimpCity downloader), which only ffmpeg can do: AVFoundation doesn't open WebM.
 
 On a Mac it's AVFoundation, through `video_helper.swift` — the iPhone app's own code for both, built once
 with `swiftc` into ~/Library/Caches/PhotoBrowser/ (like the thumbnail helper). Without Xcode's tools,
@@ -21,6 +22,7 @@ HERE = Path(__file__).resolve().parent
 IS_MAC = sys.platform == "darwin"
 TARGET = 1080
 _lock = threading.Lock()
+_converting = threading.Semaphore(1)           # one WebM conversion at a time: each one uses every core
 _helper: list[str] | None | bool = False       # False = not looked for yet
 note = ""                                      # set once when neither tool is here
 
@@ -172,3 +174,56 @@ def upscale_1080(path: str) -> str:
     os.replace(tmp, path)
     os.utime(path, (st.st_atime, st.st_mtime))
     return "upscaled"
+
+
+# ----------------------------------------------------------------------------- WebM → MP4
+
+def is_matroska(path: str) -> bool:
+    """WebM/Matroska: the file starts with the EBML header."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"\x1a\x45\xdf\xa3"
+    except OSError:
+        return False
+
+
+def is_mp4(path: str) -> bool:
+    """An MP4/QuickTime file (an `ftyp` box first) — a host can serve one under a .webm name."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(12)
+        return head[4:8] == b"ftyp"
+    except OSError:
+        return False
+
+
+_H264 = (["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"],
+         ["-c:v", "h264_videotoolbox", "-q:v", "65", "-pix_fmt", "yuv420p"])     # no libx264: the Mac's encoder
+
+
+def webm_to_mp4(src: str, out: str) -> str:
+    """The WebM at `src` as an MP4 at `out` that the iPhone, Photos and QuickTime play: its VP8/VP9/AV1
+    picture as H.264 (x264 CRF 18 — visually the same; the Mac's hardware encoder when ffmpeg has no
+    x264), its Opus/Vorbis sound as AAC, at the same size and frame rate (an odd width or height made
+    even — H.264 needs that), its metadata (a creation date) carried over. `src` is left as it is.
+    Returns "converted", "renamed" (it was an MP4 all along, only named .webm — copied as it is),
+    "no-tool" (no ffmpeg here) or "failed" (`out` is never left behind then)."""
+    if is_mp4(src) and not is_matroska(src):
+        try:
+            shutil.copyfile(src, out)
+            return "renamed"
+        except OSError:
+            return "failed"
+    ff = ffmpeg()
+    if not ff:
+        return "no-tool"
+    with _converting:
+        for codec in _H264:
+            r = _run([ff, "-y", "-v", "error", "-i", src, "-map", "0:v:0", "-map", "0:a:0?",
+                      "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", *codec, "-c:a", "aac", "-b:a", "192k",
+                      "-map_metadata", "0", "-movflags", "+faststart", "-f", "mp4", out], 4 * 3600)
+            if r is not None and r.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 1024:
+                return "converted"
+            if os.path.exists(out):
+                os.remove(out)
+    return "failed"

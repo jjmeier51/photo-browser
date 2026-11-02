@@ -168,7 +168,9 @@ actions the app makes no network calls.
   token gets the IP banned; pixeldrain's hotlink-locked files come from another host or the person
   presses Download in the window) into `<person>/simpcity`, tagged "simpcity", own capture date kept else the post's date
   (XenForo's `data-timestamp` — `data-time` is a label); WebP → JPEG, photos under 250 KB upscaled 2×
-  (Lanczos, tagged "upscaled"); earlier downloads brought up to these rules once (`made`). **A video
+  (Lanczos, tagged "upscaled"); **WebM → MP4 on the Mac** (`video_tools.webm_to_mp4`: ffmpeg, H.264 + AAC —
+  AVFoundation can't open WebM, so the iPhone keeps its WebMs and Safe Finder's next run converts them); earlier
+  downloads brought up to these rules once (`made`). **A video
   posted on several hosts is downloaded once** (`Dedup`: hosts' sizes up front, the server's size as a
   download starts, SHA-256 once in; other copies recorded `same_as`). Read in a real browser the person
   can see (DDoS-Guard/Cloudflare checks and the SimpCity login are answered there). **The record is on

@@ -295,6 +295,8 @@ class SimpCityWindow(QMainWindow):
         self.failed = self.processed = 0
         self.kept = self.post_dated = 0
         self.fixed = self.converted = self.enlarged = 0
+        self.webm = sc.can_convert_webm()            # WebM → MP4 (it takes ffmpeg)
+        self.webm_done, self.webm_failed = 0, []
         self.fail_hosts, self.fail_why = {}, {}
         self.shown = self.direct_noted = 0
         self.exif_noted = False
@@ -497,7 +499,7 @@ class SimpCityWindow(QMainWindow):
         # done, still to do, or kept for later. One cut short carries on from where it stopped (`resume`).
         self.record.note_thread(base, title, read_to, hosts=to_end and (from_start or had_hosts),
                                 resume=read_to if from_start and not to_end else 0)
-        fixes = self.record.fixes(items, self.dest)
+        fixes = self.record.fixes(items, self.dest, webm=self.webm)
         self.record.redate(items, read_all=from_start and to_end)
         left, adopted = sc.todo(items, self.record, self.dest, self.want_videos)
         to_list = self.record.links_todo(links, self.want_videos, again=full)
@@ -513,7 +515,12 @@ class SimpCityWindow(QMainWindow):
             if later:
                 self._log(f"Download videos is off: {later:,} video(s)/link(s) are kept for a run with it on.")
         if fixes:
-            self._log(f"Bringing {len(fixes):,} earlier download(s) up to date (dates, WebP → JPEG, small photos 2×).")
+            webms = sum(1 for _it, name in fixes if name.lower().endswith(".webm"))
+            self._log(f"Bringing {len(fixes):,} earlier download(s) up to date (dates, WebP → JPEG, small photos 2×"
+                      + (f", {webms:,} WebM → MP4" if webms else "") + ").")
+        if not self.webm and any(str(e.get("file") or "").lower().endswith(".webm") for e in self.record.items.values()):
+            self._log("WebM videos stay WebM — install ffmpeg (brew install ffmpeg) to have them made into MP4s, "
+                      "which the iPhone and Photos play.")
         return left, fixes, to_list
 
     def _crawled(self, error, result) -> None:
@@ -662,20 +669,28 @@ class SimpCityWindow(QMainWindow):
         for item, name in fixes:
             if self.stopping:
                 break
-            r = yield ("thread", lambda it=item, n=name: sc.fix_file(self.dest, it, n, self.exif, self.tmp))
+            r = yield ("thread", lambda it=item, n=name: sc.fix_file(self.dest, it, n, self.exif, self.tmp, webm=self.webm),
+                       f"bringing {name} up to date")
             if isinstance(r, Exception):
                 self._log(f"{name}: couldn't bring it up to date — {r}")
             else:
                 new_name, outcome, upscaled = r
                 if new_name != name:
                     self.renamed.append((str(self.dest / name), str(self.dest / new_name)))
-                    self.converted += 1
+                    if new_name.lower().endswith(".mp4") and name.lower().endswith(".webm"):
+                        self.webm_done += 1
+                    else:
+                        self.converted += 1
+                elif name.lower().endswith(".webm") and self.webm:
+                    self.webm_failed.append(item.key)
                 if upscaled:
                     self.upscaled.append(str(self.dest / new_name))
                     self.enlarged += 1
                 if outcome == "post":
                     self.fixed += 1
-                self.record.add(item, new_name, upscaled=upscaled)
+                self.record.refile(item, new_name, upscaled=upscaled)
+                if self.webm and new_name.lower().endswith(".webm"):
+                    self.record.items[item.key]["mp4"] = "failed"      # not tried again every run
             self.processed += 1
             self.bar.setValue(min(self.total, self.processed))
 
@@ -837,8 +852,9 @@ class SimpCityWindow(QMainWindow):
 
     def _settle(self, path: str, item: sc.Item):
         """On a worker thread: for a video, its size and SHA-256 as downloaded (the same video from
-        another host is dropped here); WebP → JPEG and the small-photo upscale, the date rule, then into
-        the drive folder. Returns (where it landed, upscaled, date outcome, size, sha256)."""
+        another host is dropped here — before a WebM is converted, so it's the host's file that's
+        compared); WebP → JPEG and the small-photo upscale, WebM → MP4, the date rule, then into the drive
+        folder. Returns (where it landed, upscaled, date outcome, size, sha256)."""
         try:
             size, sha = 0, ""
             if item.video or sc.is_video(path):
@@ -850,6 +866,12 @@ class SimpCityWindow(QMainWindow):
                     return sc.Duplicate(other)
                 self.dedup.note_size(item.key, size)
             path, upscaled = sc.prepare_image(path)
+            if self.webm:
+                path, how = sc.prepare_video(path)
+                if how in ("converted", "renamed"):
+                    self.webm_done += 1
+                elif how == "failed":
+                    self.webm_failed.append(item.key)
             outcome = sc.apply_date(path, item.posted, self.exif)
             if outcome == "kept":
                 self.kept += 1
@@ -949,6 +971,10 @@ class SimpCityWindow(QMainWindow):
                 parts.append(f"{len(self.links_failed):,} link(s) couldn't be listed ("
                              + ", ".join(sorted(set(self.links_failed))) + " — tried again next time)")
             msg += " " + "; ".join(parts)[:1].upper() + "; ".join(parts)[1:] + "."
+        if not problem and (getattr(self, "webm_done", 0) or getattr(self, "webm_failed", [])):
+            msg += f" {self.webm_done:,} WebM video{'s' if self.webm_done != 1 else ''} made into MP4."
+            if self.webm_failed:
+                msg += f" {len(self.webm_failed):,} WebM couldn't be converted (kept as WebM)."
         if not problem and (self.fixed or self.converted or self.enlarged):
             msg += (f" Earlier downloads: {self.fixed:,} got their post's real date, {self.converted:,} WebP → JPEG, "
                     f"{self.enlarged:,} small photos upscaled 2×.")
