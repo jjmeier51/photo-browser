@@ -206,7 +206,9 @@ Python. (`SimpCityService`,
   `InstagramService`/`FacebookService` reading the sites through `fetch()` from a hidden page in a logged-in
   Qt WebEngine browser). Facebook takes every uploaded and **every tagged** photo (walks stop early only after a
   full walk recorded in the record's `walked`; empty pages are re-read), upscales photos under 200 KB 2×
-  automatically, and dates each file with its own upload time (`created(page, id)`, with the time zone). Same
+  automatically, and dates each file with its own upload time (`created(page, id)`, with the time zone); a run
+  reads only what's new in an album it read to the end before (record `albums`: head/tail) and paces itself
+  adaptively under 50 pages a minute. Same
   file names and folders as the iPhone; files tagged "instagram"/"facebook"
   on **both** apps now; options to upscale photos 2× and videos to 1080p (`mac/video_tools.py`,
   `mac/video_helper.swift` = the iPhone's mux/upscale code, ffmpeg fallback). **The profile folder's

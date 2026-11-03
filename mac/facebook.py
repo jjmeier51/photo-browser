@@ -11,12 +11,19 @@ address, when it was uploaded, its caption, who posted it — and the id of the 
 go stale. A page Facebook answers empty (a rate-limit shell) is read again after a pause, not taken for the
 end of the set.
 
-**Nothing missed.** A walk of the uploads or tagged set may stop early — after 30 photos in a row already
+**Nothing missed.** A walk of the uploads or tagged set may stop early — after 12 photos in a row already
 done (they're newest first) — only once that set has been walked to its end with every photo of it
 downloaded; the record keeps that (`walked`: set → when). A walk cut short (Stop, a login wall, a page that
 stays empty) or one whose photos didn't all download clears it, so the next run walks the whole set again;
-`Options.full` ("Check every photo again") always does. Albums are walked to the end every time (they can be
-oldest first).
+`Options.full` ("Check every photo again") always does. An album walked to its end with everything
+downloaded is remembered by its first and last photo (`albums`: token → {head, tail}); the next run reads
+from its front until it meets the old first photo (new ones at the front), then carries on from the old last
+photo (new ones at the end) — an unchanged album is two reads instead of one per photo. A last photo that's
+gone means the whole album is read again.
+
+**Pacing** (`_Reader`): the gap between reads adapts — it eases while Facebook answers quickly and whole,
+grows when pages slow down, doubles at a 429/5xx or an empty rate-limit shell — under a ceiling of
+`PER_MINUTE` reads in any minute. Speed comes from reading less, not from pushing harder.
 
 **Upload dates.** A photo's time is the one in its own node on its page (`created`: the `created_time` /
 `creation_time` / `publish_time` nearest its id — a page also holds comments' and other posts' times); a
@@ -51,9 +58,12 @@ RECORD = ".facebook.json"
 FORMAT = "photobrowser-facebook"
 HOST = "https://www.facebook.com/"
 ROBOTS = "https://www.facebook.com/robots.txt"       # the page the reads are made from: same origin, no scripts
-KNOWN_RUN = 30                    # photos in a row already done before a newest-first walk stops
+KNOWN_RUN = 12                    # photos in a row already done before a newest-first walk stops
 MAX_ITEMS = 10_000
-GAP, JITTER = 0.35, 0.4           # seconds between page reads
+GAP, JITTER = 0.35, 0.4           # seconds between page reads, to begin with (it adapts — `_Reader`)
+MIN_GAP, MAX_GAP = 0.25, 8.0      # the most and the least it adapts to
+PER_MINUTE = 50                   # page reads in any 60 seconds, at most, however well it's going
+SLOW_READ = 3.0                   # seconds: a page taking longer than this is Facebook getting slower
 BACKOFF = (5, 15, 45)
 _RESERVED = {"profile.php", "photo.php", "photo", "story.php", "share", "people", "pages", "watch", "media", "login", ""}
 
@@ -339,6 +349,19 @@ def page_js(ident: str, url: str) -> tuple[str, str]:
     return PAGE_JS.replace("__ID__", q(ident)).replace("__URL__", q(url)), RESULT_JS.replace("__ID__", q(ident))
 
 
+def album_ends(old, walked: dict | None, done_keys: set[str]) -> dict:
+    """The record's `albums` after a run: each album walked to its end this run with every new photo of it
+    downloaded (`done_keys`) gets its new first and last photo; one with a photo that didn't download is
+    forgotten (read whole next time); albums this run didn't finish keep what they had."""
+    ends = dict(old) if isinstance(old, dict) else {}
+    for token, (keys, where) in (walked or {}).items():
+        if keys <= done_keys:
+            ends[token] = {"head": where["head"], "tail": where["tail"], "when": int(time.time())}
+        else:
+            ends.pop(token, None)
+    return ends
+
+
 # ----------------------------------------------------------------------------- a run
 
 @dataclass
@@ -351,21 +374,59 @@ class Outcome:
     # The uploads / tagged sets walked this run: name → (walked to its end, the media ids handed to the
     # downloads) — what the window turns into the record's `walked` once it knows they all downloaded.
     sets: dict = field(default_factory=dict)
+    # Albums walked to their end this run: token → (the media ids handed to the downloads, {"head", "tail"})
+    # — the record's `albums`, so the next run carries on from where each ended (once they all downloaded).
+    albums: dict = field(default_factory=dict)
+    reads: int = 0                    # pages read this run
 
 
 class _Reader:
-    """Page reads with spacing, retries, and one JavaScript redirect followed (a generator helper)."""
+    """Page reads with spacing, retries, and one JavaScript redirect followed (a generator helper).
 
-    def __init__(self) -> None:
+    **The spacing adapts to how Facebook is answering.** It starts at `GAP` (± jitter, so reads don't land
+    in lockstep); each page that comes back quickly and whole eases it by 10 % down to `MIN_GAP`; a slow page
+    (over `SLOW_READ` s) lengthens it by half; trouble — HTTP 429/5xx, an empty rate-limit shell (`trouble()`,
+    from the walk) — doubles it (to `MAX_GAP`) on top of the existing waits. Whatever the gap, no more than
+    `PER_MINUTE` reads go in any 60 seconds. So a run goes as fast as Facebook comfortably answers and backs
+    off at the first sign it wouldn't — it never pushes through a slow-down."""
+
+    def __init__(self, clock=time.monotonic) -> None:
         self.penalty = 0.0
         self.wall = False
+        self.gap = GAP
+        self.clock = clock
+        self.recent: list[float] = []          # when the last PER_MINUTE reads went
+        self.reads = 0
+
+    def trouble(self) -> None:
+        """Facebook's answer said slow down (a 429/5xx, or an empty shell): twice the gap."""
+        self.gap = min(MAX_GAP, self.gap * 2 + 0.5)
+
+    def _eased(self, took: float) -> None:
+        if took > SLOW_READ:
+            self.gap = min(MAX_GAP, self.gap * 1.5)
+        else:
+            self.gap = max(MIN_GAP, self.gap * 0.9)
+
+    def _wait(self) -> float:
+        """Seconds to wait before the next read: the gap (jittered), the penalty, and the per-minute cap."""
+        wait = self.gap * (1 + random.uniform(-JITTER, JITTER)) + self.penalty
+        now = self.clock()
+        self.recent = [t for t in self.recent if now - t < 60]
+        if len(self.recent) >= PER_MINUTE:
+            wait = max(wait, self.recent[0] + 60 - now)
+        return wait
 
     def read(self, url: str, hops: int = 1):
         """yield from: (html, final_url), or (None, why)."""
         for attempt in range(len(BACKOFF) + 1):
-            yield ("sleep", GAP * (1 + random.uniform(-JITTER, JITTER)) + self.penalty)
+            yield ("sleep", self._wait())
             self.penalty = max(0.0, self.penalty - GAP)
+            began = self.clock()
+            self.recent.append(began)
+            self.reads += 1
             status, html, final = yield ("page", url)
+            took = self.clock() - began
             if status == 0:
                 # The request never got an answer: the network, or a read the browser refused (another host).
                 why = (html or "no answer").strip()[:160]
@@ -375,6 +436,7 @@ class _Reader:
                     continue
                 return None, f"couldn't reach it: {why}"
             if status == 429 or status >= 500:
+                self.trouble()
                 if attempt < len(BACKOFF):
                     self.penalty = min(self.penalty + 2.0, 10.0)
                     yield ("note", f"   Facebook asked to slow down (HTTP {status}) — waiting {BACKOFF[attempt]} s")
@@ -383,6 +445,7 @@ class _Reader:
                 return None, f"HTTP {status}"
             if status >= 400:
                 return None, f"HTTP {status}"
+            self._eased(took)
             hop = js_redirect(html) if hops > 0 else None
             if hop and hop.startswith("https://") and hop != final:
                 return (yield from self.read(hop, hops - 1))
@@ -393,9 +456,16 @@ class _Reader:
 
 
 def _walk(reader: _Reader, token: str, first_id: str | None, skip: set[str], seen: set[str], folder: Path,
-          poster_from_page: bool, early_stop: bool, label: str, name: str, keys: set[str] | None = None):
+          poster_from_page: bool, early_stop: bool, label: str, name: str, keys: set[str] | None = None,
+          resume: dict | None = None, ends: dict | None = None):
     """yield from: one media set, photo by photo (module notes); emits what's new (their ids into `keys`).
-    Returns (how many, whether the walk got to the end of the set — or caught up, when `early_stop`)."""
+    Returns (how many, whether the walk got to the end of the set — or caught up, when `early_stop`).
+
+    `resume` — an album this run has walked to its end before: {"head": its first photo then, "tail": its
+    last}. Rather than every photo again, the walk reads from the front only until it meets the old first
+    photo (new ones added at the front), then jumps to the old last photo and carries on from there (new
+    ones added at the end) — an unchanged album costs two reads, not one per photo. A last photo that won't
+    load (deleted) falls back to the whole walk. `ends`, when given, gets {"head", "tail"} of this walk."""
     nid = first_id
     if nid is None:
         page, final = yield from reader.read(f"{HOST}media/set/?set={token}")
@@ -407,12 +477,22 @@ def _walk(reader: _Reader, token: str, first_id: str | None, skip: set[str], see
         # a set with photos is never marked done by a bad answer (an empty one costs two reads next time).
         yield ("note", f"   {label}: no photos found")
         return 0, False
+    head = nid
+    old_head = (resume or {}).get("head")
+    old_tail = (resume or {}).get("tail")
+    jumped = False
+    last = None
     visited: set[str] = set()
     known = emitted = 0
     finished = False
+    if old_tail and old_head == head:              # nothing new at the front: straight to where it ended
+        nid, jumped = old_tail, True
     while not reader.wall:
         if not nid or nid in visited:
             finished = True                    # no next photo, or back round to one already read: the end
+            break
+        if jumped and nid == head and visited:
+            finished = True                    # on from where it ended, round to the front again: the end
             break
         if len(visited) >= MAX_ITEMS:
             break
@@ -430,18 +510,25 @@ def _walk(reader: _Reader, token: str, first_id: str | None, skip: set[str], see
             if page is None or reader.wall or complete(page):
                 break
             if attempt < len(BACKOFF):         # an empty shell (rate limit): not the end of the set
+                reader.trouble()
                 yield ("note", f"   {label}: photo {nid} came back empty — reading it again in {BACKOFF[attempt]} s")
                 yield ("sleep", BACKOFF[attempt])
+        if jumped and nid == old_tail and not reader.wall and (page is None or not complete(page)):
+            yield ("note", f"   {label}: the photo it ended at last time is gone — reading the whole album")
+            visited.clear()
+            nid, jumped, old_tail = head, False, None   # (and no jumping again this walk)
+            continue
         if page is None or reader.wall:
             break
         if not complete(page):
             yield ("note", f"   {label}: stopped at photo {nid} — Facebook kept answering with an empty page "
                            "(the next run reads the whole set again)")
             break
+        last = nid
         if nid in skip or nid in seen:
             known += 1
             if early_stop and known >= KNOWN_RUN:
-                yield ("note", f"   {label}: caught up (30 already downloaded in a row)")
+                yield ("note", f"   {label}: caught up ({KNOWN_RUN} already downloaded in a row)")
                 finished = True
                 break
         else:
@@ -465,7 +552,12 @@ def _walk(reader: _Reader, token: str, first_id: str | None, skip: set[str], see
                 if keys is not None:
                     keys.add(nid)
         nid = next_media_id(page)
-    yield ("note", f"   {label}: {len(visited)} page(s) read, {emitted} new" + ("" if finished else " (not to the end)"))
+        if not jumped and old_tail and old_head and nid == old_head and old_head != head:
+            nid, jumped = old_tail, True        # caught up with the old front: on from where it ended
+    if ends is not None and finished and last:
+        ends.update(head=head, tail=last)
+    yield ("note", f"   {label}: {len(visited)} page(s) read, {emitted} new" + ("" if finished else " (not to the end)")
+           + (" — carried on from where it ended last time" if jumped else ""))
     return emitted, finished
 
 
@@ -518,9 +610,16 @@ def run(link: str, person: Path, already_for, opts: social.Options):
             for a in every(albums, pattern):
                 if f"a.{a}" not in tokens:
                     tokens.append(f"a.{a}")
+    resumes = record(folder).get("albums")
+    resumes = resumes if isinstance(resumes, dict) and not opts.full else {}
     for token in tokens:
-        yield from counting(_walk(reader, token, None, skip, seen, folder, False, False, f"album {token}",
-                                  profile.name))
+        keys_a: set[str] = set()
+        ends: dict = {}
+        _n, finished = yield from counting(_walk(reader, token, None, skip, seen, folder, False, False,
+                                                 f"album {token}", profile.name, keys_a,
+                                                 resume=resumes.get(token), ends=ends))
+        if finished and ends:
+            out.albums[token] = (keys_a, ends)
     # Uploads, then every photo it's tagged in — credited to whoever posted them. Each stops early only when
     # it was walked to its end before (module notes).
     sets = [("photos_by", f"pb.{profile.id}.-2207520000", ["pb.", "a."], False),
@@ -569,6 +668,7 @@ def run(link: str, person: Path, already_for, opts: social.Options):
                 yield ("emit", [social.Item(vid, folder, f"FB_{vid}", True, url, ext="mp4", date=created(watch, vid),
                                             caption=caption(watch), poster=profile.name)])
     out.found = count[0]
+    out.reads = reader.reads
     out.login_wall = reader.wall
     if reader.wall:
         out.problem = "Facebook asked for a fresh login — log in in the window above, then press Download again."

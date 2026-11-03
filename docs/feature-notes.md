@@ -1718,6 +1718,20 @@ Mac-made folder as an Instagram folder (bubbles, sweep) until it has downloaded 
 fallback: `-c copy` mux; `scale=1080:-2` / `-2:1080` + libx264 CRF 17 (videotoolbox if libx264 is missing),
 `-map_metadata 0`. Not covered offscreen: the Swift helper and real Qt WebEngine (the tests stand them in).
 
+**Speed without pushing harder (Nov 3, 2026)** — `facebook._Reader`, `_walk(resume=)`, `album_ends`. Asked for
+more speed "while still not getting throttled, rate limited, or seen as a bot". The reads stay what they
+were — the logged-in browser's own `fetch()` of Facebook's own pages, nothing disguised — and the gains are
+from reading less and waiting smarter: (1) **albums resume**: an album walked to its end with everything
+downloaded is stored as {head, tail} in the record's `albums` (merged like `walked`; the iPhone keeps unknown
+keys); next run reads its set page, walks from the front only until the old head (new at the front), then
+jumps to the old tail and follows on (new at the end) until it comes round to the front — an unchanged album
+is 2 reads instead of N; a tail that won't load means a full walk; `full` ignores it. (2) `KNOWN_RUN` 30 → 12
+for uploads/tagged already walked to the end. (3) **AIMD pacing**: gap × 0.9 per quick whole page down to
+0.25 s, × 1.5 for a page over 3 s, × 2 + 0.5 at a 429/5xx or an empty shell, ≤ 8 s; hard ceiling of 50 reads
+in any 60 s (≈ the old fixed pace — the ceiling, not the gap, bounds the rate). (4) The window polls the
+hidden page for an answer every 40 ms (was 100 + 150 ms) — up to ~150 ms of dead time per read. (5) Files
+6 at a time (was 4): those come from Facebook's photo/video CDN, not its pages. The log ends with pages read.
+
 ### 7.4d SimpCity threads — `SimpCityService.swift` / `SimpCityRecord.swift` / `SimpCityHosts.swift` / `SimpCityImportView.swift`, `mac/simpcity.py` / `mac/filehosts.py` / `mac/simpcity_downloader.py` (Oct 28, 2026)
 "Download from SimpCity…" on a person's folder (iPhone: the download menu; Safe Finder: right-click a
 folder, or the empty area of one): paste a `simpcity.cr/threads/…` address; every page is read, each

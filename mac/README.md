@@ -525,11 +525,15 @@ what you see (private profiles you follow included), and never fills in a login 
   Instagram has a sharper version in two halves (picture and sound), they're put together on the Mac.
 - **Facebook**: every album (profile and cover pictures included), every photo it uploaded, **every photo
   it's tagged in** (always — whoever posted it), and its videos. The first run reads every uploaded and
-  tagged photo; later runs stop once they reach 30 already downloaded in a row — but only after a run got
-  all the way through with everything downloaded. A run that was stopped, hit a login wall, or had a photo
-  fail reads the whole set again next time, and **Check every photo again** always does (it finds an old
-  photo someone tagged since). If Facebook answers a photo's page empty (it does when it's being asked too
-  fast), it waits and reads it again rather than taking it for the end. **Photos under 200 KB are upscaled
+  tagged photo; later runs stop once they reach 12 already downloaded in a row — but only after a run got
+  all the way through with everything downloaded. An album read to its end is remembered by its first and
+  last photo, so the next run reads only what's new at its front and its end (an unchanged album is two
+  page reads instead of one per photo). A run that was stopped, hit a login wall, or had a photo fail reads
+  the whole set again next time, and **Check every photo again** always does (it finds an old photo someone
+  tagged since). The pace adapts: it speeds up a little while Facebook answers quickly and fully, slows down
+  at the first slow, empty or "too many requests" answer, and never goes past 50 pages a minute — if
+  Facebook answers a photo's page empty (it does when it's being asked too fast), it backs off and reads it
+  again rather than taking it for the end. The log ends with how many pages a run read. **Photos under 200 KB are upscaled
   2× automatically** (tagged **upscaled**). Every photo and video gets **the date it was uploaded to
   Facebook** — written into it with its time zone and set as the file's dates.
 - **Upscale photos 2×** (Lanczos with a light sharpen — or Real-ESRGAN when Upscayl is installed and

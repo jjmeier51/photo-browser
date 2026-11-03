@@ -11,7 +11,7 @@ logged-in browser* — every API call or page is a `fetch()` from a hidden page 
 exactly what the site's own pages send — so it sees what the person sees, private profiles they follow
 included. It never fills in a login or answers a check itself.
 
-What the run finds goes straight to the downloads (four at a time, on worker threads — `social.settle`:
+What the run finds goes straight to the downloads (six at a time, on worker threads — `social.settle`:
 fetched, upscaled when asked, the post's date/place/caption written in, placed in the profile's folder
 under the iPhone app's names). Each file is tagged "instagram" or "facebook" in the shared tag store (and
 "upscaled" when it was), and the profile's shared record (`.instagram.json` / `.facebook.json`) gets the
@@ -46,7 +46,7 @@ import instagram as ig  # noqa: E402
 import simpcity as sc  # noqa: E402
 import social  # noqa: E402
 
-LANES = 4                     # files downloaded at once
+LANES = 6                     # files downloaded at once (from the sites' photo/video servers, not their pages)
 SAVE_EVERY = 25               # the record is saved (and the files tagged) after this many files
 CALL_TIMEOUT = 75.0           # seconds an API call / page read may take in the browser
 SMALL_PHOTO = 200 * 1024      # Facebook: photos under this are always upscaled 2×
@@ -293,6 +293,7 @@ class SocialWindow(QMainWindow):
         self.field.setText(text)
         self.settings.setValue(f"{self.kind}/last/{self.person}", text)
         self.running, self.stopping = True, False
+        self.started = time.monotonic()
         fbk = self.kind == "facebook"
         self.opts = social.Options(photos_2x=self.photos_2x.isChecked(),
                                    ai=self.ai.isChecked() and self.engine is not None and self._ai_usable(),
@@ -357,6 +358,12 @@ class SocialWindow(QMainWindow):
             else:
                 walked.pop(name, None)
         return walked
+
+    def _album_ends(self, outcome) -> dict:
+        """The record's `albums` after this run (facebook.py notes): each album walked to its end with all its
+        new photos in is remembered by its first and last photo; any other is forgotten (read whole next time)."""
+        return fb.album_ends(self.record.get("albums") if self.record is not None else None,
+                             getattr(outcome, "albums", None), self.done_keys)
 
     def _video_note(self, _v) -> None:
         import video_tools
@@ -474,9 +481,11 @@ class SocialWindow(QMainWindow):
             if time.monotonic() - began > CALL_TIMEOUT:
                 done({"status": 0, "body": "no answer"})
                 return
-            QTimer.singleShot(150, poll)
+            # asked again soon: checking the page is local and cheap, and every moment between an answer
+            # arriving and the next step was dead time on every one of thousands of reads
+            QTimer.singleShot(40 if time.monotonic() - began < 5 else 150, poll)
 
-        self.api.runJavaScript(start_js, 0, lambda _ok: QTimer.singleShot(100, poll))
+        self.api.runJavaScript(start_js, 0, lambda _ok: QTimer.singleShot(20, poll))
 
     def _profile(self, value) -> None:
         if self.kind == "instagram":
@@ -591,6 +600,7 @@ class SocialWindow(QMainWindow):
         outcome = getattr(self, "outcome", None)
         if self.kind == "facebook" and self.record is not None:
             self.info["walked"] = self._walked(outcome)
+            self.info["albums"] = self._album_ends(outcome)
         self._save()
         if self.exif is not None:
             self.exif.close()
@@ -609,6 +619,11 @@ class SocialWindow(QMainWindow):
             if self.undated:
                 line += (f" {self.undated} had no upload date on {self.k['name']}'s page — "
                          f"{'they keep' if self.undated != 1 else 'it keeps'} the download date.")
+        reads = getattr(outcome, "reads", 0) if outcome is not None else 0
+        if reads and getattr(self, "started", 0):
+            mins = (time.monotonic() - self.started) / 60
+            self._log(f"   {reads:,} Facebook pages read in {mins:.0f} min" if mins >= 1 else
+                      f"   {reads:,} Facebook pages read")
         self._log(line)
         self._say(line)
         for w in (self.go_btn, self.tagged, self.stories, self.full, self.photos_2x, self.videos_1080, self.field):
