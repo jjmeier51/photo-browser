@@ -55,6 +55,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 import filehosts as fh
@@ -114,6 +115,7 @@ _TURBO = re.compile(r"^https?://(?:www\.)?turbo\.[a-z]+/(?:v|d|e|embed|f)/([A-Za
 
 
 IMAGE_KINDS = ("goonbox", "pixhost")      # kinds whose files are photos (the rest are videos)
+LINK_RULES = 2                            # what a file-host link is listed for: 1 videos, 2 videos and zips
 
 # pixhost (pixhost.cc — also pixhost.to, pixhost.org, pixho.st): an image's show page
 # `/show/<dir>/<id>_<name>`, its thumbnail `t<N>.<domain>/thumbs/<dir>/<id>_<name>` and the full-size file
@@ -180,7 +182,7 @@ def extension(url: str, kind: str, name: str = "") -> str:
         ext = path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
         if ext == "jpeg":
             ext = "jpg"
-        if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
+        if ext in IMAGE_EXTS or ext in VIDEO_EXTS or ext == "zip":
             return ext
     return "jpg" if kind in IMAGE_KINDS else "mp4"
 
@@ -209,7 +211,12 @@ class Item:
 
     @property
     def video(self) -> bool:
-        return self.kind not in IMAGE_KINDS
+        return self.kind not in IMAGE_KINDS and not self.archive
+
+    @property
+    def archive(self) -> bool:
+        """A zip on a file host: downloaded, then its photos and videos taken out (`unpack`)."""
+        return bool(self.remote and self.remote.archive)
 
 
 def is_link(url: str) -> bool:
@@ -397,6 +404,22 @@ class Record:
         self.items[item.key] = entry
         self.failed.pop(item.key, None)
 
+    def add_archive(self, item: Item, files: list[str], upscaled: list[str] | None = None, size: int = 0) -> None:
+        """A zip downloaded and unpacked: the photos and videos it held, as saved into the folder (`files`;
+        `file` stays empty — the zip itself isn't kept). Done: never downloaded again."""
+        entry = {"file": "", "archive": True, "files": list(files), "post": item.post, "posted": int(item.posted or 0),
+                 "at": int(time.time()), "made": MADE}
+        if upscaled:
+            entry["upscaled_files"] = list(upscaled)
+        if size:
+            entry["size"] = int(size)
+        if item.via:
+            entry["via"] = item.via
+        if item.remote and item.remote.name:
+            entry["name"] = item.remote.name
+        self.items[item.key] = entry
+        self.failed.pop(item.key, None)
+
     def add_skipped(self, item: Item, why: str) -> None:
         """Nothing to keep (a file-host link that turned out not to be a video): done, never tried again."""
         self.items[item.key] = {"skipped": why, "post": item.post, "posted": int(item.posted or 0),
@@ -475,8 +498,13 @@ class Record:
     def links_todo(self, found: dict[str, fh.Link], videos: bool, again: bool) -> list[fh.Link]:
         """The file-host links to list this run: the ones the pages read hold that aren't done (all of
         them when `again` — a folder can gain files), plus every earlier one not done. With videos off
-        none are listed; the ones found are noted (`skipped`) so a later run with videos on gets them."""
+        none are listed; the ones found are noted (`skipped`) so a later run with videos on gets them.
+        A link listed before zips were downloaded (`LINK_RULES`) that held nothing is listed once more."""
         out: dict[str, fh.Link] = {}
+        for k, e in self.links.items():
+            if e.get("done") and not e.get("files") and not e.get("gone") and \
+                    int(e.get("rules") or 1) < LINK_RULES and videos:
+                e["done"] = False                  # (held no video then — it may hold a zip)
         for k, lk in found.items():
             e = self.links.get(k)
             if not videos:
@@ -515,7 +543,8 @@ class Record:
                     del self.failed[k]
         self.links[lk.key] = {"url": lk.url, "post": lk.post, "posted": int(lk.posted or 0), "files": files,
                               "done": gone or (not why and all(f in self.items for f in files)),
-                              "checked": int(time.time()), **({"why": why} if why else {}), **({"gone": True} if gone else {})}
+                              "checked": int(time.time()), "rules": LINK_RULES,
+                              **({"why": why} if why else {}), **({"gone": True} if gone else {})}
 
     def settle_links(self) -> None:
         """At the end of a run: a link is done when everything it held is."""
@@ -590,20 +619,23 @@ class Record:
         out: dict[str, int] = {}
         for key, entry in self.items.items():
             r = self.reactions.get(str(entry.get("post") or ""))
-            name = self.file_of(key) if r else ""
-            if not name:
+            if not r:
                 continue
+            # a zip's photos and videos all take its post's score
+            names = [str(f) for f in entry.get("files") or []] or [self.file_of(key)]
             try:
                 n = int(r.get("score") or 0)
             except (TypeError, ValueError):
                 continue
-            if n > out.get(name, -1):
-                out[name] = n
+            for name in names:
+                if name and n > out.get(name, -1):
+                    out[name] = n
         return out
 
     def posts(self) -> set[str]:
         """The posts the downloads came from (what "Get Reaction Scores" wants a score for)."""
-        return {str(e.get("post")) for e in self.items.values() if e.get("post") and (e.get("file") or e.get("same_as"))}
+        return {str(e.get("post")) for e in self.items.values()
+                if e.get("post") and (e.get("file") or e.get("files") or e.get("same_as"))}
 
     def last_thread(self) -> str | None:
         if not self.threads:
@@ -663,6 +695,100 @@ def forget_scores(folder: str | Path | None = None) -> None:
             _scores.clear()
         else:
             _scores.pop(str(folder), None)
+
+
+# ----------------------------------------------------------------------------- zips from file hosts
+
+UNPACK_EXTS = IMAGE_EXTS | VIDEO_EXTS | {"heif", "bmp", "tif", "tiff"}
+MAX_UNPACKED = 64 * 1024 ** 3             # bytes a zip may unpack to (a zip bomb is refused, not filled)
+MAX_RATIO = 400                           # …or a member that claims to grow more than this
+
+
+class Unpacked(NamedTuple):
+    name: str                             # where it was in the zip ("photos/IMG_1.jpg")
+    path: str                             # where it was taken out to (a work folder on the Mac)
+    stem: str                             # the file name it gets in the folder, without the extension
+
+
+def member_stem(zip_stem: str, inner: str, taken: set[str]) -> str:
+    """`<zip's stem>-<its path in the zip>`: folders joined with "_", made safe, kept unique in the zip."""
+    base = os.path.splitext(inner)[0].replace("\\", "/").strip("/").replace("/", "_")
+    base = re.sub(r'[^\w.\- ()]+', "_", base).strip(" ._") or "file"
+    stem = f"{zip_stem}-{base}"[:150]
+    out, n = stem, 2
+    while out.lower() in taken:
+        out = f"{stem} {n}"
+        n += 1
+    taken.add(out.lower())
+    return out
+
+
+def unpack(zip_path: str, work: str, zip_stem: str, depth: int = 0) -> tuple[list[Unpacked], list[str]]:
+    """The photos and videos in a zip (and in zips inside it, one level down), taken out into `work`.
+    Never outside it (only the member's file name is used — no "../" paths), never an encrypted member,
+    nothing past `MAX_UNPACKED` or a member that would grow more than `MAX_RATIO`×. Returns (what was taken
+    out, notes on what wasn't)."""
+    import zipfile
+    got: list[Unpacked] = []
+    notes: list[str] = []
+    taken: set[str] = set()
+    try:
+        zf = zipfile.ZipFile(zip_path)
+    except (zipfile.BadZipFile, OSError) as e:
+        return [], [f"not a zip that opens ({e})"]
+    with zf:
+        total = 0
+        skipped_other = 0
+        for info in zf.infolist():
+            name = info.filename
+            base = os.path.basename(name.replace("\\", "/"))
+            if info.is_dir() or not base or base.startswith(("._", ".")) or "__MACOSX/" in name:
+                continue
+            ext = base.rsplit(".", 1)[-1].lower() if "." in base else ""
+            if ext == "zip" and depth == 0:
+                inner_zip = os.path.join(work, f"inner-{len(got)}-{len(notes)}.zip")
+                try:
+                    with zf.open(info) as src, open(inner_zip, "wb") as dst:
+                        shutil.copyfileobj(src, dst, 1 << 20)
+                    more, more_notes = unpack(inner_zip, work, zip_stem + "-" + os.path.splitext(base)[0][:40], depth + 1)
+                    got += more
+                    notes += more_notes
+                finally:
+                    try:
+                        os.remove(inner_zip)
+                    except OSError:
+                        pass
+                continue
+            if ext not in UNPACK_EXTS:
+                skipped_other += 1
+                continue
+            if info.flag_bits & 0x1:
+                notes.append(f"{name}: encrypted (needs a password) — left in the zip")
+                continue
+            if info.compress_size and info.file_size / max(info.compress_size, 1) > MAX_RATIO and info.file_size > 50_000_000:
+                notes.append(f"{name}: claims to unpack to {info.file_size:,} bytes from {info.compress_size:,} — left alone")
+                continue
+            total += info.file_size
+            if total > MAX_UNPACKED:
+                notes.append(f"stopped at {name}: over {MAX_UNPACKED // 1024 ** 3} GB unpacked")
+                break
+            stem = member_stem(zip_stem, name, taken)
+            # a name of its own in the work folder (a zip inside this one unpacks into the same folder)
+            out = os.path.join(work, f"{depth}-{len(got)}-{os.urandom(4).hex()}.{ext}")
+            try:
+                with zf.open(info) as src, open(out, "wb") as dst:
+                    shutil.copyfileobj(src, dst, 1 << 20)
+            except (zipfile.BadZipFile, OSError, RuntimeError, EOFError) as e:
+                notes.append(f"{name}: couldn't be taken out ({e})")
+                try:
+                    os.remove(out)
+                except OSError:
+                    pass
+                continue
+            got.append(Unpacked(name, out, stem))
+        if skipped_other:
+            notes.append(f"{skipped_other} other file{'s' if skipped_other != 1 else ''} (not photos or videos) left in the zip")
+    return got, notes
 
 
 def files_by_id(folder: str | Path) -> dict[str, str]:
@@ -735,6 +861,9 @@ def host_items(listed: list[tuple[fh.Link, list[fh.Remote]]], record: Record, fo
             adopted += 1
             continue
         r = it.remote
+        if it.archive:                            # a zip: never "the same as" a video — its contents are checked
+            left.append(it)                       # one by one once it's unpacked
+            continue
         if r and r.locked:
             # Never claims a size: a copy that turns up elsewhere (turbo, a browser-read host) still wins.
             other = dedup.peek_hash(r.sha256) or dedup.peek(r.size) or \

@@ -18,12 +18,17 @@ capture date if it has one, else the post's — see `simpcity.apply_date`), then
 `<person>/simpcity` as `<id>.<ext>` and is tagged "simpcity" in the shared tag store. The record is
 saved as it goes, so a stopped run resumes where it was.
 
-With "Download videos" on, the posts' pixeldrain / gofile / cyberdrop / bunkr / filester / fileditch
+With "Download videos and zips" on, the posts' pixeldrain / gofile / cyberdrop / bunkr / filester / fileditch
 links are listed first (`filehosts.py` — their APIs on worker threads, a lane's page for the hosts that
 need a browser), and their videos join the downloads as `<host>-<id>.<ext>`. A video posted on several
 hosts is downloaded once (`simpcity.Dedup`: the hosts' sizes up front, the server's size as a download
-starts, the SHA-256 once it's in); the other copies are recorded as the same video. Off, turbo and the
-hosts are left for a later run.
+starts, the SHA-256 once it's in); the other copies are recorded as the same video. A **zip** on a host
+(pixeldrain, cyberdrop, bunkr — the ones that say a file's name up front) is downloaded like a video and
+unpacked in its lane the moment it's in (`_keep_zip`, `simpcity.unpack`): every photo and video inside —
+and inside a zip within it — goes into the folder as `<host>-<id>-<its path in the zip>.<ext>`, through the
+same photo rules, WebM → MP4 and date rule, a video already downloaded from another link dropped; then
+the zip is deleted and recorded (`files`) so it's never fetched again. Links listed before zips were taken
+(`LINK_RULES`) that held nothing are listed once more. Off, turbo and the hosts are left for a later run.
 
 Each page read also notes its posts' reaction scores into the record (`simpcity.reactions`). "Get Reaction
 Scores" (`scores_only`, Safe Finder's right-click on a SimpCity folder) reads every page of each thread the
@@ -193,7 +198,7 @@ class SimpCityWindow(QMainWindow):
         self.full = QCheckBox("Read every page again")
         self.full.setToolTip("Normally a thread read before is picked up from the last page it reached.")
         self.settings = QSettings("Photo Browser", "SimpCity")
-        self.videos = QCheckBox("Download videos")
+        self.videos = QCheckBox("Download videos and zips")
         self.videos.setToolTip("turbo.cr videos and the videos the posts link on pixeldrain, gofile, cyberdrop, bunkr, "
                                "filester and fileditch. Off: photos only — the videos are kept for a later run.")
         self.videos.setChecked(str(self.settings.value("videos", "true")).lower() != "false")
@@ -315,7 +320,7 @@ class SimpCityWindow(QMainWindow):
         self.dedup = sc.Dedup()
         self.click_wait = {}
         self.queue: deque = deque()
-        self.from_hosts = self.same = self.not_video = 0
+        self.from_hosts = self.same = self.not_video = self.zips = 0
         self.links_failed: list[str] = []
         self.stand_ins: dict[str, list[sc.Item]] = {}   # mirror key → the copies that failed before it was tried
         self.person_queue: list[sc.Item] = []           # locked pixeldrain videos: a person fetches them
@@ -573,7 +578,7 @@ class SimpCityWindow(QMainWindow):
         hosts: dict[str, int] = {}
         for lk in to_list:
             hosts[lk.host] = hosts.get(lk.host, 0) + 1
-        self._log("Listing the videos in " + ", ".join(f"{h} ×{c}" for h, c in sorted(hosts.items(), key=lambda kv: -kv[1])) + "…")
+        self._log("Listing the videos and zips in " + ", ".join(f"{h} ×{c}" for h, c in sorted(hosts.items(), key=lambda kv: -kv[1])) + "…")
         # gofile gets one lane of its own — one folder at a time, a pause between them — so its site never
         # sees a burst from here (it rate-limits, and bans).
         self.link_queue = deque(lk for lk in to_list if lk.host != "gofile")
@@ -612,7 +617,7 @@ class SimpCityWindow(QMainWindow):
                 continue
             self._say(f"Listing the videos in {self.links_total:,} file-host link{'s' if self.links_total != 1 else ''} — "
                       f"{self.links_done:,} done…")
-            res = yield ("thread", lambda lk=lk: fh.expand(lk, self.ua), f"{lk.url} (listing its videos)")
+            res = yield ("thread", lambda lk=lk: fh.expand(lk, self.ua), f"{lk.url} (listing its videos and zips)")
             remotes: list[fh.Remote] = res if isinstance(res, list) else []
             gone = isinstance(res, fh.Gone)
             why = "" if isinstance(res, list) else str(res)
@@ -668,7 +673,9 @@ class SimpCityWindow(QMainWindow):
         host, adopted, same = sc.host_items(self.listed, self.record, self.dest, self.dedup)
         self.same += same
         found = sum(len(r) for _lk, r in self.listed)
-        self._log(f"{found:,} video(s) in the links; {len(host):,} to download"
+        zips = sum(1 for _lk, rs in self.listed for r in rs if r.archive)
+        self._log(f"{found - zips:,} video(s)" + (f" and {zips:,} zip(s)" if zips else "")
+                  + f" in the links; {len(host):,} to download"
                   + (f", {same:,} the same as one downloaded before" if same else "")
                   + (f", {adopted:,} already in the folder" if adopted else "") + ".")
         try:
@@ -764,12 +771,15 @@ class SimpCityWindow(QMainWindow):
 
     def _keep(self, item: sc.Item, path):
         """A download's outcome: a file to date and put in the folder, a copy of a video already in (or
-        not a video at all), or nothing (failed)."""
+        not a video at all), or nothing (failed). A zip is unpacked right away (`_keep_zip`)."""
         if isinstance(path, sc.Skip):
             self._skipped(item, path)
             return
         if not path:
             self._lost(item)
+            return
+        if item.archive:
+            yield from self._keep_zip(item, path)
             return
         done = yield ("thread", lambda p=path, it=item: self._settle(p, it),
                       f"{item.stem} (dating it and saving it into the folder)")
@@ -891,6 +901,90 @@ class SimpCityWindow(QMainWindow):
             self.record.add_skipped(item, str(why))
             self._log(f"{item.stem}: not a video ({why}) — left alone.")
 
+    def _keep_zip(self, item: sc.Item, path: str):
+        """A zip in: its photos and videos taken out and each put in the folder as any download is (the
+        photo rules, WebM → MP4, the date rule, a video already downloaded from another host dropped), named
+        `<host>-<id>-<its path in the zip>`; then the zip is deleted and recorded as done."""
+        name = item.remote.name if item.remote and item.remote.name else os.path.basename(path)
+        self._log(f"📦 {item.stem} “{name}” — {sc.human_size(path)} in; taking out its photos and videos…")
+        done = yield ("thread", lambda p=path, it=item: self._settle_zip(p, it),
+                      f"{item.stem} (taking the photos and videos out of the zip)")
+        if isinstance(done, Exception):
+            self._log(f"{item.link}: couldn't unpack the zip — {done}")
+            self._lost(item)
+            return
+        saved, upscaled, notes, same, size = done
+        for line in notes[:8]:
+            self._log(f"   {line}")
+        if len(notes) > 8:
+            self._log(f"   …and {len(notes) - 8} more")
+        if not saved and not same:
+            self._log(f"{item.link}: the zip held no photos or videos.")
+            self.record.add_skipped(item, "a zip with no photos or videos")
+            return
+        photos = sum(1 for f in saved if not sc.is_video(f.name))
+        self._log(f"✓ {name}: {photos:,} photo{'s' if photos != 1 else ''} and {len(saved) - photos:,} "
+                  f"video{'s' if len(saved) - photos != 1 else ''} saved"
+                  + (f", {same:,} already downloaded from another link" if same else "")
+                  + (f", {len(upscaled):,} upscaled 2×" if upscaled else ""))
+        self.record.add_archive(item, [f.name for f in saved], [f.name for f in upscaled], size)
+        if item.remote:
+            self.from_hosts += 1
+        self.zips += 1
+        for f in saved:
+            self.written.append(str(f))
+            self.untagged.append(str(f))
+        self.upscaled += [str(f) for f in upscaled]
+
+    def _settle_zip(self, path: str, item: sc.Item):
+        """On a worker thread: the zip unpacked into a work folder and each photo/video settled like a
+        download of its own. Returns (saved files, upscaled ones, notes, how many were videos already
+        downloaded elsewhere, the zip's size)."""
+        work = tempfile.mkdtemp(prefix="zip-", dir=str(self.tmp))
+        try:
+            size = os.path.getsize(path)
+            members, notes = sc.unpack(path, work, item.stem)
+            try:
+                os.remove(path)                            # the zip itself isn't kept
+            except OSError:
+                pass
+            saved, upscaled, same = [], [], 0
+            for m in members:
+                if self.stopping:
+                    notes.append("stopped part way — the rest of the zip comes next run")
+                    break
+                try:
+                    if sc.is_video(m.path):
+                        sha = sc.file_sha256(m.path)
+                        other = self.dedup.match_hash(f"{item.key}/{m.name}", sha)
+                        if other:
+                            same += 1
+                            os.remove(m.path)
+                            continue
+                    p, up = sc.prepare_image(m.path)
+                    if self.webm:
+                        p, how = sc.prepare_video(p)
+                        if how in ("converted", "renamed"):
+                            self.webm_done += 1
+                    outcome = sc.apply_date(p, item.posted, self.exif)
+                    if outcome == "kept":
+                        self.kept += 1
+                    elif outcome == "post":
+                        self.post_dated += 1
+                    final = sc.place(p, self.dest, f"{m.stem}{os.path.splitext(p)[1].lower()}")
+                    saved.append(final)
+                    if up:
+                        upscaled.append(final)
+                except OSError as e:
+                    notes.append(f"{m.name}: couldn't be saved ({e})")
+            if self.stopping and len(saved) < len(members):
+                raise OSError("stopped while unpacking")       # not recorded: the whole zip comes again
+            return saved, upscaled, notes, same, size
+        except OSError as e:
+            return e
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
     def _settle(self, path: str, item: sc.Item):
         """On a worker thread: for a video, its size and SHA-256 as downloaded (the same video from
         another host is dropped here — before a WebM is converted, so it's the host's file that's
@@ -1005,8 +1099,11 @@ class SimpCityWindow(QMainWindow):
                     "press Download on pixeldrain — run Get New again when you're at the Mac.")
         if not problem and (self.from_hosts or self.same or self.not_video or self.links_failed):
             parts = []
-            if self.from_hosts:
-                parts.append(f"{self.from_hosts:,} video{'s' if self.from_hosts != 1 else ''} came from file hosts")
+            videos = self.from_hosts - self.zips
+            if videos:
+                parts.append(f"{videos:,} video{'s' if videos != 1 else ''} came from file hosts")
+            if self.zips:
+                parts.append(f"{self.zips:,} zip{'s' if self.zips != 1 else ''} unpacked into the folder")
             if self.same:
                 parts.append(f"{self.same:,} were the same video on another host or link (downloaded once)")
             if self.not_video:
@@ -1346,6 +1443,10 @@ class SimpCityWindow(QMainWindow):
 
         def check(size: int | None, ctype: str) -> None:
             ctype = (ctype or "").lower()
+            if item.archive:
+                if ctype.startswith(("image/", "audio/", "text/", "video/")):
+                    raise sc.NotVideo(f"the host sent {ctype}, not a zip")
+                return
             if item.remote and (ctype.startswith(("image/", "audio/", "text/")) or ctype in (
                     "application/zip", "application/x-zip-compressed", "application/x-rar-compressed",
                     "application/vnd.rar", "application/x-7z-compressed", "application/pdf")):

@@ -4,8 +4,9 @@ fileditch — for the SimpCity downloader (simpcity.py / simpcity_downloader.py)
 
 A post's link to one of these hosts is a **`Link`**: one file (`pixeldrain.com/u/…`, `bunkr.cr/f/…`,
 `filester.me/d/…`, a fileditch file) or a folder (`gofile.io/d/…`, `pixeldrain.com/l/…`,
-`cyberdrop.cr/a/…`, `bunkr.cr/a/…`, `filester.me/f/…`). `expand` turns it into the **videos** in it
-(`Remote`s — photos, archives and the rest are left alone), each with what the host says about it up front:
+`cyberdrop.cr/a/…`, `bunkr.cr/a/…`, `filester.me/f/…`). `expand` turns it into the **videos and zip
+archives** in it (`Remote`s — a zip is downloaded and its photos and videos taken out of it as soon as it's in:
+`archive`; loose photos and other files are left alone), each with what the host says about it up front:
 its name, and for most hosts its exact size (pixeldrain also its SHA-256) — which is how the downloader
 knows two links are the same video before fetching either. The file's own address comes just before its
 download (`direct_url`): cyberdrop's and bunkr's are short-lived.
@@ -48,6 +49,8 @@ HOSTS = ("pixeldrain", "gofile", "cyberdrop", "bunkr", "filester", "fileditch")
 # before the hosts read through a browser.
 PREFERENCE = {"pixeldrain": 0, "gofile": 1, "cyberdrop": 2, "turbo": 3, "filester": 4, "fileditch": 5, "bunkr": 6}
 VIDEO_EXTS = ("mp4", "mov", "m4v", "webm", "mkv")
+_ARCHIVE = re.compile(r"\.zip(?:[?#]|$)", re.I)
+ARCHIVE_TYPES = ("application/zip", "application/x-zip-compressed", "application/x-zip")
 _VIDEO = re.compile(r"\.(?:mp4|mov|m4v|webm|mkv)(?:[?#]|$)", re.I)
 _NOT_VIDEO = re.compile(r"\.(?:jpe?g|png|gif|webp|heic|avif|bmp|tiff?|zip|rar|7z|pdf|txt|mp3|m4a|wav)(?:[?#]|$)", re.I)
 WORKERS = 6               # file-info requests at once inside one folder
@@ -154,6 +157,11 @@ class Remote:
         return f"{self.host}:{self.fid}"
 
     @property
+    def archive(self) -> bool:
+        """A zip: downloaded, then its photos and videos taken out (simpcity.unpack)."""
+        return bool(self.extra.get("archive")) or is_archive_name(self.name)
+
+    @property
     def locked(self) -> bool:
         """Only a person can fetch it (pixeldrain's captcha): another host's copy is preferred."""
         return bool(self.extra.get("locked"))
@@ -161,6 +169,14 @@ class Remote:
 
 def is_video_name(name: str) -> bool:
     return bool(_VIDEO.search(name or ""))
+
+
+def is_archive_name(name: str) -> bool:
+    return bool(_ARCHIVE.search(name or ""))
+
+
+def is_archive(name: str, mime: str = "") -> bool:
+    return is_archive_name(name) or (mime or "").lower().split(";")[0].strip() in ARCHIVE_TYPES
 
 
 def maybe_video(name: str) -> bool:
@@ -294,12 +310,16 @@ def _pixeldrain_remote(f: dict) -> Remote | None:
     fid = safe_id(str(f.get("id") or ""))
     name = str(f.get("name") or fid)
     mime = str(f.get("mime_type") or "")
-    if not fid or not (mime.startswith("video/") or is_video_name(name)):
+    zipped = is_archive(name, mime)
+    if not fid or not (mime.startswith("video/") or is_video_name(name) or zipped):
         return None
     locked = str(f.get("availability") or "")
+    extra = {"locked": locked} if locked else {}
+    if zipped:
+        extra["archive"] = True
     return Remote("pixeldrain", fid, name=name, size=int(f.get("size") or 0), sha256=str(f.get("hash_sha256") or "").lower(),
                   url=f"https://pixeldrain.com/api/file/{fid}?download", page=f"https://pixeldrain.com/u/{fid}",
-                  referer=f"https://pixeldrain.com/u/{fid}", extra={"locked": locked} if locked else {})
+                  referer=f"https://pixeldrain.com/u/{fid}", extra=extra)
 
 
 def _pixeldrain(link: Link, ua: str) -> list[Remote]:
@@ -329,10 +349,12 @@ def _cyberdrop(link: Link, ua: str) -> list[Remote]:
         j = _json(f"{api}/api/file/info/{fid}", ua)
         name = str(j.get("name") or j.get("filename") or fid)
         kind = str(j.get("type") or "")
-        if not (kind.startswith("video/") or is_video_name(name) or (link.kind == "file" and maybe_video(name))):
+        zipped = is_archive(name, kind)
+        if not (kind.startswith("video/") or is_video_name(name) or zipped or (link.kind == "file" and maybe_video(name))):
             return None
         return Remote("cyberdrop", safe_id(fid), name=name, size=int(j.get("size") or 0), page=f"https://{host}/f/{fid}",
-                      referer=f"https://{host}/", extra={"auth": str(j.get("auth_url") or f"{api}/api/file/auth/{fid}")})
+                      referer=f"https://{host}/", extra={"auth": str(j.get("auth_url") or f"{api}/api/file/auth/{fid}"),
+                                                         **({"archive": True} if zipped else {})})
 
     if link.kind == "file":
         r = info(ids[0])
@@ -433,7 +455,7 @@ def _bunkr(link: Link, ua: str) -> list[Remote]:
         fid = re.search(r'data-file-id="(\d+)"', html) or re.search(r'"id"\s*:\s*"?(\d{4,})', html)
         h1 = re.search(r"<h1[^>]*>\s*([^<]+?)\s*</h1>", html)
         name = _unescape(h1.group(1)) if h1 else slug
-        if not maybe_video(name):
+        if not (maybe_video(name) or is_archive_name(name)):
             return None
         return remote(fid.group(1) if fid else "", slug, name, 0)
 
@@ -448,7 +470,7 @@ def _bunkr(link: Link, ua: str) -> list[Remote]:
     files = bunkr_album_files(html)
     if files:
         return [remote(f["id"], f["slug"], f["name"] or f["slug"] or f["id"], f["size"]) for f in files
-                if f["type"].startswith("video/") or is_video_name(f["name"])]
+                if f["type"].startswith("video/") or is_video_name(f["name"]) or is_archive(f["name"], f["type"])]
     slugs = list(dict.fromkeys(re.findall(r'href="(?:https?://[^"/]+)?/[fv]/([A-Za-z0-9_-]{4,})"', html)))
     if not slugs:
         raise NeedsBrowser("no file list on the album page")

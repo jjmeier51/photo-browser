@@ -649,9 +649,9 @@ their real post dates).
 too, full size: a post's pixhost thumbnail or its link to the image's page, and every image of a pixhost
 **gallery** a post links. They're saved as `pixhost-<number>.<ext>`, tagged **simpcity**, dated like the
 rest (a gallery's images get the date of the post that linked it), and kept in the same record, so neither
-app downloads one twice. They're photos, so they come with **Download videos** off too.
+app downloads one twice. They're photos, so they come with **Download videos and zips** off too.
 
-**Videos.** With **Download videos** ticked (it remembers the setting), the turbo.cr videos come too,
+**Videos.** With **Download videos and zips** ticked (it remembers the setting), the turbo.cr videos come too,
 and so do the videos the posts link on **pixeldrain, gofile, cyberdrop, bunkr** (.cr/.ws/.ru…),
 **filester** (.gg/.me) and **fileditch** (fileditchfiles.me, fileditchvids.st) — single files and whole
 folders/albums, videos only. They're saved as `<host>-<id>.mp4` (or `.mov`…), dated and tagged like the
@@ -664,6 +664,17 @@ same video as …"). Untick it for photos only — the videos are remembered and
 ticked, without reading the thread again. filester, fileditch and gofile are read through their own
 pages in the window's browser (if one asks whether you're human, answer it there); gofile folders go one
 at a time, and if gofile starts limiting requests the rest wait for the next run.
+
+**Zips.** A zip file linked on **pixeldrain** (e.g. `pixeldrain.com/u/…`), **cyberdrop** or **bunkr** comes too
+(with the same tick). Each is unpacked the moment it's downloaded, while the rest of the run goes on: every
+photo and video in it — and in a zip inside it — goes into `simpcity` as `<host>-<id>-<its path in the zip>`
+(e.g. `pixeldrain-DQBmsLp2-Set 1_IMG_0001.jpg`), with the same treatment as any download (WebP → JPEG, small
+photos 2×, WebM → MP4, its own date or the post's, tagged **simpcity**, the post's reaction score). Anything
+else in the zip (text files, macOS's `__MACOSX` leftovers) is left out, a password-protected file is skipped
+with a note, and a video you already have from another link isn't saved twice. The zip itself isn't kept,
+and it's never downloaded again. Links read before this — the ones that turned out to hold no video — are
+looked at once more, so zips in threads you've already downloaded come in on the next run. (RAR and 7z
+files can't be opened without extra tools and are still left alone; the iPhone app still skips zips.)
 
 **Long threads.** SimpCity limits how fast pages can be read, so pages are read a couple of seconds
 apart. If it still says "too many requests", the downloader waits (30 s, then longer) and reads that

@@ -189,7 +189,9 @@ actions the app makes no network calls.
   (XenForo's `data-timestamp` — `data-time` is a label); WebP → JPEG, photos under 250 KB upscaled 2×
   (Lanczos, tagged "upscaled"); **WebM → MP4 on the Mac** (`video_tools.webm_to_mp4`: ffmpeg, H.264 + AAC —
   AVFoundation can't open WebM, so the iPhone keeps its WebMs and Safe Finder's next run converts them); earlier
-  downloads brought up to these rules once (`made`). **A video
+  downloads brought up to these rules once (`made`). **Zips** on pixeldrain/cyberdrop/bunkr (Mac only) are
+  downloaded and unpacked as the run goes — photos and videos in as `<host>-<id>-<path in zip>`, the zip
+  recorded with its `files`, never fetched again. **A video
   posted on several hosts is downloaded once** (`Dedup`: hosts' sizes up front, the server's size as a
   download starts, SHA-256 once in; other copies recorded `same_as`). Read in a real browser the person
   can see (DDoS-Guard/Cloudflare checks and the SimpCity login are answered there). **The record is on

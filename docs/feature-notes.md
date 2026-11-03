@@ -1948,6 +1948,23 @@ is read once more after 10 s; the ExifTool session allows 60 s an answer and fal
 after three failures in a row (a success resets the count); bunkr's Referer/Origin are `get.bunkrr.su` (its
 download site, as gallery-dl uses — `dl.<domain>` got the file server's 403), on both apps.
 
+**Zips on file hosts (Nov 3, 2026, Mac only).** A post's `pixeldrain.com/u/…` that is a zip (and zips on
+cyberdrop and bunkr — the hosts whose APIs/pages say a file's name or type up front; gofile/filester/fileditch go
+through the shared page script, which lists videos only and is kept identical to the Swift copy) is a `Remote` with
+`archive` (`fh.is_archive`: `.zip` or a zip MIME type). Its `Item` is not a `video` (kept out of `Dedup` size and
+hash claims — its contents are checked one by one); the download's content-type check lets a zip through for a
+zip item only. In its lane, `_keep_zip` → `_settle_zip` on a worker thread → `sc.unpack`: zipfile, only each
+member's base name used (no zip-slip), `__MACOSX`/`._`/dot files skipped, encrypted members (flag bit 0) noted and
+left, a member claiming > 400× growth over 50 MB refused, 64 GB total cap, one nested zip level; every extracted
+file gets a unique work name (a nested zip unpacks into the same work folder — the first version reused `0.jpg`
+and lost a file). Each member: SHA-256 against `Dedup` for videos, `prepare_image`, `prepare_video`, `apply_date`
+(post time), `place` as `<host>-<id>-<path with "/"→"_">` (unique within the zip). Recorded with `add_archive`:
+`file` empty (so `fixes`, `seed` and the iPhone skip it), `files` the members, `archive: true`; `scores()` gives
+every member the post's score. Old links: `LINK_RULES = 2` is written by `note_link`; a done link with no files
+and no `rules` (listed when only videos counted) is listed once more. A stop mid-unpack records nothing — the zip
+comes again next run. The iPhone still lists videos only (its `Archiver` could unpack, but its downloads run on
+`URLSession` into the drive and weren't changed).
+
 **pixhost (Nov 2, 2026).** pixhost.cc (also .to, .org and pixho.st — the API serves all three) is read with plain
 requests, no browser. A posted image is its show page `/show/<dir>/<id>_<name>`, usually wrapping its thumbnail
 `t<N>.<domain>/thumbs/<dir>/<id>_<name>`; the original is `img<N>.<domain>/images/<dir>/<id>_<name>` on the
