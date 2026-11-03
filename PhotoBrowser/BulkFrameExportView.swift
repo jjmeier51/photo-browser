@@ -3,8 +3,9 @@ import UIKit
 
 /// Bulk "Export All Frames": exports every selected video's frames at once — each into its own
 /// "<name> Frames" folder beside it (IMG_1234.mov → "IMG_1234 Frames") — reusing the single-video
-/// framework (`FileActions.exportAllFrames`), so every export is HDR-preserving, EXIF-preserving,
-/// resumable, and caches each frame's thumbnail as it's written.
+/// framework (`FileActions.exportAllFrames`), so every export is EXIF-preserving, resumable, gets the
+/// screenshots' HDR tone mapping (the colour last chosen in the single export's sheet — standard range
+/// unless HDR was picked), and caches each frame's thumbnail as it's written.
 ///
 /// The screen is deliberately modal and non-dismissible while it runs: the whole point is to hand
 /// all of the device's resources to the export instead of splitting them with a browsing UI, so it

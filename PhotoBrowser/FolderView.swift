@@ -1451,7 +1451,9 @@ struct FolderView: View {
                 Text("Finds items in this folder that are still in your iPhone Photos (exact matches) and removes the iPhone copies — the drive copies stay. iOS will ask you to confirm the deletion.")
             }
             .sheet(item: $exportTarget) { e in
-                ExportFramesSheet(entry: e) { name, fps in library.startFrameExport(of: e, name: name, fps: fps) }
+                ExportFramesSheet(entry: e) { name, fps, standardRange in
+                    library.startFrameExport(of: e, name: name, fps: fps, standardRange: standardRange)
+                }
             }
             .alert("Rename Folder",
                    isPresented: Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })) {

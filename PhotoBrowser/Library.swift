@@ -1637,7 +1637,7 @@ final class Library {
 
     /// Exports every (or every Nth) frame of `entry` into a folder beside it, app-wide so the user
     /// can navigate around while it runs. `fps` of 0 means every frame.
-    func startFrameExport(of entry: Entry, name: String, fps: Double) {
+    func startFrameExport(of entry: Entry, name: String, fps: Double, standardRange: Bool = FileActions.framesStandardRange) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let label = trimmed.isEmpty ? (entry.url.deletingPathExtension().lastPathComponent + " Frames") : trimmed
         let id = beginActivity("Exporting frames")
@@ -1645,7 +1645,7 @@ final class Library {
         let bg = BackgroundTaskHolder(); bg.begin(name: "Export All Frames")
         Task {
             let (folder, count, firstFrame, note) = await FileActions.exportAllFrames(
-                of: entry.url, folderName: name, requestedFPS: fps) { p in
+                of: entry.url, folderName: name, requestedFPS: fps, standardRange: standardRange) { p in
                 Task { @MainActor in self.setActivity(id, fraction: p) }
             }
             if count > 0, let folder {

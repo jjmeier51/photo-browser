@@ -1198,12 +1198,15 @@ enum FileActions {
 
     /// Encodes one video frame to image data: oriented upright, metadata embedded,
     /// 10-bit HDR HEIC when the frame is HDR, otherwise a standard HEIC. `softenHDR` applies the
-    /// screenshot look (`softenedHDRFrame`) to an HDR frame; bulk frame export leaves it off.
+    /// screenshot look (`softenedHDRFrame`) to an HDR frame; `standardRange` instead tone-maps an HDR
+    /// frame to standard range the way the press-and-hold PNG screenshot does (`standardRangeFrame`)
+    /// and encodes it as an 8-bit sRGB HEIC — never HDR.
     static func encodeFrame(_ pixelBuffer: CVPixelBuffer,
                             transform: CGAffineTransform,
                             properties: [String: Any],
                             scale: CGFloat = 1,
-                            softenHDR: Bool = false) -> Data? {
+                            softenHDR: Bool = false,
+                            standardRange: Bool = false) -> Data? {
         var ci = CIImage(cvImageBuffer: pixelBuffer)
         if !transform.isIdentity {
             // CIImage is Y-up but the video transform is Y-down, so the rotation
@@ -1225,7 +1228,9 @@ enum FileActions {
         ci = upscaled(ci, by: scale)
 
         var data: Data?
-        if isHDR {
+        if isHDR && standardRange, let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
+            data = ciContext.heifRepresentation(of: standardRangeFrame(ci), format: .RGBA8, colorSpace: srgb, options: [:])
+        } else if isHDR {
             let frame = softenHDR ? softenedHDRFrame(ci) : ci
             data = try? ciContext.heif10Representation(of: frame, colorSpace: cs, options: [:])
         }
@@ -1245,10 +1250,10 @@ enum FileActions {
     /// encoding keeps the frame HDR without the blown look — highlights eased from HLG's ~4.9× SDR
     /// white to `hdrFrameHeadroom` (iOS 18+), and the frame trimmed by `hdrFrameExposureTrim`
     /// (doubled on iOS 17, which has no highlight-only control). Tune the two constants here.
-    private static let hdrFrameHeadroom: Float = 3.0
-    private static let hdrFrameExposureTrim: Float = -0.15
+    nonisolated private static let hdrFrameHeadroom: Float = 3.0
+    nonisolated private static let hdrFrameExposureTrim: Float = -0.15
 
-    private static func softenedHDRFrame(_ ci: CIImage) -> CIImage {
+    nonisolated private static func softenedHDRFrame(_ ci: CIImage) -> CIImage {
         var out = ci
         var trim = hdrFrameExposureTrim
         if #available(iOS 18.0, *) {
@@ -1322,17 +1327,26 @@ enum FileActions {
         return writeScreenshot(data, in: folder)
     }
 
+    /// An HDR frame tone-mapped to standard range — the press-and-hold PNG screenshot's mapping, shared
+    /// with Export All Frames: highlights eased from HLG's ~4.9× SDR white down to SDR white (iOS 18+),
+    /// not clipped. On iOS 17, which has no headroom filter, the screenshot look's highlight trim
+    /// (`softenedHDRFrame`) is the closest there is before the 8-bit encode clips the rest.
+    nonisolated static func standardRangeFrame(_ ci: CIImage) -> CIImage {
+        if #available(iOS 18.0, *) {
+            let tone = CIFilter.toneMapHeadroom()
+            tone.inputImage = ci
+            tone.sourceHeadroom = 4.93                     // HLG: 1,000 nits over 203-nit reference white
+            tone.targetHeadroom = 1                        // standard range
+            return tone.outputImage ?? ci
+        }
+        return softenedHDRFrame(ci)
+    }
+
     /// `frame` as 8-bit sRGB PNG data (tone-mapped first if it's HDR), metadata embedded.
     nonisolated static func standardRangePNG(_ frame: CGImage, properties: [String: Any]) -> Data? {
         var ci = CIImage(cgImage: frame)
         if let cs = frame.colorSpace, CGColorSpaceUsesITUR_2100TF(cs) || CGColorSpaceUsesExtendedRange(cs) {
-            if #available(iOS 18.0, *) {
-                let tone = CIFilter.toneMapHeadroom()
-                tone.inputImage = ci
-                tone.sourceHeadroom = 4.93                 // HLG: 1,000 nits over 203-nit reference white
-                tone.targetHeadroom = 1                    // standard range
-                ci = tone.outputImage ?? ci
-            }
+            ci = standardRangeFrame(ci)
         }
         let longSide = CGFloat(max(frame.width, frame.height))
         ci = upscaled(ci, by: max(1, min(2, 3840 / max(longSide, 1))))
@@ -1378,9 +1392,18 @@ enum FileActions {
         return "\(url.stableCacheID)|\(mtime)|\(rv?.fileSize ?? 0)"
     }
 
+    /// The colour Export All Frames writes HDR frames in, chosen in its sheet and kept for the bulk
+    /// export too: standard range (tone-mapped like the press-and-hold screenshot — the default) or HDR
+    /// with the screenshot look. A small setting, so `UserDefaults`.
+    static let framesStandardRangeKey = "photoBrowser.framesStandardRange"
+    static var framesStandardRange: Bool {
+        UserDefaults.standard.object(forKey: framesStandardRangeKey) as? Bool ?? true
+    }
+
     /// Exports *every* frame of a video — one HEIC per source frame (60fps → 60/s) —
     /// as upright, metadata-preserving HEICs into a folder (named `folderName`) beside
-    /// the video. A single sequential reader decodes frames in order (10-bit for HDR,
+    /// the video. An HDR video's frames get the screenshots' tone mapping: standard range when
+    /// `standardRange` (the press-and-hold PNG's mapping), else HDR with the tap screenshot's look. A single sequential reader decodes frames in order (10-bit for HDR,
     /// 8-bit otherwise) so only one frame is in memory at a time and a bad frame
     /// restarts the reader rather than aborting. Frames are named by index and
     /// progress is persisted, so a re-run resumes where a crash/suspension left off
@@ -1388,6 +1411,7 @@ enum FileActions {
     static func exportAllFrames(of url: URL,
                                 folderName: String,
                                 requestedFPS: Double = 0,
+                                standardRange: Bool = FileActions.framesStandardRange,
                                 onProgress: @escaping @Sendable (Double) -> Void = { _ in })
     async -> (folder: URL?, count: Int, firstFrame: URL?, note: String?) {
         let name = folderName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1454,7 +1478,7 @@ enum FileActions {
         let result = await exportFramesSequential(asset: asset, track: track, transform: transform, dir: dir,
                                                   safeName: safeName, props: props, duration: duration, interval: interval,
                                                   total: total, startIndex: startIndex, videoKey: videoKey, isHDR: isHDR,
-                                                  onProgress: onProgress)
+                                                  standardRange: standardRange, onProgress: onProgress)
         setExportProgress(nil, forVideoKey: videoKey)   // finished → forget the checkpoint
         // Report the total frames now on disk (resumed + previously-exported).
         let onDisk = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil,
@@ -1475,11 +1499,14 @@ enum FileActions {
     private final class FrameExportContext: @unchecked Sendable {
         let transform: CGAffineTransform
         let props: [String: Any]
+        let standardRange: Bool
         private let lock = NSLock()
         private(set) var written = 0
         private(set) var encodeFailures = 0
         private(set) var writeError: String?     // first disk-write error, verbatim — names the real cause
-        init(transform: CGAffineTransform, props: [String: Any]) { self.transform = transform; self.props = props }
+        init(transform: CGAffineTransform, props: [String: Any], standardRange: Bool) {
+            self.transform = transform; self.props = props; self.standardRange = standardRange
+        }
         func recordWritten() { lock.lock(); written += 1; lock.unlock() }
         func recordEncodeFailure() { lock.lock(); encodeFailures += 1; lock.unlock() }
         func recordWriteError(_ e: String) { lock.lock(); if writeError == nil { writeError = e }; lock.unlock() }
@@ -1494,7 +1521,8 @@ enum FileActions {
 
     /// Encode + write + thumbnail-prewarm one captured frame (runs on a writer task).
     private static func runFrameJob(_ job: FrameJob, ctx: FrameExportContext) {
-        guard let data = encodeFrame(job.buffer, transform: ctx.transform, properties: ctx.props, scale: 1.5) else {
+        guard let data = encodeFrame(job.buffer, transform: ctx.transform, properties: ctx.props, scale: 1.5,
+                                     softenHDR: true, standardRange: ctx.standardRange) else {
             ctx.recordEncodeFailure()
             return
         }
@@ -1525,14 +1553,14 @@ enum FileActions {
     private static func exportFramesSequential(asset: AVURLAsset, track: AVAssetTrack, transform: CGAffineTransform,
                                                dir: URL, safeName: String, props: [String: Any],
                                                duration: Double, interval: Double, total: Int, startIndex: Int,
-                                               videoKey: String, isHDR: Bool,
+                                               videoKey: String, isHDR: Bool, standardRange: Bool,
                                                onProgress: @escaping @Sendable (Double) -> Void) async -> (URL?, Int, String?) {
         await Task.detached(priority: .userInitiated) { () -> (URL?, Int, String?) in
             let settings: [String: Any] = [
                 kCVPixelBufferPixelFormatTypeKey as String:
                     isHDR ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_32BGRA
             ]
-            let ctx = FrameExportContext(transform: transform, props: props)
+            let ctx = FrameExportContext(transform: transform, props: props, standardRange: standardRange)
             var everStartedReading = false
             var frameIndex = startIndex                  // next frame index to capture
             var nextTime = Double(startIndex) * interval  // its target time
