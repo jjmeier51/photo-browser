@@ -4,6 +4,9 @@ Two entry points: grab_original() for the encrypted `original` variant, and
 grab_plain_dash() for an unencrypted manifest. The licence request is
 authenticated with the caller's own access token; the Widevine device only
 supplies the session envelope.
+
+ffmpeg is resolved through video_tools, which knows the Homebrew paths a bundled
+.app's PATH doesn't include.
 """
 from __future__ import annotations
 
@@ -20,6 +23,7 @@ from pywidevine import PSSH, Cdm, Device
 
 import passes
 import social
+import video_tools
 
 SW_SECURE_CRYPTO = "8fd9a7ea-73de-49bc-8b9e-ec1e73d325d3"
 SW_SECURE_DECODE = "d597b3c2-7827-4047-9ee4-c10e49f7bc14"
@@ -88,8 +92,24 @@ def _content_key(pssh: PSSH, content_id: str, access_token: str):
 
 
 def _ffmpeg(args: list[str]) -> None:
-    subprocess.run(["ffmpeg", "-y", *args],
+    exe = video_tools.ffmpeg()
+    if not exe:
+        raise RuntimeError("ffmpeg not found")
+    subprocess.run([exe, "-y", *args],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+
+def _merge(plain: list[Path], staged: Path, date: float) -> None:
+    """Put the downloaded tracks together into `staged`."""
+    if len(plain) == 2 and not video_tools.ffmpeg():
+        # no ffmpeg: AVFoundation through the helper can still join two halves
+        if not video_tools.mux(str(plain[0]), str(plain[1]), str(staged), date):
+            raise RuntimeError("mux failed and no ffmpeg")
+        return
+    args: list[str] = []
+    for p in plain:
+        args += ["-i", str(p)]
+    _ffmpeg(args + ["-c", "copy", str(staged)])
 
 
 def _grab(item: social.Item, headers: dict, exif_session, url: str,
@@ -138,10 +158,7 @@ def _grab(item: social.Item, headers: dict, exif_session, url: str,
 
             staged = tmp / out_name
             if item.video:
-                args: list[str] = []
-                for p in plain:
-                    args += ["-i", str(p)]
-                _ffmpeg(args + ["-c", "copy", str(staged)])
+                _merge(plain, staged, item.date)
             else:
                 _ffmpeg(["-i", str(plain[0]), "-frames:v", "1", "-q:v", "2", str(staged)])
 
