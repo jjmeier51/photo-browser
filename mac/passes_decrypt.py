@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import traceback
@@ -37,6 +38,8 @@ SERVICE_CERT = (
 
 _IMAGE_EXTS = {"jpg", "jpeg", "png", "webp"}
 _VIDEO_SUFFIXES = {".mp4", ".m4a", ".m4v", ".mov", ".m4s", ".ts", ".aac"}
+
+_FAIL_DIR = Path.home() / "Library" / "Caches" / "PhotoBrowser" / "passes-dash-fail"
 
 
 def _service_cert() -> str:
@@ -104,6 +107,61 @@ def _ffmpeg(args: list[str]) -> None:
         raise RuntimeError(f"ffmpeg {r.returncode}: {' / '.join(tail)}")
 
 
+def _ffprobe(src: Path) -> str:
+    """ffprobe JSON for `src`, or "" when the probe itself won't run."""
+    exe = video_tools.ffmpeg()
+    if not exe:
+        return ""
+    probe = exe[:-len("ffmpeg")] + "ffprobe"
+    if not os.path.exists(probe):
+        probe = "ffprobe"
+    try:
+        r = subprocess.run([probe, "-v", "error", "-show_streams", "-show_format",
+                            "-of", "json", str(src)],
+                           capture_output=True, text=True)
+        return (r.stdout or "") + (r.stderr or "")
+    except OSError:
+        return ""
+
+
+def _dump_failure(src: Path, cmd: list[str], stderr: str, probe: str,
+                  item: social.Item) -> None:
+    """Keep the evidence for one failed extraction, so it outlives the temp dir."""
+    root = _FAIL_DIR / item.name
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src), str(root / src.name))
+        (root / "cmd.txt").write_text(" ".join(cmd))
+        (root / "stderr.txt").write_text(stderr or "<empty>")
+        (root / "probe.json").write_text(probe or "<empty>")
+    except OSError:
+        pass
+
+
+def _extract_frame(src: Path, dest: Path, item: social.Item) -> None:
+    """Pull the single frame out of an image rendition, keeping the evidence on failure."""
+    exe = video_tools.ffmpeg()
+    if not exe:
+        raise RuntimeError("ffmpeg not found")
+
+    probe = _ffprobe(src)
+    has_video = '"codec_type": "video"' in probe
+
+    cmd = [exe, "-y", "-hide_banner", "-loglevel", "error",
+           "-fflags", "+genpts", "-i", str(src),
+           "-map", "0:v:0", "-frames:v", "1", "-f", "image2",
+           "-q:v", "2", str(dest)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+
+    if not has_video:
+        _dump_failure(src, cmd, r.stderr, probe, item)
+        raise RuntimeError(f"no video stream in {src.name} (probe kept)")
+    if r.returncode != 0 or not dest.exists():
+        _dump_failure(src, cmd, r.stderr, probe, item)
+        tail = [ln for ln in (r.stderr or "").strip().splitlines() if ln.strip()][-3:]
+        raise RuntimeError(f"frame extract {r.returncode}: {' / '.join(tail) or '<no stderr>'}")
+
+
 def _merge(plain: list[Path], staged: Path, date: float) -> None:
     """Put the downloaded tracks together into `staged`."""
     if len(plain) == 2 and not video_tools.ffmpeg():
@@ -123,8 +181,17 @@ def _grab(item: social.Item, headers: dict, exif_session, url: str,
     if os.path.lexists(item.folder / item.filename):
         return social.Settled(item, str(item.folder / item.filename), present=True)
 
-    # ffmpeg can't write HEIC, so anything unusual becomes a JPEG
-    ext = "mp4" if item.video else (item.ext.lower() if item.ext.lower() in _IMAGE_EXTS else "jpg")
+    # ffmpeg can't write HEIC, so anything unusual becomes a JPEG.  A gif arrives
+    # as an mp4 and stays one.
+    if item.video:
+        ext = "mp4"
+    elif item.ext.lower() in _IMAGE_EXTS:
+        ext = item.ext.lower()
+    elif url.split("?")[0].lower().endswith(".mp4"):
+        ext = "mp4"
+    else:
+        ext = "jpg"
+    as_video = item.video or ext == "mp4"
     out_name = f"{item.name}.{ext}"
 
     try:
@@ -150,7 +217,7 @@ def _grab(item: social.Item, headers: dict, exif_session, url: str,
             # video tracks may be narrowed by suffix
             got = sorted(p for p in tmp.iterdir()
                          if p.is_file() and p.suffix not in {".mpd", ".m3u8"})
-            if item.video:
+            if as_video:
                 tracks = [p for p in got if p.suffix in _VIDEO_SUFFIXES] or got
             else:
                 tracks = got
@@ -168,12 +235,10 @@ def _grab(item: social.Item, headers: dict, exif_session, url: str,
                 plain.append(out)
 
             staged = tmp / out_name
-            if item.video:
+            if as_video:
                 _merge(plain, staged, item.date)
             else:
-                # an image is a single frame; image2 names the muxer explicitly
-                _ffmpeg(["-i", str(plain[0]), "-map", "0:v:0", "-frames:v", "1",
-                         "-f", "image2", str(staged)])
+                _extract_frame(plain[0], staged, item)
 
             if item.date:
                 os.utime(str(staged), (item.date, item.date))
@@ -194,7 +259,7 @@ def _grab(item: social.Item, headers: dict, exif_session, url: str,
 
 def grab_original(item: social.Item, headers: dict, exif_session=None) -> social.Settled:
     """Fetch, decrypt and place the original-quality variant of one item."""
-    url = passes.ENCRYPTED.get(item.key)
+    url = passes.ENCRYPTED.get(item.key) or item.url
     if not url:
         return social.Settled(item, why="dash: no manifest url")
     return _grab(item, headers, exif_session, url, item.key)

@@ -51,12 +51,14 @@ GAP     = 0.3    # seconds between listing pages
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
-# variant names, best first.  `original` is the encrypted DASH stream; the
-# `signedUrlDash`/`Hls` manifests are unencrypted and watermark-free; the
-# `Lg`/`Md`/`Sm` files carry Passes' watermark.
-_URL_ORIGINAL = ("original", "signedUrlOriginal", "originalUrl", "signedUrlOrig")
+# variant names, best first.  The `signedUrlDash`/`Hls` manifests are
+# unencrypted and watermark-free; the encrypted `original` is watermarked even
+# when the API's watermarkEnabled flag reads False; the `Lg`/`Md`/`Sm` files are
+# watermarked too.  `signedUrlMp4` is the gif equivalent of `Lg`.
 _URL_DASH     = ("signedUrlDash", "signedUrlHls")
-_URL_PLAIN    = ("large", "signedUrlLg", "signedUrl", "signedUrlMd", "signedUrlSm")
+_URL_ORIGINAL = ("original", "signedUrlOriginal", "originalUrl", "signedUrlOrig")
+_URL_PLAIN    = ("signedUrlMp4", "large", "signedUrlLg", "signedUrlMd",
+                 "signedUrlSm", "signedUrl")
 
 # contentIds whose `original` variant is an encrypted DASH manifest, mapped to its URL.
 # Populated by items_from_post(); consumed by passes_decrypt.grab_original().
@@ -69,8 +71,8 @@ DASH: set[str] = set()
 # API offers one.  Used as the fallback when a manifest download fails.
 PLAIN: dict[str, str] = {}
 
-# contentIds with no `original` variant, mapped to their signedContent key list.
-# Diagnostic only — these are the ones that carry Passes' watermark.
+# contentIds with no clean variant at all, mapped to their signedContent key list.
+# Diagnostic only — these are the ones that will carry Passes' watermark.
 MISSING: dict[str, str] = {}
 
 # ── shape recorder (diagnostic) ───────────────────────────────────────────────
@@ -355,21 +357,23 @@ def items_from_post(post: dict, folder: Path, already: set[str],
         if sc and not any(k in sc for k in _URL_ORIGINAL + _URL_DASH + _URL_PLAIN):
             _shape(f"  UNKNOWN url keys — cid={cid} sc={sorted(sc)}")
 
-        # `original` is the encrypted stream; the DASH/HLS manifests are the
-        # unencrypted watermark-free ones; the Lg/Md/Sm files are watermarked
-        orig  = _pick(sc, _URL_ORIGINAL)
+        # The manifest is the watermark-free rendition, so it outranks the
+        # encrypted `original` — that one is watermarked even when the API's
+        # watermarkEnabled flag reads False.  `orig` stays the fallback for items
+        # with no manifest; `plain` is the last resort and always watermarked.
         dash  = _pick(sc, _URL_DASH)
+        orig  = _pick(sc, _URL_ORIGINAL)
         plain = _pick(sc, _URL_PLAIN)
 
-        if orig:
-            ENCRYPTED[cid] = orig
-        elif dash:
+        if dash:
             DASH.add(cid)
+        elif orig:
+            ENCRYPTED[cid] = orig
         else:
             MISSING[cid] = (f"{ct} " + (",".join(sorted(sc)) or "(empty)") +
                             f" wm={c.get('watermarkEnabled')!r}/{c.get('watermarked')!r}")
 
-        url = orig or dash or plain
+        url = dash or orig or plain
         if not url:
             _shape(f"  SKIP no url — cid={cid} type={ct!r} "
                    f"wm={c.get('watermarkEnabled')!r} keys={sorted(c)} sc={sorted(sc)}")
@@ -382,6 +386,9 @@ def items_from_post(post: dict, folder: Path, already: set[str],
         video = ct == "video"
         if not ext:
             ext = "mp4" if video else "jpg"
+        # a gif arrives as `signedUrlMp4`; it is a real video file, not a still
+        if plain and plain.split("?")[0].lower().endswith(".mp4") and ext in ("", "gif"):
+            ext = "mp4"
         items.append(social.Item(
             key     = cid,
             folder  = folder,

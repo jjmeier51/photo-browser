@@ -13,9 +13,10 @@ persistent QWebEngineProfile).  After the /auth/success navigation the page's
 (service "Safe Finder Passes", account "refresh-token").  It is re-used on
 every subsequent run and exchanged for a short-lived access token each time.
 
-Every media URL on Passes is a DASH manifest, so all items go through yt-dlp;
-`original` variants are decrypted via passes_decrypt, others are not.  If a
-manifest fails the item is retried against a plain URL, then flagged.
+Clean variants are the DASH manifests, so any item carrying one goes through
+yt-dlp; encrypted `original` variants are decrypted via passes_decrypt.  If a
+manifest fails the item is retried against a plain (watermarked) URL, then
+flagged.
 
 Passes support (Case PS-48213, 2026-11-03) confirms purchased content may be
 kept locally for personal use.  Personal archive only, no redistribution.
@@ -217,6 +218,7 @@ class PassesWindow(QMainWindow):
         self.running  = True
         self.queued   = self.settled_n = self.failed = self.present = 0
         self.photos   = self.videos = 0
+        self.watermarked = 0
         self.written:   list[str]             = []
         self.to_tag:    list[str]             = []
         self.done_keys: set[str]              = set()
@@ -232,6 +234,7 @@ class PassesWindow(QMainWindow):
         self.pool  = concurrent.futures.ThreadPoolExecutor(
             max_workers=LANES, thread_name_prefix="passes-dl")
         passes.ENCRYPTED.clear()
+        passes.DASH.clear()
         passes.PLAIN.clear()
         passes.MISSING.clear()
 
@@ -303,7 +306,7 @@ class PassesWindow(QMainWindow):
         if (item.key in passes.MISSING and item.key not in self._logged_missing
                 and len(self._logged_missing) < 3):
             self._logged_missing.add(item.key)
-            self._log(f"   no original for {item.key} — signedContent keys: "
+            self._log(f"   watermarked only for {item.key} — keys: "
                       f"{passes.MISSING[item.key]}")
 
         self.queued += 1
@@ -312,10 +315,15 @@ class PassesWindow(QMainWindow):
 
         headers = {"User-Agent": social.UA, "Referer": "https://www.passes.com/"}
         auth    = {"Authorization": f"Bearer {self._access_token}", **headers}
-        if item.key in passes.ENCRYPTED:
-            fut = self.pool.submit(passes_decrypt.grab_original, item, auth, self.exif)
-        elif passes._is_manifest(item.url):
+        if item.video or self.queued <= 5:
+            tail = item.url.split("?")[0].rsplit("/", 1)[-1]
+            self._log(f"   VARIANT {item.key} video={item.video} "
+                      f"enc={item.key in passes.ENCRYPTED} "
+                      f"dash={passes._is_manifest(item.url)} file={tail}")
+        if passes._is_manifest(item.url):
             fut = self.pool.submit(passes_decrypt.grab_plain_dash, item, auth, self.exif)
+        elif item.key in passes.ENCRYPTED:
+            fut = self.pool.submit(passes_decrypt.grab_original, item, auth, self.exif)
         else:
             fut = self.pool.submit(
                 social.settle, item, [headers],
@@ -348,10 +356,11 @@ class PassesWindow(QMainWindow):
                 self.to_tag.append(s.path)
                 self.done_keys.add(s.item.key)
             elif s.why.startswith("dash:") and s.item.key in passes.PLAIN:
-                # a manifest failed — fall back to the one-file URL for this item
+                # a manifest failed — fall back to the one-file URL, which is watermarked
                 plain = passes.PLAIN.pop(s.item.key)
                 passes.ENCRYPTED.pop(s.item.key, None)
-                self._log(f"   {s.item.name}.{s.item.ext}: {s.why} — retrying one-file")
+                self.watermarked += 1
+                self._log(f"   {s.item.name}.{s.item.ext}: {s.why} — WATERMARKED fallback")
                 self._queue(replace(s.item, url=plain))
             else:
                 self.failed += 1
@@ -413,7 +422,9 @@ class PassesWindow(QMainWindow):
             p, v = self.photos, self.videos
             line = (f"Downloaded {p} photo{'s' if p != 1 else ''} "
                     f"and {v} video{'s' if v != 1 else ''}"
-                    + (f" · {self.failed} failed" if self.failed else "") + ".")
+                    + (f" · {self.failed} failed" if self.failed else "")
+                    + (f" · {self.watermarked} watermarked" if self.watermarked else "")
+                    + ".")
         self._log(line)
         self._say(line)
         for w in (self.go_btn, self.field, self.zip_btn):
