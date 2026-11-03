@@ -4,10 +4,10 @@ Provides: token exchange, gallery and message pagination, per-post item building
 and the shared-record type (.passes.json on the drive).  Same pattern as
 instagram.py / facebook.py; passes_downloader.py is the Qt window.
 
-Two Passes quirks are handled here: a message's content is nested (so item
-building walks down), and messages name their variants `signedUrlLg`/`Md`/`Sm`
-where the gallery uses `large`, with `signedContent` often absent entirely and
-needing a per-content fetch.
+Three Passes quirks are handled here: a message's content is nested (so item
+building walks down), messages name their variants `signedUrlDash`/`Hls`/`Lg`
+where the gallery uses `large`, and the watermarked variants must be skipped in
+favour of the DASH stream.
 
 Passes support (Case PS-48213, 2026-11-03) confirms purchased content may be
 kept locally for personal use.  Personal archive only, no redistribution.
@@ -51,14 +51,19 @@ GAP     = 0.3    # seconds between listing pages
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
-# variant names, best first — the gallery uses `original`/`large`, messages use
-# `signedUrlOriginal`/`signedUrlLg`/`Md`/`Sm`
+# variant names, best first.  `original` is the encrypted DASH stream; the
+# `signedUrlDash`/`Hls` manifests are unencrypted and watermark-free; the
+# `Lg`/`Md`/`Sm` files carry Passes' watermark.
 _URL_ORIGINAL = ("original", "signedUrlOriginal", "originalUrl", "signedUrlOrig")
+_URL_DASH     = ("signedUrlDash", "signedUrlHls")
 _URL_PLAIN    = ("large", "signedUrlLg", "signedUrl", "signedUrlMd", "signedUrlSm")
 
 # contentIds whose `original` variant is an encrypted DASH manifest, mapped to its URL.
 # Populated by items_from_post(); consumed by passes_decrypt.grab_original().
 ENCRYPTED: dict[str, str] = {}
+
+# contentIds whose chosen variant is an unencrypted manifest.
+DASH: set[str] = set()
 
 # contentIds whose chosen URL is a manifest, mapped to a plain one-file URL when the
 # API offers one.  Used as the fallback when a manifest download fails.
@@ -194,8 +199,7 @@ def signed_content(content_id: str, access_token: str) -> dict:
     for path in ("/content/get", "/content/content"):
         try:
             doc = _post(path, {"contentId": content_id}, access_token)
-        except Exception as e:  # noqa: BLE001
-            _shape(f"  fetch {path} failed for {content_id}: {e}")
+        except Exception:  # noqa: BLE001
             continue
         _shape(f"  fetch {path} ok for {content_id}: keys={sorted(doc)}")
         for holder in (doc, doc.get("content") or {}, doc.get("data") or {}):
@@ -348,26 +352,30 @@ def items_from_post(post: dict, folder: Path, already: set[str],
         sc = c.get("signedContent") or {}
         if not sc and access_token:
             sc = signed_content(cid, access_token)
-        if sc and not any(k in sc for k in _URL_ORIGINAL + _URL_PLAIN):
+        if sc and not any(k in sc for k in _URL_ORIGINAL + _URL_DASH + _URL_PLAIN):
             _shape(f"  UNKNOWN url keys — cid={cid} sc={sorted(sc)}")
 
-        # the original variant is an encrypted DASH manifest; register it and let
-        # passes_decrypt.grab_original() handle the item
+        # `original` is the encrypted stream; the DASH/HLS manifests are the
+        # unencrypted watermark-free ones; the Lg/Md/Sm files are watermarked
         orig  = _pick(sc, _URL_ORIGINAL)
+        dash  = _pick(sc, _URL_DASH)
         plain = _pick(sc, _URL_PLAIN)
+
         if orig:
             ENCRYPTED[cid] = orig
+        elif dash:
+            DASH.add(cid)
         else:
-            MISSING[cid] = (",".join(sorted(sc)) or "(empty)") + \
-                f" wm={c.get('watermarkEnabled')!r}/{c.get('watermarked')!r}"
+            MISSING[cid] = (f"{ct} " + (",".join(sorted(sc)) or "(empty)") +
+                            f" wm={c.get('watermarkEnabled')!r}/{c.get('watermarked')!r}")
 
-        url = orig or plain
+        url = orig or dash or plain
         if not url:
             _shape(f"  SKIP no url — cid={cid} type={ct!r} "
                    f"wm={c.get('watermarkEnabled')!r} keys={sorted(c)} sc={sorted(sc)}")
             continue
 
-        # remember a non-manifest URL to fall back to
+        # remember a one-file URL to fall back to
         if plain and not _is_manifest(plain):
             PLAIN[cid] = plain
 
