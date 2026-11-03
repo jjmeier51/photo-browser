@@ -6,7 +6,7 @@ authenticated with the caller's own access token; the Widevine device only
 supplies the session envelope.
 
 ffmpeg is resolved through video_tools, which knows the Homebrew paths a bundled
-.app's PATH doesn't include.
+.app's PATH doesn't include. Paths handed to social.* are converted to str.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import tempfile
+import traceback
 import urllib.request
 from pathlib import Path
 from urllib.parse import quote
@@ -163,16 +164,19 @@ def _grab(item: social.Item, headers: dict, exif_session, url: str,
                 _ffmpeg(["-i", str(plain[0]), "-frames:v", "1", "-q:v", "2", str(staged)])
 
             if item.date:
-                os.utime(staged, (item.date, item.date))
+                os.utime(str(staged), (item.date, item.date))
             if exif_session is not None:
-                social.write_meta(staged, item, exif_session)
+                social.write_meta(str(staged), item, exif_session)
 
-            placed = social.place(staged, item.folder, out_name)
+            placed = social.place(str(staged), item.folder, out_name)
             if placed is None:
                 return social.Settled(item, str(item.folder / out_name), present=True)
             return social.Settled(item, placed)
     except Exception as e:  # noqa: BLE001
-        return social.Settled(item, why=f"dash: {type(e).__name__}: {e}")
+        where = traceback.extract_tb(e.__traceback__)[-1]
+        return social.Settled(
+            item,
+            why=f"dash: {type(e).__name__}: {e} (at {os.path.basename(where.filename)}:{where.lineno})")
 
 
 def grab_original(item: social.Item, headers: dict, exif_session=None) -> social.Settled:
