@@ -163,12 +163,17 @@ app before any app is asked — send them inside a folder, or use the app's "Add
 ## Safe Finder — a Finder window that moves files onto the SSD safely (`safe_finder.py`)
 
 Looks and works like Finder: a sidebar (Favorites, Locations with an eject button for the SSD, and
-your Tags), and two panes side by side — **From** (your Mac) and **To** (the SSD) — each with icon view
-(photo and video thumbnails, with a size slider up to 320 px and a spacing slider that packs the
-tiles edge to edge for more per row), list view or **Photos** view (the iPhone app's grid — below), a
-Sort menu, a search field, back/forward and a path bar. Select files
-or folders on the left and press **Move to “Extreme SSD”** (or Copy), or drag them onto the right
-pane — onto a folder there to put them inside it. Drags from the real Finder work too.
+your Tags) and **one window** of files, with icon view (photo and video thumbnails, with a size slider up
+to 320 px and a spacing slider that packs the tiles edge to edge for more per row), list view or
+**Photos** view (the iPhone app's grid — below), a Sort menu, a search field, back/forward and a path bar.
+
+**Split View** is for transfers: the button at the right end of the header (two panes), **View ▸ Split
+View** or **⌘\\** opens a second pane beside the first — **From** (your Mac) on the left and **To** (the
+SSD) on the right, with the Move/Copy bar below — and the same again closes it. Right-click ▸ **Move or
+Copy in Split View…** opens it with your selection kept. The To pane opens on the folder it was last on
+(else the SSD), and Safe Finder remembers which way you left it. Select files or folders on the left and
+press **Move to “Extreme SSD”** (or Copy), or drag them onto the right pane — onto a folder there to put
+them inside it. Drags from the real Finder work too, onto either pane.
 
 **Selecting with a box**, as in Finder: drag from anywhere that isn't a picture or a name — the space
 around a thumbnail or beside its name, a list row's other columns or the space after its name, the
@@ -240,15 +245,15 @@ they can be picked and moved to the SSD from one place. It looks afresh each tim
 
 ```sh
 open "mac/Safe Finder.command"                     # or double-click it in Finder; the first run installs PySide6
-mac/.venv/bin/python mac/safe_finder.py --from ~/Downloads --to "/Volumes/Extreme SSD"
+mac/.venv/bin/python mac/safe_finder.py --from ~/Downloads --to "/Volumes/Extreme SSD"   # --to opens in Split View
 ```
 
 ### The menu bar
 
 Everything Safe Finder does is in its menus, acting on the pane you're in and what's selected there (greyed
 out when it can't): **File** (New Folder ⇧⌘N, Open ⌘↓, Open With Default App, Quick Look, Show in Finder,
-Copy/Move to the other side ⇧⌘C / ⇧⌘M, AirDrop to iPhone, Move to Trash ⌘⌫), **Edit** (Select All, Find ⌘F,
-Tags… ⌘T), **View** (as Icons/List/Photos ⌘1–3, Sort By, bigger/smaller thumbnails ⌘= / ⌘−), **Go** (Back ⌘[,
+Copy/Move to the other side ⇧⌘C / ⇧⌘M — in one window they open Split View, AirDrop to iPhone, Move to Trash ⌘⌫), **Edit** (Select All, Find ⌘F,
+Tags… ⌘T), **View** (as Icons/List/Photos ⌘1–3, Split View ⌘\\, Sort By, bigger/smaller thumbnails ⌘= / ⌘−), **Go** (Back ⌘[,
 Forward ⌘], Enclosing Folder ⌘↑, Home ⇧⌘H, Desktop ⇧⌘D, Downloads ⌥⌘L, Pictures, All Videos, Empty Folders,
 Drives), **Photos** (Find Duplicates, Export All Frames, Crop, AI Upscale, Erase Area, Edit/Create with AI, the
 Astria.ai Browser, the SimpCity / Instagram / Facebook downloaders, taylorpictures.net) and **Window** (every

@@ -1390,6 +1390,26 @@ The window never deletes: Safe Finder's `find_duplicates` hands it `DupHooks` (t
 engine, the Trash with tags forgotten, the viewer — whose own Move to Trash prunes the groups — and reveal).
 A double-click opens without leaving a tick (`Tile.restored` puts it back as it was before the clicks).
 
+## 6r. Safe Finder: one window, Split View on a toggle — `mac/safe_finder.py`, `mac/menubar.py` (Nov 3, 2026)
+
+Safe Finder opens as **one pane**, like Finder; the From/To pair is **Split View**, for transfers. The window
+still holds both panes (`src`, `dst`) in the `panes` splitter — `MainWindow.set_split(on)` only shows or hides
+the To pane, the Move/Copy bar (`action_bar`) and the FROM chip, so a transfer's code paths are unchanged.
+Toggles: the split button at the end of the From pane's header (`Pane.split_btn`, hidden on the To pane),
+View ▸ Split View (⌘\\, the one binding — in `menubar.py`, checkable) and, on the From pane's right-click
+menu outside Split View, "Move or Copy in Split View…" in place of the Copy/Move entries (the selection is
+kept). Opening it splits the width evenly (again on the next tick, after the From pane's minimum width has
+settled).
+- **The To pane loads lazily** (`_dst_ready`): nothing is listed on the SSD until Split View first opens, then
+  it goes to `--to`, else its last folder (`To/location`), else the first external volume, else home. Only
+  `Pane.go` writes `To/location`, so an unopened pane can't wipe it.
+- **Remembered** in QSettings `split`; `--to` on the command line forces it on (without saving), which is why
+  every older offscreen test, all passing `start_to`, still runs split. The launchers pass no `--to`.
+- **Closing it moves the focus to the From pane** (`active_pane` is the From pane whenever the window isn't
+  split, so menu commands never act on the hidden pane), and outside Split View File ▸ Copy/Move to the Other
+  Side (⇧⌘C / ⇧⌘M, `transfer_selection`) open it rather than sending files into a folder you can't see — a
+  To pane closed after use still has one. Drags from Finder onto the one pane still transfer, as before.
+
 ## 6a. WebM playback — `WebMPlayer.swift`
 
 AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,

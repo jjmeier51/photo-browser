@@ -150,6 +150,8 @@ actions the app makes no network calls.
   iPhone's Astria request path field for field (keep the two in step), key in the Mac's Keychain — §1.13.
   Safe Finder's **menu bar** (`mac/menubar.py`) holds every command and its ⌘ shortcut (one binding per key —
   panes keep only Return/Space); the right-click menu groups a folder's tools under Download ▸ / AI ▸.
+  Safe Finder opens as **one window**; **Split View** (header button, View ▸ Split View ⌘\\, remembered; `--to`
+  forces it) adds the To pane and the Move/Copy bar for transfers (`MainWindow.set_split` — §6r).
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,
   "Add from iOS Album" (import then delete the iOS originals), save drive media
   to Photos, capture/export HDR-preserving video frames. (`PhotosLibraryView`,

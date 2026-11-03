@@ -85,9 +85,9 @@ def install(win, sf) -> None:
         lambda: bool(sel()) and sf.IS_MAC)
     f.addSeparator()
     act(f, "Copy to the Other Side", lambda: win.transfer_selection(False), "Ctrl+Shift+C",
-        lambda: win.copy_btn.isEnabled())
+        lambda: not win.split or win.copy_btn.isEnabled())
     act(f, "Move to the Other Side", lambda: win.transfer_selection(True), "Ctrl+Shift+M",
-        lambda: win.move_btn.isEnabled())
+        lambda: not win.split or win.move_btn.isEnabled())
     act(f, "AirDrop to iPhone…", lambda: pane().airdrop(sel()), None, lambda: bool(sel()) and sf.IS_MAC)
     f.addSeparator()
     act(f, "Move to Trash", lambda: pane().delete_selection(), "Ctrl+Backspace", lambda: bool(sel()))
@@ -110,6 +110,11 @@ def install(win, sf) -> None:
         modes.addAction(a)
         mode_acts[key] = a
     v.aboutToShow.connect(lambda: mode_acts.get(pane().mode(), mode_acts["grid"]).setChecked(True))
+    v.addSeparator()
+    split = act(v, "Split View", lambda: win.set_split(not win.split), "Ctrl+\\",
+                tip="A second pane beside this one, with Move and Copy, for transfers")
+    split.setCheckable(True)
+    split.setChecked(win.split)
     v.addSeparator()
     sort = v.addMenu("Sort By")
     sort_group = QActionGroup(win)

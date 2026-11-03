@@ -287,6 +287,9 @@ def glyph(name: str, color: str | None = None, size: int = 16) -> QIcon:
         for gx in (0.12, 0.40, 0.68):
             for gy in (0.12, 0.40, 0.68):
                 p.drawRect(QRectF(s * gx, s * gy, s * 0.24, s * 0.24))
+    elif name == "split":                                  # two panes side by side
+        p.drawRoundedRect(QRectF(s * 0.12, s * 0.2, s * 0.76, s * 0.6), 2, 2)
+        p.drawLine(QPoint(int(s * 0.5), int(s * 0.22)), QPoint(int(s * 0.5), int(s * 0.78)))
     elif name == "list":
         for i, gy in enumerate((0.25, 0.5, 0.75)):
             p.drawPoint(QPoint(int(s * 0.18), int(s * gy)))
@@ -3024,6 +3027,11 @@ class Pane(QWidget):
         h.addWidget(self.grid_btn)
         h.addWidget(self.list_btn)
         h.addWidget(self.photos_btn)
+        h.addSpacing(6)
+        self.split_btn = self._tool("split", "Split View (⌘\\) — a second pane beside this one, to move or copy "
+                                    "files into (the SSD, say)", None, "Seg")
+        self.split_btn.setCheckable(True)
+        h.addWidget(self.split_btn)
         root.addWidget(header)
 
         # scope bar — Finder's "Search: This Mac | “Downloads”", shown while a search is up
@@ -3265,7 +3273,7 @@ class Pane(QWidget):
 
     def restyle(self) -> None:
         for b in (self.back_btn, self.fwd_btn, self.sort_btn, self.new_folder_btn, self.tags_btn, self.grid_btn,
-                  self.list_btn, self.photos_btn):
+                  self.list_btn, self.photos_btn, self.split_btn):
             b.setIcon(glyph(b.property("glyph"), THEME.secondary if b.objectName() == "Nav" else THEME.text, 16))
         self.filter_btn.setIcon(glyph("funnel", THEME.accent if self.size_filter_key else THEME.secondary, 16))
         self._slider_icons()
@@ -4168,8 +4176,11 @@ class Pane(QWidget):
             menu.addSeparator()
             win = self.window()
             if isinstance(win, MainWindow) and self is win.src:
-                menu.addAction(win.copy_btn.text(), lambda: win.transfer_selection(False))
-                menu.addAction(win.move_btn.text(), lambda: win.transfer_selection(True))
+                if win.split:
+                    menu.addAction(win.copy_btn.text(), lambda: win.transfer_selection(False))
+                    menu.addAction(win.move_btn.text(), lambda: win.transfer_selection(True))
+                else:
+                    menu.addAction("Move or Copy in Split View…", lambda: win.set_split(True))
             self._tags_menu(menu, paths)
             videos = [p for p in paths if kind_of(p) == "video"]
             if videos:
@@ -5381,11 +5392,17 @@ class MainWindow(QMainWindow):
             pane.selection_changed.connect(self.update_actions)
             pane.selection_changed.connect(pane.update_status)
 
-        panes = QSplitter(Qt.Orientation.Horizontal)
+        panes = self.panes = QSplitter(Qt.Orientation.Horizontal)
         panes.setHandleWidth(1)
         panes.addWidget(self.src)
         panes.addWidget(self.dst)
         panes.setChildrenCollapsible(False)
+        # One window, as Finder is; Split View (the main pane's toggle, View ▸ Split View, ⌘\) puts the
+        # To pane beside it, with Move/Copy, for transfers. The To pane only reads its folder once shown.
+        self.split = False
+        self._dst_ready = False
+        self.dst.split_btn.setVisible(False)
+        self.src.split_btn.clicked.connect(lambda on: self.set_split(bool(on)))
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setHandleWidth(1)
         split.addWidget(self.sidebar)
@@ -5394,7 +5411,7 @@ class MainWindow(QMainWindow):
         split.setSizes([200, 1120])
         split.setChildrenCollapsible(False)
 
-        action = QWidget(objectName="ActionBar")
+        action = self.action_bar = QWidget(objectName="ActionBar")
         al = QHBoxLayout(action)
         al.setContentsMargins(16, 9, 16, 9)
         al.setSpacing(10)
@@ -5444,10 +5461,10 @@ class MainWindow(QMainWindow):
         home = str(Path.home())
         start_src = start_from or self.settings.value("From/location") or str(Path.home() / "Downloads")
         self.src.go(start_src if os.path.isdir(start_src) else home)
-        ext = external_volumes()
-        start_dst = start_to or self.settings.value("To/location") or (str(ext[0]) if ext else home)
-        self.dst.go(start_dst if os.path.isdir(start_dst) else (str(ext[0]) if ext else home))
+        self._start_to = start_to
         self.set_active(self.src)
+        # Split View if a To folder was asked for (--to), else as it was left (one window the first time)
+        self.set_split(bool(start_to) or str(self.settings.value("split", "false")) == "true", remember=False)
         geo = self.settings.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
@@ -5458,7 +5475,39 @@ class MainWindow(QMainWindow):
     # -- panes
     @property
     def active_pane(self) -> Pane:
-        return self.src if self.src.active else self.dst
+        return self.src if self.src.active or not self.split else self.dst
+
+    def set_split(self, on: bool, remember: bool = True) -> None:
+        """One window, or Split View: the To pane beside the main one, the FROM/TO chips, and the Move/Copy
+        bar. The To pane opens on its last folder (else the SSD) the first time it's shown."""
+        if on and not self._dst_ready:
+            self._dst_ready = True
+            home = str(Path.home())
+            ext = external_volumes()
+            start = self._start_to or self.settings.value("To/location") or (str(ext[0]) if ext else home)
+            self.dst.go(start if os.path.isdir(start) else (str(ext[0]) if ext else home))
+        self.split = on
+        if remember:
+            self.settings.setValue("split", "true" if on else "false")
+        self.dst.setVisible(on)
+        self.action_bar.setVisible(on)
+        self.src.chip.setVisible(on)                   # FROM/TO only mean something side by side
+        self.src.split_btn.setChecked(on)
+        self.src.split_btn.setToolTip("Close Split View (⌘\\)" if on else
+                                      "Split View (⌘\\) — a second pane beside this one, to move or copy files "
+                                      "into (the SSD, say)")
+        if on:
+            def halves() -> None:                      # once the To pane is laid out: side by side, equal
+                w = max(sum(self.panes.sizes()), 2)
+                self.panes.setSizes([w // 2, w - w // 2])
+            halves()
+            QTimer.singleShot(0, halves)
+        elif self.dst.active:
+            self.set_active(self.src)
+        act = getattr(self, "menu_actions", {}).get("Split View")
+        if act is not None:
+            act.setChecked(on)
+        self.update_actions()
 
     def _navigate(self, path: str) -> None:
         if path in (VIDEOS, EMPTY):            # a collection of the Mac's own — always the From side
@@ -5542,6 +5591,9 @@ class MainWindow(QMainWindow):
 
     # -- transfers
     def transfer_selection(self, move: bool) -> None:
+        if not self.split:                             # never into a pane you can't see: show it first
+            self.set_split(True)
+            return
         paths = self.src.selected_paths()
         if paths and self.dest:
             self.confirm_transfer(paths, self.dest, move)
