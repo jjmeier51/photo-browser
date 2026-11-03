@@ -3963,6 +3963,54 @@ class Pane(QWidget):
         win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
         win.show()
 
+    # -- cloud AI (astria.py / ai_window.py — the iPhone's Edit with AI, Create with AI, Astria.ai Browser)
+    def _ai_hooks(self):
+        import ai_window
+
+        def carry(pairs: list[tuple[str, str]]) -> None:
+            try:
+                tag_store().carry(pairs)                  # an edit's results get the photo's tags
+                tags_changed()
+            except OSError:
+                pass
+
+        def keep(w) -> None:
+            _VIEWERS.append(w)
+            w.destroyed.connect(lambda _=None, w=w: _VIEWERS.remove(w) if w in _VIEWERS else None)
+
+        if not getattr(Pane, "_ai_recovery_hooked", False):
+            Pane._ai_recovery_hooked = True
+            ai_window.jobs().recovered.connect(self._airdrop_noted)
+        return ai_window.AIHooks(tags_of=lambda p: tag_store().tags(p, fresh=False), carry_tags=carry,
+                                 reveal=self._reveal_from_viewer,
+                                 view=lambda paths, start: self.view_media(start, among=paths), keep_open=keep)
+
+    def ai_edit(self, photo: str) -> None:
+        import ai_window
+        hooks = self._ai_hooks()
+        win = ai_window.RequestWindow("edit", photo, hooks, THEME, self.window())
+        hooks.keep_open(win)
+        win.show()
+
+    def ai_create(self, folder: str) -> None:
+        import ai_window
+        hooks = self._ai_hooks()
+        win = ai_window.RequestWindow("create", folder, hooks, THEME, self.window())
+        hooks.keep_open(win)
+        win.show()
+
+    def astria_browser(self, folder: str) -> None:
+        import ai_window
+        for w in _VIEWERS:
+            if isinstance(w, ai_window.BrowserWindow):
+                w.raise_()
+                w.activateWindow()
+                return
+        hooks = self._ai_hooks()
+        win = ai_window.BrowserWindow(folder, hooks, THEME, self.window())
+        hooks.keep_open(win)
+        win.show()
+
     def open_taylor(self, folder: str) -> None:
         """Browse taylorpictures.net… (taylor_window.py — the iPhone's gallery browser): albums download into
         `folder` (the Taylor Swift folder), and what's already in it is marked."""
@@ -4113,6 +4161,8 @@ class Pane(QWidget):
                 menu.addAction("Find Duplicates…", lambda: self.find_duplicates(paths[0]))
                 menu.addAction("Download from SimpCity…", lambda: open_simpcity(paths[0], self.window()))
                 menu.addAction("Browse taylorpictures.net…", lambda: self.open_taylor(paths[0]))
+                menu.addAction("Create with AI…", lambda: self.ai_create(paths[0]))
+                menu.addAction("Astria.ai Browser…", lambda: self.astria_browser(paths[0]))
                 if (scored := simpcity_scores_folder(paths[0])) is not None:
                     menu.addAction("Get Reaction Scores",
                                    lambda: open_simpcity(scored, self.window(), scores_only=True))
@@ -4137,6 +4187,8 @@ class Pane(QWidget):
                                lambda: self.ai_upscale(photos))
                 menu.addAction("Erase Area…" if len(photos) == 1 else f"Erase Area on {len(photos)} Photos…",
                                lambda: self.erase_area(photos))
+                if len(photos) == 1:
+                    menu.addAction("Edit with AI…", lambda: self.ai_edit(photos[0]))
             menu.addAction("Move to Trash", self.delete_selection).setShortcut(QKeySequence("Ctrl+Backspace"))
             menu.addSeparator()
         if self.location == VIDEOS:
@@ -4153,6 +4205,8 @@ class Pane(QWidget):
                 menu.addAction("Find Duplicates in This Folder…", lambda: self.find_duplicates(self.location))
                 menu.addAction("Download from SimpCity…", lambda: open_simpcity(self.location, self.window()))
                 menu.addAction("Browse taylorpictures.net…", lambda: self.open_taylor(self.location))
+                menu.addAction("Create with AI…", lambda: self.ai_create(self.location))
+                menu.addAction("Astria.ai Browser…", lambda: self.astria_browser(self.location))
                 if (scored := simpcity_scores_folder(self.location)) is not None:
                     menu.addAction("Get Reaction Scores",
                                    lambda: open_simpcity(scored, self.window(), scores_only=True))

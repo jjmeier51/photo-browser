@@ -143,6 +143,8 @@ actions the app makes no network calls.
   Safe Finder's **taylorpictures.net** window (right-click the Taylor Swift folder; `mac/taylor.py`,
   `mac/taylor_window.py`): the iPhone's browser plus "already here" marks (by name, then by picture) and
   Download Missing; both apps share `Taylor Swift/.taylorpictures.json` (`TaylorRecord.swift`) — §7.4c.
+  Safe Finder's **Edit with AI / Create with AI / Astria.ai Browser** (`mac/astria.py`, `mac/ai_window.py`): the
+  iPhone's Astria request path field for field (keep the two in step), key in the Mac's Keychain — §1.13.
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,
   "Add from iOS Album" (import then delete the iOS originals), save drive media
   to Photos, capture/export HDR-preserving video frames. (`PhotosLibraryView`,

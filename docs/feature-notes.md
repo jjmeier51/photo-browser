@@ -311,6 +311,33 @@ endpoint changed), grouped by prompt with model name (`modelName(forTune:tunes:)
   stamped with the prompt's `created_at` and provenance, marked AI-generated, and remembered in
   `Library.astriaSavedImages` (image URL → path) so the grid badges what's already on the drive.
 
+### 1.13 Safe Finder's twin — `mac/astria.py`, `mac/ai_window.py` (Nov 3, 2026)
+
+A field-for-field port of the request path above, so both apps send identical prompts: `createPrompt`'s
+retries and `findRecentPrompt` reconciliation (the transport raises `PreSend` vs `Ambiguous` — urllib's
+`URLError` with a DNS/refused/SSL reason is pre-send, anything after the connection is ambiguous), the
+progressive poll (2/4/6 s, 320 ticks, 20 quiet ticks, a second sweep on fresh URLs), downloads validated by
+Pillow, `resolveGeneration`'s single/stacked rules, `compatible` tunes, faceid reference tunes cached per
+`base|path|mtime|size` (forgotten when a prompt that used them is refused), the model table, 5.0 Pro pinned
+to 2K, Flux without `prompt[resolution]`, the nearest supported `aspect_ratio`, and the trigger phrase
+prepended after the prefix — so a Flux LoRA prompt reads "ohwx woman <lora:11:1> …" on both.
+- **Where things live**: the key in the Keychain (`security add-generic-password -s "Safe Finder Astria"`;
+  off a Mac a 0600 field in the store), everything else in `~/Library/Application Support/Safe
+  Finder/astria.json` (tune overrides, `run_edit`/`run_create`, history + favorites — not shared with the
+  iPhone's — reference tunes, saved browser images by URL, the last save folder, pending jobs).
+- **Saving** is `_encode` (Pillow): the result made upright (Astria can return an orientation-flagged JPEG),
+  the source's EXIF/GPS carried (pointer tags, orientation, sizes and maker notes dropped), the capture date
+  forced, `Software` "PhotoBrowser AI — <model>" written as UTF-8 bytes (a `str` gets squeezed to ASCII,
+  "AI ? model") and `UserComment` with the prompt; then `_place` — `sc.write_file` (exFAT: in place) under a
+  unique name, file dates = capture date. Edit results get the source's tags (`tag_store().carry`).
+- **Upload**: Pillow's HEIC decode is the SDR base (no gain map), so the iPhone's HDR soft-clip isn't needed;
+  upright, ≤ 2048 (1024 for 1K), JPEG 92.
+- **Durability, simplified**: a pending record is written the moment Astria accepts the prompt and dropped
+  when the results are saved or discarded, or the error is final. `Jobs.resume` runs once per Safe Finder
+  run (first AI use): jobs < 2 h old, < 4 tries, 30-tick polls, saved straight to the folder, and only a
+  save is reported. No notifications — a Mac process isn't suspended mid-job the way iOS's is.
+- Not ported: Surprise Me, Extend with AI (Flux outpaint), creating tunes, live activities.
+
 ### 1.11 Reusable Prompts, prompt history with hearts, prompting reminder — `AIPromptSections.swift`
 
 The prompt-helper sections are shared views (one file) used by both `AICreateView` and

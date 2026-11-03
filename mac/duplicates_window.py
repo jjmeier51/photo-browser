@@ -581,9 +581,10 @@ class DuplicatesWindow(QWidget):
         self.cards = []
         while self.list.count():
             it = self.list.takeAt(0)
-            if it.widget() is not None:
-                it.widget().setParent(None)
-                it.widget().deleteLater()
+            w = it.widget()
+            if w is not None:              # keep a hold until it's gone
+                w.setParent(None)
+                w.deleteLater()
         groups = self._visible_groups()
         for g in groups[:self.shown]:
             card = Card(g, self)

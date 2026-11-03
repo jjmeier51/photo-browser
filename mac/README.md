@@ -560,6 +560,32 @@ Both apps keep `Taylor Swift/.taylorpictures.json` — the albums downloaded int
 downloaded on the iPhone shows as downloaded here, and the other way round. Pages are only read; nothing
 is sent to the site.
 
+### Edit with AI, Create with AI and the Astria.ai Browser (`ai_window.py`, `astria.py`)
+
+The iPhone app's cloud AI (astria.ai), on the Mac. It's opt-in: until you add your Astria API key nothing is
+sent anywhere, and then only the photo you're editing and any reference photos you pick. The key is kept in
+the Mac's Keychain (every AI window asks for it the first time; **Astria Settings…** changes it, the default
+model and the models' tune ids).
+
+- **Edit with AI** — right-click a photo. Write what to change (an optional negative prompt goes along in
+  the text, as on the iPhone); the prompting reminder, the two reusable prompts (Use / Copy) and your recent
+  prompts (double-click to reuse; right-click to ♥ one — hearted prompts are never dropped) are right there.
+  Pick the model — Seedream 5.0 Pro / 5.0 Lite / 4.5, Nano Banana 2.1 / 2, or Flux — and up to ten of your
+  own tunes (only the ones that can run on that model are listed), reference photos (any photos; up to 10 or
+  14, none on Flux), resolution (1K/2K/4K — Seedream 5.0 Pro is always 2K, Flux takes none), the shape
+  (Original keeps the photo's) and how many (1–8). Everything is remembered for next time.
+- **Create with AI** — right-click a folder (or its empty space): the same, from a prompt alone.
+- **Generate** opens the job's window: it shows what Astria's doing ("2 of 4 ready…"), then the results.
+  Click one to leave it out, double-click to see it full size in the viewer, then **Save** — an edit's
+  results go into an "AI" folder beside the photo as "<name> AI.jpg" with the photo's date, place and tags,
+  a creation's into the folder's "AI" folder; the model and prompt are written into each file. Closing with
+  results unsaved asks first. **Run Again** opens the form as it was. If you quit while Astria is still
+  working, the images are saved to the folder the next time you use Safe Finder's AI (within two hours).
+- **Astria.ai Browser…** — right-click a folder: every generation on your account, newest first, a card per
+  prompt (model, date, text, Copy Prompt). Search by any words of the prompt or the model. Click images to
+  pick them (Select All on a card), then **Save to “<last folder>”** or **Save to Folder…**; saved images get
+  a ✓ and the prompt's date. Double-click an image for it full size with its prompt.
+
 ### Download a SimpCity thread into a person's folder (`simpcity_downloader.py`)
 
 Right-click a person's folder (or the empty area inside it) ▸ **Download from SimpCity…**, paste the
