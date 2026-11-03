@@ -2,8 +2,10 @@
 
     python3 mac/passes_downloader.py <folder> [creator-username]
 
-Downloads purchased posts from passes.com into <folder>/<creator>/<contentId>.<ext>,
-or imports the "Export my data" ZIP from Passes Settings into the same layout.
+With a creator given, walks that creator's message channel (where purchased
+content lives) and saves into <folder>/<creator>/<contentId>.<ext>.  With none,
+walks the purchased-content gallery instead.  Also imports the "Export my data"
+ZIP from Passes Settings into the same layout.
 
 Auth: the user signs in to passes.com in the window's embedded browser (a
 persistent QWebEngineProfile).  After the /auth/success navigation the page's
@@ -234,7 +236,7 @@ class PassesWindow(QMainWindow):
         self.stop_btn.setEnabled(True)
         self.bar.setVisible(True)
         self.bar.setRange(0, 0)
-        self._say("Fetching gallery…")
+        self._say("Fetching messages…" if creator else "Fetching gallery…")
         self._log(f"Starting downloads into: {self.person}")
 
         access_token = self._access_token
@@ -252,39 +254,28 @@ class PassesWindow(QMainWindow):
                         passes.creator_username(uid, access_token), uid, 80)
                 return creator_names[uid]
 
+            fixed: Path | None = None
             try:
-                creator_id = None
                 if creator_field:
-                    try:
-                        doc = passes._post("/profile/get",
-                                           {"username": creator_field}, access_token)
-                        creator_id = doc.get("userId") or doc.get("creatorId")
-                        if not creator_id:
-                            self.bridge.call.emit(
-                                self._log, f'Creator "{creator_field}" not found.')
-                            self.bridge.call.emit(self._crawl_done, None)
-                            return
-                    except Exception as e:  # noqa: BLE001
-                        self.bridge.call.emit(
-                            self._log, f"Couldn't look up creator: {e}")
-                        self.bridge.call.emit(self._crawl_done, None)
-                        return
+                    # a named creator: everything goes in their folder, from their channel
+                    fixed  = person / social.sanitize(creator_field, creator_field, 80)
+                    pages  = passes.messages_pages(access_token, creator_field)
+                else:
+                    pages  = passes.gallery_pages(access_token, None)
 
-                for page in passes.gallery_pages(access_token, creator_id):
+                for page in pages:
                     if stopping_ref[0]:
                         break
-                    # resolve names in background before handing to main thread
                     resolved: list[tuple[dict, Path]] = []
                     for post in page:
-                        uid    = post.get("userId", "")
-                        folder = person / resolve(uid)
+                        folder = fixed or person / resolve(post.get("userId", ""))
                         resolved.append((post, folder))
                     self.bridge.call.emit(self._enqueue_resolved, resolved)
                     time.sleep(passes.GAP)
 
             except Exception as e:  # noqa: BLE001
                 self.bridge.call.emit(self._log,
-                                      f"Gallery error: {type(e).__name__}: {e}")
+                                      f"Listing error: {type(e).__name__}: {e}")
             self.bridge.call.emit(self._crawl_done, None)
 
         threading.Thread(target=crawl, daemon=True).start()
@@ -404,7 +395,7 @@ class PassesWindow(QMainWindow):
         if problem:
             line = problem
         elif not self.written:
-            line = "Nothing new." if self.queued else "No purchased posts found."
+            line = "Nothing new." if self.queued else "No purchased content found."
         else:
             p, v = self.photos, self.videos
             line = (f"Downloaded {p} photo{'s' if p != 1 else ''} "

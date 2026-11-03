@@ -1,8 +1,8 @@
 """Safe Finder — Passes.com helpers (no Qt).
 
-Provides: token exchange, gallery pagination, per-post item building, and the
-shared-record type (.passes.json on the drive).  Same pattern as instagram.py /
-facebook.py; passes_downloader.py is the Qt window.
+Provides: token exchange, gallery and message pagination, per-post item building,
+and the shared-record type (.passes.json on the drive).  Same pattern as
+instagram.py / facebook.py; passes_downloader.py is the Qt window.
 
 Passes support (Case PS-48213, 2026-11-03) confirms purchased content may be
 kept locally for personal use.  Personal archive only, no redistribution.
@@ -41,7 +41,7 @@ SETTINGS_KEY     = "passes/refresh_token"   # QSettings fallback
 DEVICE_SETTING   = "passes/device"          # path to a .wvd
 
 KEYWORD = "Passes"
-GAP     = 0.3    # seconds between gallery pages
+GAP     = 0.3    # seconds between listing pages
 
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
@@ -143,13 +143,15 @@ def creator_username(user_id: str, access_token: str) -> str:
     """Folder-safe display name for a userId.  Falls back to userId."""
     try:
         doc  = _post("/profile/get", {"creatorId": user_id}, access_token)
-        name = (doc.get("username") or doc.get("displayName") or "").strip()
+        user = doc.get("user") or {}
+        name = (user.get("username") or user.get("displayName")
+                or doc.get("username") or "").strip()
         return name or user_id
     except Exception:           # noqa: BLE001
         return user_id
 
 
-# ── gallery pagination ────────────────────────────────────────────────────────
+# ── listing ───────────────────────────────────────────────────────────────────
 
 def gallery_pages(access_token: str,
                   creator_id: str | None = None) -> Iterator[list[dict]]:
@@ -169,6 +171,40 @@ def gallery_pages(access_token: str,
             break
         body["createdAt"] = doc["createdAt"]
         body["lastId"]    = doc["lastId"]
+        time.sleep(GAP)
+
+
+def channel_id(access_token: str, username: str) -> str | None:
+    """The message channel id with `username`, or None."""
+    body: dict = {"orderType": "recent", "order": "desc"}
+    while True:
+        doc = _post("/channel/channels", body, access_token)
+        for ch in doc.get("data") or []:
+            other = ch.get("otherUser") or {}
+            if other.get("username") == username:
+                return ch.get("channelId")
+        if not doc.get("hasMore"):
+            return None
+        body["recentAt"] = doc.get("recentAt")
+        body["lastId"]   = doc.get("lastId")
+        time.sleep(GAP)
+
+
+def messages_pages(access_token: str, username: str) -> Iterator[list[dict]]:
+    """Yields successive pages of message dicts from the channel with `username`."""
+    cid = channel_id(access_token, username)
+    if not cid:
+        raise RuntimeError(f'no message channel with "{username}"')
+    body: dict = {"channelId": cid, "contentOnly": False, "pending": False}
+    while True:
+        doc = _post("/messages/messages", body, access_token)
+        data = doc.get("data") or []
+        if data:
+            yield data
+        if not doc.get("hasNextPage"):
+            break
+        body["lastSentAt"] = doc.get("lastSentAt")
+        body["lastId"]     = doc.get("lastId")
         time.sleep(GAP)
 
 
