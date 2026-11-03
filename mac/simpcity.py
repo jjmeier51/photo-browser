@@ -1324,8 +1324,9 @@ class ExifSession:
 
     TIMEOUT = 60.0                                       # seconds an answer may take (a big video's write)
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, errors: bool = False) -> None:
         self.path = path
+        self.errors = errors                             # ExifTool's error lines in the answer too (else dropped)
         self.proc: subprocess.Popen | None = None
         self.lock = threading.Lock()
         self.buf = b""
@@ -1356,7 +1357,8 @@ class ExifSession:
         import select
         if self.proc is None or self.proc.poll() is not None:
             self.proc = subprocess.Popen([self.path, "-stay_open", "True", "-@", "-"], stdin=subprocess.PIPE,
-                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                                         stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT if self.errors else subprocess.DEVNULL)
             self.buf = b""
         if self.proc.stdin is None or self.proc.stdout is None:
             raise OSError("no pipes")
@@ -1380,7 +1382,7 @@ class ExifSession:
     def _once(self, args: tuple[str, ...], timeout: float) -> str:
         try:
             res = subprocess.run([self.path, *args], capture_output=True, timeout=timeout * 4)
-            return res.stdout.decode("utf-8", "replace")
+            return (res.stdout + (res.stderr if self.errors else b"")).decode("utf-8", "replace")
         except (OSError, subprocess.SubprocessError):
             return ""
 

@@ -35,6 +35,15 @@ def _key(path: str, kind: str) -> tuple[str, int, int, str] | None:
     return (path, st.st_mtime_ns, st.st_size, kind)
 
 
+def forget(paths) -> None:
+    """Drops what was read for these files (after their metadata was rewritten — a write that kept the size and
+    the modified date would otherwise still show the old)."""
+    gone = set(paths)
+    with _lock:
+        for key in [k for k in _cache if k[0] in gone]:
+            del _cache[key]
+
+
 def _cached(path: str, kind: str, read) -> dict:
     key = _key(path, kind)
     if key is None:

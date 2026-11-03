@@ -66,6 +66,10 @@ def install(win, sf) -> None:
     def photos() -> list[str]:
         return [p for p in sel() if os.path.splitext(p)[1].lower() in sf.batch_crop.CROPPABLE]
 
+    def editable() -> list[str]:
+        """Selected photos and videos that can hold metadata, and selected folders (everything inside)."""
+        return [p for p in sel() if os.path.isdir(p) or sf.metadata_edit.can_edit(p)]
+
     def videos() -> list[str]:
         return [p for p in sel() if sf.kind_of(p) == "video"]
 
@@ -164,6 +168,10 @@ def install(win, sf) -> None:
 
     # -- Photos: the tools
     t = each("Photos")
+    act(t, "Edit Metadata…", lambda: pane().edit_metadata(editable()) if editable() else None, "Ctrl+I",
+        lambda: bool(editable()),
+        "Capture date, location, caption, keywords, camera and any other tag — of everything selected")
+    t.addSeparator()
     act(t, "Find Duplicates…", lambda: pane().find_duplicates(folder_target()), None, folder_target,
         "Likely copies in the selected folder (or this one)")
     act(t, "Export All Frames…", lambda: pane().export_frames(videos()), None, lambda: bool(videos()))

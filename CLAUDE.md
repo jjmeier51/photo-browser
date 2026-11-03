@@ -150,6 +150,10 @@ actions the app makes no network calls.
   iPhone's Astria request path field for field (keep the two in step), key in the Mac's Keychain — §1.13.
   Safe Finder's **menu bar** (`mac/menubar.py`) holds every command and its ⌘ shortcut (one binding per key —
   panes keep only Return/Space); the right-click menu groups a folder's tools under Download ▸ / AI ▸.
+  Safe Finder's **Edit Metadata** (right-click ▸ Edit Metadata… / ⌘I; `mac/metadata_edit.py`, `mac/metadata_window.py`):
+  capture date (set / shift / from name / from file date / to file dates), location, caption, title, keywords,
+  creator, copyright, rating, camera, any ExifTool tag, strip — for many photos and videos or whole folders, written
+  with ExifTool in place in the tags the iPhone reads (the downloaders' tags) — §6s.
   Safe Finder opens as **one window**; **Split View** (header button, View ▸ Split View ⌘\\, remembered; `--to`
   forces it) adds the To pane and the Move/Copy bar for transfers (`MainWindow.set_split` — §6r).
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,

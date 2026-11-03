@@ -255,10 +255,51 @@ out when it can't): **File** (New Folder ⇧⌘N, Open ⌘↓, Open With Default
 Copy/Move to the other side ⇧⌘C / ⇧⌘M — in one window they open Split View, AirDrop to iPhone, Move to Trash ⌘⌫), **Edit** (Select All, Find ⌘F,
 Tags… ⌘T), **View** (as Icons/List/Photos ⌘1–3, Split View ⌘\\, Sort By, bigger/smaller thumbnails ⌘= / ⌘−), **Go** (Back ⌘[,
 Forward ⌘], Enclosing Folder ⌘↑, Home ⇧⌘H, Desktop ⇧⌘D, Downloads ⌥⌘L, Pictures, All Videos, Empty Folders,
-Drives), **Photos** (Find Duplicates, Export All Frames, Crop, AI Upscale, Erase Area, Edit/Create with AI, the
+Drives), **Photos** (Edit Metadata ⌘I, Find Duplicates, Export All Frames, Crop, AI Upscale, Erase Area, Edit/Create with AI, the
 Astria.ai Browser, the SimpCity / Instagram / Facebook downloaders, taylorpictures.net) and **Window** (every
 viewer and tool window that's open). The right-click menu keeps the everyday commands at the top and puts a
 folder's downloaders under **Download ▸** and its AI under **AI ▸**.
+
+### Edit Metadata — many photos and videos at once
+
+Select photos and videos — or folders, for every one inside them and their subfolders — and right-click ▸
+**Edit Metadata…** (or **⌘I**, or Photos ▸ Edit Metadata…; right-click a folder's empty space for **Edit
+Metadata of Everything Here…**). The window reads what the files hold now in the background, then each field
+is ticked to change it; everything left unticked stays exactly as it is, and a ticked field left empty is
+removed. Each field says what the files hold now — the one value they share, how many different ones, or none
+— and ticking a field they all share fills it in, ready to edit.
+
+- **Capture date** — **Set to** a date and time (each next file a few seconds later, in the order listed, so
+  they keep that order when sorted by date), **Shift by** days/hours/minutes/seconds (a camera clock or time
+  zone that was off), **From the file name** (IMG_20240613_101530, PXL_…, 2024-06-13 10.15.30, “Screenshot
+  2024-06-13 at 10.15.30”, VID-20240613-WA0001 — a date alone is taken as noon — Unix times, or a pattern of
+  your own like `%d.%m.%Y`), **From the file's own date** (modified or created), or **Copy to the files' own
+  dates** (the capture date stays; Finder then sorts by when they were taken). *Only files that have no capture
+  date yet* fills the gaps; *the files' own created and modified dates follow* (on by default) moves those too.
+  A date keeps the time zone the file already has; one without gets this Mac's.
+- **Location** — paste coordinates (`37.7749, -122.4194`, `37.7749 N 122.4194 W`, degrees-minutes-seconds) or a
+  Google or Apple Maps link, or **Remove it**.
+- **Description** — caption (line breaks and all), title, keywords (**Replace with**, **Add** or **Remove**,
+  comma-separated), creator, copyright, rating (★ to ★★★★★, or none).
+- **Camera** — make, model, lens (photos only) and software.
+- **Other Tags** — any tag by its ExifTool name, one per line (`EXIF:ISO=200`, `XMP:Label=Red`,
+  `IPTC:City=Paris`; `Tag=` removes it). Tags that would rename, move or link a file aren't accepted.
+- **Remove Everything Else** — takes every other tag out first (camera, serial numbers, location, captions…),
+  keeping only the capture date, how the photo is turned and its colour profile; RAW and TIFF files are left
+  alone, since stripping them can make them unreadable.
+
+The list underneath is the plan, file by file: the capture date now and after, and anything a file can't take
+(no date to shift, no date in its name, a video has no lens) — those parts are skipped, the rest written.
+**Write** asks first (it can't be undone), writes one file at a time with Stop between files, and lists any file
+that wasn't changed with ExifTool's reason.
+
+Everything is written the way Photo Browser on the iPhone reads it — a photo's date in EXIF with its time zone,
+a video's in its QuickTime creation date; a photo's place in EXIF GPS, a video's in QuickTime's ISO 6709 location;
+a photo's caption in IPTC (and EXIF and XMP), a video's in QuickTime — the same tags the downloaders write. It
+needs **ExifTool** (`brew install exiftool`; the window says so, with *Choose ExifTool…* for one elsewhere). Each
+file is rewritten in place, so it keeps its Photo Browser tags and its other extended attributes; a write isn't
+cut off for taking long — a big video gets all the time it needs. JPEG, HEIC, PNG, WebP, TIFF, RAW, MOV, MP4 and
+M4V can be edited; GIF, WebM, AVI and MKV can't hold these tags and are left out (the window counts them).
 
 ### Thumbnails
 

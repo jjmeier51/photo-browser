@@ -1410,6 +1410,48 @@ settled).
   Side (⇧⌘C / ⇧⌘M, `transfer_selection`) open it rather than sending files into a folder you can't see — a
   To pane closed after use still has one. Drags from Finder onto the one pane still transfer, as before.
 
+## 6s. Safe Finder Edit Metadata — `mac/metadata_edit.py`, `mac/metadata_window.py` (Nov 3, 2026)
+
+Bulk metadata for any number of photos and videos (or everything under picked folders — `media_in`: hidden
+items, `._` files and app/library bundles skipped; GIF/WebM/AVI/MKV… counted as can't-hold). Entry points:
+right-click ▸ Edit Metadata… / …of N Items… / …of Everything Inside… / …of Everything Here… (empty space),
+Photos ▸ Edit Metadata… ⌘I (`menubar.editable()`), all through `Pane.edit_metadata`.
+- **Reading** is ExifTool kept running (`simpcity.ExifSession`), 100 files a `-j` call, with `-api QuickTimeUTC` —
+  a session of its own *without* error lines (one printed mid-answer would break the JSON); writing has another,
+  `ExifSession(…, errors=True)` — the new flag keeps ExifTool's `Error:` lines, which say why a file failed. GPS and
+  rating asked with `#` (numbers), a positive GPSLatitude/Longitude signed by its Ref (the EXIF tags are unsigned;
+  GPSPosition is read first). `info_from` takes the iPhone's orders: a photo's date DateTimeOriginal → CreateDate →
+  DateCreated → ModifyDate (zone from the value or OffsetTimeOriginal), a video's Keys CreationDate → QuickTime
+  CreateDate; a photo's caption IPTC → ImageDescription → UserComment → XMP. One IPTC keyword holding a comma
+  stays one (ExifTool answers a one-item list as a plain string); only a video's Keys:Keywords string is split.
+- **The plan** (`plan` → one `Change` per file, with `notes` for what a file can't take) is pure — the window
+  re-plans on every edit. Dates are written like the downloaders (`social.write_meta`): EXIF DateTimeOriginal /
+  CreateDate / ModifyDate + OffsetTime*, or QuickTime Create/Modify/Track/Media dates + `Keys:CreationDate` with
+  its zone. The zone is the file's own, else this Mac's for that day; the QuickTime dates are handed over as this
+  Mac's wall-clock time *for the same moment* (ExifTool assumes local time under QuickTimeUTC), so they never
+  disagree with the creation date — no reliance on ExifTool parsing a zone on a QuickTime date. Place: EXIF GPS +
+  refs / `Keys:GPSCoordinates` + `UserData:GPSCoordinates` (ISO 6709 "lat, lon, 0"); removing a photo's is
+  `-GPS:all=`. Text fields: `PHOTO_TAGS` / `VIDEO_TAGS` (+ `*_CLEAR` for older places on removal). Keywords are
+  worked out per file and written whole (first `-IPTC:Keywords=` replaces, the rest add); IPTC goes in UTF-8.
+  Rating `XMP-xmp:Rating`. "Set to" steps only over the files it dates (only-missing leaves no gaps). File dates
+  follow only when they differ (`Info.mtime`).
+- **Writing** (`write`): `-m -overwrite_original_in_place` (inode and xattrs kept — the tag marker survives), `-P`
+  unless the file dates follow (then `-FileModifyDate`/`-FileCreateDate` on the Mac + `os.utime`, as
+  `simpcity.apply_date`). A caption goes through a temp file (`-TAG<=file`): ExifSession sends one argument per
+  line. The timeout scales with size (`120 s + size / 4 MB/s`) — the session kills a call that runs out, and an
+  in-place write cut off mid-copy would damage the file. Strip is its own command first: `-all= -tagsFromFile @
+  -ColorSpaceTags -Orientation` + the capture date; never on RAW/TIFF (`NO_STRIP`). `outcome` reads "N image files
+  updated / unchanged" and ExifTool's `Error:` line (the path trimmed off).
+- **Other Tags** (`parse_custom`): `Group:Tag=value`; refused: FileName/Directory/TestName/HardLink/SymLink, file
+  permissions/dates, Geotag…, `all`, and bare ExifTool option names — nothing typed can move a file or read as an
+  option. Values are one line.
+- After a write the pane drops `media_info`'s cache for the files (`media_info.forget`) and, only when orientation
+  could have changed (strip, or an Orientation tag), their thumbnails.
+- **Verified against a fake ExifTool only** — exiftool.org couldn't be reached from where this was written. The
+  tag forms are the ones the downloaders already use in production; the rest (`-GPS:all=`, `-tagsFromFile @
+  -ColorSpaceTags -Orientation`, list-tag assignment, `UserData:GPSCoordinates`, the `*_CLEAR` tags) are standard
+  ExifTool usage worth one real run on a copy before trusting on the library.
+
 ## 6a. WebM playback — `WebMPlayer.swift`
 
 AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,

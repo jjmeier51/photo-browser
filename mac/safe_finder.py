@@ -86,6 +86,7 @@ except ModuleNotFoundError:
 import airdrop_to_iphone as airdrop
 import batch_crop
 import media_info
+import metadata_edit
 import safe_transfer as engine
 import shared_tags
 import spare_folders
@@ -4182,6 +4183,12 @@ class Pane(QWidget):
                 else:
                     menu.addAction("Move or Copy in Split View…", lambda: win.set_split(True))
             self._tags_menu(menu, paths)
+            editable = [p for p in paths if os.path.isdir(p) or metadata_edit.can_edit(p)]
+            if editable:
+                label = "Edit Metadata…" if len(editable) == 1 and not os.path.isdir(editable[0]) else \
+                    "Edit Metadata of Everything Inside…" if len(editable) == 1 else \
+                    f"Edit Metadata of {len(editable)} Items…"
+                menu.addAction(label, lambda: self.edit_metadata(editable)).setShortcut(QKeySequence("Ctrl+I"))
             videos = [p for p in paths if kind_of(p) == "video"]
             if videos:
                 menu.addAction("Export All Frames…" if len(videos) == 1 else f"Export All Frames of {len(videos)} Videos…",
@@ -4209,6 +4216,7 @@ class Pane(QWidget):
         else:
             menu.addAction("New Folder", self.new_folder)
             if not paths and os.path.isdir(self.location):
+                menu.addAction("Edit Metadata of Everything Here…", lambda: self.edit_metadata([self.location]))
                 self._folder_tools(menu, self.location, "Find Duplicates in This Folder…")
         menu.exec(view.viewport().mapToGlobal(pos))
         menu.deleteLater()                                 # a new menu each right-click: don't keep them all
@@ -4228,6 +4236,26 @@ class Pane(QWidget):
         ai = menu.addMenu("AI")
         ai.addAction("Create with AI…", lambda: self.ai_create(folder))
         ai.addAction("Astria.ai Browser…", lambda: self.astria_browser(folder))
+
+    # -- metadata (metadata_window.py / metadata_edit.py — ExifTool)
+    def edit_metadata(self, paths: list[str]) -> None:
+        """Right-click ▸ Edit Metadata…: the capture date, location, caption, keywords, camera and any other tag
+        of the selected photos and videos — or of every one inside the selected folders — in one go."""
+        import metadata_window
+
+        def done(changed: list[str], redraw: bool) -> None:
+            media_info.forget(changed)
+            if redraw and THUMBS is not None:
+                THUMBS.forget(changed)
+            self.grid.viewport().update()
+            self.list.viewport().update()
+            if changed:
+                n = len(changed)
+                self._airdrop_noted(f"Updated the metadata of {n:,} file{'s' if n != 1 else ''}.")
+
+        dlg = metadata_window.MetadataDialog(self.window(), paths, self.settings, done)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.open()
 
     # -- crop (crop_window.py / batch_crop.py — the iPhone app's Crop screen, on the Mac)
     def crop_photos(self, paths: list[str]) -> None:
