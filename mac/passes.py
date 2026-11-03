@@ -4,6 +4,10 @@ Provides: token exchange, gallery and message pagination, per-post item building
 and the shared-record type (.passes.json on the drive).  Same pattern as
 instagram.py / facebook.py; passes_downloader.py is the Qt window.
 
+A message's content is nested: `contents[0]` is another message-shaped object
+with its own `contents`, so item building walks down rather than reading one
+level.
+
 Passes support (Case PS-48213, 2026-11-03) confirms purchased content may be
 kept locally for personal use.  Personal archive only, no redistribution.
 """
@@ -274,20 +278,33 @@ def _is_manifest(url: str) -> bool:
     return path.endswith((".mpd", ".m3u8"))
 
 
+def _walk(node, out: list[dict], depth: int = 0) -> None:
+    """Collect every content object under `node`, however deeply nested."""
+    if depth > 4 or not isinstance(node, dict):
+        return
+    if node.get("contentId") or node.get("postId"):
+        out.append(node)
+        return
+    for child in node.get("contents") or []:
+        _walk(child, out, depth + 1)
+    snap = node.get("replyMessageSnapshot")
+    if isinstance(snap, dict):
+        _walk(snap, out, depth + 1)
+
+
 def items_from_post(post: dict, folder: Path,
                     already: set[str]) -> list[social.Item]:
     """Build social.Item entries for all contents in a post not yet in `already`."""
     date   = _ts(post.get("createdAt") or post.get("sentAt"))
-    poster = post.get("username") or post.get("userId", "")
+    poster = post.get("sender") if isinstance(post.get("sender"), str) else ""
+    poster = poster or post.get("username") or post.get("userId", "")
 
-    contents = post.get("contents") or []
-    if not contents:
-        contents = [post]          # post IS the single content item
-
-    _shape(f"msg keys={sorted(post)} contents={len(contents)}")
+    found: list[dict] = []
+    _walk(post, found)
+    _shape(f"msg keys={sorted(post)} found={len(found)}")
 
     items: list[social.Item] = []
-    for c in contents:
+    for c in found:
         cid = c.get("contentId") or c.get("postId", "")
         sc  = c.get("signedContent") or {}
         if not cid:
@@ -305,11 +322,13 @@ def items_from_post(post: dict, folder: Path,
         if orig:
             ENCRYPTED[cid] = orig
         else:
-            MISSING[cid] = ",".join(sorted(sc)) or "(empty)"
+            MISSING[cid] = (",".join(sorted(sc)) or "(empty)") + \
+                f" wm={c.get('watermarkEnabled')!r}/{c.get('watermarked')!r}"
 
         url = orig or sc.get("large") or sc.get("signedUrl") or ""
         if not url:
-            _shape(f"  SKIP no url — cid={cid} type={ct!r} keys={sorted(c)} sc={sorted(sc)}")
+            _shape(f"  SKIP no url — cid={cid} type={ct!r} "
+                   f"wm={c.get('watermarkEnabled')!r} keys={sorted(c)} sc={sorted(sc)}")
             continue
 
         # remember a non-manifest URL to fall back to
