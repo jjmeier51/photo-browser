@@ -94,11 +94,14 @@ def _content_key(pssh: PSSH, content_id: str, access_token: str):
 
 
 def _ffmpeg(args: list[str]) -> None:
+    """Run ffmpeg, raising with the tail of its stderr when it fails."""
     exe = video_tools.ffmpeg()
     if not exe:
         raise RuntimeError("ffmpeg not found")
-    subprocess.run([exe, "-y", *args],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    r = subprocess.run([exe, "-y", *args], capture_output=True, text=True)
+    if r.returncode != 0:
+        tail = [ln for ln in (r.stderr or "").strip().splitlines() if ln.strip()][-3:]
+        raise RuntimeError(f"ffmpeg {r.returncode}: {' / '.join(tail)}")
 
 
 def _merge(plain: list[Path], staged: Path, date: float) -> None:
@@ -121,7 +124,7 @@ def _grab(item: social.Item, headers: dict, exif_session, url: str,
         return social.Settled(item, str(item.folder / item.filename), present=True)
 
     # ffmpeg can't write HEIC, so anything unusual becomes a JPEG
-    ext = "mp4" if item.video else (item.ext if item.ext in _IMAGE_EXTS else "jpg")
+    ext = "mp4" if item.video else (item.ext.lower() if item.ext.lower() in _IMAGE_EXTS else "jpg")
     out_name = f"{item.name}.{ext}"
 
     try:
@@ -168,7 +171,9 @@ def _grab(item: social.Item, headers: dict, exif_session, url: str,
             if item.video:
                 _merge(plain, staged, item.date)
             else:
-                _ffmpeg(["-i", str(plain[0]), "-frames:v", "1", "-q:v", "2", str(staged)])
+                # an image is a single frame; image2 names the muxer explicitly
+                _ffmpeg(["-i", str(plain[0]), "-map", "0:v:0", "-frames:v", "1",
+                         "-f", "image2", str(staged)])
 
             if item.date:
                 os.utime(str(staged), (item.date, item.date))
