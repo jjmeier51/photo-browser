@@ -86,6 +86,7 @@ class Hooks:
     export_frames: Callable[[str], None] | None = None
     save_frame: Callable[[str, float], str | None] | None = None   # (video, seconds) → saved file
     labels_of: Callable[[str], list[str]] | None = None       # "favorite", "ai" — the iPhone app's labels
+    remove_objects: Callable[[str], None] | None = None       # the photo → Remove Objects (remove_window.py)
     set_label: Callable[[str, str, bool], None] | None = None  # (path, label, on)
     extra: dict = field(default_factory=dict)
 
@@ -901,6 +902,9 @@ class MediaViewer(QWidget):
         self.slide_act.setShortcutVisibleInContextMenu(True)
         menu.addAction("Full Screen", self.toggle_full)
         menu.addSeparator()
+        self.remove_act = menu.addAction("Remove Objects…", self.remove_objects)
+        self.remove_act.setToolTip("Draw round anything in the photo and it's gone")
+        self.remove_act.setVisible(self.hooks.remove_objects is not None)
         self.frames_act = menu.addAction("Export All Frames…", self.export_frames)
         self.frames_act.setToolTip("Every frame (or every other, every fourth) into a folder beside the video")
         self.loop_act = menu.addAction("Loop", self._toggle_loop)
@@ -1041,6 +1045,7 @@ class MediaViewer(QWidget):
         self.frames_act.setVisible(video and self.hooks.export_frames is not None)
         self.frame_btn.setEnabled(video)
         self.loop_act.setVisible(video)
+        self.remove_act.setVisible(not video and self.hooks.remove_objects is not None)
         self._show_labels()
         self._show_badges(path)
         self._fit_to(path)
@@ -1469,6 +1474,17 @@ class MediaViewer(QWidget):
             except RuntimeError:                         # the viewer was closed meanwhile
                 pass
         threading.Thread(target=work, daemon=True).start()
+
+    def reload(self, path: str) -> None:
+        """The file was rewritten (Remove Objects, Replace Original): read it afresh."""
+        self.loader.cache.pop(path, None)
+        self._hdr_cache.pop(path, None)
+        if self.paths and path == self.current:
+            self.show_current()
+
+    def remove_objects(self) -> None:
+        if self.hooks.remove_objects is not None and self.paths and not is_video(self.current):
+            self.hooks.remove_objects(self.current)
 
     def export_frames(self) -> None:
         if self.hooks.export_frames is not None and is_video(self.current):

@@ -185,6 +185,8 @@ def install(win, sf) -> None:
     act(t, "Crop…", lambda: pane().crop_photos(photos()), None, lambda: bool(photos()))
     act(t, "AI Upscale 2×…", lambda: pane().ai_upscale(photos()), None, lambda: bool(photos()))
     act(t, "Erase Area…", lambda: pane().erase_area(photos()), None, lambda: bool(photos()))
+    act(t, "Remove Objects…", lambda: pane().remove_objects(photos()[0]) if len(photos()) == 1 else None, None,
+        lambda: len(photos()) == 1, "Draw round anything in the photo and it's gone — filled in from the photo itself")
     t.addSeparator()
     act(t, "Edit with AI…", lambda: pane().ai_edit(photos()[0]), None, lambda: len(photos()) == 1)
     act(t, "Create with AI…", lambda: pane().ai_create(folder_target()), None, folder_target)

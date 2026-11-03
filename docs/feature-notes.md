@@ -1440,6 +1440,41 @@ settled).
   Side (⇧⌘C / ⇧⌘M, `transfer_selection`) open it rather than sending files into a folder you can't see — a
   To pane closed after use still has one. Drags from Finder onto the one pane still transfer, as before.
 
+## 6t. Safe Finder Remove Objects — `mac/inpaint.py`, `mac/remove_window.py` (Nov 3, 2026)
+
+TouchRetouch-style removal: a lasso/brush mark, filled from the photo itself by **multi-scale exemplar
+completion** (Wexler, Shechtman & Irani 2007 + PatchMatch, Barnes et al. 2009 — Content-Aware Fill's method),
+numpy only. Erase Area's membrane fill (`retouch._membrane`) is the coarsest level's first guess; its
+`_grow`/`_box_blur` are reused.
+- **Levels**: halve (known-only 2×2 averages; a block is unknown if any of its pixels is) until the hole's long
+  side ≤ `COARSEST` (20). Per level: targets = every 7×7 patch touching the hole; sources = patches wholly
+  outside it (and off the edge). EM: PatchMatch search (propagation from neighbours 8/4/2/1 px away, then random
+  search in halving circles; all patches at once), then voting (each hole pixel = weighted average of covering
+  patches, weight exp(−d/2σ²) × `CONFIDENCE`^depth — patches deeper in the hole count less, so structure enters
+  from the edges). Distances on all 49 pixels below `FULL_PATCHES` targets, else on every other one.
+- **A finer level starts from its own pixels along the coarse matches** (`init_from` → a vote with flat weights),
+  not from the enlarged coarse image. That was a real bug: matched against the blurred upscale, a thin line came
+  out a row off and each level doubled it (a horizon ended 15 px high). Measured fix, not a guess (tests carry it).
+- **Last pass at full detail** copies each hole pixel from its match's centre (`copy_centres`) after one more
+  search — averaging the votes had visibly softened grass/noise.
+- **Big holes** (long side > `HOLE_MAX` 280) are worked at a smaller size; `_to_full` copies the original's
+  pixels along the matches scaled up (averaged over the 3×3 neighbours' matches, so seams between matches blend)
+  and adds the worked result's low frequencies over a wide box (6/scale) — wide on purpose: narrow, it imprinted
+  the small result's soft stripes.
+- **Region only**: `remove_region` works on the hole's bounding box + a margin (1.5× its size, ≥ 64 px) and
+  returns (y0, x0, patch) — float work never touches the rest of a 48 MP photo; the window's undo steps are those
+  patches. The mask is grown by max(2, 0.25 % of the short side) first; the hole's outer 2 px are blended 60/40.
+- Synthetic benchmark (sky gradient, 3-px fence line, striped noisy grass): mean error vs. the hidden truth
+  7.3 (smooth fill 17.5), grain std 39.3 vs. truth 39.4; ~4 s for a person-sized hole, ~7 s for a 700×300 one on
+  the sandbox CPU.
+- **Window**: the mark is an ARGB overlay ≤ 4096 px (scaled up for the removal); lasso fills on release, brush /
+  eraser paint with Source / Clear composition; "Remove as I draw" (remembered) runs on release; work on a
+  thread with a bar, Esc cancels between rounds. Saving is batch_crop's (`encode_like` + `write_in_place` /
+  `write_beside`, label "retouched"); Safe Finder carries tags to a new photo, adds "retouched", forgets the
+  thumbnail and tells open viewers to `reload`.
+- Not done: a learned inpainting model (LaMa-style) would do better on unique structure; it would need a model
+  download and an ML runtime, and couldn't be tested from here.
+
 ## 6s. Safe Finder Edit Metadata — `mac/metadata_edit.py`, `mac/metadata_window.py` (Nov 3, 2026)
 
 Bulk metadata for any number of photos and videos (or everything under picked folders — `media_in`: hidden

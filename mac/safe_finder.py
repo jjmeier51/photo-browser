@@ -3993,7 +3993,7 @@ class Pane(QWidget):
             edit_tags=lambda p: TagDialog(QApplication.activeWindow() or self.window(), [p], describe_items([p])).open(),
             reveal=self._reveal_from_viewer, export_frames=lambda p: self.export_frames([p]),
             save_frame=frame_export.save_frame, labels_of=lambda p: tag_store().labels(p, fresh=False),
-            set_label=lambda p, label, on: self.set_label([p], label, on))
+            set_label=lambda p, label, on: self.set_label([p], label, on), remove_objects=self.remove_objects)
         # Opens at the size of Safe Finder's window, over it, and takes each item's shape within that.
         viewer = media_viewer.MediaViewer(items, items.index(path), hooks, poster, None, box=self.window().geometry())
         viewer.removed.connect(lambda _paths: self.refresh_results())
@@ -4312,6 +4312,8 @@ class Pane(QWidget):
                 menu.addAction("Erase Area…" if len(photos) == 1 else f"Erase Area on {len(photos)} Photos…",
                                lambda: self.erase_area(photos))
                 if len(photos) == 1:
+                    menu.addAction("Remove Objects…", lambda: self.remove_objects(photos[0]))
+                if len(photos) == 1:
                     menu.addAction("Edit with AI…", lambda: self.ai_edit(photos[0]))
             menu.addAction("Move to Trash", self.delete_selection).setShortcut(QKeySequence("Ctrl+Backspace"))
             menu.addSeparator()
@@ -4439,6 +4441,45 @@ class Pane(QWidget):
             self._airdrop_noted(note + ".")
 
         dlg = erase_window.EraseDialog(self.window(), photos, self.settings, done)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.open()
+
+    # -- Remove Objects (remove_window.py / inpaint.py — TouchRetouch on the Mac)
+    def remove_objects(self, path: str) -> None:
+        """Right-click a photo ▸ Remove Objects…: a lasso (or a brush) round anything, and it's filled in from the
+        photo itself; saved in place or as a new photo with the original's tags, tagged "retouched"."""
+        try:
+            import remove_window
+            import retouch
+        except ImportError:                      # numpy, not in an older mac/.venv yet
+            QMessageBox.information(self.window(), "Remove Objects", "Remove Objects needs numpy. Quit Safe Finder "
+                                    "and open “Safe Finder.command” again — it installs it — or run: "
+                                    "mac/.venv/bin/pip install numpy")
+            return
+        if not retouch.can_erase(path):
+            QMessageBox.information(self.window(), "Remove Objects", "This photo can't be retouched here — JPEG, HEIC, "
+                                    "PNG, WebP, TIFF and BMP photos can (HEIC needs pillow-heif; run mac/run.sh once).")
+            return
+
+        def done(written: str, as_new: bool) -> None:
+            try:
+                if as_new:
+                    tag_store().carry([(path, written)])             # a new photo has its original's tags…
+                tag_store().add([written], [retouch.ERASED_TAG])     # …and "retouched"
+            except OSError as e:
+                QMessageBox.warning(self.window(), "Remove Objects", f"Couldn't save the tags: {e}")
+            tags_changed()
+            if THUMBS is not None and not as_new:
+                THUMBS.forget([written])
+            media_info.forget([written])
+            for w in list(_VIEWERS):                                   # a viewer showing it: read it afresh
+                if hasattr(w, "reload"):
+                    w.reload(written)
+            self.grid.viewport().update()
+            self.list.viewport().update()
+            self._airdrop_noted(f"Saved “{os.path.basename(written)}”" + (" beside the original." if as_new else "."))
+
+        dlg = remove_window.RemoveWindow(QApplication.activeWindow() or self.window(), path, self.settings, done)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.open()
 

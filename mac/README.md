@@ -255,7 +255,7 @@ out when it can't): **File** (New Folder ⇧⌘N, Open ⌘↓, Open With Default
 Copy/Move to the other side ⇧⌘C / ⇧⌘M — in one window they open Split View, AirDrop to iPhone, Move to Trash ⌘⌫), **Edit** (Select All, Find ⌘F,
 Tags… ⌘T), **View** (as Icons/List/Photos ⌘1–3, Split View ⌘\\, Sort By, bigger/smaller thumbnails ⌘= / ⌘−), **Go** (Back ⌘[,
 Forward ⌘], Enclosing Folder ⌘↑, Home ⇧⌘H, Desktop ⇧⌘D, Downloads ⌥⌘L, Pictures, All Videos, Empty Folders, Favorites, To AI,
-Drives), **Photos** (Edit Metadata ⌘I, Favorite ⇧⌘F, To AI ⇧⌘A, Find Duplicates, Export All Frames, Crop, AI Upscale, Erase Area, Edit/Create with AI, the
+Drives), **Photos** (Edit Metadata ⌘I, Favorite ⇧⌘F, To AI ⇧⌘A, Find Duplicates, Export All Frames, Crop, AI Upscale, Erase Area, Remove Objects, Edit/Create with AI, the
 Astria.ai Browser, the SimpCity / Instagram / Facebook downloaders, taylorpictures.net) and **Window** (every
 viewer and tool window that's open). The right-click menu keeps the everyday commands at the top and puts a
 folder's downloaders under **Download ▸** and its AI under **AI ▸**.
@@ -584,6 +584,34 @@ photo with the same metadata, dates and tags; **Replace** rewrites them in place
 "retouched"; **Last Area** brings back the boxes used last. Photos where Just the Mark finds nothing in the
 boxes are left alone (and counted). It erases what you box; it doesn't look for watermarks on its own.
 (Needs numpy — `Safe Finder.command` installs it; rebuild the app with `build_safe_finder_app.sh`.)
+
+### Remove Objects — draw round it and it's gone (`remove_window.py`, `inpaint.py`)
+
+TouchRetouch on the Mac. Right-click a photo ▸ **Remove Objects…** (or Photos ▸ Remove Objects…, or ⋯ in the
+viewer), then:
+
+- **Lasso** (L) — draw round a person, a sign, a bin, a wire… and let go: it's gone. **Brush** (B) paints over
+  it instead (handy for thin things); **Eraser** (E) takes back part of a mark; [ and ] change the brush size.
+  With **Remove as I draw** off, mark several things and press **Remove** (or Return).
+- **Undo** ⌘Z / **Redo** ⇧⌘Z, one removal at a time; **Compare** (press and hold, or hold Space) shows the
+  original; ⌘-scroll or pinch zooms (or − / Fit / +), scrolling moves around. Esc stops a removal that's
+  running, or clears the mark.
+- **Save as New** puts the result beside the photo as "name (retouched).jpg" with the original's tags;
+  **Replace Original** writes it in place. Either way the format, metadata (date, place, camera), the file's
+  dates and its tags are kept, and the result is tagged "retouched". Closing with changes asks first.
+
+**How it fills the hole.** Not by smearing the surroundings in (Erase Area's fill, made for thin watermarks),
+but with the photo itself — the method behind Photoshop's Content-Aware Fill: every small patch of the hole is
+matched to the most alike patch elsewhere in the photo, the matches vote on each pixel, and that repeats from
+a small version of the photo up to full size, so the big shapes (a horizon, a wall, a path) carry through
+first and then the texture and grain. The last pass copies real pixels rather than averages, so grass, sand,
+skin and noise look like the rest of the photo. The object's soft edge is taken with it, and a big area is
+worked at a smaller size and brought back to full resolution along the same matches. A person-sized area
+takes a few seconds; the bar shows how far it's got. Everything happens on this Mac — nothing is uploaded.
+
+It works best when what's behind the object is like something else in the photo (sky, grass, water, a wall, a
+crowd); a unique thing hidden behind it can't be known, and gets the most plausible fill from around it. Draw
+the lasso a little outside the object, with its shadow if it has one.
 
 ### Download an Instagram or Facebook profile (`social_downloader.py`, `instagram.py`, `facebook.py`)
 

@@ -136,6 +136,8 @@ actions the app makes no network calls.
   is Lanczos + denoise + sharpen. And right-click ▸ **Erase Area…** — boxes
   drawn once over a watermark/stamp on one photo, erased from every selected one (see-through marks taken
   back out, the rest filled; Save as New or Replace; tagged "retouched" — `mac/retouch.py`, §6o).
+  And right-click ▸ **Remove Objects…** — TouchRetouch-style: lasso/brush round anything and it's filled from the
+  photo itself (multi-scale PatchMatch completion, `mac/inpaint.py`; window `mac/remove_window.py`; §6t).
   Safe Finder's **Photos view** (⌘3, the iPhone's square grid with video lengths) and its **viewer** (double-click:
   the window takes each item's shape within Safe Finder's window size, bars above/below the picture — never over
   it — a resolution + HDR badge top right, ♡/✦ labels, zoom for photos and videos, a click-anywhere scrubber +
