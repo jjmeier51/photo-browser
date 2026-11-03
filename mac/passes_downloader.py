@@ -295,7 +295,8 @@ class PassesWindow(QMainWindow):
                 self._records[key] = passes.record(folder)
             rec     = self._records[key]
             already = rec.downloaded | passes.ids_on_disk(folder)
-            for item in passes.items_from_post(post, folder, already):
+            for item in passes.items_from_post(post, folder, already,
+                                                self._access_token):
                 self._queue(item)
 
     def _queue(self, item: social.Item) -> None:

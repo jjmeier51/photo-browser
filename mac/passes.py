@@ -4,9 +4,10 @@ Provides: token exchange, gallery and message pagination, per-post item building
 and the shared-record type (.passes.json on the drive).  Same pattern as
 instagram.py / facebook.py; passes_downloader.py is the Qt window.
 
-A message's content is nested: `contents[0]` is another message-shaped object
-with its own `contents`, so item building walks down rather than reading one
-level.
+Two Passes quirks are handled here: a message's content is nested (so item
+building walks down), and messages name their variants `signedUrlLg`/`Md`/`Sm`
+where the gallery uses `large`, with `signedContent` often absent entirely and
+needing a per-content fetch.
 
 Passes support (Case PS-48213, 2026-11-03) confirms purchased content may be
 kept locally for personal use.  Personal archive only, no redistribution.
@@ -50,6 +51,11 @@ GAP     = 0.3    # seconds between listing pages
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
+# variant names, best first — the gallery uses `original`/`large`, messages use
+# `signedUrlOriginal`/`signedUrlLg`/`Md`/`Sm`
+_URL_ORIGINAL = ("original", "signedUrlOriginal", "originalUrl", "signedUrlOrig")
+_URL_PLAIN    = ("large", "signedUrlLg", "signedUrl", "signedUrlMd", "signedUrlSm")
+
 # contentIds whose `original` variant is an encrypted DASH manifest, mapped to its URL.
 # Populated by items_from_post(); consumed by passes_decrypt.grab_original().
 ENCRYPTED: dict[str, str] = {}
@@ -65,7 +71,7 @@ MISSING: dict[str, str] = {}
 # ── shape recorder (diagnostic) ───────────────────────────────────────────────
 
 _SHAPE_FILE = Path.home() / "Library" / "Caches" / "PhotoBrowser" / "passes-shapes.txt"
-_shapes_left = 14
+_shapes_left = 20
 
 
 def _shape(line: str) -> None:
@@ -183,6 +189,23 @@ def creator_username(user_id: str, access_token: str) -> str:
         return user_id
 
 
+def signed_content(content_id: str, access_token: str) -> dict:
+    """Signed variant URLs for one content id, when the message didn't carry them."""
+    for path in ("/content/get", "/content/content"):
+        try:
+            doc = _post(path, {"contentId": content_id}, access_token)
+        except Exception as e:  # noqa: BLE001
+            _shape(f"  fetch {path} failed for {content_id}: {e}")
+            continue
+        _shape(f"  fetch {path} ok for {content_id}: keys={sorted(doc)}")
+        for holder in (doc, doc.get("content") or {}, doc.get("data") or {}):
+            if isinstance(holder, dict) and isinstance(holder.get("signedContent"), dict):
+                return holder["signedContent"]
+        if isinstance(doc.get("signedContent"), dict):
+            return doc["signedContent"]
+    return {}
+
+
 # ── listing ───────────────────────────────────────────────────────────────────
 
 def _more(doc: dict) -> bool:
@@ -278,6 +301,14 @@ def _is_manifest(url: str) -> bool:
     return path.endswith((".mpd", ".m3u8"))
 
 
+def _pick(sc: dict, keys: tuple[str, ...]) -> str:
+    for k in keys:
+        v = sc.get(k)
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
 def _walk(node, out: list[dict], depth: int = 0) -> None:
     """Collect every content object under `node`, however deeply nested."""
     if depth > 4 or not isinstance(node, dict):
@@ -292,8 +323,8 @@ def _walk(node, out: list[dict], depth: int = 0) -> None:
         _walk(snap, out, depth + 1)
 
 
-def items_from_post(post: dict, folder: Path,
-                    already: set[str]) -> list[social.Item]:
+def items_from_post(post: dict, folder: Path, already: set[str],
+                    access_token: str = "") -> list[social.Item]:
     """Build social.Item entries for all contents in a post not yet in `already`."""
     date   = _ts(post.get("createdAt") or post.get("sentAt"))
     poster = post.get("sender") if isinstance(post.get("sender"), str) else ""
@@ -306,33 +337,37 @@ def items_from_post(post: dict, folder: Path,
     items: list[social.Item] = []
     for c in found:
         cid = c.get("contentId") or c.get("postId", "")
-        sc  = c.get("signedContent") or {}
         if not cid:
             _shape(f"  SKIP no cid — keys={sorted(c)}")
             continue
         if cid in already:
-            _shape(f"  skip already — {cid}")
             continue
         ct  = (c.get("contentType") or "").lower()
         ext = (c.get("extension") or "").lstrip(".")
 
+        sc = c.get("signedContent") or {}
+        if not sc and access_token:
+            sc = signed_content(cid, access_token)
+        if sc and not any(k in sc for k in _URL_ORIGINAL + _URL_PLAIN):
+            _shape(f"  UNKNOWN url keys — cid={cid} sc={sorted(sc)}")
+
         # the original variant is an encrypted DASH manifest; register it and let
         # passes_decrypt.grab_original() handle the item
-        orig = sc.get("original") or ""
+        orig  = _pick(sc, _URL_ORIGINAL)
+        plain = _pick(sc, _URL_PLAIN)
         if orig:
             ENCRYPTED[cid] = orig
         else:
             MISSING[cid] = (",".join(sorted(sc)) or "(empty)") + \
                 f" wm={c.get('watermarkEnabled')!r}/{c.get('watermarked')!r}"
 
-        url = orig or sc.get("large") or sc.get("signedUrl") or ""
+        url = orig or plain
         if not url:
             _shape(f"  SKIP no url — cid={cid} type={ct!r} "
                    f"wm={c.get('watermarkEnabled')!r} keys={sorted(c)} sc={sorted(sc)}")
             continue
 
         # remember a non-manifest URL to fall back to
-        plain = sc.get("signedUrl") or sc.get("large") or ""
         if plain and not _is_manifest(plain):
             PLAIN[cid] = plain
 
