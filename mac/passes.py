@@ -58,6 +58,26 @@ PLAIN: dict[str, str] = {}
 # Diagnostic only — these are the ones that carry Passes' watermark.
 MISSING: dict[str, str] = {}
 
+# ── shape recorder (diagnostic) ───────────────────────────────────────────────
+
+_SHAPE_FILE = Path.home() / "Library" / "Caches" / "PhotoBrowser" / "passes-shapes.txt"
+_shapes_left = 14
+
+
+def _shape(line: str) -> None:
+    """Appends one line about a message shape, for the first few of a run."""
+    global _shapes_left
+    if _shapes_left <= 0:
+        return
+    _shapes_left -= 1
+    try:
+        _SHAPE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with _SHAPE_FILE.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
 # ── secret storage ────────────────────────────────────────────────────────────
 
 def get_refresh_token() -> str:
@@ -264,14 +284,20 @@ def items_from_post(post: dict, folder: Path,
     if not contents:
         contents = [post]          # post IS the single content item
 
+    _shape(f"msg keys={sorted(post)} contents={len(contents)}")
+
     items: list[social.Item] = []
     for c in contents:
         cid = c.get("contentId") or c.get("postId", "")
-        if not cid or cid in already:
+        sc  = c.get("signedContent") or {}
+        if not cid:
+            _shape(f"  SKIP no cid — keys={sorted(c)}")
+            continue
+        if cid in already:
+            _shape(f"  skip already — {cid}")
             continue
         ct  = (c.get("contentType") or "").lower()
         ext = (c.get("extension") or "").lstrip(".")
-        sc  = c.get("signedContent") or {}
 
         # the original variant is an encrypted DASH manifest; register it and let
         # passes_decrypt.grab_original() handle the item
@@ -283,6 +309,7 @@ def items_from_post(post: dict, folder: Path,
 
         url = orig or sc.get("large") or sc.get("signedUrl") or ""
         if not url:
+            _shape(f"  SKIP no url — cid={cid} type={ct!r} keys={sorted(c)} sc={sorted(sc)}")
             continue
 
         # remember a non-manifest URL to fall back to
