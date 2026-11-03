@@ -1102,6 +1102,7 @@ final class Library {
         if favorites.contains(url.path) { favorites.remove(url.path) } else { favorites.insert(url.path) }
         scheduleBulkSave(favorites, "favorites")
         labelsVersion += 1
+        noteTagsEdited()                    // the drive's shared file carries Favorites and To AI too
     }
 
     /// Favorites (or un-favorites) many items as one change: one store update, one save, one
@@ -1112,6 +1113,7 @@ final class Library {
         if on { favorites.formUnion(paths) } else { favorites.subtract(paths) }
         scheduleBulkSave(favorites, "favorites")
         labelsVersion += 1
+        noteTagsEdited()
     }
 
     func isAI(_ url: URL) -> Bool { aiLabels.contains(url.path) }
@@ -1123,12 +1125,14 @@ final class Library {
         if on { aiLabels.formUnion(paths) } else { aiLabels.subtract(paths) }
         scheduleBulkSave(aiLabels, "ai")
         labelsVersion += 1
+        noteTagsEdited()
     }
 
     func toggleAI(_ url: URL) {
         if aiLabels.contains(url.path) { aiLabels.remove(url.path) } else { aiLabels.insert(url.path) }
         scheduleBulkSave(aiLabels, "ai")
         labelsVersion += 1
+        noteTagsEdited()
     }
 
     // MARK: - Trash (Recently Deleted)

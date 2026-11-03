@@ -254,8 +254,8 @@ Everything Safe Finder does is in its menus, acting on the pane you're in and wh
 out when it can't): **File** (New Folder ⇧⌘N, Open ⌘↓, Open With Default App, Quick Look, Show in Finder,
 Copy/Move to the other side ⇧⌘C / ⇧⌘M — in one window they open Split View, AirDrop to iPhone, Move to Trash ⌘⌫), **Edit** (Select All, Find ⌘F,
 Tags… ⌘T), **View** (as Icons/List/Photos ⌘1–3, Split View ⌘\\, Sort By, bigger/smaller thumbnails ⌘= / ⌘−), **Go** (Back ⌘[,
-Forward ⌘], Enclosing Folder ⌘↑, Home ⇧⌘H, Desktop ⇧⌘D, Downloads ⌥⌘L, Pictures, All Videos, Empty Folders,
-Drives), **Photos** (Edit Metadata ⌘I, Find Duplicates, Export All Frames, Crop, AI Upscale, Erase Area, Edit/Create with AI, the
+Forward ⌘], Enclosing Folder ⌘↑, Home ⇧⌘H, Desktop ⇧⌘D, Downloads ⌥⌘L, Pictures, All Videos, Empty Folders, Favorites, To AI,
+Drives), **Photos** (Edit Metadata ⌘I, Favorite ⇧⌘F, To AI ⇧⌘A, Find Duplicates, Export All Frames, Crop, AI Upscale, Erase Area, Edit/Create with AI, the
 Astria.ai Browser, the SimpCity / Instagram / Facebook downloaders, taylorpictures.net) and **Window** (every
 viewer and tool window that's open). The right-click menu keeps the everyday commands at the top and puts a
 folder's downloaders under **Download ▸** and its AI under **AI ▸**.
@@ -464,6 +464,21 @@ nothing is wiped — the app fills it back in. Drive Health ▸ Sync Tags with S
 demand and shows when it last did. (Tags are only shared for files on the drive the app has open.)
 Each file also carries its own tags (see "Tags stick to the file" above), which is how they survive a
 move or copy that neither app saw.
+
+### Favorites and To AI — the same as the iPhone app's
+
+Select items and right-click ▸ **Favorite** / **To AI** (or Photos ▸ Favorite **⇧⌘F**, Photos ▸ To AI **⇧⌘A**, the
+♡ and ✦ buttons in the viewer, or drop items on **Favorites** / **To AI** in the sidebar). Choosing it again when
+every selected item already has it takes it off (Unfavorite / Remove To AI). A favorite shows a white heart on its
+tile, a To AI item the iPhone's sparkles. The sidebar's **Labels** section shows how many there are and opens
+either as a list of everything with it — on this Mac and every connected drive (Go ▸ Favorites / To AI too).
+
+They are the iPhone app's Favorites and To AI, both ways: they're kept in the drive's shared tag file
+(`.Photo Browser Metadata/shared-tags.json`, beside the tags, under `labels`), and the app merges that with its
+own whenever it opens the drive, comes back to the foreground, or a label or tag changes — a heart added or taken
+off on either side reaches the other, as tags do. Like the app's, they stay with the original when an item is
+copied, follow it when Safe Finder moves it to the SSD, and go when it's moved to the Trash. Items on the Mac's
+own disk keep theirs in Safe Finder's own file. A file moved by Finder (not Safe Finder) leaves its labels behind.
 
 ### Crop photos — one crop on many (`crop_window.py`, `batch_crop.py`)
 

@@ -21,7 +21,15 @@ How the two stay in step
 
 Format (JSON, UTF-8):
   {"format": "Photo Browser shared tags", "version": 1, "id": "<uuid>", "updated": <epoch seconds>,
-   "by": "Safe Finder" | "Photo Browser", "files": {"<path in the drive>": ["tag", …], …}}
+   "by": "Safe Finder" | "Photo Browser", "files": {"<path in the drive>": ["tag", …], …},
+   "labels": {"<path in the drive>": ["favorite", "ai"], …}}
+
+Favorites and To AI ride in the same file, in `labels` (keys like `files`'): the iPhone app's Favorites and
+"To AI" labels, merged by the app three ways exactly as tags are (`SharedTags.sync`), so a heart added or taken
+off on either side reaches the other. They aren't tags — no tag list shows them — and, like the app's, they stay
+with the original when a file is copied, follow it when Safe Finder moves it (`carry_labels`), and go when it's
+trashed (`forget`). They aren't carried inside files: a file moved by Finder leaves its labels behind, as it
+always has on the iPhone.
 A tag is stored as the app stores it (Library.normalizedTag: trimmed, no leading "#", inner spaces
 collapsed) and compared ignoring case. Paths are NFC. Hidden items (any part starting with ".") are
 never in it.
@@ -84,6 +92,8 @@ _RECHECK = 2.0                                                    # seconds betw
 MARKER = "com.photobrowser.tags"                                  # {"path": key when written, "tags": [...]}
 FINDER_TAGS = "com.apple.metadata:_kMDItemUserTags"              # read only to take off what an earlier build wrote
 BACKUPS_KEPT = 14
+LABELS = ("favorite", "ai")                                      # the app's Favorites and To AI
+LABEL_NAMES = {"favorite": "Favorites", "ai": "To AI"}
 
 
 def normalized(raw: str) -> str:
@@ -267,6 +277,7 @@ class TagFile:
         self.file = file
         self.base = base
         self.files: dict[str, list[str]] = {}      # key → tags
+        self.labels: dict[str, list[str]] = {}     # key → labels ("favorite", "ai")
         self.id = ""
         self.damaged = False                       # it was there but couldn't be read (started afresh on save)
         self._stamp: tuple[int, int] | None = None  # (mtime_ns, size) of what was read
@@ -308,8 +319,8 @@ class TagFile:
         try:
             st = os.stat(self.file)
         except OSError:
-            if self._stamp is not None or self.files:
-                self.files, self.id, self.damaged = {}, "", False
+            if self._stamp is not None or self.files or self.labels:
+                self.files, self.labels, self.id, self.damaged = {}, {}, "", False
             self._stamp = None
             return
         stamp = (st.st_mtime_ns, st.st_size)
@@ -323,7 +334,7 @@ class TagFile:
             if not isinstance(raw, dict):
                 raise ValueError("no “files” table")
         except (OSError, ValueError, UnicodeDecodeError):
-            self.files, self.id, self.damaged = {}, "", True
+            self.files, self.labels, self.id, self.damaged = {}, {}, "", True
             return
         files: dict[str, list[str]] = {}
         for k, v in raw.items():
@@ -333,7 +344,15 @@ class TagFile:
             tags = clean((files.get(key) or []) + v)
             if tags:
                 files[key] = tags
-        self.files, self.id, self.damaged = files, str(doc.get("id") or ""), False
+        labels: dict[str, list[str]] = {}
+        raw_labels = doc.get("labels")
+        for k, v in (raw_labels.items() if isinstance(raw_labels, dict) else ()):
+            if isinstance(k, str) and isinstance(v, list) and (self.base is None or not any(
+                    part.startswith(".") for part in k.split("/"))):      # hidden paths are never shared
+                have = set(labels.get(_nfc(k), [])) | {x for x in v if x in LABELS}
+                if have:
+                    labels[_nfc(k)] = [x for x in LABELS if x in have]
+        self.files, self.labels, self.id, self.damaged = files, labels, str(doc.get("id") or ""), False
 
     # -- writing
     def back_up(self) -> None:
@@ -362,6 +381,8 @@ class TagFile:
             self.id = str(uuid.uuid4()).upper()
         doc = {"format": FORMAT, "version": VERSION, "id": self.id, "updated": round(time.time(), 3),
                "by": "Safe Finder", "files": {k: self.files[k] for k in sorted(self.files) if self.files[k]}}
+        if any(self.labels.values()):
+            doc["labels"] = {k: self.labels[k] for k in sorted(self.labels) if self.labels[k]}
         data = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         folder = self.file.parent
         if not folder.is_dir():
@@ -669,6 +690,77 @@ class TagStore:
                 pass
         return changed
 
+    # -- Favorites and To AI (the app's labels — see the module doc)
+    def labels(self, path: str, fresh: bool = True) -> list[str]:
+        """`path`'s labels ("favorite", "ai"). `fresh=False` skips the file check (for painting tiles)."""
+        t = self.table_for(path)
+        if fresh:
+            t.refresh()
+        k = t.key(path)
+        return list(t.labels.get(k, ())) if k else []
+
+    def has_label(self, path: str, label: str, fresh: bool = False) -> bool:
+        return label in self.labels(path, fresh)
+
+    def _edit_labels(self, paths: Iterable[str], change: Callable[[set[str], str], set[str]]) -> int:
+        touched: dict[int, TagFile] = {}
+        dirty: dict[int, TagFile] = {}
+        changed = 0
+        for p in paths:
+            t = self.table_for(p)
+            if id(t) not in touched:
+                t.refresh(force=True)
+                touched[id(t)] = t
+            k = t.key(p)
+            if k is None:
+                continue
+            before = set(t.labels.get(k, ()))
+            after = change(set(before), p) & set(LABELS)
+            if after == before:
+                continue
+            if after:
+                t.labels[k] = [x for x in LABELS if x in after]
+            else:
+                t.labels.pop(k, None)
+            dirty[id(t)] = t
+            changed += 1
+        for t in dirty.values():
+            t.save()
+        if dirty:
+            self.version += 1
+        return changed
+
+    def set_label(self, paths: Iterable[str], label: str, on: bool) -> int:
+        """Favorites (or un-favorites) the items — or puts them in / takes them out of To AI. Returns how many
+        changed."""
+        if label not in LABELS:
+            return 0
+        return self._edit_labels((p for p in paths if taggable(p)) if on else paths,
+                                 lambda cur, _p: cur | {label} if on else cur - {label})
+
+    def files_labelled(self, label: str) -> list[str]:
+        """Full paths of the items with `label` on this Mac and the connected drives (they may have gone
+        missing since — check)."""
+        out: list[str] = []
+        for t in self.tables():
+            out.extend(t.path(k) for k, v in t.labels.items() if label in v)
+        return out
+
+    def label_count(self, label: str) -> int:
+        return sum(1 for t in self.tables() for v in t.labels.values() if label in v)
+
+    def carry_labels(self, pairs: Iterable[tuple[str, str]]) -> int:
+        """After a move: each item's labels go to its new place (call before `forget` drops the old)."""
+        moves = [(src, dst) for src, dst in pairs]
+        wanted: dict[str, set[str]] = {}
+        for src, dst in moves:
+            have = set(self.labels(src))
+            if have:
+                wanted.setdefault(dst, set()).update(have)
+        if not wanted:
+            return 0
+        return self._edit_labels(list(wanted), lambda cur, p: cur | wanted.get(p, set()))
+
     def forget(self, paths: Iterable[str]) -> int:
         """Items that are gone (to the Trash, or moved away): their tags — and, for a folder, the tags of
         everything inside it — are dropped. One pass over each table however many went (a move of
@@ -687,7 +779,11 @@ class TagStore:
             for k in keys:
                 t.files.pop(k, None)
                 n += 1
-            if keys:
+            labelled = [x for x in t.labels if _within(x, roots)]
+            for k in labelled:
+                t.labels.pop(k, None)
+                n += 1
+            if keys or labelled:
                 dirty[id(t)] = t
         for t in dirty.values():
             t.save()

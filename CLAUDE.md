@@ -102,7 +102,9 @@ actions the app makes no network calls.
   whenever it opens or gets the drive back, returns to the foreground, or a tag changes — base kept
   by the file's id (`tagSyncBase`), so removals cross too and a lost file never wipes anything.
   Every tag change must reach `noteTagsEdited()` (the tag setters and `persistAllPathKeyed` call
-  it). **Tags also travel inside each file** (not on exFAT) in a private attribute
+  it). **Favorites and To AI ride in the same file** (`labels`: path → ["favorite", "ai"]), merged three ways the same
+  way — Safe Finder edits them too (right-click / ⇧⌘F / ⇧⌘A / sidebar Labels); every favorite/To AI change calls
+  `noteTagsEdited()`; copies don't get them, moves carry them (§6h). **Tags also travel inside each file** (not on exFAT) in a private attribute
   (`com.photobrowser.tags`: path + tags when written — deliberately *not* Finder's tags, which are the
   user's and are left alone). A file new to the index (moved/copied in by Finder or Files) is squared
   with the store (`adoptCarriedTags` → `SharedTags.reconcile`): its tags are adopted, a move drops the

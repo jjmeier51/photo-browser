@@ -154,6 +154,8 @@ def install(win, sf) -> None:
     act(g, "Pictures", lambda: pane().go(str(home / "Pictures")))
     act(g, "All Videos", lambda: win._navigate(sf.VIDEOS))
     act(g, "Empty Folders", lambda: win._navigate(sf.EMPTY))
+    act(g, "Favorites", lambda: win._navigate(sf.LABEL + "favorite"))
+    act(g, "To AI", lambda: win._navigate(sf.LABEL + "ai"))
     drives = g.addMenu("Drives")
 
     def fill_drives() -> None:
@@ -171,6 +173,10 @@ def install(win, sf) -> None:
     act(t, "Edit Metadata…", lambda: pane().edit_metadata(editable()) if editable() else None, "Ctrl+I",
         lambda: bool(editable()),
         "Capture date, location, caption, keywords, camera and any other tag — of everything selected")
+    act(t, "Favorite", lambda: pane().toggle_label("favorite"), "Ctrl+Shift+F", lambda: bool(sel()),
+        "Favorite the selection (or unfavorite it, when it all is) — the iPhone app's Favorites")
+    act(t, "To AI", lambda: pane().toggle_label("ai"), "Ctrl+Shift+A", lambda: bool(sel()),
+        "Mark the selection To AI (or take it off) — the iPhone app's To AI")
     t.addSeparator()
     act(t, "Find Duplicates…", lambda: pane().find_duplicates(folder_target()), None, folder_target,
         "Likely copies in the selected folder (or this one)")

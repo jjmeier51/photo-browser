@@ -32,6 +32,12 @@ import Foundation
 /// 2026) briefly wrote Finder tags too; they come off wherever they're exactly what it wrote
 /// (`isOursInFinder`). Safe Finder does the same for every folder it opens (`mac/shared_tags.py`).
 ///
+/// **Favorites and To AI ride along** in the same file, in `labels` (path → ["favorite", "ai"]), merged three
+/// ways against the same base exactly as tags are — so a heart added or taken off in Safe Finder or here reaches
+/// the other. They are the app's `favorites` / `aiLabels`, not tags: no tag list shows them, copies don't get
+/// them (`copyTags`), and they aren't carried inside files. A base from before labels were shared has none, so
+/// the first sync combines the two sides' labels and removes nothing.
+///
 /// Everything here runs off the main actor; reading and applying the store is `Library.syncDriveTags`.
 nonisolated enum SharedTags {
     static let fileName = "shared-tags.json"
@@ -45,6 +51,7 @@ nonisolated enum SharedTags {
         var updated: Double?
         var by: String?
         var files: [String: [String]]
+        var labels: [String: [String]]?        // Favorites and To AI: path → ["favorite", "ai"]
     }
 
     /// What the app and one drive's file agreed on at the last sync.
@@ -52,6 +59,7 @@ nonisolated enum SharedTags {
         var files: [String: [String]]
         var date: Double
         var markers: Bool?          // every file's marker was written at that sync (nil: not yet)
+        var labels: [String: [String]]?     // the labels agreed on (nil: from before labels were shared)
     }
 
     /// `com.photobrowser.tags` on a file: where it was, and what it carried, when last written.
@@ -84,9 +92,18 @@ nonisolated enum SharedTags {
     nonisolated enum Outcome: Sendable {
         /// `adopted`: drive-relative keys whose files carried tags the store lacked; `movedAway`: keys
         /// whose files moved elsewhere (their tags went with them).
-        case synced(merged: [String: [String]], id: String, by: String?, markers: Bool,
+        case synced(merged: [String: [String]], labels: [String: [String]], id: String, by: String?, markers: Bool,
                     adopted: [String: [String]], movedAway: [String])
         case failed(String)
+    }
+
+    /// The labels the shared file holds — `Library.favorites` and `Library.aiLabels`.
+    static let labelNames = ["favorite", "ai"]
+
+    /// A file's labels as stored: only the known ones, each once, in `labelNames`' order.
+    static func cleanLabels(_ labels: [String]) -> [String] {
+        let have = Set(labels.map { $0.lowercased() })
+        return labelNames.filter { have.contains($0) }
     }
 
     static let markerName = "com.photobrowser.tags"
@@ -254,7 +271,8 @@ nonisolated enum SharedTags {
     /// has in `bases`, and writes the result back when the drive's copy differs. With `carry`, every
     /// file whose tags changed (every tagged file, the first time) gets its own attributes written too.
     /// Blocking file I/O.
-    static func sync(root: URL, local: [String: [String]], bases: [String: Base], carry: Bool) -> Outcome {
+    static func sync(root: URL, local: [String: [String]], labels localLabels: [String: [String]],
+                     bases: [String: Base], carry: Bool) -> Outcome {
         let fm = FileManager.default
         let url = fileURL(root: root)
         guard fm.fileExists(atPath: root.path) else { return .failed("The drive isn't connected.") }
@@ -267,12 +285,19 @@ nonisolated enum SharedTags {
             let tags = clean((theirs[key] ?? []) + list)
             if !tags.isEmpty { theirs[key] = tags }
         }
+        var theirLabels: [String: [String]] = [:]
+        for (key, list) in remote?.labels ?? [:] where isShared(key) {
+            let labels = cleanLabels((theirLabels[key] ?? []) + list)
+            if !labels.isEmpty { theirLabels[key] = labels }
+        }
         let base = remote?.id.flatMap { bases[$0] }
         let merged = merge(local: local, base: base?.files, remote: theirs)
+        var mergedLabels = merge(local: localLabels, base: base?.labels, remote: theirLabels)
+        for (key, list) in mergedLabels { mergedLabels[key] = cleanLabels(list) }
         let id = remote?.id ?? UUID().uuidString
-        if remote == nil || merged != theirs {
+        if remote == nil || merged != theirs || mergedLabels != theirLabels {
             let out = File(format: format, version: 1, id: id, updated: Date().timeIntervalSince1970,
-                           by: "Photo Browser", files: merged)
+                           by: "Photo Browser", files: merged, labels: mergedLabels.isEmpty ? nil : mergedLabels)
             let enc = JSONEncoder()
             enc.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             do {
@@ -300,7 +325,8 @@ nonisolated enum SharedTags {
                 }
             }
         }
-        return .synced(merged: merged, id: id, by: remote?.by, markers: carry, adopted: adopted, movedAway: movedAway)
+        return .synced(merged: merged, labels: mergedLabels, id: id, by: remote?.by, markers: carry,
+                       adopted: adopted, movedAway: movedAway)
     }
 }
 
@@ -360,11 +386,24 @@ extension Library {
             local[rel] = list
             stored[rel] = path
         }
-        let mine = local, bases = tagSyncBases
+        // Favorites and To AI under this drive, the same way — they ride in the same file (`labels`).
+        var localLabels: [String: [String]] = [:]
+        var labelStored: [String: String] = [:]
+        for (name, set) in [("favorite", favorites), ("ai", aiLabels)] {
+            for path in set {
+                let canonical = Self.canonicalPath(path)
+                guard canonical.hasPrefix(prefix) else { continue }
+                let rel = String(canonical.dropFirst(prefix.count))
+                guard SharedTags.isShared(rel) else { continue }
+                localLabels[rel, default: []].append(name)
+                labelStored[rel] = path
+            }
+        }
+        let mine = local, myLabels = localLabels, bases = tagSyncBases
         let generation = tagEditGeneration
         let carry = DriveWriter.syncMode != .full           // exFAT: no attributes (macOS would make `._` files)
         let outcome = await Task.detached(priority: .utility) {
-            SharedTags.sync(root: root, local: mine, bases: bases, carry: carry)
+            SharedTags.sync(root: root, local: mine, labels: myLabels, bases: bases, carry: carry)
         }.value
         tagSyncRunning = false
         defer {
@@ -375,8 +414,25 @@ extension Library {
         case .failed(let why):
             tagSyncStatus = SharedTags.Status(date: Date(), files: local.count, error: why)
             if announce { postNotice("Couldn't Sync Tags", why) }
-        case .synced(let merged, let id, let by, let markers, let adopted, let movedAway):
+        case .synced(let merged, let mergedLabels, let id, let by, let markers, let adopted, let movedAway):
             var changed = 0
+            // Favorites and To AI from the other side (an item edited here during the sync waits for the next).
+            var labelChanges = 0
+            for rel in Set(localLabels.keys).union(mergedLabels.keys) {
+                let new = Set(mergedLabels[rel] ?? []), old = Set(localLabels[rel] ?? [])
+                guard new != old else { continue }
+                let key = labelStored[rel] ?? rootPath + "/" + rel
+                guard favorites.contains(key) == old.contains("favorite"),
+                      aiLabels.contains(key) == old.contains("ai") else { continue }
+                if new.contains("favorite") { favorites.insert(key) } else { favorites.remove(key) }
+                if new.contains("ai") { aiLabels.insert(key) } else { aiLabels.remove(key) }
+                labelChanges += 1
+            }
+            if labelChanges > 0 {
+                scheduleBulkSave(favorites, "favorites")
+                scheduleBulkSave(aiLabels, "ai")
+                labelsVersion += 1
+            }
             for rel in Set(local.keys).union(merged.keys) {
                 let new = merged[rel] ?? [], old = local[rel] ?? []
                 guard new != old else { continue }
@@ -399,7 +455,8 @@ extension Library {
                 if tags.removeValue(forKey: key) != nil { carriedIn += 1 }
             }
             tagSyncBases[id] = SharedTags.Base(files: merged, date: Date().timeIntervalSince1970,
-                                               markers: markers ? true : tagSyncBases[id]?.markers)
+                                               markers: markers ? true : tagSyncBases[id]?.markers,
+                                               labels: mergedLabels)
             scheduleBulkSave(tagSyncBases, "tagSyncBase")
             if carriedIn > 0 {
                 scheduleBulkSave(tags, "tags")
@@ -407,11 +464,16 @@ extension Library {
                 labelsVersion += 1
             }
             tagSyncStatus = SharedTags.Status(date: Date(), files: merged.count, error: nil)
-            if changed > 0 {
-                scheduleBulkSave(tags, "tags")
-                labelsVersion += 1
+            if changed > 0 || labelChanges > 0 {
+                if changed > 0 {
+                    scheduleBulkSave(tags, "tags")
+                    labelsVersion += 1
+                }
                 let from = by == "Safe Finder" ? "Safe Finder" : "the drive"
-                showToast("Tags from \(from): \(changed) file\(changed == 1 ? "" : "s") updated")
+                let what = changed > 0 && labelChanges > 0 ? "Tags and favorites"
+                    : changed > 0 ? "Tags" : "Favorites and To AI"
+                let n = changed + labelChanges
+                showToast("\(what) from \(from): \(n) item\(n == 1 ? "" : "s") updated")
             } else if announce {
                 showToast("Tags are in step with the drive (\(merged.count) tagged file\(merged.count == 1 ? "" : "s"))")
             }

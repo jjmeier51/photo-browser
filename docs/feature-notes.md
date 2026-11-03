@@ -1125,6 +1125,19 @@ This Mac>/` (last 14).
 
 ---
 
+**Favorites and To AI ride along (Nov 3, 2026).** The shared file has a second table, `labels` (drive path →
+["favorite", "ai"]) — the app's `favorites` / `aiLabels` — merged by `SharedTags.sync` three ways against the same
+base (`Base.labels`, nil for bases saved before → the first sync combines and removes nothing), written whenever
+either table differs, applied back to the sets in `syncDriveTags` (an item edited during the sync waits for the
+next). Every favorite/To AI setter calls `noteTagsEdited()` so the drive follows. Deliberately *not* reserved tags:
+those would surface in every tag list, count and filter on both sides. Not carried in the file's own marker xattr,
+so a Finder move leaves them behind (as it always did on the iPhone). Safe Finder: `TagFile.labels` (hidden keys
+skipped on read), `TagStore.labels / set_label / files_labelled / label_count / carry_labels`, `forget` drops them;
+transfers carry them only for items that were moved (`_carry_tags`: originals that went to the Trash, or inside
+one), never for copies — the app's rule. UI: right-click Favorite/To AI, Photos ▸ ⇧⌘F/⇧⌘A (toggle: off when all
+have it), sidebar **Labels** (counts; drop to add), `LABEL` collections (`LabelScanner`), tile badges
+(`draw_labels`: grid top-right of the picture, Photos view bottom-left past a video's length), the viewer's buttons.
+
 ## 6i. Batch crop — `BatchCrop.swift`, `mac/batch_crop.py`, `mac/crop_window.py` (Oct 29, 2026)
 
 Crop one photo, put the same crop on many, and tag every one of them "cropped" — on the iPhone and in

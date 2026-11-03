@@ -288,6 +288,15 @@ def glyph(name: str, color: str | None = None, size: int = 16) -> QIcon:
         for gx in (0.12, 0.40, 0.68):
             for gy in (0.12, 0.40, 0.68):
                 p.drawRect(QRectF(s * gx, s * gy, s * 0.24, s * 0.24))
+    elif name in ("heart", "heart.fill"):                  # Favorites
+        if name == "heart.fill":
+            p.setBrush(c)
+        p.drawPath(heart_path(QRectF(s * 0.12, s * 0.16, s * 0.76, s * 0.7)))
+    elif name == "sparkles":                               # To AI — the iPhone's sparkles
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        p.drawPath(star_path(QPointF(s * 0.42, s * 0.56), s * 0.34))
+        p.drawPath(star_path(QPointF(s * 0.78, s * 0.24), s * 0.17))
     elif name == "split":                                  # two panes side by side
         p.drawRoundedRect(QRectF(s * 0.12, s * 0.2, s * 0.76, s * 0.6), 2, 2)
         p.drawLine(QPoint(int(s * 0.5), int(s * 0.22)), QPoint(int(s * 0.5), int(s * 0.78)))
@@ -630,6 +639,69 @@ def open_social(kind: str, folder: str, parent: QWidget | None = None) -> None:
     win.destroyed.connect(lambda _=None, w=win: _SOCIAL_WINDOWS.remove(w) if w in _SOCIAL_WINDOWS else None)
     _SOCIAL_WINDOWS.append(win)
     win.show()
+
+
+def heart_path(r: QRectF) -> QPainterPath:
+    """A heart filling `r`."""
+    x, y, w, h = r.x(), r.y(), r.width(), r.height()
+    path = QPainterPath()
+    path.moveTo(x + w * 0.5, y + h)
+    path.cubicTo(x + w * 0.08, y + h * 0.66, x - w * 0.02, y + h * 0.32, x + w * 0.2, y + h * 0.1)
+    path.cubicTo(x + w * 0.34, y - h * 0.02, x + w * 0.48, y + h * 0.06, x + w * 0.5, y + h * 0.2)
+    path.cubicTo(x + w * 0.52, y + h * 0.06, x + w * 0.66, y - h * 0.02, x + w * 0.8, y + h * 0.1)
+    path.cubicTo(x + w * 1.02, y + h * 0.32, x + w * 0.92, y + h * 0.66, x + w * 0.5, y + h)
+    path.closeSubpath()
+    return path
+
+
+def star_path(c: QPointF, r: float) -> QPainterPath:
+    """A four-pointed sparkle centred on `c`."""
+    path = QPainterPath()
+    k = r * 0.22
+    path.moveTo(c.x(), c.y() - r)
+    path.quadTo(c.x() + k, c.y() - k, c.x() + r, c.y())
+    path.quadTo(c.x() + k, c.y() + k, c.x(), c.y() + r)
+    path.quadTo(c.x() - k, c.y() + k, c.x() - r, c.y())
+    path.quadTo(c.x() - k, c.y() - k, c.x(), c.y() - r)
+    path.closeSubpath()
+    return path
+
+
+def labels_of(path: str) -> list[str]:
+    """The item's Favorites / To AI labels (the iPhone app's, shared through the drive's tag file)."""
+    return tag_store().labels(path, fresh=False)
+
+
+AI_PURPLE = "#AF52DE"
+
+
+def draw_labels(p: QPainter, labels: list[str], rect: QRectF, corner: str = "top-right", nudge: float = 0) -> None:
+    """A favorite's white heart and a To AI item's sparkles on its tile — in `corner` of `rect`, `nudge` pixels
+    in from that side (past a video's length)."""
+    if not labels:
+        return
+    d = max(13.0, min(20.0, rect.width() / 7))
+    gap = 3.0
+    marks = [x for x in ("favorite", "ai") if x in labels]
+    total = len(marks) * d + (len(marks) - 1) * gap
+    right = corner.endswith("right")
+    x = rect.right() - 5 - total - nudge if right else rect.x() + 5 + nudge
+    y = rect.y() + 5 if corner.startswith("top") else rect.bottom() - 5 - d
+    p.save()
+    for mark in marks:
+        box = QRectF(x, y, d, d)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 120))
+        p.drawEllipse(box)
+        if mark == "favorite":
+            p.setBrush(QColor("white"))
+            p.drawPath(heart_path(box.adjusted(d * 0.22, d * 0.26, -d * 0.22, -d * 0.22)))
+        else:
+            p.setBrush(QColor(AI_PURPLE).lighter(150))
+            p.drawPath(star_path(QPointF(box.center().x() - d * 0.05, box.center().y() + d * 0.05), d * 0.3))
+            p.drawPath(star_path(QPointF(box.center().x() + d * 0.2, box.center().y() - d * 0.2), d * 0.13))
+        x += d + gap
+    p.restore()
 
 
 def has_tag(path: str, tag: str) -> bool:
@@ -1288,6 +1360,7 @@ class GridDelegate(QStyledItemDelegate):
         tags = tag_store().tags(path, fresh=False)
         if tags:
             self._draw_tags(p, tags, shown, option.font, not is_dir and kind_of(path) == "video" and thumb is not None)
+        draw_labels(p, labels_of(path), QRectF(shown), "top-right")
         if not is_dir and self.pane.current_sort()[0] == "reactions":
             score = reaction_score(path)
             if score is not None:
@@ -1574,6 +1647,14 @@ class PhotoDelegate(QStyledItemDelegate):
                 tri.closeSubpath()
                 p.setBrush(QColor("white"))
                 p.drawPath(tri)
+        labels = labels_of(path)
+        if labels:                                     # bottom left, past a video's length (a folder's name: top)
+            nudge = 0.0
+            if kind == "video":
+                length = durations.get((path, model.lastModified(index).toSecsSinceEpoch()))
+                if length:
+                    nudge = fm.horizontalAdvance(media_info.clock(length)) + 14
+            draw_labels(p, labels, QRectF(r), "top-left" if is_dir else "bottom-left", nudge)
         tags = tag_store().tags(path, fresh=False)
         if tags:
             d = max(7, min(11, r.width() // 14))
@@ -1985,6 +2066,7 @@ VIDEOS = "safe-finder://videos"                 # the "All Videos" collection
 SEARCH = "safe-finder://search/"                # + a number: one search's results (see Pane.searches)
 EMPTY = "safe-finder://empty"                   # the "Empty Folders" collection (see empty_roots)
 TAG = "safe-finder://tag/"                      # + a tag: every file carrying it (see TagScanner)
+LABEL = "safe-finder://label/"                  # + "favorite" / "ai": the iPhone app's Favorites and To AI
 _R_PATH, _R_MTIME, _R_SIZE, _R_ISDIR = 258, 259, 260, 261    # roles on a results row (256/257: the sidebar's)
 KIND_EXT = {
     "image": IMAGE_EXT, "video": VIDEO_EXT, "raw": RAW_EXT, "pdf": {".pdf"},
@@ -2583,6 +2665,14 @@ class TagScanner:
         if batch and not self._stop.is_set():
             self.signals.found.emit(batch)
         self.signals.done.emit(not self._stop.is_set())
+
+
+class LabelScanner(TagScanner):
+    """The items with one label (Favorites or To AI) — like a tag's, from the same tables."""
+
+    def start(self) -> None:
+        paths = tag_store().files_labelled(self.tag)
+        threading.Thread(target=self._run, args=(paths,), name="label-scan", daemon=True).start()
 
 
 class ResultsModel(QStandardItemModel):
@@ -3444,7 +3534,7 @@ class Pane(QWidget):
 
     # -- navigation
     def go(self, path: str, record: bool = True) -> None:
-        if path in (VIDEOS, EMPTY) or path.startswith(TAG):
+        if path in (VIDEOS, EMPTY) or path.startswith(TAG) or path.startswith(LABEL):
             self._show_results(path, record)
             return
         if path.startswith(SEARCH):
@@ -3559,6 +3649,14 @@ class Pane(QWidget):
                                   "Folders in Documents, Pictures, Movies and Downloads with nothing in them (0 KB) — "
                                   "select some and press ⌘⌫ to move them to the Trash")
             self.scopebar.hide()
+        elif loc.startswith(LABEL):
+            label = loc[len(LABEL):]
+            self.title.setText(shared_tags.LABEL_NAMES.get(label, label))
+            self.title.setToolTip("Your favorites on this Mac and the connected drives — the same as the iPhone "
+                                  "app's (⇧⌘F favorites or unfavorites the selection)" if label == "favorite" else
+                                  "Everything marked To AI on this Mac and the connected drives — the same as the "
+                                  "iPhone app's (⇧⌘A adds or removes the selection)")
+            self.scopebar.hide()
         elif loc.startswith(TAG):
             tag = loc[len(TAG):]
             self.title.setText(f"#{tag}")
@@ -3595,6 +3693,8 @@ class Pane(QWidget):
             scanner = EmptyFolderScanner(empty_roots())
         elif self.location.startswith(TAG):
             scanner = TagScanner(self.location[len(TAG):])
+        elif self.location.startswith(LABEL):
+            scanner = LabelScanner(self.location[len(LABEL):])
         else:
             run = self.searches[self.location]
             scanner = FileScanner(run.roots, run.query, folders=run.query.wants_folders(), spotlight=run.spotlight)
@@ -3703,6 +3803,10 @@ class Pane(QWidget):
                 self.location, ("Search results", "search"))
             if self.location.startswith(TAG):
                 text, icon = f"Tag “{self.location[len(TAG):]}”", "tag"
+            elif self.location.startswith(LABEL):
+                label = self.location[len(LABEL):]
+                text, icon = shared_tags.LABEL_NAMES.get(label, label), ("heart.fill" if label == "favorite" else
+                                                                          "sparkles")
             b.setText(text)
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             b.setIcon(glyph(icon, THEME.accent, 14))
@@ -3754,6 +3858,9 @@ class Pane(QWidget):
             text = f"{sel} of {n} selected{size_note}" if sel else f"{n} {what}{'s' if n != 1 else ''}"
             if self.location.startswith(TAG) and not sel:
                 text = f"{n} item{'s' if n != 1 else ''} tagged “{self.location[len(TAG):]}”"
+            elif self.location.startswith(LABEL) and not sel:
+                text = (f"{n} favorite{'s' if n != 1 else ''}" if self.location.endswith("favorite") else
+                        f"{n} item{'s' if n != 1 else ''} in To AI")
             if shown != n:
                 text += f" ({shown} shown)"
             if self.scanner is not None:
@@ -4183,6 +4290,7 @@ class Pane(QWidget):
                 else:
                     menu.addAction("Move or Copy in Split View…", lambda: win.set_split(True))
             self._tags_menu(menu, paths)
+            self._labels_menu(menu, paths)
             editable = [p for p in paths if os.path.isdir(p) or metadata_edit.can_edit(p)]
             if editable:
                 label = "Edit Metadata…" if len(editable) == 1 and not os.path.isdir(editable[0]) else \
@@ -4211,7 +4319,7 @@ class Pane(QWidget):
             menu.addAction("Look for Empty Folders Again", lambda: self.go(EMPTY))
         elif self.is_search:
             menu.addAction("Search Again", lambda: self.go(self.location))
-        elif self.location.startswith(TAG):
+        elif self.location.startswith(TAG) or self.location.startswith(LABEL):
             menu.addAction("Look Again", lambda: self.go(self.location))
         else:
             menu.addAction("New Folder", self.new_folder)
@@ -4404,6 +4512,37 @@ class Pane(QWidget):
         run.open()
 
     # -- tags (shared with the Photo Browser app — see shared_tags.py)
+    def _labels_menu(self, menu: QMenu, paths: list[str]) -> None:
+        """Favorite / Unfavorite and To AI / Remove To AI — the iPhone app's labels, which the app shows too."""
+        fav = bool(paths) and all("favorite" in labels_of(p) for p in paths)
+        menu.addAction(glyph("heart" if fav else "heart.fill", THEME.secondary, 16), "Unfavorite" if fav else "Favorite",
+                       lambda: self.set_label(paths, "favorite", not fav)).setShortcut(QKeySequence("Ctrl+Shift+F"))
+        ai = bool(paths) and all("ai" in labels_of(p) for p in paths)
+        menu.addAction(glyph("sparkles", THEME.secondary, 16), "Remove To AI" if ai else "To AI",
+                       lambda: self.set_label(paths, "ai", not ai)).setShortcut(QKeySequence("Ctrl+Shift+A"))
+
+    def set_label(self, paths: list[str], label: str, on: bool) -> int:
+        """Favorites / unfavorites (or To AI) the items; the iPhone app picks it up from the drive."""
+        try:
+            n = tag_store().set_label(paths, label, on)
+        except OSError as e:
+            QMessageBox.warning(self.window(), shared_tags.LABEL_NAMES.get(label, label),
+                                f"Couldn't save it to the drive: {e}")
+            return 0
+        if n:
+            tags_changed()
+            name = "favorite" if label == "favorite" else "To AI"
+            what = f"{n:,} item{'s' if n != 1 else ''}"
+            self._airdrop_noted(f"{'Favorited' if on else 'Unfavorited'} {what}." if label == "favorite" else
+                                f"{'Added' if on else 'Removed'} {what} {'to' if on else 'from'} {name}.")
+        return n
+
+    def toggle_label(self, label: str) -> None:
+        """⇧⌘F / ⇧⌘A: on for the selection — off when every selected item already has it."""
+        paths = self.selected_paths()
+        if paths:
+            self.set_label(paths, label, not all(label in labels_of(p) for p in paths))
+
     def _tags_menu(self, menu: QMenu, paths: list[str]) -> None:
         """Right-click ▸ Tags: "Add Tags…", then every tag — ticked when every selected item has it; choosing
         one puts it on all of them, or takes it off when they all have it. A folder gets the tag itself,
@@ -4554,6 +4693,10 @@ class Pane(QWidget):
         if self.location.startswith(TAG):
             tag = self.location[len(TAG):]
             if self.results.remove_where(lambda path: not has_tag(path, tag)):
+                self.model.forget_keys()
+        elif self.location.startswith(LABEL):
+            label = self.location[len(LABEL):]
+            if self.results.remove_where(lambda path: label not in labels_of(path)):
                 self.model.forget_keys()
         self.update_status()
 
@@ -4857,7 +5000,7 @@ class SidebarTree(QTreeWidget):
     def _tag_at(self, event) -> str | None:
         idx = self.indexAt(event.position().toPoint())
         path = idx.data(PATH_ROLE) if idx.isValid() else None
-        return path if isinstance(path, str) and path.startswith(TAG) else None
+        return path if isinstance(path, str) and (path.startswith(TAG) or path.startswith(LABEL)) else None
 
     def _set_drop(self, path: str | None) -> None:
         if path != self.drop_path:
@@ -4893,7 +5036,7 @@ class SidebarTree(QTreeWidget):
             return
         event.setDropAction(Qt.DropAction.CopyAction)
         event.accept()
-        QTimer.singleShot(0, lambda: self.tag_drop.emit(tag[len(TAG):], paths))
+        QTimer.singleShot(0, lambda: self.tag_drop.emit(tag, paths))
 
 
 REVEAL_ROLE = 258                         # a sidebar row that reveals its folder (selects it in its parent)
@@ -4932,6 +5075,7 @@ class Sidebar(QWidget):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._context_menu)
         self._tags_section: QTreeWidgetItem | None = None
+        self._labels_section: QTreeWidgetItem | None = None
         lay.addWidget(self.tree)
         self.provider = QFileIconProvider()
         self.watcher = QFileSystemWatcher(self)
@@ -5010,6 +5154,8 @@ class Sidebar(QWidget):
         self._entry(loc, boot_volume_name(), Path("/"))
         for v in external_volumes():
             self._entry(loc, v.name, v, ejectable=True)
+        self._labels_section = self._section("Labels")
+        self._fill_labels()
         self._tags_section = self._section("Tags")
         self._fill_tags()
         # Empty folders (0 KB) under Documents, Pictures, Movies and Downloads: the collection
@@ -5065,8 +5211,31 @@ class Sidebar(QWidget):
                              "here to tag them, right-click to rename")
             sec.addChild(it)
 
+    def _fill_labels(self) -> None:
+        """Favorites and To AI — the iPhone app's labels, with how many items carry each. A click shows them;
+        items dropped on one get it."""
+        sec = getattr(self, "_labels_section", None)
+        if sec is None:
+            return
+        for child in sec.takeChildren():
+            del child
+        for label, icon, tip in (("favorite", "heart.fill", "Your favorites on this Mac and the connected drives — the "
+                                  "iPhone app's Favorites; drop items here to favorite them"),
+                                 ("ai", "sparkles", "Everything marked To AI — the iPhone app's To AI; drop items "
+                                  "here to add them")):
+            it = QTreeWidgetItem([shared_tags.LABEL_NAMES[label]])
+            it.setData(0, PATH_ROLE, LABEL + label)
+            it.setData(0, EJECT_ROLE, False)
+            n = tag_store().label_count(label)
+            if n:
+                it.setData(0, COUNT_ROLE, n)
+            it.setIcon(0, glyph(icon, "#FF375F" if label == "favorite" else AI_PURPLE, 16))
+            it.setToolTip(0, tip)
+            sec.addChild(it)
+
     def refresh_tags(self) -> None:
         selected = [i.data(0, PATH_ROLE) for i in self.tree.selectedItems()]
+        self._fill_labels()
         self._fill_tags()
         if self._tags_section is not None:
             self._tags_section.setExpanded(True)
@@ -5557,10 +5726,14 @@ class MainWindow(QMainWindow):
         for pane in (self.src, self.dst):
             pane.on_tags_changed()
 
-    def _tag_dropped(self, tag: str, paths: list[str]) -> None:
+    def _tag_dropped(self, target: str, paths: list[str]) -> None:
         """Files and folders dropped on a tag in the sidebar get it (a folder: asked whether the files
-        inside it do too)."""
-        self.active_pane.tag_items(paths, tag, remove=False)
+        inside it do too) — or, dropped on Favorites or To AI, that label."""
+        if target.startswith(LABEL):
+            self.active_pane.set_label(paths, target[len(LABEL):], True)
+        else:
+            tag = target[len(TAG):] if target.startswith(TAG) else target
+            self.active_pane.tag_items(paths, tag, remove=False)
 
     def _tag_renamed(self, old: str, new: str) -> None:
         for pane in (self.src, self.dst):
@@ -5803,6 +5976,16 @@ class MainWindow(QMainWindow):
             return
         try:
             n = tag_store().carry(placed)
+            moved = {g.rstrip(os.sep) for g in gone}
+
+            def was_moved(path: str) -> bool:             # it, or a folder it was in, went to the Trash after copying
+                while path and path != os.sep:
+                    if path in moved:
+                        return True
+                    path = os.path.dirname(path)
+                return False
+            # Favorites and To AI follow a moved item (as the app's do); a copy leaves them with the original.
+            tag_store().carry_labels([(a, b) for a, b in placed if was_moved(a)])
             tag_store().forget(gone)
         except OSError as e:
             self.panel.log.appendPlainText(f"   couldn't carry the tags over: {e}")
