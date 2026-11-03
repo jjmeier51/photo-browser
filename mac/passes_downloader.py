@@ -261,7 +261,9 @@ class PassesWindow(QMainWindow):
                 if creator_field:
                     # a named creator: everything goes in their folder, from their channel
                     fixed  = person / social.sanitize(creator_field, creator_field, 80)
-                    pages  = passes.messages_pages(access_token, creator_field)
+                    pages  = passes.messages_pages(
+                        access_token, creator_field,
+                        lambda s: self.bridge.call.emit(self._log, s))
                 else:
                     pages  = passes.gallery_pages(access_token, None)
 
@@ -342,10 +344,6 @@ class PassesWindow(QMainWindow):
                 passes.ENCRYPTED.pop(s.item.key, None)
                 self._log(f"   {s.item.name}.{s.item.ext}: {s.why} — retrying one-file")
                 self._queue(replace(s.item, url=plain))
-            elif s.why.startswith("dash:"):
-                self.failed += 1
-                self.failed_keys.add(s.item.key)
-                self._log(f"   couldn't download {s.item.name}.{s.item.ext}: {s.why}")
             else:
                 self.failed += 1
                 self.failed_keys.add(s.item.key)

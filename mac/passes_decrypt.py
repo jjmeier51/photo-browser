@@ -36,6 +36,7 @@ SERVICE_CERT = (
 )
 
 _IMAGE_EXTS = {"jpg", "jpeg", "png", "webp"}
+_VIDEO_SUFFIXES = {".mp4", ".m4a", ".m4v", ".mov", ".m4s", ".ts", ".aac"}
 
 
 def _service_cert() -> str:
@@ -142,10 +143,16 @@ def _grab(item: social.Item, headers: dict, exif_session, url: str,
                 "outtmpl": str(tmp / "%(format_id)s.%(ext)s"),
             }).download([url])
 
-            tracks = sorted(p for p in tmp.iterdir()
-                            if p.suffix in {".mp4", ".m4a", ".m4v"})
+            # an encrypted image downloads as a segment, not a media file, so only
+            # video tracks may be narrowed by suffix
+            got = sorted(p for p in tmp.iterdir()
+                         if p.is_file() and p.suffix not in {".mpd", ".m3u8"})
+            if item.video:
+                tracks = [p for p in got if p.suffix in _VIDEO_SUFFIXES] or got
+            else:
+                tracks = got
             if not tracks:
-                raise RuntimeError("no tracks downloaded")
+                raise RuntimeError("nothing downloaded")
 
             plain: list[Path] = []
             for t in tracks:
@@ -176,7 +183,8 @@ def _grab(item: social.Item, headers: dict, exif_session, url: str,
         where = traceback.extract_tb(e.__traceback__)[-1]
         return social.Settled(
             item,
-            why=f"dash: {type(e).__name__}: {e} (at {os.path.basename(where.filename)}:{where.lineno})")
+            why=(f"dash: {type(e).__name__}: {e} "
+                 f"(at {os.path.basename(where.filename)}:{where.lineno})"))
 
 
 def grab_original(item: social.Item, headers: dict, exif_session=None) -> social.Settled:
