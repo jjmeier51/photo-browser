@@ -137,6 +137,9 @@ actions the app makes no network calls.
   photos zoom, videos loop with Slo-Mo/frame step, Info panel, Save Frame, slideshow — `mac/media_viewer.py`,
   `mac/media_info.py`) and **Export All Frames** (`mac/frame_export.py` + `video_helper.swift` `frames`; same names,
   rates and standard-range/HDR choice as the iPhone; resumes only the same export, else "<name> 2") — §6p.
+  Safe Finder's **Find Duplicates** (right-click a folder; `mac/duplicates.py`, `mac/duplicates_window.py`): the
+  iPhone's exact / visually similar / similar-name groups, plus an Identical (SHA-256) check and Select Extra
+  Copies for identical groups only — it ticks, the person trashes — §6q.
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,
   "Add from iOS Album" (import then delete the iOS originals), save drive media
   to Photos, capture/export HDR-preserving video frames. (`PhotosLibraryView`,

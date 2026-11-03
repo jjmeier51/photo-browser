@@ -1322,6 +1322,33 @@ rates mixed in one folder. Here the folder carries `.frames-export.json`
 unbroken run from 0, less two that may have been mid-write), anything else goes to "<name> 2". On exFAT the
 helper writes frames in place (`direct`, no rename — CLAUDE.md #12); elsewhere temp → rename.
 
+## 6q. Safe Finder Find Duplicates — `mac/duplicates.py`, `mac/duplicates_window.py` (Nov 3, 2026)
+
+A port of §2 (same three kinds, kept apart, same threshold 6, same normalized names, same Oldest/Newest from
+millisecond dates, same "Frame" toggle), with deliberate differences:
+
+- **Subsets aren't listed again.** iOS dedupes identical sets only, so "IMG_1 / IMG_1 (1)" showed as a name
+  group beside the exact group already holding both. Here a group wholly inside one already listed is
+  skipped.
+- **Similar name keeps photos and videos apart** — `IMG_0001.HEIC` + `IMG_0001.MOV` is a Live Photo. With
+  subfolders, a name group is per folder (every camera folder has an `IMG_0001`).
+- **Identical (SHA-256) for exact groups**, in the background, and only identical groups are offered to
+  **Select Extra Copies** — the one bulk pick. iOS deliberately has no bulk delete ("the user chooses which
+  copy goes"); this keeps that spirit: it only *ticks* (keeper: most tags, plain name, oldest birth time,
+  shortest path), the person still presses Move to Trash and confirms, and it never touches groups that
+  aren't byte-identical.
+- **Subfolders** optional (iOS: one folder). Pairing uses 7 bands over the 64 bits (pigeonhole: within 6
+  bits ⇒ one band equal) instead of all pairs, so a drive-sized scan stays fast; `test_duplicates_core`
+  checks it finds exactly what the all-pairs compare does. A band bucket over 5,000 (flat colour) is skipped.
+- **No remembered result** (iOS's `DuplicateScanCache`); instead dHashes are cached on disk
+  (`~/Library/Caches/PhotoBrowser/dhash.json`, by path|mtime_ns|size) and only files sharing a byte size are
+  opened for dimensions, so a rescan is quick. Not Duplicates is this Mac's own
+  (`~/Library/Application Support/Safe Finder/not-duplicates.json`) — not shared with the iPhone's.
+
+The window never deletes: Safe Finder's `find_duplicates` hands it `DupHooks` (thumbnails from the shared
+engine, the Trash with tags forgotten, the viewer — whose own Move to Trash prunes the groups — and reveal).
+A double-click opens without leaving a tick (`Tile.restored` puts it back as it was before the clicks).
+
 ## 6a. WebM playback — `WebMPlayer.swift`
 
 AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,

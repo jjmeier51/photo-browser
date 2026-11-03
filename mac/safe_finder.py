@@ -3926,6 +3926,43 @@ class Pane(QWidget):
         win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
         win.show()
 
+    def find_duplicates(self, folder: str) -> None:
+        """Find Duplicates… (duplicates_window.py — the iPhone's): likely copies in `folder`, ticked and moved to
+        the Trash from there."""
+        import duplicates_window
+
+        def thumb(p: str) -> QPixmap | None:
+            try:
+                return THUMBS.get(p, os.stat(p).st_mtime) if THUMBS is not None else None
+            except OSError:
+                return None
+
+        def trash(paths: list[str]) -> list[str]:
+            moved = [p for p in paths if MainWindow.trash_item(Path(p))]
+            try:
+                if moved and tag_store().forget(moved):
+                    tags_changed()
+            except OSError:
+                pass
+            sizer().clear()
+            return moved
+
+        def view(paths: list[str], start: str) -> None:
+            self.view_media(start, among=paths)
+            viewer = _VIEWERS[-1] if _VIEWERS else None
+            if viewer is not None and hasattr(viewer, "removed"):
+                viewer.removed.connect(lambda gone: [w.remove_paths(gone) for w in list(_VIEWERS)
+                                                     if isinstance(w, duplicates_window.DuplicatesWindow)])
+
+        hooks = duplicates_window.DupHooks(
+            thumb=thumb, thumbs_ready=THUMBS.ready if THUMBS is not None else None, trash=trash,
+            tags_of=lambda p: tag_store().tags(p, fresh=False), view=view, reveal=self._reveal_from_viewer,
+            changed=self.refresh_results)
+        win = duplicates_window.DuplicatesWindow(folder, hooks, THEME, self.window())
+        _VIEWERS.append(win)
+        win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
+        win.show()
+
     def quick_look(self) -> None:
         paths = self.selected_paths()
         if paths and IS_MAC:
@@ -4055,6 +4092,7 @@ class Pane(QWidget):
             if IS_MAC:
                 menu.addAction("AirDrop to iPhone…", lambda: self.airdrop(paths))
             if len(paths) == 1 and os.path.isdir(paths[0]):
+                menu.addAction("Find Duplicates…", lambda: self.find_duplicates(paths[0]))
                 menu.addAction("Download from SimpCity…", lambda: open_simpcity(paths[0], self.window()))
                 if (scored := simpcity_scores_folder(paths[0])) is not None:
                     menu.addAction("Get Reaction Scores",
@@ -4093,6 +4131,7 @@ class Pane(QWidget):
         else:
             menu.addAction("New Folder", self.new_folder)
             if not paths and os.path.isdir(self.location):
+                menu.addAction("Find Duplicates in This Folder…", lambda: self.find_duplicates(self.location))
                 menu.addAction("Download from SimpCity…", lambda: open_simpcity(self.location, self.window()))
                 if (scored := simpcity_scores_folder(self.location)) is not None:
                     menu.addAction("Get Reaction Scores",

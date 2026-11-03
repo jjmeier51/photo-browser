@@ -304,6 +304,31 @@ Both use `video_helper.swift` (the iPhone's AVFoundation and Core Image code: fr
 Without Xcode's Command Line Tools ffmpeg does them instead — JPEG frames, tone-mapped when that ffmpeg has
 `zscale`.
 
+### Find Duplicates (`duplicates_window.py`, `duplicates.py`)
+
+Right-click a folder ▸ **Find Duplicates…** (or a folder's empty space ▸ **Find Duplicates in This Folder…**) —
+the iPhone app's Find Duplicates. It lists groups of likely copies, strongest first:
+
+- **Exact match** (green) — the same size in bytes and the same pixel dimensions. Safe Finder then reads the
+  copies through in the background and marks the group **✓ Identical** when they're the same file byte for
+  byte (or says "same size, different bytes" when they aren't).
+- **Visually similar** (blue) — the same picture re-saved, resized or lightly edited (a perceptual
+  fingerprint; photos only). Kept tight, so a shoot of similar poses doesn't become one huge group.
+- **Similar name** (orange) — copy-style names: `IMG_0001.jpg`, `IMG_0001 (1).jpg`, `IMG_0001 2.jpg`,
+  `… copy.jpg` (a Live Photo's `.HEIC` and `.MOV` aren't copies of each other).
+
+Each copy is a tile with its size — or, when the copies' dates differ, the date and time to the millisecond,
+with the **Oldest** and **Newest** marked. **Click the copies you don't want** (a red ring), then **Move to
+Trash** at the bottom; it asks first and says if a group would lose every copy. Double-click a tile (or
+**View**) to see the group full size in the viewer and flip between the copies. **Not Duplicates** hides a
+group for good; the ••• menu has Select All But One, Select All Copies, Deselect and Show in Safe Finder.
+
+**Select Extra Copies** ticks every copy but one in each *identical* group — keeping the copy with the most
+tags, then a plain name (not "(1)" or "copy"), then the oldest — so clearing out true duplicates is two
+clicks; check the ticks, then Move to Trash. **Include subfolders** looks through everything inside the
+folder (each tile then says which folder it's in), and **Leave out “Frame” files** skips video-frame
+screenshots; both are remembered. The photos' fingerprints are kept, so Rescan is quick.
+
 ### Sizes, a size filter, empty folders, and the Trash
 
 - **Folder sizes.** Each pane adds up what its folders hold, in the background, and shows it in the
