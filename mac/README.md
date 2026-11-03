@@ -243,6 +243,18 @@ open "mac/Safe Finder.command"                     # or double-click it in Finde
 mac/.venv/bin/python mac/safe_finder.py --from ~/Downloads --to "/Volumes/Extreme SSD"
 ```
 
+### The menu bar
+
+Everything Safe Finder does is in its menus, acting on the pane you're in and what's selected there (greyed
+out when it can't): **File** (New Folder ⇧⌘N, Open ⌘↓, Open With Default App, Quick Look, Show in Finder,
+Copy/Move to the other side ⇧⌘C / ⇧⌘M, AirDrop to iPhone, Move to Trash ⌘⌫), **Edit** (Select All, Find ⌘F,
+Tags… ⌘T), **View** (as Icons/List/Photos ⌘1–3, Sort By, bigger/smaller thumbnails ⌘= / ⌘−), **Go** (Back ⌘[,
+Forward ⌘], Enclosing Folder ⌘↑, Home ⇧⌘H, Desktop ⇧⌘D, Downloads ⌥⌘L, Pictures, All Videos, Empty Folders,
+Drives), **Photos** (Find Duplicates, Export All Frames, Crop, AI Upscale, Erase Area, Edit/Create with AI, the
+Astria.ai Browser, the SimpCity / Instagram / Facebook downloaders, taylorpictures.net) and **Window** (every
+viewer and tool window that's open). The right-click menu keeps the everyday commands at the top and puts a
+folder's downloaders under **Download ▸** and its AI under **AI ▸**.
+
 ### Thumbnails
 
 Each photo and video is rendered once, at one size (512 px), and that one thumbnail is drawn at

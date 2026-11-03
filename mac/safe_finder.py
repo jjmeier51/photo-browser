@@ -3280,12 +3280,9 @@ class Pane(QWidget):
 
     def _shortcuts(self) -> None:
         ctx = Qt.ShortcutContext.WidgetWithChildrenShortcut
-        for keys, slot in (("Ctrl+[", self.go_back), ("Ctrl+]", self.go_forward), ("Ctrl+Up", self.go_up),
-                           ("Ctrl+Down", self.open_selected), ("Return", self.open_selected),
-                           ("Space", self.quick_look), ("Ctrl+1", lambda: self.set_mode("grid")),
-                           ("Ctrl+2", lambda: self.set_mode("list")), ("Ctrl+3", lambda: self.set_mode("photos")),
-                           ("Ctrl+Shift+N", self.new_folder),
-                           ("Ctrl+Backspace", self.delete_selection), ("Ctrl+T", self.edit_tags)):
+        # Return and Space belong to the list you're in; every other key is a menu bar command (menubar.py) —
+        # bound once there, as two live shortcuts for one key make Qt fire neither.
+        for keys, slot in (("Return", self.open_selected), ("Space", self.quick_look)):
             sc = QShortcut(QKeySequence(keys), self)
             sc.setContext(ctx)
             sc.activated.connect(slot)
@@ -4158,17 +4155,7 @@ class Pane(QWidget):
             if IS_MAC:
                 menu.addAction("AirDrop to iPhone…", lambda: self.airdrop(paths))
             if len(paths) == 1 and os.path.isdir(paths[0]):
-                menu.addAction("Find Duplicates…", lambda: self.find_duplicates(paths[0]))
-                menu.addAction("Download from SimpCity…", lambda: open_simpcity(paths[0], self.window()))
-                menu.addAction("Browse taylorpictures.net…", lambda: self.open_taylor(paths[0]))
-                menu.addAction("Create with AI…", lambda: self.ai_create(paths[0]))
-                menu.addAction("Astria.ai Browser…", lambda: self.astria_browser(paths[0]))
-                if (scored := simpcity_scores_folder(paths[0])) is not None:
-                    menu.addAction("Get Reaction Scores",
-                                   lambda: open_simpcity(scored, self.window(), scores_only=True))
-                for kind in ("instagram", "facebook"):
-                    menu.addAction(social_label(paths[0], kind),
-                                   lambda _=False, kind=kind: open_social(kind, paths[0], self.window()))
+                self._folder_tools(menu, paths[0], "Find Duplicates…")
             menu.addSeparator()
             win = self.window()
             if isinstance(win, MainWindow) and self is win.src:
@@ -4202,18 +4189,25 @@ class Pane(QWidget):
         else:
             menu.addAction("New Folder", self.new_folder)
             if not paths and os.path.isdir(self.location):
-                menu.addAction("Find Duplicates in This Folder…", lambda: self.find_duplicates(self.location))
-                menu.addAction("Download from SimpCity…", lambda: open_simpcity(self.location, self.window()))
-                menu.addAction("Browse taylorpictures.net…", lambda: self.open_taylor(self.location))
-                menu.addAction("Create with AI…", lambda: self.ai_create(self.location))
-                menu.addAction("Astria.ai Browser…", lambda: self.astria_browser(self.location))
-                if (scored := simpcity_scores_folder(self.location)) is not None:
-                    menu.addAction("Get Reaction Scores",
-                                   lambda: open_simpcity(scored, self.window(), scores_only=True))
-                for kind in ("instagram", "facebook"):
-                    menu.addAction(social_label(self.location, kind),
-                                   lambda _=False, kind=kind: open_social(kind, self.location, self.window()))
+                self._folder_tools(menu, self.location, "Find Duplicates in This Folder…")
         menu.exec(view.viewport().mapToGlobal(pos))
+        menu.deleteLater()                                 # a new menu each right-click: don't keep them all
+
+    def _folder_tools(self, menu: QMenu, folder: str, dups_label: str) -> None:
+        """A folder's tools in the right-click menu: Find Duplicates, then the downloaders and the AI grouped
+        (the menu had grown past a screenful)."""
+        menu.addAction(dups_label, lambda: self.find_duplicates(folder))
+        dl = menu.addMenu("Download")
+        dl.addAction("Download from SimpCity…", lambda: open_simpcity(folder, self.window()))
+        if (scored := simpcity_scores_folder(folder)) is not None:
+            dl.addAction("Get Reaction Scores", lambda: open_simpcity(scored, self.window(), scores_only=True))
+        for kind in ("instagram", "facebook"):
+            dl.addAction(social_label(folder, kind), lambda _=False, kind=kind: open_social(kind, folder, self.window()))
+        dl.addSeparator()
+        dl.addAction("Browse taylorpictures.net…", lambda: self.open_taylor(folder))
+        ai = menu.addMenu("AI")
+        ai.addAction("Create with AI…", lambda: self.ai_create(folder))
+        ai.addAction("Astria.ai Browser…", lambda: self.astria_browser(folder))
 
     # -- crop (crop_window.py / batch_crop.py — the iPhone app's Crop screen, on the Mac)
     def crop_photos(self, paths: list[str]) -> None:
@@ -5444,10 +5438,8 @@ class MainWindow(QMainWindow):
         geo = self.settings.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
-        QShortcut(QKeySequence("Ctrl+Shift+M"), self, activated=lambda: self.transfer_selection(True))
-        QShortcut(QKeySequence("Ctrl+Shift+C"), self, activated=lambda: self.transfer_selection(False))
-        QShortcut(QKeySequence("Ctrl+F"), self, activated=lambda: (self.active_pane.search.setFocus(),
-                                                                  self.active_pane.search.selectAll()))
+        import menubar
+        menubar.install(self, sys.modules[__name__])      # File, Edit, View, Go, Photos, Window, Help + shortcuts
         self.update_actions()
 
     # -- panes
