@@ -649,6 +649,14 @@ Both apps keep `Taylor Swift/.taylorpictures.json` — the albums downloaded int
 downloaded on the iPhone shows as downloaded here, and the other way round. Pages are only read; nothing
 is sent to the site.
 
+**Connecting.** Safe Finder makes the iPhone app's request (its browser agent, Accept and language headers),
+and reads a page whatever status the site sends it with, as the iPhone does. If Python's own networking can't
+get through — a certificate chain macOS would complete but Python won't, a dropped connection — the same
+request goes through the Mac's own networking (URLSession, what the iPhone uses; the video helper, built once
+with Xcode's command line tools), which then goes first. If neither can read it, the window says why from each
+(“the site answered 403 Forbidden”, “its certificate couldn't be checked …”, “it didn't answer within 30
+seconds”).
+
 ### Edit with AI, Create with AI and the Astria.ai Browser (`ai_window.py`, `astria.py`)
 
 The iPhone app's cloud AI (astria.ai), on the Mac. It's opt-in: until you add your Astria API key nothing is

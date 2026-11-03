@@ -2117,6 +2117,15 @@ the sections and reads only new albums. Photos are stored as thumbnail paths (th
 derived) to keep `site.json` small. "Albums With Photos to Get" is a virtual section (trail id -2) built
 from the summary. "Tag Them…" adds "taylorpictures.net" through the shared tag store, only on request.
 
+**Safe Finder's networking (Nov 3, 2026).** The first Mac build said "Couldn't reach taylorpictures.net" for every
+failure, and differed from the iPhone in three ways: no `Accept` header, any non-2xx answer thrown away (the
+iPhone reads a page whatever its status — `fetchHTML` ignores it), and Python's TLS, which — unlike Apple's —
+doesn't fetch a missing intermediate certificate. `taylor._http_get` now sends the iPhone's headers (gzip
+accepted), takes a page by its content (`_is_page`: Coppermine links) whatever the status (pictures still need
+2xx), and on failure makes the same request through URLSession (`video_helper fetch`) — sticky once it's what
+works. `unreachable()` carries each side's reason into the message. The site couldn't be reached from where
+this was written, so the cause on the user's Mac was not confirmed; the message now names it.
+
 ### 7.4b TikTok — `TikTokService.swift` / `TikTokWebFetcher.swift` / `TikTokChallengeView.swift`
 Profiles are listed and resolved through the public **tikwm.com** resolver (no login, no
 request signing): `user/posts` pages the whole profile, the single-video endpoint gives the HD

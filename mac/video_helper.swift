@@ -12,6 +12,13 @@
 //   video_helper frame <in> <seconds> <out.png>                            → exit 0 when <out> is written
 //   video_helper frames <in> <dir> <base> <fps|0> <sdr|hdr> <start> <atomic|direct>
 //                                       → prints "total N", "progress i N" now and then, then "done <written>"
+//   video_helper fetch <url> <referer> <user agent> <out>               → prints "status <code>" (exit 0) or
+//                                                                          "failed <why>" (exit 1)
+//
+// `fetch` is one web page or picture through the Mac's own networking — URLSession, what the iPhone app
+// uses — for Safe Finder's taylorpictures.net browser when Python's can't get through (macOS completes a
+// server's certificate chain and speaks TLS as Safari does). The request is the iPhone app's
+// (TaylorGallery.fetchHTML): its agent, Accept and Accept-Language, and the referer.
 //
 // `frame` is the iPhone's press-and-hold screenshot (FileActions.saveStandardRangePNG): the frame upright,
 // tone-mapped to standard range when the video is HDR, 8-bit sRGB PNG, doubled up to a 4K long side, the
@@ -362,6 +369,24 @@ func exportFrames(_ url: URL, dir: URL, base: String, fps requested: Double, sta
     return 0
 }
 
+func fetch(_ address: String, referer: String, agent: String, to out: URL) async -> Int32 {
+    guard let url = URL(string: address) else { print("failed not a web address"); return 1 }
+    var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+    req.setValue(agent, forHTTPHeaderField: "User-Agent")
+    req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+    req.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+    if !referer.isEmpty { req.setValue(referer, forHTTPHeaderField: "Referer") }
+    do {
+        let (data, response) = try await URLSession.shared.data(for: req)
+        try data.write(to: out)
+        print("status \((response as? HTTPURLResponse)?.statusCode ?? 0)")
+        return 0
+    } catch {
+        print("failed \(error.localizedDescription)")
+        return 1
+    }
+}
+
 @main
 struct VideoHelper {
     static func main() async {
@@ -390,6 +415,8 @@ struct VideoHelper {
                                           base: a[4], fps: Double(a[5]) ?? 0, standardRange: a[6] != "hdr",
                                           start: Int(a[7]) ?? 0, atomic: a[8] != "direct")
             exit(code)
+        case "fetch" where a.count >= 6:
+            exit(await fetch(a[2], referer: a[3], agent: a[4], to: URL(fileURLWithPath: a[5])))
         default:
             exit(2)
         }

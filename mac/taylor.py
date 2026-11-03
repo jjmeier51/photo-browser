@@ -257,7 +257,7 @@ class Gallery:
             return f"index.php?cat={cat}&page={p}" if cat is not None else f"index.php?page={p}"
         first = self.html(path(1))
         if first is None:
-            return [], [], "Couldn't reach taylorpictures.net."
+            return [], [], unreachable()
         cats = parse_categories(first, cat)
         albums: dict[int, Album] = {}
 
@@ -350,17 +350,155 @@ class Gallery:
         return data
 
 
-def _http_get(url: str, referer: str) -> bytes | None:
+# ----------------------------------------------------------------------------- the network
+#
+# The iPhone app's request (TaylorGallery.fetchHTML), made two ways. First Python's own networking, with the
+# same headers the iPhone sends — and, like the iPhone, a page is read whatever status it came with (the site
+# has served its pages with odd statuses). When Python can't get through — a certificate chain macOS would
+# complete but Python's TLS won't, a connection the server drops, a refusal — the same request goes through
+# the Mac's own networking, URLSession, exactly as the iPhone makes it (`video_helper fetch`); once that's what
+# works, it goes first. Nothing here is disguised: it is the iPhone app's request either way. When both fail,
+# `unreachable()` says why, from each.
+
+UNREACHABLE = "Couldn't reach taylorpictures.net"
+ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+_net = {"mac_first": False, "why": "", "mac_why": ""}
+_net_lock = threading.Lock()
+
+
+def unreachable() -> str:
+    """The message when the site couldn't be read, with why (from Python, and from the Mac's networking)."""
+    with _net_lock:
+        why, mac = _net["why"], _net["mac_why"]
+    bits = [b for b in (why, f"the Mac's own networking: {mac}" if mac else "") if b]
+    return f"{UNREACHABLE} — {'; '.join(bits)}." if bits else f"{UNREACHABLE}."
+
+
+def _is_page(data: bytes) -> bool:
+    """A page of the gallery (whatever status it came with), not an error or block page."""
+    low = data[:400_000].lower()
+    return b"thumbnails.php" in low or b"index.php?cat=" in low or b"displayimage.php" in low or b"coppermine" in low
+
+
+def _wanted(url: str, status: int, data: bytes) -> bool:
+    if 200 <= status < 300:
+        return True
+    return not url.lower().split("?")[0].endswith(IMAGE_EXTS) and _is_page(data)
+
+
+def _why_python(e: BaseException) -> str:
+    import socket
+    import ssl
+    import urllib.error
+    if isinstance(e, urllib.error.HTTPError):
+        return f"the site answered {e.code} {e.reason}".rstrip()
+    reason = e.reason if isinstance(e, urllib.error.URLError) else e
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return f"its certificate couldn't be checked ({reason.verify_message or reason.reason})"
+    if isinstance(reason, ssl.SSLError):
+        return f"a secure connection couldn't be made ({reason.reason or reason})"
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return "it didn't answer within 30 seconds"
+    if isinstance(reason, socket.gaierror):
+        return "its name couldn't be looked up (is the Mac online?)"
+    if isinstance(reason, ConnectionResetError):
+        return "the connection was dropped by the server"
+    if isinstance(reason, ConnectionRefusedError):
+        return "the connection was refused"
+    return str(reason) or type(reason).__name__
+
+
+def _python_get(url: str, referer: str) -> tuple[bytes | None, str]:
+    import gzip
     import urllib.error
     import urllib.request
+    import zlib
     import simpcity as sc
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": referer,
-                                               "Accept-Language": "en-US,en;q=0.9"})
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": referer, "Accept": ACCEPT,
+                                               "Accept-Language": "en-US,en;q=0.9",
+                                               "Accept-Encoding": "gzip, deflate"})
+
+    def body(raw: bytes, encoding: str | None) -> bytes:
+        enc = (encoding or "").lower()
+        try:
+            if enc == "gzip":
+                return gzip.decompress(raw)
+            if enc == "deflate":
+                try:
+                    return zlib.decompress(raw)
+                except zlib.error:
+                    return zlib.decompress(raw, -zlib.MAX_WBITS)
+        except (OSError, zlib.error, EOFError):
+            pass
+        return raw
     try:
         with urllib.request.urlopen(req, timeout=30, context=sc.ssl_context()) as resp:
-            return resp.read()
-    except (urllib.error.URLError, OSError, ValueError):
-        return None
+            return body(resp.read(), resp.headers.get("Content-Encoding")), ""
+    except urllib.error.HTTPError as e:
+        try:
+            data = body(e.read(), e.headers.get("Content-Encoding") if e.headers else None)
+        except (OSError, ValueError):
+            data = b""
+        if _wanted(url, e.code, data):
+            return data, ""
+        return None, _why_python(e)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return None, _why_python(e)
+
+
+def _mac_get(url: str, referer: str) -> tuple[bytes | None, str]:
+    """The request through URLSession (`video_helper fetch`) — None and why when it isn't there or fails."""
+    import subprocess
+    import video_tools
+    cmd = video_tools.helper()
+    if not cmd:
+        return None, ""
+    fd, out = tempfile.mkstemp(prefix="taylor-", suffix=".part")
+    os.close(fd)
+    try:
+        try:
+            r = subprocess.run([*cmd, "fetch", url, referer, UA, out], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e:
+            return None, str(e)
+        line = (r.stdout or "").strip().splitlines()[-1:] or [""]
+        if r.returncode != 0 or not line[0].startswith("status "):
+            return None, line[0].removeprefix("failed ").strip() or "it couldn't connect"
+        try:
+            status = int(line[0].split()[1])
+        except (IndexError, ValueError):
+            status = 0
+        with open(out, "rb") as f:
+            data = f.read()
+        if _wanted(url, status, data):
+            return data, ""
+        return None, f"the site answered {status}"
+    finally:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+
+
+def _http_get(url: str, referer: str) -> bytes | None:
+    with _net_lock:
+        mac_first = _net["mac_first"]
+    if mac_first:
+        data, mac_why = _mac_get(url, referer)
+        if data is not None:
+            return data
+    data, why = _python_get(url, referer)
+    if data is not None:
+        return data
+    if not mac_first:
+        data, mac_why = _mac_get(url, referer)
+        if data is not None:
+            with _net_lock:
+                _net["mac_first"] = True               # what gets through: first from now on
+            return data
+    with _net_lock:
+        _net["why"], _net["mac_why"] = why, mac_why
+    return None
 
 
 # ----------------------------------------------------------------------------- the record on the drive
@@ -740,7 +878,7 @@ class SiteIndex:
             if depth > 6:
                 continue
             cats, albums, note = gallery.browse(cat)
-            if note != "Couldn't reach taylorpictures.net.":
+            if not note.startswith(UNREACHABLE):
                 answered = True
             with self.lock:
                 for a in albums:

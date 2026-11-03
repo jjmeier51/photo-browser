@@ -472,7 +472,7 @@ class TaylorWindow(QWidget):
             self.pass_btn.setText("Continue")
             self.pass_text.setText(f"Stopped — {read:,} of {albums:,} albums ({photos:,} photos) read so far. "
                                    "Continue carries on from there." if albums else
-                                   "Couldn't reach taylorpictures.net — try Continue in a moment.")
+                                   f"{T.unreachable()} Try Continue in a moment.")
             return
         self.summary = summary
         for key, (total, have) in summary.per_album.items():
