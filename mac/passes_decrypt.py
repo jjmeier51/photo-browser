@@ -24,11 +24,20 @@ SW_SECURE_CRYPTO = "8fd9a7ea-73de-49bc-8b9e-ec1e73d325d3"
 SW_SECURE_DECODE = "d597b3c2-7827-4047-9ee4-c10e49f7bc14"
 
 # BuyDRM service certificate — the licence endpoint rejects challenges without it.
+# Only a backstop: make_device.py writes the real one to service_cert.txt next to the device.
 SERVICE_CERT = (
     "CAUSuQUKswIIAxIQTBvbgP1Avrk5wSGIMyCvYRjV5pC7BSKOAjCCAQoCggEBANZJ542CyvnJY1c3AsvH1jtzpXtHIfaL+gaiqFK9TQG3hA5UZq2kJaBVe+JfXKL4OV1qwyV18/OXiWeNFXJc7TTSkuC+oqnNFIuICNCvAH2dhpB/FBOm7w6X8kGQUZh9vm0QxbpLct60VUl1uwajN76lJRtrIkZyvy9+Ep6AST3cYPDWwhIwao6BDSWDk8XlxT+Lu22RgaiYPUgBUhnc3uhN4jyYZj5lQ4HIw7YJ8rMTI+CVS1TcxAeQfwoDfmLkIK0ifRBuUbKVDFXKaHCD62+MOytkCQsDGuSWAL+zX2lFtuyIEU3tF1yAHHZNP4OilJktHA4rw600jhl8OazEe/MCAwEAAToGYnV5ZHJtEoADfn/wSHa0UlyDQqzv+GDaAbT8sMV7tUpqXbAHSCJRmdIDX/ZuZPLVJucxSnEVakX5goeMELdkKjMeGi75dojRoVEPpWw7GJSxzxZ8LAjRE+Y2ymVxyKgeH7MZxVIGhxxBosUVnOR3LyCfKiUArK/cZ2wQYJ/mOFOmBQDEmDU7nkGclIJOxY0BKNwpMlKJFWy32srxXJlDJ1VozWdkLxZuMP6J0qzqsZGm0AIMXPMPha16XIsycTPA5O7cjb3fF2hqWZF7ah1NMbcvfprZiPfJPCWnwtL+ZCz8poq1PJ2QRXr0GE1ZwS5CDv/AmOiE2i3NuhdVTrBi1aQ6QBB5rkERA2ypjBAPV59PreurelpBx8kgZSTxwITRJJvO46INq0Jy7bHXL42iDli25YatVW4s7IlGPHIjSphQ/Z4k/PKwX3vQOe5LvGWyRN4OXcNFBdZB6yv5k+2LYW2yhz5NFjO92p4YCwSXx/s/7EidD4tev5Ry6N3/heqc7YIIo2q4hsyp"
 )
 
 _IMAGE_EXTS = {"jpg", "jpeg", "png", "webp"}
+
+
+def _service_cert() -> str:
+    """The service certificate written by make_device.py, else the embedded copy."""
+    try:
+        return (passes.device_path().parent / "service_cert.txt").read_text().strip()
+    except OSError:
+        return SERVICE_CERT
 
 
 def _pssh_from(manifest: bytes) -> PSSH:
@@ -50,7 +59,7 @@ def _content_key(pssh: PSSH, content_id: str, access_token: str):
     cdm = Cdm.from_device(Device.load(str(device)))
     sid = cdm.open()
     try:
-        cdm.set_service_certificate(sid, SERVICE_CERT)
+        cdm.set_service_certificate(sid, _service_cert())
         last: Exception | None = None
         for level in (SW_SECURE_CRYPTO, SW_SECURE_DECODE):
             challenge = cdm.get_license_challenge(sid, pssh)
