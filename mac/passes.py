@@ -38,12 +38,17 @@ API = "https://www.passes.com/api"
 KEYCHAIN_SERVICE = "Safe Finder Passes"
 KEYCHAIN_ACCOUNT = "refresh-token"
 SETTINGS_KEY     = "passes/refresh_token"   # QSettings fallback
+DEVICE_SETTING   = "passes/device"          # path to a .wvd
 
 KEYWORD = "Passes"
 GAP     = 0.3    # seconds between gallery pages
 
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+
+# contentIds whose `original` variant is an encrypted DASH manifest, mapped to its URL.
+# Populated by items_from_post(); consumed by passes_decrypt.grab_original().
+ENCRYPTED: dict[str, str] = {}
 
 # ── secret storage ────────────────────────────────────────────────────────────
 
@@ -86,6 +91,15 @@ def set_refresh_token(token: str) -> None:
         s.setValue(SETTINGS_KEY, token)
     else:
         s.remove(SETTINGS_KEY)
+
+
+def device_path() -> Path:
+    """Where the Widevine .wvd lives. Swappable; nothing is committed to the repo."""
+    from PySide6.QtCore import QSettings
+    p = str(QSettings("PhotoBrowser", "SafeFinder").value(DEVICE_SETTING, "") or "")
+    if p:
+        return Path(p).expanduser()
+    return Path.home() / "Library/Application Support/SafeFinder/device.wvd"
 
 
 # ── API helpers ───────────────────────────────────────────────────────────────
@@ -184,10 +198,21 @@ def items_from_post(post: dict, folder: Path,
         ct  = (c.get("contentType") or "").lower()
         ext = (c.get("extension") or "").lstrip(".")
         sc  = c.get("signedContent") or {}
-        # prefer large, fall back to signedUrl (both are plain, non-encrypted files)
+
+        # the original variant is an encrypted DASH manifest; register it and let
+        # passes_decrypt.grab_original() handle the item instead of social.settle()
+        orig = sc.get("original") or ""
+        if orig:
+            ENCRYPTED[cid] = orig
+
+        # fall back to the plain variants, then to the original if nothing else exists
         url = sc.get("large") or sc.get("signedUrl") or ""
         if not url:
-            continue
+            if orig:
+                url = orig
+            else:
+                continue
+
         video = ct == "video"
         if not ext:
             ext = "mp4" if video else "jpg"

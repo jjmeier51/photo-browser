@@ -11,7 +11,9 @@ persistent QWebEngineProfile).  After the /auth/success navigation the page's
 (service "Safe Finder Passes", account "refresh-token").  It is re-used on
 every subsequent run and exchanged for a short-lived access token each time.
 
-Downloads use `large`, then `signedUrl` — the standard-quality variants.
+Items with an `original` variant are fetched and decrypted via passes_decrypt;
+everything else uses `large`, then `signedUrl`.  If the original path fails the
+item is retried at `large` and flagged in the log.
 
 Passes support (Case PS-48213, 2026-11-03) confirms purchased content may be
 kept locally for personal use.  Personal archive only, no redistribution.
@@ -41,6 +43,7 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile           
 from PySide6.QtWebEngineWidgets import QWebEngineView                             # noqa: E402
 
 import passes                                                                     # noqa: E402
+import passes_decrypt                                                             # noqa: E402
 import simpcity as sc                                                             # noqa: E402
 import social                                                                     # noqa: E402
 
@@ -221,6 +224,7 @@ class PassesWindow(QMainWindow):
         self.heavy = threading.Lock()
         self.pool  = concurrent.futures.ThreadPoolExecutor(
             max_workers=LANES, thread_name_prefix="passes-dl")
+        passes.ENCRYPTED.clear()
 
         for w in (self.go_btn, self.field, self.zip_btn):
             w.setEnabled(False)
@@ -298,10 +302,19 @@ class PassesWindow(QMainWindow):
         self.queued += 1
         self.key_left[item.key] = self.key_left.get(item.key, 0) + 1
         self.bar.setRange(0, self.queued)
-        fut = self.pool.submit(
-            social.settle, item,
-            [{"User-Agent": social.UA, "Referer": "https://www.passes.com/"}],
-            social.Options(), self.exif, None, self.heavy)
+
+        headers = {"User-Agent": social.UA, "Referer": "https://www.passes.com/"}
+        if item.key in passes.ENCRYPTED:
+            # original variant: decrypt rather than plain-download
+            fut = self.pool.submit(
+                passes_decrypt.grab_original, item,
+                {"Authorization": f"Bearer {self._access_token}", **headers},
+                self.exif)
+        else:
+            fut = self.pool.submit(
+                social.settle, item, [headers],
+                social.Options(), self.exif, None, self.heavy)
+
         self.futures.append(fut)
         fut.add_done_callback(
             lambda f: self.bridge.call.emit(self._settled, f))
@@ -328,6 +341,11 @@ class PassesWindow(QMainWindow):
                         self.photos += 1
                 self.to_tag.append(s.path)
                 self.done_keys.add(s.item.key)
+            elif s.why.startswith("original:") and s.item.key in passes.ENCRYPTED:
+                # decryption failed — drop back to the plain variant for this item
+                passes.ENCRYPTED.pop(s.item.key, None)
+                self._log(f"   {s.item.name}.{s.item.ext}: {s.why} — retrying at large")
+                self._queue(s.item)
             else:
                 self.failed += 1
                 self.failed_keys.add(s.item.key)
@@ -528,7 +546,7 @@ def _import_zip(zip_path: str, dest: Path,
                                  "uid": uid, "video": ct == "video", "ext": ext}
 
         # 2. Process media files
-        creator_cache: dict[str, str] = {}   # uid → sanitized folder name
+        creator_cache: dict[str, str] = {}   # poster → sanitized folder name
         # per-creator record: collect done ids, save once at end
         folder_done: dict[str, set[str]]    = {}   # folder_str → set of cids
         folder_recs: dict[str, social.Record] = {}
@@ -550,10 +568,12 @@ def _import_zip(zip_path: str, dest: Path,
                 poster = m["poster"] if m else ""
                 video  = (m["video"] if m else ext in {"mp4", "mov", "m4v"})
 
-                # creator folder
-                if uid not in creator_cache:
-                    creator_cache[uid] = social.sanitize(uid, "Passes", 80) if uid else "Passes"
-                folder = dest / creator_cache[uid]
+                # creator folder — named after the username, matching downloads
+                name_key = poster or uid
+                if name_key not in creator_cache:
+                    creator_cache[name_key] = (
+                        social.sanitize(poster, "Passes", 80) if poster else "Passes")
+                folder = dest / creator_cache[name_key]
                 sc.make_folder(folder)
                 fkey   = str(folder)
                 if fkey not in folder_recs:
