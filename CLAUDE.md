@@ -129,8 +129,9 @@ actions the app makes no network calls.
   remember them for "Last Crop". Safe Finder's twin: right-click ▸ Crop… (`mac/batch_crop.py`,
   `mac/crop_window.py`, same arithmetic — `docs/feature-notes.md` §6i). Safe Finder also has
   right-click ▸ **AI Upscale 2×** — real Real-ESRGAN (Upscayl's engine) on the Mac, in place or saved as a
-  new "name (upscaled)" photo with the same metadata, dates and tags, tagged "upscaled" (`mac/ai_upscale.py`,
-  §6l); the iPhone's "AI Upscale" is Lanczos + denoise + sharpen. And right-click ▸ **Erase Area…** — boxes
+  new "name (upscaled)" photo with the same metadata, dates and tags, tagged "upscaled" (`mac/ai_upscale.py`;
+  photos over 12 MP too, in tiles, after a warning of how big they'll be — §6l); the iPhone's "AI Upscale"
+  is Lanczos + denoise + sharpen. And right-click ▸ **Erase Area…** — boxes
   drawn once over a watermark/stamp on one photo, erased from every selected one (see-through marks taken
   back out, the rest filled; Save as New or Replace; tagged "retouched" — `mac/retouch.py`, §6o).
   Safe Finder's **Photos view** (⌘3, the iPhone's square grid with video lengths) and its **viewer** (double-click:

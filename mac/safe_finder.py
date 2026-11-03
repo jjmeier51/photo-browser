@@ -4350,13 +4350,17 @@ class Pane(QWidget):
             secs = time.monotonic() - started
             note += f" in {secs / 60:.0f} min {secs % 60:.0f} s" if secs >= 60 else f" in {secs:.0f} s"
             if skipped:
-                note += f"; {len(skipped):,} already large"
+                big = sum(1 for _p, why in skipped if why.startswith("too large"))
+                if len(skipped) - big:
+                    note += f"; {len(skipped) - big:,} already large (left as they were)"
+                if big:
+                    note += f"; {big:,} too large to upscale"
             if failed:
                 note += f"; {len(failed):,} couldn't be"
             self._airdrop_noted(note + ".")
 
         run = upscale_window.UpscaleRun(self.window(), photos, engine, done, as_new=as_new, texture=choice.texture,
-                                        lanes=ai_upscale.lanes(len(photos)))
+                                        lanes=ai_upscale.lanes(len(photos)), allow_large=choice.allow_large)
         run.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         run.open()
 

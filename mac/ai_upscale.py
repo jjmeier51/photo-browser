@@ -16,8 +16,16 @@ general-photo model found is used (`PREFERRED`); anime and digital-art models ar
 Each photo is saved like a crop (batch_crop.encode_like): its format, EXIF (pixel size updated), ICC
 profile, XMP, tags and dates kept — in place (write_in_place), or as a new photo beside it, "name
 (upscaled).ext" (write_beside: the same metadata, extended attributes and created/modified dates; its tags
-are the caller's to carry over). Photos over ~12 MP are left alone (2× would be ~50 MP and the network's
-pass ~200 MP). GIFs and RAW files are left out, as for crops; HDR comes out standard range.
+are the caller's to carry over). GIFs and RAW files are left out, as for crops; HDR comes out standard range.
+
+Large photos: a photo over ~12 MP (`MAX_PIXELS`) is "already large" — left alone unless the caller says
+`allow_large` (the window asks, with a warning of how big the results will be: `estimate`). Those go through
+the network in tiles (`TILE_CORE` px of the photo each, with `TILE_PAD` px of the photo around them for
+context, only each tile's core kept), so its 4× pass never holds more than a 12 MP photo's would and the
+size of the photo doesn't matter to memory beyond the result itself. A result over `MAX_RESULT_PIXELS`
+(400 MP — a 100 MP photo) or wider than its format can hold (JPEG 65,500 px a side, WebP 16,383) isn't
+attempted (`too_large`). Pillow's decompression-bomb guard is raised to match: the engine's 4× pass of even
+a 12 MP photo (~195 MP) was over its 179 MP limit, so its result didn't open.
 
 Progress: the engine prints how far its pass is, a percentage per tile ("42.50%"), as Upscayl's own app
 reads it; `upscale` reports each photo in stages — reading, the network's pass (most of the time), saving —
@@ -53,9 +61,18 @@ from typing import Callable, NamedTuple
 
 import batch_crop
 
+# Our own photos and the engine's own results, not files off the internet: room for the 4× pass of a large
+# tile and a 400 MP result (Pillow refuses at twice this).
+batch_crop.Image.MAX_IMAGE_PIXELS = max(batch_crop.Image.MAX_IMAGE_PIXELS or 0, 600_000_000)
+
 UPSCALED_TAG = "upscaled"                    # the iPhone app's tag for its upscales too
 FACTOR = 2
-MAX_PIXELS = 12_300_000                      # a 12 MP iPhone photo (4032×3024) still goes; bigger ones don't
+MAX_PIXELS = 12_300_000                      # "already large" above this (a 12 MP iPhone photo is 4032×3024)
+MAX_RESULT_PIXELS = 400_000_000              # the most a result may be (a 100 MP photo, 2×): memory for it, twice
+MAX_SIDE = {"JPEG": 65_500, "WEBP": 16_383}  # what a format can hold a side; the rest: 65,500 too, to be safe
+TILE_CORE = 3000                             # px of a large photo per network pass (its 4× pass ≈ a 9 MP photo's)
+TILE_PAD = 48                                # px of the photo around each tile, for context; cut away after
+BYTES_PER_PIXEL = {"JPEG": 0.9, "HEIF": 0.35, "WEBP": 0.6, "PNG": 2.4, "TIFF": 3.0, "BMP": 3.0}   # rough, for `estimate`
 TIMEOUT = 20 * 60                            # seconds for one photo — a slow GPU on a 12 MP photo, with room
 UPSCAYL_URL = "https://upscayl.org"
 ENGINE_NAMES = ("upscayl-bin", "realesrgan-ncnn-vulkan")
@@ -255,6 +272,51 @@ def can_upscale(path: str) -> bool:
     return batch_crop.can_crop(path)
 
 
+class Size(NamedTuple):
+    width: int                  # as shown (turned by its EXIF orientation)
+    height: int
+    fmt: str
+    bytes: int
+
+    @property
+    def pixels(self) -> int:
+        return self.width * self.height
+
+    @property
+    def large(self) -> bool:
+        return self.pixels > MAX_PIXELS
+
+
+def size_of(path: str) -> Size | None:
+    """A photo's size from its header (cheap), turned as it shows; None when it can't be read."""
+    try:
+        with batch_crop.Image.open(path) as im:
+            w, h = im.size
+            if im.getexif().get(0x0112) in (5, 6, 7, 8):
+                w, h = h, w
+            return Size(w, h, im.format or "", os.path.getsize(path))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def too_large(w: int, h: int, fmt: str, factor: int = FACTOR) -> str:
+    """Why a w×h photo can't be upscaled at all ("" when it can)."""
+    tw, th = w * factor, h * factor
+    side = MAX_SIDE.get(fmt, 65_500)
+    if max(tw, th) > side:
+        return f"it would be {tw:,}×{th:,} — wider than {fmt or 'its format'} can hold ({side:,} px)"
+    if tw * th > MAX_RESULT_PIXELS:
+        return f"it would be {tw * th / 1e6:,.0f} MP — over the {MAX_RESULT_PIXELS // 1_000_000} MP Safe Finder makes"
+    return ""
+
+
+def estimate(size: Size, factor: int = FACTOR) -> int:
+    """About how many bytes the upscale will be: its pixels at what its format typically takes at the
+    quality it's saved at — and never less than twice the original."""
+    px = size.pixels * factor * factor
+    return int(max(px * BYTES_PER_PIXEL.get(size.fmt, 1.0), size.bytes * 2))
+
+
 def run_engine(engine: Engine, src_png: str, out_path: str, on_percent: Callable[[float], None] | None = None,
                stop: threading.Event | None = None, tile: int = 0, fmt: str = "png") -> None:
     """One pass of the network, its result written to `out_path` as `fmt` (png / jpg). Its percentages (a
@@ -306,14 +368,13 @@ def _looks_blank(im: "batch_crop.Image.Image", like: "batch_crop.Image.Image") -
     return hi < 8 and like.convert("L").resize((32, 32)).getextrema()[1] > 40
 
 
-def _pass(engine: Engine, inp: str, td: str, fmt: str, target: tuple[int, int], report: Progress,
+def _pass(engine: Engine, inp: str, td: str, fmt: str, target: tuple[int, int], on_engine: Callable[[float], None],
           stop: threading.Event | None, tile: int) -> "batch_crop.Image.Image":
-    """The network's pass and its result, at `target`."""
+    """The network's pass and its result, at `target`. `on_engine` hears how far the pass is (0–1)."""
     out = os.path.join(td, f"out.{fmt}")
     if os.path.exists(out):
         os.remove(out)
-    run_engine(engine, inp, out, lambda p: report("engine", READ_DONE + (ENGINE_DONE - READ_DONE) * p), stop,
-               tile=tile, fmt=fmt)
+    run_engine(engine, inp, out, on_engine, stop, tile=tile, fmt=fmt)
     try:
         with batch_crop.Image.open(out) as made:
             if made.format == "JPEG":
@@ -327,13 +388,69 @@ def _pass(engine: Engine, inp: str, td: str, fmt: str, target: tuple[int, int], 
     return big
 
 
+def _network(engine: Engine, piece: "batch_crop.Image.Image", td: str, fmt: str, factor: int,
+             on_engine: Callable[[float], None], stop: threading.Event | None) -> "batch_crop.Image.Image":
+    """One picture (a whole photo, or a large one's tile) through the network, at `factor`×: in the tile
+    size this Mac takes, once more at the engine's own if that fails or comes out blank."""
+    global _tile_failed
+    inp = os.path.join(td, "in.png")
+    piece.save(inp, compress_level=1)                          # read once by the engine: speed over size
+    target = (piece.width * factor, piece.height * factor)
+    if max(piece.size) * engine.scale > MAX_SIDE["JPEG"]:
+        fmt = "png"                                            # a long panorama's 4× pass: wider than JPEG holds
+    tile = 0 if _tile_failed else tile_size()
+    try:
+        big = _pass(engine, inp, td, fmt, target, on_engine, stop, tile)
+        if tile and _looks_blank(big, piece):
+            raise UpscaleError("blank result")
+    except Stopped:
+        raise
+    except UpscaleError:
+        if not tile:
+            raise
+        _tile_failed = True                                     # too big a tile for this Mac: the engine's own
+        on_engine(0.0)
+        big = _pass(engine, inp, td, fmt, target, on_engine, stop, 0)
+    return big.convert(piece.mode)
+
+
+def _tiled(engine: Engine, flat: "batch_crop.Image.Image", td: str, fmt: str, factor: int, texture: float,
+           report: Progress, stop: threading.Event | None) -> "batch_crop.Image.Image":
+    """A large photo through the network a tile at a time (module notes): each tile with `TILE_PAD` px of
+    the photo around it, only its core kept; the texture blended in per tile too, so nothing but the result
+    is ever held at full size."""
+    w, h = flat.size
+    cells = [(x, y) for y in range(0, h, TILE_CORE) for x in range(0, w, TILE_CORE)]
+    canvas = batch_crop.Image.new(flat.mode, (w * factor, h * factor))
+    span = ENGINE_DONE - READ_DONE
+    for k, (x, y) in enumerate(cells):
+        if stop is not None and stop.is_set():
+            raise Stopped("stopped")
+        box = (max(0, x - TILE_PAD), max(0, y - TILE_PAD), min(w, x + TILE_CORE + TILE_PAD),
+               min(h, y + TILE_CORE + TILE_PAD))
+        piece = flat.crop(box)
+        big = _network(engine, piece, td, fmt, factor,
+                       lambda p, k=k: report("engine", READ_DONE + span * (k + p) / len(cells)), stop)
+        core = ((x - box[0]) * factor, (y - box[1]) * factor,
+                (min(w, x + TILE_CORE) - box[0]) * factor, (min(h, y + TILE_CORE) - box[1]) * factor)
+        kept = big.crop(core)
+        if texture > 0:
+            plain = piece.resize(big.size, batch_crop.Image.Resampling.LANCZOS).crop(core)
+            kept = batch_crop.Image.blend(kept, plain, min(1.0, texture))
+        canvas.paste(kept, (x * factor, y * factor))
+        report("engine", READ_DONE + span * (k + 1) / len(cells))
+    return canvas
+
+
 def upscale(engine: Engine, path: str, factor: int = FACTOR, *, as_new: bool = False, texture: float = 0.0,
-            progress: Progress | None = None, stop: threading.Event | None = None) -> Upscaled:
+            progress: Progress | None = None, stop: threading.Event | None = None,
+            allow_large: bool = False) -> Upscaled:
     """Upscales one photo `factor`× — in place, or (`as_new`) into a new photo beside it — with `texture`
     (0–1) of a plain enlargement of the original blended back in. Returns where it went and its size.
-    `progress` hears how far along it is; `stop` ends the network's pass (Stopped). Raises Skipped (already
-    large), UpscaleError or OSError, and leaves the photo as it was then."""
-    global _tile_failed
+    `progress` hears how far along it is; `stop` ends the network's pass (Stopped). A photo over
+    `MAX_PIXELS` is Skipped ("already large") unless `allow_large` — then it goes through in tiles — and
+    one whose result would be too large for its format or for memory is Skipped either way. Raises Skipped,
+    UpscaleError or OSError, and leaves the photo as it was then."""
     report = progress or (lambda _stage, _done: None)
     report("read", 0.0)
     try:
@@ -341,33 +458,25 @@ def upscale(engine: Engine, path: str, factor: int = FACTOR, *, as_new: bool = F
     except batch_crop.CropError as e:
         raise UpscaleError(str(e)) from e
     w, h = src.image.size
-    if w * h > MAX_PIXELS:
+    if (why := too_large(w, h, src.fmt, factor)):
+        raise Skipped(f"too large to upscale — {why}")
+    large = w * h > MAX_PIXELS
+    if large and not allow_large:
         raise Skipped(f"already {w}×{h}")
     target = (w * factor, h * factor)
     mode = src.image.mode
     alpha = mode in ("RGBA", "LA", "PA") or (mode == "P" and "transparency" in src.image.info)
     flat = src.image.convert("RGBA" if alpha else "RGB")
+    fmt = "png" if alpha else "jpg"
     with tempfile.TemporaryDirectory(prefix="safe-finder-upscale-") as td:
-        inp = os.path.join(td, "in.png")
-        flat.save(inp, compress_level=1)                       # read once by the engine: speed over size
-        fmt = "png" if alpha else "jpg"
         report("engine", READ_DONE)
-        tile = 0 if _tile_failed else tile_size()
-        try:
-            big = _pass(engine, inp, td, fmt, target, report, stop, tile)
-            if tile and _looks_blank(big, flat):
-                raise UpscaleError("blank result")
-        except Stopped:
-            raise
-        except UpscaleError:
-            if not tile:
-                raise
-            _tile_failed = True                                 # too big a tile for this Mac: the engine's own
-            report("engine", READ_DONE)
-            big = _pass(engine, inp, td, fmt, target, report, stop, 0)
+        if large:
+            big = _tiled(engine, flat, td, fmt, factor, texture, report, stop)
+        else:
+            big = _network(engine, flat, td, fmt, factor,
+                           lambda p: report("engine", READ_DONE + (ENGINE_DONE - READ_DONE) * p), stop)
         report("save", ENGINE_DONE)
-    big = big.convert(flat.mode)
-    if texture > 0:
+    if texture > 0 and not large:                              # (a large photo's is blended tile by tile)
         plain = flat.resize(target, batch_crop.Image.Resampling.LANCZOS)
         big = batch_crop.Image.blend(big, plain, min(1.0, texture))
     if mode in ("L", "LA") and big.mode not in ("L", "LA"):
@@ -386,14 +495,15 @@ def upscale(engine: Engine, path: str, factor: int = FACTOR, *, as_new: bool = F
     return Upscaled(made, *target)
 
 
-if __name__ == "__main__":                   # python3 mac/ai_upscale.py [--new] photo.jpg … — from the shell
+if __name__ == "__main__":                   # python3 mac/ai_upscale.py [--new] [--large] photo.jpg … — from the shell
     e = find_engine()
     if e is None:
         sys.exit(f"No Real-ESRGAN engine found — install Upscayl ({UPSCAYL_URL}) and try again.")
     new = "--new" in sys.argv[1:]
-    for p in (a for a in sys.argv[1:] if a != "--new"):
+    large = "--large" in sys.argv[1:]                         # photos over 12 MP too
+    for p in (a for a in sys.argv[1:] if a not in ("--new", "--large")):
         try:
-            r = upscale(e, p, as_new=new)
+            r = upscale(e, p, as_new=new, allow_large=large)
             print(p, "→", r.path if new else "", f"{r.width}×{r.height}", "with", e.describe())
         except UpscaleError as err:
             print(p, "— left as it was:", err)

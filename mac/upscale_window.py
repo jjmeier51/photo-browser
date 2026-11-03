@@ -17,7 +17,7 @@ from typing import Callable, NamedTuple
 
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QMessageBox,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QMessageBox,
                                QProgressBar, QPushButton, QSlider, QVBoxLayout, QWidget)
 
 import ai_upscale as au
@@ -31,6 +31,50 @@ class Choice(NamedTuple):
     how: str                    # "new" (save beside the original) / "replace" (in place)
     model: str
     texture: float              # 0–1
+    allow_large: bool = False   # photos over 12 MP too (the window warned how big they'd be)
+
+
+def _mb(n: float) -> str:
+    return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{n / 1e6:,.0f} MB"
+
+
+def large_warning(sizes: list[tuple[str, "au.Size"]]) -> tuple[str, int, int]:
+    """(the warning's text, how many large photos can go, how many are too large even so) for the photos'
+    sizes — "" when none is large."""
+    large = [(p, z) for p, z in sizes if z.large]
+    if not large:
+        return "", 0, 0
+    blocked = [(p, z) for p, z in large if au.too_large(z.width, z.height, z.fmt)]
+    ok = [(p, z) for p, z in large if not au.too_large(z.width, z.height, z.fmt)]
+    lines = []
+    if ok:
+        biggest_p, biggest = max(ok, key=lambda pz: pz[1].pixels)
+        f = au.FACTOR
+        out_w, out_h = biggest.width * f, biggest.height * f
+        each = au.estimate(biggest)
+        total = sum(au.estimate(z) for _p, z in ok)
+        slower = biggest.pixels / au.MAX_PIXELS
+        if len(sizes) == 1:
+            lines.append(f"⚠︎ This photo is already large — {biggest.width:,}×{biggest.height:,} "
+                         f"({biggest.pixels / 1e6:.1f} MP, {_mb(biggest.bytes)}).")
+        elif len(ok) == 1:
+            lines.append(f"⚠︎ 1 of these photos, “{os.path.basename(biggest_p)}”, is already large — "
+                         f"{biggest.width:,}×{biggest.height:,} ({biggest.pixels / 1e6:.1f} MP).")
+        else:
+            lines.append(f"⚠︎ {len(ok):,} of these photos are already large (over 12 MP) — the biggest, "
+                         f"“{os.path.basename(biggest_p)}”, is {biggest.width:,}×{biggest.height:,} "
+                         f"({biggest.pixels / 1e6:.1f} MP).")
+        lines.append(f"Upscaled 2×{' the biggest' if len(ok) > 1 else ''} it would be {out_w:,}×{out_h:,} — {out_w * out_h / 1e6:,.0f} MP, about "
+                     f"{_mb(each)} as {biggest.fmt or 'the same format'}" +
+                     (f" ({_mb(total)} for all {len(ok):,})" if len(ok) > 1 else "") +
+                     f" — and take about {max(1.5, slower):.0f}× as long as a 12 MP photo. Some apps, and the "
+                     "iPhone, may be slow to open photos that big.")
+    if blocked:
+        names = ", ".join(f"“{os.path.basename(p)}”" for p, _z in blocked[:3]) + ("…" if len(blocked) > 3 else "")
+        why = au.too_large(blocked[0][1].width, blocked[0][1].height, blocked[0][1].fmt)
+        lines.append(f"{len(blocked):,} {'is' if len(blocked) == 1 else 'are'} too large to upscale even so and "
+                     f"will be left as {'it is' if len(blocked) == 1 else 'they are'} ({names}: {why}).")
+    return " ".join(lines), len(ok), len(blocked)
 
 
 class UpscaleOptions(QDialog):
@@ -42,6 +86,7 @@ class UpscaleOptions(QDialog):
                  model: str | None = None, texture: float = TEXTURE) -> None:
         super().__init__(parent)
         self._picked: str | None = None
+        self.photos = photos
         n = len(photos)
         self.setWindowTitle("AI Upscale")
         self.setMinimumWidth(500)
@@ -81,10 +126,24 @@ class UpscaleOptions(QDialog):
             f"Save as New puts the upscale beside {'it' if n == 1 else 'each'} as “… ({au.NEW_LABEL})” and leaves "
             f"the original as it is; Replace rewrites {'it' if n == 1 else 'them'} in place. Either way the format, "
             f"capture date, location and the rest of the metadata, the file dates and the tags are kept, and the "
-            f"result is tagged “{au.UPSCALED_TAG}”. Uses {engine.label} on this Mac — nothing is uploaded. "
-            "Photos over 12 MP are left as they are.", objectName="SheetSub")
+            f"result is tagged “{au.UPSCALED_TAG}”. Uses {engine.label} on this Mac — nothing is uploaded.",
+            objectName="SheetSub")
         info.setWordWrap(True)
         lay.addWidget(info)
+        # Photos already over 12 MP: allowed, with how big they'll come out (read from their headers — cheap)
+        sizes = [(p, z) for p in photos[:5000] if (z := au.size_of(p)) is not None]
+        text, self.n_large, self.n_blocked = large_warning(sizes)
+        self.warning = QLabel(text, objectName="UpscaleWarning")
+        self.warning.setWordWrap(True)
+        self.warning.setStyleSheet("#UpscaleWarning { background: rgba(255,159,10,0.14); border: 1px solid "
+                                   "rgba(255,159,10,0.55); border-radius: 8px; padding: 8px 10px; }")
+        self.warning.setVisible(bool(text))
+        lay.addWidget(self.warning)
+        self.include_large = QCheckBox(
+            "Upscale it anyway" if n == 1 else f"Upscale the {self.n_large:,} large photo{'s' if self.n_large != 1 else ''} too")
+        self.include_large.setChecked(True)
+        self.include_large.setVisible(self.n_large > 0 and n > 1)
+        lay.addWidget(self.include_large)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         cancel = QPushButton("Cancel")
@@ -106,7 +165,9 @@ class UpscaleOptions(QDialog):
     def choice(self) -> Choice | None:
         if self._picked is None:
             return None
-        return Choice(self._picked, self.model.currentData(), self.texture.value() / 20)
+        # one photo: picking it with the warning in view is the choice; several: the box says
+        allow = self.n_large > 0 and (len(self.photos) == 1 or self.include_large.isChecked())
+        return Choice(self._picked, self.model.currentData(), self.texture.value() / 20, allow)
 
 
 def ask_options(parent: QWidget | None, photos: list[str], engine: au.Engine, how: str = "new",
@@ -136,9 +197,10 @@ class UpscaleRun(QDialog):
 
     def __init__(self, parent: QWidget | None, photos: list[str], engine: au.Engine,
                  on_done: Callable[[list[tuple[str, str]], list[tuple[str, str]], list[tuple[str, str]]], None],
-                 as_new: bool = False, texture: float = 0.0, lanes: int = 1) -> None:
+                 as_new: bool = False, texture: float = 0.0, lanes: int = 1, allow_large: bool = False) -> None:
         super().__init__(parent)
         self.photos, self.engine, self.on_done, self.as_new = photos, engine, on_done, as_new
+        self.allow_large = allow_large
         self.texture = texture
         self.running = True
         self._stop = threading.Event()
@@ -216,7 +278,8 @@ class UpscaleRun(QDialog):
             path = self.photos[i]
             try:
                 r = au.upscale(self.engine, path, as_new=self.as_new, texture=self.texture, stop=self._stop,
-                               progress=lambda stage, done, i=i: self._sig.step.emit(i, stage, done))
+                               progress=lambda stage, done, i=i: self._sig.step.emit(i, stage, done),
+                               allow_large=self.allow_large)
                 self._sig.progress.emit(i, path, "done", f"{r.width}×{r.height}", r.path)
             except au.Stopped:
                 self._sig.progress.emit(i, path, "stopped", "", "")

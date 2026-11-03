@@ -1244,6 +1244,20 @@ input type image) — built in, but stills are limited to 1920 px tall on macOS 
 couldn't be checked from the sandbox this was written in; worth revisiting for a no-install path (and for
 the iPhone, whose "AI Upscale" is Lanczos + denoise + sharpen, not a network).
 
+**Large photos (Nov 3, 2026).** Over `MAX_PIXELS` (12.3 MP) was a hard skip; now it's "already large",
+skipped unless `allow_large` (the options window: a warning from header sizes — `size_of`, `estimate` =
+output pixels × a per-format rate at the saved quality (JPEG 0.9, HEIC 0.35, WebP 0.6, PNG 2.4 B/px), at
+least 2× the original — and, for a mixed selection, an "Upscale the N large photos too" box; a single photo
+picked with the warning showing is a yes). Large ones go through `_tiled`: 3,000 px cores with 48 px of the
+photo around each for context, only the core kept, texture blended per tile — measured identical to a
+one-pass upscale within 1.5/255 mean on a test photo (`test_upscale_large`), so no seams. Hard limits
+(`too_large`): result ≤ 400 MP (the canvas plus `encode_like`'s verifying decode ≈ 2.4 GB) and sides ≤ 65,500
+(JPEG) / 16,383 (WebP). **A bug this found**: Pillow refuses images over 2 × `MAX_IMAGE_PIXELS` (≈179 MP)
+as decompression bombs, and a 12 MP photo's 4× pass is ~195 MP — so the engine's result for a full-size
+iPhone photo didn't open. `ai_upscale` raises the limit to 600 M (our own photos and the engine's output,
+never downloads). A very wide panorama's 4× pass would also pass JPEG's 65,500 px: `_network` asks the
+engine for PNG then. Social downloads (`social.upscale_photo`) still leave large photos alone.
+
 ## 6m. Safe Finder: each folder's own look, and the freeze in big moves — `mac/safe_finder.py` (Oct 30, 2026)
 
 **View memory (`FolderViews`).** Every place a pane shows keeps the look it was last shown in — mode

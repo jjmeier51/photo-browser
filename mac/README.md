@@ -474,9 +474,17 @@ its engine and models on its own. A `realesrgan-ncnn-vulkan` release works too �
 `~/Library/Application Support/Safe Finder/Real-ESRGAN` — or point Safe Finder at either with **Choose
 Engine…** the first time (remembered). The best general-photo model found is used (Upscayl's standard
 model, else `realesrgan-x4plus`; anime and digital-art models are passed over). The models are 4×: the
-network upscales 4× and the result is brought to exactly 2× with Lanczos. Photos over 12 MP are left as they
-are; GIFs and RAW files can't be upscaled; HDR photos come out standard range. From the shell:
-`python3 mac/ai_upscale.py [--new] photo.jpg …`.
+network upscales 4× and the result is brought to exactly 2× with Lanczos. GIFs and RAW files can't be
+upscaled; HDR photos come out standard range. From the shell: `python3 mac/ai_upscale.py [--new] [--large]
+photo.jpg …`.
+
+**Photos that are already large** (over 12 MP) can be upscaled too. The options window then warns how big
+the result will be — e.g. "this photo is already 8,064×6,048 (48.8 MP); upscaled 2× it would be
+16,128×12,096 — 195 MP, about 176 MB as JPEG — and take about 4× as long as a 12 MP photo" (with the total
+for several) — and, when only some of the selection is large, has a **Upscale the N large photos too** box
+(untick it to leave them as they are). They go through the network in tiles, so the Mac's memory only ever
+holds a 12 MP photo's worth of work plus the result. A result over 400 MP (a 100 MP photo), or wider than
+its format can hold (JPEG 65,500 px, WebP 16,383 px), isn't attempted, and the window says which.
 
 (The iPhone app's "AI Upscale" is not a neural network — it's Lanczos with denoise and sharpen.)
 
