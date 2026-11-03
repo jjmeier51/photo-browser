@@ -55,6 +55,8 @@ rm -rf "dist/Safe Finder" "dist/Safe Finder.app"
   --windowed --name "Safe Finder" \
   --icon "$PWD/build/SafeFinder.icns" \
   --osx-bundle-identifier com.photobrowser.safefinder \
+  --collect-all pywidevine \
+  --collect-all yt_dlp \
   --add-data "$PWD/relocate_folders.py:." \
   --add-data "$PWD/exfat_inspect.py:." \
   --add-data "$PWD/spare_folders.py:." \
