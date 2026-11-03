@@ -225,6 +225,7 @@ class PassesWindow(QMainWindow):
         self.futures:   list[concurrent.futures.Future] = []
         self._records:  dict[str, social.Record] = {}   # creator_folder_str → Record
         self._creator_names: dict[str, str]  = {}       # userId → folder name (resolved in bg)
+        self._logged_missing: set[str]       = set()
         self.crawl_done = False
         self.exif  = sc.ExifSession(self.exiftool) if self.exiftool else None
         self.heavy = threading.Lock()
@@ -232,6 +233,7 @@ class PassesWindow(QMainWindow):
             max_workers=LANES, thread_name_prefix="passes-dl")
         passes.ENCRYPTED.clear()
         passes.PLAIN.clear()
+        passes.MISSING.clear()
 
         for w in (self.go_btn, self.field, self.zip_btn):
             w.setEnabled(False)
@@ -297,6 +299,12 @@ class PassesWindow(QMainWindow):
                 self._queue(item)
 
     def _queue(self, item: social.Item) -> None:
+        if (item.key in passes.MISSING and item.key not in self._logged_missing
+                and len(self._logged_missing) < 3):
+            self._logged_missing.add(item.key)
+            self._log(f"   no original for {item.key} — signedContent keys: "
+                      f"{passes.MISSING[item.key]}")
+
         self.queued += 1
         self.key_left[item.key] = self.key_left.get(item.key, 0) + 1
         self.bar.setRange(0, self.queued)

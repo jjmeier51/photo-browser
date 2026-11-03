@@ -19,7 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import social
 
@@ -53,6 +53,10 @@ ENCRYPTED: dict[str, str] = {}
 # contentIds whose chosen URL is a manifest, mapped to a plain one-file URL when the
 # API offers one.  Used as the fallback when a manifest download fails.
 PLAIN: dict[str, str] = {}
+
+# contentIds with no `original` variant, mapped to their signedContent key list.
+# Diagnostic only — these are the ones that carry Passes' watermark.
+MISSING: dict[str, str] = {}
 
 # ── secret storage ────────────────────────────────────────────────────────────
 
@@ -199,22 +203,32 @@ def channel_id(access_token: str, username: str) -> str | None:
         time.sleep(GAP)
 
 
-def messages_pages(access_token: str, username: str) -> Iterator[list[dict]]:
+def messages_pages(access_token: str, username: str,
+                   log: Callable[[str], None] | None = None) -> Iterator[list[dict]]:
     """Yields successive pages of message dicts from the channel with `username`."""
     cid = channel_id(access_token, username)
     if not cid:
         raise RuntimeError(f'no message channel with "{username}"')
     body: dict = {"channelId": cid, "contentOnly": False, "pending": False}
     last_id = None
+    page = 0
     while True:
+        page += 1
         doc = _post("/messages/messages", body, access_token)
         data = doc.get("data") or []
+        if log:
+            log(f"page {page}: {len(data)} message(s), "
+                f"hasNextPage={doc.get('hasNextPage')!r} hasMore={doc.get('hasMore')!r} "
+                f"lastId={'yes' if doc.get('lastId') else 'no'} "
+                f"lastSentAt={'yes' if doc.get('lastSentAt') else 'no'}")
         if data:
             yield data
         if not _more(doc):
             break
         nid = doc.get("lastId")
         if nid is not None and nid == last_id:      # cursor stopped moving
+            if log:
+                log("cursor did not advance — stopping")
             break
         last_id = nid
         body["lastSentAt"] = doc.get("lastSentAt")
@@ -264,6 +278,8 @@ def items_from_post(post: dict, folder: Path,
         orig = sc.get("original") or ""
         if orig:
             ENCRYPTED[cid] = orig
+        else:
+            MISSING[cid] = ",".join(sorted(sc)) or "(empty)"
 
         url = orig or sc.get("large") or sc.get("signedUrl") or ""
         if not url:
