@@ -165,8 +165,8 @@ app before any app is asked — send them inside a folder, or use the app's "Add
 Looks and works like Finder: a sidebar (Favorites, Locations with an eject button for the SSD, and
 your Tags), and two panes side by side — **From** (your Mac) and **To** (the SSD) — each with icon view
 (photo and video thumbnails, with a size slider up to 320 px and a spacing slider that packs the
-tiles edge to edge for more per row) or list view, a Sort menu, a search field, back/forward and a
-path bar. Select files
+tiles edge to edge for more per row), list view or **Photos** view (the iPhone app's grid — below), a
+Sort menu, a search field, back/forward and a path bar. Select files
 or folders on the left and press **Move to “Extreme SSD”** (or Copy), or drag them onto the right
 pane — onto a folder there to put them inside it. Drags from the real Finder work too.
 
@@ -257,6 +257,52 @@ as you scroll). Safe Finder builds it once with Xcode's `swiftc` (the same way a
 into `~/Library/Caches/PhotoBrowser/`. Until it's built, without Xcode's tools, or for a file it can't
 read, Quick Look does those thumbnails, four at a time. The system may clear the Caches folder under
 disk pressure; the thumbnails just render again.
+
+### Photos view and the viewer — the iPhone app's grid and viewer (`media_viewer.py`, `media_info.py`)
+
+The third view button in each pane (⌘3, beside icons and list) shows a folder the way Photo Browser on the
+iPhone does: square tiles two pixels apart filling the pane's width in whole columns, each picture cropped
+to fill its square; a video's length bottom left and a play badge bottom right; tag dots top right (the
+reaction score top left while sorting by it); a folder shows the first photo or video inside it with its
+name across the bottom. The size slider sets how many columns. A selected tile lightens and gets the
+iPhone's blue check; dragging from a tile that isn't selected draws a selection box (from a selected one it
+drags the files, as everywhere else). Each folder remembers it, like icons and list.
+
+**Double-click a photo or video** (or press Return) — in any view — and it opens in the viewer instead of
+Preview: one item at a time on black, in the folder's order (or just the ones you picked, if you picked
+several), with a top and bottom bar that a click hides and brings back.
+
+- **Photos** fit the window; pinch, ⌘-scroll or +/− zooms, a double-click toggles fit and actual size at the
+  spot clicked, and you drag to pan. The ones either side are read ahead, so ←/→ is instant.
+- **Videos** play and loop, as on the iPhone, with a scrubber, ↺15 / 15↻ (J / L), a frame step (, and .),
+  slow motion (½×, ¼×, ⅛× — the iPhone's Slo-Mo) and mute. **Save Frame** saves the frame on screen as a
+  standard-range PNG in a "Screenshots" folder beside the video (the iPhone's press-and-hold screenshot);
+  **All Frames…** opens Export All Frames (below).
+- ←/→ (or a two-finger swipe) moves, Esc or ↓ closes, I or ↑ opens the **Info** panel (when it was taken or
+  recorded, size, length, camera, place with a Maps link, caption, folder, tags and Edit Tags…), F is full
+  screen, S a slideshow (3 seconds a photo; a video plays to its end), Space plays/pauses, ⌘⌫ moves to the
+  Trash (asking first), ⌘T edits tags. **Show in Folder** closes the viewer with the file selected; **Open
+  With…** opens it in Preview or QuickTime Player. Right-click ▸ **Open With Default App** still does that
+  from the folder.
+
+Video lengths, dates, sizes and the camera are read from the files themselves (`media_info.py`: the MP4/MOV
+boxes and the photo's EXIF — no ExifTool), off the main thread and once per file.
+
+### Export All Frames and Save Frame (`frame_export.py`)
+
+Right-click a video ▸ **Export All Frames…** (or several videos ▸ **Export All Frames of N Videos…**, or
+**All Frames…** in the viewer) — the iPhone app's Export All Frames, with the same choices and names:
+every frame, half or a quarter (the rates shown in frames per second), into a folder beside the video named
+"<video> Frames" unless you name it, as "<folder> 0.heic", "<folder> 1.heic"… at 1.5× (Lanczos), the
+video's capture date kept. An HDR video's frames are tone-mapped like the iPhone's screenshots — **Standard
+range** (the default, the press-and-hold screenshot's look; right anywhere) or **HDR** (kept HDR, highlights
+eased) — and the choice is remembered. Several videos go one after another, each into its own folder.
+**Stop** keeps what's done; exporting the same video at the same rate and colour again carries on where it
+stopped. A finished export, or one at another rate, is left alone: the next goes into "<video> Frames 2".
+
+Both use `video_helper.swift` (the iPhone's AVFoundation and Core Image code: frames, tone mapping, HEIC).
+Without Xcode's Command Line Tools ffmpeg does them instead — JPEG frames, tone-mapped when that ffmpeg has
+`zscale`.
 
 ### Sizes, a size filter, empty folders, and the Trash
 

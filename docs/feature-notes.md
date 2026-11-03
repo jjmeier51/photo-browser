@@ -1289,6 +1289,39 @@ Saving through `batch_crop` (`encode_like`, `write_in_place` / `write_beside` "�
 carries tags to new photos and adds "retouched". numpy is new in `mac/requirements.txt` (the launchers now
 check for it; the menu says how to install it into an older `.venv`).
 
+## 6p. Safe Finder Photos view, viewer and Export All Frames — `mac/media_viewer.py`, `mac/media_info.py`, `mac/frame_export.py` (Nov 3, 2026)
+
+**Photos view** (`PhotoDelegate`, mode "photos" in `Pane`): the same `GridView` and model as Icons with
+another delegate — no second view to keep in step. `cell_size` makes the columns fill the viewport
+(`cols = round(width / slider px)`, side = width // cols), and `resizeEvent` re-lays out, so there's never a
+ragged right edge. Folder covers and video lengths are `_Facts` — a small thread pool keyed by (path, mtime)
+that signals `ready`, after which the grid repaints; painting never touches the disk. Drag-select from an
+unselected tile (`on_body` is "is it selected" in this mode): with tiles edge to edge there's no blank space
+to start a box from, which is what Icons relies on.
+
+**Viewer** (`MediaViewer`): a top-level window per open, holding a path list (the listing's photos and videos,
+or the selection when several are picked). It never touches files: `Hooks` carries trash / tags / reveal /
+export / save frame from the pane, so search results and collections work the same. Photos decode on worker
+threads (`_ImageLoader`, Qt's reader, then Pillow for what Qt can't) with an LRU of neighbours. Video is
+QtMultimedia; PySide6 wheels without it (and this sandbox) get the poster and Open With. The Info panel's
+labels are taken off the panel at once (`setParent(None)`), not left to `deleteLater` — otherwise a refill
+before the event loop ran drew both sets on top of each other.
+
+**`media_info`** reads MP4/MOV boxes by seeking (mvhd length/date, the video `tkhd` size and turn, mdhd+stts
+frame rate, QuickTime's `creationdate` with its zone), so a 4 GB file costs a few small reads, and Pillow EXIF
+for photos. Cached by (path, mtime_ns, size).
+
+**Frames** port `FileActions.exportAllFrames` / `encodeFrame` / `standardRangeFrame` into `video_helper.swift`
+(`frame`, `frames`: CIToneMapHeadroom on macOS 15+, else the iPhone's softened HDR curve; 1.5× Lanczos; HEIC;
+capture date). Output is line-based ("total N", "progress i N", "error …") for the window's bar. ffmpeg is the
+fallback (JPEG, `zscale`+`tonemap` when built in). **Resume differs from the iPhone on purpose**: iOS keeps a
+per-video checkpoint and otherwise writes into the same-named folder, skipping names already there — so a
+second export at another rate kept the first's frames under its indexes and added its own after them, two
+rates mixed in one folder. Here the folder carries `.frames-export.json`
+(video name + size, rate, colour) while an export runs; only an exact match resumes (`_resume_index`: the
+unbroken run from 0, less two that may have been mid-write), anything else goes to "<name> 2". On exFAT the
+helper writes frames in place (`direct`, no rename — CLAUDE.md #12); elsewhere temp → rename.
+
 ## 6a. WebM playback — `WebMPlayer.swift`
 
 AVPlayer, AVAssetImageGenerator and QuickLook can't open WebM on iOS; WebKit can (VP8/VP9/AV1,

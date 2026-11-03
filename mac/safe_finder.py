@@ -61,11 +61,12 @@ sys.path.insert(0, str(HERE))
 
 try:
     from PySide6.QtCore import (QDateTime, QDir, QFileInfo, QFileSystemWatcher, QItemSelection, QItemSelectionModel,
-                                QLocale, QMimeData, QModelIndex, QObject, QPersistentModelIndex, QPoint, QRect,
+                                QLocale, QMimeData, QModelIndex, QObject, QPersistentModelIndex, QPoint, QPointF, QRect,
                                 QRectF, QRunnable, QSettings, QSize, QSortFilterProxyModel, QStringListModel, Qt,
                                 QThreadPool, QTimer, QUrl, Signal)
     from PySide6.QtGui import (QAction, QActionGroup, QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QIcon,
-                               QImage, QImageReader, QKeySequence, QMouseEvent, QPainter, QPainterPath, QPalette,
+                               QImage, QImageReader, QKeySequence, QLinearGradient, QMouseEvent, QPainter,
+                               QPainterPath, QPalette,
                                QPen, QPixmap, QShortcut, QStandardItem, QStandardItemModel)
     from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
                                    QCompleter, QFileIconProvider, QFileSystemModel, QFrame, QHBoxLayout,
@@ -84,6 +85,7 @@ except ModuleNotFoundError:
 
 import airdrop_to_iphone as airdrop
 import batch_crop
+import media_info
 import safe_transfer as engine
 import shared_tags
 import spare_folders
@@ -279,6 +281,12 @@ def glyph(name: str, color: str | None = None, size: int = 16) -> QIcon:
         for gx in (0.15, 0.55):
             for gy in (0.15, 0.55):
                 p.drawRoundedRect(QRectF(s * gx, s * gy, s * 0.3, s * 0.3), 1.5, 1.5)
+    elif name == "photos":                                 # the iPhone's grid: nine squares a hair apart
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        for gx in (0.12, 0.40, 0.68):
+            for gy in (0.12, 0.40, 0.68):
+                p.drawRect(QRectF(s * gx, s * gy, s * 0.24, s * 0.24))
     elif name == "list":
         for i, gy in enumerate((0.25, 0.5, 0.75)):
             p.drawPoint(QPoint(int(s * 0.18), int(s * gy)))
@@ -557,6 +565,7 @@ def tags_changed() -> None:
 
 
 _SIMPCITY_WINDOWS: list = []
+_VIEWERS: list = []                   # open viewers and frame exports (kept alive while shown)
 
 
 def simpcity_scores_folder(folder: str) -> str | None:
@@ -1389,6 +1398,213 @@ class GridDelegate(QStyledItemDelegate):
         return target
 
 
+class _Facts(QObject):
+    """Small facts read off the main thread and kept for the session: a video's length (`media_info`) and a
+    folder's cover (the first photo or video in it, by name). `get` answers from what's known — None while
+    it's being read, which starts the read — and `ready` asks the views to repaint once a batch is in."""
+    ready = Signal()
+    _got = Signal()
+
+    def __init__(self, read, workers: int = 4) -> None:
+        super().__init__()
+        from concurrent.futures import ThreadPoolExecutor
+        self._read = read
+        self._known: dict = {}
+        self._asked: set = set()
+        self._lock = threading.Lock()
+        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="facts")
+        self._tick = QTimer(self)
+        self._tick.setSingleShot(True)
+        self._tick.setInterval(120)
+        self._tick.timeout.connect(self.ready.emit)
+        self._got.connect(self._tick.start, Qt.ConnectionType.QueuedConnection)
+
+    def get(self, key):
+        with self._lock:
+            if key in self._known:
+                return self._known[key]
+            if key in self._asked:
+                return None
+            self._asked.add(key)
+        self._pool.submit(self._work, key)
+        return None
+
+    def _work(self, key) -> None:
+        try:
+            value = self._read(key)
+        except Exception:  # noqa: BLE001 — a fact that can't be read is just not shown
+            value = None
+        with self._lock:
+            self._known[key] = value
+        self._got.emit()
+
+
+def _read_duration(key) -> float | None:
+    return media_info.video_duration(key[0])
+
+
+def _read_cover(key) -> tuple[str, float] | None:
+    """The first photo or video in a folder (by name, hidden files left out), with its modified time."""
+    folder = key[0]
+    best: str | None = None
+    try:
+        with os.scandir(folder) as it:
+            for n, e in enumerate(it):
+                if n > 5000:
+                    break
+                if e.name.startswith(".") or kind_of(e.name) == "other":
+                    continue
+                if best is None or natural_key(e.name) < natural_key(best):
+                    best = e.name
+    except OSError:
+        return None
+    if best is None:
+        return None
+    path = os.path.join(folder, best)
+    try:
+        return path, os.stat(path).st_mtime
+    except OSError:
+        return None
+
+
+DURATIONS: _Facts | None = None
+COVERS: _Facts | None = None
+
+
+def facts() -> tuple[_Facts, _Facts]:
+    global DURATIONS, COVERS
+    if DURATIONS is None:
+        DURATIONS, COVERS = _Facts(_read_duration), _Facts(_read_cover, workers=2)
+    return DURATIONS, COVERS
+
+
+class PhotoDelegate(QStyledItemDelegate):
+    """The Photos view — the iPhone app's grid: square tiles a hair apart, each picture cropped to fill its
+    square; a video's length bottom left and its play badge bottom right; tags top right (the reaction score
+    top left while sorting by it); a folder shows the first photo or video in it, its name across the bottom.
+    A selected tile is lightened and carries the iPhone's blue check. `bodies` as GridDelegate's (the tile)."""
+    GAP = 2
+
+    def __init__(self, pane: "Pane") -> None:
+        super().__init__(pane)
+        self.pane = pane
+        self.bodies: dict[str, tuple[QRect, QRect]] = {}
+
+    def sizeHint(self, option, index) -> QSize:  # noqa: N802
+        return self.pane.cell_size()
+
+    @staticmethod
+    def draw_cover(p: QPainter, pm: QPixmap, rect: QRect) -> None:
+        """`pm` scaled to fill `rect`, its middle kept (the iPhone's aspect-fill)."""
+        scale = max(rect.width() / max(pm.width(), 1), rect.height() / max(pm.height(), 1))
+        sw, sh = rect.width() / scale, rect.height() / scale
+        p.drawPixmap(QRectF(rect), pm, QRectF((pm.width() - sw) / 2, (pm.height() - sh) / 2, sw, sh))
+
+    def paint(self, p: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        model = self.pane.model
+        path = model.filePath(index)
+        is_dir = model.isDir(index)
+        kind = "folder" if is_dir else kind_of(path)
+        r = option.rect.adjusted(0, 0, -self.GAP, -self.GAP)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        durations, covers = facts()
+        p.save()
+        p.setClipRect(option.rect)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        p.fillRect(r, QColor("#2C2C2E") if THEME.dark else QColor("#E5E5EA"))
+        pic = None
+        if THUMBS is not None:
+            if is_dir:
+                try:
+                    cover = covers.get((path, os.stat(path).st_mtime))
+                except OSError:
+                    cover = None
+                if cover:
+                    pic = THUMBS.get(cover[0], cover[1])
+            elif kind != "other":
+                pic = THUMBS.get(path, model.lastModified(index).toSecsSinceEpoch())
+        if pic is not None:
+            self.draw_cover(p, pic, r)
+        else:
+            side = int(min(r.width(), r.height()) * (0.42 if is_dir or kind == "other" else 0.3))
+            model.fileIcon(index).paint(p, QRect(r.center().x() - side // 2, r.center().y() - side // 2 - (8 if is_dir
+                                                 or kind == "other" else 0), side, side))
+        small = QFont(option.font)
+        small.setPointSizeF(max(8.0, small.pointSizeF() - 1.5))
+        small.setWeight(QFont.Weight.DemiBold)
+        fm = QFontMetrics(small)
+        if is_dir or (kind == "other" and pic is None):
+            band = fm.height() * 2 + 8
+            grad = QLinearGradient(0, r.bottom() - band, 0, r.bottom())
+            grad.setColorAt(0, QColor(0, 0, 0, 0))
+            grad.setColorAt(1, QColor(0, 0, 0, 170 if pic is not None else 0))
+            p.fillRect(QRect(r.x(), r.bottom() - band, r.width(), band + 1), grad)
+            p.setFont(small)
+            p.setPen(QColor("white") if pic is not None else QColor(THEME.text))
+            name = fm.elidedText(model.fileName(index), Qt.TextElideMode.ElideMiddle, r.width() - 12)
+            p.drawText(QRect(r.x() + 6, r.bottom() - fm.height() - 6, r.width() - 12, fm.height()),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+        if kind == "video":
+            length = durations.get((path, model.lastModified(index).toSecsSinceEpoch()))
+            if length:
+                text = media_info.clock(length)
+                p.setFont(small)
+                tw = fm.horizontalAdvance(text) + 10
+                pill = QRectF(r.x() + 5, r.bottom() - fm.height() - 8, tw, fm.height() + 3)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(0, 0, 0, 130))
+                p.drawRoundedRect(pill, pill.height() / 2, pill.height() / 2)
+                p.setPen(QColor("white"))
+                p.drawText(pill, Qt.AlignmentFlag.AlignCenter, text)
+            if not selected:
+                d = max(14, min(22, r.width() // 6))
+                badge = QRectF(r.right() - d - 5, r.bottom() - d - 5, d, d)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(0, 0, 0, 120))
+                p.drawEllipse(badge)
+                tri = QPainterPath()
+                tri.moveTo(badge.left() + d * 0.38, badge.top() + d * 0.28)
+                tri.lineTo(badge.left() + d * 0.74, badge.top() + d * 0.5)
+                tri.lineTo(badge.left() + d * 0.38, badge.top() + d * 0.72)
+                tri.closeSubpath()
+                p.setBrush(QColor("white"))
+                p.drawPath(tri)
+        tags = tag_store().tags(path, fresh=False)
+        if tags:
+            d = max(7, min(11, r.width() // 14))
+            x = r.right() - 6 - d
+            for t in reversed(tags[:3]):
+                p.setPen(QPen(QColor(0, 0, 0, 150), 1))
+                p.setBrush(QColor(tag_color(t)))
+                p.drawEllipse(QRectF(x, r.y() + 6, d, d))
+                x -= d * 0.6
+        if not is_dir and self.pane.current_sort()[0] == "reactions":
+            score = reaction_score(path)
+            if score is not None:
+                GridDelegate._draw_score(p, score, r, option.font)
+        if self.pane.drop_target == path:
+            p.setPen(QPen(QColor(THEME.accent), 3))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(QRectF(r).adjusted(1.5, 1.5, -1.5, -1.5))
+        if selected:
+            p.fillRect(r, QColor(255, 255, 255, 70 if not THEME.dark else 55))
+            d = max(16, min(24, r.width() // 6))
+            ring = QRectF(r.right() - d - 5, r.bottom() - d - 5, d, d)
+            p.setPen(QPen(QColor("white"), 1.6))
+            p.setBrush(QColor(THEME.accent))
+            p.drawEllipse(ring)
+            p.setPen(QPen(QColor("white"), max(1.6, d / 10), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                          Qt.PenJoinStyle.RoundJoin))
+            p.drawPolyline([QPointF(ring.left() + d * 0.28, ring.top() + d * 0.52),
+                            QPointF(ring.left() + d * 0.44, ring.top() + d * 0.68),
+                            QPointF(ring.left() + d * 0.74, ring.top() + d * 0.34)])
+        p.restore()
+        if len(self.bodies) > 20000:
+            self.bodies.clear()
+        self.bodies[path] = (r.translated(-option.rect.topLeft()), QRect())
+
+
 class ListDelegate(QStyledItemDelegate):
     def __init__(self, pane: "Pane") -> None:
         super().__init__(pane)
@@ -1704,6 +1920,10 @@ class GridView(BoxSelect, DropMixin, QListView):
         return QRect(r.x() + (r.width() - s) // 2, r.y() + pad, s, r.height() - 2 * pad)
 
     def on_body(self, idx: QModelIndex, pos: QPoint) -> bool:
+        if self.pane.photos:
+            # The Photos view: tiles touch, so a drag from an unselected tile selects across tiles (the
+            # iPhone's drag-to-select); a drag from a selected one drags the files.
+            return self.selectionModel().isSelected(idx)
         r = self.visualRect(idx)
         drawn = self.itemDelegate().bodies.get(self.pane.model.filePath(idx))
         if drawn is None:                                    # not painted yet: its column
@@ -1713,7 +1933,12 @@ class GridView(BoxSelect, DropMixin, QListView):
         return picture.adjusted(-2, -2, 2, 2).contains(rel) or name.contains(rel)
 
     def box_rect(self, idx: QModelIndex) -> QRect:
-        return self._column(idx)
+        return self.visualRect(idx) if self.pane.photos else self._column(idx)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if getattr(self.pane, "photos", False):
+            self.pane._relayout()                     # whole columns across the width, as on the iPhone
 
 
 class ListView(BoxSelect, DropMixin, QTreeView):
@@ -2646,7 +2871,7 @@ class FolderViews:
         except ValueError:
             raw = {}
         for loc, v in (raw.items() if isinstance(raw, dict) else ()):
-            if isinstance(v, list) and len(v) == 3 and v[0] in ("grid", "list") and v[1] in dict(SORT_KEYS) \
+            if isinstance(v, list) and len(v) == 3 and v[0] in ("grid", "list", "photos") and v[1] in dict(SORT_KEYS) \
                     and v[2] in ("asc", "desc"):
                 self.views[loc] = (v[0], v[1], v[2])
 
@@ -2787,14 +3012,18 @@ class Pane(QWidget):
         h.addSpacing(6)
         self.grid_btn = self._tool("grid", "as Icons (⌘1)", lambda: self.set_mode("grid"), "Seg")
         self.list_btn = self._tool("list", "as List (⌘2)", lambda: self.set_mode("list"), "Seg")
-        for b in (self.grid_btn, self.list_btn):
+        self.photos_btn = self._tool("photos", "as Photos (⌘3) — the iPhone's grid: square tiles, video lengths; "
+                                     "double-click opens the viewer", lambda: self.set_mode("photos"), "Seg")
+        for b in (self.grid_btn, self.list_btn, self.photos_btn):
             b.setCheckable(True)
         group = QButtonGroup(self)
         group.setExclusive(True)
         group.addButton(self.grid_btn)
         group.addButton(self.list_btn)
+        group.addButton(self.photos_btn)
         h.addWidget(self.grid_btn)
         h.addWidget(self.list_btn)
+        h.addWidget(self.photos_btn)
         root.addWidget(header)
 
         # scope bar — Finder's "Search: This Mac | “Downloads”", shown while a search is up
@@ -2826,8 +3055,11 @@ class Pane(QWidget):
         root.addWidget(self.scopebar)
 
         # views
+        self.photos = False                            # the Photos view (the iPhone's grid) in the grid's place
         self.grid = GridView(self)
-        self.grid.setItemDelegate(GridDelegate(self))
+        self.grid_delegate = GridDelegate(self)
+        self.photo_delegate = PhotoDelegate(self)
+        self.grid.setItemDelegate(self.grid_delegate)
         self.list = ListView(self)
         self.list.setItemDelegate(ListDelegate(self))
         self.grid.setModel(self.model)
@@ -3033,7 +3265,7 @@ class Pane(QWidget):
 
     def restyle(self) -> None:
         for b in (self.back_btn, self.fwd_btn, self.sort_btn, self.new_folder_btn, self.tags_btn, self.grid_btn,
-                  self.list_btn):
+                  self.list_btn, self.photos_btn):
             b.setIcon(glyph(b.property("glyph"), THEME.secondary if b.objectName() == "Nav" else THEME.text, 16))
         self.filter_btn.setIcon(glyph("funnel", THEME.accent if self.size_filter_key else THEME.secondary, 16))
         self._slider_icons()
@@ -3051,7 +3283,8 @@ class Pane(QWidget):
         for keys, slot in (("Ctrl+[", self.go_back), ("Ctrl+]", self.go_forward), ("Ctrl+Up", self.go_up),
                            ("Ctrl+Down", self.open_selected), ("Return", self.open_selected),
                            ("Space", self.quick_look), ("Ctrl+1", lambda: self.set_mode("grid")),
-                           ("Ctrl+2", lambda: self.set_mode("list")), ("Ctrl+Shift+N", self.new_folder),
+                           ("Ctrl+2", lambda: self.set_mode("list")), ("Ctrl+3", lambda: self.set_mode("photos")),
+                           ("Ctrl+Shift+N", self.new_folder),
                            ("Ctrl+Backspace", self.delete_selection), ("Ctrl+T", self.edit_tags)):
             sc = QShortcut(QKeySequence(keys), self)
             sc.setContext(ctx)
@@ -3106,6 +3339,13 @@ class Pane(QWidget):
         return max(1, min(5, self.gap // 4))
 
     def cell_size(self) -> QSize:
+        if self.photos:
+            # Whole columns across the width (the size slider picks about how wide a tile is), so the
+            # squares reach both edges as they do on the iPhone.
+            w = max(1, self.grid.viewport().width())
+            cols = max(1, round(w / max(self.icon_px, 40)))
+            side = max(40, w // cols)
+            return QSize(side, side)
         lh = QFontMetrics(self.grid.font()).height()
         return QSize(max(self.icon_px + self.gap, 56), self.tile_pad() * 2 + self.icon_px + 6 + lh * 2)
 
@@ -3125,14 +3365,21 @@ class Pane(QWidget):
         self._relayout()
 
     def mode(self) -> str:
-        return "grid" if self.stack.currentIndex() == 0 else "list"
+        if self.stack.currentIndex() == 1:
+            return "list"
+        return "photos" if self.photos else "grid"
 
     def set_mode(self, mode: str) -> None:
-        self.stack.setCurrentIndex(0 if mode == "grid" else 1)
+        mode = mode if mode in ("grid", "list", "photos") else "grid"
+        self.photos = mode == "photos"
+        self.grid.setItemDelegate(self.photo_delegate if self.photos else self.grid_delegate)
+        self.stack.setCurrentIndex(1 if mode == "list" else 0)
         self.grid_btn.setChecked(mode == "grid")
-        self.list_btn.setChecked(mode != "grid")
+        self.list_btn.setChecked(mode == "list")
+        self.photos_btn.setChecked(mode == "photos")
         for w in self.view_controls:
-            w.setVisible(mode == "grid")
+            w.setVisible(mode == "grid" or (mode == "photos" and w in (self.size_icon, self.slider)))
+        self._relayout()
         self.settings.setValue(f"{self.role}/mode", mode)
         self._remember_view()
 
@@ -3576,6 +3823,8 @@ class Pane(QWidget):
         path = self.model.filePath(idx.siblingAtColumn(0))
         if self.model.isDir(idx):
             self.go(path)
+        elif kind_of(path) != "other":
+            self.view_media(path)
         else:
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
@@ -3583,9 +3832,99 @@ class Pane(QWidget):
         paths = self.selected_paths()
         if len(paths) == 1 and os.path.isdir(paths[0]):
             self.go(paths[0])
-        else:
-            for p in paths:
+            return
+        media = [p for p in paths if kind_of(p) != "other"]
+        if media:
+            # Several picked: the viewer goes through those; one: through the whole listing from it.
+            self.view_media(media[0], media if len(media) > 1 else None)
+        for p in paths:
+            if p not in media and not os.path.isdir(p):
                 QDesktopServices.openUrl(QUrl.fromLocalFile(p))
+
+    def open_external(self) -> None:
+        """Open With the Mac's app for it (Preview, QuickTime Player) — the old double-click."""
+        for p in self.selected_paths():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(p))
+
+    def listing_paths(self) -> list[str]:
+        """The files shown, in the order shown (folders left out)."""
+        root = self.grid.rootIndex() if self._is_fs_listing() else QModelIndex()
+        out = []
+        for r in range(self.model.rowCount(root)):
+            idx = self.model.index(r, 0, root)
+            if not self.model.isDir(idx):
+                out.append(self.model.filePath(idx))
+        return out
+
+    def _is_fs_listing(self) -> bool:
+        return not self.is_virtual
+
+    def view_media(self, path: str, among: list[str] | None = None) -> None:
+        """The viewer (media_viewer.py — the iPhone's), on `path`, through `among` or the listing's photos and
+        videos in the order shown."""
+        import frame_export
+        import media_viewer
+        items = among or [p for p in self.listing_paths() if kind_of(p) != "other"]
+        if path not in items:
+            items = [path] + items
+
+        def poster(p: str) -> QImage | None:
+            try:
+                pm = THUMBS.get(p, os.stat(p).st_mtime) if THUMBS is not None else None
+            except OSError:
+                pm = None
+            return pm.toImage() if pm is not None else None
+
+        hooks = media_viewer.Hooks(
+            trash=self._viewer_trash, tags_of=lambda p: tag_store().tags(p, fresh=False),
+            edit_tags=lambda p: TagDialog(QApplication.activeWindow() or self.window(), [p], describe_items([p])).open(),
+            reveal=self._reveal_from_viewer, export_frames=lambda p: self.export_frames([p]),
+            save_frame=frame_export.save_frame)
+        viewer = media_viewer.MediaViewer(items, items.index(path), hooks, poster, None)
+        viewer.removed.connect(lambda _paths: self.refresh_results())
+        _VIEWERS.append(viewer)
+        viewer.destroyed.connect(lambda _=None, v=viewer: _VIEWERS.remove(v) if v in _VIEWERS else None)
+        viewer.show()
+        viewer.raise_()
+        viewer.activateWindow()
+
+    def _reveal_from_viewer(self, path: str) -> None:
+        self.window().raise_()
+        self.window().activateWindow()
+        self.reveal(path)
+
+    def _viewer_trash(self, paths: list[str]) -> bool:
+        """The viewer's Move to Trash: asked first (over the viewer), as from the listing."""
+        box = QMessageBox(QApplication.activeWindow() or self.window())
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Move to Trash")
+        box.setText(f"Move “{os.path.basename(paths[0])}” to the Trash?" if len(paths) == 1
+                    else f"Move these {len(paths)} items to the Trash?")
+        box.setInformativeText("It can be put back from the Trash.")
+        go = box.addButton("Move to Trash", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(go)
+        box.exec()
+        if box.clickedButton() is not go:
+            return False
+        moved = [p for p in paths if MainWindow.trash_item(Path(p))]
+        try:
+            if moved and tag_store().forget(moved):
+                tags_changed()
+        except OSError:
+            pass
+        sizer().clear()
+        self.refresh_results()
+        return bool(moved)
+
+    def export_frames(self, videos: list[str]) -> None:
+        """Export All Frames… (frame_export.py — the iPhone's): one video or several, each into a folder
+        beside it."""
+        import frame_export
+        win = frame_export.FramesWindow(videos, self.window(), on_done=lambda _folders: self.refresh_results())
+        _VIEWERS.append(win)
+        win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
+        win.show()
 
     def quick_look(self) -> None:
         paths = self.selected_paths()
@@ -3707,6 +4046,8 @@ class Pane(QWidget):
         menu = QMenu(self)
         if paths:
             menu.addAction("Open", self.open_selected)
+            if any(kind_of(p) != "other" for p in paths):
+                menu.addAction("Open With Default App", self.open_external)
             if IS_MAC:
                 menu.addAction("Quick Look", self.quick_look)
                 menu.addAction("Show in Finder", lambda: subprocess.Popen(["open", "-R", paths[0]]))
@@ -3727,6 +4068,10 @@ class Pane(QWidget):
                 menu.addAction(win.copy_btn.text(), lambda: win.transfer_selection(False))
                 menu.addAction(win.move_btn.text(), lambda: win.transfer_selection(True))
             self._tags_menu(menu, paths)
+            videos = [p for p in paths if kind_of(p) == "video"]
+            if videos:
+                menu.addAction("Export All Frames…" if len(videos) == 1 else f"Export All Frames of {len(videos)} Videos…",
+                               lambda: self.export_frames(videos))
             photos = [p for p in paths if os.path.splitext(p)[1].lower() in batch_crop.CROPPABLE]
             if photos:
                 menu.addAction("Crop…" if len(photos) == 1 else f"Crop {len(photos)} Photos…",
@@ -4971,6 +5316,8 @@ class MainWindow(QMainWindow):
         self._panel_soon.setInterval(200)
         self._panel_soon.timeout.connect(self._show_progress)
         THUMBS.ready.connect(lambda: (self.src.grid.viewport().update(), self.dst.grid.viewport().update()))
+        for f in facts():                                  # video lengths, folder covers (the Photos view)
+            f.ready.connect(lambda: (self.src.grid.viewport().update(), self.dst.grid.viewport().update()))
         tag_events().changed.connect(self._tags_changed)
         tag_events().scores.connect(lambda: [pane.on_scores_changed() for pane in (self.src, self.dst)])
 

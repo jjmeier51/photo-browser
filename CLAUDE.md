@@ -133,6 +133,10 @@ actions the app makes no network calls.
   §6l); the iPhone's "AI Upscale" is Lanczos + denoise + sharpen. And right-click ▸ **Erase Area…** — boxes
   drawn once over a watermark/stamp on one photo, erased from every selected one (see-through marks taken
   back out, the rest filled; Save as New or Replace; tagged "retouched" — `mac/retouch.py`, §6o).
+  Safe Finder's **Photos view** (⌘3, the iPhone's square grid with video lengths) and its **viewer** (double-click:
+  photos zoom, videos loop with Slo-Mo/frame step, Info panel, Save Frame, slideshow — `mac/media_viewer.py`,
+  `mac/media_info.py`) and **Export All Frames** (`mac/frame_export.py` + `video_helper.swift` `frames`; same names,
+  rates and standard-range/HDR choice as the iPhone; resumes only the same export, else "<name> 2") — §6p.
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,
   "Add from iOS Album" (import then delete the iOS originals), save drive media
   to Photos, capture/export HDR-preserving video frames. (`PhotosLibraryView`,
