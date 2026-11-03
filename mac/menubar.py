@@ -200,6 +200,8 @@ def install(win, sf) -> None:
         folder_target)
     act(t, "Download Facebook Profile…", lambda: sf.open_social("facebook", folder_target(), win), None,
         folder_target)
+    act(t, sf.passes_label(folder_target()) if folder_target() else "Download Passes…",
+        lambda: sf.open_passes(folder_target(), win), None, folder_target)
     act(t, "Browse taylorpictures.net…", lambda: pane().open_taylor(
         folder_target() or str(win.settings.value("taylor/root") or "")), None,
         lambda: folder_target() is not None or bool(win.settings.value("taylor/root")))

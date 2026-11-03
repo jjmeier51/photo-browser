@@ -613,6 +613,35 @@ def open_simpcity(folder: str, parent: QWidget | None = None, scores_only: bool 
 
 
 _SOCIAL_WINDOWS: list = []
+_PASSES_WINDOWS: list = []
+
+
+def passes_label(folder: str) -> str:
+    """Menu label for the Passes downloader entry on a folder."""
+    try:
+        import passes_downloader
+        return passes_downloader.passes_label(folder)
+    except ModuleNotFoundError:
+        return "Download Passes…"
+
+
+def open_passes(folder: str, parent=None) -> None:
+    """Right-click a folder ▸ "Download Passes…": the downloader window."""
+    try:
+        import passes_downloader
+    except ModuleNotFoundError:
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(parent, "Passes",
+                                "The downloader needs Qt WebEngine (part of PySide6).\n"
+                                "Run mac/run.sh once to set it up, then try again.")
+        return
+    win = passes_downloader.PassesWindow(folder, tags=tag_store())
+    win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    win.finished.connect(lambda _folder, files: files and tags_changed())
+    win.destroyed.connect(
+        lambda _=None, w=win: _PASSES_WINDOWS.remove(w) if w in _PASSES_WINDOWS else None)
+    _PASSES_WINDOWS.append(win)
+    win.show()
 
 
 def social_label(folder: str, kind: str) -> str:
