@@ -1533,6 +1533,13 @@ final class Library {
         guard downloadedTaylorAlbums.insert(id).inserted else { return }
         UserDefaults.standard.set(Array(downloadedTaylorAlbums), forKey: "photoBrowser.tpDownloaded")
     }
+    /// Several at once — the albums the folder's shared record (`TaylorRecord`) lists.
+    func markTaylorAlbumsDownloaded(_ ids: Set<Int>) {
+        let fresh = ids.subtracting(downloadedTaylorAlbums)
+        guard !fresh.isEmpty else { return }
+        downloadedTaylorAlbums.formUnion(fresh)
+        UserDefaults.standard.set(Array(downloadedTaylorAlbums), forKey: "photoBrowser.tpDownloaded")
+    }
     func isTaylorAlbumDownloaded(_ id: Int) -> Bool { downloadedTaylorAlbums.contains(id) }
 
     // MARK: - Frame folders + Tinder-style clean up

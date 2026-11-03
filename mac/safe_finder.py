@@ -3963,6 +3963,24 @@ class Pane(QWidget):
         win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
         win.show()
 
+    def open_taylor(self, folder: str) -> None:
+        """Browse taylorpictures.net… (taylor_window.py — the iPhone's gallery browser): albums download into
+        `folder` (the Taylor Swift folder), and what's already in it is marked."""
+        import taylor_window
+        for w in _VIEWERS:
+            if isinstance(w, taylor_window.TaylorWindow) and w.root == folder:
+                w.raise_()
+                w.activateWindow()
+                return
+        self.settings.setValue("taylor/root", folder)
+        hooks = taylor_window.TaylorHooks(
+            view=lambda paths, start: self.view_media(start, among=paths), reveal=self._reveal_from_viewer,
+            changed=lambda _folder: sizer().clear())
+        win = taylor_window.TaylorWindow(folder, hooks, THEME, self.window())
+        _VIEWERS.append(win)
+        win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
+        win.show()
+
     def quick_look(self) -> None:
         paths = self.selected_paths()
         if paths and IS_MAC:
@@ -4094,6 +4112,7 @@ class Pane(QWidget):
             if len(paths) == 1 and os.path.isdir(paths[0]):
                 menu.addAction("Find Duplicates…", lambda: self.find_duplicates(paths[0]))
                 menu.addAction("Download from SimpCity…", lambda: open_simpcity(paths[0], self.window()))
+                menu.addAction("Browse taylorpictures.net…", lambda: self.open_taylor(paths[0]))
                 if (scored := simpcity_scores_folder(paths[0])) is not None:
                     menu.addAction("Get Reaction Scores",
                                    lambda: open_simpcity(scored, self.window(), scores_only=True))
@@ -4133,6 +4152,7 @@ class Pane(QWidget):
             if not paths and os.path.isdir(self.location):
                 menu.addAction("Find Duplicates in This Folder…", lambda: self.find_duplicates(self.location))
                 menu.addAction("Download from SimpCity…", lambda: open_simpcity(self.location, self.window()))
+                menu.addAction("Browse taylorpictures.net…", lambda: self.open_taylor(self.location))
                 if (scored := simpcity_scores_folder(self.location)) is not None:
                     menu.addAction("Get Reaction Scores",
                                    lambda: open_simpcity(scored, self.window(), scores_only=True))

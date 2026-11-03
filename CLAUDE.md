@@ -140,6 +140,9 @@ actions the app makes no network calls.
   Safe Finder's **Find Duplicates** (right-click a folder; `mac/duplicates.py`, `mac/duplicates_window.py`): the
   iPhone's exact / visually similar / similar-name groups, plus an Identical (SHA-256) check and Select Extra
   Copies for identical groups only — it ticks, the person trashes — §6q.
+  Safe Finder's **taylorpictures.net** window (right-click the Taylor Swift folder; `mac/taylor.py`,
+  `mac/taylor_window.py`): the iPhone's browser plus "already here" marks (by name, then by picture) and
+  Download Missing; both apps share `Taylor Swift/.taylorpictures.json` (`TaylorRecord.swift`) — §7.4c.
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,
   "Add from iOS Album" (import then delete the iOS originals), save drive media
   to Photos, capture/export HDR-preserving video frames. (`PhotosLibraryView`,

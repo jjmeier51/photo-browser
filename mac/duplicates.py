@@ -88,9 +88,10 @@ def distance(a: int, b: int) -> int:
 
 # ----------------------------------------------------------------------------- the dHash
 
-def dhash(path: str) -> int | None:
+def dhash(path) -> int | None:
     """The iPhone's `PerceptualHash.dHash`: upright, tiny, grey, 9×8 — a bit per pixel brighter than its right
-    neighbour, row by row. None when the photo can't be read."""
+    neighbour, row by row. `path` is a file or a file-like object (a downloaded thumbnail's bytes). None when
+    the picture can't be read."""
     from PIL import Image, ImageOps
     try:
         import batch_crop                          # registers HEIC with Pillow, when it can

@@ -532,6 +532,34 @@ Videos are put together and upscaled with AVFoundation — a small helper Safe F
 when that's installed instead (`brew install ffmpeg`). Neither: videos come in their one-file version, not
 upscaled (the log says so). The browser needs Qt WebEngine (part of PySide6, set up by `run.sh`).
 
+### Browse taylorpictures.net — and see what's already in your Taylor Swift folder (`taylor_window.py`, `taylor.py`)
+
+Right-click your Taylor Swift folder ▸ **Browse taylorpictures.net…** — the iPhone app's gallery browser, with
+that folder as where albums go. Go through the site's sections (double-click; ‹ Back or ⌘[ to come out) to
+its albums, each with its cover, a **Here** column and how many photos it has; the field at the top finds an
+album by title.
+
+**What you already have.** Safe Finder looks through the Taylor Swift folder when the window opens — every
+photo's name at once, then its picture (a quick fingerprint, kept between launches) — and marks:
+- in the album list, **✓ All here**, "87 of 120", "Folder here", or nothing yet. **Check Albums Here** reads
+  every album of the section and fills the column in (by name, so it's quick);
+- on an album's page (double-click it), a green ✓ on each photo you have — in the album's own folder, under
+  another folder by the same (distinctive) name, or saved under another name entirely (found by its
+  picture); hover to see where. **All / Missing / Here** filters the grid. Double-click a photo you have to
+  see your copy in the viewer; one you don't opens on the site.
+
+**Downloading.** **Download N Missing** on an album gets just the photos you don't have; **Download All**
+everything not already in the album's folder; in the list, **Download Selected** or **Download N Not Here**
+queues whole albums. They come down one after another, eight photos at a time, into `Taylor Swift/<album
+title>` (the folder the iPhone app uses too), with the album's date on photos that carry none — from the
+title ("2023-05-05 …", or "3/17 …" in a "2023" section) — written by ExifTool when it's installed. **Skip
+photos already in Taylor Swift** (on by default) leaves out the ones found elsewhere in the folder. Stop
+keeps what's done; downloading again finishes it.
+
+Both apps keep `Taylor Swift/.taylorpictures.json` — the albums downloaded into the folder — so an album
+downloaded on the iPhone shows as downloaded here, and the other way round. Pages are only read; nothing
+is sent to the site.
+
 ### Download a SimpCity thread into a person's folder (`simpcity_downloader.py`)
 
 Right-click a person's folder (or the empty area inside it) ▸ **Download from SimpCity…**, paste the

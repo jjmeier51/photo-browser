@@ -1944,6 +1944,31 @@ app-wide activity pill, the folder behind reloads after each (`onFinished`), and
 never dismissed for you. Album lists are searchable (title or id). Everything heavy runs through
 `Task.detached` (constraint 13).
 
+**Safe Finder twin + shared record (Nov 3, 2026)** — `mac/taylor.py`, `mac/taylor_window.py`,
+`TaylorRecord.swift`. The Mac ports the parsers pattern for pattern (including `decode`'s short entity list
+and `stripTags` without collapsing whitespace — so both apps name an album's folder identically and the Mac
+finds folders the iPhone made before the record existed). Same paging (pager → rest six at a time; no pager
+→ page until nothing new), same full-size rule (drop `thumb_`), same agent (the site varies on it).
+- **`<Taylor folder>/.taylorpictures.json`** — `{"version":1,"albums":{"<id>":{title, folder (relative),
+  files, total, downloaded}}}`, read-merged-written by both (`Record.note` / `TaylorRecord.note`, files
+  unioned, larger total). The iPhone folds its ids into `downloadedTaylorAlbums` when the browser opens
+  (`markTaylorAlbumsDownloaded`) and notes each album it finishes (total = downloaded + failed, as its
+  "downloaded" counts files already there).
+- **"Already here"** (`match`): (1) same file name in the album's folder (record's folder, else a folder
+  named like the album anywhere under the root); (2) same name elsewhere — only when the thumbnail's dHash is
+  within 10 bits of that file's, or, with no fingerprints yet, when the name is distinctive (≥ 6 chars, not
+  `001`/`IMG_0042`/`image12`) and unique in the folder; (3) any photo whose dHash is within 5 bits of the
+  thumbnail (renamed copies) — through the duplicate finder's bands. Site thumbnails are ~100 px; dHash at
+  9×8 is the same for a thumbnail and its original to a bit or two, but 5 is kept tight because an event's
+  burst shots sit close together. Generic names alone never count.
+- **Check Albums Here** is by name only (no thumbnails fetched — a big section is thousands), stored per
+  (root, album) in `~/Library/Caches/PhotoBrowser/taylor/checks.json`; an album's page re-checks by picture
+  and overwrites it, and a finished download sets it to everything it accounted for.
+- Downloads go through `gallery.get` (the same fetch as pages — testable with a fake site), bytes → temp on
+  the Mac → `sc.apply_date` (album date only when the photo has none) → `social.place` (exFAT: straight in,
+  never over a file). A section's year (a "2023" section title) is carried down to date "M/D" album titles
+  — the iPhone's download only uses full dates in the title; its cross-reference used the year.
+
 ### 7.4b TikTok — `TikTokService.swift` / `TikTokWebFetcher.swift` / `TikTokChallengeView.swift`
 Profiles are listed and resolved through the public **tikwm.com** resolver (no login, no
 request signing): `user/posts` pages the whole profile, the single-video endpoint gives the HD
