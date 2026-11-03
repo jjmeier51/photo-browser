@@ -158,7 +158,37 @@ def _read_track(f, a: int, b: int) -> dict:
     fps = _frame_rate(f, *mdia) if mdia else None
     if fps:
         out["fps"] = fps
+    if mdia and _video_hdr(f, *mdia):
+        out["hdr"] = True
     return out
+
+
+def _video_hdr(f, a: int, b: int) -> bool:
+    """Whether the video track is HDR: its sample entry's colour (`colr` nclx) uses the HLG or PQ transfer —
+    what the iPhone records — or it carries Dolby Vision (`dvcC` / `dvvC`, or a `dvh1` / `dvhe` entry)."""
+    try:
+        minf = _find(f, a, b, "minf")
+        stbl = _find(f, *minf, "stbl") if minf else None
+        stsd = _find(f, *stbl, "stsd") if stbl else None
+        if not stsd:
+            return False
+        entry = stsd[0] + 8                            # version, flags, entry count
+        f.seek(entry)
+        size, kind = struct.unpack(">I4s", f.read(8))
+        if kind in (b"dvh1", b"dvhe", b"dva1", b"dvav"):
+            return True
+        for k, x, _y in _boxes(f, entry + 8 + 78, min(entry + size, stsd[1])):   # after the visual entry's fields
+            if k in ("dvcC", "dvvC", "dvwC"):
+                return True
+            if k == "colr":
+                f.seek(x)
+                if f.read(4) == b"nclx":
+                    _prim, transfer, _matrix = struct.unpack(">HHH", f.read(6))
+                    if transfer in (16, 18):           # PQ (HDR10, Dolby Vision) / HLG
+                        return True
+    except (OSError, struct.error):
+        return False
+    return False
 
 
 def _frame_rate(f, a: int, b: int) -> float | None:
@@ -320,6 +350,38 @@ def _read_image(path: str) -> dict:
         if caption:
             out["caption"] = caption.strip()
     return out
+
+
+def image_hdr(path: str) -> bool:
+    """Whether a photo is HDR: an HDR gain map (the iPhone's, the ISO one, or an Ultra HDR JPEG's) or an HLG / PQ
+    colour profile — looked for in the file's first megabyte, where the metadata is."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(1 << 20)
+    except OSError:
+        return False
+    if (b"urn:com:apple:photo:2020:aux:hdrgainmap" in head or b"urn:iso:std:iso:ts:21496:-1" in head
+            or b"hdrgm:Version" in head or b"hdrgm:GainMapMax" in head):
+        return True
+    at = head.find(b"nclx")
+    while at >= 0:
+        if at + 8 <= len(head):
+            transfer = struct.unpack(">H", head[at + 6:at + 8])[0]
+            if transfer in (16, 18):
+                return True
+        at = head.find(b"nclx", at + 4)
+    return False
+
+
+def res_label(width: int, height: int) -> str:
+    """8K / 4K / 1440p / 1080p / 720p / 480p — by the long side, as the iPhone app's resolution filter."""
+    long_side, short = max(width, height), min(width, height)
+    if not long_side:
+        return ""
+    for edge, label in ((7680, "8K"), (3840, "4K"), (2560, "1440p"), (1920, "1080p"), (1280, "720p"), (854, "480p")):
+        if long_side >= edge:
+            return label
+    return f"{short}p"
 
 
 def image_info(path: str) -> dict:

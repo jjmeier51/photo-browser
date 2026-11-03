@@ -3992,8 +3992,10 @@ class Pane(QWidget):
             trash=self._viewer_trash, tags_of=lambda p: tag_store().tags(p, fresh=False),
             edit_tags=lambda p: TagDialog(QApplication.activeWindow() or self.window(), [p], describe_items([p])).open(),
             reveal=self._reveal_from_viewer, export_frames=lambda p: self.export_frames([p]),
-            save_frame=frame_export.save_frame)
-        viewer = media_viewer.MediaViewer(items, items.index(path), hooks, poster, None)
+            save_frame=frame_export.save_frame, labels_of=lambda p: tag_store().labels(p, fresh=False),
+            set_label=lambda p, label, on: self.set_label([p], label, on))
+        # Opens at the size of Safe Finder's window, over it, and takes each item's shape within that.
+        viewer = media_viewer.MediaViewer(items, items.index(path), hooks, poster, None, box=self.window().geometry())
         viewer.removed.connect(lambda _paths: self.refresh_results())
         _VIEWERS.append(viewer)
         viewer.destroyed.connect(lambda _=None, v=viewer: _VIEWERS.remove(v) if v in _VIEWERS else None)

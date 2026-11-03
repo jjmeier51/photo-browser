@@ -1376,6 +1376,23 @@ rates mixed in one folder. Here the folder carries `.frames-export.json`
 unbroken run from 0, less two that may have been mid-write), anything else goes to "<name> 2". On exFAT the
 helper writes frames in place (`direct`, no rename — CLAUDE.md #12); elsewhere temp → rename.
 
+**The viewer, reworked (Nov 3, 2026).** The bars were translucent overlays: they hid the top and bottom of every
+photo, and on the Mac `QVideoWidget` is a native surface Qt draws *above* any widget laid over it — so a video's
+scrubber and play/pause, though built, were never seen. Now the bars are in the layout, above and below the
+stage. The window fits each item (`_fit_to`): within `box` — Safe Finder's window geometry, passed by
+`view_media`; the size a hand resize leaves (`resizeEvent`: a size that isn't our `_fit_target`) — minus the bars
+and the Info panel, keeping its centre (first time: Safe Finder's), kept on screen (`available_geometry`,
+patchable for tests). The bars' minimum widths limit how narrow it can go (top ≈ 382 px, bottom ≈ 333): All
+Frames moved into ⋯ and the video controls are two rows (full-width scrubber, then buttons) so a 9:16 video in an
+820-px-tall window fits without side bars. Photos fill the stage (the old 100 % cap left small photos framed).
+Video zoom: fitted, `QVideoWidget` (fast); zoomed, the player's output moves to a `QGraphicsVideoItem` in a
+`QGraphicsView` (scaled/dragged like a photo) and back at fit — untested here (no QtMultimedia in the sandbox).
+The scrubber (`_Scrubber`) jumps to a click, pauses while dragged, tooltips the time. Badges: `media_info.res_label`
+(long side: 8K ≥ 7680, 4K ≥ 3840, 1440p ≥ 2560, 1080p ≥ 1920, 720p ≥ 1280, 480p ≥ 854) and HDR from the video
+track's sample entry (`colr` nclx transfer 16/18, Dolby Vision boxes) or a photo's first megabyte (Apple / ISO /
+Ultra HDR gain-map markers, nclx 16/18), off the main thread. Notes go in the count line (`say`), never over the
+picture. ♡ / ✦ through `Hooks.labels_of` / `set_label`.
+
 ## 6q. Safe Finder Find Duplicates — `mac/duplicates.py`, `mac/duplicates_window.py` (Nov 3, 2026)
 
 A port of §2 (same three kinds, kept apart, same threshold 6, same normalized names, same Oldest/Newest from

@@ -1,21 +1,34 @@
 """Safe Finder's photo and video viewer — the iPhone app's viewer on the Mac: one item at a time on black,
 the listing's order, a top and a bottom bar that a click hides or shows (the iPhone's tap), and an Info panel.
 
-- **Photos** (`_ImageStage`): fitted to the window; pinch, ⌘-scroll or +/− to zoom, a double-click toggles
-  fit / actual size at the point clicked, drag to pan. Read with Qt (its HEIC plug-in on the Mac) or, failing
-  that, Pillow (pillow-heif), off the main thread, the neighbours read ahead so ←/→ is instant.
-- **Videos** (`_VideoStage`): Qt Multimedia (AVFoundation on the Mac) — looping like the iPhone's, a
-  millisecond scrubber, ±15 s (J/L), a frame step (, and .), slow motion (½×, ¼×, ⅛×, as the iPhone's
-  press-and-hold Slo-Mo), mute, and **Save Frame** (the camera button — a standard-range PNG in a
-  "Screenshots" folder beside the video, `frame_export.save_frame`) and **Export All Frames…**. Without
-  Qt Multimedia it shows the video's picture and offers Open With… (QuickTime Player).
+**The window fits the picture.** It opens at the size of Safe Finder's window (`box`) — centred over it — and
+takes each item's shape within that, so a portrait video or photo has no black bars beside it; moving to the
+next item re-fits it around the same centre. Resizing the window by hand makes that the new size to fit within.
+The bars sit above and below the picture, never over it (they used to be translucent overlays, which hid the
+top and bottom of every photo — and Qt draws a video above any widget laid over it, so a video's controls were
+never seen at all). A click still hides them (the iPhone's tap), and the window re-fits.
+
+- **Photos** (`_ImageStage`): fitted to the window; pinch, ⌘-scroll, +/− or the zoom buttons, a double-click
+  toggles fit / actual size at the point clicked, drag to pan. Read with Qt (its HEIC plug-in on the Mac) or,
+  failing that, Pillow (pillow-heif), off the main thread, the neighbours read ahead so ←/→ is instant.
+- **Videos** (`_VideoStage`): Qt Multimedia (AVFoundation on the Mac) — play/pause, a scrubber you click or drag
+  anywhere along (the video pauses while you drag; hovering shows the time there), looping like the iPhone's,
+  ±15 s (J/L), a frame step (, and .), slow motion (½×, ¼×, ⅛×, as the iPhone's Slo-Mo), mute, **zoom** (the
+  same buttons and keys: zoomed in, the video is drawn by a `QGraphicsVideoItem` that can be scaled and dragged;
+  fitted, by the faster `QVideoWidget`), and **Save Frame** (the camera — a standard-range PNG in a "Screenshots"
+  folder beside the video, `frame_export.save_frame`) and **Export All Frames…**. Without Qt Multimedia it shows
+  the video's picture and offers Open With… (QuickTime Player).
+- **Top right**: the resolution, quietly — 4K, 1080p, 720p, 8K… for a video (the iPhone app's long-side rule),
+  megapixels for a photo — and HDR when it is (`media_info`: an HLG/PQ/Dolby Vision track; a gain map or HLG/PQ
+  photo). Beside it, ♡ (Favorite) and ✦ (To AI) — the iPhone app's labels, which Safe Finder shares with it.
 - **Moving around**: ←/→ (or a two-finger swipe when not zoomed), Esc or ↓ closes, I (or ↑) the Info panel,
-  F full screen, S a slideshow (3 s a photo; a video plays out first), ⌘⌫ Move to Trash.
+  F full screen, S a slideshow (3 s a photo; a video plays out first), ⇧⌘F / ⇧⌘A Favorite / To AI, ⌘⌫ Move to
+  Trash; the ⋯ menu has the rest.
 - **Info panel**: name, when it was taken or recorded (`media_info`), size and dimensions, length, camera,
   place (with a link to Maps), caption, folder, tags (and Edit Tags…).
 
-The viewer doesn't touch files itself: Safe Finder hands it what to do for the trash, tags, revealing a file
-and exporting frames (`hooks`), so it works the same from a folder, a search or a collection.
+The viewer doesn't touch files itself: Safe Finder hands it what to do for the trash, tags, labels, revealing a
+file and exporting frames (`hooks`), so it works the same from a folder, a search or a collection.
 """
 from __future__ import annotations
 
@@ -28,12 +41,13 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Callable
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QImage, QImageReader, QKeySequence, QPainter, QPixmap,
-                           QShortcut)
-from PySide6.QtWidgets import (QFrame, QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel,
-                               QMenu, QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedWidget, QToolButton,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage, QImageReader,
+                           QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut)
+from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QHBoxLayout,
+                               QLabel, QMenu, QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedLayout,
+                               QStackedWidget, QStyle, QStyleOptionSlider, QToolButton, QToolTip, QVBoxLayout,
+                               QWidget)
 
 import media_info
 
@@ -71,6 +85,8 @@ class Hooks:
     reveal: Callable[[str], None] | None = None               # show the file in its pane
     export_frames: Callable[[str], None] | None = None
     save_frame: Callable[[str, float], str | None] | None = None   # (video, seconds) → saved file
+    labels_of: Callable[[str], list[str]] | None = None       # "favorite", "ai" — the iPhone app's labels
+    set_label: Callable[[str, str, bool], None] | None = None  # (path, label, on)
     extra: dict = field(default_factory=dict)
 
 
@@ -143,6 +159,7 @@ class _ImageStage(QGraphicsView):
     sideways while fitted asks for the next or previous item (`swiped`); a click `tapped`."""
     swiped = Signal(int)
     tapped = Signal()
+    zoom_changed = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -180,26 +197,35 @@ class _ImageStage(QGraphicsView):
         if not pm.isNull():
             r = self.viewport().rect()
             scale = min(r.width() / max(pm.width(), 1), r.height() / max(pm.height(), 1))
-            scale = min(scale, 1.0 if max(pm.width(), pm.height()) >= 400 else 3.0)
+            # Filled to the window, which has the photo's shape — a small photo is enlarged rather than left
+            # in a black frame (only a tiny one is held back).
+            scale = min(scale, 8.0 if max(pm.width(), pm.height()) >= 200 else 3.0)
             self.scale(scale, scale)
             self.centerOn(self.item)
         self.fitted = True
+        self.zoom_changed.emit()
+
+    def scale_now(self) -> float:
+        return self.transform().m11()
 
     def zoom(self, factor: float, at: QPoint | None = None) -> None:
         if self.item.pixmap().isNull():
             return
         current = self.transform().m11()
         target = max(0.05, min(current * factor, 16.0))
-        if at is not None:
-            self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse if at is not None
+                                     else QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.scale(target / current, target / current)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.fitted = False
+        self.zoom_changed.emit()
 
     def actual_size(self, at: QPoint) -> None:
         scene_pt = self.mapToScene(at)
         self.resetTransform()
         self.centerOn(scene_pt)
         self.fitted = False
+        self.zoom_changed.emit()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -267,6 +293,159 @@ def _double_click_ms() -> int:
     return QApplication.doubleClickInterval() if QApplication.instance() else 300
 
 
+# ----------------------------------------------------------------------------- icons
+
+def _heart(r: QRectF) -> QPainterPath:
+    x, y, w, h = r.x(), r.y(), r.width(), r.height()
+    path = QPainterPath()
+    path.moveTo(x + w * 0.5, y + h)
+    path.cubicTo(x + w * 0.08, y + h * 0.66, x - w * 0.02, y + h * 0.32, x + w * 0.2, y + h * 0.1)
+    path.cubicTo(x + w * 0.34, y - h * 0.02, x + w * 0.48, y + h * 0.06, x + w * 0.5, y + h * 0.2)
+    path.cubicTo(x + w * 0.52, y + h * 0.06, x + w * 0.66, y - h * 0.02, x + w * 0.8, y + h * 0.1)
+    path.cubicTo(x + w * 1.02, y + h * 0.32, x + w * 0.92, y + h * 0.66, x + w * 0.5, y + h)
+    path.closeSubpath()
+    return path
+
+
+def _star(c: QPointF, r: float) -> QPainterPath:
+    path = QPainterPath()
+    k = r * 0.22
+    path.moveTo(c.x(), c.y() - r)
+    path.quadTo(c.x() + k, c.y() - k, c.x() + r, c.y())
+    path.quadTo(c.x() + k, c.y() + k, c.x(), c.y() + r)
+    path.quadTo(c.x() - k, c.y() + k, c.x() - r, c.y())
+    path.quadTo(c.x() - k, c.y() - k, c.x(), c.y() - r)
+    path.closeSubpath()
+    return path
+
+
+def icon(name: str, color: str = "#F2F2F7", size: int = 18) -> QIcon:
+    """The viewer's line icons, drawn so they match on every Mac (no emoji fallbacks)."""
+    dpr = 3
+    pm = QPixmap(size * dpr, size * dpr)
+    pm.fill(Qt.GlobalColor.transparent)
+    pm.setDevicePixelRatio(dpr)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    c = QColor(color)
+    p.setPen(QPen(c, 1.7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    s = float(size)
+    if name == "close":
+        p.drawLine(QPointF(s * 0.28, s * 0.28), QPointF(s * 0.72, s * 0.72))
+        p.drawLine(QPointF(s * 0.72, s * 0.28), QPointF(s * 0.28, s * 0.72))
+    elif name in ("heart", "heart.fill"):
+        if name == "heart.fill":
+            p.setBrush(c)
+        p.drawPath(_heart(QRectF(s * 0.14, s * 0.2, s * 0.72, s * 0.64)))
+    elif name == "sparkles":
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        p.drawPath(_star(QPointF(s * 0.42, s * 0.58), s * 0.32))
+        p.drawPath(_star(QPointF(s * 0.76, s * 0.24), s * 0.16))
+    elif name == "camera":
+        p.drawRoundedRect(QRectF(s * 0.12, s * 0.3, s * 0.76, s * 0.5), 2.5, 2.5)
+        p.drawLine(QPointF(s * 0.36, s * 0.3), QPointF(s * 0.42, s * 0.2))
+        p.drawLine(QPointF(s * 0.42, s * 0.2), QPointF(s * 0.58, s * 0.2))
+        p.drawLine(QPointF(s * 0.58, s * 0.2), QPointF(s * 0.64, s * 0.3))
+        p.drawEllipse(QPointF(s * 0.5, s * 0.55), s * 0.14, s * 0.14)
+    elif name == "frames":                                    # a strip of film
+        p.drawRoundedRect(QRectF(s * 0.16, s * 0.18, s * 0.68, s * 0.64), 2, 2)
+        p.drawLine(QPointF(s * 0.32, s * 0.18), QPointF(s * 0.32, s * 0.82))
+        p.drawLine(QPointF(s * 0.68, s * 0.18), QPointF(s * 0.68, s * 0.82))
+    elif name == "info":
+        p.drawEllipse(QPointF(s * 0.5, s * 0.5), s * 0.36, s * 0.36)
+        p.drawLine(QPointF(s * 0.5, s * 0.46), QPointF(s * 0.5, s * 0.68))
+        p.setBrush(c)
+        p.drawEllipse(QPointF(s * 0.5, s * 0.33), s * 0.03, s * 0.03)
+    elif name == "more":
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        for x in (0.26, 0.5, 0.74):
+            p.drawEllipse(QPointF(s * x, s * 0.5), s * 0.07, s * 0.07)
+    elif name == "play":
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        path = QPainterPath()
+        path.moveTo(s * 0.3, s * 0.2)
+        path.lineTo(s * 0.8, s * 0.5)
+        path.lineTo(s * 0.3, s * 0.8)
+        path.closeSubpath()
+        p.drawPath(path)
+    elif name == "pause":
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        p.drawRoundedRect(QRectF(s * 0.26, s * 0.2, s * 0.16, s * 0.6), 1.5, 1.5)
+        p.drawRoundedRect(QRectF(s * 0.58, s * 0.2, s * 0.16, s * 0.6), 1.5, 1.5)
+    elif name in ("speaker", "speaker.off"):
+        path = QPainterPath()
+        path.moveTo(s * 0.14, s * 0.4)
+        path.lineTo(s * 0.3, s * 0.4)
+        path.lineTo(s * 0.5, s * 0.22)
+        path.lineTo(s * 0.5, s * 0.78)
+        path.lineTo(s * 0.3, s * 0.6)
+        path.lineTo(s * 0.14, s * 0.6)
+        path.closeSubpath()
+        p.drawPath(path)
+        if name == "speaker":
+            p.drawArc(QRectF(s * 0.46, s * 0.3, s * 0.28, s * 0.4), -50 * 16, 100 * 16)
+            p.drawArc(QRectF(s * 0.46, s * 0.18, s * 0.42, s * 0.64), -50 * 16, 100 * 16)
+        else:
+            p.drawLine(QPointF(s * 0.62, s * 0.38), QPointF(s * 0.86, s * 0.62))
+            p.drawLine(QPointF(s * 0.86, s * 0.38), QPointF(s * 0.62, s * 0.62))
+    elif name in ("prev", "next"):
+        x0, x1 = (s * 0.62, s * 0.36) if name == "prev" else (s * 0.38, s * 0.64)
+        p.drawPolyline([QPointF(x0, s * 0.2), QPointF(x1, s * 0.5), QPointF(x0, s * 0.8)])
+    elif name in ("minus", "plus"):
+        p.drawLine(QPointF(s * 0.24, s * 0.5), QPointF(s * 0.76, s * 0.5))
+        if name == "plus":
+            p.drawLine(QPointF(s * 0.5, s * 0.24), QPointF(s * 0.5, s * 0.76))
+    p.end()
+    return QIcon(pm)
+
+
+# ----------------------------------------------------------------------------- the scrubber
+
+class _Scrubber(QSlider):
+    """The video's timeline: a click anywhere along it jumps there (a plain slider would only page a step), then
+    drags on; hovering shows the time under the pointer."""
+
+    def __init__(self) -> None:
+        super().__init__(Qt.Orientation.Horizontal)
+        self.setObjectName("Scrubber")
+        self.setMouseTracking(True)
+        self.setRange(0, 0)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def _value_at(self, x: float) -> int:
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, opt,
+                                             QStyle.SubControl.SC_SliderGroove, self)
+        handle = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, opt,
+                                             QStyle.SubControl.SC_SliderHandle, self)
+        span = max(1, groove.width() - handle.width())
+        return QStyle.sliderValueFromPosition(self.minimum(), self.maximum(),
+                                              int(x - groove.x() - handle.width() / 2), span)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self.maximum() > 0:
+            opt = QStyleOptionSlider()
+            self.initStyleOption(opt)
+            handle = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, opt,
+                                                 QStyle.SubControl.SC_SliderHandle, self)
+            if not handle.contains(event.position().toPoint()):
+                v = self._value_at(event.position().x())
+                self.setValue(v)
+                self.sliderMoved.emit(v)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        super().mouseMoveEvent(event)
+        if self.maximum() > 0:
+            ms = self._value_at(event.position().x())
+            QToolTip.showText(event.globalPosition().toPoint(), media_info.clock(ms / 1000), self)
+
+
 # ----------------------------------------------------------------------------- the video stage
 
 def multimedia():
@@ -280,11 +459,14 @@ def multimedia():
 
 
 class _VideoStage(QWidget):
-    """A video: Qt Multimedia's player, or — without it — the video's picture and QuickTime Player."""
+    """A video: Qt Multimedia's player, or — without it — the video's picture and QuickTime Player. Fitted, the
+    player draws into a `QVideoWidget` (the fast path); zoomed in, into a `QGraphicsVideoItem` in a view that can
+    be scaled and dragged like a photo — and back to the widget when fitted again."""
     tapped = Signal()
     ended = Signal()
     position_changed = Signal(int, int)        # ms, duration ms
     playing_changed = Signal(bool)
+    zoom_changed = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -292,13 +474,18 @@ class _VideoStage(QWidget):
         pal = self.palette()
         pal.setColor(self.backgroundRole(), QColor("black"))
         self.setPalette(pal)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
+        self.pages = QStackedLayout(self)
+        self.pages.setContentsMargins(0, 0, 0, 0)
         mm = multimedia()
         self.path = ""
         self.loop = True
         self.fps = 30.0
+        self.fitted = True
+        self.size_shown = QSize()
         self.player = self.audio = self.video = None
+        self.zoom_view: QGraphicsView | None = None
+        self.zoom_item = None
+        self._fit_scale = 1.0
         self.poster = QLabel()
         self.poster.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.poster.setStyleSheet("color: #C8C8CD; background: black;")
@@ -315,23 +502,26 @@ class _VideoStage(QWidget):
             self.player.playbackStateChanged.connect(
                 lambda st: self.playing_changed.emit(st == QMediaPlayer.PlaybackState.PlayingState))
             self.player.mediaStatusChanged.connect(self._status)
-            lay.addWidget(self.video)
+            self.pages.addWidget(self.video)
         else:
-            lay.addWidget(self.poster)
+            self.pages.addWidget(self.poster)
 
     @property
     def available(self) -> bool:
         return self.player is not None
 
     def show_video(self, path: str, poster: QImage | None = None, autoplay: bool = True) -> None:
+        self.fit()
         self.path = path
         info = media_info.video_info(path)
-        self.fps = 30.0
+        self.size_shown = QSize(int(info.get("width") or 0), int(info.get("height") or 0))
+        self.fps = float(info.get("fps") or 30.0)
         if self.player is None:
             if poster is not None and not poster.isNull():
                 self.poster.setPixmap(QPixmap.fromImage(poster).scaled(
-                    self.size() * 0.9, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                    self.size() * 0.98, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
             else:
+                self.poster.setPixmap(QPixmap())
                 self.poster.setText("This Mac's Qt can't play videos here — use Open With… to play it in QuickTime Player.")
             self.position_changed.emit(0, int((info.get("duration") or 0) * 1000))
             return
@@ -342,17 +532,25 @@ class _VideoStage(QWidget):
 
     def stop(self) -> None:
         if self.player is not None:
+            self.fit()
             self.player.stop()
             self.player.setSource(QUrl())
 
     def toggle(self) -> None:
         if self.player is None:
             return
-        from PySide6.QtMultimedia import QMediaPlayer
-        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        if self.is_playing():
             self.player.pause()
         else:
             self.player.play()
+
+    def play(self) -> None:
+        if self.player is not None:
+            self.player.play()
+
+    def pause(self) -> None:
+        if self.player is not None:
+            self.player.pause()
 
     def is_playing(self) -> bool:
         if self.player is None:
@@ -386,6 +584,96 @@ class _VideoStage(QWidget):
     def position_s(self) -> float:
         return (self.player.position() / 1000) if self.player is not None else 0.0
 
+    # -- zoom
+    def _zoomer(self) -> bool:
+        """The zoomable view, made the first time it's wanted (False when this Qt can't draw video into one)."""
+        if self.zoom_view is not None:
+            return True
+        if self.player is None:
+            return False
+        try:
+            from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
+        except ImportError:
+            return False
+        view = QGraphicsView()
+        view.setScene(QGraphicsScene(view))
+        view.setBackgroundBrush(QColor("black"))
+        view.setFrameShape(QFrame.Shape.NoFrame)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        item = QGraphicsVideoItem()
+        view.scene().addItem(item)
+        self.zoom_view, self.zoom_item = view, item
+        self.pages.addWidget(view)
+        return True
+
+    def scale_now(self) -> float:
+        if self.fitted or self.zoom_view is None:
+            return self._fit_scale
+        return self.zoom_view.transform().m11()
+
+    def zoom(self, factor: float, at: QPoint | None = None) -> None:
+        if self.player is None:
+            return
+        if self.fitted:
+            if factor <= 1.0 or not self._zoomer():
+                return
+            w, h = self.size_shown.width(), self.size_shown.height()
+            if w <= 0 or h <= 0:
+                w, h = max(self.width(), 1), max(self.height(), 1)
+            self.zoom_item.setSize(QSizeF(w, h))
+            self.zoom_view.scene().setSceneRect(QRectF(0, 0, w, h))
+            self._fit_scale = min(self.width() / w, self.height() / h)
+            self.player.setVideoOutput(self.zoom_item)
+            self.pages.setCurrentWidget(self.zoom_view)
+            self.zoom_view.resetTransform()
+            target = self._fit_scale * factor
+            self.zoom_view.scale(target, target)
+            self.zoom_view.centerOn(self.zoom_item)
+            self.fitted = False
+        else:
+            current = self.zoom_view.transform().m11()
+            target = max(0.05, min(current * factor, 16.0))
+            if target <= self._fit_scale * 1.001:
+                self.fit()
+                return
+            self.zoom_view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse if at is not None
+                                                   else QGraphicsView.ViewportAnchor.AnchorViewCenter)
+            self.zoom_view.scale(target / current, target / current)
+        self.zoom_changed.emit()
+
+    def actual_size(self, at: QPoint | None = None) -> None:
+        """100 %: one pixel of the video to one point."""
+        if self.player is None:
+            return
+        if self.fitted:
+            self.zoom(max(1.01, 1.0 / max(self._fit_scale_for_size(), 1e-6)), at)
+        if not self.fitted:
+            current = self.zoom_view.transform().m11()
+            self.zoom_view.scale(1.0 / current, 1.0 / current)
+            self.zoom_changed.emit()
+
+    def _fit_scale_for_size(self) -> float:
+        w, h = self.size_shown.width(), self.size_shown.height()
+        if w <= 0 or h <= 0:
+            return 1.0
+        return min(self.width() / w, self.height() / h)
+
+    def fit(self) -> None:
+        if not self.fitted and self.player is not None and self.video is not None:
+            self.player.setVideoOutput(self.video)
+            self.pages.setCurrentWidget(self.video)
+        self.fitted = True
+        self._fit_scale = self._fit_scale_for_size()
+        self.zoom_changed.emit()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self.fitted:
+            self._fit_scale = self._fit_scale_for_size()
+
     def _status(self, status) -> None:
         from PySide6.QtMultimedia import QMediaPlayer
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
@@ -410,12 +698,17 @@ class _VideoStage(QWidget):
 
 # ----------------------------------------------------------------------------- the window
 
-def _bar_button(text: str, tip: str, slot) -> QToolButton:
+def _bar_button(text: str, tip: str, slot, glyph: str = "") -> QToolButton:
     b = QToolButton()
-    b.setText(text)
+    if glyph:
+        b.setIcon(icon(glyph))
+        b.setIconSize(QSize(18, 18))
+    else:
+        b.setText(text)
     b.setToolTip(tip)
     b.setObjectName("ViewerButton")
     b.setCursor(Qt.CursorShape.PointingHandCursor)
+    b.setFocusPolicy(Qt.FocusPolicy.NoFocus)          # the keys belong to the viewer, not a button
     if slot is not None:
         b.clicked.connect(slot)
     return b
@@ -423,14 +716,25 @@ def _bar_button(text: str, tip: str, slot) -> QToolButton:
 
 VIEWER_STYLE = f"""
 #ViewerTop, #ViewerBottom {{ background: {CHROME_BG}; }}
+#ViewerTop {{ border-bottom: 1px solid #2C2C2E; }}
+#ViewerBottom {{ border-top: 1px solid #2C2C2E; }}
 #ViewerTop QLabel, #ViewerBottom QLabel {{ color: #F2F2F7; }}
 #ViewerTitle {{ font-size: 14px; font-weight: 600; }}
 #ViewerCount {{ color: #A1A1A6; font-size: 12px; }}
+#ViewerBottom QLabel#ViewerTime {{ color: #C7C7CC; font-size: 12px; }}
+QLabel#ViewerRes {{ color: #A1A1A6; font-size: 11px; font-weight: 600; border: 1px solid rgba(255,255,255,0.22);
+                    border-radius: 4px; padding: 1px 5px; }}
+QLabel#ViewerHDR {{ color: #E8C46A; font-size: 11px; font-weight: 700; border: 1px solid rgba(232,196,106,0.45);
+                    border-radius: 4px; padding: 1px 5px; }}
 QToolButton#ViewerButton {{ color: #F2F2F7; background: transparent; border: none; border-radius: 7px;
-                            padding: 5px 9px; font-size: 13px; }}
+                            padding: 4px 7px; font-size: 13px; }}
 QToolButton#ViewerButton:hover {{ background: rgba(255,255,255,0.12); }}
-QToolButton#ViewerButton:checked {{ background: rgba(10,132,255,0.85); }}
+QToolButton#ViewerButton:checked {{ background: rgba(255,255,255,0.14); }}
 QToolButton#ViewerButton:disabled {{ color: #636366; }}
+QToolButton#ViewerButton::menu-indicator {{ image: none; width: 0; }}
+QToolButton#ZoomLabel {{ color: #C7C7CC; background: transparent; border: none; border-radius: 6px;
+                         padding: 3px 6px; font-size: 12px; min-width: 38px; }}
+QToolButton#ZoomLabel:hover {{ background: rgba(255,255,255,0.12); }}
 #ViewerInfo {{ background: #1C1C1E; border-left: 1px solid #2C2C2E; }}
 #ViewerInfo QLabel {{ color: #EBEBF0; }}
 #InfoHead {{ color: #8E8E93; font-size: 11px; font-weight: 600; letter-spacing: 0.5px; }}
@@ -439,20 +743,33 @@ QToolButton#ViewerButton:disabled {{ color: #636366; }}
 #ViewerInfo QPushButton {{ color: #F2F2F7; background: #2C2C2E; border: 1px solid #3A3A3C; border-radius: 7px;
                           padding: 5px 12px; font-size: 13px; }}
 #ViewerInfo QPushButton:hover {{ background: #3A3A3C; }}
+QSlider#Scrubber {{ min-height: 18px; }}
 QSlider#Scrubber::groove:horizontal {{ height: 4px; background: rgba(255,255,255,0.25); border-radius: 2px; }}
 QSlider#Scrubber::sub-page:horizontal {{ background: #F2F2F7; border-radius: 2px; }}
-QSlider#Scrubber::handle:horizontal {{ background: #FFFFFF; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }}
-#ViewerToast {{ background: rgba(44,44,46,0.92); color: #F2F2F7; border-radius: 10px; padding: 8px 14px; }}
+QSlider#Scrubber::handle:horizontal {{ background: #FFFFFF; width: 13px; height: 13px; margin: -5px 0; border-radius: 6px; }}
+#ViewerToast {{ background: rgba(44,44,46,0.95); color: #F2F2F7; border-radius: 10px; padding: 6px 14px; }}
 """
+FAVORITE_RED = "#FF375F"
+
+
+def available_geometry(widget: QWidget) -> QRect | None:
+    """The usable part of the screen the window is on (the bound it's fitted and kept within)."""
+    screen = widget.screen() or QApplication.primaryScreen()
+    return screen.availableGeometry() if screen is not None else None
+AI_PURPLE = "#BF5AF2"
+INFO_WIDTH = 300
 
 
 class MediaViewer(QWidget):
-    """One window: the items of a listing, one at a time (module notes)."""
+    """One window: the items of a listing, one at a time (module notes). `box`: Safe Finder's window — the
+    size the viewer fits each item within, and where it opens."""
     closed = Signal()
     removed = Signal(list)                 # paths moved to the Trash from here
     _frame_saved = Signal(str)             # a saved frame's file ("" when it failed), from a worker thread
+    _hdr_read = Signal(str, bool)          # a photo's HDR check, from a worker thread
 
-    def __init__(self, paths: list[str], start: int = 0, hooks: Hooks | None = None, poster=None, parent=None) -> None:
+    def __init__(self, paths: list[str], start: int = 0, hooks: Hooks | None = None, poster=None, parent=None,
+                 box: QRect | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.paths = [p for p in paths if is_media(p)] or list(paths)
@@ -464,9 +781,15 @@ class MediaViewer(QWidget):
         self.loader.signals.done.connect(self._image_ready)
         self.chrome = True
         self.slideshow = False
+        self.box = QSize(box.size()) if box is not None and box.isValid() else QSize(1180, 820)
+        self.anchor = box.center() if box is not None and box.isValid() else None
+        self.fit_window = True
+        self._fit_target: QSize | None = None
+        self._hdr_cache: dict[str, bool] = {}
+        self._was_playing = False
         self.setWindowTitle("Viewer")
         self.setStyleSheet(VIEWER_STYLE)
-        self.setMinimumSize(640, 420)
+        self.setMinimumSize(380, 260)
         pal = self.palette()
         pal.setColor(self.backgroundRole(), QColor("black"))
         self.setPalette(pal)
@@ -482,32 +805,41 @@ class MediaViewer(QWidget):
         self.video.tapped.connect(self.toggle_chrome)
         self.video.ended.connect(lambda: self.go(1) if self.slideshow else None)
         self.video.position_changed.connect(self._position)
-        self.video.playing_changed.connect(lambda on: self.play_btn.setText("⏸" if on else "▶"))
+        self.video.playing_changed.connect(self._playing)
+        self.image.zoom_changed.connect(self._zoom_label)
+        self.video.zoom_changed.connect(self._zoom_label)
 
         self.info = self._info_panel()
         self.info.setVisible(False)
+        self.top = self._top_bar()
+        self.bottom = self._bottom_bar()
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self.top)
+        column.addWidget(self.stack, 1)
+        column.addWidget(self.bottom)
         body = QHBoxLayout(self)
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
-        body.addWidget(self.stack, 1)
+        body.addLayout(column, 1)
         body.addWidget(self.info)
 
-        self.top = self._top_bar()
-        self.bottom = self._bottom_bar()
         self.toast = QLabel(self)
         self.toast.setObjectName("ViewerToast")
         self.toast.setVisible(False)
         self._toast_timer = QTimer(self)
         self._toast_timer.setSingleShot(True)
-        self._toast_timer.timeout.connect(lambda: self.toast.setVisible(False))
+        self._toast_timer.timeout.connect(self._end_note)
         self._slide = QTimer(self)
         self._slide.setSingleShot(True)
         self._slide.timeout.connect(self._slide_next)
         self._frame_saved.connect(lambda out: self.say(
             f"Saved “{os.path.basename(out)}” in “{os.path.basename(os.path.dirname(out))}”." if out
             else "Couldn't save the frame."))
+        self._hdr_read.connect(self._hdr_ready)
         self._shortcuts()
-        self.resize(1180, 820)
+        self.resize(self.box)
         self.show_current()
 
     # ------------------------------------------------------------------ bars
@@ -515,101 +847,144 @@ class MediaViewer(QWidget):
         bar = QFrame(self)
         bar.setObjectName("ViewerTop")
         h = QHBoxLayout(bar)
-        h.setContentsMargins(10, 6, 10, 6)
-        h.addWidget(_bar_button("✕", "Close (Esc)", self.close))
+        h.setContentsMargins(8, 5, 10, 5)
+        h.setSpacing(2)
+        h.addWidget(_bar_button("", "Close (Esc)", self.close, "close"))
         titles = QVBoxLayout()
         titles.setSpacing(0)
         self.title = QLabel()
         self.title.setObjectName("ViewerTitle")
         self.count = QLabel()
         self.count.setObjectName("ViewerCount")
+        for lbl in (self.title, self.count):
+            lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)   # long names give way
+            lbl.setMinimumWidth(30)
         titles.addWidget(self.title)
         titles.addWidget(self.count)
-        h.addSpacing(6)
+        h.addSpacing(4)
         h.addLayout(titles, 1)
-        self.slide_btn = _bar_button("Slideshow", "Slideshow (S)", self.toggle_slideshow)
-        self.slide_btn.setCheckable(True)
-        self.info_btn = _bar_button("Info", "Info (I)", self.toggle_info)
+        self.fav_btn = _bar_button("", "Favorite (⇧⌘F) — the iPhone app's Favorites", lambda: self.toggle_label("favorite"),
+                                   "heart")
+        self.ai_btn = _bar_button("", "To AI (⇧⌘A) — the iPhone app's To AI", lambda: self.toggle_label("ai"), "sparkles")
+        for b in (self.fav_btn, self.ai_btn):
+            b.setCheckable(True)
+            b.setVisible(self.hooks.labels_of is not None and self.hooks.set_label is not None)
+        self.frame_btn = _bar_button("", "Save Frame — this frame as a standard-range PNG in a “Screenshots” folder "
+                                     "beside the video", self.save_frame, "camera")
+        self.frames_btn = _bar_button("", "Export All Frames — every frame (or every other, every fourth) into a folder "
+                                      "beside the video", self.export_frames, "frames")
+        self.info_btn = _bar_button("", "Info (I)", self.toggle_info, "info")
         self.info_btn.setCheckable(True)
-        h.addWidget(self.slide_btn)
-        h.addWidget(self.info_btn)
-        h.addWidget(_bar_button("⤢", "Full Screen (F)", self.toggle_full))
+        self.more_btn = _bar_button("", "More", None, "more")
+        self.more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.more_btn.setMenu(self._more_menu())
+        for b in (self.fav_btn, self.ai_btn, self.frame_btn, self.info_btn, self.more_btn):
+            h.addWidget(b)
+        self.frames_btn.setVisible(False)              # Export All Frames is in ⋯ (the bar stays narrow)
+        h.addSpacing(6)
+        self.res_badge = QLabel()
+        self.res_badge.setObjectName("ViewerRes")
+        self.hdr_badge = QLabel("HDR")
+        self.hdr_badge.setObjectName("ViewerHDR")
+        self.hdr_badge.setToolTip("High dynamic range")
+        for b in (self.res_badge, self.hdr_badge):
+            b.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        h.addWidget(self.res_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        h.addSpacing(3)
+        h.addWidget(self.hdr_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         return bar
 
+    def _more_menu(self) -> QMenu:
+        menu = QMenu(self)
+        self.slide_act = menu.addAction("Slideshow", self.toggle_slideshow)
+        self.slide_act.setCheckable(True)
+        self.slide_act.setShortcutVisibleInContextMenu(True)
+        menu.addAction("Full Screen", self.toggle_full)
+        menu.addSeparator()
+        self.frames_act = menu.addAction("Export All Frames…", self.export_frames)
+        self.frames_act.setToolTip("Every frame (or every other, every fourth) into a folder beside the video")
+        self.loop_act = menu.addAction("Loop", self._toggle_loop)
+        self.loop_act.setCheckable(True)
+        self.loop_act.setChecked(True)
+        self.loop_act.setToolTip("Play it over and over (as the iPhone does)")
+        self.tags_act = menu.addAction("Tags…", self.edit_tags)
+        self.reveal_act = menu.addAction("Show in Folder", self.reveal)
+        menu.addAction("Open With Default App", self.open_external)
+        menu.addSeparator()
+        self.trash_act = menu.addAction("Move to Trash", self.trash)
+        self.tags_act.setVisible(self.hooks.edit_tags is not None)
+        self.reveal_act.setVisible(self.hooks.reveal is not None)
+        self.trash_act.setVisible(self.hooks.trash is not None)
+        return menu
+
     def _bottom_bar(self) -> QWidget:
+        """Two rows for a video — the scrubber across the whole width (easy to hit with the mouse, and the bar
+        stays narrow enough for a portrait video), then the buttons — and just the buttons for a photo."""
         bar = QFrame(self)
         bar.setObjectName("ViewerBottom")
-        v = QVBoxLayout(bar)
-        v.setContentsMargins(12, 6, 12, 8)
-        v.setSpacing(4)
-        # the video row: play, time, scrubber, length, speed, mute, frames
+        col = QVBoxLayout(bar)
+        col.setContentsMargins(10, 4, 10, 5)
+        col.setSpacing(0)
+        # the timeline: the time, the scrubber, the length
         self.video_row = QWidget()
         vr = QHBoxLayout(self.video_row)
         vr.setContentsMargins(0, 0, 0, 0)
-        self.play_btn = _bar_button("⏸", "Play / Pause (Space)", lambda: self.video.toggle())
-        vr.addWidget(_bar_button("↺15", "Back 15 s (J)", lambda: self.video.skip(-15)))
-        vr.addWidget(self.play_btn)
-        vr.addWidget(_bar_button("15↻", "On 15 s (L)", lambda: self.video.skip(15)))
+        vr.setSpacing(8)
         self.time_now = QLabel("0:00")
-        self.scrub = QSlider(Qt.Orientation.Horizontal)
-        self.scrub.setObjectName("Scrubber")
-        self.scrub.setRange(0, 0)
+        self.time_now.setObjectName("ViewerTime")
+        self.scrub = _Scrubber()
         self.scrub.sliderMoved.connect(lambda ms: self.video.seek(ms))
+        self.scrub.sliderPressed.connect(self._scrub_start)
+        self.scrub.sliderReleased.connect(self._scrub_end)
         self.time_all = QLabel("0:00")
+        self.time_all.setObjectName("ViewerTime")
         vr.addWidget(self.time_now)
         vr.addWidget(self.scrub, 1)
         vr.addWidget(self.time_all)
+        col.addWidget(self.video_row)
+        # the buttons: previous / next, play-pause, mute, speed, and zoom (photos and videos alike)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(2)
+        self.prev_btn = _bar_button("", "Previous (←)", lambda: self.go(-1), "prev")
+        self.next_btn = _bar_button("", "Next (→)", lambda: self.go(1), "next")
+        row.addWidget(self.prev_btn)
+        row.addWidget(self.next_btn)
+        row.addStretch(1)
+        self.play_btn = _bar_button("", "Play (Space)", lambda: self.video.toggle(), "play")
+        self.mute_btn = _bar_button("", "Mute (M)", self._toggle_mute, "speaker")
+        self.mute_btn.setCheckable(True)
         self.speed_btn = _bar_button("1×", "Speed — slow motion like the iPhone's Slo-Mo", None)
         menu = QMenu(self.speed_btn)
         for label, rate in (("1×", 1.0), ("½×", 0.5), ("¼× (Slo-Mo)", 0.25), ("⅛× (Slo-Mo)", 0.125), ("2×", 2.0)):
             menu.addAction(label, lambda r=rate, t=label.split()[0]: (self.video.set_rate(r), self.speed_btn.setText(t)))
         self.speed_btn.setMenu(menu)
         self.speed_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        vr.addWidget(self.speed_btn)
-        self.loop_btn = _bar_button("Loop", "Play it over and over (as the iPhone does)", self._toggle_loop)
-        self.loop_btn.setCheckable(True)
-        self.loop_btn.setChecked(True)
-        vr.addWidget(self.loop_btn)
-        self.mute_btn = _bar_button("🔈", "Mute (M)", self._toggle_mute)
-        self.mute_btn.setCheckable(True)
-        vr.addWidget(self.mute_btn)
-        v.addWidget(self.video_row)
-        # the item row: previous / next, and what can be done with it
-        row = QHBoxLayout()
-        row.setSpacing(2)
-        self.prev_btn = _bar_button("‹", "Previous (←)", lambda: self.go(-1))
-        self.next_btn = _bar_button("›", "Next (→)", lambda: self.go(1))
-        for b in (self.prev_btn, self.next_btn):
-            b.setFont(QFont(b.font().family(), 20))
-        row.addWidget(self.prev_btn)
-        row.addWidget(self.next_btn)
-        row.addStretch(1)
-        self.frame_btn = _bar_button("Save Frame", "Save this frame as a standard-range PNG in a “Screenshots” "
-                                                     "folder beside the video", self.save_frame)
-        self.frames_btn = _bar_button("All Frames…", "Export All Frames — every frame (or every other, every "
-                                                     "fourth) into a folder beside the video", self.export_frames)
-        self.tags_btn = _bar_button("Tags…", "Edit this file's tags (⌘T)", self.edit_tags)
-        self.reveal_btn = _bar_button("Show in Folder", "Close the viewer and select it in Safe Finder", self.reveal)
-        self.open_btn = _bar_button("Open With…", "Open it in the Mac's app for it (Preview, QuickTime Player)",
-                                    self.open_external)
-        self.trash_btn = _bar_button("Trash", "Move to Trash (⌘⌫)", self.trash)
-        for b in (self.frame_btn, self.frames_btn, self.tags_btn, self.reveal_btn, self.open_btn, self.trash_btn):
-            b.setMinimumWidth(b.sizeHint().width())   # never squeezed into "Sa…rame": the window grows instead
+        self.play_controls = [self.play_btn, self.mute_btn, self.speed_btn]
+        for b in self.play_controls:
             row.addWidget(b)
-        self.frame_btn.setVisible(self.hooks.save_frame is not None)
-        self.frames_btn.setVisible(self.hooks.export_frames is not None)
-        self.tags_btn.setVisible(self.hooks.edit_tags is not None)
-        self.reveal_btn.setVisible(self.hooks.reveal is not None)
-        self.trash_btn.setVisible(self.hooks.trash is not None)
-        v.addLayout(row)
+        row.addStretch(1)
+        self.zoom_out_btn = _bar_button("", "Zoom Out (−)", lambda: self.zoom(0.8), "minus")
+        self.zoom_label = QToolButton()
+        self.zoom_label.setObjectName("ZoomLabel")
+        self.zoom_label.setText("Fit")
+        self.zoom_label.setToolTip("Fit / Actual Size (0)")
+        self.zoom_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.zoom_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.zoom_label.clicked.connect(self.toggle_actual)
+        self.zoom_in_btn = _bar_button("", "Zoom In (+)", lambda: self.zoom(1.25), "plus")
+        row.addWidget(self.zoom_out_btn)
+        row.addWidget(self.zoom_label)
+        row.addWidget(self.zoom_in_btn)
+        col.addLayout(row)
         return bar
 
     def _info_panel(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("ViewerInfo")
-        panel.setFixedWidth(300)
+        panel.setFixedWidth(INFO_WIDTH)
         outer = QVBoxLayout(panel)
-        outer.setContentsMargins(0, 54, 0, 0)
+        outer.setContentsMargins(0, 10, 0, 0)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -629,9 +1004,10 @@ class MediaViewer(QWidget):
                            ("J", lambda: self.video.skip(-15)), ("L", lambda: self.video.skip(15)),
                            (",", lambda: self.video.step(-1)), (".", lambda: self.video.step(1)),
                            ("M", lambda: self.mute_btn.click()), ("Ctrl+Backspace", self.trash),
-                           ("Ctrl+T", self.edit_tags), ("+", lambda: self.image.zoom(1.25)),
-                           ("=", lambda: self.image.zoom(1.25)), ("-", lambda: self.image.zoom(0.8)),
-                           ("0", self.image.fit)):
+                           ("Ctrl+T", self.edit_tags), ("+", lambda: self.zoom(1.25)),
+                           ("=", lambda: self.zoom(1.25)), ("-", lambda: self.zoom(0.8)),
+                           ("0", self.fit_current), ("Ctrl+Shift+F", lambda: self.toggle_label("favorite")),
+                           ("Ctrl+Shift+A", lambda: self.toggle_label("ai"))):
             sc = QShortcut(QKeySequence(keys), self)
             sc.activated.connect(slot)
 
@@ -640,6 +1016,10 @@ class MediaViewer(QWidget):
     def current(self) -> str:
         return self.paths[self.index] if self.paths else ""
 
+    @property
+    def stage(self):
+        return self.video if is_video(self.current) else self.image
+
     def show_current(self) -> None:
         self._slide.stop()
         if not self.paths:
@@ -647,21 +1027,28 @@ class MediaViewer(QWidget):
             return
         path = self.current
         self.title.setText(os.path.basename(path))
-        self.count.setText(f"{self.index + 1:,} of {len(self.paths):,}")
+        self.title.setToolTip(path)
+        if not self._toast_timer.isActive():
+            self.count.setText(f"{self.index + 1:,} of {len(self.paths):,}")
         self.setWindowTitle(os.path.basename(path))
         self.prev_btn.setEnabled(self.index > 0)
         self.next_btn.setEnabled(self.index < len(self.paths) - 1)
         video = is_video(path)
         self.video_row.setVisible(video)
-        self.frame_btn.setEnabled(video)
-        self.frames_btn.setEnabled(video)
+        for b in self.play_controls:
+            b.setVisible(video)
         self.frame_btn.setVisible(video and self.hooks.save_frame is not None)
-        self.frames_btn.setVisible(video and self.hooks.export_frames is not None)
+        self.frames_act.setVisible(video and self.hooks.export_frames is not None)
+        self.frame_btn.setEnabled(video)
+        self.loop_act.setVisible(video)
+        self._show_labels()
+        self._show_badges(path)
+        self._fit_to(path)
         if video:
             self.stack.setCurrentWidget(self.video)
             poster = self.poster(path) if self.poster else None
             self.video.show_video(path, poster)
-            self.video.loop = self.loop_btn.isChecked() and not self.slideshow
+            self.video.loop = self.loop_act.isChecked() and not self.slideshow
         else:
             self.video.stop()
             self.stack.setCurrentWidget(self.image)
@@ -678,7 +1065,8 @@ class MediaViewer(QWidget):
                 self.loader.request(self.paths[j])
         if self.info.isVisible():
             self.fill_info()
-        self._place_overlays()
+        self._zoom_label()
+        self._place_toast()
 
     def _image_ready(self, path: str, img: QImage) -> None:
         if path == self.current and not is_video(path):
@@ -706,6 +1094,97 @@ class MediaViewer(QWidget):
         else:
             self.close()
 
+    # ------------------------------------------------------------------ the window's shape
+    def media_size(self, path: str) -> QSize:
+        """The item's size as it's shown (turned upright) — read from its header, cheaply."""
+        if is_video(path):
+            info = media_info.video_info(path)
+            return QSize(int(info.get("width") or 0), int(info.get("height") or 0))
+        reader = QImageReader(path)
+        size = reader.size()
+        if size.isValid() and not size.isEmpty():
+            try:
+                from PySide6.QtGui import QImageIOHandler
+                if reader.transformation() & QImageIOHandler.Transformation.TransformationRotate90:
+                    size = size.transposed()
+            except Exception:  # noqa: BLE001 — an orientation we can't read: as stored
+                pass
+            return size
+        info = media_info.image_info(path)
+        return QSize(int(info.get("width") or 0), int(info.get("height") or 0))
+
+    def _chrome_height(self) -> int:
+        return (self.top.sizeHint().height() + self.bottom.sizeHint().height()) if self.chrome else 0
+
+    def _fit_to(self, path: str, first: bool = False) -> None:
+        """The window takes the item's shape within `box` (the picture fills it: no bars beside it), keeping its
+        centre — or, the first time, opening over Safe Finder's window."""
+        if not self.fit_window or self.isFullScreen() or self.isMaximized():
+            return
+        ms = self.media_size(path)
+        if ms.isEmpty():
+            return
+        info_w = INFO_WIDTH if self.info.isVisible() else 0
+        chrome_h = self._chrome_height()
+        box = QSize(self.box)
+        avail = available_geometry(self)
+        if avail is not None:
+            box = box.boundedTo(QSize(avail.width() - 20, avail.height() - 50))
+        room_w, room_h = max(box.width() - info_w, 200), max(box.height() - chrome_h, 150)
+        scale = min(room_w / ms.width(), room_h / ms.height())
+        w, h = max(1, round(ms.width() * scale)), max(1, round(ms.height() * scale))
+        min_w = max(self.minimumWidth(), self.bottom.minimumSizeHint().width() if self.chrome else 0,
+                    self.top.minimumSizeHint().width() if self.chrome else 0)
+        target = QSize(max(w + info_w, min_w), max(h + chrome_h, self.minimumHeight()))
+        if target == self.size() and self.isVisible() and not first:
+            return
+        center = self.anchor if (first or not self.isVisible()) and self.anchor is not None else \
+            self.frameGeometry().center()
+        self._fit_target = QSize(target)
+        self.resize(target)
+        if center is not None:
+            geo = self.frameGeometry()
+            geo.moveCenter(center)
+            if avail is not None:
+                geo.moveLeft(max(avail.left(), min(geo.left(), avail.right() - geo.width())))
+                geo.moveTop(max(avail.top(), min(geo.top(), avail.bottom() - geo.height())))
+            self.move(geo.topLeft())
+
+    def refit(self) -> None:
+        if self.paths:
+            self._fit_to(self.current)
+
+    # ------------------------------------------------------------------ zoom
+    def zoom(self, factor: float) -> None:
+        self.stage.zoom(factor)
+
+    def fit_current(self) -> None:
+        self.stage.fit()
+
+    def toggle_actual(self) -> None:
+        """Fit ⇄ actual size (one pixel to one point)."""
+        stage = self.stage
+        if stage.fitted:
+            if stage is self.image:
+                stage.actual_size(stage.viewport().rect().center())
+            else:
+                stage.actual_size()
+        else:
+            stage.fit()
+
+    def _zoom_label(self) -> None:
+        if not hasattr(self, "zoom_label"):
+            return
+        stage = self.stage
+        if stage.fitted:
+            self.zoom_label.setText("Fit")
+        else:
+            self.zoom_label.setText(f"{round(stage.scale_now() * 100)}%")
+        available = stage is self.image or self.video.available
+        for b in (self.zoom_out_btn, self.zoom_label, self.zoom_in_btn):
+            b.setEnabled(available)
+
+    # ------------------------------------------------------------------ video controls
     def _position(self, ms: int, duration: int) -> None:
         if not self.scrub.isSliderDown():
             self.scrub.setRange(0, max(0, duration))
@@ -713,18 +1192,89 @@ class MediaViewer(QWidget):
         self.time_now.setText(media_info.clock(ms / 1000))
         self.time_all.setText(media_info.clock(duration / 1000) if duration else "")
 
+    def _playing(self, on: bool) -> None:
+        self.play_btn.setIcon(icon("pause" if on else "play"))
+        self.play_btn.setToolTip("Pause (Space)" if on else "Play (Space)")
+
+    def _scrub_start(self) -> None:
+        self._was_playing = self.video.is_playing()
+        self.video.pause()                                   # still while dragging, as the iPhone's
+        self.video.seek(self.scrub.value())
+
+    def _scrub_end(self) -> None:
+        self.video.seek(self.scrub.value())
+        if self._was_playing:
+            self.video.play()
+
     def _toggle_loop(self) -> None:
-        self.video.loop = self.loop_btn.isChecked()
+        self.video.loop = self.loop_act.isChecked()
 
     def _toggle_mute(self) -> None:
         on = self.mute_btn.isChecked()
         self.video.set_muted(on)
-        self.mute_btn.setText("🔇" if on else "🔈")
+        self.mute_btn.setIcon(icon("speaker.off" if on else "speaker"))
+
+    # ------------------------------------------------------------------ resolution, HDR, labels
+    def _show_badges(self, path: str) -> None:
+        size = self.media_size(path)
+        if is_video(path):
+            info = media_info.video_info(path)
+            res = media_info.res_label(size.width(), size.height())
+            self.res_badge.setToolTip(f"{size.width():,} × {size.height():,}" if not size.isEmpty() else "")
+            hdr = bool(info.get("hdr"))
+        else:
+            mp = size.width() * size.height() / 1e6
+            res = (f"{mp:.0f} MP" if mp >= 9.5 else f"{mp:.1f} MP") if mp >= 0.95 else \
+                (f"{size.width()}×{size.height()}" if not size.isEmpty() else "")
+            self.res_badge.setToolTip(f"{size.width():,} × {size.height():,}" if not size.isEmpty() else "")
+            hdr = self._hdr_cache.get(path)
+            if hdr is None:
+                hdr = False
+                sig = self._hdr_read
+
+                def check() -> None:
+                    found = media_info.image_hdr(path)
+                    try:
+                        sig.emit(path, found)
+                    except RuntimeError:                 # the viewer was closed meanwhile
+                        pass
+                threading.Thread(target=check, daemon=True).start()
+        self.res_badge.setText(res)
+        self.res_badge.setVisible(bool(res))
+        self.hdr_badge.setVisible(hdr)
+
+    def _hdr_ready(self, path: str, hdr: bool) -> None:
+        self._hdr_cache[path] = hdr
+        if path == self.current:
+            self.hdr_badge.setVisible(hdr)
+
+    def _show_labels(self) -> None:
+        if self.hooks.labels_of is None:
+            return
+        have = self.hooks.labels_of(self.current) if self.paths else []
+        fav, ai = "favorite" in have, "ai" in have
+        self.fav_btn.setChecked(fav)
+        self.fav_btn.setIcon(icon("heart.fill" if fav else "heart", FAVORITE_RED if fav else "#F2F2F7"))
+        self.fav_btn.setToolTip("Unfavorite (⇧⌘F)" if fav else "Favorite (⇧⌘F) — the iPhone app's Favorites")
+        self.ai_btn.setChecked(ai)
+        self.ai_btn.setIcon(icon("sparkles", AI_PURPLE if ai else "#F2F2F7"))
+        self.ai_btn.setToolTip("Remove To AI (⇧⌘A)" if ai else "To AI (⇧⌘A) — the iPhone app's To AI")
+
+    def toggle_label(self, label: str) -> None:
+        if self.hooks.labels_of is None or self.hooks.set_label is None or not self.paths:
+            return
+        on = label not in self.hooks.labels_of(self.current)
+        self.hooks.set_label(self.current, label, on)
+        self._show_labels()
+        self.say(("Favorited." if on else "Unfavorited.") if label == "favorite" else
+                 ("Added to To AI." if on else "Removed from To AI."))
 
     # ------------------------------------------------------------------ chrome, info, slideshow
     def toggle_chrome(self) -> None:
         self.chrome = not self.chrome
-        self._place_overlays()
+        self.top.setVisible(self.chrome)
+        self.bottom.setVisible(self.chrome)
+        QTimer.singleShot(0, self.refit)
 
     def toggle_info(self) -> None:
         on = not self.info.isVisible()
@@ -732,22 +1282,28 @@ class MediaViewer(QWidget):
         self.info_btn.setChecked(on)
         if on:
             self.fill_info()
-        QTimer.singleShot(0, self._place_overlays)
+        QTimer.singleShot(0, self.refit)
 
     def toggle_full(self) -> None:
-        self.showNormal() if self.isFullScreen() else self.showFullScreen()
+        if self.isFullScreen():
+            self.showNormal()
+            QTimer.singleShot(150, self.refit)
+        else:
+            self.showFullScreen()
 
     def toggle_slideshow(self) -> None:
         self.slideshow = not self.slideshow
-        self.slide_btn.setChecked(self.slideshow)
-        self.video.loop = self.loop_btn.isChecked() and not self.slideshow
+        self.slide_act.setChecked(self.slideshow)
+        self.video.loop = self.loop_act.isChecked() and not self.slideshow
         if self.slideshow:
-            self.chrome = False
-            self._place_overlays()
+            if self.chrome:
+                self.toggle_chrome()
             if not is_video(self.current):
                 self._slide.start(int(SLIDE_SECONDS * 1000))
         else:
             self._slide.stop()
+            if not self.chrome:
+                self.toggle_chrome()
 
     def _slide_next(self) -> None:
         if self.slideshow:
@@ -757,28 +1313,34 @@ class MediaViewer(QWidget):
                 self.go(1)
 
     def say(self, text: str) -> None:
+        """A passing note, in the line under the name (in place of "3 of 12") for a few seconds — never over the
+        picture (where the Mac would hide it under a video) or the buttons."""
         self.toast.setText(text)
-        self.toast.adjustSize()
-        self.toast.setVisible(True)
-        self._place_overlays()
+        self.count.setText(text)
+        self.count.setStyleSheet("color: #F2F2F7; font-weight: 600;")
+        self.count.setToolTip(text)
         self._toast_timer.start(3500)
+
+    def _end_note(self) -> None:
+        self.count.setStyleSheet("")
+        self.count.setToolTip("")
+        if self.paths:
+            self.count.setText(f"{self.index + 1:,} of {len(self.paths):,}")
+
+    def _place_toast(self) -> None:
+        pass
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._place_overlays()
+        if self._fit_target is not None and event.size() == self._fit_target:
+            self._fit_target = None                 # our own fit
+        elif self.isVisible() and not self.isFullScreen() and not self.isMaximized():
+            self.box = QSize(event.size())          # resized by hand: fit within this from now on
+        self._place_toast()
 
-    def _place_overlays(self) -> None:
-        w = self.stack.width()
-        self.top.setVisible(self.chrome)
-        self.bottom.setVisible(self.chrome)
-        self.top.setGeometry(0, 0, w, self.top.sizeHint().height())
-        bh = self.bottom.sizeHint().height()
-        self.bottom.setGeometry(0, self.height() - bh, w, bh)
-        self.top.raise_()
-        self.bottom.raise_()
-        if self.toast.isVisible():
-            self.toast.move((w - self.toast.width()) // 2, self.height() - bh - self.toast.height() - 16)
-            self.toast.raise_()
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._place_toast()
 
     def fill_info(self) -> None:
         lay = self.info_lay
@@ -829,6 +1391,9 @@ class MediaViewer(QWidget):
             row("Place", f"{lat:.5f}, {lng:.5f}", f"https://maps.apple.com/?ll={lat},{lng}&q=Photo")
         row("Caption", meta.get("caption", ""))
         row("Folder", os.path.dirname(path))
+        if self.hooks.labels_of is not None:
+            have = self.hooks.labels_of(path)
+            row("Labels", ", ".join(n for k, n in (("favorite", "Favorite"), ("ai", "To AI")) if k in have))
         tags = self.hooks.tags_of(path) if self.hooks.tags_of else []
         if self.hooks.tags_of is not None:
             h = QLabel("TAGS")
@@ -895,9 +1460,14 @@ class MediaViewer(QWidget):
         path, at = self.current, self.video.position_s()
         self.say("Saving the frame…")
 
+        sig = self._frame_saved
+
         def work() -> None:
             out = self.hooks.save_frame(path, at)
-            self._frame_saved.emit(out or "")
+            try:
+                sig.emit(out or "")
+            except RuntimeError:                         # the viewer was closed meanwhile
+                pass
         threading.Thread(target=work, daemon=True).start()
 
     def export_frames(self) -> None:
@@ -905,10 +1475,6 @@ class MediaViewer(QWidget):
             if self.video.is_playing():
                 self.video.toggle()
             self.hooks.export_frames(self.current)
-
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        self._place_overlays()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._slide.stop()

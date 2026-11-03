@@ -328,20 +328,33 @@ drags the files, as everywhere else). Each folder remembers it, like icons and l
 
 **Double-click a photo or video** (or press Return) — in any view — and it opens in the viewer instead of
 Preview: one item at a time on black, in the folder's order (or just the ones you picked, if you picked
-several), with a top and bottom bar that a click hides and brings back.
+several).
 
-- **Photos** fit the window; pinch, ⌘-scroll or +/− zooms, a double-click toggles fit and actual size at the
-  spot clicked, and you drag to pan. The ones either side are read ahead, so ←/→ is instant.
-- **Videos** play and loop, as on the iPhone, with a scrubber, ↺15 / 15↻ (J / L), a frame step (, and .),
-  slow motion (½×, ¼×, ⅛× — the iPhone's Slo-Mo) and mute. **Save Frame** saves the frame on screen as a
-  standard-range PNG in a "Screenshots" folder beside the video (the iPhone's press-and-hold screenshot);
-  **All Frames…** opens Export All Frames (below).
+- **The window fits the picture.** It opens at the size of Safe Finder's window, over it, and takes each
+  item's shape within that — a portrait video or photo gets a tall, narrow window with no black bars beside it,
+  a wide one a wide window; moving to the next item re-fits it around the same centre. Resize it by hand and
+  that becomes the size it fits within. The bar with the name and buttons sits **above** the picture and the
+  one with the controls **below** it — never over it. A click on the picture hides them both (the iPhone's
+  tap) and brings them back.
+- **Top right:** the resolution, quietly — **720p, 1080p, 4K, 8K…** for a video (by its long side, as the
+  iPhone app's filter), megapixels for a photo — and **HDR** when it is (an HLG, PQ or Dolby Vision video; a
+  photo with an HDR gain map, as the iPhone takes them). Beside them: ♡ **Favorite** and ✦ **To AI** (⇧⌘F /
+  ⇧⌘A — the iPhone app's, shared with it), the camera (**Save Frame**, videos), ⓘ **Info** and ⋯ (Slideshow,
+  Full Screen, Export All Frames…, Loop, Tags…, Show in Folder, Open With Default App, Move to Trash).
+- **Zoom** — the − / Fit / + buttons at the bottom right (or +, −, 0), for photos **and videos**; click the
+  percentage for fit ⇄ actual size. Photos also pinch, ⌘-scroll, and double-click to toggle; drag to pan.
+  Photos fill the window (a small one is enlarged rather than framed in black). The ones either side are read
+  ahead, so ←/→ is instant.
+- **Videos** play and loop, as on the iPhone. Below the picture: the **scrubber** across the whole width —
+  click anywhere along it to jump there, or drag (the video holds still while you drag, and hovering shows the
+  time under the pointer) — then ‹ ›, **play/pause**, mute and speed (½×, ¼×, ⅛× — the iPhone's Slo-Mo). J / L
+  skip 15 s, , and . step a frame. **Save Frame** saves the frame on screen as a standard-range PNG in a
+  "Screenshots" folder beside the video (the iPhone's press-and-hold screenshot); ⋯ ▸ **Export All Frames…**
+  opens Export All Frames (below).
 - ←/→ (or a two-finger swipe) moves, Esc or ↓ closes, I or ↑ opens the **Info** panel (when it was taken or
-  recorded, size, length, camera, place with a Maps link, caption, folder, tags and Edit Tags…), F is full
-  screen, S a slideshow (3 seconds a photo; a video plays to its end), Space plays/pauses, ⌘⌫ moves to the
-  Trash (asking first), ⌘T edits tags. **Show in Folder** closes the viewer with the file selected; **Open
-  With…** opens it in Preview or QuickTime Player. Right-click ▸ **Open With Default App** still does that
-  from the folder.
+  recorded, size, length, camera, place with a Maps link, caption, folder, labels, tags and Edit Tags…), F is
+  full screen, S a slideshow (3 seconds a photo; a video plays to its end), Space plays/pauses, ⌘⌫ moves to the
+  Trash (asking first), ⌘T edits tags. Notes ("Saved …", "Favorited.") show for a moment under the name.
 
 Video lengths, dates, sizes and the camera are read from the files themselves (`media_info.py`: the MP4/MOV
 boxes and the photo's EXIF — no ExifTool), off the main thread and once per file.
