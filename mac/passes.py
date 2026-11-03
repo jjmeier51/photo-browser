@@ -50,6 +50,10 @@ _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 # Populated by items_from_post(); consumed by passes_decrypt.grab_original().
 ENCRYPTED: dict[str, str] = {}
 
+# contentIds whose chosen URL is a manifest, mapped to a plain one-file URL when the
+# API offers one.  Used as the fallback when a manifest download fails.
+PLAIN: dict[str, str] = {}
+
 # ── secret storage ────────────────────────────────────────────────────────────
 
 def get_refresh_token() -> str:
@@ -153,6 +157,11 @@ def creator_username(user_id: str, access_token: str) -> str:
 
 # ── listing ───────────────────────────────────────────────────────────────────
 
+def _more(doc: dict) -> bool:
+    """True when the API says there is another page."""
+    return bool(doc.get("hasMore") or doc.get("hasNextPage"))
+
+
 def gallery_pages(access_token: str,
                   creator_id: str | None = None) -> Iterator[list[dict]]:
     """Yields successive pages of post dicts from the purchased-content gallery."""
@@ -167,10 +176,10 @@ def gallery_pages(access_token: str,
         data = doc.get("data") or []
         if data:
             yield data
-        if not doc.get("hasMore"):
+        if not _more(doc):
             break
-        body["createdAt"] = doc["createdAt"]
-        body["lastId"]    = doc["lastId"]
+        body["createdAt"] = doc.get("createdAt")
+        body["lastId"]    = doc.get("lastId")
         time.sleep(GAP)
 
 
@@ -183,7 +192,7 @@ def channel_id(access_token: str, username: str) -> str | None:
             other = ch.get("otherUser") or {}
             if other.get("username") == username:
                 return ch.get("channelId")
-        if not doc.get("hasMore"):
+        if not _more(doc):
             return None
         body["recentAt"] = doc.get("recentAt")
         body["lastId"]   = doc.get("lastId")
@@ -196,15 +205,20 @@ def messages_pages(access_token: str, username: str) -> Iterator[list[dict]]:
     if not cid:
         raise RuntimeError(f'no message channel with "{username}"')
     body: dict = {"channelId": cid, "contentOnly": False, "pending": False}
+    last_id = None
     while True:
         doc = _post("/messages/messages", body, access_token)
         data = doc.get("data") or []
         if data:
             yield data
-        if not doc.get("hasNextPage"):
+        if not _more(doc):
             break
+        nid = doc.get("lastId")
+        if nid is not None and nid == last_id:      # cursor stopped moving
+            break
+        last_id = nid
         body["lastSentAt"] = doc.get("lastSentAt")
-        body["lastId"]     = doc.get("lastId")
+        body["lastId"]     = nid
         time.sleep(GAP)
 
 
@@ -219,6 +233,11 @@ def _ts(s: str | None) -> float:
         return dt.timestamp()
     except (ValueError, AttributeError):
         return 0
+
+
+def _is_manifest(url: str) -> bool:
+    path = url.split("?")[0].lower()
+    return path.endswith((".mpd", ".m3u8"))
 
 
 def items_from_post(post: dict, folder: Path,
@@ -241,18 +260,19 @@ def items_from_post(post: dict, folder: Path,
         sc  = c.get("signedContent") or {}
 
         # the original variant is an encrypted DASH manifest; register it and let
-        # passes_decrypt.grab_original() handle the item instead of social.settle()
+        # passes_decrypt.grab_original() handle the item
         orig = sc.get("original") or ""
         if orig:
             ENCRYPTED[cid] = orig
 
-        # fall back to the plain variants, then to the original if nothing else exists
-        url = sc.get("large") or sc.get("signedUrl") or ""
+        url = orig or sc.get("large") or sc.get("signedUrl") or ""
         if not url:
-            if orig:
-                url = orig
-            else:
-                continue
+            continue
+
+        # remember a non-manifest URL to fall back to
+        plain = sc.get("signedUrl") or sc.get("large") or ""
+        if plain and not _is_manifest(plain):
+            PLAIN[cid] = plain
 
         video = ct == "video"
         if not ext:

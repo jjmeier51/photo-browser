@@ -1,8 +1,9 @@
-"""Content-key retrieval and in-place decryption for Passes original-quality media.
+"""Content-key retrieval and DASH download for Passes media (no Qt).
 
-Nothing here is Qt. The licence request is authenticated with the caller's own
-access token; the Widevine device only supplies the session envelope. The device
-path comes from settings and is swappable — no device file is committed.
+Two entry points: grab_original() for the encrypted `original` variant, and
+grab_plain_dash() for an unencrypted manifest. The licence request is
+authenticated with the caller's own access token; the Widevine device only
+supplies the session envelope.
 """
 from __future__ import annotations
 
@@ -23,8 +24,8 @@ import social
 SW_SECURE_CRYPTO = "8fd9a7ea-73de-49bc-8b9e-ec1e73d325d3"
 SW_SECURE_DECODE = "d597b3c2-7827-4047-9ee4-c10e49f7bc14"
 
-# BuyDRM service certificate — the licence endpoint rejects challenges without it.
-# Only a backstop: make_device.py writes the real one to service_cert.txt next to the device.
+# BuyDRM service certificate — only a backstop; make_device.py writes the real
+# one to service_cert.txt next to the device.
 SERVICE_CERT = (
     "CAUSuQUKswIIAxIQTBvbgP1Avrk5wSGIMyCvYRjV5pC7BSKOAjCCAQoCggEBANZJ542CyvnJY1c3AsvH1jtzpXtHIfaL+gaiqFK9TQG3hA5UZq2kJaBVe+JfXKL4OV1qwyV18/OXiWeNFXJc7TTSkuC+oqnNFIuICNCvAH2dhpB/FBOm7w6X8kGQUZh9vm0QxbpLct60VUl1uwajN76lJRtrIkZyvy9+Ep6AST3cYPDWwhIwao6BDSWDk8XlxT+Lu22RgaiYPUgBUhnc3uhN4jyYZj5lQ4HIw7YJ8rMTI+CVS1TcxAeQfwoDfmLkIK0ifRBuUbKVDFXKaHCD62+MOytkCQsDGuSWAL+zX2lFtuyIEU3tF1yAHHZNP4OilJktHA4rw600jhl8OazEe/MCAwEAAToGYnV5ZHJtEoADfn/wSHa0UlyDQqzv+GDaAbT8sMV7tUpqXbAHSCJRmdIDX/ZuZPLVJucxSnEVakX5goeMELdkKjMeGi75dojRoVEPpWw7GJSxzxZ8LAjRE+Y2ymVxyKgeH7MZxVIGhxxBosUVnOR3LyCfKiUArK/cZ2wQYJ/mOFOmBQDEmDU7nkGclIJOxY0BKNwpMlKJFWy32srxXJlDJ1VozWdkLxZuMP6J0qzqsZGm0AIMXPMPha16XIsycTPA5O7cjb3fF2hqWZF7ah1NMbcvfprZiPfJPCWnwtL+ZCz8poq1PJ2QRXr0GE1ZwS5CDv/AmOiE2i3NuhdVTrBi1aQ6QBB5rkERA2ypjBAPV59PreurelpBx8kgZSTxwITRJJvO46INq0Jy7bHXL42iDli25YatVW4s7IlGPHIjSphQ/Z4k/PKwX3vQOe5LvGWyRN4OXcNFBdZB6yv5k+2LYW2yhz5NFjO92p4YCwSXx/s/7EidD4tev5Ry6N3/heqc7YIIo2q4hsyp"
 )
@@ -91,35 +92,34 @@ def _ffmpeg(args: list[str]) -> None:
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 
-def grab_original(item: social.Item, headers: dict, exif_session=None) -> social.Settled:
-    """Fetch, decrypt and place the original-quality variant of one item."""
+def _grab(item: social.Item, headers: dict, exif_session, url: str,
+          content_id: str | None) -> social.Settled:
+    """Download `url` as DASH, decrypt when `content_id` is given, then place it."""
     if os.path.lexists(item.folder / item.filename):
         return social.Settled(item, str(item.folder / item.filename), present=True)
 
-    mpd = passes.ENCRYPTED.get(item.key)
-    if not mpd:
-        return social.Settled(item, why="original: no manifest url")
-
     # ffmpeg can't write HEIC, so anything unusual becomes a JPEG
-    ext = item.ext if (item.video or item.ext in _IMAGE_EXTS) else "jpg"
+    ext = "mp4" if item.video else (item.ext if item.ext in _IMAGE_EXTS else "jpg")
     out_name = f"{item.name}.{ext}"
 
     try:
-        with tempfile.TemporaryDirectory(prefix="passes-enc-") as td:
+        with tempfile.TemporaryDirectory(prefix="passes-dash-") as td:
             tmp = Path(td)
-            man = tmp / "manifest.mpd"
-            with urllib.request.urlopen(mpd, timeout=30) as r:
-                man.write_bytes(r.read())
 
-            token = headers["Authorization"].split(" ", 1)[1]
-            key = _content_key(_pssh_from(man.read_bytes()), item.key, token)
+            key = None
+            if content_id is not None:
+                man = tmp / "manifest.mpd"
+                with urllib.request.urlopen(url, timeout=30) as r:
+                    man.write_bytes(r.read())
+                token = headers["Authorization"].split(" ", 1)[1]
+                key = _content_key(_pssh_from(man.read_bytes()), content_id, token)
 
             yt_dlp.YoutubeDL({
                 "quiet": True,
                 "no_warnings": True,
                 "allow_unplayable_formats": True,
                 "outtmpl": str(tmp / "%(format_id)s.%(ext)s"),
-            }).download([mpd])
+            }).download([url])
 
             tracks = sorted(p for p in tmp.iterdir()
                             if p.suffix in {".mp4", ".m4a", ".m4v"})
@@ -128,6 +128,9 @@ def grab_original(item: social.Item, headers: dict, exif_session=None) -> social
 
             plain: list[Path] = []
             for t in tracks:
+                if key is None:
+                    plain.append(t)
+                    continue
                 out = tmp / f"plain_{t.name}"
                 _ffmpeg(["-decryption_key", key.key.hex(),
                          "-i", str(t), "-c", "copy", str(out)])
@@ -152,4 +155,17 @@ def grab_original(item: social.Item, headers: dict, exif_session=None) -> social
                 return social.Settled(item, str(item.folder / out_name), present=True)
             return social.Settled(item, placed)
     except Exception as e:  # noqa: BLE001
-        return social.Settled(item, why=f"original: {type(e).__name__}: {e}")
+        return social.Settled(item, why=f"dash: {type(e).__name__}: {e}")
+
+
+def grab_original(item: social.Item, headers: dict, exif_session=None) -> social.Settled:
+    """Fetch, decrypt and place the original-quality variant of one item."""
+    url = passes.ENCRYPTED.get(item.key)
+    if not url:
+        return social.Settled(item, why="dash: no manifest url")
+    return _grab(item, headers, exif_session, url, item.key)
+
+
+def grab_plain_dash(item: social.Item, headers: dict, exif_session=None) -> social.Settled:
+    """Fetch and place an unencrypted manifest (no key needed)."""
+    return _grab(item, headers, exif_session, item.url, None)

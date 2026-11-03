@@ -13,9 +13,9 @@ persistent QWebEngineProfile).  After the /auth/success navigation the page's
 (service "Safe Finder Passes", account "refresh-token").  It is re-used on
 every subsequent run and exchanged for a short-lived access token each time.
 
-Items with an `original` variant are fetched and decrypted via passes_decrypt;
-everything else uses `large`, then `signedUrl`.  If the original path fails the
-item is retried at `large` and flagged in the log.
+Every media URL on Passes is a DASH manifest, so all items go through yt-dlp;
+`original` variants are decrypted via passes_decrypt, others are not.  If a
+manifest fails the item is retried against a plain URL, then flagged.
 
 Passes support (Case PS-48213, 2026-11-03) confirms purchased content may be
 kept locally for personal use.  Personal archive only, no redistribution.
@@ -31,6 +31,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -230,6 +231,7 @@ class PassesWindow(QMainWindow):
         self.pool  = concurrent.futures.ThreadPoolExecutor(
             max_workers=LANES, thread_name_prefix="passes-dl")
         passes.ENCRYPTED.clear()
+        passes.PLAIN.clear()
 
         for w in (self.go_btn, self.field, self.zip_btn):
             w.setEnabled(False)
@@ -298,12 +300,11 @@ class PassesWindow(QMainWindow):
         self.bar.setRange(0, self.queued)
 
         headers = {"User-Agent": social.UA, "Referer": "https://www.passes.com/"}
+        auth    = {"Authorization": f"Bearer {self._access_token}", **headers}
         if item.key in passes.ENCRYPTED:
-            # original variant: decrypt rather than plain-download
-            fut = self.pool.submit(
-                passes_decrypt.grab_original, item,
-                {"Authorization": f"Bearer {self._access_token}", **headers},
-                self.exif)
+            fut = self.pool.submit(passes_decrypt.grab_original, item, auth, self.exif)
+        elif passes._is_manifest(item.url):
+            fut = self.pool.submit(passes_decrypt.grab_plain_dash, item, auth, self.exif)
         else:
             fut = self.pool.submit(
                 social.settle, item, [headers],
@@ -335,11 +336,16 @@ class PassesWindow(QMainWindow):
                         self.photos += 1
                 self.to_tag.append(s.path)
                 self.done_keys.add(s.item.key)
-            elif s.why.startswith("original:") and s.item.key in passes.ENCRYPTED:
-                # decryption failed — drop back to the plain variant for this item
+            elif s.why.startswith("dash:") and s.item.key in passes.PLAIN:
+                # a manifest failed — fall back to the one-file URL for this item
+                plain = passes.PLAIN.pop(s.item.key)
                 passes.ENCRYPTED.pop(s.item.key, None)
-                self._log(f"   {s.item.name}.{s.item.ext}: {s.why} — retrying at large")
-                self._queue(s.item)
+                self._log(f"   {s.item.name}.{s.item.ext}: {s.why} — retrying one-file")
+                self._queue(replace(s.item, url=plain))
+            elif s.why.startswith("dash:"):
+                self.failed += 1
+                self.failed_keys.add(s.item.key)
+                self._log(f"   couldn't download {s.item.name}.{s.item.ext}: {s.why}")
             else:
                 self.failed += 1
                 self.failed_keys.add(s.item.key)
