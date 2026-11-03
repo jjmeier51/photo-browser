@@ -1,6 +1,12 @@
 """The taylorpictures.net window in Safe Finder (taylor.py does the reading, matching and downloading) — the
 iPhone app's gallery browser on the Mac, plus what you already have in your Taylor Swift folder.
 
+- **First, the whole site against the whole folder** (the first time it opens on a folder, or Check Again):
+  every album on the site read and compared with every photo in the folder — "8,912 of your 12,340 photos are
+  on taylorpictures.net; you have all of 1,203 albums, some of 400, none of 1,657". Browsing works meanwhile;
+  Stop/closing keeps what's been read. Then **Albums With Photos to Get** (all, some, none of — a list across
+  the whole site), **Tag Them…** (your matching photos get "taylorpictures.net"), and optionally matching
+  renamed copies by picture (every thumbnail fetched once — slower).
 - **Sections and albums**: one list, sections first (double-click to go in; ‹ Back or ⌘[ to come out),
   albums with their cover, a **Here** column and a photo count. Here says ✓ All here, "87 of 120", "Folder
   here" or nothing yet; **Check Albums Here** reads every album of the section and fills it in (by name —
@@ -33,7 +39,8 @@ from typing import Callable
 from PySide6.QtCore import QObject, QSettings, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QListView, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
+                               QLineEdit, QListView, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton,
+                               QSizePolicy,
                                QStackedWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 import taylor as T
@@ -47,6 +54,7 @@ class TaylorHooks:
     view: Callable[[list[str], str], None] | None = None     # (your photos, the one to start at)
     reveal: Callable[[str], None] | None = None
     changed: Callable[[str], None] | None = None             # a folder got new files
+    tag: Callable[[list[str], str], int] | None = None       # (photos, tag) → how many got it
 
 
 class Checks:
@@ -88,6 +96,8 @@ class _Bridge(QObject):
     check_done = Signal()
     dl_progress = Signal(int, int, int)             # album id, done, total
     dl_done = Signal(int, object)                   # album id, Outcome
+    pass_progress = Signal(str, int, int)           # stage, done, total
+    pass_done = Signal(object)                      # Summary, or None when stopped
 
 
 def _badge(pm: QPixmap) -> QPixmap:
@@ -152,6 +162,15 @@ class TaylorWindow(QWidget):
         self.queue: list[tuple[T.Album, int | None, bool]] = []
         self.downloading: T.Album | None = None
         self.checking = False
+        self.site = T.SiteIndex()
+        self.summary = T.load_summary(root)
+        self.passing = False
+        self.pass_stop = threading.Event()
+        if self.summary is not None:
+            for key, (total, have) in self.summary.per_album.items():
+                self.checks.put(root, int(key), total, have)
+        self.bridge.pass_progress.connect(self._pass_progress)
+        self.bridge.pass_done.connect(self._pass_done)
         self.bridge.section.connect(self._section_loaded)
         self.bridge.images.connect(self._images_page)
         self.bridge.images_done.connect(self._images_done)
@@ -167,6 +186,10 @@ class TaylorWindow(QWidget):
         self._build()
         self._build_index()
         self.open_section(None, "taylorpictures.net", None)
+        if self.summary is None:
+            QTimer.singleShot(0, self.start_pass)        # the first time: the whole site against the folder
+        else:
+            self._show_summary()
 
     # ------------------------------------------------------------------ layout
     def _build(self) -> None:
@@ -182,6 +205,7 @@ class TaylorWindow(QWidget):
                                    background: {t.button}; font-size: 15px; }}
             QListWidget#TayGrid {{ background: {t.content}; border: none; }}
             QTreeWidget#TayList::item {{ height: 52px; }}
+            QFrame#TayPass {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 9px; }}
         """)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -222,7 +246,9 @@ class TaylorWindow(QWidget):
         tv.addLayout(row2)
         self.status = QLabel("")
         self.status.setObjectName("SheetSub")
+        self.status.linkActivated.connect(lambda which: self.open_to_get(which))   # the to-get lists' links
         tv.addWidget(self.status)
+        tv.addWidget(self._pass_panel())
         v.addWidget(top)
         self.stack = QStackedWidget()
         v.addWidget(self.stack, 1)
@@ -331,6 +357,211 @@ class TaylorWindow(QWidget):
         v.addWidget(bar)
         self.list_buttons = (self.check_btn, self.sel_btn, self.notyet_btn)
 
+    def _pass_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("TayPass")
+        pv = QVBoxLayout(panel)
+        pv.setContentsMargins(12, 10, 12, 10)
+        pv.setSpacing(6)
+        self.pass_text = QLabel("")
+        self.pass_text.setWordWrap(True)
+        pv.addWidget(self.pass_text)
+        prow = QHBoxLayout()
+        self.pass_bar = QProgressBar()
+        self.pass_bar.setVisible(False)
+        prow.addWidget(self.pass_bar, 1)
+        self.pass_btn = QPushButton("Stop")
+        self.pass_btn.clicked.connect(self._pass_button)
+        prow.addWidget(self.pass_btn)
+        self.togo_btn = QPushButton("Albums With Photos to Get")
+        self.togo_btn.setToolTip("Every album on the site you have only some of — or none of")
+        self.togo_btn.clicked.connect(lambda: self.open_to_get())
+        prow.addWidget(self.togo_btn)
+        self.tag_btn = QPushButton("Tag Them…")
+        self.tag_btn.setToolTip("Give your photos that are on taylorpictures.net the tag “taylorpictures.net”")
+        self.tag_btn.clicked.connect(self.tag_matches)
+        prow.addWidget(self.tag_btn)
+        pv.addLayout(prow)
+        self.by_pic = QCheckBox("Also find photos saved under other names (reads every thumbnail on the site — "
+                                "much slower the first time)")
+        self.by_pic.setChecked(str(self.settings.value("taylor/by_picture", "false")) == "true")
+        self.by_pic.toggled.connect(lambda on: self.settings.setValue("taylor/by_picture", "true" if on else "false"))
+        pv.addWidget(self.by_pic)
+        for b in (self.togo_btn, self.tag_btn):
+            b.setVisible(False)
+        for b in (self.pass_btn, self.togo_btn, self.tag_btn):     # their own width, not the row's
+            b.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        prow.addStretch(0)
+        return panel
+
+    # ------------------------------------------------------------------ the whole site against the whole folder
+    def start_pass(self) -> None:
+        """Lists every album on the site (resuming where an earlier pass stopped), reads each one's photos,
+        optionally their thumbnails' fingerprints, then compares all of it with the Taylor folder."""
+        if self.passing:
+            return
+        self.passing = True
+        self.pass_stop = threading.Event()
+        self.pass_bar.setVisible(True)
+        self.pass_bar.setRange(0, 0)
+        self.pass_btn.setText("Stop")
+        self.pass_btn.setEnabled(True)
+        self.togo_btn.setVisible(False)
+        self.tag_btn.setVisible(False)
+        self.pass_text.setText("Comparing your Taylor Swift folder with all of taylorpictures.net — first listing "
+                               "the site's albums. You can browse meanwhile.")
+        stop, site, gallery, index, record, bridge = self.pass_stop, self.site, self.gallery, self.index, \
+            self.record, self.bridge
+        by_pic = self.by_pic.isChecked()
+
+        def work() -> None:
+            bridge.pass_progress.emit("walk", 0, 0)
+            if not site.walk_sections(gallery, lambda a, s_: bridge.pass_progress.emit("walk", a, s_), stop) and \
+                    not site.albums:
+                bridge.pass_done.emit(None)
+                return
+            site.read_albums(gallery, lambda n, t: bridge.pass_progress.emit("read", n, t), stop)
+            if by_pic and not stop.is_set():
+                site.hash_thumbs(gallery, lambda n, t: bridge.pass_progress.emit("hash", n, t), stop)
+            while not stop.is_set() and not (index.names_ready and (index.pictures_ready or not by_pic)):
+                bridge.pass_progress.emit("wait", 0, 0)
+                time.sleep(0.5)
+            if stop.is_set():
+                bridge.pass_done.emit(None)
+                return
+            bridge.pass_progress.emit("match", 0, 0)
+            out = T.cross_reference(site, index, record, lambda n, t: bridge.pass_progress.emit("match", n, t), stop)
+            bridge.pass_done.emit(None if stop.is_set() else out)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _pass_button(self) -> None:
+        if self.passing:
+            self.pass_stop.set()
+            self.pass_btn.setEnabled(False)
+            self.pass_text.setText("Stopping — what's been read is kept; Continue carries on from there.")
+        else:
+            self.start_pass()
+
+    def _pass_progress(self, stage: str, done: int, total: int) -> None:
+        if stage == "walk":
+            self.pass_bar.setRange(0, 0)
+            self.pass_text.setText(f"Listing the site's albums — {done:,} found in {total:,} sections…" if done
+                                   else "Listing the site's albums…")
+        elif stage == "read":
+            self.pass_bar.setRange(0, max(total, 1))
+            self.pass_bar.setValue(done)
+            self.pass_text.setText(f"Reading every album's photos — {done:,} of {total:,} albums…")
+        elif stage == "hash":
+            self.pass_bar.setRange(0, max(total, 1))
+            self.pass_bar.setValue(done)
+            self.pass_text.setText(f"Reading thumbnails to find renamed photos — {done:,} of {total:,}…")
+        elif stage == "wait":
+            self.pass_bar.setRange(0, 0)
+            self.pass_text.setText("Looking through your Taylor Swift folder…")
+        elif stage == "match":
+            self.pass_bar.setRange(0, max(total, 1))
+            self.pass_bar.setValue(done)
+            self.pass_text.setText("Comparing every album with your Taylor Swift folder…")
+
+    def _pass_done(self, summary) -> None:
+        self.passing = False
+        self.pass_bar.setVisible(False)
+        self.pass_btn.setEnabled(True)
+        if summary is None:
+            albums, read, photos = self.site.counts()
+            self.pass_btn.setText("Continue")
+            self.pass_text.setText(f"Stopped — {read:,} of {albums:,} albums ({photos:,} photos) read so far. "
+                                   "Continue carries on from there." if albums else
+                                   "Couldn't reach taylorpictures.net — try Continue in a moment.")
+            return
+        self.summary = summary
+        for key, (total, have) in summary.per_album.items():
+            self.checks.put(self.root, int(key), total, have)
+        self.checks.save()
+        self._show_summary()
+        self._refresh_here()
+        if self.album is not None:
+            self._rematch()
+
+    def _show_summary(self) -> None:
+        s = self.summary
+        if s is None:
+            return
+        when = time.strftime("%b %-d at %H:%M", time.localtime(s.when)) if s.when else ""
+        text = (f"<b>{s.matched_local:,} of the {s.local_photos:,} photos in your Taylor Swift folder are on "
+                f"taylorpictures.net.</b> Of the site's {s.albums:,} albums ({s.images:,} photos), you have all of "
+                f"{s.complete:,}, some of {s.partial:,} and none of {s.none:,}.")
+        text += (" Matched by name and by picture." if s.by_picture else
+                 " Matched by name (and the album folders) — tick the box below to also find renamed copies.")
+        if when:
+            text += f" <span style='color:gray'>Checked {when}.</span>"
+        self.pass_text.setText(text)
+        self.pass_btn.setText("Check Again")
+        self.togo_btn.setVisible(True)
+        self.tag_btn.setVisible(self.hooks.tag is not None and s.matched_local > 0)
+        self.tag_btn.setText(f"Tag Them ({s.matched_local:,})…")
+
+    def open_to_get(self, which: str = "partial") -> None:
+        """Every album on the site by what you have of it — the ones you have some of first (closest to
+        complete first), or none of, or all of."""
+        if self.summary is None:
+            return
+        self.trail = self.trail[:1]
+        self.trail.append((-2, {"partial": "Albums you have some of", "none": "Albums you have none of",
+                                "complete": "Albums you have all of"}[which], None))
+        self.album = None
+        self.stack.setCurrentIndex(0)
+        self.title.setText(" › ".join(t for _c, t, _y in self.trail[-3:]))
+        self.back_btn.setEnabled(True)
+        self.tree.clear()
+        rows = []
+        for key, (total, have) in self.summary.per_album.items():
+            kind = "complete" if total and have >= total else "partial" if have else "none"
+            if kind == which:
+                a = self.site.album(int(key))
+                if a is not None:
+                    rows.append((-(have / max(total, 1)), (self.site.albums[key].get("section") or ""), a))
+        rows.sort(key=lambda r: (r[0], r[1], r[2].title))
+        self.cats, self.albums = [], [r[2] for r in rows]
+        self.token += 1
+        for _k, section, a in rows:
+            it = QTreeWidgetItem([a.title or f"Album {a.id}", "", ""])
+            it.setData(0, ROLE_KIND, "album")
+            it.setData(0, ROLE_ID, a.id)
+            it.setToolTip(0, f"{a.title}\n{section}" if section else a.title)
+            it.setIcon(0, self._placeholder())
+            self.tree.addTopLevelItem(it)
+        other = [k for k in ("partial", "none", "complete") if k != which]
+        self.status.setText(f"{len(rows):,} album{'s' if len(rows) != 1 else ''}. Also: " +
+                            " · ".join({"partial": "some of", "none": "none of", "complete": "all of"}[k] for k in other))
+        self._view_links(other)
+        self._refresh_here()
+        QTimer.singleShot(0, self._want_visible_covers)
+
+    def _view_links(self, others: list[str]) -> None:
+        names = {"partial": "Albums you have some of", "none": "Albums you have none of",
+                 "complete": "Albums you have all of"}
+        self.status.setText(self.status.text().split(" Also:")[0] + "  Also: " + " · ".join(
+            f"<a href='{k}'>{names[k].split('have ')[1]}</a>" for k in others))
+        self.status.setTextFormat(Qt.TextFormat.RichText)
+
+    def tag_matches(self) -> None:
+        if self.summary is None or self.hooks.tag is None:
+            return
+        paths = [p for p in self.summary.matched if os.path.exists(p)]
+        box = QMessageBox(self)
+        box.setWindowTitle("Tag the photos on taylorpictures.net")
+        box.setText(f"Give the tag “taylorpictures.net” to the {len(paths):,} photos in your Taylor Swift folder "
+                    "that are also on the site?")
+        box.setInformativeText("They show under Tags in the sidebar (and in the iPhone app). Removing the tag "
+                               "later takes it off again; nothing else changes.")
+        go = box.addButton("Tag Them", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is go:
+            n = self.hooks.tag(paths, "taylorpictures.net")
+            self.status.setText(f"Tagged {n:,} photos “taylorpictures.net”.")
+
     # ------------------------------------------------------------------ your folder
     def _build_index(self) -> None:
         stop, bridge, index = self.stop, self.bridge, self.index
@@ -368,6 +599,7 @@ class TaylorWindow(QWidget):
         self.search.setPlaceholderText("Find an album")
         self.tree.clear()
         self.cats, self.albums = [], []
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setText("Loading…")
         self.token += 1
         token, bridge, gallery = self.token, self.bridge, self.gallery
@@ -381,7 +613,11 @@ class TaylorWindow(QWidget):
     def back(self) -> None:
         if self.stack.currentIndex() == 1:
             cat, title, year = self.trail[-1]
-            self.open_section(cat, title, year, push=False)
+            if cat == -2:
+                self.open_to_get({"Albums you have some of": "partial", "Albums you have none of": "none",
+                                  "Albums you have all of": "complete"}.get(title, "partial"))
+            else:
+                self.open_section(cat, title, year, push=False)
             return
         if len(self.trail) > 1:
             self.trail.pop()
@@ -410,9 +646,12 @@ class TaylorWindow(QWidget):
             it.setIcon(0, self._placeholder())          # the cover replaces it as it comes
             self.tree.addTopLevelItem(it)
         n = len(albums)
-        self.status.setText(note or (f"{len(cats):,} section{'s' if len(cats) != 1 else ''}, " if cats else "") +
-                            (f"{n:,} album{'s' if n != 1 else ''}." if n or not cats else "") +
-                            (f"  Albums here are dated {year}." if year and n else ""))
+        parts = []
+        if cats:
+            parts.append(f"{len(cats):,} section{'s' if len(cats) != 1 else ''}")
+        if n or not cats:
+            parts.append(f"{n:,} album{'s' if n != 1 else ''}")
+        self.status.setText(note or (", ".join(parts) + "." + (f"  Albums here are dated {year}." if year and n else "")))
         self._refresh_here()
         self._filter_list(self.search.text())
         QTimer.singleShot(0, self._want_visible_covers)
@@ -505,7 +744,7 @@ class TaylorWindow(QWidget):
             self.search.clear()
             self.open_section(ident, it.text(0), T.year_of(it.text(0), year))
         elif (a := self._album_by_id(ident)) is not None:
-            self.open_album(a, year)
+            self.open_album(a, year if year is not None else self.site.year(a.id))
 
     def _selected_albums(self) -> list[T.Album]:
         out = []
@@ -602,10 +841,17 @@ class TaylorWindow(QWidget):
         self.album_facts.setText((self._facts_base + " · " if self._facts_base else "") + "Listing…")
         self.status.setText("")
         self._update_buttons()
-        bridge, gallery, aid = self.bridge, self.gallery, album.id
+        bridge, gallery, aid, site = self.bridge, self.gallery, album.id, self.site
+        known = site.hashes(aid)
+        if known:
+            self.thumb_hashes = {u: h for u, h in known.items() if h >= 0}
 
         def work() -> None:
-            imgs = gallery.images(aid, on_page=lambda batch: bridge.images.emit(aid, batch))
+            imgs = site.images(aid)
+            if imgs:
+                bridge.images.emit(aid, imgs)
+            else:
+                imgs = gallery.images(aid, on_page=lambda batch: bridge.images.emit(aid, batch))
             bridge.images_done.emit(aid, imgs)
         self.pool.submit(work)
 
@@ -766,7 +1012,9 @@ class TaylorWindow(QWidget):
         for a in albums:
             if a is None or self._queued(a):
                 continue
-            self.queue.append((a, year, skip_have and self.skip_box.isChecked()))
+            # from the cross-site lists there's no section year: the site index remembers each album's
+            self.queue.append((a, year if year is not None else self.site.year(a.id),
+                               skip_have and self.skip_box.isChecked()))
             added += 1
         if added:
             self.status.setText(f"Queued {added:,} album{'s' if added != 1 else ''}.")
@@ -870,6 +1118,7 @@ class TaylorWindow(QWidget):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.stop.set()
+        self.pass_stop.set()                               # what it read is saved; reopening carries on
         self.dl_stop.set()
         self.queue.clear()
         self.checks.save()

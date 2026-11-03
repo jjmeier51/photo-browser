@@ -141,8 +141,10 @@ actions the app makes no network calls.
   iPhone's exact / visually similar / similar-name groups, plus an Identical (SHA-256) check and Select Extra
   Copies for identical groups only — it ticks, the person trashes — §6q.
   Safe Finder's **taylorpictures.net** window (right-click the Taylor Swift folder; `mac/taylor.py`,
-  `mac/taylor_window.py`): the iPhone's browser plus "already here" marks (by name, then by picture) and
-  Download Missing; both apps share `Taylor Swift/.taylorpictures.json` (`TaylorRecord.swift`) — §7.4c.
+  `mac/taylor_window.py`): first a pass of the whole site against the whole folder (resumable; "N of your
+  photos are on the site", albums you have all/some/none of), then the iPhone's browser with "already here"
+  marks (by name, then by picture) and Download Missing; both apps share `Taylor Swift/.taylorpictures.json`
+  (`TaylorRecord.swift`) — §7.4c.
   Safe Finder's **Edit with AI / Create with AI / Astria.ai Browser** (`mac/astria.py`, `mac/ai_window.py`): the
   iPhone's Astria request path field for field (keep the two in step), key in the Mac's Keychain — §1.13.
   Safe Finder's **menu bar** (`mac/menubar.py`) holds every command and its ⌘ shortcut (one binding per key —

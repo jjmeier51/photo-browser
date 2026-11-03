@@ -24,6 +24,12 @@ it's installed; the file's own dates follow either way.
   by name when the name is distinctive (or the picture agrees); or anywhere by picture (the thumbnail's
   fingerprint within 5 bits of one of yours). Generic names (`001.jpg`) alone never count.
 
+**The whole site against the whole folder** (`SiteIndex`, `cross_reference`): every section walked, every
+album's photo list read (and, when asked, every thumbnail fingerprinted), kept in
+`~/Library/Caches/PhotoBrowser/taylor/site.json` so a pass resumes and a later one reads only new albums; then
+every album matched against the folder — how many of your photos are on the site, and which albums you have
+all, some or none of (`Summary`, saved per folder).
+
 Everything here runs on worker threads; nothing touches Qt.
 """
 from __future__ import annotations
@@ -649,4 +655,251 @@ def download_album(gallery: Gallery, album: Album, root: str, year: int | None =
             folder.rmdir()                               # nothing landed: no empty folder left behind
         except OSError:
             pass
+    return out
+
+
+# ----------------------------------------------------------------------------- the whole site against the whole folder
+
+class SiteIndex:
+    """Every album on the site and its photos (`~/Library/Caches/PhotoBrowser/taylor/site.json`): the sections
+    walked once (breadth first, each once — every page links back to the others — the year of a "2023"
+    section carried down), then each album's photo list, then (when asked) each thumbnail's fingerprint. Saved
+    as it goes, so a pass that's stopped or closed carries on where it was; a later "Check Again" walks the
+    sections for new albums and reads only those. Photos are kept as their thumbnail paths (the full-size path
+    and the file name follow from it)."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or CACHE_DIR / "site.json"
+        self.lock = threading.RLock()
+        self.albums: dict[str, dict] = {}
+        self.walked = 0.0                       # when the sections were last walked through
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                data = json.load(f)
+            self.albums = data.get("albums") or {}
+            self.walked = float(data.get("walked") or 0)
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def save(self) -> None:
+        with self.lock:
+            data = json.dumps({"version": 1, "walked": self.walked, "albums": self.albums})
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".saving")
+            tmp.write_text(data, encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    # -- reading it back
+    def album(self, aid: int) -> Album | None:
+        a = self.albums.get(str(aid))
+        return Album(aid, a.get("title", ""), a.get("thumb", "")) if a else None
+
+    def year(self, aid: int) -> int | None:
+        a = self.albums.get(str(aid)) or {}
+        return a.get("year")
+
+    def images(self, aid: int) -> list[Image] | None:
+        a = self.albums.get(str(aid))
+        if not a or a.get("images") is None:
+            return None
+        out = []
+        for i, rel in enumerate(a["images"]):
+            full = absolute(full_image_path(rel))
+            out.append(Image(i, full, absolute(rel), full.rsplit("/", 1)[-1]))
+        return out
+
+    def hashes(self, aid: int) -> dict[str, int]:
+        a = self.albums.get(str(aid)) or {}
+        return {absolute(full_image_path(rel)): h for rel, h in (a.get("hashes") or {}).items()}
+
+    def counts(self) -> tuple[int, int, int]:
+        """(albums known, albums read, photos)."""
+        with self.lock:
+            read = [a for a in self.albums.values() if a.get("images") is not None]
+            return len(self.albums), len(read), sum(len(a["images"]) for a in read)
+
+    # -- filling it in
+    def walk_sections(self, gallery: Gallery, progress: Callable[[int, int], None] | None = None,
+                      stop: threading.Event | None = None) -> bool:
+        """Every section → its albums (new ones added, unread). False when stopped or the site didn't answer."""
+        seen_sections: set[int] = set()
+        queue: list[tuple[int | None, int | None, str, int]] = [(None, None, "", 0)]
+        found = 0
+        answered = False
+        while queue:
+            if stop is not None and stop.is_set():
+                return False
+            cat, year, path, depth = queue.pop(0)
+            if cat is not None:
+                if cat in seen_sections:
+                    continue
+                seen_sections.add(cat)
+            if depth > 6:
+                continue
+            cats, albums, note = gallery.browse(cat)
+            if note != "Couldn't reach taylorpictures.net.":
+                answered = True
+            with self.lock:
+                for a in albums:
+                    key = str(a.id)
+                    if key not in self.albums:
+                        self.albums[key] = {"title": a.title, "thumb": a.thumb, "year": year, "section": path}
+                        found += 1
+                    elif not self.albums[key].get("section") and path:
+                        self.albums[key]["section"] = path
+            for c in cats:
+                if c.id not in seen_sections:
+                    queue.append((c.id, year_of(c.title, year), f"{path} › {c.title}" if path else c.title, depth + 1))
+            if progress:
+                progress(len(self.albums), len(seen_sections))
+        if answered:
+            self.walked = time.time()
+            self.save()
+        return answered
+
+    def read_albums(self, gallery: Gallery, progress: Callable[[int, int], None] | None = None,
+                    stop: threading.Event | None = None, workers: int = 4) -> None:
+        """Every album not read yet → its photos. Saved every 25 albums."""
+        todo = [int(k) for k, a in self.albums.items() if a.get("images") is None]
+        total = len(self.albums)
+        done = [total - len(todo)]
+        lock = threading.Lock()
+
+        def one(aid: int) -> None:
+            if stop is not None and stop.is_set():
+                return
+            imgs = gallery.images(aid)
+            if not imgs:
+                return                                  # the site didn't answer: tried again next pass
+            rels = [img.thumb[len(HOST):] if img.thumb.startswith(HOST) else img.thumb for img in imgs]
+            with self.lock:
+                self.albums[str(aid)]["images"] = rels
+            with lock:
+                done[0] += 1
+                n = done[0]
+            if n % 25 == 0:
+                self.save()
+            if progress:
+                progress(n, total)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(one, todo))
+        self.save()
+
+    def hash_thumbs(self, gallery: Gallery, progress: Callable[[int, int], None] | None = None,
+                    stop: threading.Event | None = None, workers: int = 6) -> None:
+        """Every thumbnail's fingerprint (for photos saved under another name). Saved every 1,000."""
+        with self.lock:
+            todo = [(k, rel) for k, a in self.albums.items() for rel in (a.get("images") or [])
+                    if rel not in (a.get("hashes") or {})]
+            total = sum(len(a.get("images") or []) for a in self.albums.values())
+        done = [total - len(todo)]
+        lock = threading.Lock()
+
+        def one(item: tuple[str, str]) -> None:
+            if stop is not None and stop.is_set():
+                return
+            key, rel = item
+            h = thumb_hash(gallery.thumb(absolute(rel)))
+            with self.lock:
+                self.albums[key].setdefault("hashes", {})[rel] = h if h is not None else -1
+            with lock:
+                done[0] += 1
+                n = done[0]
+            if n % 1000 == 0:
+                self.save()
+            if progress and n % 50 == 0:
+                progress(n, total)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(one, todo))
+        self.save()
+        if progress:
+            progress(total, total)
+
+
+@dataclass
+class Summary:
+    """How the Taylor folder and the site compare (`cross_reference`)."""
+    albums: int = 0                        # albums on the site (read)
+    images: int = 0                        # photos on the site
+    complete: int = 0                      # albums you have every photo of
+    partial: int = 0
+    none: int = 0
+    local_photos: int = 0                  # photos in the Taylor folder
+    matched_local: int = 0                 # …that are on the site
+    by_picture: bool = False
+    when: float = 0.0
+    per_album: dict[str, list[int]] = field(default_factory=dict)    # id → [total, have]
+    matched: dict[str, list[int]] = field(default_factory=dict)      # your photo → the albums it's in
+
+    def to_json(self) -> dict:
+        return dict(self.__dict__)
+
+    @staticmethod
+    def from_json(d: dict) -> "Summary":
+        s = Summary()
+        for k, v in (d or {}).items():
+            if hasattr(s, k):
+                setattr(s, k, v)
+        return s
+
+
+def summary_path(root: str) -> Path:
+    import hashlib
+    return CACHE_DIR / f"xref-{hashlib.sha1(os.path.normcase(os.path.abspath(root)).encode()).hexdigest()[:16]}.json"
+
+
+def load_summary(root: str) -> Summary | None:
+    try:
+        with open(summary_path(root), encoding="utf-8") as f:
+            return Summary.from_json(json.load(f))
+    except (OSError, ValueError):
+        return None
+
+
+def cross_reference(site: SiteIndex, index: LocalIndex, record: Record | None = None,
+                    progress: Callable[[int, int], None] | None = None,
+                    stop: threading.Event | None = None) -> Summary:
+    """Every album the site index has read, matched against the whole Taylor folder (`match`, with the
+    thumbnails' fingerprints where the index has them). Saved per folder."""
+    out = Summary(local_photos=index.photos, when=time.time())
+    keys = [k for k, a in site.albums.items() if a.get("images") is not None]
+    any_hashes = False
+    for i, key in enumerate(keys):
+        if stop is not None and stop.is_set():
+            break
+        aid = int(key)
+        album, imgs = site.album(aid), site.images(aid) or []
+        hashes = site.hashes(aid)
+        any_hashes = any_hashes or bool(hashes)
+        m = match(album, imgs, index, record, {u: h for u, h in hashes.items() if h >= 0})
+        have = sum(1 for x in m.values() if x.have)
+        out.per_album[key] = [len(imgs), have]
+        out.albums += 1
+        out.images += len(imgs)
+        if imgs and have >= len(imgs):
+            out.complete += 1
+        elif have:
+            out.partial += 1
+        else:
+            out.none += 1
+        for x in m.values():
+            if x.have:
+                out.matched.setdefault(x.path, [])
+                if aid not in out.matched[x.path]:
+                    out.matched[x.path].append(aid)
+        if progress and i % 50 == 0:
+            progress(i, len(keys))
+    out.matched_local = len(out.matched)
+    out.by_picture = any_hashes and index.pictures_ready
+    try:
+        p = summary_path(index.root)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".saving")
+        tmp.write_text(json.dumps(out.to_json()), encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError:
+        pass
     return out

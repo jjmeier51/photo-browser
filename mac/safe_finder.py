@@ -4018,9 +4018,18 @@ class Pane(QWidget):
                 w.activateWindow()
                 return
         self.settings.setValue("taylor/root", folder)
+        def tag(paths: list[str], name: str) -> int:
+            try:
+                tag_store().add(paths, [name])
+            except OSError as e:
+                QMessageBox.warning(self.window(), "Tags", f"Couldn't save the tags: {e}")
+                return 0
+            tags_changed()
+            return len(paths)
+
         hooks = taylor_window.TaylorHooks(
             view=lambda paths, start: self.view_media(start, among=paths), reveal=self._reveal_from_viewer,
-            changed=lambda _folder: sizer().clear())
+            changed=lambda _folder: sizer().clear(), tag=tag)
         win = taylor_window.TaylorWindow(folder, hooks, THEME, self.window())
         _VIEWERS.append(win)
         win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)

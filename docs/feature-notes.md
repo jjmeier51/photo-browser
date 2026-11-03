@@ -1996,6 +1996,20 @@ finds folders the iPhone made before the record existed). Same paging (pager →
   never over a file). A section's year (a "2023" section title) is carried down to date "M/D" album titles
   — the iPhone's download only uses full dates in the title; its cross-reference used the year.
 
+**The first pass (Nov 3, 2026)** — `SiteIndex`, `cross_reference`, `TaylorWindow.start_pass`. Asked for:
+"first do a pass of the entire Taylor Swift folder to determine which photos already exist there that also
+exist on taylorpictures.net". It runs by itself the first time the window opens on a folder (no saved
+comparison for it), in four stages: walk every section breadth first (each once — the iPhone index's
+`visited` lesson), read every unread album (4 at a time, each album's pages 6 at a time, saved every 25 —
+resumable across Stop and quitting), optionally every thumbnail's dHash (6 at a time, saved every 1,000;
+off by default — a big site is hundreds of thousands of thumbnails), then `match` per album against the
+`LocalIndex` (waiting for the local fingerprints only when picture matching is on). The `Summary` (per
+album [total, have], your photo → albums) is saved per folder (`xref-<sha1(root)>.json`) and seeds the
+per-album checks, so the Here column is filled everywhere at once on later opens; "Check Again" re-walks
+the sections and reads only new albums. Photos are stored as thumbnail paths (the full path and name are
+derived) to keep `site.json` small. "Albums With Photos to Get" is a virtual section (trail id -2) built
+from the summary. "Tag Them…" adds "taylorpictures.net" through the shared tag store, only on request.
+
 ### 7.4b TikTok — `TikTokService.swift` / `TikTokWebFetcher.swift` / `TikTokChallengeView.swift`
 Profiles are listed and resolved through the public **tikwm.com** resolver (no login, no
 request signing): `user/posts` pages the whole profile, the single-video endpoint gives the HD

@@ -551,6 +551,25 @@ that folder as where albums go. Go through the site's sections (double-click; �
 its albums, each with its cover, a **Here** column and how many photos it has; the field at the top finds an
 album by title.
 
+**First, the whole site against the whole folder.** The first time the window opens on a Taylor Swift
+folder it compares the two before anything else: it lists every section and album on taylorpictures.net,
+reads each album's photo list, and checks every one against every photo in the folder. You can browse while
+it runs (the panel at the top shows how far it's got; Stop keeps what's been read, and Continue — or simply
+opening the window again — carries on from there). Then it says, e.g., **"8,912 of the 12,340 photos in your
+Taylor Swift folder are on taylorpictures.net. Of the site's 3,260 albums, you have all of 1,203, some of 400
+and none of 1,657"**, and every album everywhere shows its Here count. From there:
+- **Albums With Photos to Get** — every album on the site you have only some of (the closest to complete
+  first), with links to the ones you have none of and all of; double-click one to see what's missing, or
+  pick several and Download Selected.
+- **Tag Them…** — gives your photos that are on the site the tag "taylorpictures.net" (they then show under
+  Tags in the sidebar, and on the iPhone). Only when you press it.
+- **Check Again** — later on: looks for new albums on the site (reading only those) and compares again.
+- **Also find photos saved under other names** — off by default: it also fetches every thumbnail on the site
+  once (kept on the Mac afterwards) to recognise renamed copies by their picture. Much slower the first time.
+
+The site's album and photo lists are kept in `~/Library/Caches/PhotoBrowser/taylor/` (`site.json`, and the
+comparison per folder), so later opens show the totals at once.
+
 **What you already have.** Safe Finder looks through the Taylor Swift folder when the window opens — every
 photo's name at once, then its picture (a quick fingerprint, kept between launches) — and marks:
 - in the album list, **✓ All here**, "87 of 120", "Folder here", or nothing yet. **Check Albums Here** reads
