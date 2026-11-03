@@ -139,10 +139,12 @@ actions the app makes no network calls.
   And right-click ▸ **Remove Objects…** — TouchRetouch-style: lasso/brush round anything and it's filled from the
   photo itself (multi-scale PatchMatch completion, `mac/inpaint.py`; window `mac/remove_window.py`; §6t).
   Safe Finder's **Photos view** (⌘3, the iPhone's square grid with video lengths) and its **viewer** (double-click:
-  the window takes each item's shape within Safe Finder's window size, bars above/below the picture — never over
-  it — a resolution + HDR badge top right, ♡/✦ labels, zoom for photos and videos, a click-anywhere scrubber +
-  play/pause; photos zoom, videos loop with Slo-Mo/frame step, Info panel, Save Frame, slideshow — `mac/media_viewer.py`,
-  `mac/media_info.py`) and **Export All Frames** (`mac/frame_export.py` + `video_helper.swift` `frames`; same names,
+  the window is the full height of its display and takes each item's shape at that height, bars above/below the
+  picture — never over it — a resolution + HDR badge top right, ♡/✦ labels, zoom for photos and videos, a
+  click-anywhere scrubber + play/pause; photos zoom, videos loop with Slo-Mo/frame step, Info panel, Save Frame,
+  slideshow — `mac/media_viewer.py`, `mac/media_info.py`; **videos and HDR photos are drawn by macOS itself**
+  — AVFoundation/AppKit through `mac/viewer_surface.swift`, a Swift library loaded with ctypes — so HDR looks as in
+  QuickTime/Preview; Qt's player is only the fallback, §6p) and **Export All Frames** (`mac/frame_export.py` + `video_helper.swift` `frames`; same names,
   rates and standard-range/HDR choice as the iPhone; resumes only the same export, else "<name> 2") — §6p.
   Safe Finder's **Find Duplicates** (right-click a folder; `mac/duplicates.py`, `mac/duplicates_window.py`): the
   iPhone's exact / visually similar / similar-name groups, plus an Identical (SHA-256) check and Select Extra

@@ -330,9 +330,11 @@ drags the files, as everywhere else). Each folder remembers it, like icons and l
 Preview: one item at a time on black, in the folder's order (or just the ones you picked, if you picked
 several).
 
-- **The window fits the picture.** It opens at the size of Safe Finder's window, over it, and takes each
-  item's shape within that — a portrait video or photo gets a tall, narrow window with no black bars beside it,
-  a wide one a wide window; moving to the next item re-fits it around the same centre. Resize it by hand and
+- **The window fits the picture, as tall as the display.** It opens over Safe Finder's window, on the same
+  display, the **full height of that display** (from the menu bar down to the Dock), and takes each item's
+  shape at that height — a portrait video or photo gets a tall, narrow window with no black bars beside it, a
+  wide one a wide window (only something too wide for the display at full height, like a panorama, is as wide
+  as the display instead); moving to the next item re-fits it around the same centre. Resize it by hand and
   that becomes the size it fits within. The bar with the name and buttons sits **above** the picture and the
   one with the controls **below** it — never over it. A click on the picture hides them both (the iPhone's
   tap) and brings them back.
@@ -341,8 +343,17 @@ several).
   photo with an HDR gain map, as the iPhone takes them). Beside them: ♡ **Favorite** and ✦ **To AI** (⇧⌘F /
   ⇧⌘A — the iPhone app's, shared with it), the camera (**Save Frame**, videos), ⓘ **Info** and ⋯ (Slideshow,
   Full Screen, Export All Frames…, Loop, Tags…, Show in Folder, Open With Default App, Move to Trash).
+- **HDR looks as it does in QuickTime Player and Preview.** Videos are played by macOS itself (AVFoundation —
+  QuickTime's own player), so an HDR video is shown in HDR on a Mac display that can (and tone-mapped by macOS
+  on one that can't), with the same colours and brightness as QuickTime — not Qt's brighter, harsher version. An
+  HDR photo (an iPhone photo with an HDR gain map, or an HLG/PQ one) appears for a moment in standard range, then
+  in HDR. This is a small Swift library (`viewer_surface.swift`) that Safe Finder builds in the background the
+  first time it starts, with Xcode's Command Line Tools like the other helpers; until it's built, without the
+  tools, and for videos macOS can't play (MKV, WebM, AVI…), Qt's player is used as before. If it won't build,
+  the compiler's message is in `~/Library/Caches/PhotoBrowser/viewer_surface.log`.
 - **Zoom** — the − / Fit / + buttons at the bottom right (or +, −, 0), for photos **and videos**; click the
-  percentage for fit ⇄ actual size. Photos also pinch, ⌘-scroll, and double-click to toggle; drag to pan.
+  percentage for fit ⇄ actual size. Photos (and videos macOS plays) also pinch, ⌘-scroll, and double-click to
+  toggle; drag to pan.
   Photos fill the window (a small one is enlarged rather than framed in black). The ones either side are read
   ahead, so ←/→ is instant.
 - **Videos** play and loop, as on the iPhone. Below the picture: the **scrubber** across the whole width —
