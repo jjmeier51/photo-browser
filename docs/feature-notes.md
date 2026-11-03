@@ -1393,6 +1393,45 @@ track's sample entry (`colr` nclx transfer 16/18, Dolby Vision boxes) or a photo
 Ultra HDR gain-map markers, nclx 16/18), off the main thread. Notes go in the count line (`say`), never over the
 picture. ♡ / ✦ through `Hooks.labels_of` / `set_label`.
 
+**HDR drawn by macOS, and full-height windows (Nov 3, 2026).** An HDR (HLG) iPhone video looked brighter and
+harsher in the viewer than in QuickTime Player: since Qt 6.5, Qt Multimedia on the Mac decodes with **FFmpeg**,
+not AVFoundation, and maps HDR to standard range with its own shaders; Qt's HEIC reader also gives only an HDR
+photo's standard-range base picture. Tuning Qt can't reach QuickTime's look, so the picture is now drawn by
+macOS: `viewer_surface.swift`, a Swift **library** (`swiftc -emit-library`, the first in-process one — the other
+helpers are separate processes) built in the background at launch (`viewer_surface.prepare()`) into
+`~/Library/Caches/PhotoBrowser/libviewer_surface.dylib` and loaded with **ctypes** (no PyObjC). Python calls a C
+interface (`pbv_*`); every call is on Qt's thread, which is the main thread AppKit needs (`MainActor.assumeIsolated`
+in each entry point — it traps rather than race if that's ever broken).
+
+- **How it sits in Qt.** `_NativeStage` is a widget made native (`winId()`, with `WA_DontCreateNativeAncestors`
+  so only it is); its NSView gets a `PassThroughView` subview holding an `AVPlayerLayer`-backed view and an
+  `NSImageView`. `hitTest` returns nil, so clicks, drags, scrolls and pinches all land on Qt's view — taps,
+  double-clicks, swipes and zoom stay in Python. Qt keeps the geometry (`picture_rect`: fit, zoom about a point,
+  pan with the edges clamped) and sends the rect (`pbv_set_rect`); the surface never decides layout.
+- **Videos**: `AVPlayer` + `AVPlayerLayer` — QuickTime's own path, HDR (EDR) where the display has headroom,
+  tone-mapped by the system where not. Exact seeks are chased one at a time (`nextSeek`, a generation number so a
+  seek cancelled by a video change can't wedge it); loop is done natively at the end notification; the frame
+  step is `AVPlayerItem.step(byCount:)` (as the iPhone, CLAUDE.md #8). A 50 ms timer (`_VideoStage._tick`) reads
+  position/length/playing/ended for the bars. **Qt's player stays as the fallback**: MKV/WebM/AVI/WMV/FLV go
+  straight to it (`QT_ONLY`), anything AVFoundation reports `failed` is handed over, and so is everything while
+  the library isn't built (or the Command Line Tools are missing, or the build failed — `viewer_surface.log`,
+  not retried until the source changes). Qt's player signals are ignored unless it's the one playing — a late
+  "stopped" from the previous video otherwise flipped the play button while macOS played the next.
+- **HDR photos**: `media_info.image_hdr` (unchanged) decides; Qt's standard-range picture shows first, then the
+  surface's — `CIImage(contentsOf:, [.expandToHDR])` (gain map applied, macOS 14+; HLG/PQ read as extended range),
+  scaled to ≤ 24 MP (`MAX_HDR_PIXELS`: it's held as half floats, 8 bytes a pixel), rendered extended-linear
+  Display P3, shown by an `NSImageView` with `preferredImageDynamicRange = .high` (set by KVC after `responds(to:)`,
+  so the library still builds — and videos still work — with an SDK or macOS that lacks it). A photo zoomed
+  before its HDR version arrived stays on Qt's. SDR photos stay on Qt (the read-ahead cache).
+- **Window size**: by default each item is fitted within the **whole display** the viewer opens on (the screen
+  under Safe Finder's window, `setScreen`), its full available height less the title bar — `_room`. A hand resize
+  still sets `box`. The frame is placed from the computed outer size (the title bar isn't known until the window
+  is up: 28 pt assumed, corrected by a refit 80 ms after the first show), and resizes the system makes while
+  placing the window or leaving full screen (`_settling`) aren't taken for hand resizes.
+- Untestable in the Linux sandbox: the Swift (no compiler there) and the native view itself. The Qt side was
+  checked offscreen with a stand-in surface (full-height sizing, zoom/pan/clamp, controls, end, the fallbacks,
+  the HDR swap-in, teardown).
+
 ## 6q. Safe Finder Find Duplicates — `mac/duplicates.py`, `mac/duplicates_window.py` (Nov 3, 2026)
 
 A port of §2 (same three kinds, kept apart, same threshold 6, same normalized names, same Oldest/Newest from

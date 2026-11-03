@@ -4023,7 +4023,7 @@ class Pane(QWidget):
             reveal=self._reveal_from_viewer, export_frames=lambda p: self.export_frames([p]),
             save_frame=frame_export.save_frame, labels_of=lambda p: tag_store().labels(p, fresh=False),
             set_label=lambda p, label, on: self.set_label([p], label, on), remove_objects=self.remove_objects)
-        # Opens at the size of Safe Finder's window, over it, and takes each item's shape within that.
+        # Opens over Safe Finder's window, as tall as its display, and takes each item's shape within that.
         viewer = media_viewer.MediaViewer(items, items.index(path), hooks, poster, None, box=self.window().geometry())
         viewer.removed.connect(lambda _paths: self.refresh_results())
         _VIEWERS.append(viewer)
@@ -6163,6 +6163,8 @@ def main() -> None:
         app.setFont(f)
     global THUMBS
     THUMBS = Thumbnails()
+    import viewer_surface
+    viewer_surface.prepare()             # the viewer's HDR picture (Swift, built once in the background)
     apply_theme(app)
     win = MainWindow(args.src, args.dst)
     app.styleHints().colorSchemeChanged.connect(lambda _s: apply_theme(app, win))

@@ -1,23 +1,35 @@
 """Safe Finder's photo and video viewer — the iPhone app's viewer on the Mac: one item at a time on black,
 the listing's order, a top and a bottom bar that a click hides or shows (the iPhone's tap), and an Info panel.
 
-**The window fits the picture.** It opens at the size of Safe Finder's window (`box`) — centred over it — and
-takes each item's shape within that, so a portrait video or photo has no black bars beside it; moving to the
-next item re-fits it around the same centre. Resizing the window by hand makes that the new size to fit within.
+**The window fits the picture, as tall as the display.** It opens over Safe Finder's window (`box`), on its
+display, the full height of that display (below the menu bar, above the Dock), and takes each item's shape at
+that height — a portrait video or photo has no black bars beside it; only an item too wide for the display at
+full height (a panorama) is as wide as the display instead. Moving to the next item re-fits it around the same
+centre. Resizing the window by hand makes that the new size to fit within.
 The bars sit above and below the picture, never over it (they used to be translucent overlays, which hid the
 top and bottom of every photo — and Qt draws a video above any widget laid over it, so a video's controls were
 never seen at all). A click still hides them (the iPhone's tap), and the window re-fits.
 
+**HDR as QuickTime Player and Preview show it** (`viewer_surface`): Qt Multimedia decodes with FFmpeg and maps HDR
+to standard range with its own shaders (an HDR video came out brighter and harsher than in QuickTime), and Qt
+reads only an HDR photo's standard-range picture. So on a Mac, macOS draws the picture itself into a native view
+(`_NativeStage`): videos through AVFoundation — QuickTime's own player — and HDR photos through Core Image (gain
+map applied) and AppKit, in HDR on a display with the headroom. Qt still says where the picture goes (fit, zoom,
+pan) and gets every click. Qt's player stays for what AVFoundation can't open (MKV, WebM, AVI…) or turns down,
+and for everything while the Swift library is being built or can't be (no Xcode tools).
+
 - **Photos** (`_ImageStage`): fitted to the window; pinch, ⌘-scroll, +/− or the zoom buttons, a double-click
   toggles fit / actual size at the point clicked, drag to pan. Read with Qt (its HEIC plug-in on the Mac) or,
-  failing that, Pillow (pillow-heif), off the main thread, the neighbours read ahead so ←/→ is instant.
-- **Videos** (`_VideoStage`): Qt Multimedia (AVFoundation on the Mac) — play/pause, a scrubber you click or drag
-  anywhere along (the video pauses while you drag; hovering shows the time there), looping like the iPhone's,
-  ±15 s (J/L), a frame step (, and .), slow motion (½×, ¼×, ⅛×, as the iPhone's Slo-Mo), mute, **zoom** (the
-  same buttons and keys: zoomed in, the video is drawn by a `QGraphicsVideoItem` that can be scaled and dragged;
-  fitted, by the faster `QVideoWidget`), and **Save Frame** (the camera — a standard-range PNG in a "Screenshots"
-  folder beside the video, `frame_export.save_frame`) and **Export All Frames…**. Without Qt Multimedia it shows
-  the video's picture and offers Open With… (QuickTime Player).
+  failing that, Pillow (pillow-heif), off the main thread, the neighbours read ahead so ←/→ is instant. An HDR
+  photo shows Qt's picture first, then macOS's HDR one in its place (`_NativeStage`, the same zoom and pan).
+- **Videos** (`_VideoStage`): AVFoundation on the Mac (Qt Multimedia otherwise) — play/pause, a scrubber you
+  click or drag anywhere along (the video pauses while you drag; hovering shows the time there), looping like the
+  iPhone's, ±15 s (J/L), a frame step (, and .), slow motion (½×, ¼×, ⅛×, as the iPhone's Slo-Mo), mute,
+  **zoom** (the same buttons and keys, pinch, double-click; under Qt's player, zoomed in, the video is drawn by
+  a `QGraphicsVideoItem` that can be scaled and dragged — fitted, by the faster `QVideoWidget`), and **Save
+  Frame** (the camera — a standard-range PNG in a "Screenshots" folder beside the video,
+  `frame_export.save_frame`) and **Export All Frames…**. With neither player it shows the video's picture and
+  offers Open With… (QuickTime Player).
 - **Top right**: the resolution, quietly — 4K, 1080p, 720p, 8K… for a video (the iPhone app's long-side rule),
   megapixels for a photo — and HDR when it is (`media_info`: an HLG/PQ/Dolby Vision track; a gain map or HLG/PQ
   photo). Beside it, ♡ (Favorite) and ✦ (To AI) — the iPhone app's labels, which Safe Finder shares with it.
@@ -50,6 +62,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsPixmapItem, QGraph
                                QWidget)
 
 import media_info
+import viewer_surface
 
 IS_MAC = sys.platform == "darwin"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff", ".bmp", ".avif",
@@ -447,6 +460,258 @@ class _Scrubber(QSlider):
             QToolTip.showText(event.globalPosition().toPoint(), media_info.clock(ms / 1000), self)
 
 
+# ----------------------------------------------------------------------------- the stage macOS draws
+
+MAX_HDR_PIXELS = 24_000_000      # an HDR photo is held as 16-bit floats (8 bytes a pixel): bigger is shown smaller
+
+
+class _NativeStage(QWidget):
+    """Where macOS draws the picture itself (`viewer_surface`): a video by AVFoundation — QuickTime Player's own
+    player, so HDR looks as it does there — or an HDR photo in HDR. The widget has its own native view for the
+    surface to live in; Qt keeps where the picture goes (`picture_rect`: fitted, zoomed about a point, dragged —
+    as `_ImageStage` does for photos) and gets every click, which the surface lets through. `tapped`, `swiped`
+    and `zoom_changed` as `_ImageStage`; `picture_done(ok)` once a photo has been read, or couldn't be."""
+    tapped = Signal()
+    swiped = Signal(int)
+    zoom_changed = Signal()
+    picture_done = Signal(bool)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)   # only this widget goes native
+        self.setAutoFillBackground(True)
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), QColor("black"))
+        self.setPalette(pal)
+        self.surface: viewer_surface.Surface | None = None
+        self.path = ""
+        self.content = QSize()            # the picture's size in pixels, upright
+        self.fitted = True
+        self._scale = 1.0                 # points per pixel of the picture
+        self._origin = QPointF()          # the picture's top left in this widget
+        self._press: QPointF | None = None
+        self._origin_at_press = QPointF()
+        self._swipe = 0.0
+        self._swipe_at = 0.0
+        self._tap = QTimer(self)
+        self._tap.setSingleShot(True)
+        self._tap.setInterval(_double_click_ms())
+        self._tap.timeout.connect(self.tapped.emit)
+        self._watch = QTimer(self)        # a photo being read
+        self._watch.setInterval(40)
+        self._watch.timeout.connect(self._check_picture)
+
+    def attach(self) -> bool:
+        """The surface, made the first time it's wanted (False while the library is being built, or without it)."""
+        if self.surface is not None:
+            return True
+        lib = viewer_surface.library()
+        if lib is None:
+            return False
+        try:
+            self.surface = viewer_surface.Surface(lib, int(self.winId()))
+        except (OSError, TypeError, ValueError):
+            return False
+        self.surface.layout()
+        self._apply()
+        return True
+
+    def release(self) -> None:
+        self._watch.stop()
+        if self.surface is not None:
+            self.surface.destroy()
+            self.surface = None
+
+    # -- what's shown
+    def show_video(self, path: str, size: QSize) -> bool:
+        if not self.attach():
+            return False
+        self._watch.stop()
+        self.path, self.content = path, QSize(size)
+        self.surface.open_video(path)
+        self.fit()
+        return True
+
+    def show_picture(self, path: str, size: QSize) -> bool:
+        """Starts reading an HDR photo; `picture_done` says when it's there to be shown."""
+        if not self.attach():
+            return False
+        self.path, self.content = path, QSize(size)
+        self.surface.open_image(path, MAX_HDR_PIXELS)
+        self.fit()
+        self._watch.start()
+        return True
+
+    def clear(self) -> None:
+        self._watch.stop()
+        self.path, self.content = "", QSize()
+        if self.surface is not None:
+            self.surface.clear()
+
+    def adopt_size(self) -> None:
+        """The picture's size from macOS, when the file's header didn't give one."""
+        if self.content.isEmpty() and self.surface is not None:
+            w, h = self.surface.content_size()
+            if w >= 1 and h >= 1:
+                self.content = QSize(round(w), round(h))
+                self.fit()
+
+    def _check_picture(self) -> None:
+        state = self.surface.state() if self.surface is not None else viewer_surface.FAILED
+        if state == viewer_surface.LOADING:
+            return
+        self._watch.stop()
+        if state == viewer_surface.READY:
+            self.adopt_size()
+        self.picture_done.emit(state == viewer_surface.READY)
+
+    # -- where the picture goes
+    def _fit_scale(self) -> float:
+        w, h = self.content.width(), self.content.height()
+        if w <= 0 or h <= 0 or self.width() <= 0 or self.height() <= 0:
+            return 1.0
+        return min(self.width() / w, self.height() / h)
+
+    def picture_rect(self) -> QRectF:
+        """Where the picture is drawn: centred along a side it doesn't fill, never pulled in from an edge it
+        overflows (so a drag can't lose it)."""
+        if self.content.isEmpty():
+            return QRectF(0, 0, self.width(), self.height())
+        w, h = self.content.width() * self._scale, self.content.height() * self._scale
+        x = (self.width() - w) / 2 if w <= self.width() else min(0.0, max(self.width() - w, self._origin.x()))
+        y = (self.height() - h) / 2 if h <= self.height() else min(0.0, max(self.height() - h, self._origin.y()))
+        self._origin = QPointF(x, y)
+        return QRectF(x, y, w, h)
+
+    def _apply(self) -> None:
+        r = self.picture_rect()
+        if self.surface is not None:
+            self.surface.set_rect(r.x(), r.y(), r.width(), r.height())
+        if self.fitted:
+            self.unsetCursor()
+        elif self._press is None:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def scale_now(self) -> float:
+        return self._scale
+
+    def fit(self) -> None:
+        self._scale = self._fit_scale()
+        self._origin = QPointF()
+        self.fitted = True
+        self._apply()
+        self.zoom_changed.emit()
+
+    def _zoom_to(self, target: float, at: QPointF | QPoint | None) -> None:
+        p = QPointF(at) if at is not None else QPointF(self.width() / 2, self.height() / 2)
+        k = target / max(self._scale, 1e-9)
+        self._origin = p - (p - self._origin) * k
+        self._scale = target
+        self.fitted = False
+        self._apply()
+        self.zoom_changed.emit()
+
+    def zoom(self, factor: float, at: QPointF | QPoint | None = None) -> None:
+        """In or out about `at` (the middle when None); back out past the fit, it fits."""
+        if self.content.isEmpty():
+            return
+        target = min(self._scale * factor, 16.0)
+        if target <= self._fit_scale() * 1.001:
+            if not self.fitted:
+                self.fit()
+            return
+        self._zoom_to(target, at)
+
+    def actual_size(self, at: QPointF | QPoint | None = None) -> None:
+        """100 %: one pixel of the picture to one point."""
+        if self.content.isEmpty():
+            return
+        if abs(self._fit_scale() - 1.0) < 1e-3:
+            self.fit()
+        else:
+            self._zoom_to(1.0, at)
+
+    # -- Qt's events (the surface passes them all through)
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self.surface is not None:
+            self.surface.layout()
+        if self.fitted:
+            self.fit()
+        else:
+            old = event.oldSize()
+            if old.isValid():
+                self._origin += QPointF((self.width() - old.width()) / 2, (self.height() - old.height()) / 2)
+            self._apply()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self.surface is not None:
+            self.surface.layout()
+            self._apply()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press = event.position()
+            self._origin_at_press = QPointF(self._origin)
+            if not self.fitted:
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        event.accept()                    # not on to the video stage, which would count it as a tap too
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._press is not None and not self.fitted:
+            self._origin = self._origin_at_press + (event.position() - self._press)
+            self._apply()
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._press is not None and (event.position() - self._press).manhattanLength() < 4:
+            self._tap.start()             # a click — unless a double-click follows
+        self._press = None
+        self._apply()
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        self._tap.stop()
+        if self.fitted:
+            self.actual_size(event.position())
+        else:
+            self.fit()
+        event.accept()
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        event.accept()
+        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
+            self.zoom(1.0015 ** event.angleDelta().y(), event.position())
+            return
+        dx = event.pixelDelta().x() or event.angleDelta().x() / 4
+        dy = event.pixelDelta().y() or event.angleDelta().y() / 4
+        if not self.fitted:
+            self._origin += QPointF(dx, dy)           # scrolling pans a zoomed picture
+            self._apply()
+            return
+        if abs(dx) > abs(dy):
+            now = time.monotonic()
+            if now - self._swipe_at > 0.6:            # a new swipe: count afresh
+                self._swipe = 0.0
+            self._swipe += dx
+            if abs(self._swipe) > 120 and now - self._swipe_at > 0.6:
+                self._swipe_at = now
+                self.swiped.emit(-1 if self._swipe > 0 else 1)
+                self._swipe = 0.0
+
+    def event(self, event) -> bool:
+        if event.type() == event.Type.NativeGesture:
+            kind = event.gestureType()
+            if kind == Qt.NativeGestureType.ZoomNativeGesture:
+                self.zoom(1.0 + event.value(), event.position())
+                return True
+            if kind == Qt.NativeGestureType.SmartZoomNativeGesture:
+                self.fit() if not self.fitted else self.actual_size(event.position())
+                return True
+        return super().event(event)
+
+
 # ----------------------------------------------------------------------------- the video stage
 
 def multimedia():
@@ -459,11 +724,18 @@ def multimedia():
         return None
 
 
+# What AVFoundation can't open: Qt's player (FFmpeg) plays these. Anything else it turns down falls back too.
+QT_ONLY = {".mkv", ".webm", ".avi", ".wmv", ".flv"}
+
+
 class _VideoStage(QWidget):
-    """A video: Qt Multimedia's player, or — without it — the video's picture and QuickTime Player. Fitted, the
-    player draws into a `QVideoWidget` (the fast path); zoomed in, into a `QGraphicsVideoItem` in a view that can
-    be scaled and dragged like a photo — and back to the widget when fitted again."""
+    """A video. On a Mac macOS plays it (`_NativeStage`: AVFoundation, as QuickTime Player — HDR shown as HDR);
+    what AVFoundation can't open (MKV, WebM, AVI…), or everything while the native surface isn't there, Qt
+    Multimedia plays — fitted, into a `QVideoWidget` (the fast path); zoomed in, into a `QGraphicsVideoItem` in a
+    view that can be scaled and dragged like a photo, and back to the widget when fitted again. Without either:
+    the video's picture and QuickTime Player."""
     tapped = Signal()
+    swiped = Signal(int)
     ended = Signal()
     position_changed = Signal(int, int)        # ms, duration ms
     playing_changed = Signal(bool)
@@ -479,9 +751,15 @@ class _VideoStage(QWidget):
         self.pages.setContentsMargins(0, 0, 0, 0)
         mm = multimedia()
         self.path = ""
-        self.loop = True
+        self.backend = ""                      # "native", "qt", or "" (nothing playing)
+        self._loop = True
+        self._muted = False
+        self._autoplay = True
+        self._length_ms = 0
+        self._poster_image: QImage | None = None
+        self._reported: tuple | None = None    # what the native player last told the bars
         self.fps = 30.0
-        self.fitted = True
+        self._qt_fitted = True
         self.size_shown = QSize()
         self.player = self.audio = self.video = None
         self.zoom_view: QGraphicsView | None = None
@@ -498,92 +776,213 @@ class _VideoStage(QWidget):
             self.audio = QAudioOutput(self)
             self.player.setAudioOutput(self.audio)
             self.player.setVideoOutput(self.video)
-            self.player.positionChanged.connect(lambda ms: self.position_changed.emit(ms, self.player.duration()))
-            self.player.durationChanged.connect(lambda d: self.position_changed.emit(self.player.position(), d))
+            # Only while Qt is the one playing: a late "stopped" from the last video mustn't reach the bars
+            # while macOS plays this one.
+            self.player.positionChanged.connect(
+                lambda ms: self.position_changed.emit(ms, self.player.duration()) if self.backend == "qt" else None)
+            self.player.durationChanged.connect(
+                lambda d: self.position_changed.emit(self.player.position(), d) if self.backend == "qt" else None)
             self.player.playbackStateChanged.connect(
-                lambda st: self.playing_changed.emit(st == QMediaPlayer.PlaybackState.PlayingState))
+                lambda st: self.playing_changed.emit(st == QMediaPlayer.PlaybackState.PlayingState)
+                if self.backend == "qt" else None)
             self.player.mediaStatusChanged.connect(self._status)
             self.pages.addWidget(self.video)
-        else:
-            self.pages.addWidget(self.poster)
+        self.pages.addWidget(self.poster)
+        self.native = _NativeStage() if viewer_surface.wanted() else None
+        if self.native is not None:
+            self.native.tapped.connect(self.tapped)
+            self.native.swiped.connect(self.swiped)
+            self.native.zoom_changed.connect(self.zoom_changed)
+            self.pages.addWidget(self.native)
+        self._ticker = QTimer(self)            # the native player's progress, for the bars
+        self._ticker.setInterval(50)
+        self._ticker.timeout.connect(self._tick)
 
     @property
     def available(self) -> bool:
-        return self.player is not None
+        return self.player is not None or self.native is not None
+
+    @property
+    def loop(self) -> bool:
+        return self._loop
+
+    @loop.setter
+    def loop(self, on: bool) -> None:
+        self._loop = bool(on)
+        if self.native is not None and self.native.surface is not None:
+            self.native.surface.set_loop(self._loop)
+
+    @property
+    def fitted(self) -> bool:
+        return self.native.fitted if self.backend == "native" else self._qt_fitted
+
+    def _surface(self) -> viewer_surface.Surface | None:
+        return self.native.surface if self.backend == "native" and self.native is not None else None
 
     def show_video(self, path: str, poster: QImage | None = None, autoplay: bool = True) -> None:
-        self.fit()
+        self.stop()
         self.path = path
         info = media_info.video_info(path)
         self.size_shown = QSize(int(info.get("width") or 0), int(info.get("height") or 0))
         self.fps = float(info.get("fps") or 30.0)
+        self._length_ms = int((info.get("duration") or 0) * 1000)
+        self._poster_image, self._autoplay = poster, autoplay
+        native = self.native
+        if native is not None and os.path.splitext(path)[1].lower() not in QT_ONLY \
+                and native.show_video(path, self.size_shown):
+            self.backend = "native"
+            s = native.surface
+            s.set_loop(self._loop)
+            s.set_muted(self._muted)
+            s.set_rate(1.0)
+            if autoplay:
+                s.play()
+            self.pages.setCurrentWidget(native)
+            self._reported = None
+            self.position_changed.emit(0, self._length_ms)
+            self._ticker.start()
+            return
+        self._show_with_qt()
+
+    def _show_with_qt(self) -> None:
+        self._qt_fit()
         if self.player is None:
+            self.backend = ""
+            poster = self._poster_image
             if poster is not None and not poster.isNull():
+                self.poster.setText("")
                 self.poster.setPixmap(QPixmap.fromImage(poster).scaled(
                     self.size() * 0.98, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
             else:
                 self.poster.setPixmap(QPixmap())
                 self.poster.setText("This Mac's Qt can't play videos here — use Open With… to play it in QuickTime Player.")
-            self.position_changed.emit(0, int((info.get("duration") or 0) * 1000))
+            self.pages.setCurrentWidget(self.poster)
+            self.position_changed.emit(0, self._length_ms)
             return
-        self.player.setSource(QUrl.fromLocalFile(path))
+        self.backend = "qt"
+        self.pages.setCurrentWidget(self.video)
+        self.player.setSource(QUrl.fromLocalFile(self.path))
         self.player.setPlaybackRate(1.0)
-        if autoplay:
+        if self._autoplay:
             self.player.play()
+
+    def _tick(self) -> None:
+        """The native player's progress to the bars; a video macOS turned down goes to Qt's player."""
+        s = self._surface()
+        if s is None:
+            self._ticker.stop()
+            return
+        state = s.state()
+        if state == viewer_surface.FAILED:
+            self._ticker.stop()
+            self.native.clear()
+            self._show_with_qt()
+            return
+        if state == viewer_surface.READY:
+            self.native.adopt_size()
+        length = int(s.duration() * 1000) or self._length_ms
+        playing = s.is_playing()
+        now = (int(s.position() * 1000), length, playing)
+        if now != self._reported:
+            if self._reported is None or now[:2] != self._reported[:2]:
+                self.position_changed.emit(now[0], length)
+            if self._reported is None or playing != self._reported[2]:
+                self.playing_changed.emit(playing)
+            self._reported = now
+        if s.take_ended():
+            self.ended.emit()
 
     def stop(self) -> None:
+        self._ticker.stop()
+        if self.native is not None:
+            self.native.clear()
         if self.player is not None:
-            self.fit()
+            self._qt_fit()
             self.player.stop()
             self.player.setSource(QUrl())
+        self.backend = ""
+
+    def release(self) -> None:
+        """The window is closing: the native player goes too."""
+        self.stop()
+        if self.native is not None:
+            self.native.release()
 
     def toggle(self) -> None:
-        if self.player is None:
-            return
         if self.is_playing():
-            self.player.pause()
+            self.pause()
         else:
-            self.player.play()
+            self.play()
 
     def play(self) -> None:
-        if self.player is not None:
+        s = self._surface()
+        if s is not None:
+            s.play()
+        elif self.backend == "qt":
             self.player.play()
 
     def pause(self) -> None:
-        if self.player is not None:
+        s = self._surface()
+        if s is not None:
+            s.pause()
+        elif self.backend == "qt":
             self.player.pause()
 
     def is_playing(self) -> bool:
-        if self.player is None:
+        s = self._surface()
+        if s is not None:
+            return s.is_playing()
+        if self.backend != "qt":
             return False
         from PySide6.QtMultimedia import QMediaPlayer
         return self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
 
+    def duration_ms(self) -> int:
+        s = self._surface()
+        if s is not None:
+            return int(s.duration() * 1000) or self._length_ms
+        return self.player.duration() if self.backend == "qt" else self._length_ms
+
     def seek(self, ms: int) -> None:
-        if self.player is not None:
-            self.player.setPosition(max(0, min(int(ms), self.player.duration() or int(ms))))
+        length = self.duration_ms()
+        ms = max(0, min(int(ms), length or int(ms)))
+        s = self._surface()
+        if s is not None:
+            s.seek(ms / 1000)
+        elif self.backend == "qt":
+            self.player.setPosition(ms)
 
     def skip(self, seconds: float) -> None:
-        if self.player is not None:
-            self.seek(self.player.position() + int(seconds * 1000))
+        self.seek(int(self.position_s() * 1000) + int(seconds * 1000))
 
     def step(self, frames: int) -> None:
         """One frame back or on (paused first — the iPhone's frame step)."""
-        if self.player is None:
-            return
-        self.player.pause()
-        self.seek(self.player.position() + int(round(frames * 1000 / max(self.fps, 1))))
+        s = self._surface()
+        if s is not None:
+            s.step(frames)
+        elif self.backend == "qt":
+            self.player.pause()
+            self.seek(self.player.position() + int(round(frames * 1000 / max(self.fps, 1))))
 
     def set_rate(self, rate: float) -> None:
-        if self.player is not None:
+        s = self._surface()
+        if s is not None:
+            s.set_rate(rate)
+        elif self.player is not None:
             self.player.setPlaybackRate(rate)
 
     def set_muted(self, muted: bool) -> None:
+        self._muted = muted
+        if self.native is not None and self.native.surface is not None:
+            self.native.surface.set_muted(muted)
         if self.audio is not None:
             self.audio.setMuted(muted)
 
     def position_s(self) -> float:
-        return (self.player.position() / 1000) if self.player is not None else 0.0
+        s = self._surface()
+        if s is not None:
+            return s.position()
+        return (self.player.position() / 1000) if self.backend == "qt" else 0.0
 
     # -- zoom
     def _zoomer(self) -> bool:
@@ -611,14 +1010,19 @@ class _VideoStage(QWidget):
         return True
 
     def scale_now(self) -> float:
-        if self.fitted or self.zoom_view is None:
+        if self.backend == "native":
+            return self.native.scale_now()
+        if self._qt_fitted or self.zoom_view is None:
             return self._fit_scale
         return self.zoom_view.transform().m11()
 
     def zoom(self, factor: float, at: QPoint | None = None) -> None:
-        if self.player is None:
+        if self.backend == "native":
+            self.native.zoom(factor, at)
             return
-        if self.fitted:
+        if self.backend != "qt":
+            return
+        if self._qt_fitted:
             if factor <= 1.0 or not self._zoomer():
                 return
             w, h = self.size_shown.width(), self.size_shown.height()
@@ -633,7 +1037,7 @@ class _VideoStage(QWidget):
             target = self._fit_scale * factor
             self.zoom_view.scale(target, target)
             self.zoom_view.centerOn(self.zoom_item)
-            self.fitted = False
+            self._qt_fitted = False
         else:
             current = self.zoom_view.transform().m11()
             target = max(0.05, min(current * factor, 16.0))
@@ -647,11 +1051,14 @@ class _VideoStage(QWidget):
 
     def actual_size(self, at: QPoint | None = None) -> None:
         """100 %: one pixel of the video to one point."""
-        if self.player is None:
+        if self.backend == "native":
+            self.native.actual_size(at)
             return
-        if self.fitted:
+        if self.backend != "qt":
+            return
+        if self._qt_fitted:
             self.zoom(max(1.01, 1.0 / max(self._fit_scale_for_size(), 1e-6)), at)
-        if not self.fitted:
+        if not self._qt_fitted:
             current = self.zoom_view.transform().m11()
             self.zoom_view.scale(1.0 / current, 1.0 / current)
             self.zoom_changed.emit()
@@ -663,19 +1070,27 @@ class _VideoStage(QWidget):
         return min(self.width() / w, self.height() / h)
 
     def fit(self) -> None:
-        if not self.fitted and self.player is not None and self.video is not None:
+        if self.backend == "native":
+            self.native.fit()
+        else:
+            self._qt_fit()
+
+    def _qt_fit(self) -> None:
+        if not self._qt_fitted and self.player is not None and self.video is not None:
             self.player.setVideoOutput(self.video)
             self.pages.setCurrentWidget(self.video)
-        self.fitted = True
+        self._qt_fitted = True
         self._fit_scale = self._fit_scale_for_size()
         self.zoom_changed.emit()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        if self.fitted:
+        if self._qt_fitted:
             self._fit_scale = self._fit_scale_for_size()
 
     def _status(self, status) -> None:
+        if self.backend != "qt":
+            return
         from PySide6.QtMultimedia import QMediaPlayer
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             if self.loop:
@@ -693,7 +1108,7 @@ class _VideoStage(QWidget):
                 pass
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        self.tapped.emit()
+        self.tapped.emit()                     # Qt's video, or the picture (the native stage takes its own)
         super().mouseReleaseEvent(event)
 
 
@@ -754,16 +1169,20 @@ FAVORITE_RED = "#FF375F"
 
 
 def available_geometry(widget: QWidget) -> QRect | None:
-    """The usable part of the screen the window is on (the bound it's fitted and kept within)."""
+    """The usable part of the screen the window is on — below the menu bar, above the Dock (the bound it's
+    fitted and kept within)."""
     screen = widget.screen() or QApplication.primaryScreen()
     return screen.availableGeometry() if screen is not None else None
+
+
 AI_PURPLE = "#BF5AF2"
 INFO_WIDTH = 300
+TITLE_BAR = 28 if IS_MAC else 32          # the title bar's height until the window is up and can say
 
 
 class MediaViewer(QWidget):
     """One window: the items of a listing, one at a time (module notes). `box`: Safe Finder's window — the
-    size the viewer fits each item within, and where it opens."""
+    viewer opens over it, on its display, as tall as that display."""
     closed = Signal()
     removed = Signal(list)                 # paths moved to the Trash from here
     _frame_saved = Signal(str)             # a saved frame's file ("" when it failed), from a worker thread
@@ -782,8 +1201,17 @@ class MediaViewer(QWidget):
         self.loader.signals.done.connect(self._image_ready)
         self.chrome = True
         self.slideshow = False
-        self.box = QSize(box.size()) if box is not None and box.isValid() else QSize(1180, 820)
+        # The size each item is fitted within: None — the whole display (its full height) — until the window is
+        # resized by hand (`resizeEvent`), then that size.
+        self.box: QSize | None = None
         self.anchor = box.center() if box is not None and box.isValid() else None
+        screen = QApplication.screenAt(self.anchor) if self.anchor is not None else None
+        if screen is not None and hasattr(self, "setScreen"):
+            self.setScreen(screen)                 # Safe Finder's display, not just the main one
+        self._shown_once = False
+        # Until then a resize is the system's (placing the window, leaving full screen), not a hand resize.
+        self._settling = time.monotonic() + 1.5
+        viewer_surface.prepare()
         self.fit_window = True
         self._fit_target: QSize | None = None
         self._hdr_cache: dict[str, bool] = {}
@@ -801,7 +1229,16 @@ class MediaViewer(QWidget):
         self.video = _VideoStage()
         self.stack.addWidget(self.image)
         self.stack.addWidget(self.video)
+        # An HDR photo is shown by macOS, in HDR (`_show_hdr`): Qt's picture stands in until it's read.
+        self.hdr = _NativeStage() if viewer_surface.wanted() else None
+        if self.hdr is not None:
+            self.stack.addWidget(self.hdr)
+            self.hdr.swiped.connect(self.go)
+            self.hdr.tapped.connect(self.toggle_chrome)
+            self.hdr.zoom_changed.connect(self._zoom_label)
+            self.hdr.picture_done.connect(self._hdr_shown)
         self.image.swiped.connect(self.go)
+        self.video.swiped.connect(self.go)
         self.image.tapped.connect(self.toggle_chrome)
         self.video.tapped.connect(self.toggle_chrome)
         self.video.ended.connect(lambda: self.go(1) if self.slideshow else None)
@@ -840,7 +1277,7 @@ class MediaViewer(QWidget):
             else "Couldn't save the frame."))
         self._hdr_read.connect(self._hdr_ready)
         self._shortcuts()
-        self.resize(self.box)
+        self.resize(self._room(available_geometry(self), TITLE_BAR))   # until the first item says its shape
         self.show_current()
 
     # ------------------------------------------------------------------ bars
@@ -1022,7 +1459,11 @@ class MediaViewer(QWidget):
 
     @property
     def stage(self):
-        return self.video if is_video(self.current) else self.image
+        if is_video(self.current):
+            return self.video
+        if self.hdr is not None and self.stack.currentWidget() is self.hdr:
+            return self.hdr
+        return self.image
 
     def show_current(self) -> None:
         self._slide.stop()
@@ -1049,11 +1490,14 @@ class MediaViewer(QWidget):
         self._show_labels()
         self._show_badges(path)
         self._fit_to(path)
+        if self.hdr is not None:
+            self.hdr.clear()
         if video:
             self.stack.setCurrentWidget(self.video)
             poster = self.poster(path) if self.poster else None
             self.video.show_video(path, poster)
             self.video.loop = self.loop_act.isChecked() and not self.slideshow
+            self.speed_btn.setText("1×")                        # each video starts at normal speed
         else:
             self.video.stop()
             self.stack.setCurrentWidget(self.image)
@@ -1064,6 +1508,8 @@ class MediaViewer(QWidget):
                 self.image.show_image(img, "" if not img.isNull() else "This photo can't be shown.")
                 if self.slideshow:
                     self._slide.start(int(SLIDE_SECONDS * 1000))
+            if self._hdr_cache.get(path):
+                self._show_hdr(path)
         for d in (1, -1, 2):                                    # read ahead
             j = self.index + d
             if 0 <= j < len(self.paths) and not is_video(self.paths[j]):
@@ -1095,7 +1541,7 @@ class MediaViewer(QWidget):
 
     def _escape(self) -> None:
         if self.isFullScreen():
-            self.showNormal()
+            self.toggle_full()
         else:
             self.close()
 
@@ -1121,9 +1567,23 @@ class MediaViewer(QWidget):
     def _chrome_height(self) -> int:
         return (self.top.sizeHint().height() + self.bottom.sizeHint().height()) if self.chrome else 0
 
+    def _title_height(self) -> int:
+        """The title bar's height: the window's own once it's up, else the usual one."""
+        extra = self.frameGeometry().height() - self.geometry().height()
+        return extra if self.isVisible() and extra > 0 else TITLE_BAR
+
+    def _room(self, avail: QRect | None, title: int) -> QSize:
+        """The most the window's inside may take: the whole display it's on — its full height, below the menu bar
+        and above the Dock, less the title bar — or, once resized by hand, that size (kept on the display)."""
+        if avail is None:
+            return QSize(self.box) if self.box is not None else QSize(1180, 820)
+        whole = QSize(avail.width(), max(200, avail.height() - title))
+        return whole if self.box is None else QSize(self.box).boundedTo(whole)
+
     def _fit_to(self, path: str, first: bool = False) -> None:
-        """The window takes the item's shape within `box` (the picture fills it: no bars beside it), keeping its
-        centre — or, the first time, opening over Safe Finder's window."""
+        """The window takes the item's shape within `_room` — as tall as the display, unless the item is too
+        wide for that (the picture fills it: no bars beside it) — keeping its centre, or, the first time, opening
+        over Safe Finder's window."""
         if not self.fit_window or self.isFullScreen() or self.isMaximized():
             return
         ms = self.media_size(path)
@@ -1131,11 +1591,10 @@ class MediaViewer(QWidget):
             return
         info_w = INFO_WIDTH if self.info.isVisible() else 0
         chrome_h = self._chrome_height()
-        box = QSize(self.box)
         avail = available_geometry(self)
-        if avail is not None:
-            box = box.boundedTo(QSize(avail.width() - 20, avail.height() - 50))
-        room_w, room_h = max(box.width() - info_w, 200), max(box.height() - chrome_h, 150)
+        title = self._title_height()
+        room = self._room(avail, title)
+        room_w, room_h = max(room.width() - info_w, 200), max(room.height() - chrome_h, 150)
         scale = min(room_w / ms.width(), room_h / ms.height())
         w, h = max(1, round(ms.width() * scale)), max(1, round(ms.height() * scale))
         min_w = max(self.minimumWidth(), self.bottom.minimumSizeHint().width() if self.chrome else 0,
@@ -1148,11 +1607,13 @@ class MediaViewer(QWidget):
         self._fit_target = QSize(target)
         self.resize(target)
         if center is not None:
-            geo = self.frameGeometry()
+            # Placed by its outside (title bar and all), which isn't known until the window is up: worked out.
+            side = max(0, self.frameGeometry().width() - self.geometry().width()) if self.isVisible() else 0
+            geo = QRect(QPoint(0, 0), QSize(target.width() + side, target.height() + title))
             geo.moveCenter(center)
             if avail is not None:
-                geo.moveLeft(max(avail.left(), min(geo.left(), avail.right() - geo.width())))
-                geo.moveTop(max(avail.top(), min(geo.top(), avail.bottom() - geo.height())))
+                geo.moveLeft(max(avail.left(), min(geo.left(), avail.right() - geo.width() + 1)))
+                geo.moveTop(max(avail.top(), min(geo.top(), avail.bottom() - geo.height() + 1)))
             self.move(geo.topLeft())
 
     def refit(self) -> None:
@@ -1185,7 +1646,7 @@ class MediaViewer(QWidget):
             self.zoom_label.setText("Fit")
         else:
             self.zoom_label.setText(f"{round(stage.scale_now() * 100)}%")
-        available = stage is self.image or self.video.available
+        available = stage is not self.video or self.video.available
         for b in (self.zoom_out_btn, self.zoom_label, self.zoom_in_btn):
             b.setEnabled(available)
 
@@ -1252,6 +1713,21 @@ class MediaViewer(QWidget):
         self._hdr_cache[path] = hdr
         if path == self.current:
             self.hdr_badge.setVisible(hdr)
+            if hdr and not is_video(path):
+                self._show_hdr(path)
+
+    def _show_hdr(self, path: str) -> None:
+        """An HDR photo, in HDR: macOS reads it (its gain map, or its HLG / PQ curve) while Qt's standard-range
+        picture stands in; `_hdr_shown` swaps it in when it's ready."""
+        if self.hdr is not None and self.hdr.path != path:
+            self.hdr.show_picture(path, self.media_size(path))
+
+    def _hdr_shown(self, ok: bool) -> None:
+        if not ok or self.hdr is None or not self.paths or self.hdr.path != self.current:
+            return
+        if self.stack.currentWidget() is self.image and self.image.fitted:   # not if it's been zoomed meanwhile
+            self.stack.setCurrentWidget(self.hdr)
+            self._zoom_label()
 
     def _show_labels(self) -> None:
         if self.hooks.labels_of is None:
@@ -1291,6 +1767,7 @@ class MediaViewer(QWidget):
 
     def toggle_full(self) -> None:
         if self.isFullScreen():
+            self._settling = time.monotonic() + 1.0   # coming back from full screen isn't a resize by hand
             self.showNormal()
             QTimer.singleShot(150, self.refit)
         else:
@@ -1339,13 +1816,18 @@ class MediaViewer(QWidget):
         super().resizeEvent(event)
         if self._fit_target is not None and event.size() == self._fit_target:
             self._fit_target = None                 # our own fit
-        elif self.isVisible() and not self.isFullScreen() and not self.isMaximized():
+        elif self.isVisible() and not self.isFullScreen() and not self.isMaximized() \
+                and time.monotonic() > self._settling:
             self.box = QSize(event.size())          # resized by hand: fit within this from now on
         self._place_toast()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._place_toast()
+        if not self._shown_once:                    # now the title bar's real height is known: fit again
+            self._shown_once = True
+            self._settling = time.monotonic() + 0.5
+            QTimer.singleShot(80, self.refit)
 
     def fill_info(self) -> None:
         lay = self.info_lay
@@ -1494,6 +1976,8 @@ class MediaViewer(QWidget):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._slide.stop()
-        self.video.stop()
+        self.video.release()
+        if self.hdr is not None:
+            self.hdr.release()
         self.closed.emit()
         super().closeEvent(event)
