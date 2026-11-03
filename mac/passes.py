@@ -53,7 +53,11 @@ ENCRYPTED: dict[str, str] = {}
 # ── secret storage ────────────────────────────────────────────────────────────
 
 def get_refresh_token() -> str:
-    """Reads the stored refresh token (Keychain on Mac, QSettings fallback)."""
+    """Reads the stored refresh token (Keychain on Mac, QSettings fallback).
+
+    Passes keeps the token JSON-encoded in localStorage, so a stored value can
+    arrive wrapped in quotes — those are stripped here.
+    """
     if sys.platform == "darwin":
         try:
             r = subprocess.run(
@@ -61,16 +65,17 @@ def get_refresh_token() -> str:
                  "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w"],
                 capture_output=True, text=True, timeout=10)
             if r.returncode == 0:
-                return r.stdout.strip()
+                return r.stdout.strip().strip('"')
         except (OSError, subprocess.SubprocessError):
             pass
     from PySide6.QtCore import QSettings
-    return str(QSettings("PhotoBrowser", "SafeFinder").value(SETTINGS_KEY, "") or "")
+    return str(QSettings("PhotoBrowser", "SafeFinder").value(SETTINGS_KEY, "")
+               or "").strip().strip('"')
 
 
 def set_refresh_token(token: str) -> None:
     """Stores the refresh token in the Keychain (or QSettings fallback)."""
-    token = token.strip()
+    token = token.strip().strip('"')
     if sys.platform == "darwin":
         try:
             if not token:
@@ -126,7 +131,7 @@ def exchange_token(refresh_token: str) -> str:
         f"{API}/auth/refresh",
         data=b"{}",
         headers={
-            "Authorization": f"Bearer {refresh_token}",
+            "Authorization": f"Bearer {refresh_token.strip().strip('\"')}",
             "Content-Type":  "application/json",
             "User-Agent":    _UA,
         })

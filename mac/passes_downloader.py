@@ -157,7 +157,10 @@ class PassesWindow(QMainWindow):
     def _got_token(self, token) -> None:
         if not isinstance(token, str) or not token.strip():
             return
-        token = token.strip()
+        # Passes stores the token JSON-encoded, so it arrives wrapped in quotes
+        token = token.strip().strip('"')
+        if not token:
+            return
         if token == self._refresh_token:
             if self._access_token:
                 return
