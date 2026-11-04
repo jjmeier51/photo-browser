@@ -1565,6 +1565,12 @@ the stub would pop an installer) runs `pip install --target ~/Library/Applicatio
 charset-normalizer — all `py3-none-any`, so the pip's own Python version doesn't matter; Pillow (ReportLab's other
 need) is already in the app. `book_window` appends that folder to `sys.path` at import. Tested with a clean
 interpreter as the "app": install → `import bookify` → a book, hyphenated.
+
+**Save in (Nov 4)**: `BookWindow.dest` ("" = beside each text, else a folder; QSettings `book/dest`), shown in the
+form and in the window's subtitle so a remembered folder never surprises. Checked at Make Book (`os.path.isdir`) —
+an unplugged drive's folder is said, nothing made; choosing the text's own folder stores "" (so it follows the
+text). Still `simpcity.place` into the folder (drive-safe, never over a file — "story 2.pdf"), tags carried from the
+text to wherever the book went; the result line names the folder when it isn't the text's.
 Tested offscreen through a pane: preview, an iPhone book, two files at 5 × 8, Stop mid-book (no file left), the
 install path, Open in the PDF viewer.
 

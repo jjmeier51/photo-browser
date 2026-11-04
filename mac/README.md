@@ -414,6 +414,9 @@ breaks, and cream paper with a light texture. It finds the title, author and cha
 and bold — see the top of `bookify.py`), and the window shows what it found before you start.
 
 - **Title / Author** — leave empty to use what was found, or type your own.
+- **Save in** — beside the text (the default), or **Choose Folder…** for anywhere else, on the Mac or a drive;
+  **Beside the Text** goes back. Remembered and always shown in the window; a folder that isn't there any more
+  (its drive unplugged) is said before anything is made.
 - **Page size** — 6 × 9 in (a trade paperback), 5.5 × 8.5, 5 × 8, A5, US Letter, or **iPhone 17 Pro Max**: pages
   the shape of its screen, so one page fills it; 10-point type that reads at about 15 on the phone, equal narrow
   margins, no blank pages, saved as "<name> (for iPhone).pdf" — AirDrop it, or open it from the drive in Photo
@@ -423,8 +426,8 @@ and bold — see the top of `bookify.py`), and the window shows what it found be
   Regular and an Italic), and Contents page, "Chapter One: Title" in the contents, drop caps, chapters on right-hand
   pages, equal margins. Your choices are remembered.
 
-**Make Book** sets it in the background (Stop stops it); the PDF goes beside the text as "<name>.pdf" — never
-over a file that's there — with the text's tags, and **Open** shows it in Safe Finder's PDF viewer (where Optimize
+**Make Book** sets it in the background (Stop stops it); the PDF goes beside the text (or in the folder you chose) as
+"<name>.pdf" — never over a file that's there — with the text's tags, and **Open** shows it in Safe Finder's PDF viewer (where Optimize
 for iPhone works on it too). The first book downloads EB Garamond once. It needs ReportLab and pyphen (in
 `requirements.txt`): `Safe Finder.command` adds them to an existing setup and `build_safe_finder_app.sh` builds them
 into the app; if they're still missing, the window's main button is **Install ReportLab** instead of Make Book — it

@@ -6,9 +6,11 @@ several: a book of each), or File ▸ Make Book PDF….
 Every bookify option is here — title and author (found in the file when left empty: the window shows what it
 found), page size (5 × 8 … US Letter, and **iPhone**: pages the shape of the iPhone 17 Pro Max's screen, one per
 screen, no blank pages), text size, paper, the accent colour, hyphenation language, contents, drop caps, chapters on
-right-hand pages, equal margins, your own fonts — and remembered for next time. The book goes beside the text as
-"<name>.pdf" ("<name> (for iPhone).pdf" for the iPhone size; never over a file), carries the text's tags, and opens
-in Safe Finder's PDF viewer from here.
+right-hand pages, equal margins, your own fonts — and remembered for next time. **Save in**: beside the text (the
+default) or a folder you choose (remembered too, and always shown, so a book never lands somewhere unexpected; a
+folder that's gone — its drive unplugged — is said before anything is made). The book is "<name>.pdf" ("<name> (for
+iPhone).pdf" for the iPhone size; never over a file), carries the text's tags, and opens in Safe Finder's PDF viewer
+from here.
 
 bookify needs ReportLab (and pyphen for hyphenation; both in requirements.txt). When this copy of Safe Finder
 hasn't got them, the window's main button becomes **Install ReportLab** (never a dead Make Book): run from the
@@ -144,6 +146,7 @@ class BookWindow(QWidget):
         self.running = False
         self.books: list[str] = []
         self.fonts_dir = str(self.settings.value("book/fonts", "") or "")
+        self.dest = str(self.settings.value("book/dest", "") or "")      # "" = beside each text
         self.accent = str(self.settings.value("book/accent", DEFAULT_ACCENT) or DEFAULT_ACCENT)
         self.bridge = _Bridge()
         self.bridge.progress.connect(self._progress)
@@ -158,11 +161,9 @@ class BookWindow(QWidget):
         v.setSpacing(10)
         title = QLabel("Make Book PDF", objectName="SheetTitle")
         v.addWidget(title)
-        sub = QLabel((f"“{os.path.basename(self.sources[0])}” typeset like a printed book — a new PDF beside it."
-                      if one else f"Each of these {len(self.sources)} files typeset like a printed book — a PDF "
-                      "beside each."), objectName="SheetSub")
-        sub.setWordWrap(True)
-        v.addWidget(sub)
+        self.sub = QLabel("", objectName="SheetSub")
+        self.sub.setWordWrap(True)
+        v.addWidget(self.sub)
         self.found = QLabel("", objectName="SheetSub")
         self.found.setWordWrap(True)
         v.addWidget(self.found)
@@ -175,6 +176,19 @@ class BookWindow(QWidget):
         if one:
             form.addRow("Title", self.title_edit)
             form.addRow("Author", self.author_edit)
+        dest_row = QHBoxLayout()
+        self.dest_label = QLabel()
+        self.dest_label.setWordWrap(True)
+        dest_pick = QPushButton("Choose Folder…")
+        dest_pick.setToolTip("Save the book in another folder — on this Mac or a drive")
+        dest_pick.clicked.connect(self._pick_dest)
+        self.dest_reset = QPushButton("Beside the Text")
+        self.dest_reset.setToolTip("Save the book in the same folder as its text")
+        self.dest_reset.clicked.connect(lambda: self._set_dest(""))
+        dest_row.addWidget(self.dest_label, 1)
+        dest_row.addWidget(dest_pick)
+        dest_row.addWidget(self.dest_reset)
+        form.addRow("Save in", dest_row)
         self.size = self._combo(SIZES, "book/size", "6x9")
         self.size.currentIndexChanged.connect(self._size_changed)
         form.addRow("Page size", self.size)
@@ -265,6 +279,7 @@ class BookWindow(QWidget):
 
         self._set_accent(self.accent)
         self._set_fonts(self.fonts_dir)
+        self._set_dest(self.dest)
         self._size_changed()
         self.resize(600, max(560, v.totalHeightForWidth(600) + 40))
         if not self.sources:
@@ -331,6 +346,39 @@ class BookWindow(QWidget):
                                  else "EB Garamond — downloaded once, the first time")
         self.fonts_reset.setVisible(bool(folder))
 
+    def _set_dest(self, folder: str) -> None:
+        """Where the books go: `folder`, or "" — beside each text."""
+        self.dest = folder
+        one = len(self.sources) == 1
+        if folder:
+            where = f"“{os.path.basename(folder.rstrip(os.sep)) or folder}”"
+            gone = "" if os.path.isdir(folder) else " — not there now (is its drive connected?)"
+            self.dest_label.setText(where + gone)
+            self.dest_label.setToolTip(folder)
+            self.dest_label.setStyleSheet("font-weight: 600;" if gone else "")
+        else:
+            self.dest_label.setText("Beside the text" if one else "Beside each text")
+            self.dest_label.setToolTip(os.path.dirname(self.sources[0]) if one and self.sources else "")
+            self.dest_label.setStyleSheet("")
+        self.dest_reset.setVisible(bool(folder))
+        if not self.sources:
+            self.sub.setText("")
+        elif one:
+            self.sub.setText(f"“{os.path.basename(self.sources[0])}” typeset like a printed book — a new PDF "
+                             + (f"in {where}." if folder else "beside it."))
+        else:
+            self.sub.setText(f"Each of these {len(self.sources)} files typeset like a printed book — "
+                             + (f"their PDFs in {where}." if folder else "a PDF beside each."))
+
+    def _pick_dest(self) -> None:
+        start = self.dest if self.dest and os.path.isdir(self.dest) else \
+            (os.path.dirname(self.sources[0]) if self.sources else str(Path.home()))
+        d = QFileDialog.getExistingDirectory(self, "Save the book in", start)
+        if d:
+            # Picking the text's own folder is the same as "beside the text" (and stays so if the text moves).
+            same = len(self.sources) == 1 and os.path.normpath(d) == os.path.normpath(os.path.dirname(self.sources[0]))
+            self._set_dest("" if same else d)
+
     def _pick_fonts(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "A folder of fonts (a Regular and an Italic at least)",
                                              self.fonts_dir or str(Path.home()))
@@ -346,6 +394,7 @@ class BookWindow(QWidget):
         s.setValue("book/font_size", self.font_size.value())
         s.setValue("book/accent", self.accent)
         s.setValue("book/fonts", self.fonts_dir)
+        s.setValue("book/dest", self.dest)
         for c, key in ((self.toc, "toc"), (self.toc_labels, "toc_labels"), (self.dropcaps, "dropcaps"),
                        (self.recto, "recto"), (self.symmetric, "symmetric")):
             on = c.isChecked()
@@ -446,7 +495,13 @@ class BookWindow(QWidget):
     def start(self) -> None:
         if self.running or not self.sources:
             return
+        if self.dest and not os.path.isdir(self.dest):
+            self._notice(f"“{self.dest}” isn't there now — is its drive connected? Choose another folder, or save "
+                         "beside the text.")
+            self._set_dest(self.dest)
+            return
         self._remember()
+        self.status.setStyleSheet("")
         self.running = True
         self.stop.clear()
         self.go.setEnabled(False)
@@ -456,6 +511,7 @@ class BookWindow(QWidget):
         self.bar.setVisible(True)
         self.status.setText("Starting…")
         sources, opts, stop, bridge, place = list(self.sources), self.options(), self.stop, self.bridge, self.hooks.place
+        dest = self.dest
 
         def work() -> None:
             done: list[tuple[str, str, object]] = []
@@ -472,12 +528,15 @@ class BookWindow(QWidget):
                 try:
                     summary = bookify.make_book(src, tmpdir / name, progress=lambda t: _emit(bridge.progress, pre + t),
                                                 stop=stop, **opts)
-                    _emit(bridge.progress, pre + "Putting it beside the text…")
-                    dest = place(str(tmpdir / name), str(Path(src).parent), name) if place else \
-                        str(Path(src).with_name(name))
-                    if not place:
-                        os.replace(tmpdir / name, dest)
-                    done.append((src, str(dest), summary))
+                    folder = dest or str(Path(src).parent)
+                    _emit(bridge.progress, pre + (f"Putting it in “{os.path.basename(folder)}”…" if dest
+                                                  else "Putting it beside the text…"))
+                    if place:
+                        made = place(str(tmpdir / name), folder, name)
+                    else:
+                        made = str(Path(folder) / name)
+                        shutil.copyfile(tmpdir / name, made)
+                    done.append((src, str(made), summary))
                 except bookify.Stopped:
                     why = "stopped"
                     break
@@ -509,7 +568,9 @@ class BookWindow(QWidget):
         for _src, dest, s in done:
             size = "iPhone-screen pages" if s.size == "iphone" else dict(SIZES)[s.size].split(" — ")[0]
             chapters = f"{s.chapters} chapter{'s' if s.chapters != 1 else ''}" if s.chapters else "no chapters"
-            lines.append(f"Made “{os.path.basename(dest)}” — {s.pages} pages, {chapters}, {size}, "
+            where = "" if os.path.dirname(dest) == os.path.dirname(_src) else \
+                f" in “{os.path.basename(os.path.dirname(dest))}”"
+            lines.append(f"Made “{os.path.basename(dest)}”{where} — {s.pages} pages, {chapters}, {size}, "
                          f"{s.font_size:g} pt {s.font}.")
         if why == "stopped":
             lines.append("Stopped.")
