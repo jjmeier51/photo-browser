@@ -8,7 +8,8 @@
 # safe_finder_icon.png into the app icon; bundles the drive tools (relocate_folders.py, exfat_inspect.py,
 # spare_folders.py) into the app's Contents/Resources so the "make spare folders" command Safe Finder
 # shows works without the repo, plus airdrop_to_iphone.py and airdrop_helper.swift for "AirDrop to
-# iPhone…", thumb_helper.swift for video thumbnails and viewer_surface.swift for the viewer's
+# iPhone…", thumb_helper.swift for video thumbnails, geocode_helper.swift for the Location filter and
+# viewer_surface.swift for the viewer's
 # QuickTime-style video and HDR photos (all compiled on first use with Xcode's swiftc — the app is
 # signed without the hardened runtime, so it can load the viewer's library); adds the privacy strings macOS
 # shows when the app first opens Desktop,
@@ -66,6 +67,7 @@ rm -rf "dist/Safe Finder" "dist/Safe Finder.app"
   --add-data "$PWD/thumb_helper.swift:." \
   --add-data "$PWD/video_helper.swift:." \
   --add-data "$PWD/viewer_surface.swift:." \
+  --add-data "$PWD/geocode_helper.swift:." \
   --workpath build/pyinstaller --distpath dist --specpath build \
   safe_finder.py
 

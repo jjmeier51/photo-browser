@@ -18,8 +18,10 @@ different rate) goes into a fresh "<name> 2", so two exports never mix in one fo
 each into its own folder, one after another.
 
 Both are `video_helper.swift` (`frame`, `frames` — the iPhone's AVFoundation and Core Image code). Without it
-(no Xcode Command Line Tools) ffmpeg does them: the frame as PNG and the frames as JPEG, tone-mapped with
-`zscale`/`tonemap` when this ffmpeg has them (else as they come).
+(no Xcode Command Line Tools, or it didn't build) ffmpeg does them: the frame as PNG and the frames as JPEG —
+always standard range (a JPEG can't hold HDR), tone-mapped with `zscale`/`tonemap` when this ffmpeg has them.
+ffmpeg's tone mapping isn't Apple's, so its frames look different from the video in QuickTime: whatever made
+them with ffmpeg says so (`engine_note`), with why the helper isn't there.
 """
 from __future__ import annotations
 
@@ -149,6 +151,15 @@ TONEMAP = ("zscale=t=linear:npl=203,format=gbrpf32le,zscale=p=bt709,tonemap=tone
 
 def _ffmpeg_filters(video: str, standard_range: bool) -> list[str]:
     return [TONEMAP] if standard_range and _is_hdr(video) and _has_zscale() else []
+
+
+def engine_note() -> str:
+    """"" when the Mac's own frame tools (the helper) make the frames; otherwise a note that ffmpeg did, and why."""
+    if video_tools.helper():
+        return ""
+    if not video_tools.ffmpeg():
+        return ""
+    return f"made with ffmpeg, not the Mac's own tools — {video_tools.problem or 'the video helper is missing'}"
 
 
 # ----------------------------------------------------------------------------- Save Frame
@@ -294,7 +305,8 @@ def _ffmpeg_frames(video: str, folder: Path, name: str, fps: float, standard_ran
     native = float(info.get("fps") or 30)
     rate = fps or native
     total = max(1, int(round(duration * rate))) if duration else 0
-    filters = [*(["fps=" + f"{fps:.4f}"] if fps else []), *_ffmpeg_filters(video, standard_range),
+    # Standard range whatever was chosen: these are JPEGs, and an HDR picture written as one unmapped comes out flat.
+    filters = [*(["fps=" + f"{fps:.4f}"] if fps else []), *_ffmpeg_filters(video, True),
                "scale=iw*1.5:ih*1.5:flags=lanczos"]
     seek = ["-ss", f"{start / rate:.4f}"] if start and rate else []
     cmd = [ff, "-y", "-v", "error", *seek, "-i", video, "-vf", ",".join(filters), "-q:v", "2",
@@ -484,6 +496,8 @@ def FramesWindow(videos: list[str], parent=None, on_done: Callable[[list[str]], 
             if folder:
                 self.folders.append(folder)
             text = (f"{count:,} frames in “{os.path.basename(folder)}”" if count else f"didn't export — {why}")
+            if count and (made_with := engine_note()):
+                text += f" ({made_with})"
             if len(self.videos) > 1:
                 self.list.item(i).setText(f"{os.path.basename(self.videos[i])} — {text}")
             else:

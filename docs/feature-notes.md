@@ -1432,6 +1432,59 @@ in each entry point — it traps rather than race if that's ever broken).
   checked offscreen with a stand-in surface (full-height sizing, zoom/pan/clamp, controls, end, the fallbacks,
   the HDR swap-in, teardown).
 
+**Save Frame / Export All Frames and HDR (Nov 4, 2026).** Asked whether the Qt/FFmpeg problem also made the
+frames look different: no — both run in `video_helper.swift` (AVFoundation + Core Image, the iPhone's code), and
+only the ffmpeg *fallback* tone-maps the FFmpeg way. What was actually wrong, Mac-side:
+- **Save Frame could tone-map twice.** `isHDRSpace` also called any colour space whose *name* mentions 2020 HDR.
+  `AVAssetImageGenerator` already hands back an HDR video's frame in standard range; tagged BT.2020, it went
+  through `CIToneMapHeadroom` (4.93 → 1) again — darker and duller than the video. Now HDR means an HLG/PQ curve
+  or extended range only (`CGColorSpaceUsesITUR_2100TF` / `UsesExtendedRange`), which is exactly the iPhone's
+  `standardRangePNG` check. (The iPhone's `encodeFrame` still has the 2020 name test; its input is the reader's
+  HLG/PQ buffer, so it doesn't misfire there.) An HDR frame that can't be written 10-bit is tone-mapped before
+  the 8-bit encode instead of clipped.
+- **The viewer showed HDR HEIC frames flattened** (Qt reads standard range only). The native HDR path needs
+  `media_info.image_hdr` to say HDR; it only knew `nclx` boxes and gain maps, so frames whose HLG/PQ curve is in
+  an **ICC profile's `cicp` tag** (or a PNG's `cICP` chunk) were missed. Both are recognised now.
+- **The ffmpeg fallback was silent and its "HDR" choice unmapped.** If `video_helper.swift` doesn't build (an
+  older SDK lacks `CIToneMapHeadroom`, say) everything falls to ffmpeg — Hable tone mapping, a different look —
+  with no sign. Now a failed build leaves `video_helper.log` (`video_tools.problem` says why), the frames
+  window and the viewer's Save Frame note "made with ffmpeg, not the Mac's own tools — <why>"
+  (`frame_export.engine_note`, through `Hooks.extra["frame_note"]`), and ffmpeg frames are always tone-mapped:
+  they're JPEGs, and an HLG picture written into one unmapped comes out flat.
+- **Not fixed, by design:** a still frame keeps none of the Dolby Vision metadata the player tone-maps an
+  iPhone video with, so it can't match QuickTime exactly; standard-range frames are standard range; HDR frames
+  keep the iPhone screenshots' look (headroom 3, −0.15 EV — `FileActions.hdrFrameHeadroom`, §6g).
+
+## 6u. Safe Finder Type, Format and Location filters — `mac/places.py`, `Pane._filter_menu` (Nov 4, 2026)
+
+The iPhone's `TypeFilter`, `FormatFilter` and Location filter, in the funnel menu beside the size filter (now
+four submenus titled with their values; **Show Everything** clears them). `PaneModel.filterAcceptsRow` applies
+them to the listed folder's own rows or to every results row, like the size filter. Same rules as the iPhone:
+Type/Format show **files only** (a screenshot is a PNG or a name with "screenshot"); Location keeps folders;
+a file whose place isn't known yet is hidden while a Location is chosen. Type, Format and Size persist across
+navigation (as Size did); Location is cleared on leaving the listing (`_leave_places`) since its options are the
+listing's.
+
+**Places** (`places.py`) copy the iPhone's two-layer index (`MetadataLoader.PlaceIndex`): file key → ~1 km bin
+("%.2f|%.2f", the iPhone's `binString`), bin → label ("Hauppauge, NY") and search text. **Keys are the
+iPhone's** — `<path inside the volume>|<int mtime>|<size>` (its `stableCacheID` is volume-relative) — so the
+drive's `.Photo Browser Metadata/places.json`, which every iPhone metadata backup writes, is read as it is
+(read-only; nearest metadata folder up to the volume, reloaded when its mtime changes; an NFC/NFD retry for
+accented names). Safe Finder's own finds go to `~/Library/Application Support/Safe Finder/places.json` (same
+shape, atomic writes on the Mac's disk). Lookups (`label`) never read the disk — they run in `filterAcceptsRow`.
+**Opening the Location submenu** starts a `PlacePass` (worker thread, `Places.locate`): GPS for unknown files
+(8 at a time; photos' EXIF via `media_info.image_info`, videos' place now read by `media_info` from QuickTime
+`keys`/`ilst` `com.apple.quicktime.location.ISO6709` — plain `moov/meta` or full-box `udta/meta` — `©xyz`, or
+3GPP `loci`), then names for unnamed bins, at most `NAME_LIMIT` = 60 a pass, through `geocode_helper.swift` — its own
+helper, so a geocoder that won't compile can't take Save Frame and Export All Frames down with it — (CLGeocoder, the iPhone's `shortLabel`/`searchText`, 1.2 s apart, 4 s timeout; "none" = unnameable, recorded as
+""; errors left for next time). The helper **awaits** the async API: in an async `main` the main queue
+is served by the run loop only while the main task is suspended, so blocking and pumping the run loop could
+starve CLGeocoder's main-queue reply. The menu fills in live while open; it's re-run when the listing's file
+count changes, or if places are still unknown 30 s after the last pass. Over 8,000 files → "open a subfolder"
+(the iPhone's cap). Tested offscreen with a real pane (temp "drive", fake geocoder): type/format/location
+results, the iPhone's names used without asking, keys, persistence across navigation. CLGeocoder itself (and
+the Swift) couldn't be run in the Linux sandbox.
+
 ## 6q. Safe Finder Find Duplicates — `mac/duplicates.py`, `mac/duplicates_window.py` (Nov 3, 2026)
 
 A port of §2 (same three kinds, kept apart, same threshold 6, same normalized names, same Oldest/Newest from

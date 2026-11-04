@@ -145,11 +145,15 @@ func upscale(_ url: URL, to dest: URL, short targetShort: CGFloat) async -> Stri
 
 let ciContext = CIContext()
 
+/// HDR is an HLG / PQ curve or extended range. Not BT.2020 primaries on their own: AVAssetImageGenerator hands
+/// an HDR video's frame back already tone-mapped to standard range, and if that comes tagged BT.2020 a
+/// name check took it for HDR and tone-mapped it a second time — a darker, duller screenshot than the video.
+/// (The iPhone's press-and-hold screenshot checks exactly this, `FileActions.standardRangePNG`.)
 func isHDRSpace(_ cs: CGColorSpace?) -> Bool {
     guard let cs else { return false }
     if CGColorSpaceUsesITUR_2100TF(cs) || CGColorSpaceUsesExtendedRange(cs) { return true }
     let name = (cs.name as String?) ?? ""
-    return name.contains("2100") || name.contains("2020") || name.contains("HLG") || name.contains("PQ")
+    return name.contains("2100") || name.contains("HLG") || name.contains("PQ")
 }
 
 /// HDR → standard range, the press-and-hold screenshot's mapping (macOS 15+: from HLG's 4.93 headroom down
@@ -251,8 +255,9 @@ func encodeFrame(_ pb: CVPixelBuffer, transform: CGAffineTransform, props: [Stri
     if hdr, #available(macOS 12.0, *), let d = try? ciContext.heif10Representation(of: softened(ci), colorSpace: cs, options: [:]) {
         return d
     }
+    // 8-bit: an HDR frame that couldn't be written as 10-bit is tone-mapped first, not clipped.
     let p3 = CGColorSpace(name: CGColorSpace.displayP3) ?? cs
-    return ciContext.heifRepresentation(of: ci, format: .RGBA8, colorSpace: p3, options: [:])
+    return ciContext.heifRepresentation(of: hdr ? standardRange(ci) : ci, format: .RGBA8, colorSpace: p3, options: [:])
 }
 
 final class FrameCounter: @unchecked Sendable {

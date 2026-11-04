@@ -1185,7 +1185,7 @@ class MediaViewer(QWidget):
     viewer opens over it, on its display, as tall as that display."""
     closed = Signal()
     removed = Signal(list)                 # paths moved to the Trash from here
-    _frame_saved = Signal(str)             # a saved frame's file ("" when it failed), from a worker thread
+    _frame_saved = Signal(str, str)        # a saved frame's file ("" when it failed) and a note, from a worker thread
     _hdr_read = Signal(str, bool)          # a photo's HDR check, from a worker thread
 
     def __init__(self, paths: list[str], start: int = 0, hooks: Hooks | None = None, poster=None, parent=None,
@@ -1272,9 +1272,9 @@ class MediaViewer(QWidget):
         self._slide = QTimer(self)
         self._slide.setSingleShot(True)
         self._slide.timeout.connect(self._slide_next)
-        self._frame_saved.connect(lambda out: self.say(
-            f"Saved “{os.path.basename(out)}” in “{os.path.basename(os.path.dirname(out))}”." if out
-            else "Couldn't save the frame."))
+        self._frame_saved.connect(lambda out, note: self.say(
+            (f"Saved “{os.path.basename(out)}” in “{os.path.basename(os.path.dirname(out))}”" +
+             (f" — {note}." if note else ".")) if out else "Couldn't save the frame."))
         self._hdr_read.connect(self._hdr_ready)
         self._shortcuts()
         self.resize(self._room(available_geometry(self), TITLE_BAR))   # until the first item says its shape
@@ -1948,11 +1948,18 @@ class MediaViewer(QWidget):
         self.say("Saving the frame…")
 
         sig = self._frame_saved
+        noted = self.hooks.extra.get("frame_note")         # e.g. "made with ffmpeg …" (frame_export.engine_note)
 
         def work() -> None:
             out = self.hooks.save_frame(path, at)
+            note = ""
+            if out and noted is not None:
+                try:
+                    note = noted() or ""
+                except Exception:  # noqa: BLE001 — a note is a nicety
+                    note = ""
             try:
-                sig.emit(out or "")
+                sig.emit(out or "", note)
             except RuntimeError:                         # the viewer was closed meanwhile
                 pass
         threading.Thread(target=work, daemon=True).start()

@@ -162,6 +162,9 @@ actions the app makes no network calls.
   capture date (set / shift / from name / from file date / to file dates), location, caption, title, keywords,
   creator, copyright, rating, camera, any ExifTool tag, strip — for many photos and videos or whole folders, written
   with ExifTool in place in the tags the iPhone reads (the downloaders' tags) — §6s.
+  Safe Finder's **funnel** holds the iPhone's **Type / Format / Location** filters beside Size (`Pane._filter_menu`;
+  Location via `mac/places.py`, keyed like the iPhone so the drive's `.Photo Browser Metadata/places.json` names
+  photos without asking again; new places through `mac/geocode_helper.swift`, CLGeocoder) — §6u.
   Safe Finder opens as **one window**; **Split View** (header button, View ▸ Split View ⌘\\, remembered; `--to`
   forces it) adds the To pane and the Move/Copy bar for transfers (`MainWindow.set_split` — §6r).
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,

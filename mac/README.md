@@ -382,9 +382,19 @@ eased) — and the choice is remembered. Several videos go one after another, ea
 **Stop** keeps what's done; exporting the same video at the same rate and colour again carries on where it
 stopped. A finished export, or one at another rate, is left alone: the next goes into "<video> Frames 2".
 
-Both use `video_helper.swift` (the iPhone's AVFoundation and Core Image code: frames, tone mapping, HEIC).
-Without Xcode's Command Line Tools ffmpeg does them instead — JPEG frames, tone-mapped when that ffmpeg has
-`zscale`.
+Both use `video_helper.swift` (the iPhone's AVFoundation and Core Image code: frames, tone mapping, HEIC) —
+not Qt, so the viewer's old HDR problem never touched them. Why a frame still won't look exactly like the
+video in QuickTime: an iPhone video carries Dolby Vision information that the player uses to show it, and a
+still frame keeps none of it; a standard-range frame is, on purpose, standard range (HDR highlights brought
+down, not clipped); and an HDR frame gets the iPhone screenshots' look (highlights eased, a light trim). Two
+things that were wrong are fixed: Save Frame could tone-map a frame that AVFoundation had already brought to
+standard range a second time (a darker, duller screenshot), and an HDR frame saved as HEIC is now recognised as
+HDR by the viewer (so it's shown in HDR rather than flattened).
+
+Without the helper — no Xcode Command Line Tools, or it didn't build (the compiler's message is then in
+`~/Library/Caches/PhotoBrowser/video_helper.log`) — ffmpeg does them instead: JPEG frames, always standard
+range, tone-mapped with ffmpeg's own curve when that ffmpeg has `zscale`. Those look different from
+QuickTime, so the result says "made with ffmpeg, not the Mac's own tools" and why.
 
 ### Find Duplicates (`duplicates_window.py`, `duplicates.py`)
 
@@ -411,17 +421,31 @@ clicks; check the ticks, then Move to Trash. **Include subfolders** looks throug
 folder (each tile then says which folder it's in), and **Leave out “Frame” files** skips video-frame
 screenshots; both are remembered. The photos' fingerprints are kept, so Rescan is quick.
 
-### Sizes, a size filter, empty folders, and the Trash
+### Sizes, filters, empty folders, and the Trash
 
 - **Folder sizes.** Each pane adds up what its folders hold, in the background, and shows it in the
   list view's Size column (and the folder's tooltip); "Calculate Folder Sizes" in the Sort menu turns
   it off. Sort by Size orders folders by what they hold. The status line shows the selection's size;
   the Move/Copy summary counts folders by it too.
-- **Size filter.** The funnel button next to Sort narrows the listing (or search results) to Empty
-  (0 KB), under 1 MB, or 1 MB / 10 MB / 100 MB / 1 GB and up — folders by their calculated size (one
-  not calculated yet still shows, except under "Empty"). The status line says how many are shown.
-  In a search, `size:>100mb`, `size:<1gb` or `size:0` does the same for files (`size:>1gb` alone
-  finds the big ones).
+- **Filters — the iPhone app's Type, Format and Location, and Size.** The funnel button next to Sort
+  opens four submenus, each titled with what it's set to; they combine, apply to the listing or to search
+  results and collections, and the status line says how many are shown and by what ("12 items (4 shown —
+  photos · HEIF · Hauppauge, NY)"). **Show Everything** clears them. Type, Format and Size stay as you go
+  from folder to folder; a Location is the folder's own and is cleared when you leave it.
+  - **Type**: Photos, Videos or Screenshots (a PNG, or a photo with "screenshot" in its name) — as on the
+    iPhone. **Format**: JPEG, PNG, HEIF, RAW, GIF, MOV, MP4 or AVI. Either one shows files only.
+  - **Location**: opening it reads where the folder's photos and videos were taken, in the background, and
+    lists each place with how many are from it ("Hauppauge, NY (3)", "Paris, France (1)") — most first, **No
+    Location** last; folders stay listed. It uses the iPhone app's own place names wherever it can: the
+    drive's `.Photo Browser Metadata/places.json` (written with every metadata backup on the iPhone) already
+    knows the photos it has seen, so they're never looked up again. For the rest it reads the GPS from the
+    files (photos' EXIF, videos' QuickTime location) and names new places through Apple's geocoder, as the
+    iPhone does — only the coordinates are sent, one place every 1.2 s, at most 60 a time (open it again to
+    name more). What it learns is kept in `~/Library/Application Support/Safe Finder/places.json`. A folder
+    with over 8,000 files asks you to open a subfolder, like the iPhone.
+  - **Size**: Empty (0 KB), under 1 MB, or 1 MB / 10 MB / 100 MB / 1 GB and up — folders by their
+    calculated size (one not calculated yet still shows, except under "Empty"). In a search, `size:>100mb`,
+    `size:<1gb` or `size:0` does the same for files (`size:>1gb` alone finds the big ones).
 - **Empty Folders** in the sidebar: every folder under Documents, Pictures, Movies and Downloads with
   nothing in it (0 KB — dot files like .DS_Store don't count; a folder holding only empty folders is
   listed once, as itself). Click one to see it in its folder, selected; click "All Empty Folders"
