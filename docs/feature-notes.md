@@ -1530,6 +1530,33 @@ abstract and a figure across them, a scan, a coloured slide) and a real-text two
 pictures; the viewer driven offscreen (open, paging, zoom, search, thumbnails, both Optimizes, Back to Original,
 AirDrop hook); a pane's double-click → viewer → placed file + tags. The Swift composer couldn't be compiled here.
 
+## 6w. Safe Finder Make Book PDF — `mac/bookify.py`, `mac/book_window.py` (Nov 4, 2026)
+
+`bookify.py` is the person's own script (ReportLab book typesetting), brought in as it was and kept a working CLI;
+the changes are only what a UI needs: `main()` split into **`make_book(src, out, **options, progress, stop)`**
+(returns a summary; raises instead of `sys.exit`), `detect_title` and `preview` (title/author/chapter count without
+typesetting, for the window), a ReportLab-less import **raises ImportError** instead of exiting (only `__main__`
+exits), `locate_fonts(note=)` for the download message, progress through ReportLab's
+`setProgressCallBack` ("PAGE" events), and **Stop by raising `Stopped` from that callback** (ReportLab has no other
+way in). Checked: the refactored CLI's text output is identical to the original's (`pdftotext` compare).
+
+**iPhone size** (`--size iphone`, `SCREEN_SIZES`): 4 × 8.69 in (the 17 Pro Max's 1320:2868), 10 pt from bookify's
+own size formula (≈ 15 pt on the phone, which fits the page width to the screen), equal 7.5 % side margins, 7/8 %
+top/bottom, **no recto starts at all** (the first chapter and the contents forced a right-hand page → blank pages
+on a phone) and **no spine shadow** in the paper texture (`make_paper(gutter_shadow=False)`).
+
+**Window** (`BookWindow`): every CLI option, remembered in QSettings (`book/*`); the iPhone size shows Equal margins
+ticked and Right-hand pages unticked, both greyed, and gives the person's own back on another size (`_own`, also
+what's saved). One worker thread per run, files one after another, each typeset into a temp folder then
+`simpcity.place`d beside its text ("<stem>.pdf" / "<stem> (for iPhone).pdf", never over a file); tags carried
+(`TagStore.carry`); Open → `Pane.view_pdf`. bookify is imported through a plain `import` in `_bookify()` (so
+PyInstaller takes it in — `importlib.import_module` would hide it); `--collect-all reportlab --collect-data pyphen`
+in the app build. **Dependencies**: `reportlab>=4.0`, `pyphen>=0.14` added to `requirements.txt`; `Safe
+Finder.command` installs them into an existing `.venv` quietly and non-fatally (Safe Finder must still open
+offline); if missing at use, the window offers `pip install` into its own interpreter (not in the frozen app).
+Tested offscreen through a pane: preview, an iPhone book, two files at 5 × 8, Stop mid-book (no file left), the
+install path, Open in the PDF viewer.
+
 ## 6q. Safe Finder Find Duplicates — `mac/duplicates.py`, `mac/duplicates_window.py` (Nov 3, 2026)
 
 A port of §2 (same three kinds, kept apart, same threshold 6, same normalized names, same Oldest/Newest from

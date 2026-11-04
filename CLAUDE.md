@@ -169,6 +169,8 @@ actions the app makes no network calls.
   "<name> (for iPhone).pdf": iPhone 17 Pro Max-shaped pages, margins trimmed, two-column pages read a column at a time,
   cut only between lines) and **Optimize for Safe Finder** (trimmed pages, blanks dropped) — `mac/pdf_optimize.py`
   plans, `mac/pdf_helper.swift` draws vectors (Qt pictures as fallback) — §6v.
+  Safe Finder's **Make Book PDF** (right-click a .txt/.md/.rtf, or File menu; `mac/book_window.py` → the person's
+  `mac/bookify.py`, ReportLab): the text typeset like a printed book beside it, incl. an iPhone-screen page size — §6w.
   Safe Finder opens as **one window**; **Split View** (header button, View ▸ Split View ⌘\\, remembered; `--to`
   forces it) adds the To pane and the Move/Copy bar for transfers (`MainWindow.set_split` — §6r).
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,
