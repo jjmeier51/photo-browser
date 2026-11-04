@@ -403,6 +403,32 @@ searchable and selectable — and the file stays small. Without it (or if it won
 `~/Library/Caches/PhotoBrowser/pdf_helper.log`) Qt draws the same layout from pictures of the pages at the iPhone's
 3 pixels a point: sharp on the phone, but the text can't be searched or selected, and the viewer says so.
 
+### Make Book PDF — a text file typeset like a printed book (`book_window.py`, `bookify.py`)
+
+Right-click a **.txt, .md or .rtf** file ▸ **Make Book PDF…** (several selected: a book of each), or File ▸ Make
+Book PDF…. It's `bookify.py` with a window: the text becomes a PDF that looks and reads like a printed book —
+EB Garamond, justified and hyphenated, a title page, a contents page, chapters opening part-way down the page with a
+drop cap and small-caps lead-in, running heads and page numbers, mirrored margins, smart quotes and dashes, scene
+breaks, and cream paper with a light texture. It finds the title, author and chapters in the file ("Title:" /
+"Author:" lines, "Chapter 1", "CHAPTER IV. The Storm", "Prologue", "# Heading", Project Gutenberg headers, RTF italics
+and bold — see the top of `bookify.py`), and the window shows what it found before you start.
+
+- **Title / Author** — leave empty to use what was found, or type your own.
+- **Page size** — 6 × 9 in (a trade paperback), 5.5 × 8.5, 5 × 8, A5, US Letter, or **iPhone 17 Pro Max**: pages
+  the shape of its screen, so one page fills it; 10-point type that reads at about 15 on the phone, equal narrow
+  margins, no blank pages, saved as "<name> (for iPhone).pdf" — AirDrop it, or open it from the drive in Photo
+  Browser.
+- **Text size** (automatic suits the page), **Paper** (textured cream, flat cream, white for printing),
+  **Hyphenation** language, the **drop caps and ornaments** colour, **your own fonts** (a folder with at least a
+  Regular and an Italic), and Contents page, "Chapter One: Title" in the contents, drop caps, chapters on right-hand
+  pages, equal margins. Your choices are remembered.
+
+**Make Book** sets it in the background (Stop stops it); the PDF goes beside the text as "<name>.pdf" — never
+over a file that's there — with the text's tags, and **Open** shows it in Safe Finder's PDF viewer (where Optimize
+for iPhone works on it too). The first book downloads EB Garamond once. It needs ReportLab and pyphen (in
+`requirements.txt`; `Safe Finder.command` adds them to an existing setup, and if they're still missing the window
+offers **Install ReportLab**). `bookify.py` still works on its own: `python3 bookify.py story.txt --size iphone`.
+
 ### Export All Frames and Save Frame (`frame_export.py`)
 
 Right-click a video ▸ **Export All Frames…** (or several videos ▸ **Export All Frames of N Videos…**, or

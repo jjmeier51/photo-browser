@@ -59,6 +59,8 @@ rm -rf "dist/Safe Finder" "dist/Safe Finder.app"
   --osx-bundle-identifier com.photobrowser.safefinder \
   --collect-all pywidevine \
   --collect-all yt_dlp \
+  --collect-all reportlab \
+  --collect-data pyphen \
   --add-data "$PWD/relocate_folders.py:." \
   --add-data "$PWD/exfat_inspect.py:." \
   --add-data "$PWD/spare_folders.py:." \

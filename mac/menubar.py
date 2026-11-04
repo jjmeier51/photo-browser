@@ -73,6 +73,10 @@ def install(win, sf) -> None:
     def videos() -> list[str]:
         return [p for p in sel() if sf.kind_of(p) == "video"]
 
+    def texts() -> list[str]:
+        return [p for p in sel() if os.path.splitext(p)[1].lower() in (".txt", ".text", ".md", ".markdown", ".rtf")
+                and not os.path.isdir(p)]
+
     def each(menu_title: str):
         m = bar.addMenu(menu_title)
         m.aboutToShow.connect(lambda m=m: refresh(m))
@@ -93,6 +97,8 @@ def install(win, sf) -> None:
     act(f, "Move to the Other Side", lambda: win.transfer_selection(True), "Ctrl+Shift+M",
         lambda: not win.split or win.move_btn.isEnabled())
     act(f, "AirDrop to iPhone…", lambda: pane().airdrop(sel()), None, lambda: bool(sel()) and sf.IS_MAC)
+    act(f, "Make Book PDF…", lambda: pane().make_book(texts()), None, lambda: bool(texts()),
+        "The selected .txt / .md / .rtf typeset like a printed book (bookify) — a PDF beside it")
     f.addSeparator()
     act(f, "Move to Trash", lambda: pane().delete_selection(), "Ctrl+Backspace", lambda: bool(sel()))
 

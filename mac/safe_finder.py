@@ -4332,6 +4332,30 @@ class Pane(QWidget):
         viewer.raise_()
         viewer.activateWindow()
 
+    def make_book(self, paths: list[str]) -> None:
+        """Make Book PDF… (book_window.py → bookify.py): each text file typeset like a printed book, the PDF put
+        beside it the drive-safe way with its tags, opened in the PDF viewer from there."""
+        import book_window
+        import simpcity
+
+        def carry(pairs: list[tuple[str, str]]) -> None:
+            try:
+                tag_store().carry(pairs)
+                tags_changed()
+            except OSError:
+                pass
+
+        hooks = book_window.BookHooks(
+            place=lambda tmp, folder, name: str(simpcity.place(tmp, folder, name)), carry_tags=carry,
+            reveal=self._reveal_from_viewer,
+            open_pdf=lambda p: self.view_pdf(p) if self._pdf_viewer_ok(p) else
+            QDesktopServices.openUrl(QUrl.fromLocalFile(p)),
+            made=lambda _paths: self.refresh_results())
+        win = book_window.BookWindow(paths, hooks, self.window())
+        _VIEWERS.append(win)
+        win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
+        win.show()
+
     @staticmethod
     def _pdf_viewer_ok(path: str) -> bool:
         if not path.lower().endswith(".pdf"):
@@ -4680,6 +4704,11 @@ class Pane(QWidget):
                     menu.addAction("Remove Objects…", lambda: self.remove_objects(photos[0]))
                 if len(photos) == 1:
                     menu.addAction("Edit with AI…", lambda: self.ai_edit(photos[0]))
+            texts = [p for p in paths if os.path.splitext(p)[1].lower() in (".txt", ".text", ".md", ".markdown", ".rtf")
+                     and not os.path.isdir(p)]
+            if texts:
+                menu.addAction("Make Book PDF…" if len(texts) == 1 else f"Make Book PDFs of {len(texts)} Files…",
+                               lambda: self.make_book(texts))
             menu.addAction("Move to Trash", self.delete_selection).setShortcut(QKeySequence("Ctrl+Backspace"))
             menu.addSeparator()
         if self.location == VIDEOS:
