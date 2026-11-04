@@ -118,10 +118,49 @@ def _read_video(path: str) -> dict:
                 if track:
                     out.update(track)
             elif kind == "meta":
-                when = _quicktime_date(f, a, b)
-                if when:
-                    out["created"] = when
+                _read_meta(f, a, b, out)
+            elif kind == "udta":
+                _read_udta(f, a, b, out)
     return out
+
+
+def _read_meta(f, a: int, b: int, out: dict) -> None:
+    """A `meta` box's creation date (wins over mvhd's) and place. QuickTime's (`moov/meta`, the iPhone's) is a
+    plain box; the ISO one (`udta/meta`) starts with 4 bytes of version and flags — told apart by where `hdlr` is."""
+    f.seek(a)
+    head = f.read(12)
+    start = a + 4 if head[8:12] == b"hdlr" and head[4:8] != b"hdlr" else a
+    items = _quicktime_items(f, start, b, (CREATION_KEY, LOCATION_KEY))
+    when = _parse_iso(items[CREATION_KEY]) if CREATION_KEY in items else None
+    if when:
+        out["created"] = when
+    place = parse_iso6709(items.get(LOCATION_KEY, ""))
+    if place:
+        out["place"] = place
+
+
+def _read_udta(f, a: int, b: int, out: dict) -> None:
+    """`udta`: a `meta` inside it, or the older location atoms — `©xyz` (ISO 6709 text, most cameras and Android
+    phones) and 3GPP's `loci` (fixed-point degrees)."""
+    for kind, ia, ib in _boxes(f, a, b):
+        if kind == "meta":
+            _read_meta(f, ia, ib, out)
+        elif "place" in out:
+            continue
+        elif kind == "\xa9xyz" and ib - ia > 4:          # text length (2), language (2), text
+            f.seek(ia + 4)
+            place = parse_iso6709(f.read(min(ib - ia - 4, 200)).decode("latin-1", "replace"))
+            if place:
+                out["place"] = place
+        elif kind == "loci" and ib - ia > 20:             # version/flags, language, name\0, role, lng, lat (16.16)
+            f.seek(ia + 6)
+            body = f.read(min(ib - ia - 6, 600))
+            end = body.find(b"\0")
+            if end >= 0 and end + 9 <= len(body):
+                lng, lat = struct.unpack(">ii", body[end + 2:end + 10])
+                lat, lng = lat / 65536, lng / 65536
+                if -90 <= lat <= 90 and -180 <= lng <= 180 and not (lat == 0 and lng == 0):
+                    out["place"] = (lat, lng)
 
 
 def _read_track(f, a: int, b: int) -> dict:
@@ -219,33 +258,46 @@ def _frame_rate(f, a: int, b: int) -> float | None:
     return round(frames / (length / scale), 3)
 
 
-def _quicktime_date(f, a: int, b: int) -> float | None:
-    """`com.apple.quicktime.creationdate` from a QuickTime `meta` box (keys + ilst), with its time zone."""
+CREATION_KEY = "com.apple.quicktime.creationdate"
+LOCATION_KEY = "com.apple.quicktime.location.ISO6709"
+
+
+def _quicktime_items(f, a: int, b: int, wanted: tuple[str, ...]) -> dict[str, str]:
+    """The `wanted` text items of a QuickTime `meta` box (keys + ilst) — the creation date with its time zone,
+    the place as ISO 6709."""
     keys_box = _find(f, a, b, "keys")
     ilst = _find(f, a, b, "ilst")
     if not keys_box or not ilst:
-        return None
+        return {}
     f.seek(keys_box[0] + 4)
     count = struct.unpack(">I", f.read(4))[0]
     names = []
     for _ in range(min(count, 200)):
         n, _ns = struct.unpack(">I4s", f.read(8))
         names.append(f.read(max(0, n - 8)).decode("utf-8", "replace"))
-    try:
-        want = names.index("com.apple.quicktime.creationdate") + 1
-    except ValueError:
-        return None
+    index = {i + 1: name for i, name in enumerate(names) if name in wanted}
+    out: dict[str, str] = {}
     for kind, ia, ib in _boxes(f, *ilst):
-        idx = struct.unpack(">I", kind.encode("latin-1"))[0]
-        if idx != want:
+        name = index.get(struct.unpack(">I", kind.encode("latin-1"))[0])
+        if name is None:
             continue
         data = _find(f, ia, ib, "data")
-        if not data:
-            return None
-        f.seek(data[0] + 8)
-        text = f.read(max(0, data[1] - data[0] - 8)).decode("utf-8", "replace").strip()
-        return _parse_iso(text)
-    return None
+        if data:
+            f.seek(data[0] + 8)
+            out[name] = f.read(max(0, min(data[1] - data[0] - 8, 4096))).decode("utf-8", "replace").strip()
+    return out
+
+
+def parse_iso6709(text: str) -> tuple[float, float] | None:
+    """"+40.7969-073.2079+032.618/" → (40.7969, -73.2079); None for no place (or 0, 0, or out of range)."""
+    import re
+    m = re.match(r"\s*([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)", text or "")
+    if not m:
+        return None
+    lat, lng = float(m.group(1)), float(m.group(2))
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180) or (lat == 0 and lng == 0):
+        return None
+    return lat, lng
 
 
 def _parse_iso(text: str) -> float | None:
@@ -261,7 +313,8 @@ def _parse_iso(text: str) -> float | None:
 
 
 def video_info(path: str) -> dict:
-    """{duration (s), width, height (as shown), rotation, fps, created (unix)} — whatever the file says; {}
+    """{duration (s), width, height (as shown), rotation, fps, created (unix), place (lat, lng)} — whatever the
+    file says; {}
     for a file that isn't an MP4/MOV or can't be read."""
     if os.path.splitext(path)[1].lower() not in VIDEO_EXTS:
         return {}
@@ -354,7 +407,9 @@ def _read_image(path: str) -> dict:
 
 def image_hdr(path: str) -> bool:
     """Whether a photo is HDR: an HDR gain map (the iPhone's, the ISO one, or an Ultra HDR JPEG's) or an HLG / PQ
-    colour profile — looked for in the file's first megabyte, where the metadata is."""
+    curve — looked for in the file's first megabyte, where the metadata is. The curve can be declared three ways:
+    a HEIF/AVIF `colr` box of type `nclx`, an ICC profile's `cicp` tag (how a 10-bit HLG frame from Save Frame
+    on the iPhone or Export All Frames may carry it), or a PNG's `cICP` chunk."""
     try:
         with open(path, "rb") as f:
             head = f.read(1 << 20)
@@ -363,13 +418,20 @@ def image_hdr(path: str) -> bool:
     if (b"urn:com:apple:photo:2020:aux:hdrgainmap" in head or b"urn:iso:std:iso:ts:21496:-1" in head
             or b"hdrgm:Version" in head or b"hdrgm:GainMapMax" in head):
         return True
-    at = head.find(b"nclx")
+    hdr_curves = (16, 18)                          # PQ (HDR10, Dolby Vision) / HLG
+    at = head.find(b"nclx")                        # nclx: primaries (2 bytes), transfer (2), matrix (2), range
     while at >= 0:
-        if at + 8 <= len(head):
-            transfer = struct.unpack(">H", head[at + 6:at + 8])[0]
-            if transfer in (16, 18):
-                return True
+        if at + 8 <= len(head) and struct.unpack(">H", head[at + 6:at + 8])[0] in hdr_curves:
+            return True
         at = head.find(b"nclx", at + 4)
+    at = head.find(b"cicp")                        # ICC cicpType: 'cicp', 4 zero bytes, primaries, transfer, …
+    while at >= 0:
+        if at + 10 <= len(head) and head[at + 4:at + 8] == b"\0\0\0\0" and head[at + 9] in hdr_curves:
+            return True
+        at = head.find(b"cicp", at + 4)
+    at = head.find(b"cICP")                        # PNG: primaries, transfer, matrix, full range
+    if at >= 0 and at + 6 <= len(head) and head[at + 5] in hdr_curves:
+        return True
     return False
 
 

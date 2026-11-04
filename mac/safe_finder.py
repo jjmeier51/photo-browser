@@ -54,7 +54,7 @@ import unicodedata
 import zlib
 from collections import OrderedDict, deque
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -87,6 +87,7 @@ import airdrop_to_iphone as airdrop
 import batch_crop
 import media_info
 import metadata_edit
+import places
 import safe_transfer as engine
 import shared_tags
 import spare_folders
@@ -2148,6 +2149,36 @@ _COLUMN_KEY = {0: "name", 1: "size", 2: "kind", 3: "modified"}      # the list v
 _KEY_COLUMN = {v: k for k, v in _COLUMN_KEY.items()}
 SIZE_FILTERS = [("", "Any size"), ("empty", "Empty (0 KB)"), ("<1m", "Under 1 MB"), (">=1m", "1 MB or more"),
                 (">=10m", "10 MB or more"), (">=100m", "100 MB or more"), (">=1g", "1 GB or more")]
+# The iPhone app's Type and Format filters (`TypeFilter`, `FormatFilter` in Models.swift): what they offer and,
+# for Format, the extensions each matches. Either one shows files only, as on the iPhone.
+TYPE_FILTERS = [("", "All"), ("photo", "Photos"), ("video", "Videos"), ("screenshot", "Screenshots")]
+FORMAT_FILTERS = [
+    ("", "All", frozenset()),
+    ("jpeg", "JPEG", frozenset({".jpg", ".jpeg", ".jpe"})),
+    ("png", "PNG", frozenset({".png"})),
+    ("heif", "HEIF", frozenset({".heic", ".heif", ".hif", ".heics"})),
+    ("raw", "RAW", frozenset({".dng", ".raw", ".cr2", ".cr3", ".nef", ".arw", ".raf", ".rw2", ".orf", ".srw", ".pef",
+                              ".sr2", ".3fr", ".erf", ".nrw"})),
+    ("gif", "GIF", frozenset({".gif"})),
+    ("mov", "MOV", frozenset({".mov", ".qt"})),
+    ("mp4", "MP4", frozenset({".mp4", ".m4v"})),
+    ("avi", "AVI", frozenset({".avi"})),
+]
+PLACES_CAP = 8000                      # the iPhone's: more files than this in one listing → "open a subfolder"
+
+
+def type_of(path: str) -> str:
+    """"photo", "video", "screenshot" or "" — the iPhone's `TypeFilter` (a screenshot is a PNG, or a photo with
+    "screenshot" in its name)."""
+    kind = kind_of(path)
+    if kind == "video":
+        return "video"
+    if kind == "image":
+        name = os.path.basename(path)
+        return "screenshot" if name.lower().endswith(".png") or "screenshot" in name.lower() else "photo"
+    return ""
+
+
 _UNITS = {"b": 1, "k": 1024, "kb": 1024, "m": 1024 ** 2, "mb": 1024 ** 2, "g": 1024 ** 3, "gb": 1024 ** 3,
           "t": 1024 ** 4, "tb": 1024 ** 4}
 
@@ -2822,6 +2853,36 @@ class ResultsModel(QStandardItemModel):
         return len(gone)
 
 
+class PlacePass(QObject):
+    """One Location pass (`places.Places.locate`) on a worker thread for a listing's photos and videos: their GPS,
+    then names for the places that have none. `progress` lines and `finished` come back to the pane's thread."""
+    progress = Signal(str)
+    finished = Signal()
+
+    def __init__(self, files: list[tuple[str, int, int]], location: str) -> None:
+        super().__init__()
+        self.files, self.location = files, location
+        self.stop = threading.Event()
+
+    def start(self) -> None:
+        def work() -> None:
+            try:
+                places.shared().locate(self.files, self._say, self.stop)
+            except Exception as e:  # noqa: BLE001 — a damaged file or index mustn't take the pane down
+                places.shared().problem = f"places couldn't be read — {e}"
+            try:
+                self.finished.emit()
+            except RuntimeError:                     # the pane closed meanwhile
+                pass
+        threading.Thread(target=work, name="places", daemon=True).start()
+
+    def _say(self, text: str) -> None:
+        try:
+            self.progress.emit(text)
+        except RuntimeError:
+            pass
+
+
 class PaneModel(QSortFilterProxyModel):
     """What a pane's views show: the folder listing (QFileSystemModel) or a results list, sorted the
     way the Sort menu says — by the dates QFileSystemModel has no column for too (created, added)
@@ -2835,6 +2896,10 @@ class PaneModel(QSortFilterProxyModel):
         self._keys: dict[int, tuple] = {}            # node (fs) or row (results) → sort key, for `key`
         self.show_sizes = True                       # folder sizes in the Size column (and the size sort)
         self.size_filter: tuple[int | None, int | None] | None = None
+        self.type_filter = ""                        # "photo" / "video" / "screenshot" (TYPE_FILTERS)
+        self.format_exts: frozenset[str] = frozenset()
+        self.place: str | None = None                # a Location label ("" = no location), None = any
+        self.label_of: Callable[[str, int, int], str | None] | None = None   # (path, mtime, size) → label
         self.root_path = ""                          # the folder listed — only its own rows are filtered
         self.setDynamicSortFilter(True)
         # Sizes come in one folder at a time: the order (by size) and the size filter catch up a few
@@ -2848,15 +2913,37 @@ class PaneModel(QSortFilterProxyModel):
         self.size_filter = bounds
         self.invalidateFilter()
 
+    def set_kind_filters(self, type_filter: str, format_exts: frozenset[str], place: str | None) -> None:
+        self.type_filter, self.format_exts, self.place = type_filter, format_exts, place
+        self.invalidateFilter()
+
+    def filtering(self) -> bool:
+        return bool(self.size_filter is not None or self.type_filter or self.format_exts or self.place is not None)
+
     def filterAcceptsRow(self, row: int, parent: QModelIndex) -> bool:  # noqa: N802
-        if self.size_filter is None:
+        if not self.filtering():
             return True
         src = self.sourceModel()
         if self._is_fs and (not parent.isValid() or src.filePath(parent) != self.root_path):
             return True                              # never the listed folder's own ancestors
         idx = src.index(row, 0, parent)
+        is_dir = src.isDir(idx)
+        if self.type_filter or self.format_exts:     # files only, as on the iPhone
+            if is_dir:
+                return False
+            path = src.filePath(idx)
+            if self.format_exts and os.path.splitext(path)[1].lower() not in self.format_exts:
+                return False
+            if self.type_filter and type_of(path) != self.type_filter:
+                return False
+        if self.place is not None and not is_dir:    # folders stay: their places aren't all read
+            if self.label_of is None or self.label_of(src.filePath(idx), src.lastModified(idx).toSecsSinceEpoch(),
+                                                      src.size(idx)) != self.place:
+                return False
+        if self.size_filter is None:
+            return True
         lo, hi = self.size_filter
-        if src.isDir(idx):
+        if is_dir:
             size = folder_size(src.filePath(idx))
             if size is None:                         # not calculated yet: shown, except by "Empty" until known
                 return not (lo == 0 and hi == 0)
@@ -3075,6 +3162,16 @@ class Pane(QWidget):
         self.model.set_source(self.fs)
         self.model.show_sizes = settings.value(f"{role}/sizes", "true") == "true"
         self.size_filter_key = ""
+        # The iPhone's Type, Format and Location filters (`_filter_menu`). Type, Format and size stay as you move
+        # from folder to folder; a Location is the listing's own, so it's cleared when you leave.
+        self.type_filter_key = ""
+        self.format_filter_key = ""
+        self.place_filter: str | None = None
+        self.model.label_of = lambda path, mtime, size: places.shared().label(path, mtime, size)
+        self._place_run: PlacePass | None = None
+        self._place_note = ""                       # "Reading locations… 50 of 500", or why places can't be named
+        self._places_done: tuple[str, int] | None = None   # (listing, files) the last finished pass covered
+        self._places_at = 0.0
         self.scanner: FileScanner | EmptyFolderScanner | TagScanner | None = None
         # Folder sizes arrive from the worker thread; the listing asks for its folders' as it loads.
         sizer().ready.connect(self._size_ready, Qt.ConnectionType.QueuedConnection)
@@ -3119,8 +3216,8 @@ class Pane(QWidget):
         self.search.installEventFilter(self)
         h.addWidget(self.search)
         h.addSpacing(2)
-        self.filter_btn = self._tool("funnel", "Filter by size", None, "Nav")
-        self.filter_btn.setMenu(self._size_menu())
+        self.filter_btn = self._tool("funnel", "Filter — type, format, location, size", None, "Nav")
+        self.filter_btn.setMenu(self._filter_menu())
         self.filter_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         h.addWidget(self.filter_btn)
         self.sort_btn = self._tool("sort", "Sort by", None, "Nav")
@@ -3320,10 +3417,45 @@ class Pane(QWidget):
         self.sizes_action.toggled.connect(self.set_show_sizes)
         return menu
 
+    def _filter_menu(self) -> QMenu:
+        """The funnel: the iPhone app's Type, Format and Location filters, and the size filter — each a submenu
+        whose title says what it's set to. Like the iPhone's, a Type or a Format shows files only; a Location keeps
+        the folders (their places aren't all read). They apply to the listing, or to a search's or collection's
+        results."""
+        menu = QMenu(self)
+        self.type_menu, self.type_actions = self._choice_menu(menu, TYPE_FILTERS, self.set_type_filter)
+        self.format_menu, self.format_actions = self._choice_menu(
+            menu, [(k, label) for k, label, _exts in FORMAT_FILTERS], self.set_format_filter)
+        self.place_menu = menu.addMenu("Location")
+        self.place_menu.setToolTipsVisible(True)
+        self.place_menu.aboutToShow.connect(self._place_menu_opened)
+        self.size_menu = self._size_menu()
+        menu.addMenu(self.size_menu)
+        menu.addSeparator()
+        self.clear_filters_act = menu.addAction("Show Everything", self.clear_filters)
+        self._filters_changed(apply=False)
+        return menu
+
+    def _choice_menu(self, parent: QMenu, choices: list[tuple[str, str]], slot) -> tuple[QMenu, dict[str, QAction]]:
+        menu = parent.addMenu("")
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        actions: dict[str, QAction] = {}
+        for key, label in choices:
+            a = menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(key == "")
+            group.addAction(a)
+            a.triggered.connect(lambda _=False, k=key: slot(k))
+            actions[key] = a
+            if key == "":
+                menu.addSeparator()
+        return menu, actions
+
     def _size_menu(self) -> QMenu:
         """The size filter: what the listing (or the results) shows, by size. Folders count by what
         they hold, once calculated."""
-        menu = QMenu(self)
+        menu = QMenu("Size", self)
         group = QActionGroup(menu)
         group.setExclusive(True)
         self.size_actions: dict[str, QAction] = {}
@@ -3342,12 +3474,172 @@ class Pane(QWidget):
         self.size_filter_key = key if key in dict(SIZE_FILTERS) else ""
         self.model.set_size_filter(size_bounds(self.size_filter_key))
         self.size_actions[self.size_filter_key].setChecked(True)
-        label = dict(SIZE_FILTERS)[self.size_filter_key]
-        self.filter_btn.setToolTip("Filter by size" if not self.size_filter_key else f"Showing: {label} — click to change")
-        self.filter_btn.setIcon(glyph("funnel", THEME.accent if self.size_filter_key else THEME.secondary, 16))
+        self._filters_changed(apply=False)
         if self.size_filter_key:
             self._request_sizes()
         self._status_soon.start()
+
+    # -- the iPhone's Type, Format and Location filters
+    def set_type_filter(self, key: str) -> None:
+        self.type_filter_key = key if key in dict(TYPE_FILTERS) else ""
+        self._filters_changed()
+
+    def set_format_filter(self, key: str) -> None:
+        self.format_filter_key = key if key in {k for k, _l, _e in FORMAT_FILTERS} else ""
+        self._filters_changed()
+
+    def set_place_filter(self, label: str | None) -> None:
+        self.place_filter = label
+        self._filters_changed()
+
+    def clear_filters(self) -> None:
+        self.type_filter_key = self.format_filter_key = ""
+        self.place_filter = None
+        if self.size_filter_key:
+            self.set_size_filter("")
+        self._filters_changed()
+
+    def any_filter(self) -> bool:
+        return bool(self.type_filter_key or self.format_filter_key or self.place_filter is not None
+                    or self.size_filter_key)
+
+    def filter_summary(self) -> str:
+        """What the filters let through, for the status line ("photos · HEIF · Hauppauge, NY")."""
+        parts = []
+        if self.type_filter_key:
+            parts.append(dict(TYPE_FILTERS)[self.type_filter_key].lower())
+        if self.format_filter_key:
+            parts.append(next(label for k, label, _e in FORMAT_FILTERS if k == self.format_filter_key))
+        if self.place_filter is not None:
+            parts.append(self.place_filter or "no location")
+        if self.size_filter_key:
+            parts.append(dict(SIZE_FILTERS)[self.size_filter_key].lower())
+        return " · ".join(parts)
+
+    def _filters_changed(self, apply: bool = True) -> None:
+        if apply:
+            exts = next(e for k, _l, e in FORMAT_FILTERS if k == self.format_filter_key)
+            self.model.set_kind_filters(self.type_filter_key, exts, self.place_filter)
+        if not hasattr(self, "type_menu"):
+            return
+        self.type_actions[self.type_filter_key].setChecked(True)
+        self.format_actions[self.format_filter_key].setChecked(True)
+        self.type_menu.setTitle(f"Type: {dict(TYPE_FILTERS)[self.type_filter_key]}")
+        self.format_menu.setTitle("Format: " + next(label for k, label, _e in FORMAT_FILTERS
+                                                    if k == self.format_filter_key))
+        place = "All" if self.place_filter is None else (self.place_filter or "No Location")
+        self.place_menu.setTitle(f"Location: {place}")
+        self.size_menu.setTitle(f"Size: {dict(SIZE_FILTERS)[self.size_filter_key]}")
+        on = self.any_filter()
+        self.clear_filters_act.setEnabled(on)
+        self.filter_btn.setToolTip(f"Showing: {self.filter_summary()} — click to change" if on else
+                                   "Filter — type, format, location, size")
+        self.filter_btn.setIcon(glyph("funnel", THEME.accent if on else THEME.secondary, 16))
+        self._status_soon.start()
+
+    def _listing_media(self) -> list[tuple[str, int, int]]:
+        """(path, modified, size) of the photos and videos listed here (the folder's own, or the results)."""
+        src = self.model.sourceModel()
+        if self.is_virtual:
+            rows = [self.results.index(r, 0) for r in range(self.results.rowCount())]
+        else:
+            root = self.fs.index(self.location)
+            rows = [self.fs.index(r, 0, root) for r in range(self.fs.rowCount(root))]
+        out = []
+        for idx in rows:
+            if src.isDir(idx):
+                continue
+            path = src.filePath(idx)
+            if os.path.splitext(path)[1].lower() in places.MEDIA_EXTS:
+                out.append((path, src.lastModified(idx).toSecsSinceEpoch(), src.size(idx)))
+        return out
+
+    def _place_menu_opened(self) -> None:
+        """Opening Location is what reads the places (as on the iPhone): the files' GPS, then names for the
+        places that have none yet — in the background, the menu filling in as they come."""
+        files = self._listing_media()
+        if 0 < len(files) <= PLACES_CAP and self._place_run is None:
+            here = (self.location, len(files))
+            unknown = any(places.shared().label(*f) is None for f in files)
+            if self._places_done != here or (unknown and time.monotonic() - self._places_at > 30):
+                self._start_places(files)
+        self._fill_place_menu(files)
+
+    def _start_places(self, files: list[tuple[str, int, int]]) -> None:
+        run = PlacePass(files, self.location)
+        run.progress.connect(self._places_progress)
+        run.finished.connect(lambda r=run: self._places_finished(r))
+        self._place_run = run
+        self._place_note = "Reading locations…"
+        run.start()
+
+    def _places_progress(self, text: str) -> None:
+        self._place_note = text
+        if self.place_menu.isVisible():
+            self._fill_place_menu(self._listing_media())
+
+    def _places_finished(self, run: "PlacePass") -> None:
+        if self._place_run is run:
+            self._place_run = None
+        self._place_note = places.shared().problem
+        if run.location == self.location:
+            self._places_done = (run.location, len(run.files))
+            self._places_at = time.monotonic()
+            if self.place_filter is not None:
+                self.model.invalidateFilter()
+            if self.place_menu.isVisible():
+                self._fill_place_menu(self._listing_media())
+            self._status_soon.start()
+
+    def _fill_place_menu(self, files: list[tuple[str, int, int]]) -> None:
+        """All Locations, what's happening (reading, naming, too many here), then each place with how many
+        files here are from it, most first — No Location last."""
+        menu = self.place_menu
+        menu.clear()
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+
+        def choice(text: str, value: str | None) -> None:
+            a = menu.addAction(text)
+            a.setCheckable(True)
+            a.setChecked(self.place_filter == value)
+            group.addAction(a)
+            a.triggered.connect(lambda _=False, v=value: self.set_place_filter(v))
+
+        choice("All Locations", None)
+        menu.addSeparator()
+        counts: dict[str, int] = {}
+        if len(files) > PLACES_CAP:
+            note = "Too many items here — open a subfolder"
+        else:
+            lookup = places.shared()
+            for f in files:
+                label = lookup.label(*f)
+                if label is not None:
+                    counts[label] = counts.get(label, 0) + 1
+            note = self._place_note if self._place_run is not None else (
+                self._place_note or ("" if counts else "No photos or videos here" if not files else
+                                     "No locations here"))
+        if note:
+            info = menu.addAction(note)
+            info.setEnabled(False)
+        named = sorted(((k, v) for k, v in counts.items() if k), key=lambda kv: (-kv[1], kv[0].lower()))
+        if self.place_filter and self.place_filter not in counts:
+            named.insert(0, (self.place_filter, 0))      # the one chosen, even when nothing here is from there now
+        for label, n in named:
+            choice(f"{label} ({n:,})", label)
+        if "" in counts or self.place_filter == "":
+            choice(f"No Location ({counts.get('', 0):,})", "")
+
+    def _leave_places(self) -> None:
+        """Leaving the listing: its Location goes (the next one has its own places), and so does its pass."""
+        if self._place_run is not None:
+            self._place_run.stop.set()
+            self._place_run = None
+        self._place_note = ""
+        if self.place_filter is not None:
+            self.place_filter = None
+            self._filters_changed()
 
     def set_show_sizes(self, on: bool) -> None:
         self.model.show_sizes = on
@@ -3395,7 +3687,7 @@ class Pane(QWidget):
         for b in (self.back_btn, self.fwd_btn, self.sort_btn, self.new_folder_btn, self.tags_btn, self.grid_btn,
                   self.list_btn, self.photos_btn, self.split_btn):
             b.setIcon(glyph(b.property("glyph"), THEME.secondary if b.objectName() == "Nav" else THEME.text, 16))
-        self.filter_btn.setIcon(glyph("funnel", THEME.accent if self.size_filter_key else THEME.secondary, 16))
+        self.filter_btn.setIcon(glyph("funnel", THEME.accent if self.any_filter() else THEME.secondary, 16))
         self._slider_icons()
         self.update_pathbar()
         self.grid.viewport().update()
@@ -3575,6 +3867,7 @@ class Pane(QWidget):
             return
         if self.location and self.location != path:
             self._remember_view()
+            self._leave_places()
         if record and self.location and self.location != path:
             self.history.append(self.location)
             self.future.clear()
@@ -3655,6 +3948,7 @@ class Pane(QWidget):
             return
         if self.location:
             self._remember_view()
+            self._leave_places()
         if record and self.location:
             self.history.append(self.location)
             self.future.clear()
@@ -3891,7 +4185,7 @@ class Pane(QWidget):
                 text = (f"{n} favorite{'s' if n != 1 else ''}" if self.location.endswith("favorite") else
                         f"{n} item{'s' if n != 1 else ''} in To AI")
             if shown != n:
-                text += f" ({shown} shown)"
+                text += f" ({shown} shown — {self.filter_summary()})" if self.any_filter() else f" ({shown} shown)"
             if self.scanner is not None:
                 text += " so far — still looking…"
             self.status.setText(text + tag_note)
@@ -3902,8 +4196,8 @@ class Pane(QWidget):
         shown = self.model.rowCount(self.model.mapFromSource(root))
         free = self._free_space()
         text = f"{sel} of {n} selected{size_note}" if sel else f"{n} item{'s' if n != 1 else ''}"
-        if self.size_filter_key and shown != n:
-            text += f" ({shown} shown — {dict(SIZE_FILTERS)[self.size_filter_key].lower()})"
+        if self.any_filter() and shown != n:
+            text += f" ({shown} shown — {self.filter_summary()})"
         self.status.setText(f"{text}, {human(free)} available{tag_note}")
         fs = MOUNTS.get(self._volume, "")
         self.fs_chip.setText(FS_NAMES.get(fs, fs))
@@ -4022,7 +4316,8 @@ class Pane(QWidget):
             edit_tags=lambda p: TagDialog(QApplication.activeWindow() or self.window(), [p], describe_items([p])).open(),
             reveal=self._reveal_from_viewer, export_frames=lambda p: self.export_frames([p]),
             save_frame=frame_export.save_frame, labels_of=lambda p: tag_store().labels(p, fresh=False),
-            set_label=lambda p, label, on: self.set_label([p], label, on), remove_objects=self.remove_objects)
+            set_label=lambda p, label, on: self.set_label([p], label, on), remove_objects=self.remove_objects,
+            extra={"frame_note": frame_export.engine_note})
         # Opens over Safe Finder's window, as tall as its display, and takes each item's shape within that.
         viewer = media_viewer.MediaViewer(items, items.index(path), hooks, poster, None, box=self.window().geometry())
         viewer.removed.connect(lambda _paths: self.refresh_results())

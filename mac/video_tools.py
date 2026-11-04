@@ -5,8 +5,10 @@ video to 1080p (`upscale_1080`), in place, its metadata and dates kept — and t
 On a Mac it's AVFoundation, through `video_helper.swift` — the iPhone app's own code for both, built once
 with `swiftc` into ~/Library/Caches/PhotoBrowser/ (like the thumbnail helper). Without Xcode's tools,
 ffmpeg does it when it's installed (`brew install ffmpeg`). With neither, a DASH video falls back to its
-one-file version and no video is upscaled — the log says so once. `SAFE_FINDER_VIDEO_HELPER` names a
-stand-in helper and `SAFE_FINDER_FFMPEG` an ffmpeg (tests).
+one-file version and no video is upscaled — the log says so once. A helper that won't build leaves the
+compiler's output in `video_helper.log` beside it (`problem` says why it isn't there), so falling back to
+ffmpeg — which tone-maps HDR its own way — is never silent. `SAFE_FINDER_VIDEO_HELPER` names a stand-in
+helper and `SAFE_FINDER_FFMPEG` an ffmpeg (tests).
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ TARGET = 1080
 _lock = threading.Lock()
 _converting = threading.Semaphore(1)           # one WebM conversion at a time: each one uses every core
 _helper: list[str] | None | bool = False       # False = not looked for yet
+problem = ""                                   # why there's no helper, once it's been looked for
 note = ""                                      # set once when neither tool is here
 
 
@@ -37,7 +40,7 @@ def _source() -> Path | None:
 
 def helper() -> list[str] | None:
     """The command that runs the helper, building it the first time (or when its source is newer)."""
-    global _helper
+    global _helper, problem
     with _lock:
         if _helper is not False:
             return _helper
@@ -48,20 +51,35 @@ def helper() -> list[str] | None:
         _helper = None
         src = _source()
         if not IS_MAC or src is None:
+            problem = "the video helper isn't here"
             return None
         out = Path.home() / "Library" / "Caches" / "PhotoBrowser" / "video_helper"
+        log = out.with_name("video_helper.log")
         if out.is_file() and out.stat().st_mtime >= src.stat().st_mtime:
             _helper = [str(out)]
             return _helper
         if subprocess.run(["xcode-select", "-p"], capture_output=True).returncode != 0:
+            problem = "Xcode's Command Line Tools aren't installed (xcode-select --install)"
             return None                                    # no Command Line Tools: don't pop their installer
         out.parent.mkdir(parents=True, exist_ok=True)
         try:
             r = subprocess.run(["xcrun", "swiftc", "-O", "-parse-as-library", "-swift-version", "5", "-o", str(out),
                                 str(src)], capture_output=True, text=True, timeout=900)
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError) as e:
+            problem = f"the video helper couldn't be built ({e})"
             return None
-        _helper = [str(out)] if r.returncode == 0 and out.is_file() else None
+        if r.returncode == 0 and out.is_file():
+            _helper = [str(out)]
+            try:
+                log.unlink()
+            except OSError:
+                pass
+        else:
+            problem = f"the video helper didn't build — see {log}"
+            try:
+                log.write_text(f"swiftc failed ({r.returncode}) building {src}\n\n{r.stderr or ''}{r.stdout or ''}")
+            except OSError:
+                pass
         return _helper
 
 
