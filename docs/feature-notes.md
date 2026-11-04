@@ -1553,7 +1553,18 @@ what's saved). One worker thread per run, files one after another, each typeset 
 PyInstaller takes it in — `importlib.import_module` would hide it); `--collect-all reportlab --collect-data pyphen`
 in the app build. **Dependencies**: `reportlab>=4.0`, `pyphen>=0.14` added to `requirements.txt`; `Safe
 Finder.command` installs them into an existing `.venv` quietly and non-fatally (Safe Finder must still open
-offline); if missing at use, the window offers `pip install` into its own interpreter (not in the frozen app).
+offline). **Bug found in use (Nov 4): "Make Book" greyed out** in the built app — `build_safe_finder_app.sh` only
+installed requirements into a *new* `.venv` (or one missing PySide6/numpy), so an existing one never got ReportLab,
+`--collect-all reportlab` collected nothing, and the window disabled the button with a grey line saying "build it
+again" (which would have done the same). Now the build pip-installs `requirements.txt` every time and warns if
+ReportLab/pyphen still won't import; and the window never shows a dead button: without ReportLab its Primary button
+*is* **Install ReportLab** (bold notice above it). From source: pip into `sys.executable`. **Built app:** a Python on
+the Mac with pip (Homebrew, python.org, or Apple's once the Command Line Tools are there — `xcode-select -p` first,
+the stub would pop an installer) runs `pip install --target ~/Library/Application Support/Safe Finder/python
+--no-deps --only-binary=:all: --implementation py --python-version <the app's>` of reportlab, pyphen and
+charset-normalizer — all `py3-none-any`, so the pip's own Python version doesn't matter; Pillow (ReportLab's other
+need) is already in the app. `book_window` appends that folder to `sys.path` at import. Tested with a clean
+interpreter as the "app": install → `import bookify` → a book, hyphenated.
 Tested offscreen through a pane: preview, an iPhone book, two files at 5 × 8, Stop mid-book (no file left), the
 install path, Open in the PDF viewer.
 

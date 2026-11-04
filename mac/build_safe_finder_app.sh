@@ -27,12 +27,18 @@ fi
 INSTALL=1
 [ "${1:-}" = "--no-install" ] && INSTALL=0
 
-# 1. The virtual environment, with PyInstaller.
-if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c "import PySide6, numpy" 2>/dev/null; then
+# 1. The virtual environment, with PyInstaller — and everything in requirements.txt, every build (a no-op when it's
+#    all there). Only checking for PySide6 once let an existing .venv miss what was added later: the app was built
+#    without ReportLab, and Make Book PDF in it couldn't work.
+if [ ! -x .venv/bin/python ]; then
   echo "Setting up mac/.venv (once) …"
   python3 -m venv .venv
   .venv/bin/pip install --quiet --upgrade pip
-  .venv/bin/pip install --quiet -r requirements.txt
+fi
+.venv/bin/pip install --quiet -r requirements.txt || echo "Warning: not everything in requirements.txt installed (offline?) — see above."
+if ! .venv/bin/python -c "import reportlab, pyphen" 2>/dev/null; then
+  echo "Warning: ReportLab / pyphen aren't in mac/.venv, so this build can't make books itself — its Make Book PDF"
+  echo "         window will offer to install them. To build them in:  mac/.venv/bin/pip install reportlab pyphen"
 fi
 .venv/bin/python -c "import PyInstaller" 2>/dev/null || .venv/bin/pip install --quiet pyinstaller
 

@@ -426,8 +426,10 @@ and bold — see the top of `bookify.py`), and the window shows what it found be
 **Make Book** sets it in the background (Stop stops it); the PDF goes beside the text as "<name>.pdf" — never
 over a file that's there — with the text's tags, and **Open** shows it in Safe Finder's PDF viewer (where Optimize
 for iPhone works on it too). The first book downloads EB Garamond once. It needs ReportLab and pyphen (in
-`requirements.txt`; `Safe Finder.command` adds them to an existing setup, and if they're still missing the window
-offers **Install ReportLab**). `bookify.py` still works on its own: `python3 bookify.py story.txt --size iphone`.
+`requirements.txt`): `Safe Finder.command` adds them to an existing setup and `build_safe_finder_app.sh` builds them
+into the app; if they're still missing, the window's main button is **Install ReportLab** instead of Make Book — it
+fetches them (into Safe Finder's own Python, or for the built app into ~/Library/Application Support/Safe
+Finder/python, with any Python on the Mac), then Make Book appears. `bookify.py` still works on its own: `python3 bookify.py story.txt --size iphone`.
 
 ### Export All Frames and Save Frame (`frame_export.py`)
 

@@ -11,8 +11,12 @@ right-hand pages, equal margins, your own fonts — and remembered for next time
 in Safe Finder's PDF viewer from here.
 
 bookify needs ReportLab (and pyphen for hyphenation; both in requirements.txt). When this copy of Safe Finder
-hasn't got them, the window says so and offers to install them into its own Python (`pip`); the built app has
-them inside. The first book downloads the EB Garamond fonts once (bookify caches them).
+hasn't got them, the window's main button becomes **Install ReportLab** (never a dead Make Book): run from the
+source it pip-installs them into its own Python; the built app — which has them inside when it was built from a
+.venv that had them (build_safe_finder_app.sh now makes sure) — installs them into its own folder,
+~/Library/Application Support/Safe Finder/python (`PRIVATE`, read at import), with any Python 3 on the Mac. They're
+pure Python (py3-none-any wheels), so pip fetches exactly those for the app's Python version, whatever Python runs
+pip. The first book downloads the EB Garamond fonts once (bookify caches them).
 
 It doesn't touch files itself: `BookHooks` place the PDF (Safe Finder's drive-safe `simpcity.place`), carry the
 tags, reveal and open it.
@@ -43,6 +47,18 @@ LANGS = [("en_US", "English (US)"), ("en_GB", "English (UK)"), ("de_DE", "German
          ("es_ES", "Spanish"), ("it_IT", "Italian"), ("nl_NL", "Dutch"), ("pt_PT", "Portuguese"),
          ("", "Don't hyphenate")]
 DEFAULT_ACCENT = "#7A2E22"
+# Where the built app keeps ReportLab and pyphen when it was built without them (module notes).
+PRIVATE = Path.home() / "Library" / "Application Support" / "Safe Finder" / "python"
+PURE = ["reportlab>=4.0", "pyphen>=0.14", "charset-normalizer"]      # ReportLab's own needs, less Pillow (inside)
+
+
+def _use_private() -> None:
+    p = str(PRIVATE)
+    if PRIVATE.is_dir() and p not in sys.path:
+        sys.path.append(p)                       # after the app's own modules: it only adds what's missing
+
+
+_use_private()
 
 
 def is_text(path: str) -> bool:
@@ -70,11 +86,35 @@ def missing() -> str:
     return ""
 
 
+def _system_python() -> str | None:
+    """A Python 3 on this Mac that has pip (for the built app, which can't run pip itself)."""
+    candidates = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3",
+                  "/Library/Frameworks/Python.framework/Versions/Current/bin/python3"]
+    # Apple's /usr/bin/python3 is a stub that offers to install the Command Line Tools when they're missing.
+    if subprocess.run(["xcode-select", "-p"], capture_output=True).returncode == 0:
+        candidates.append("/usr/bin/python3")
+    for py in candidates:
+        if os.path.exists(py):
+            try:
+                if subprocess.run([py, "-m", "pip", "--version"], capture_output=True, timeout=30).returncode == 0:
+                    return py
+            except (OSError, subprocess.SubprocessError):
+                continue
+    return None
+
+
 def install_command() -> list[str] | None:
-    """The pip that installs ReportLab and pyphen into this Safe Finder's own Python (None in the built app)."""
-    if getattr(sys, "frozen", False):
+    """The pip that installs ReportLab and pyphen: into this Safe Finder's own Python when it runs from the
+    source; for the built app, into `PRIVATE` by a Python on the Mac — pure-Python wheels for the app's own
+    Python version. None when there's no way (the built app, and no Python with pip on the Mac)."""
+    if not getattr(sys, "frozen", False):
+        return [sys.executable, "-m", "pip", "install", "--quiet", "reportlab>=4.0", "pyphen>=0.14"]
+    py = _system_python()
+    if py is None:
         return None
-    return [sys.executable, "-m", "pip", "install", "--quiet", "reportlab>=4.0", "pyphen>=0.14"]
+    return [py, "-m", "pip", "install", "--quiet", "--upgrade", "--target", str(PRIVATE), "--no-deps",
+            "--only-binary=:all:", "--implementation", "py",
+            "--python-version", f"{sys.version_info[0]}.{sys.version_info[1]}", *PURE]
 
 
 @dataclass
@@ -203,9 +243,7 @@ class BookWindow(QWidget):
         self.reveal_btn = QPushButton("Show in Folder")
         self.reveal_btn.clicked.connect(lambda: self.hooks.reveal(self.books[-1]) if self.books and self.hooks.reveal
                                         else None)
-        self.install_btn = QPushButton("Install ReportLab")
-        self.install_btn.clicked.connect(self._install)
-        for b in (self.open_btn, self.reveal_btn, self.install_btn):
+        for b in (self.open_btn, self.reveal_btn):
             b.setVisible(False)
             buttons.addWidget(b)
         buttons.addStretch(1)
@@ -215,7 +253,13 @@ class BookWindow(QWidget):
         self.go.setObjectName("Primary")
         self.go.setDefault(True)
         self.go.clicked.connect(self.start)
+        # Without ReportLab this is the main button instead of Make Book — a way forward, never a dead button.
+        self.install_btn = QPushButton("Install ReportLab")
+        self.install_btn.setObjectName("Primary")
+        self.install_btn.clicked.connect(self._install)
+        self.install_btn.setVisible(False)
         buttons.addWidget(self.cancel)
+        buttons.addWidget(self.install_btn)
         buttons.addWidget(self.go)
         v.addLayout(buttons)
 
@@ -224,8 +268,9 @@ class BookWindow(QWidget):
         self._size_changed()
         self.resize(600, max(560, v.totalHeightForWidth(600) + 40))
         if not self.sources:
-            self.status.setText("Nothing here can be made into a book — .txt, .md and .rtf files can.")
+            self._notice("Nothing here can be made into a book — .txt, .md and .rtf files can.")
             self.go.setEnabled(False)
+            self.go.setToolTip("Select a .txt, .md or .rtf file first")
         elif missing():
             self._need_install()
         elif one:
@@ -333,23 +378,29 @@ class BookWindow(QWidget):
         self.found.setText("Found: " + " · ".join(parts) + ". Type a title or author to use another.")
 
     # ------------------------------------------------------------------ ReportLab
+    def _notice(self, text: str) -> None:
+        """Something the person has to know (why the book can't be made yet): plain to see, not a grey aside."""
+        self.status.setText(text)
+        self.status.setStyleSheet("font-weight: 600;")
+
     def _need_install(self) -> None:
-        self.go.setEnabled(False)
-        if install_command() is None:
-            self.status.setText("This copy of Safe Finder was built without ReportLab, which makes the books — "
-                                "build it again with build_safe_finder_app.sh.")
-            return
-        self.status.setText("Making books needs ReportLab (and pyphen, for hyphenation) — they aren't installed in "
-                            "Safe Finder's Python yet. Install them now? (A minute, once.)")
+        self.go.setVisible(False)
         self.install_btn.setVisible(True)
+        self.install_btn.setDefault(True)
+        self._notice("Making books needs ReportLab (and pyphen, for hyphenation), and this Safe Finder hasn't got "
+                     "them yet. Install ReportLab adds them — a minute, once — and then Make Book is here.")
 
     def _install(self) -> None:
         cmd, bridge = install_command(), self.bridge
         if not cmd:
+            self._notice("There's no Python with pip on this Mac to fetch ReportLab with. Either install Xcode's "
+                         "Command Line Tools (in Terminal: xcode-select --install) and press Install ReportLab "
+                         "again, or build Safe Finder again with mac/build_safe_finder_app.sh — it puts ReportLab "
+                         "inside the app.")
             return
         self.install_btn.setEnabled(False)
         self.bar.setVisible(True)
-        self.status.setText("Installing ReportLab and pyphen…")
+        self._notice("Installing ReportLab and pyphen…")
 
         def work() -> None:
             try:
@@ -364,16 +415,22 @@ class BookWindow(QWidget):
     def _installed(self, ok: bool, why: str) -> None:
         self.bar.setVisible(False)
         importlib.invalidate_caches()
+        _use_private()
         if ok and not missing():
             self.install_btn.setVisible(False)
+            self.go.setVisible(True)
             self.go.setEnabled(True)
+            self.go.setDefault(True)
+            self.status.setStyleSheet("")
             self.status.setText("Installed — ready to make the book.")
             if len(self.sources) == 1:
                 self._preview()
         else:
             self.install_btn.setEnabled(True)
-            self.status.setText(f"Couldn't install them: {why or 'unknown error'}. In Terminal: "
-                                f"“{sys.executable} -m pip install reportlab pyphen”.")
+            how = (f"in Terminal: “{sys.executable} -m pip install reportlab pyphen”"
+                   if not getattr(sys, "frozen", False) else
+                   "or build Safe Finder again with mac/build_safe_finder_app.sh, which puts ReportLab inside the app")
+            self._notice(f"Couldn't install them ({why or 'unknown error'}). Try again (are you online?), {how}.")
 
     # ------------------------------------------------------------------ making the books
     def options(self) -> dict:
