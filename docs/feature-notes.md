@@ -1485,6 +1485,51 @@ count changes, or if places are still unknown 30 s after the last pass. Over 8,0
 results, the iPhone's names used without asking, keys, persistence across navigation. CLGeocoder itself (and
 the Swift) couldn't be run in the Linux sandbox.
 
+## 6v. Safe Finder PDF viewer and Optimize for Safe Finder / for iPhone — `mac/pdf_viewer.py`, `mac/pdf_optimize.py`, `mac/pdf_helper.swift` (Nov 4, 2026)
+
+**Viewer**: QtPdf (`QPdfDocument` + `QPdfView`, PySide6 ≥ 6.6, no new dependency) in MultiPage / FitToWidth, the
+photo viewer's chrome (`media_viewer.VIEWER_STYLE`, `_bar_button`, full display height). Search is
+`QPdfSearchModel` + `QPdfView.setSearchModel`; the model fills in incrementally, so the first hit is jumped to on
+`rowsInserted` and "no matches" is only said after a page-count-based delay. Thumbnails render on the GUI thread
+a few per tick (one QPdfDocument per thread — the optimizer opens its own). Panes route `.pdf` there
+(`Pane._pdf_viewer_ok` / `view_pdf`) when QtPdf is present, else Preview as before. `PdfHooks`: `place`
+(= `simpcity.place`, drive-safe, never overwrites), `carry_tags` (`TagStore.carry`), `reveal`, `airdrop`
+(`airdrop.send` of the raw PDF — the iPhone app takes any file), `made` (refresh the listing).
+
+**Optimize** never reflows or retypes — it cuts the original's own drawing and places it:
+1. *Read* (`read_page`): each page rendered at 2 px/pt, ink = |pixel − paper| > 48, paper = the edge's median
+   unless the edge varies (a full-bleed picture: then the whole page is ink and is kept whole). The ink box, then a
+   **column gutter**: in the middle 38–62 % of the box, the band of 8-pt windows that the fewest rows touch.
+   *Dead ends, kept out on purpose:* per-pixel-column ink counts (a full-width line's word gaps make fake minima);
+   5-pt windows (a 16-pt title's word space is ~5 pt — the gutter came out as the title's gap, and the title was cut
+   in two); a wide tolerance on the score (it swallows a ragged-right column's line ends, so those lines read
+   across); splitting two-column stretches at every full-width white gap (paragraph breaks that line up across the
+   columns would interleave them). What holds: 8-pt windows (wider than any word space), tolerance 1 % of the page,
+   **crossing tested on the gutter's middle 4 pt only**, columns split at the gutter's middle, and only short bands
+   (< 40 pt) at the *ends* of a two-column stretch peeled off as full width (a heading over the columns). A stretch
+   counts as two columns when it's ≥ 40 pt tall with ink on both sides in ≥ 25 % of its rows.
+2. *Blocks* in reading order — full-width stretches and left/right columns — each with its **atoms** (runs of ink
+   rows, joined across < 1 pt) and its own ink extent (`side` says which column; a column keeps the page's trim on
+   its outer edge only).
+3. *Plan* — iPhone (`plan_iphone`): 440 × 956 pt pages (the 17 Pro Max's 1320 × 2868 at 3×), 12 pt sides, 18 pt
+   top/bottom; a full-width block scales to the page's common trim width (`_common_boxes`: the median ink box per
+   page size and odd/even side, grown per page — one text size throughout), a column to its own width, at most
+   2.4×; atoms flow down, consecutive atoms of one block on one new page are **one piece** (so a phone page draws the
+   original page a few times, not once per line); a page break only between atoms; an atom taller than the page is
+   shrunk alone onto a page (≤ 1.5 pages) or cut into page-high slices. Safe Finder (`plan_mac`): one piece per page,
+   the common trim box + 14 pt; blank pages dropped.
+4. *Compose*: `pdf_helper compose` (CGPDFDocument → CGContext PDF: per piece clip, scale, translate,
+   `getDrawingTransform(.cropBox, rect: shown size)` for /Rotate, `drawPDFPage` — vectors, text stays text; password
+   via `PDF_PASSWORD`). Fallback `compose_with_qt`: whole-page renders cropped (cached per page and scale, ≤ 60 MP)
+   into 3 px/pt pictures via `QPdfWriter`. **`QPdfDocumentRenderOptions.setScaledClipRect` doesn't put the part where
+   it says** (checked: no offset matched) — never render parts with it.
+5. Written to a temp file, then `simpcity.place` beside the original as "<name> (for iPhone|Safe Finder).pdf".
+
+Tested in the sandbox (Qt path): a synthetic five-page PDF (single column, blank, two columns with a title, an
+abstract and a figure across them, a scan, a coloured slide) and a real-text two-column paper — pages inspected as
+pictures; the viewer driven offscreen (open, paging, zoom, search, thumbnails, both Optimizes, Back to Original,
+AirDrop hook); a pane's double-click → viewer → placed file + tags. The Swift composer couldn't be compiled here.
+
 ## 6q. Safe Finder Find Duplicates — `mac/duplicates.py`, `mac/duplicates_window.py` (Nov 3, 2026)
 
 A port of §2 (same three kinds, kept apart, same threshold 6, same normalized names, same Oldest/Newest from

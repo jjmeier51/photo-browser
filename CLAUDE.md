@@ -165,6 +165,10 @@ actions the app makes no network calls.
   Safe Finder's **funnel** holds the iPhone's **Type / Format / Location** filters beside Size (`Pane._filter_menu`;
   Location via `mac/places.py`, keyed like the iPhone so the drive's `.Photo Browser Metadata/places.json` names
   photos without asking again; new places through `mac/geocode_helper.swift`, CLGeocoder) — §6u.
+  Safe Finder's **PDF viewer** (double-click a PDF; `mac/pdf_viewer.py`, QtPdf) has **Optimize for iPhone** (new
+  "<name> (for iPhone).pdf": iPhone 17 Pro Max-shaped pages, margins trimmed, two-column pages read a column at a time,
+  cut only between lines) and **Optimize for Safe Finder** (trimmed pages, blanks dropped) — `mac/pdf_optimize.py`
+  plans, `mac/pdf_helper.swift` draws vectors (Qt pictures as fallback) — §6v.
   Safe Finder opens as **one window**; **Split View** (header button, View ▸ Split View ⌘\\, remembered; `--to`
   forces it) adds the To pane and the Move/Copy bar for transfers (`MainWindow.set_split` — §6r).
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,

@@ -4261,6 +4261,8 @@ class Pane(QWidget):
             self.go(path)
         elif kind_of(path) != "other":
             self.view_media(path)
+        elif self._pdf_viewer_ok(path):
+            self.view_pdf(path)
         else:
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
@@ -4275,7 +4277,10 @@ class Pane(QWidget):
             self.view_media(media[0], media if len(media) > 1 else None)
         for p in paths:
             if p not in media and not os.path.isdir(p):
-                QDesktopServices.openUrl(QUrl.fromLocalFile(p))
+                if self._pdf_viewer_ok(p):
+                    self.view_pdf(p)
+                else:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(p))
 
     def open_external(self) -> None:
         """Open With the Mac's app for it (Preview, QuickTime Player) — the old double-click."""
@@ -4321,6 +4326,42 @@ class Pane(QWidget):
         # Opens over Safe Finder's window, as tall as its display, and takes each item's shape within that.
         viewer = media_viewer.MediaViewer(items, items.index(path), hooks, poster, None, box=self.window().geometry())
         viewer.removed.connect(lambda _paths: self.refresh_results())
+        _VIEWERS.append(viewer)
+        viewer.destroyed.connect(lambda _=None, v=viewer: _VIEWERS.remove(v) if v in _VIEWERS else None)
+        viewer.show()
+        viewer.raise_()
+        viewer.activateWindow()
+
+    @staticmethod
+    def _pdf_viewer_ok(path: str) -> bool:
+        if not path.lower().endswith(".pdf"):
+            return False
+        import pdf_viewer
+        return pdf_viewer.available()
+
+    def view_pdf(self, path: str) -> None:
+        """The PDF viewer (pdf_viewer.py), with its Optimize for Safe Finder / for iPhone: the new PDF is put
+        beside the original the drive-safe way, with the original's tags."""
+        import pdf_viewer
+        import simpcity
+
+        def carry(pairs: list[tuple[str, str]]) -> None:
+            try:
+                tag_store().carry(pairs)
+                tags_changed()
+            except OSError:
+                pass
+
+        def send(files: list[str], note) -> None:
+            def work() -> None:
+                airdrop.send([Path(f) for f in files], log=note)
+            threading.Thread(target=work, daemon=True).start()
+
+        hooks = pdf_viewer.PdfHooks(
+            place=lambda tmp, folder, name: str(simpcity.place(tmp, folder, name)), carry_tags=carry,
+            reveal=self._reveal_from_viewer, airdrop=send if IS_MAC else None,
+            made=lambda _p: self.refresh_results())
+        viewer = pdf_viewer.PdfViewer(path, hooks, None, box=self.window().geometry())
         _VIEWERS.append(viewer)
         viewer.destroyed.connect(lambda _=None, v=viewer: _VIEWERS.remove(v) if v in _VIEWERS else None)
         viewer.show()
@@ -4597,7 +4638,7 @@ class Pane(QWidget):
         menu = QMenu(self)
         if paths:
             menu.addAction("Open", self.open_selected)
-            if any(kind_of(p) != "other" for p in paths):
+            if any(kind_of(p) != "other" or p.lower().endswith(".pdf") for p in paths):
                 menu.addAction("Open With Default App", self.open_external)
             if IS_MAC:
                 menu.addAction("Quick Look", self.quick_look)

@@ -370,6 +370,39 @@ several).
 Video lengths, dates, sizes and the camera are read from the files themselves (`media_info.py`: the MP4/MOV
 boxes and the photo's EXIF — no ExifTool), off the main thread and once per file.
 
+### The PDF viewer, and Optimize for Safe Finder / for iPhone (`pdf_viewer.py`, `pdf_optimize.py`)
+
+**Double-click a PDF** (or press Return) and it opens in Safe Finder's own PDF viewer instead of Preview — the
+photo viewer's dark look, as tall as the display, the pages scrolling one after another fitted to the width.
+←/→ (Page Up/Down) a page at a time, or type a page number at the bottom; − / + and the zoom menu (Fit Width, Fit
+Page, 50–400 %), ⌘-scroll or pinch to zoom; **⌘F** searches — every match is marked, Return goes to the next and
+⇧Return the one before; **☰** shows the pages as thumbnails. ⋯ has Open With Default App (Preview), Show in Folder
+and AirDrop to iPhone. A protected PDF asks for its password. Right-click ▸ Open With Default App still opens
+Preview.
+
+Two buttons at the bottom make a **new PDF beside the original** (the original is never changed); it opens in the
+viewer when it's made (**Back to Original** returns), carries the original's tags, and Show in Folder finds it:
+
+- **Optimize for iPhone** → "<name> (for iPhone).pdf", made for the **iPhone 17 Pro Max**: every page is the shape
+  of its screen (440 × 956 points), so one page fills the phone and the next is a swipe away. The margins are
+  trimmed (to the same box on every page, so the text keeps one size); a **two-column page is read a column at a
+  time** — the left column, then the right — so its text comes out nearly twice as large (a paper's 9-point text
+  reads at about 16 on the phone); and the content flows from page to page, **cut only in the white between lines**.
+  A title or figure across both columns stays whole, a picture taller than the screen is shrunk to fit it, and
+  blank pages are left out. Nothing is retyped: it's the original's own drawing, cut and placed, so fonts,
+  pictures and layout stay as they were. **AirDrop to iPhone…** sends it straight to the phone (Photo Browser
+  takes it), or it travels on the drive beside the original.
+- **Optimize for Safe Finder** → "<name> (for Safe Finder).pdf": the pages stay whole and in order, trimmed to
+  their content — the same box on every page (left and right pages separately, as a book's margins alternate),
+  grown for any page with something outside it — and blank pages left out, so in this viewer the page, not its
+  margins, fills the window and the text comes out larger.
+
+The new PDF is drawn by `pdf_helper.swift` (Core Graphics, built on first use with Xcode's Command Line Tools like
+the other helpers): the original's pages drawn clipped and scaled, so text stays text — sharp at any zoom,
+searchable and selectable — and the file stays small. Without it (or if it won't build — its message is in
+`~/Library/Caches/PhotoBrowser/pdf_helper.log`) Qt draws the same layout from pictures of the pages at the iPhone's
+3 pixels a point: sharp on the phone, but the text can't be searched or selected, and the viewer says so.
+
 ### Export All Frames and Save Frame (`frame_export.py`)
 
 Right-click a video ▸ **Export All Frames…** (or several videos ▸ **Export All Frames of N Videos…**, or
