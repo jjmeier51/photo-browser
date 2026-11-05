@@ -7,8 +7,13 @@
 //   - a video by AVFoundation (AVPlayer into an AVPlayerLayer, QuickTime's own player): HDR in HDR on a
 //     display that has the headroom (EDR), tone-mapped by the system on one that hasn't, colour-managed;
 //   - an HDR photo by Core Image (the gain map applied — the iPhone's or the ISO one — or the HLG/PQ curve
-//     read) into an extended-range picture, shown by an NSImageView allowed HDR (AppKit's own HDR path,
-//     which tone-maps it on a display without the headroom).
+//     read), **tone-mapped to the headroom the display has now** and shown by an NSImageView allowed HDR. The
+//     full HDR picture goes far above what a Mac display shows at most brightness settings (an iPhone photo's
+//     highlights reach several times SDR white); handed over as it was, everything above the display's headroom
+//     was cut off — white walls, a white dress, window light came out flat white, "extremely overexposed". So,
+//     like Preview: the picture is read once (`HDRSource`, its brightest value measured), made for the screen's
+//     current headroom (CIToneMapHeadroom: highlights eased in, never clipped), and made again whenever that
+//     headroom changes (brightness, another display) — checked while it's shown.
 //
 // Built with `swiftc -emit-library` into ~/Library/Caches/PhotoBrowser/ and loaded into Safe Finder with
 // ctypes. It's a plain C interface (`pbv_*`): Python makes the surface inside a Qt widget's own NSView (its
@@ -60,14 +65,35 @@ final class PictureView: NSImageView {
         if responds(to: NSSelectorFromString("setPreferredImageDynamicRange:")) {
             setValue(2, forKey: "preferredImageDynamicRange")       // NSImageDynamicRangeHigh
         }
+        // And the layer asks for EDR outright: macOS only gives a window headroom once something in it asks, and
+        // the first picture is made for the headroom there is then — perhaps none yet (`headroomChanged`).
+        wantsLayer = true
+        if let layer = layer, layer.responds(to: NSSelectorFromString("setWantsExtendedDynamicRangeContent:")) {
+            layer.setValue(true, forKey: "wantsExtendedDynamicRangeContent")
+        }
     }
 }
 
-/// An HDR photo as an extended-range picture: the gain map applied (macOS 14+), turned upright, scaled down to
-/// at most `maxPixels` (0: as it is). nil when Core Image can't read it.
-func hdrPicture(_ url: URL, maxPixels: Int) -> CGImage? {
+/// An HDR photo, read once: the full HDR picture (the gain map applied, turned upright, scaled down to at most
+/// `maxPixels`) and its brightest value (`peak`, in multiples of SDR white) — what it's tone-mapped from.
+final class HDRSource: @unchecked Sendable {
+    let image: CIImage
+    let peak: Double
+
+    init(image: CIImage, peak: Double) {
+        self.image = image
+        self.peak = peak
+    }
+}
+
+/// The tone-mapping filter (macOS 15+), by name so this builds with any SDK; nil before macOS 15.
+func toneMapFilter() -> CIFilter? { CIFilter(name: "CIToneMapHeadroom") }
+
+/// Reads an HDR photo. Without the tone-mapping filter the gain map isn't applied (the standard-range picture is
+/// shown, never a clipped HDR one). nil when Core Image can't read it.
+func loadHDR(_ url: URL, maxPixels: Int) -> HDRSource? {
     var options: [CIImageOption: Any] = [.applyOrientationProperty: true]
-    if #available(macOS 14.0, *) {
+    if toneMapFilter() != nil, #available(macOS 14.0, *) {
         options[.expandToHDR] = true
     }
     guard var image = CIImage(contentsOf: url, options: options) else { return nil }
@@ -80,7 +106,37 @@ func hdrPicture(_ url: URL, maxPixels: Int) -> CGImage? {
         lanczos.setValue(1.0, forKey: kCIInputAspectRatioKey)
         if let out = lanczos.outputImage { image = out }
     }
-    let rect = image.extent.integral
+    return HDRSource(image: image, peak: peakOf(image))
+}
+
+/// The brightest component anywhere in `image`, in Core Image's linear working space (1 = SDR white).
+func peakOf(_ image: CIImage) -> Double {
+    guard let area = CIFilter(name: "CIAreaMaximum") else { return 1 }
+    area.setValue(image, forKey: kCIInputImageKey)
+    area.setValue(CIVector(cgRect: image.extent), forKey: kCIInputExtentKey)
+    guard let out = area.outputImage else { return 1 }
+    var px = [Float](repeating: 0, count: 4)
+    renderContext.render(out, toBitmap: &px, rowBytes: 16,
+                         bounds: CGRect(x: out.extent.minX, y: out.extent.minY, width: 1, height: 1),
+                         format: .RGBAf, colorSpace: nil)
+    let m = Double(max(px[0], max(px[1], px[2])))
+    return m.isFinite && m > 0 ? m : 1
+}
+
+/// The picture made for a display with `headroom` (≥ 1): brought down to it when it's brighter, never clipped.
+/// nil when it would have to be clipped (no tone-mapping filter) or can't be rendered.
+func renderHDR(_ source: HDRSource, headroom: Double) -> CGImage? {
+    var image = source.image
+    let target = max(1.0, headroom)
+    if source.peak > target * 1.01 {
+        guard let tone = toneMapFilter() else { return nil }
+        tone.setValue(image, forKey: kCIInputImageKey)
+        tone.setValue(source.peak, forKey: "inputSourceHeadroom")
+        tone.setValue(target, forKey: "inputTargetHeadroom")
+        guard let out = tone.outputImage else { return nil }
+        image = out
+    }
+    let rect = source.image.extent.integral
     guard rect.width >= 1, rect.height >= 1,
           let space = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3) else { return nil }
     return renderContext.createCGImage(image, from: rect, format: .RGBAh, colorSpace: space)
@@ -96,6 +152,10 @@ final class Surface {
     var pictureState = stateNothing
     var pictureSize = CGSize.zero
     var token = 0                         // the photo being read: a late one for another photo is dropped
+    var pictureSource: HDRSource?         // the photo shown, as read — to make it again for another headroom
+    var pictureHeadroom = 1.0             // the headroom the shown picture was made for
+    var rerendering = false
+    var headroomTimer: Timer?
     var loop = true
     var ended = false
     var rate: Float = 1
@@ -147,6 +207,10 @@ final class Surface {
         player.pause()
         if player.currentItem != nil { player.replaceCurrentItem(with: nil) }
         token += 1
+        headroomTimer?.invalidate()
+        headroomTimer = nil
+        pictureSource = nil
+        rerendering = false
         pictureView.image = nil
         pictureState = stateNothing
         pictureSize = .zero
@@ -276,30 +340,72 @@ final class Surface {
 
     // MARK: photo
 
+    /// How much brighter than SDR white the display under the picture can show now (1 on an SDR display, and
+    /// until macOS gives the picture's HDR request its headroom — the watch then makes it again).
+    func currentHeadroom() -> Double {
+        guard let screen = root.window?.screen ?? NSScreen.main else { return 1 }
+        let now = Double(screen.maximumExtendedDynamicRangeColorComponentValue)
+        return now.isFinite ? max(1.0, now) : 1
+    }
+
     func openPicture(_ url: URL, maxPixels: Int) {
         clear()
         showing = 2
         pictureState = stateLoading
         let mine = token
+        let headroom = currentHeadroom()
         DispatchQueue.global(qos: .userInitiated).async {
-            let picture = hdrPicture(url, maxPixels: maxPixels)
+            let source = loadHDR(url, maxPixels: maxPixels)
+            let target = source.map { min(headroom, max(1.0, $0.peak)) } ?? headroom
+            let picture = source.flatMap { renderHDR($0, headroom: target) }
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self.pictureRead(picture, token: mine) }
+                MainActor.assumeIsolated { self.pictureRead(picture, source: source, headroom: target, token: mine) }
             }
         }
     }
 
-    func pictureRead(_ picture: CGImage?, token mine: Int) {
+    func pictureRead(_ picture: CGImage?, source: HDRSource?, headroom: Double, token mine: Int) {
         guard mine == token, showing == 2 else { return }
         guard let picture = picture else {
             pictureState = stateFailed
             return
         }
+        showPicture(picture)
+        pictureSource = source
+        pictureHeadroom = headroom
+        pictureView.isHidden = false
+        pictureState = stateReady
+        headroomTimer?.invalidate()
+        headroomTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { _ in
+            MainActor.assumeIsolated { self.headroomChanged() }
+        }
+    }
+
+    func showPicture(_ picture: CGImage) {
         let size = NSSize(width: picture.width, height: picture.height)
         pictureView.image = NSImage(cgImage: picture, size: size)
         pictureSize = size
-        pictureView.isHidden = false
-        pictureState = stateReady
+    }
+
+    /// The display's headroom moved (brightness, another screen, macOS granting the HDR request): the picture is
+    /// made again for it, so it's never brighter than the display can show — nor dimmer than it could be.
+    func headroomChanged() {
+        guard showing == 2, let source = pictureSource, !rerendering else { return }
+        let target = min(currentHeadroom(), max(1.0, source.peak))
+        guard abs(target - pictureHeadroom) > max(0.08, pictureHeadroom * 0.1) else { return }
+        rerendering = true
+        let mine = token
+        DispatchQueue.global(qos: .userInitiated).async {
+            let picture = renderHDR(source, headroom: target)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.rerendering = false
+                    guard mine == self.token, self.showing == 2, let picture = picture else { return }
+                    self.showPicture(picture)
+                    self.pictureHeadroom = target
+                }
+            }
+        }
     }
 }
 

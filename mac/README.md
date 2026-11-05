@@ -347,7 +347,8 @@ several).
   QuickTime's own player), so an HDR video is shown in HDR on a Mac display that can (and tone-mapped by macOS
   on one that can't), with the same colours and brightness as QuickTime — not Qt's brighter, harsher version. An
   HDR photo (an iPhone photo with an HDR gain map, or an HLG/PQ one) appears for a moment in standard range, then
-  in HDR. This is a small Swift library (`viewer_surface.swift`) that Safe Finder builds in the background the
+  in HDR — made for the brightness your display can show right now, and made again as that changes (screen
+  brightness, another display), the way Preview does, so its highlights are never cut off. This is a small Swift library (`viewer_surface.swift`) that Safe Finder builds in the background the
   first time it starts, with Xcode's Command Line Tools like the other helpers; until it's built, without the
   tools, and for videos macOS can't play (MKV, WebM, AVI…), Qt's player is used as before. If it won't build,
   the compiler's message is in `~/Library/Caches/PhotoBrowser/viewer_surface.log`.

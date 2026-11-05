@@ -1423,6 +1423,17 @@ in each entry point — it traps rather than race if that's ever broken).
   Display P3, shown by an `NSImageView` with `preferredImageDynamicRange = .high` (set by KVC after `responds(to:)`,
   so the library still builds — and videos still work — with an SDK or macOS that lacks it). A photo zoomed
   before its HDR version arrived stays on Qt's. SDR photos stay on Qt (the read-ahead cache).
+  **Fixed Nov 5 — HDR photos "extremely overexposed".** The full-headroom rendition (an iPhone gain map lifts
+  highlights several times past SDR white) was handed to the display as it was; a Mac only shows as much as its
+  *current* EDR headroom (often < 2× at normal-to-high brightness) and cut the rest off — walls, a white dress,
+  window light went flat white. Now, like Preview's adaptive HDR: `loadHDR` reads the photo once into an
+  `HDRSource` (CIImage + its `peak`, measured with CIAreaMaximum in the linear working space), `renderHDR` makes it
+  for the screen's `maximumExtendedDynamicRangeColorComponentValue` with **CIToneMapHeadroom** (by name — macOS 15+;
+  source = peak, target = headroom; highlights eased in, never clipped), and a 0.75 s timer re-makes it when the
+  headroom moves by > 10 % (brightness, another display, or macOS granting the layer's EDR request — the layer asks
+  outright via KVC `wantsExtendedDynamicRangeContent`, since the first picture may be made for headroom 1). Without
+  the filter (macOS 14) the gain map isn't applied and an HLG/PQ photo that would need clipping isn't shown natively
+  (Qt's stays) — a standard-range picture, never a clipped one. Untested on a Mac (no compiler here).
 - **Window size**: by default each item is fitted within the **whole display** the viewer opens on (the screen
   under Safe Finder's window, `setScreen`), its full available height less the title bar — `_room`. A hand resize
   still sets `box`. The frame is placed from the computed outer size (the title bar isn't known until the window
