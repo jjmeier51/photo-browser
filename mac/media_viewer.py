@@ -18,14 +18,14 @@ map applied) and AppKit, in HDR on a display with the headroom. Qt still says wh
 pan) and gets every click. Qt's player stays for what AVFoundation can't open (MKV, WebM, AVI…) or turns down,
 and for everything while the Swift library is being built or can't be (no Xcode tools).
 
-- **Photos** (`_ImageStage`): fitted to the window; pinch, ⌘-scroll, +/− or the zoom buttons, a double-click
+- **Photos** (`_ImageStage`): fitted to the window; the mouse wheel, pinch, ⌘-scroll, +/− or the zoom buttons, a double-click
   toggles fit / actual size at the point clicked, drag to pan. Read with Qt (its HEIC plug-in on the Mac) or,
   failing that, Pillow (pillow-heif), off the main thread, the neighbours read ahead so ←/→ is instant. An HDR
   photo shows Qt's picture first, then macOS's HDR one in its place (`_NativeStage`, the same zoom and pan).
 - **Videos** (`_VideoStage`): AVFoundation on the Mac (Qt Multimedia otherwise) — play/pause, a scrubber you
   click or drag anywhere along (the video pauses while you drag; hovering shows the time there), looping like the
   iPhone's, ±15 s (J/L), a frame step (, and .), slow motion (½×, ¼×, ⅛×, as the iPhone's Slo-Mo), mute,
-  **zoom** (the same buttons and keys, pinch, double-click; under Qt's player, zoomed in, the video is drawn by
+  **zoom** (the same buttons and keys, the mouse wheel, pinch, double-click; under Qt's player, zoomed in, the video is drawn by
   a `QGraphicsVideoItem` that can be scaled and dragged — fitted, by the faster `QVideoWidget`), and **Save
   Frame** (the camera — a standard-range PNG in a "Screenshots" folder beside the video,
   `frame_export.save_frame`) and **Export All Frames…**. With neither player it shows the video's picture and
@@ -53,7 +53,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Callable
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage, QImageReader,
                            QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QHBoxLayout,
@@ -169,7 +169,8 @@ class _ImageLoader:
 # ----------------------------------------------------------------------------- the photo stage
 
 class _ImageStage(QGraphicsView):
-    """A photo, fitted; zoom by pinch, ⌘-scroll, +/− or double-click; pan by dragging. A two-finger swipe
+    """A photo, fitted; zoom by the mouse wheel (about the pointer, out no further than the fit), pinch, ⌘-scroll,
+    +/− or double-click; pan by dragging (or a two-finger scroll when zoomed). A two-finger swipe
     sideways while fitted asks for the next or previous item (`swiped`); a click `tapped`."""
     swiped = Signal(int)
     tapped = Signal()
@@ -205,15 +206,19 @@ class _ImageStage(QGraphicsView):
         self.fit()
         self.viewport().update()
 
+    def _fit_scale(self) -> float:
+        pm = self.item.pixmap()
+        r = self.viewport().rect()
+        scale = min(r.width() / max(pm.width(), 1), r.height() / max(pm.height(), 1))
+        # Filled to the window, which has the photo's shape — a small photo is enlarged rather than left
+        # in a black frame (only a tiny one is held back).
+        return min(scale, 8.0 if max(pm.width(), pm.height()) >= 200 else 3.0)
+
     def fit(self) -> None:
         self.resetTransform()
         pm = self.item.pixmap()
         if not pm.isNull():
-            r = self.viewport().rect()
-            scale = min(r.width() / max(pm.width(), 1), r.height() / max(pm.height(), 1))
-            # Filled to the window, which has the photo's shape — a small photo is enlarged rather than left
-            # in a black frame (only a tiny one is held back).
-            scale = min(scale, 8.0 if max(pm.width(), pm.height()) >= 200 else 3.0)
+            scale = self._fit_scale()
             self.scale(scale, scale)
             self.centerOn(self.item)
         self.fitted = True
@@ -254,10 +259,20 @@ class _ImageStage(QGraphicsView):
             painter.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter, self.message)
             painter.restore()
 
+    def wheel_zoom(self, factor: float, at: QPoint) -> None:
+        """The wheel's zoom, about the pointer: in as far as zoom goes, out no further than the fit."""
+        if self.item.pixmap().isNull():
+            return
+        if factor < 1 and (self.fitted or self.scale_now() * factor <= self._fit_scale() * 1.001):
+            if not self.fitted:
+                self.fit()
+            return
+        self.zoom(factor, at)
+
     def wheelEvent(self, event) -> None:  # noqa: N802
-        mods = event.modifiers()
-        if mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
-            self.zoom(1.0015 ** event.angleDelta().y(), event.position().toPoint())
+        if wheel_zooms(event):
+            self.wheel_zoom(wheel_factor(event), event.position().toPoint())
+            event.accept()
             return
         dx, dy = event.pixelDelta().x() or event.angleDelta().x() / 4, event.pixelDelta().y() or event.angleDelta().y() / 4
         if self.fitted and abs(dx) > abs(dy):
@@ -300,6 +315,23 @@ class _ImageStage(QGraphicsView):
             self.actual_size(event.position().toPoint())
         else:
             self.fit()
+
+
+WHEEL_STEP = 1.0015                          # zoom per eighth of a degree: one wheel notch (120) ≈ 1.2×
+
+
+def wheel_zooms(event) -> bool:
+    """Whether a scroll zooms: a mouse's scroll wheel does (its events come without a scroll phase), and so does
+    ⌘- or Ctrl-scroll. A trackpad's or Magic Mouse's two-finger scroll (phased) keeps swiping to the next item
+    and panning a zoomed picture — pinching zooms there."""
+    if event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
+        return True
+    return event.phase() == Qt.ScrollPhase.NoScrollPhase and not event.angleDelta().isNull()
+
+
+def wheel_factor(event) -> float:
+    steps = event.angleDelta().y() or event.angleDelta().x()     # ⇧-scroll turns a wheel's notches sideways
+    return WHEEL_STEP ** steps
 
 
 def _double_click_ms() -> int:
@@ -681,8 +713,8 @@ class _NativeStage(QWidget):
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         event.accept()
-        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
-            self.zoom(1.0015 ** event.angleDelta().y(), event.position())
+        if wheel_zooms(event):                        # zoom() stops at the fit going out
+            self.zoom(wheel_factor(event), event.position())
             return
         dx = event.pixelDelta().x() or event.angleDelta().x() / 4
         dy = event.pixelDelta().y() or event.angleDelta().y() / 4
@@ -1005,6 +1037,7 @@ class _VideoStage(QWidget):
         view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         item = QGraphicsVideoItem()
         view.scene().addItem(item)
+        view.viewport().installEventFilter(self)      # its wheel zooms too, rather than scrolling the view
         self.zoom_view, self.zoom_item = view, item
         self.pages.addWidget(view)
         return True
@@ -1110,6 +1143,24 @@ class _VideoStage(QWidget):
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         self.tapped.emit()                     # Qt's video, or the picture (the native stage takes its own)
         super().mouseReleaseEvent(event)
+
+    def _wheel(self, event) -> bool:
+        """The mouse wheel zooms Qt's video too (the native stage handles its own)."""
+        if self.backend != "qt" or not wheel_zooms(event):
+            return False
+        self.zoom(wheel_factor(event), event.position().toPoint())
+        event.accept()
+        return True
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        if not self._wheel(event):
+            super().wheelEvent(event)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if self.zoom_view is not None and obj is self.zoom_view.viewport() and event.type() == QEvent.Type.Wheel:
+            if self._wheel(event):
+                return True
+        return super().eventFilter(obj, event)
 
 
 # ----------------------------------------------------------------------------- the window

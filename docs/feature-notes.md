@@ -1585,6 +1585,13 @@ text to wherever the book went; the result line names the folder when it isn't t
 Tested offscreen through a pane: preview, an iPhone book, two files at 5 × 8, Stop mid-book (no file left), the
 install path, Open in the PDF viewer.
 
+**Mouse-wheel zoom (Nov 5).** In the viewer a mouse's wheel zooms photos and videos (`_ImageStage`, `_NativeStage`,
+and Qt's player — `_VideoStage.wheelEvent` plus an event filter on the zoomed `QGraphicsView`'s viewport, which
+would otherwise scroll) about the pointer, 1.0015^angleDelta (≈ 1.2× a notch), out no further than the fit.
+`wheel_zooms` tells a wheel from a trackpad by **`QWheelEvent.phase() == NoScrollPhase`** (macOS gives trackpad
+and Magic Mouse scrolls begin/update/end/momentum phases), so two-finger scrolling keeps swiping to the next item
+and panning a zoomed picture; ⌘/Ctrl-scroll zooms from either.
+
 ## 6q. Safe Finder Find Duplicates — `mac/duplicates.py`, `mac/duplicates_window.py` (Nov 3, 2026)
 
 A port of §2 (same three kinds, kept apart, same threshold 6, same normalized names, same Oldest/Newest from

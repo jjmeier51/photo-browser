@@ -353,8 +353,9 @@ several).
   tools, and for videos macOS can't play (MKV, WebM, AVI…), Qt's player is used as before. If it won't build,
   the compiler's message is in `~/Library/Caches/PhotoBrowser/viewer_surface.log`.
 - **Zoom** — the − / Fit / + buttons at the bottom right (or +, −, 0), for photos **and videos**; click the
-  percentage for fit ⇄ actual size. Photos (and videos macOS plays) also pinch, ⌘-scroll, and double-click to
-  toggle; drag to pan.
+  percentage for fit ⇄ actual size. **The mouse wheel zooms** photos and videos, about the pointer (out no further
+  than the fit); on a trackpad or Magic Mouse a two-finger scroll still swipes to the next item (and pans when
+  zoomed in), and pinch or ⌘-scroll zoom. Double-click toggles fit ⇄ actual size; drag to pan.
   Photos fill the window (a small one is enlarged rather than framed in black). The ones either side are read
   ahead, so ←/→ is instant.
 - **Videos** play and loop, as on the iPhone. Below the picture: the **scrubber** across the whole width —
