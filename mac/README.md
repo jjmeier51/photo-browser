@@ -688,30 +688,33 @@ boxes are left alone (and counted). It erases what you box; it doesn't look for 
 
 ### Remove Watermark — your own watermark, off many pieces at once (`watermark_window.py`, `watermark.py`)
 
-For art you signed with a see-through watermark repeated across the piece ("John Meier artwork" a dozen times
-over it), where the original without it is gone. Select the pieces — or folders of them — and right-click ▸
-**Remove Watermark…** (or **Remove Watermark from Photos Inside…** on folders; or Photos ▸ Remove Watermark…).
+For art you signed with a see-through watermark — anywhere on the piece, once or many times, and with words
+that change from piece to piece ("John Meier artwork", "2025 n498rfhd", "34987h34rtf98") — where the original
+without it is gone. Select the pieces — or folders of them — and right-click ▸ **Remove Watermark…** (or
+**Remove Watermark from Photos Inside…** on folders; or Photos ▸ Remove Watermark…).
 
 - **The first time**, drag a box round **one whole copy** of the watermark on the first piece. It learns the
-  watermark from that copy and every other copy on the piece — wherever they are, a little bigger or turned
-  — and shows the piece with all of them taken out. Stars, sparks and detail under the letters come back,
-  because the see-through letters are *taken back out* of the picture, not painted over.
-- **After that it remembers.** On the next pieces it finds the watermark by itself — even where it's in other
-  places, or the words change ("John Meier's Work", "Meier dfs8437he9", "John's Art 9/12/23"): a piece
-  whose words share one with a watermark it knows ("Meier", "John") has its own words learned from there.
-  It looks ahead through the pieces while you look at one, so ‹ › is quick.
-- **If it finds nothing on a piece, or the result isn't right**, drag a box round one copy on that piece —
-  it learns that one too. **Look Again** forgets a piece's result and looks again; **Original** shows the
-  piece as it is with what will go in red. **Forget** clears everything it has learned.
+  watermark from that copy (and any other copies on the piece) and shows the piece with them taken out.
+  Stars, sparks and detail under the letters come back, because the see-through letters are *taken back out*
+  of the picture, not painted over.
+- **After that it finds it by its look**, whatever the words: the same white, the same see-through strength,
+  the same size and slant of lettering. On the next pieces it finds every line of your watermark by itself —
+  one copy or many, anywhere, in any words — and takes it out. Pieces with the very same words as one it has
+  seen are matched exactly. It looks ahead through the pieces while you look at one, so ‹ › is quick.
+- **If it finds nothing on a piece, or misses something**, drag a box round one copy on that piece — it
+  learns that one too (handy if some pieces were signed in a different size or style). **Look Again**
+  forgets a piece's result and looks again; **Original** shows the piece as it is with what will go in red.
+  **Forget** clears everything it has learned.
 - **Save as New Photos** writes "name (no watermark).jpg" beside each piece with the same metadata, dates and
   tags; **Replace Originals** rewrites them. Pieces where no watermark was found are left alone (and
   counted). Results are tagged "retouched". Running it again on a folder skips the "(no watermark)" copies.
 
-It needs several copies of the watermark on a piece (it compares them to tell the watermark from the art),
-and a watermark of one colour (a white or black see-through mark; a drop shadow would stay). For a single
-opaque logo, use Remove Objects; for something boxed in the same spot on every photo, Erase Area. Each piece
-takes from a few seconds to about half a minute. The learned watermarks are kept in
-`~/Library/Application Support/Safe Finder/Watermarks`. (Needs numpy, like Erase Area.)
+It needs a watermark of one colour (a white or black see-through mark; a drop shadow would stay) and lines of
+four letters or more. A copy sitting on art as light as the ink (white on near-white) can't be read and is
+left. For a single opaque logo, use Remove Objects; for something boxed in the same spot on every photo,
+Erase Area. Each piece takes ten to thirty seconds. Check a few results with **Original** before replacing
+anything. The learned watermarks are kept in `~/Library/Application Support/Safe Finder/Watermarks`. (Needs
+numpy, like Erase Area.)
 
 ### Remove Objects — draw round it and it's gone (`remove_window.py`, `inpaint.py`)
 

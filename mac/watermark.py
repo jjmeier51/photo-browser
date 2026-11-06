@@ -1,17 +1,29 @@
 """Take one's own see-through watermark off photos in bulk, for Safe Finder's Remove Watermark window
 (watermark_window.py). No Qt here, so it's testable on its own.
 
-Made for art signed with a see-through mark repeated across each piece ("John Meier artwork" a dozen times,
-at slightly different places, sizes and turns on every piece, and not always the same words — "John Meier's
-Work", "John's Art 9/12/23", "Meier dfs8437he9"). Erase Area (retouch.py) erases what stands out inside
-boxes; on art that also takes the stars, sparks and highlights under the boxes. Here the mark itself is
-learned, every copy of it is found wherever it is, and each copy is *taken back out* rather than painted
-over, so what was under it comes back.
+Made for art signed with a see-through mark, at different places, sizes and turns on every piece, often
+repeated across it, and with words that change from piece to piece — "John Meier artwork", "John Meier's
+Work", even "2025 n498rfhd" and "34987h34rtf98", sharing no word at all. Erase Area (retouch.py) erases
+what stands out inside boxes; on art that also takes the stars, sparks and highlights under the boxes.
+Here the mark itself is learned, every copy of it is found wherever it is, and each copy is *taken back
+out* rather than painted over, so what was under it comes back.
 
-**On one photo** (`from_box`, or `auto` from the library):
+**By its look** (`detect`, `by_look` — what lets one box do for a whole batch): what the person's marks share
+isn't words but look — one ink, one see-through strength, one letter size and slant. A see-through mark
+lightens what it covers towards its ink by its opacity, so (pixel − art)/(ink − art) reads as that opacity on
+its strokes, the same in every colour channel for a white mark. Every pixel is read against a median
+background; strokes reading as the kept marks' opacity are grouped into lines; a line counts only with the
+mark's letter height, stroke width, slant, letters (four or more, letter-sized) and length (five letters'
+height or more) and channels that agree. Lines in the art crossing the text are taken out first
+(`_straight`); a tangle of copies joined by them is split into bands at the mark's angle (`_bands`); each
+line gathers what lies along it (`_extend`) and is read per channel against a fill under it
+(`_line_alpha`). One copy or many, any words. When a piece repeats its words three times or more, the
+clearest line becomes a box for the template method below, which is more exact with many copies.
+
+**From a box** (`from_box`) — and for the same words seen before (`auto`):
 - *A first template*: one copy boxed by the person — what's lighter (or darker) than a coarse median
-  background inside the box, specks such as stars dropped (`_components`: specks are small) — or a mark
-  (or one word of one) already learned.
+  background inside the box, specks such as stars and lines in the art dropped — or a mark already
+  learned.
 - *Finding copies* (`_coarse`, `refine_all`): normalized cross-correlation of the photo's fine detail with
   the template's over a grid of sizes and turns at a coarse scale — masked NCC (Padfield 2012), so a copy
   running off the edge still counts — then each hit refined at full scale by a pattern search over
@@ -31,16 +43,17 @@ over, so what was under it comes back.
   strength reads low isn't the mark and is left alone, so a shape in the art is never "removed" into a
   dark ghost.
 
-**Across photos** (`Library`): every mark learned is kept in `~/Library/Application Support/Safe Finder/
-Watermarks` with its words split out (`words`). A new photo is tried against the kept marks (the same words
-as before: found and taken out as is), then against their words (new words round a familiar one: the
-template grows from the word on that photo); only when neither matches does it need a box.
+**Across photos** (`Library`): every mark learned from a box is kept in `~/Library/Application Support/Safe
+Finder/Watermarks`, with its look (`style_of`). A new photo is tried against the last few kept marks (the
+same words again: taken out as they are), then by the look of all of them; only a photo with a mark of a look
+never seen needs a box.
 
 What it can't do: a mark that isn't one colour (white text with a black shadow — the shadow stays), an
-opaque mark (nothing under it to bring back — Remove Objects fills those), and a mark seen only once on a
-photo (the median needs several copies; a lone copy is read against a smooth background, which loses the
-detail under its strokes). Saving is the crop's (batch_crop): format, metadata, tags and dates kept — in
-place, or beside it as "name (no watermark).ext".
+opaque mark (nothing under it to bring back — Remove Objects fills those), a copy over art as light as its
+ink (white on white: nothing to read), and very short marks found by look (under four letters). A copy found
+by look is read against a smooth fill under its strokes, which loses fine detail there that the template
+method would keep. Saving is the crop's (batch_crop): format, metadata, tags and dates kept — in place, or
+beside it as "name (no watermark).ext".
 """
 from __future__ import annotations
 
@@ -142,12 +155,44 @@ class Watermark:
 
 
 @dataclass
+class Line:
+    """One line of watermark text found by its look (`detect`), words unknown: where it is on the photo,
+    its opacity per colour channel there (y0, x0, alpha (h, w, 3)), its ink, and its shape."""
+    y0: int
+    x0: int
+    alpha: np.ndarray
+    colour: np.ndarray
+    cx: float
+    cy: float
+    length: float
+    height: float
+    angle: float
+    opacity: float
+
+
+@dataclass
+class Style:
+    """How a learned mark looks, words aside — its ink, how see-through its solid strokes are, how thick its
+    strokes and how tall its letters, and the line's angle — for finding marks whose words are new on every
+    piece ("2025 n498rfhd", "34987h34rtf98")."""
+    colour: np.ndarray
+    opacity: float
+    stroke: float                           # px, on a photo whose short side is `side`
+    height: float                           # the band holding 80 % of the strokes, px
+    angle: float                            # the line on screen, degrees, rising positive, in (−90, 90]
+    side: int
+
+
+@dataclass
 class Result:
-    """What was found on one photo: its mark, the copies, and how it was found ("box" — learned from the
-    person's box; "same" — a kept mark as it is; "grown" — learned from a kept mark or word)."""
-    wm: Watermark
+    """What was found on one photo, and how ("box" — learned from the person's box; "same" — a kept mark as
+    it is; "grown" — learned from a kept mark or word; "style" — lines found by the look of the marks learned
+    so far, `lines`, sometimes with a mark learned from them too). `wm` is None when only lines were found."""
+    wm: Watermark | None
     copies: list[Copy]
     how: str
+    lines: list[Line] = field(default_factory=list)
+    styles: list[Style] = field(default_factory=list)
 
 
 # -- small tools ---------------------------------------------------------------------------------------
@@ -442,6 +487,15 @@ def _parted(wm: Watermark) -> Watermark:
     return replace(wm, axis=axis, cuts=tuple(sorted(cuts)))
 
 
+def _angle_of(mask: np.ndarray) -> float | None:
+    """The main direction of a mask's pixels on screen (rising positive), or None when there are few."""
+    ys, xs = np.nonzero(mask)
+    if len(ys) < 20:
+        return None
+    _ev, vec = np.linalg.eigh(np.cov(np.stack([xs, ys]).astype(np.float64)))
+    return math.degrees(math.atan2(-vec[1, 1], vec[0, 1]))
+
+
 def _line(mask: np.ndarray, across: float) -> bool:
     """A straight thin stroke reaching a good way across (`across`: the box's diagonal) — a line in the art
     running through the box (a letter, a word or a logo is never that thin and straight). Left in, it finds
@@ -452,6 +506,61 @@ def _line(mask: np.ndarray, across: float) -> bool:
     ev = np.linalg.eigvalsh(np.cov(np.stack([xs, ys]).astype(np.float64)))
     length, width = 3.46 * math.sqrt(max(ev[1], 0.0)), math.sqrt(max(ev[0], 0.0))
     return length > 0.1 * across and width < min(2.5, 0.05 * length)
+
+
+def _shift(a: np.ndarray, oy: int, ox: int) -> np.ndarray:
+    """`a` moved by (oy, ox), what comes in from outside empty."""
+    h, w = a.shape
+    out = np.zeros_like(a)
+    if abs(oy) >= h or abs(ox) >= w:
+        return out
+    out[max(0, oy):h + min(0, oy), max(0, ox):w + min(0, ox)] = a[max(0, -oy):h - max(0, oy), max(0, -ox):w - max(0, ox)]
+    return out
+
+
+def _straight(mask: np.ndarray, length: int, step: float = 3.0, text: float | list[float] | None = None,
+              thin: int = 5) -> np.ndarray:
+    """The pixels of `mask` on a straight run at least `length` long, at any angle (a morphological opening
+    with a line `length` long, every `step` degrees, on the mask thickened by a pixel so a thin line drawn
+    at a slant doesn't break into steps). Letters' strokes are never that long; lines in the art are, even
+    where they cross letters and are joined to them. Close-set letters thickened make a band with runs of its
+    own, along the text and a little either side of it: a run only counts where the strokes don't reach
+    `thin` pixels out on both sides across it (a line is thin; a band of letters is a letter tall), and along
+    the text itself (`text`: its angle on screen, rising positive, or several, ±8°) not at all."""
+    if length < 4 or not mask.any():
+        return np.zeros_like(mask)
+    thick = retouch._grow(mask, 1)
+    h, w = mask.shape
+    pad = length + 1
+    big = np.zeros((h + 2 * pad, w + 2 * pad), bool)
+    big[pad:pad + h, pad:pad + w] = thick
+    found = np.zeros_like(big)
+    skip = [] if text is None else [text] if isinstance(text, (int, float)) else list(text)
+    for deg in np.arange(0.0, 180.0, step):
+        if any(abs((deg + t + 90) % 180 - 90) < 8 for t in skip):          # deg runs y-down: screen = −deg
+            continue
+        dx, dy = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+
+        def moved(a: np.ndarray, t: float) -> np.ndarray:
+            return _shift(a, int(round(-t * dy)), int(round(-t * dx)))
+        run, span = big, 1                       # every pixel `length` along from here is set — by doubling:
+        while 2 * span <= length:                # a run of 2s is a run of s here and a run of s s further on
+            run = run & moved(run, span)
+            span *= 2
+        if span < length:
+            run = run & moved(run, length - span)
+        if not run.any():
+            continue
+        seg, span = run, 1                       # …then the whole run is marked, by doubling back
+        while 2 * span <= length:
+            seg = seg | moved(seg, -span)
+            span *= 2
+        if span < length:
+            seg = seg | moved(seg, -(length - span))
+        ny, nx = int(round(thin * dx)), int(round(-thin * dy))
+        wide = big & _shift(big, ny, nx) & _shift(big, -ny, -nx)
+        found |= seg & ~wide                     # …where it's thin across (a band of letters isn't)
+    return found[pad:pad + h, pad:pad + w] & mask
 
 
 # -- the first template, from one boxed copy --------------------------------------------------------
@@ -483,6 +592,10 @@ def rough(rgb: np.ndarray, box: tuple[int, int, int, int]) -> tuple[Watermark, C
         if more.sum() == mark.sum():
             break
         mark = more
+    mark &= ~retouch._grow(_straight(mark, int(0.3 * math.hypot(*crop.shape)), text=_angle_of(mark)), 1)
+    if mark.sum() >= 30:                                     # lines in the art, then shorter bits of them
+        _length, tall = _shape(mark.astype(np.float32))
+        mark &= ~retouch._grow(_straight(mark, max(8, int(2.6 * tall)), text=_angle_of(mark)), 1)
     labels, n = _components(mark)
     if n:
         sizes = np.bincount(labels.ravel())[1:]
@@ -959,6 +1072,24 @@ def _estimate(rgb: np.ndarray, copies: list[Copy], wm: Watermark) -> np.ndarray:
     return np.clip(est, 0.0, 1.0).astype(np.float32)
 
 
+def _unlined(alpha: np.ndarray, focus: np.ndarray | None) -> np.ndarray:
+    """The template without straight runs longer than 2.6 letters' height (the band measure; a tall letter's
+    stem is ~1.5 of it, and a shorter limit cut the "J" and "h" of the person's mark) — a line in the art
+    that crossed the copies at the same place in each (lined up by the line itself) is not part of the mark."""
+    peak = float(alpha.max())
+    if peak <= 0:
+        return alpha
+    mark = alpha > 0.15 * peak
+    if mark.sum() < 30:
+        return alpha
+    _length, height = _shape(alpha, focus)
+    along = _angle_of(mark & focus) if focus is not None and (mark & focus).sum() >= 20 else _angle_of(mark)
+    lines = _straight(mark, max(10, int(2.6 * height)), text=along)
+    if not lines.any():
+        return alpha
+    return np.where(retouch._grow(lines, 1), 0.0, alpha).astype(np.float32)
+
+
 def _ink(rgb: np.ndarray, copies: list[Copy], wm: Watermark) -> np.ndarray:
     """The mark's colour: (pixel − (1 − α)·background) / α where the strokes are solid, by median."""
     vals = []
@@ -1040,11 +1171,11 @@ def _relearn(rgb: np.ndarray, wm: Watermark, copies: list[Copy], *, grow: int = 
             say((rnd + 0.7) / rounds, f"Learning the watermark from {n} cop{'y' if n == 1 else 'ies'}…")
         if cancelled is not None and cancelled():
             raise Stopped
-        wm = replace(wm, alpha=_estimate(rgb, copies, wm), _cache={})
+        wm = replace(wm, alpha=_unlined(_estimate(rgb, copies, wm), wm.focus), _cache={})
         if float(wm.alpha.max()) <= 0.02:
             raise NoWatermark("the copies didn't agree on a watermark — drag the box round one whole copy")
         wm = replace(wm, colour=_ink(rgb, copies, wm), _cache={})
-        wm = replace(wm, alpha=_estimate(rgb, copies, wm), _cache={})
+        wm = replace(wm, alpha=_unlined(_estimate(rgb, copies, wm), wm.focus), _cache={})
         wm, copies = _main_block(wm, copies, final=rnd == rounds - 1)
     copies = refine_all(rgb, wm, copies, L=L, cancelled=cancelled, coarse=1.0)
     if not copies:
@@ -1091,26 +1222,6 @@ def from_box(rgb: np.ndarray, box: tuple[int, int, int, int], progress: Progress
     return Result(wm, copies, "box")
 
 
-def _part_read(rgb: np.ndarray, wm: Watermark, c: Copy) -> float:
-    """How strongly the best-matching part of the template reads on this copy: the 70th percentile of what the
-    photo says the opacity is over what the template says, inside its strokes. A copy with other words round
-    a shared one ("John Meier vea4t34fe" for a kept "John Meier artwork") reads ~1 there and 0 elsewhere,
-    which a median would call 0; a shape in the art that only looks like the mark reads low throughout."""
-    H, W = rgb.shape[:2]
-    r = render(wm, c, H, W, pad=4)
-    if r is None:
-        return 0.0
-    y0, x0, t = r
-    inner = t > 0.5 * float(t.max())
-    lum = luminance(rgb[y0:y0 + t.shape[0], x0:x0 + t.shape[1]])
-    bg = _fill(lum[..., None], retouch._grow(t > 0.02 * float(t.max()), 2))[..., 0]
-    room = float(wm.colour @ LUMA) - bg
-    ok = inner & (np.abs(room) > 30)
-    if ok.sum() < 20:
-        return 0.0
-    return float(np.percentile((lum - bg)[ok] / room[ok] / t[ok], 70))
-
-
 def _grown(rgb: np.ndarray, seed: Watermark, seeds: list[Copy], grow: int, say, cancelled: Cancelled | None) -> Result | None:
     """The photo's own mark grown from copies of a kept mark (or word), or None when what grew isn't
     believable: it needs two seeds at least (one copy alone can't tell the mark from the art under it), it
@@ -1136,30 +1247,31 @@ def _grown(rgb: np.ndarray, seed: Watermark, seeds: list[Copy], grow: int, say, 
 
 def auto(rgb: np.ndarray, library: "Library", progress: Progress | None = None,
          cancelled: Cancelled | None = None) -> Result | None:
-    """The mark on this photo found from the library, or None: a kept mark with the same words is taken as it
-    is; one that matches only in part, or one of the kept marks' words, is grown into this photo's own
-    (`_grown`). Raises Stopped."""
+    """The mark on this photo found from what's been learned, or None. First the last few marks learned, as
+    they are — the same words again ("same"; one with more words beside them is learned afresh, "grown");
+    then the look of every mark learned (`by_look`): any words, one copy or many, anywhere ("style").
+    Raises Stopped."""
     say = _sayer(progress, cancelled)
     H, W = rgb.shape[:2]
     L = luminance(rgb)
-    marks = library.items[:12]
+    marks = library.items[:4]
     best: tuple[float, Watermark, list[Copy]] | None = None
     for i, wm in enumerate(marks):
-        say(0.4 * i / max(1, len(marks)), "Looking for your watermark…")
+        say(0.3 * i / max(1, len(marks)), "Looking for your watermark…")
         cands = _coarse(L, wm, search_space(wm, H, W), cancelled, most=30)
         if cands and (best is None or cands[0].score > best[0]):
             best = (cands[0].score, wm, cands)
         if best is not None and best[0] >= 0.6:
             break
-    if best is not None and best[0] >= 0.25:
+    if best is not None and best[0] >= 0.45:
         _top, wm, cands = best
         got = refine_all(rgb, wm, cands, L=L, check=False, cancelled=cancelled)
         good = [c for c in got if c.gain >= MIN_GAIN and c.score >= MIN_SCORE]
-        length, height = _shape(wm.alpha)
         if len(good) >= 2 and np.mean([c.score for c in good]) >= SAME and len(good) >= 0.6 * len(got):
             # The same words — unless there are more beside them ("John Meier" kept, "John Meier vea4t34fe"
             # here): read again with room round it; if it grows, it's new words, else the kept mark.
-            found = _grown(rgb, wm, good, int(0.6 * length + height), _sayer(progress, cancelled, 0.45, 1.0), cancelled)
+            length, height = _shape(wm.alpha)
+            found = _grown(rgb, wm, good, int(0.6 * length + height), _sayer(progress, cancelled, 0.3, 0.6), cancelled)
             if found is None:
                 return Result(_stats(wm, good, H, W), good, "same")
             before = int((wm.alpha > 0.3 * float(wm.alpha.max())).sum())
@@ -1167,52 +1279,428 @@ def auto(rgb: np.ndarray, library: "Library", progress: Progress | None = None,
             if after <= 1.15 * before:
                 return Result(replace(found.wm, key=wm.key), found.copies, "same")
             return found
-        seeds = [c for c in got if c.score >= 0.3 and _part_read(rgb, wm, c) >= 0.5]
-        found = _grown(rgb, wm, seeds, int(0.6 * length + height), _sayer(progress, cancelled, 0.45, 1.0), cancelled)
-        if found is not None:
-            return found
-    # One word of a kept mark — "Meier" in "Meier dfs8437he9" — and the rest grown from it.
-    anchors = library.anchors()
-    best = None
-    for i, word in enumerate(anchors):           # the word with several strong copies, not one lucky hit
-        say(0.45 + 0.3 * i / max(1, len(anchors)), "Looking for words of your watermark…")
-        cands = _coarse(L, word, search_space(word, H, W), cancelled, most=30)
-        evidence = sum(c.score for c in cands[:3]) / 3
-        if cands and (best is None or evidence > best[0]):
-            best = (evidence, word, cands)
-        if best is not None and best[0] >= 0.75:
-            break
-    if best is None or best[0] < 0.35:
-        return None
-    _top, word, cands = best
-    seeds = [c for c in refine_all(rgb, word, cands, L=L, cancelled=cancelled) if c.score >= 0.35]
-    length, height = _shape(word.alpha)
-    return _grown(rgb, word, seeds, int(2 * length + height), _sayer(progress, cancelled, 0.75, 1.0), cancelled)
+    return by_look(rgb, library.styles(), _sayer(progress, cancelled, 0.4, 1.0), cancelled)
 
 
-def words(wm: Watermark) -> list[Watermark]:
-    """The mark's words, each a template of its own (strokes closer than a ninth of the letters' height make
-    a word; dots and apostrophes are left out). Empty when it doesn't split."""
+# -- the look of the mark, words aside ----------------------------------------------------------------
+
+def style_of(wm: Watermark) -> Style | None:
+    """A learned mark's look: ink, solid strokes' opacity, stroke width (twice the area over the outline),
+    letter height (`_shape`) and the line's angle on screen, at the size its copies were seen at."""
     a = wm.alpha
     peak = float(a.max())
-    mark = a > 0.15 * peak
-    if mark.sum() < 30:
+    if peak <= 0.02:
+        return None
+    mask = a > 0.35 * peak
+    if mask.sum() < 30:
+        return None
+    inner = mask.copy()
+    inner[1:, :] &= mask[:-1, :]
+    inner[:-1, :] &= mask[1:, :]
+    inner[:, 1:] &= mask[:, :-1]
+    inner[:, :-1] &= mask[:, 1:]
+    stroke = 2.0 * float(mask.sum()) / max(1.0, float((mask & ~inner).sum()))
+    _length, height = _shape(a, wm.focus)
+    size = math.sqrt(max(wm.scales[0], 1e-3) * max(wm.scales[1], 1e-3))
+    turn = (wm.angles[0] + wm.angles[1]) / 2
+    co, si = _rot(turn)
+    ax, ay = wm.axis
+    dx, dy = co * ax + si * ay, -si * ax + co * ay
+    angle = math.degrees(math.atan2(-dy, dx))
+    angle = angle - 180 if angle > 90 else angle + 180 if angle <= -90 else angle
+    return Style(np.asarray(wm.colour, np.float32), float(np.percentile(a[a > 0.5 * peak], 75)),
+                 stroke * size, height * size, angle, wm.side)
+
+
+def _median(a: np.ndarray, size: int) -> np.ndarray:
+    """A 2-D array's median over size × size (PIL's, on 8 bits — a level is plenty here)."""
+    im = Image.fromarray(np.clip(np.rint(a), 0, 255).astype(np.uint8))
+    return np.asarray(im.filter(ImageFilter.MedianFilter(size)), dtype=np.float32)
+
+
+def _turned_off(angle: float, angles: list[float]) -> float:
+    """How far a line's angle is from the nearest of `angles`, degrees (lines have no direction)."""
+    return min(abs((angle - a + 90) % 180 - 90) for a in angles)
+
+
+def detect(rgb: np.ndarray, styles: list[Style], cancelled: Cancelled | None = None) -> list[Line]:
+    """Lines of watermark text found by their look alone — any words, any number of copies, anywhere.
+
+    A see-through mark lightens what it covers towards its ink by its opacity: (pixel − art)/(ink − art) is
+    the opacity, and for a white mark it's the same in every colour channel. So: the art under thin strokes
+    is the photo's median over a window a little wider than the strokes; pixels whose reading against it is
+    the kept marks' opacity (give or take — copies differ) are stroke centres, and their soft edges join
+    them. Those are grouped (strokes closer than a third of the letters' height; a tangle of copies joined by
+    a line in the art is split into the dense bands at the mark's angle), each line gathers what lies along
+    it, and it's a line of the mark only if it has the mark's shape — letters' height and stroke width in
+    range, at least four letter-sized pieces, five times longer than tall, text-like density, at a kept mark's
+    angle, lifting the art by 5 levels or more — and its colour channels agree on one opacity read against a
+    proper fill under it. A star is too bright and too small, a spark the wrong colour, a line in the art too
+    thin and straight (taken out first, `_straight`), a cloud's edge not thin at all, a highlight too short."""
+    styles = [st for st in styles if st is not None]
+    if not styles:
         return []
-    _length, height = _shape(a)
-    labels, n = _components(retouch._grow(mark, max(1, int(round(0.11 * height)))))
-    if n < 2:
+    lines: list[Line] = []
+    cache: dict = {}
+    taken = np.zeros(rgb.shape[:2], bool)
+    for look in _looks(styles):                  # each look with its own ranges, newest first
+        sign = 1.0 if float(look.colour @ LUMA) >= 128 else -1.0
+        lines += _detect(rgb, [look], sign, cancelled, cache, taken)
+    return lines
+
+
+def _looks(styles: list[Style]) -> list[Style]:
+    """The kept marks' looks, alike ones merged (same ink, opacity within a third, letters within 30 %, angle
+    within 8°) — each is looked for with its own ranges: pooled, a faint big mark and a strong small one
+    would let through anything in between."""
+    groups: list[list[Style]] = []
+    for st in styles:
+        for g in groups:
+            o = g[0]
+            if (float(np.abs(st.colour - o.colour).max()) < 40 and 0.75 < st.opacity / o.opacity < 1.33
+                    and 0.77 < st.height / o.height < 1.3 and _turned_off(st.angle, [o.angle]) < 8):
+                g.append(st)
+                break
+        else:
+            groups.append([st])
+    return [Style(np.median(np.stack([st.colour for st in g]), axis=0).astype(np.float32),
+                  float(np.median([st.opacity for st in g])), float(np.median([st.stroke for st in g])),
+                  float(np.median([st.height for st in g])), float(np.median([st.angle for st in g])), g[0].side)
+            for g in groups]
+
+
+_WHY: list | None = None                     # a test sets a list here to hear why lines were turned down
+
+
+def _no(why: str, cx: float, cy: float, n: int) -> None:
+    if _WHY is not None:
+        _WHY.append((why, cx, cy, n))
+
+
+def _detect(rgb: np.ndarray, styles: list[Style], sign: float, cancelled: Cancelled | None, cache: dict,
+            taken: np.ndarray) -> list[Line]:
+    H, W = rgb.shape[:2]
+    priors = []
+    for st in styles:
+        priors.append((st, 1.0))
+        ratio = min(H, W) / max(1, st.side)
+        if abs(math.log(ratio)) > math.log(1.1):
+            priors.append((st, ratio))
+    heights = [st.height * p for st, p in priors]
+    strokes_w = [st.stroke * p for st, p in priors]
+    h_mid = float(np.median(heights))
+    h_lo, h_hi = 0.55 * min(heights), 1.8 * max(heights)
+    sw_lo, sw_hi = 0.35 * min(strokes_w), 1.8 * max(strokes_w)
+    a_lo, a_hi = 0.55 * min(st.opacity for st in styles), 1.9 * max(st.opacity for st in styles)
+    angles = [st.angle for st in styles]
+    ink = np.median(np.stack([st.colour for st in styles]), axis=0).astype(np.float32)
+    ink_l = float(ink @ LUMA)
+    if "L" not in cache:
+        cache["L"] = luminance(rgb)
+    L = cache["L"]
+    k = int(np.clip(2 * math.ceil(1.7 * max(strokes_w)) + 3, 5, 21)) | 1
+    if ("bg", k) not in cache:
+        cache[("bg", k)] = _median(L, k)
+    bg = cache[("bg", k)]
+    # Anything brighter than a mark can be — a line in the art, a star — would lift the median beside it and
+    # make the mark's letters there read too faint: out, and the median again.
+    room = ink_l - bg
+    glare = retouch._grow(sign * (L - bg) > a_hi * np.abs(room), 1)
+    if glare.any():
+        key = ("bg2", k, round(a_hi, 3), round(ink_l), sign)
+        if key not in cache:
+            cache[key] = _median(np.where(glare, bg, L), k)
+        bg = cache[key]
+    if cancelled is not None and cancelled():
+        raise Stopped
+    lift = sign * (L - bg)
+    room = ink_l - bg
+    ok = np.abs(room) > 35                       # nearer the ink than that, texture reads as "mark"
+    r = np.where(ok, (L - bg) / np.where(ok, room, 1.0), 0.0)
+    core = ok & (r >= a_lo) & (r <= a_hi) & (lift > 3)
+    weak = ok & (r >= 0.1 * a_lo) & (lift > 1.5)
+    strokes = core | (retouch._grow(core, 2) & weak)
+
+    # Lines in the art (long straight thin runs, not along the marks' own angles), found once for the photo.
+    run = int(1.4 * h_hi)
+    art_lines = retouch._grow(_straight(strokes, run, text=angles), 1)
+    if cancelled is not None and cancelled():
+        raise Stopped
+
+    # Candidate lines: each group of strokes that's about the mark's size as it is; a bigger one (copies
+    # joined to each other by a line in the art, or by busy texture) split into the dense bands at the
+    # mark's angle, a letter tall.
+    join = max(2, int(round(0.35 * h_mid)))
+    labels, n = _components(retouch._grow(core, join))
+    if n == 0:
         return []
-    mass = np.bincount(labels.ravel(), weights=a.ravel().astype(np.float64))[1:]
+    ys, xs = np.nonzero(core)
+    lab = labels[ys, xs]
+    order = np.argsort(lab, kind="stable")
+    ys, xs, lab = ys[order], xs[order], lab[order]
+    starts = np.flatnonzero(np.r_[True, lab[1:] != lab[:-1]])
+    ends = np.r_[starts[1:], len(lab)]
+    cands: list[tuple[float, float, float, float, float, int]] = []    # cx, cy, angle, length, height, pixels
+    for s0, s1 in zip(starts, ends):
+        if cancelled is not None and cancelled():
+            raise Stopped
+        if s1 - s0 < 30:
+            continue
+        gy, gx = ys[s0:s1].astype(np.float64), xs[s0:s1].astype(np.float64)
+        rect = _rect_of(gx, gy)
+        if rect is not None and rect[4] <= 1.25 * h_hi:
+            cands.append(rect + (int(s1 - s0),))
+        else:
+            cands += _bands(gx, gy, angles, h_mid)
+
+    out: list[Line] = []                         # `taken`: pixels of lines already found, never found twice
+    for cx, cy, angle, length, height, _n in sorted(cands, key=lambda c: -c[5]):
+        if cancelled is not None and cancelled():
+            raise Stopped
+        if any(math.hypot(cx - ln.cx, cy - ln.cy) < 0.4 * max(length, ln.length) and
+               _turned_off(angle, [ln.angle]) < 10 for ln in out):
+            continue                             # a line already taken
+        if _turned_off(angle, angles) > 12 or length < max(2.0 * h_lo, 1.5 * height):
+            _no(f"angle {angle:.0f} / short", cx, cy, _n)    # a star, a spark, a blob: not worth gathering
+            continue
+        # Everything along the line — out past gaps of up to a letter's height, so a word set apart from the
+        # rest ("2019 q6eqzh") and letters that broke away come with it.
+        reach = max(height, h_mid)
+        cx, cy, length = _extend(core & ~taken, cx, cy, angle, length, 1.4 * reach, h_mid)
+        local, lcore, y0, x0 = _in_rect(strokes, core, cx, cy, angle, length + 2 * reach, 1.6 * reach)
+        if local is None:
+            continue
+        free = ~taken[y0:y0 + local.shape[0], x0:x0 + local.shape[1]]
+        local &= free
+        lcore &= free
+        cut = art_lines[y0:y0 + local.shape[0], x0:x0 + local.shape[1]]     # lines in the art crossing it
+        local &= ~cut
+        lcore &= ~cut
+        cy_, cx_ = np.nonzero(lcore)
+        if len(cy_) < 30:
+            _no("few core", cx, cy, len(cy_))
+            continue
+        rect = _rect_of(cx_ + x0 + 0.0, cy_ + y0 + 0.0)
+        if rect is None:
+            continue
+        rcx, rcy, angle, length, height = rect
+        if not h_lo <= height <= h_hi or length < 5.0 * max(height, 1.0):
+            _no(f"shape h{height:.0f} l{length:.0f}", cx, cy, len(cy_))
+            continue
+        if _turned_off(angle, angles) > 12:
+            _no(f"angle {angle:.0f}", cx, cy, len(cy_))
+            continue
+        if float(np.median(lift[y0:y0 + local.shape[0], x0:x0 + local.shape[1]][lcore])) < 5:
+            _no("too faint", cx, cy, len(cy_))       # a few levels' lift is texture, not a mark
+            continue
+        inner = local.copy()
+        inner[1:, :] &= local[:-1, :]
+        inner[:-1, :] &= local[1:, :]
+        inner[:, 1:] &= local[:, :-1]
+        inner[:, :-1] &= local[:, 1:]
+        sw = 2.0 * float(local.sum()) / max(1.0, float((local & ~inner).sum()))
+        if not sw_lo <= sw <= sw_hi:
+            _no(f"stroke {sw:.1f}", cx, cy, len(cy_))
+            continue
+        density = float(local.sum()) / max(1.0, length * max(height, 1.0) * 1.6)
+        if not 0.08 <= density <= 0.75:
+            _no(f"density {density:.2f}", cx, cy, len(cy_))
+            continue
+        letters, nl = _components(lcore)
+        sizes = np.bincount(letters.ravel())[1:]
+        letter = 0.07 * h_mid * h_mid            # the look's letters, not this line's (a row of star dots
+        big = sizes >= letter                    # measures short, and would pass by its own measure)
+        if nl < 4 or int(big.sum()) < 4 or float(np.median(sizes[sizes >= 6])) < letter:
+            _no(f"letters {nl}", cx, cy, len(cy_))
+            continue
+        line = _line_alpha(rgb, local, lcore, y0, x0, ink, a_lo, a_hi)
+        if line is None:
+            _no("channels/opacity", cx, cy, len(cy_))
+            continue
+        alpha, opacity = line
+        # Taken with a margin, so another look doesn't make a "line" of this one's soft edges.
+        taken[y0:y0 + local.shape[0], x0:x0 + local.shape[1]] |= retouch._grow(local, max(2, int(round(0.4 * height))))
+        out.append(Line(y0, x0, alpha, ink, rcx, rcy, length, height, angle, opacity))
+    return out
+
+
+def _rect_of(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float, float, float] | None:
+    """Stroke pixels' line: centre, angle on screen (rising positive, (−90, 90]), length (2nd–98th
+    percentile along it) and height (the narrowest band across holding 80 % of them)."""
+    if len(x) < 10:
+        return None
+    pts = np.stack([x, y]).astype(np.float64)
+    mid = pts.mean(axis=1, keepdims=True)
+    pts = pts - mid
+    _ev, vec = np.linalg.eigh(np.cov(pts))
+    along, across = np.sort(vec[:, 1] @ pts), np.sort(vec[:, 0] @ pts)
+    kk = int(math.ceil(0.8 * len(across)))
+    height = float(np.min(across[kk - 1:] - across[:len(across) - kk + 1]))
+    length = float(np.percentile(along, 98) - np.percentile(along, 2))
+    angle = math.degrees(math.atan2(-vec[1, 1], vec[0, 1]))
+    angle = angle - 180 if angle > 90 else angle + 180 if angle <= -90 else angle
+    return float(mid[0, 0]), float(mid[1, 0]), angle, length, height
+
+
+def _bands(x: np.ndarray, y: np.ndarray, angles: list[float], h: float) -> list[tuple[float, float, float, float, float, int]]:
+    """Lines inside a big tangle of stroke pixels: at each of the marks' angles (and 3° and 6° either side),
+    the bands a letter and a third tall holding the most pixels, cut where they have a gap of more than a
+    letter's height; runs at least two letters long."""
     out = []
-    m = max(4, int(0.3 * height))
-    for i in np.flatnonzero(mass >= 0.08 * mass.sum()) + 1:
-        keep = retouch._grow(labels == i, 2)
-        ys, xs = np.nonzero(keep & mark)
-        i0, i1 = max(0, ys.min() - m), min(a.shape[0], ys.max() + m + 1)
-        j0, j1 = max(0, xs.min() - m), min(a.shape[1], xs.max() + m + 1)
-        part = np.where(keep, a, 0.0)[i0:i1, j0:j1].astype(np.float32)
-        out.append(_parted(replace(wm, alpha=part, focus=part > 0.15 * peak, key=f"{wm.key}#{len(out)}", _cache={})))
-    return out if len(out) > 1 else []
+    band = max(4, int(round(1.3 * h)))
+    for base in angles:
+        for d in (-6.0, -3.0, 0.0, 3.0, 6.0):
+            t = math.radians(base + d)
+            dx, dy = math.cos(t), -math.sin(t)
+            u = x * dx + y * dy
+            v = -x * dy + y * dx
+            v0 = v.min()
+            hist = np.bincount(np.floor(v - v0).astype(np.int64))
+            win = np.convolve(hist, np.ones(band), mode="same")
+            taken = np.zeros_like(win, dtype=bool)
+            for peak in np.argsort(-win):
+                if win[peak] < 30:
+                    break
+                if taken[max(0, peak - band):peak + band + 1].any():
+                    continue
+                taken[peak] = True
+                sel = np.abs(v - (v0 + peak + 0.5)) <= band / 2
+                us = np.sort(u[sel])
+                if len(us) < 30:
+                    continue
+                cuts = np.flatnonzero(np.diff(us) > h) + 1
+                for run in np.split(us, cuts):
+                    if len(run) < 30 or run[-1] - run[0] < 2 * h:
+                        continue
+                    uc, vc = (run[0] + run[-1]) / 2, v0 + peak + 0.5
+                    cx, cy = uc * dx - vc * dy, uc * dy + vc * dx
+                    out.append((cx, cy, base + d, float(run[-1] - run[0]), float(band), len(run)))
+    return out
+
+
+def _extend(core: np.ndarray, cx: float, cy: float, angle: float, length: float, height: float,
+            gap: float) -> tuple[float, float, float]:
+    """A found line stretched along its own direction over the core pixels that continue it, across gaps of
+    up to `gap`: its new centre and length."""
+    H, W = core.shape
+    t = math.radians(angle)
+    dx, dy = math.cos(t), -math.sin(t)
+    far = length / 2 + 6 * gap
+    ex, ey = abs(dx) * far + abs(dy) * height / 2, abs(dy) * far + abs(dx) * height / 2
+    x0, x1 = max(0, int(cx - ex)), min(W, int(cx + ex) + 1)
+    y0, y1 = max(0, int(cy - ey)), min(H, int(cy + ey) + 1)
+    ys, xs = np.nonzero(core[y0:y1, x0:x1])
+    if len(ys) < 10:
+        return cx, cy, length
+    u = (xs + x0 - cx) * dx + (ys + y0 - cy) * dy
+    v = -(xs + x0 - cx) * dy + (ys + y0 - cy) * dx
+    u = np.sort(u[(np.abs(v) <= height / 2) & (np.abs(u) <= far)])
+    if len(u) < 10:
+        return cx, cy, length
+    inside = np.abs(u) <= length / 2
+    if not inside.any():
+        return cx, cy, length
+    lo_i, hi_i = int(np.argmax(inside)), len(u) - 1 - int(np.argmax(inside[::-1]))
+    while lo_i > 0 and u[lo_i] - u[lo_i - 1] <= gap:
+        lo_i -= 1
+    while hi_i < len(u) - 1 and u[hi_i + 1] - u[hi_i] <= gap:
+        hi_i += 1
+    lo, hi = float(u[lo_i]), float(u[hi_i])
+    mid = (lo + hi) / 2
+    return cx + mid * dx, cy + mid * dy, max(length, hi - lo)
+
+
+def _in_rect(strokes: np.ndarray, core: np.ndarray, cx: float, cy: float, angle: float, length: float,
+             height: float) -> tuple[np.ndarray | None, np.ndarray, int, int]:
+    """The stroke (and core) pixels inside a turned rectangle, on its bounding box: (strokes, core, y0, x0)."""
+    H, W = strokes.shape
+    t = math.radians(angle)
+    dx, dy = math.cos(t), -math.sin(t)
+    ex = abs(dx) * length / 2 + abs(dy) * height / 2
+    ey = abs(dy) * length / 2 + abs(dx) * height / 2
+    x0, x1 = max(0, int(cx - ex) - 2), min(W, int(cx + ex) + 3)
+    y0, y1 = max(0, int(cy - ey) - 2), min(H, int(cy + ey) + 3)
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None, core, 0, 0
+    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float64)
+    u = (xx - cx) * dx + (yy - cy) * dy
+    v = -(xx - cx) * dy + (yy - cy) * dx
+    inside = (np.abs(u) <= length / 2) & (np.abs(v) <= height / 2)
+    return strokes[y0:y1, x0:x1] & inside, core[y0:y1, x0:x1] & inside, y0, x0
+
+
+def _line_alpha(rgb: np.ndarray, strokes: np.ndarray, core: np.ndarray, y0: int, x0: int, ink: np.ndarray,
+                a_lo: float, a_hi: float) -> tuple[np.ndarray, float] | None:
+    """A found line's opacity per colour channel, read against a smooth fill under its strokes, or None when
+    its channels don't agree on one opacity in the mark's range (a coloured spark, a highlight). Inside the
+    strokes it's held within ±30 % of the line's own (so a star under a stroke keeps most of itself); at the
+    soft edges it follows the photo."""
+    h, w = strokes.shape
+    patch = rgb[y0:y0 + h, x0:x0 + w, :3].astype(np.float32)
+    hole = retouch._grow(strokes, 2)
+    bg = retouch._membrane(patch, hole)
+    room = ink[None, None, :] - bg
+    readable = np.abs(room) > 15
+    seen = np.where(readable, (patch - bg) / np.where(readable, room, 1.0), 0.0)
+    lum_room = float(ink @ LUMA) - bg @ LUMA
+    lum_ok = np.abs(lum_room) > 15
+    lum = np.where(lum_ok, (patch @ LUMA - bg @ LUMA) / np.where(lum_ok, lum_room, 1.0), 0.0)
+    at = core & lum_ok
+    if at.sum() < 20:
+        return None
+    level = float(np.median(lum[at]))
+    if not a_lo <= level <= a_hi:
+        return None
+    alpha = np.zeros((h, w, 3), np.float32)
+    for c in range(3):
+        sel = core & readable[..., c]
+        lc = float(np.median(seen[..., c][sel])) if sel.sum() >= 20 else level
+        if abs(lc - level) > 0.35 * level + 0.02:
+            return None                          # the channels disagree: not a mark of this ink
+        alpha[..., c] = np.where(core, np.clip(seen[..., c], 0.7 * lc, 1.3 * lc),
+                                 np.where(strokes, np.clip(seen[..., c], 0.0, 1.3 * lc), 0.0))
+        alpha[..., c] = np.where(readable[..., c], alpha[..., c], np.where(strokes, lc * strokes, 0.0))
+    return np.clip(alpha, 0.0, MAX_ALPHA), level
+
+
+def _covered(line: Line, wm: Watermark, copies: list[Copy], H: int, W: int) -> bool:
+    """Whether a found line is one of the copies (its centre inside a copy's box)."""
+    for c in copies:
+        b = _bounds(wm, c, H, W, pad=0)
+        if b is not None and b[0] <= line.cy < b[2] and b[1] <= line.cx < b[3]:
+            return True
+    return False
+
+
+def by_look(rgb: np.ndarray, styles: list[Style], progress: Progress | None = None,
+            cancelled: Cancelled | None = None) -> Result | None:
+    """The mark found by its look (`detect`) — any words, any number of copies — or None. When the piece has
+    the same words three times or more (lines of about one length), the clearest is used as a box to learn
+    them (`from_box`): with many copies the median template takes each out more exactly than reading each
+    line for itself. That's kept only when its copies are most of those lines; lines it doesn't cover are
+    taken out by their look."""
+    say = _sayer(progress, cancelled)
+    say(0.0, "Looking for your watermark by its look…")
+    lines = detect(rgb, styles, cancelled)
+    if not lines:
+        return None
+    H, W = rgb.shape[:2]
+    best = max(lines, key=lambda ln: ln.opacity * ln.length)
+    alike = [ln for ln in lines if 0.8 < ln.length / best.length < 1.25 and 0.8 < ln.height / best.height < 1.25]
+    if len(alike) >= 3:
+        h, w = best.alpha.shape[:2]
+        m = int(0.1 * max(h, w))
+        try:
+            learned = from_box(rgb, (best.x0 - m, best.y0 - m, best.x0 + w + m, best.y0 + h + m),
+                               progress=_sayer(progress, cancelled, 0.3, 1.0), cancelled=cancelled)
+        except NoWatermark:
+            learned = None
+        if learned is not None and len(learned.copies) >= 3:
+            covered = [ln for ln in alike if _covered(ln, learned.wm, learned.copies, H, W)]
+            if len(covered) >= 0.7 * len(alike):
+                rest = [ln for ln in lines if not _covered(ln, learned.wm, learned.copies, H, W)]
+                return Result(learned.wm, learned.copies, "style", rest, styles)
+    return Result(None, [], "style", lines, styles)
 
 
 # -- taking it out -----------------------------------------------------------------------------------
@@ -1272,6 +1760,22 @@ def remove(rgb: np.ndarray, wm: Watermark, copies: list[Copy]) -> tuple[np.ndarr
     return out, A.max(axis=-1) > 0.01
 
 
+def remove_result(rgb: np.ndarray, result: Result) -> tuple[np.ndarray, np.ndarray]:
+    """The photo with everything in `result` taken out — the mark's copies, then the lines found by look —
+    and where it changed."""
+    out = np.array(rgb, dtype=np.float32, copy=True)
+    changed = np.zeros(rgb.shape[:2], bool)
+    if result.wm is not None and result.copies:
+        out, changed = remove(out, result.wm, result.copies)
+    for ln in result.lines:
+        h, w = ln.alpha.shape[:2]
+        sub = out[ln.y0:ln.y0 + h, ln.x0:ln.x0 + w, :3]
+        a = ln.alpha[:sub.shape[0], :sub.shape[1]]
+        sub[...] = np.clip((sub - a * ln.colour[None, None, :]) / (1 - a), 0, 255)
+        changed[ln.y0:ln.y0 + h, ln.x0:ln.x0 + w] |= a.max(axis=-1) > 0.01
+    return out, changed
+
+
 def can_clean(path: str) -> bool:
     return batch_crop.can_crop(path)
 
@@ -1328,7 +1832,13 @@ def clean(path: str, result: Result, factor: float = 1.0, *, as_new: bool = Fals
     mode = im.mode
     has_alpha = mode in ("RGBA", "LA", "PA") or (mode == "P" and "transparency" in im.info)
     work = im.convert("RGBA" if has_alpha else "RGB")
-    out, _changed = remove(np.asarray(work, dtype=np.float32), result.wm, scaled(result.copies, factor))
+    pixels = np.asarray(work, dtype=np.float32)
+    lines = result.lines
+    if lines and factor != 1:                    # found on a smaller copy: found again at full size, near there
+        again = detect(pixels, result.styles)
+        lines = [ln for ln in again if any(math.hypot(ln.cx - o.cx * factor, ln.cy - o.cy * factor)
+                                           < 0.5 * o.length * factor for o in lines)]
+    out, _changed = remove_result(pixels, replace(result, copies=scaled(result.copies, factor), lines=lines))
     picture = Image.fromarray(np.rint(out).astype(np.uint8), work.mode)
     if mode in ("L", "LA", "I;16", "I", "1"):
         picture = picture.convert("LA" if has_alpha else "L")
@@ -1347,7 +1857,7 @@ class Library:
     def __init__(self, folder: Path = LIBRARY) -> None:
         self.folder = folder
         self.items: list[Watermark] = []
-        self._words: dict[str, list[Watermark]] = {}
+        self._words: dict = {}                   # per mark: its words, and ("style", key): its look
         self.load()
 
     def load(self) -> None:
@@ -1376,8 +1886,10 @@ class Library:
             self.forget(old)
         return wm
 
-    def touch(self, wm: Watermark) -> None:
+    def touch(self, wm: Watermark | None) -> None:
         """A kept mark was just used: first in line (and kept longest)."""
+        if wm is None:
+            return
         for i, w in enumerate(self.items):
             if w.key == wm.key:
                 self.items.insert(0, self.items.pop(i))
@@ -1390,6 +1902,7 @@ class Library:
     def forget(self, wm: Watermark) -> None:
         self.items = [w for w in self.items if w.key != wm.key]
         self._words.pop(wm.key, None)
+        self._words.pop(("style", wm.key), None)
         try:
             (self.folder / f"{wm.key}.npz").unlink()
         except OSError:
@@ -1399,28 +1912,14 @@ class Library:
         for wm in list(self.items):
             self.forget(wm)
 
-    def anchors(self) -> list[Watermark]:
-        """The words of the kept marks (cached), the newest marks' first, each word once ("John" and "Meier"
-        are in most of them)."""
-        out: list[Watermark] = []
+    def styles(self) -> list[Style]:
+        """How the kept marks look (cached), the newest marks' first."""
+        out = []
         for wm in self.items[:12]:
-            if wm.key not in self._words:
-                self._words[wm.key] = words(wm)
-            out.extend(w for w in self._words[wm.key] if not any(_same_word(w, o) for o in out))
+            if ("style", wm.key) not in self._words:
+                self._words[("style", wm.key)] = [st for st in [style_of(wm)] if st is not None]
+            out.extend(self._words[("style", wm.key)])
         return out
-
-
-def _same_word(a: Watermark, b: Watermark) -> bool:
-    """Two words of kept marks that are the same word: about the same size, and their strokes match."""
-    ha, wa = a.alpha.shape
-    hb, wb = b.alpha.shape
-    if not (0.85 < ha / hb < 1.18 and 0.85 < wa / wb < 1.18):
-        return False
-    x = _resize(a.alpha, 48, 48) - _resize(a.alpha, 48, 48).mean()
-    y = _resize(b.alpha, 48, 48) - _resize(b.alpha, 48, 48).mean()
-    den = float(np.sqrt((x * x).sum() * (y * y).sum()))
-    return den > 0 and float((x * y).sum()) / den > 0.75
-
 
 def _write(wm: Watermark, path: Path) -> None:
     meta = {"side": wm.side, "copies": wm.copies, "scales": list(wm.scales), "angles": list(wm.angles),

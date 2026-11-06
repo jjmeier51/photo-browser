@@ -1676,6 +1676,8 @@ numpy only. Erase Area's membrane fill (`retouch._membrane`) is the coarsest lev
 
 ## 6x. Safe Finder Remove Watermark — `mac/watermark.py`, `mac/watermark_window.py` (Nov 6, 2026)
 
+Two ways in, one result: **by look** (any words, any number of copies — the batch path after one box) and **by template** (a box, or the same words again — exact when copies repeat). Both un-blend.
+
 For the person's own art signed with a see-through watermark repeated across each piece (their example: "John
 Meier artwork" ~12× over a 1104×2000 WebP, white at α ≈ 0.16), whose originals are lost. Erase Area (§6o) was
 the wrong tool: its boxes take everything that stands out in them — on art, the stars and sparks too — and
@@ -1713,18 +1715,56 @@ and **straight thin strokes dropped** (`_line`): a bright line in the art crossi
 along every line, and the "mark" learned became the line (40 false copies on a synthetic piece). A learned
 template that is a line is refused.
 
-**Different words on different pieces** ("John Meier's Work", "Meier dfs8437he9"…): every mark learned goes in
-the `Library` (one `.npz` each in `~/Library/Application Support/Safe Finder/Watermarks`, 40 kept, least
-recently used dropped). `auto`: the kept marks first; a match is re-read with room round it (`_grown`) — if
-the template grows (>15 % more strokes) it was new words beside familiar ones, else it's "same". Then the kept
-marks' words (`words`, deduplicated by `_same_word`), the word chosen by the mean of its **top three** hits
-(one lucky 0.63 hit beat the real word's 0.88s when it was "first above 0.6"), grown into the piece's own mark.
-**Growing is guarded** — ≥ 2 seeds, the grown mark keeps the seed's strokes, peak opacity within ×0.5–2 and
-ink within 45 levels of the seed's: without these a plain piece "found" 9 copies grown from one weak hit.
-A hit is a copy only with NCC ≥ 0.2 (and ≥ ¼ of the best) and strength ≥ 0.45.
+**Different words on different pieces — found by look (Nov 6, 2026, second pass).** The person's marks also
+come as random strings ("2025 n498rfhd", "34987h34rtf98"), one to a few per piece, anywhere: no word is shared
+and a piece may hold one copy, so neither the kept templates nor a median over copies can work. (A first
+attempt split kept marks into *words* and grew each piece's mark from a shared word; it's gone — useless for
+random strings and slow.) What *is* shared is the look, `Style` (`style_of` a learned mark: ink, solid-stroke
+opacity, stroke width = 2·area/outline, letter height = `_shape`'s band, slant on screen). `detect`:
+- every pixel read as (L − median)/(ink − median) on luminance (median over a window a bit wider than the
+  strokes, `_median`, PIL's; a second pass with anything brighter than a mark can be swapped out — lines and
+  stars lift the median beside them); core = reading within ×0.55–1.9 of the look's opacity and lifted >3
+  levels, where the background is ≥ 35 levels from the ink (nearer, texture reads as "mark": a pale piece
+  "found" a line of smooth bumps at 0.11);
+- **lines in the art first** (`_straight`: pixels on straight runs ≥ 1.4 × the largest letter height at any
+  angle but the marks' own ±8°, on the mask thickened 1 px; by doubling — a run of 2s is a run of s and
+  another s further, 12 ops an angle instead of 120 — and once for the whole photo, not per candidate:
+  173 s → 13 s on the example). A run only counts where strokes don't also reach 5 px out on *both* sides
+  across it: close-set letters thickened merge into a band with runs of its own, and without that test the
+  middle of "q6eqzh" was cut out as a line;
+- candidates: core joined at ⅓ letter height; a group bigger than a line (three copies joined by an art
+  line into one 1032 × 525 group) is split into bands one letter tall at the looks' angles ±6° (`_bands`);
+  each is stretched along itself over gaps ≤ a letter (`_extend`: "2019" sits apart from "q6eqzh") and
+  gathers the strokes in its turned rectangle (`_in_rect`), minus pixels already taken (with a margin of
+  0.4 letter height — else another look made a "line" of one's soft edges);
+- a line passes with: band height in range, length ≥ 5 × height (a highlight along a pole was 3.7 ×), slant
+  within 12°, stroke width ≤ 1.8 × the look's, density 0.08–0.75, ≥ 4 pieces of ≥ 0.07 × (the *look's* letter
+  height)² — a row of star dots measured its own height small and passed by it — median lift ≥ 5 levels, and
+  channels agreeing on one opacity against a membrane fill (`_line_alpha`: core held ±30 % of the line's
+  level per channel, edges free);
+- looks alike are merged (`_looks`), each searched with its own ranges, sharing the median cache and `taken`
+  — pooled ranges of a 0.13 and a 0.30 mark let a 0.06 "line" of texture through.
+`by_look`: with ≥ 3 lines of one length, the clearest becomes a box for `from_box`, kept if its copies cover
+≥ 70 % of them (repeated words: median template beats per-line reading, 8–13 → 3.4–5.5 on the shared-words
+set; on random strings with few copies it isn't kept). `auto`: the last 4 kept marks (same words, `_grown`
+check for extra words), then `by_look` with every kept mark's look. Only box (and grown) results go in the
+library. `clean` re-detects lines at full size when the photo was worked smaller (`factor`), keeping those
+near the ones found.
+**Measured**: random-string set (8 pieces, 1–4 copies, 0.2–0.35 opacity, sizes ×0.85–1.3, WebP) after one box
+on the first: every other piece found automatically, error on the mark 21–50 → 3.7–12 (most 4–7), no false
+lines; 5 plain pieces (incl. a pale one) untouched; ~9 s a look a piece (1100 × 1900). The example by look: all
+7 readable copies, nothing on the net, sparks or stars. A 2× piece: worked at 3000, saved at full size, 35 → 6.7.
+Box-learning guards added on the way: `_line` / `_straight` in `rough` (an art line in the box became the
+"mark" and found 40 "copies" along every line), `_unlined` on each round's template — at 2.6 × letter height,
+not 1.5: the person's "J" and "h" stems are ~1.5 × the band and were cut, leaving their ghosts on every copy.
 
-**Speed**: per piece ~20–40 s on the sandbox CPU at 1100×2000 (a box), ~4–35 s from the library, ~15–25 s to
-decide a piece has none. What got it there: the word search vectorized (98 k separate evaluations → batches),
+**Same words seen before** (the first pass): every mark learned goes in the `Library` (one `.npz` each, 40
+kept, least recently used dropped). A kept-mark match is re-read with room round it (`_grown`) — if the
+template grows (>15 % more strokes) it was new words beside familiar ones, else "same". Growing is guarded:
+≥ 2 seeds, keeps the seed's strokes, peak opacity ×0.5–2 and ink within 45 levels of the seed's. A hit is a
+copy only with NCC ≥ 0.2 (and ≥ ¼ of the best) and strength ≥ 0.45.
+
+**Speed** (template path): per piece ~20–40 s on the sandbox CPU at 1100×2000 (a box), ~4–35 s from the library. What got it there: the per-part search vectorized (98 k separate evaluations → batches),
 fits only for hits that pass the score check, `_fill` (normalized box averages) instead of the membrane for
 internal readings, no per-call padding in `_bilinear`, the coarse photo capped at 560 px (words are small:
 a word search at near full size took 12 s per word). Photos over 3000 px are worked at 3000 and the copies

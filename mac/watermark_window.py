@@ -1,11 +1,12 @@
 """Safe Finder's Remove Watermark window: take one's own see-through watermark off many photos at once
 (watermark.py does the work).
 
-Right-click photos (or folders) ▸ "Remove Watermark…". The window shows one photo at a time. If the
-watermark is one it has learned before — the same words, or new words round familiar ones ("Meier
-dfs8437he9" after "John Meier artwork") — it finds every copy by itself and shows the photo with them
-taken out. If not, drag a box round one whole copy: it learns the watermark from that copy and the others
-like it on the photo, and remembers it for the next photos (and next time). A box drawn on a photo that
+Right-click photos (or folders) ▸ "Remove Watermark…". The window shows one photo at a time. Once it has
+learned the watermark from one box, it finds it by itself on the next photos — the same words again, or any
+words at all in the same look ("2025 n498rfhd", "34987h34rtf98": the same ink, see-through strength, letter
+size and slant), one copy or many, anywhere — and shows the photo with them taken out. If not, drag a box
+round one whole copy: it learns the watermark from that copy and the others like it on the photo, and
+remembers it for the next photos (and next time). A box drawn on a photo that
 already has a result teaches it again from that copy, for when the result isn't right. "Original" shows the
 photo as it is, with what will go in red; ‹ › (or the arrow keys) step through the photos, which are
 looked through ahead of time in the background so stepping is quick. Save as New writes each result beside
@@ -400,7 +401,7 @@ class WatermarkDialog(QDialog):
         def learned(result: wmk.Result) -> None:
             if result.how == "same":
                 library.touch(result.wm)
-            else:
+            elif result.wm is not None and result.how in ("box", "grown"):   # found by its look: nothing new
                 result.wm = library.add(result.wm)
                 with self._lock:
                     self._tried.clear()          # what found nothing before may know it now
@@ -422,13 +423,17 @@ class WatermarkDialog(QDialog):
             if result is None:
                 self._sig.shown.emit(token, i, QImage(), QImage(), text)
                 return
-            out, changed = wmk.remove(rgb, result.wm, result.copies)
+            out, changed = wmk.remove_result(rgb, result)
             pv = _preview(out)
             self._sig.shown.emit(token, i, to_qimage(pv), _mask_preview(changed, pv.size), text)
 
         def found_text(result: wmk.Result) -> str:
             n = len(result.copies)
             copies = f"{n} cop{'y' if n == 1 else 'ies'}"
+            if result.how == "style":
+                k = len(result.lines)
+                return (f"Found {k} line{'s' if k != 1 else ''} of your watermark by its look — new words, taken "
+                        "out. Something missed? Drag a box round it.")
             return {"box": f"Learned the watermark from your box — {copies} taken out.",
                     "same": f"Your watermark — {copies} taken out.",
                     "grown": f"Your watermark, with words not seen before — learned here; {copies} taken out."}[result.how]
