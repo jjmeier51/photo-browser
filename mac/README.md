@@ -255,7 +255,7 @@ out when it can't): **File** (New Folder ⇧⌘N, Open ⌘↓, Open With Default
 Copy/Move to the other side ⇧⌘C / ⇧⌘M — in one window they open Split View, AirDrop to iPhone, Move to Trash ⌘⌫), **Edit** (Select All, Find ⌘F,
 Tags… ⌘T), **View** (as Icons/List/Photos ⌘1–3, Split View ⌘\\, Sort By, bigger/smaller thumbnails ⌘= / ⌘−), **Go** (Back ⌘[,
 Forward ⌘], Enclosing Folder ⌘↑, Home ⇧⌘H, Desktop ⇧⌘D, Downloads ⌥⌘L, Pictures, All Videos, Empty Folders, Favorites, To AI,
-Drives), **Photos** (Edit Metadata ⌘I, Favorite ⇧⌘F, To AI ⇧⌘A, Find Duplicates, Export All Frames, Crop, AI Upscale, Erase Area, Remove Objects, Edit/Create with AI, the
+Drives), **Photos** (Edit Metadata ⌘I, Favorite ⇧⌘F, To AI ⇧⌘A, Find Duplicates, Export All Frames, Crop, AI Upscale, Erase Area, Remove Watermark, Remove Objects, Edit/Create with AI, the
 Astria.ai Browser, the SimpCity / Instagram / Facebook downloaders, taylorpictures.net) and **Window** (every
 viewer and tool window that's open). The right-click menu keeps the everyday commands at the top and puts a
 folder's downloaders under **Download ▸** and its AI under **AI ▸**.
@@ -685,6 +685,33 @@ photo with the same metadata, dates and tags; **Replace** rewrites them in place
 "retouched"; **Last Area** brings back the boxes used last. Photos where Just the Mark finds nothing in the
 boxes are left alone (and counted). It erases what you box; it doesn't look for watermarks on its own.
 (Needs numpy — `Safe Finder.command` installs it; rebuild the app with `build_safe_finder_app.sh`.)
+
+### Remove Watermark — your own watermark, off many pieces at once (`watermark_window.py`, `watermark.py`)
+
+For art you signed with a see-through watermark repeated across the piece ("John Meier artwork" a dozen times
+over it), where the original without it is gone. Select the pieces — or folders of them — and right-click ▸
+**Remove Watermark…** (or **Remove Watermark from Photos Inside…** on folders; or Photos ▸ Remove Watermark…).
+
+- **The first time**, drag a box round **one whole copy** of the watermark on the first piece. It learns the
+  watermark from that copy and every other copy on the piece — wherever they are, a little bigger or turned
+  — and shows the piece with all of them taken out. Stars, sparks and detail under the letters come back,
+  because the see-through letters are *taken back out* of the picture, not painted over.
+- **After that it remembers.** On the next pieces it finds the watermark by itself — even where it's in other
+  places, or the words change ("John Meier's Work", "Meier dfs8437he9", "John's Art 9/12/23"): a piece
+  whose words share one with a watermark it knows ("Meier", "John") has its own words learned from there.
+  It looks ahead through the pieces while you look at one, so ‹ › is quick.
+- **If it finds nothing on a piece, or the result isn't right**, drag a box round one copy on that piece —
+  it learns that one too. **Look Again** forgets a piece's result and looks again; **Original** shows the
+  piece as it is with what will go in red. **Forget** clears everything it has learned.
+- **Save as New Photos** writes "name (no watermark).jpg" beside each piece with the same metadata, dates and
+  tags; **Replace Originals** rewrites them. Pieces where no watermark was found are left alone (and
+  counted). Results are tagged "retouched". Running it again on a folder skips the "(no watermark)" copies.
+
+It needs several copies of the watermark on a piece (it compares them to tell the watermark from the art),
+and a watermark of one colour (a white or black see-through mark; a drop shadow would stay). For a single
+opaque logo, use Remove Objects; for something boxed in the same spot on every photo, Erase Area. Each piece
+takes from a few seconds to about half a minute. The learned watermarks are kept in
+`~/Library/Application Support/Safe Finder/Watermarks`. (Needs numpy, like Erase Area.)
 
 ### Remove Objects — draw round it and it's gone (`remove_window.py`, `inpaint.py`)
 

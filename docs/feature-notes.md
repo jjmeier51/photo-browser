@@ -1674,6 +1674,74 @@ numpy only. Erase Area's membrane fill (`retouch._membrane`) is the coarsest lev
 - Not done: a learned inpainting model (LaMa-style) would do better on unique structure; it would need a model
   download and an ML runtime, and couldn't be tested from here.
 
+## 6x. Safe Finder Remove Watermark — `mac/watermark.py`, `mac/watermark_window.py` (Nov 6, 2026)
+
+For the person's own art signed with a see-through watermark repeated across each piece (their example: "John
+Meier artwork" ~12× over a 1104×2000 WebP, white at α ≈ 0.16), whose originals are lost. Erase Area (§6o) was
+the wrong tool: its boxes take everything that stands out in them — on art, the stars and sparks too — and
+the copies sit somewhere else on every piece. Here the mark is learned and every copy is *un-blended*:
+art = (pixel − α·ink)/(1 − α).
+
+**What the example taught (don't relearn):**
+- Copies on one piece are **not** one stamp tiled: the top row was 13 % bigger and turned 2°, and missing from
+  the middle of the piece. Hence a similarity transform per copy (`Copy`: centre, scale, angle), found by
+  masked NCC over a size × turn grid at a coarse scale (`_coarse`, Padfield's masked NCC, so copies running off
+  the edge count) and refined by pattern search at full scale (`_refine`, on the support pixels only).
+- A copy at another size is **not the template scaled**: the top copies' "John" sat 15 px further along the
+  line (word spacing changes with size). Hence per-word placement (`_parted` cuts the template into words —
+  long words into ~3-letter pieces — and `_shifts` searches each ±⅔ letter height along the line, ±⅙ across,
+  vectorized over the grid then to 1/20 px); a steady drift across ≥4 parts is folded back into the copy's
+  scale/turn (`_bend`). Before this, "artwork" came out clean and "John Meier" left a dark double.
+- **Even then, edges are off by ~1 px letter to letter**, and un-blending a template that's off by a pixel
+  leaves dark outlines. Hence `matte`: each copy's opacity is *read from the copy* — (pixel − bg)/(ink − bg),
+  bg a membrane fill under the strokes — clamped between the template's 3×3 min ×0.8 and max ×1.2: free at
+  the edges, held inside the strokes (where a star under a stroke would otherwise read as "more mark").
+- One row of copies was a **warmer white** (blue channel at 0.7× the red's strength): strengths are read per
+  channel (`_strengths`: the median of measured/template opacity inside the strokes — robust to stars,
+  unlike the least-squares fit, which the star field fooled).
+
+**Learning** (`_relearn`, 3 rounds): read every copy (`_readings`), map into the template frame, per-pixel
+median — the art differs under each copy and drops out. A pixel needs ≥ half the copies to see it (`need`):
+where only one or two copies reach (the rest off the photo) the basketball net's strings became "mark". The
+frame gets room each round so strokes the first template lacked (the "J") can grow in, then `_main_block`
+crops to the block of strokes joined *along the line* (`_grow_along`: words join, neighbouring copies on
+other lines don't) that overlaps where it started (`focus`). Letter height for all of this is the narrowest
+band holding 80 % of the starting strokes (`_shape`) — the full spread was inflated 9× by neighbouring copies.
+
+**The first template** (`rough`): what's lighter than a coarse median inside the person's box, specks dropped —
+and **straight thin strokes dropped** (`_line`): a bright line in the art crossing the box matches itself all
+along every line, and the "mark" learned became the line (40 false copies on a synthetic piece). A learned
+template that is a line is refused.
+
+**Different words on different pieces** ("John Meier's Work", "Meier dfs8437he9"…): every mark learned goes in
+the `Library` (one `.npz` each in `~/Library/Application Support/Safe Finder/Watermarks`, 40 kept, least
+recently used dropped). `auto`: the kept marks first; a match is re-read with room round it (`_grown`) — if
+the template grows (>15 % more strokes) it was new words beside familiar ones, else it's "same". Then the kept
+marks' words (`words`, deduplicated by `_same_word`), the word chosen by the mean of its **top three** hits
+(one lucky 0.63 hit beat the real word's 0.88s when it was "first above 0.6"), grown into the piece's own mark.
+**Growing is guarded** — ≥ 2 seeds, the grown mark keeps the seed's strokes, peak opacity within ×0.5–2 and
+ink within 45 levels of the seed's: without these a plain piece "found" 9 copies grown from one weak hit.
+A hit is a copy only with NCC ≥ 0.2 (and ≥ ¼ of the best) and strength ≥ 0.45.
+
+**Speed**: per piece ~20–40 s on the sandbox CPU at 1100×2000 (a box), ~4–35 s from the library, ~15–25 s to
+decide a piece has none. What got it there: the word search vectorized (98 k separate evaluations → batches),
+fits only for hits that pass the score check, `_fill` (normalized box averages) instead of the membrane for
+internal readings, no per-call padding in `_bilinear`, the coarse photo capped at 560 px (words are small:
+a word search at near full size took 12 s per word). Photos over 3000 px are worked at 3000 and the copies
+scaled up for the save (`scaled`).
+
+**Measured**: the example — every copy found except one ~invisible white-on-white copy and edge slivers; zooms
+show the stars kept and no outlines. Synthetic (DejaVu text at α 0.3, jittered 2–12 % in size, ±2°, WebP q88,
+five wordings): mean error on the mark 30–36 → 3.4–6.5 for four pieces (one learned from a box, three grown
+from the library), 10.6 for one where a 6 %-bigger row was partly missed; a plain piece left alone; changes off the
+mark ≤ ~30 pixels per piece (specks next to strokes).
+
+**Window**: one worker thread does all pixel work, priority box > Look Again > save > the piece on screen >
+looking ahead (`_next_job`); a new want sets `_preempt`, which the engine's `cancelled` turns into `Stopped`
+and the job is simply picked up again later. The library is touched only by the worker. Saving re-opens each
+photo at full size and applies the copies found (`clean`, through `batch_crop`); Safe Finder carries tags to
+new photos and adds "retouched". Smoke-tested offscreen (box → learn → step → box → plain piece → Save as New).
+
 ## 6s. Safe Finder Edit Metadata — `mac/metadata_edit.py`, `mac/metadata_window.py` (Nov 3, 2026)
 
 Bulk metadata for any number of photos and videos (or everything under picked folders — `media_in`: hidden

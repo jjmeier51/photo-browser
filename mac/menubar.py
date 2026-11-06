@@ -70,6 +70,10 @@ def install(win, sf) -> None:
         """Selected photos and videos that can hold metadata, and selected folders (everything inside)."""
         return [p for p in sel() if os.path.isdir(p) or sf.metadata_edit.can_edit(p)]
 
+    def watermarkable() -> list[str]:
+        """Selected photos and folders (the photos inside)."""
+        return [p for p in sel() if os.path.isdir(p) or os.path.splitext(p)[1].lower() in sf.batch_crop.CROPPABLE]
+
     def videos() -> list[str]:
         return [p for p in sel() if sf.kind_of(p) == "video"]
 
@@ -191,6 +195,9 @@ def install(win, sf) -> None:
     act(t, "Crop…", lambda: pane().crop_photos(photos()), None, lambda: bool(photos()))
     act(t, "AI Upscale 2×…", lambda: pane().ai_upscale(photos()), None, lambda: bool(photos()))
     act(t, "Erase Area…", lambda: pane().erase_area(photos()), None, lambda: bool(photos()))
+    act(t, "Remove Watermark…", lambda: pane().remove_watermark(watermarkable()), None, lambda: bool(watermarkable()),
+        "Your own see-through watermark, learned once and taken out of every selected photo (or every photo inside "
+        "the selected folders)")
     act(t, "Remove Objects…", lambda: pane().remove_objects(photos()[0]) if len(photos()) == 1 else None, None,
         lambda: len(photos()) == 1, "Draw round anything in the photo and it's gone — filled in from the photo itself")
     t.addSeparator()

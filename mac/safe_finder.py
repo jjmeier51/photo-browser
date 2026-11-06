@@ -4700,10 +4700,15 @@ class Pane(QWidget):
                                lambda: self.ai_upscale(photos))
                 menu.addAction("Erase Area…" if len(photos) == 1 else f"Erase Area on {len(photos)} Photos…",
                                lambda: self.erase_area(photos))
+                menu.addAction("Remove Watermark…" if len(photos) == 1 else f"Remove Watermark from {len(photos)} Photos…",
+                               lambda: self.remove_watermark(photos))
                 if len(photos) == 1:
                     menu.addAction("Remove Objects…", lambda: self.remove_objects(photos[0]))
                 if len(photos) == 1:
                     menu.addAction("Edit with AI…", lambda: self.ai_edit(photos[0]))
+            folders = [p for p in paths if os.path.isdir(p)]
+            if folders:
+                menu.addAction("Remove Watermark from Photos Inside…", lambda: self.remove_watermark(folders))
             texts = [p for p in paths if os.path.splitext(p)[1].lower() in (".txt", ".text", ".md", ".markdown", ".rtf")
                      and not os.path.isdir(p)]
             if texts:
@@ -4835,6 +4840,64 @@ class Pane(QWidget):
             self._airdrop_noted(note + ".")
 
         dlg = erase_window.EraseDialog(self.window(), photos, self.settings, done)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.open()
+
+    # -- Remove Watermark (watermark_window.py / watermark.py — one's own see-through mark, learned and taken out)
+    def remove_watermark(self, paths: list[str]) -> None:
+        """Right-click photos (or folders) ▸ Remove Watermark…: one's own see-through watermark — repeated over
+        each piece, in other places and words on other pieces — learned from a box round one copy (or from
+        the ones learned before) and taken back out of every photo; replaced, or saved as new photos with
+        the originals' tags; the results tagged "retouched"."""
+        try:
+            import watermark
+        except ImportError:                      # numpy, not in an older mac/.venv yet
+            QMessageBox.information(self.window(), "Remove Watermark", "Remove Watermark needs numpy. Quit Safe "
+                                    "Finder and open “Safe Finder.command” again — it installs it — or run: "
+                                    "mac/.venv/bin/pip install numpy")
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            photos = watermark.photos_in(paths)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not photos:
+            QMessageBox.information(self.window(), "Remove Watermark", "No photos here can be retouched — JPEG, "
+                                    "HEIC, PNG, WebP, TIFF and BMP photos can (HEIC needs pillow-heif; run "
+                                    "mac/run.sh once).")
+            return
+        import watermark_window
+
+        def done(written: list[tuple[str, str]], as_new: bool, untouched: int, failed: int) -> None:
+            made = [result for _photo, result in written]
+            if written:
+                try:
+                    if as_new:
+                        tag_store().carry(written)                 # a new photo has its original's tags…
+                    tag_store().add(made, [watermark.TAG])         # …and "retouched"
+                except OSError as e:
+                    QMessageBox.warning(self.window(), "Remove Watermark", f"Couldn't save the tags: {e}")
+                tags_changed()
+            if THUMBS is not None and not as_new:
+                THUMBS.forget(made)
+            media_info.forget(made)
+            for w in list(_VIEWERS):                                   # a viewer showing one: read it afresh
+                if hasattr(w, "reload"):
+                    for path in made:
+                        w.reload(path)
+            self.grid.viewport().update()
+            self.list.viewport().update()
+            n = len(written)
+            note = f"Took the watermark off {n:,} photo{'s' if n != 1 else ''}"
+            if as_new and n:
+                note += " — saved beside the original" + ("s" if n != 1 else "")
+            if untouched:
+                note += f"; none found on {untouched:,}"
+            if failed:
+                note += f"; {failed:,} couldn't be"
+            self._airdrop_noted(note + ".")
+
+        dlg = watermark_window.WatermarkDialog(self.window(), photos, self.settings, done)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.open()
 
