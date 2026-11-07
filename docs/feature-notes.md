@@ -2166,57 +2166,87 @@ in any 60 s (≈ the old fixed pace — the ceiling, not the gap, bounds the rat
 hidden page for an answer every 40 ms (was 100 + 150 ms) — up to ~150 ms of dead time per read. (5) Files
 6 at a time (was 4): those come from Facebook's photo/video CDN, not its pages. The log ends with pages read.
 
-### 7.4f Fanfix in Safe Finder — `mac/fanfix.py`, `mac/fanfix_downloader.py` (Nov 7, 2026)
+### 7.4f Fanfix in Safe Finder — `mac/fanfix.py`, `mac/fanfix_downloader.py` (Nov 7, 2026; reworked the same day)
 
 The person's own purchased content from Fanfix creators (subscriptions, bought posts and messages), for a
 personal archive. Mac only (no iPhone twin yet); `.fanfix.json` uses `social.Record`'s shape so one could
 share it later.
 
-**Watch, don't call.** Fanfix has no public API, and app.fanfix.io answers anything but a real browser with a
-Cloudflare managed challenge — its JS can't even be read from outside (checked from the sandbox: the login
-page is the challenge). So nothing is reverse-engineered: the window's Qt WebEngine profile ("fanfix",
-persistent) carries a `QWebEngineScript` at `DocumentCreation` in the main world (`HOOK_JS`) that wraps
-`fetch` and `XMLHttpRequest` and keeps a copy of every JSON answer the page receives (plus inline
-`__NEXT_DATA__` / `application/json` scripts) in `window.__pbCaptured`. Download = reload the page (a page
-reached inside the SPA would carry earlier pages' answers), then every 1.2 s: take the copies (`DRAIN_JS`,
-spliced so each is read once) → `extract` → queue the new media, and scroll one step (`SCROLL_JS`: the biggest
-scrollable box, else the page). The end: 7 steps with no new height and nothing new loaded. If the page's
-data named no media at all (a server-drawn page), `DOM_JS` takes the big, unblurred `<img>`s and real-address
-`<video>`s it shows.
+**Why the rework.** The first version "didn't work" on the real site. Three things it did could each fail there,
+and none showed up on its friendly mock: (1) it downloaded files with Python's `urllib` and copied cookies — but
+Fanfix sits behind Cloudflare, whose clearance is bound to the browser, so a request outside it gets the 403 "Just
+a moment…" page (and a 200 HTML page over 512 bytes would even have been kept as a ".jpg"); (2) it kept only
+`application/json` answers — but app.fanfix.io is a Next.js App Router site (its robots.txt lists
+`/*/opengraph-image`), which draws pages from React Server Components streams (`text/x-component`) and inline
+`self.__next_f.push([1,"…"])` scripts, none of which was read; (3) it treated `isPurchased: false` as locked —
+which every subscription post says — and opened creators at `/<handle>` instead of `/@<handle>`. The person
+pointed at **fanripper** (github.com/SatyamHitman/fanripper) as a downloader that works: that repo holds only docs
+and a proprietary licence that forbids reverse-engineering "by a human or an automated/AI system", so its code
+was not unpacked or read. What its docs describe was taken as the model instead: it **works through the browser
+the person is already logged into** — save what's shown, crawl what the account can open, download in that
+browser. From this sandbox Fanfix's own servers couldn't be studied either (the login page is a Cloudflare
+challenge; probing its back ends was refused), so the rework is built to work without knowing Fanfix's shapes.
 
-**`extract` on JSON of unknown shape**: walk with the enclosing post as context (id, date — ISO or s/ms epoch —
-caption, creator handle from a nested user object, locked). Media object = a dict with a direct media
-address (by extension: images, mp4/mov/m4v/webm, m3u8/mpd), or whose type says image/video, or an id whose
-URL-bearing children carry no ids (variants of one media). Best address: video file > HLS > DASH, then key
-words (original/full/large +, thumb/preview/blur/poster −), then width. Left out: locked context (`isLocked`,
-`hasAccess: false`, `isPurchased: false`…), only-a-teaser (blur/preview/teaser keys or "blur" in the URL),
-user objects' own pictures (avatar/banner/cover keys, or a URL directly on a user object) — but posts nested
-*under* a creator object are walked and get that creator's handle. Key = the media id, else a hash of the URL
-without its query (signatures change, the picture doesn't). Tests cover seven shapes (media lists, variants,
-source lists with qualities, flat posts, a profile with nested posts, purchased vs unbought messages, DASH).
+**Everything through the browser.**
+- *What's there* (`HOOK_JS`, a `QWebEngineScript` at `DocumentCreation` in the main world of the persistent
+  "fanfix" profile): wraps `fetch`/`XMLHttpRequest` and keeps every **data** answer — JSON, `text/x-component`,
+  `text/plain`, or anything starting like JSON/an RSC row; pictures, video, scripts, styles and HTML are never
+  copied — plus the page's inline data (`inline()`: `__NEXT_DATA__`/JSON scripts, and every `__next_f.push([1,…])`
+  chunk joined; re-run at each drain, since a streamed page keeps adding scripts; each script read once).
+  `documents()` turns an answer into JSON values: whole, else every value starting a line or an RSC row
+  (`4:[…]`, `1:I[…]`, `2:HL[…]`; `T…` text rows skipped) via `raw_decode`; XSSI guards dropped; Firestore typed
+  values made plain (`plain()`: `{"stringValue"}`→str, `mapValue`/`arrayValue`, documents → fields + id +
+  createTime) — the DuckDuckGo tracker data lists a `fan-fix` Cloud Functions host, so Firebase is plausible.
+- *What's shown* (`DOM_JS`, every scroll step): full-size `<img>` (largest `srcset` entry; ≥ 320 px; not wider
+  than 2.5:1; not in `header`/`nav`/`footer`; no avatar/banner/cover/logo words; blur on it or an ancestor noted)
+  and `<video>` with a real address (`blob:` ones only counted), each with its card's `/@creator` link and
+  `<time datetime>`. Kept by address in the window; at the end `from_page` takes what the data didn't name —
+  `Haul.knows`: the address without its query, or the **last id-like path segment** (UUID / long hex / long
+  digits / 20+ chars), so another size of a known picture isn't saved twice. A server-drawn page with no data
+  at all (a Gallery) is saved this way, sorted by each card's creator.
+- *The files* (`_browser_fetch` → `_begin_download`): a worker thread asks the GUI thread (the existing signal
+  bridge) to call `QWebEnginePage.download(url, name)`; the profile's `downloadRequested` (`_on_download`, one
+  module-level handler; jobs matched by encoded URL, then by URL without query) sets the temp folder and name and
+  accepts; `isFinishedChanged` completes the job. The worker gives up after 40 s unstarted / 120 s without bytes,
+  or on Stop/close. 404 and 403 end at once ("The server does not have the requested data" / "Access forbidden
+  by the server"). Only if the browser fails is the old plain request tried. Every download is sniffed
+  (`sniff`): a web page is refused ("the server sent a web page…"), a playlist is read as a stream.
+  Four lanes (paced like a person).
 
-**Streams and DRM** (`fetch_stream`): the manifest is read first; FairPlay / Widevine / PlayReady markers
-(`SAMPLE-AES`, `com.apple.streamingkeydelivery`, the Widevine/PlayReady system ids, `ContentProtection`) →
-"protected by DRM — not downloaded", nothing more fetched. Unprotected HLS/DASH via yt-dlp (which refuses DRM
-itself), ffmpeg for HLS without it. No DRM is worked around (unlike `passes_decrypt.py`).
-`social.settle` gained a `fetcher` parameter for this; Instagram/Facebook pass none and are unchanged.
+**Locked or open** (`_access`): `isPurchased`/`isUnlocked`/`hasAccess`/`canView`… true → open, and it **beats**
+`isLocked: true` (a bought pay-per-view stays "locked" on many sites); `isLocked`/`blurred`/`paywalled` true or
+`hasAccess`/`canView` false → locked; "not purchased" counts only with a price > 0. A child's word beats its
+post's. Only-a-teaser addresses (blur/preview/teaser/lqip) still count as locked.
 
-**Cookies only to Fanfix** (`tries_for`): plain request first; the session cookie added only for `*.fanfix.io`
-hosts — media on another company's CDN comes from signed URLs and never gets the person's session.
+**Addresses**: media extension as before, or — in a dict whose type/mime says image/video — any http(s) string
+under a url/src/file/playback-like key (Cloudflare Images, signed storage links); `/_next/image?url=` and
+`/cdn-cgi/image/<opts>/<url>` unwrapped. A video named with only its poster is counted ("came with no address —
+play one and press Download again"), less the videos the page harvest supplied. Dates also from `{seconds:…}`
+and nanosecond ISO strings.
 
-**Folders**: `destination` — the right-clicked folder when its record names the creator or it's named for
-them, a matching subfolder, else `<folder>/<creator>`; media with no creator (a mixed purchases page with no
-handles in its data) → `<folder>/Fanfix`. Handle from the page URL (`creator_from_url`, minus app routes
-such as messages/settings/purchases) or from the posts' data.
+**DRM, never worked round**: playlists as before (`drm_in`); and now an MP4 that comes down encrypted —
+`mp4_protected` walks `moov`→`trak`→…→`stsd` for `encv`/`enca`/`encs`/`enct` sample entries and `pssh` boxes
+(a structured walk, not a byte search: four random bytes in sample tables would false-positive) → deleted,
+"protected by DRM — not downloaded".
 
-**Tested** only against a local mock (no Fanfix account here): an app loading its feed page by page on scroll
-by fetch *and* XHR, inline `__NEXT_DATA__`, signed-style URLs, a cookie-gated photo, locked posts with blurred
-teasers, avatar/banner, MP4, HLS, a SAMPLE-AES playlist. The real window offscreen: 5 photos + 2 videos, byte-
-identical originals (not thumbnails), cookie sent only on the retry, DRM skipped after reading only its
-playlist, 2 locked left out, avatars never fetched, record + tags written, second run "nothing new"; both the
-yt-dlp and the ffmpeg stream paths. **Untested on real Fanfix** — the troubleshooting file (`~/Library/Logs/
-Safe Finder/fanfix-*.json`: the page URL, counts, every captured answer) is how to tune `extract` to Fanfix's
-real shapes.
+**Window**: Creator field (Return opens it) + Open Creator (`/@handle`), **Home Feed** (`/home`), **Purchases**
+(`/gallery` — robots.txt confirms both routes), **Messages**; Download reloads the page and scrolls it as before
+(drain → harvest → scroll per 1.2 s tick). A Cloudflare check on the page ("Just a moment…" title) is waited for
+up to 3 min without counting as the end; landing on `/login` stops with "log in first". Off a creator page the
+creator comes from the posts/cards (the field only if typed). "Save Troubleshooting File" is always on after a
+run: counts by answer kind, every item found (key, address, creator, date, from-page), every failure with its
+reason, what the page showed, the log, and the answers.
+
+**Tested** against a hard local mock (`/@jane` as a Next.js page: inline RSC split across two pushes, an RSC
+fetch, a Firestore `runQuery` XHR; files only for requests carrying `Sec-Fetch-Dest` + the HttpOnly session
+cookie, else a 403 "Just a moment…" page; a WebP behind `.jpg`; a bought PPV `isLocked`+`isPurchased`; an unbought
+one; a video whose address only the player builds; an extension-less image; an `encv` MP4; HLS on an open CDN;
+avatar/banner): the committed first version got 1 of 8 (no date, no caption) and a 403; the rework gets **8 of
+8, every file through Chromium** (no Python request to the gated hosts), the WebP as a real JPEG, DRM refused, the
+locked one left out, second run "nothing new". Home Feed (two creators in one JSON answer) and a server-drawn
+Gallery (no data) sort into `kim/` and `jane/`, dated. Stop ends in ~1 s with no threads or jobs left. **Still
+untested on real Fanfix** (no account here): if a run misses something, the troubleshooting file shows which
+answers came in and what the page showed.
 
 ### 7.4d SimpCity threads — `SimpCityService.swift` / `SimpCityRecord.swift` / `SimpCityHosts.swift` / `SimpCityImportView.swift`, `mac/simpcity.py` / `mac/filehosts.py` / `mac/simpcity_downloader.py` (Oct 28, 2026)
 "Download from SimpCity…" on a person's folder (iPhone: the download menu; Safe Finder: right-click a

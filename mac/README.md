@@ -792,30 +792,32 @@ upscaled (the log says so). The browser needs Qt WebEngine (part of PySide6, set
 ### Download what you've bought on Fanfix (`fanfix_downloader.py`, `fanfix.py`)
 
 For creators you subscribe to or bought posts from on Fanfix: a personal archive of the content your account
-can see. Right-click a folder ▸ **Download ▸ Download from Fanfix…** (or Photos ▸ Download from Fanfix…; on a
+can open. Right-click a folder ▸ **Download ▸ Download from Fanfix…** (or Photos ▸ Download from Fanfix…; on a
 creator's own folder it says **Get New Fanfix Posts**). The window holds a real browser: log in to Fanfix there
 once — it stays logged in — and answer Cloudflare's "checking your browser" there if it asks. It never fills
 in a login or answers a check itself.
 
-Then open a creator's page (type the handle and press **Open Creator**, or click your way there) — or your
-Messages, or your purchases — and press **Download from This Page**. The page loads afresh and scrolls itself
-to the end, in front of you, while Safe Finder reads what the page loads (the same posts you see) and
-downloads every photo and video in it as it goes:
+Then open what you want saved — a creator's page (type the handle and press **Open Creator**: app.fanfix.io/@name),
+**Home Feed** (everyone you subscribe to), **Purchases** (your Gallery of everything you've bought) or a chat in
+**Messages** — and press **Download from This Page**. The page loads afresh and scrolls itself to the end, in
+front of you, while Safe Finder reads what the page loads and shows (the same posts you see), and downloads
+every photo and video you can open there **through that same browser** — your login and Cloudflare's OK go with
+it, the way browser-extension downloaders do it:
 
-- into a folder for the creator inside the one you right-clicked (`<folder>/<creator>`, or the folder itself
+- into a folder for each creator inside the one you right-clicked (`<folder>/<creator>`, or the folder itself
   when it's the creator's), named by Fanfix's media id, dated from the post (and captioned, with ExifTool),
   tagged **fanfix**; **Upscale photos 2×** and **Upscale videos to 1080p** as for Instagram;
-- full size: the original of each photo, not its thumbnail; a video as its own file, or as one MP4 put
-  together from its stream;
-- **left out**: posts you haven't bought (their blurred teasers), creators' avatars and banners, and videos
-  protected by DRM — those can only be watched on Fanfix.
+- full size: the original of each photo (a WebP saved as a real JPEG), not its thumbnail; a video as its own
+  file, or as one MP4 put together from its stream; pay-per-view posts you bought included;
+- **left out** (and counted): posts you haven't bought (their blurred teasers), creators' avatars and banners,
+  and videos protected by DRM — those can only be watched on Fanfix.
 
 The creator's folder keeps a hidden record (`.fanfix.json`) of everything downloaded, so **Get New Fanfix
-Posts** takes only what's new, and a file you delete stays deleted. Your Fanfix login is only ever sent to
-Fanfix itself. Fanfix publishes no API, so Safe Finder reads what Fanfix's own page receives rather than
-asking Fanfix directly: if something you can see on a page isn't downloaded, press **Save Troubleshooting
-File** (it writes what the page loaded to `~/Library/Logs/Safe Finder`, on this Mac only) and send it over.
-Streams need yt-dlp (`run.sh` installs it) or ffmpeg.
+Posts** takes only what's new, and a file you delete stays deleted. Your Fanfix login never leaves that browser
+(and Fanfix's own servers). If something you can see on a page isn't downloaded, press **Save Troubleshooting
+File** — it writes the last run (what the page loaded and showed, what was found, what failed and why) to
+`~/Library/Logs/Safe Finder`, on this Mac only — and send it over. Streams need yt-dlp (`run.sh` installs it) or
+ffmpeg.
 
 ### Browse taylorpictures.net — and see what's already in your Taylor Swift folder (`taylor_window.py`, `taylor.py`)
 

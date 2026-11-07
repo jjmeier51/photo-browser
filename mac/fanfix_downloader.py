@@ -1,29 +1,38 @@
 #!/usr/bin/env python3
-"""Safe Finder ▸ "Download from Fanfix…" — the window (fanfix.py reads what Fanfix's page loads, social.py
-downloads).
+"""Safe Finder ▸ "Download from Fanfix…" — the window (fanfix.py reads what Fanfix's page loads and shows,
+social.py places the files).
 
     python3 mac/fanfix_downloader.py "/Volumes/SSD/Jane" [creator]
 
 For creators the person subscribes to or bought from: their own purchased content, saved to the drive for a
 personal archive. The window is a real Chromium (Qt WebEngine) with its own lasting profile: log in to Fanfix
 there once (and answer Cloudflare's check there when it asks) — it never fills in a login or answers a check
-itself. Open a creator's page (or Messages, or your purchases) and press Download: the page is loaded afresh,
-scrolled to its end so it loads everything, and every photo and video in what it loaded that this account can
-see is downloaded into the creator's folder (`<folder>/<creator>`, or the folder itself when it's the
+itself. Open a creator's page (app.fanfix.io/@name), or Home Feed (everyone you subscribe to), Purchases (your
+Gallery) or a chat in Messages, and press Download: the page is loaded afresh and scrolled to its end so it loads
+everything, and every photo and video this account can open there — named by the page's data, or shown on the
+page — is downloaded into the creator's folder (`<folder>/<creator>`, or the folder itself when it's the
 creator's), named by Fanfix's media id, dated from the post, captioned, tagged "fanfix" in the shared tag store.
-Locked posts' teasers are left out, and so are videos protected by DRM. The creator's folder's `.fanfix.json`
+Locked posts are left out (counted), and so are videos protected by DRM. The creator's folder's `.fanfix.json`
 keeps the ids, so the next run takes only what's new.
 
-The page scrolls in front of the person — what it reads is what they see. Downloads run as the page goes
-(six at a time, on worker threads: `social.settle`), so links that expire are used while they're fresh.
+**The files come down through this same browser** (fanripper's model): each address goes to Chromium's own
+download manager (`_begin_download` on the GUI thread; a worker waits for it, `_browser_fetch`), so the person's
+session and Cloudflare's clearance go with it — a plain request outside the browser gets Cloudflare's check page,
+not the file. A plain request is only the fallback. Four at a time, on worker threads (`social.settle`), as the
+page goes, so links that expire are used while they're fresh.
+
+The page scrolls in front of the person — what it reads is what they see. "Save Troubleshooting File" writes the
+last run (what the page loaded, what it showed, what was found, what failed and why) to ~/Library/Logs/Safe Finder.
 """
 from __future__ import annotations
 
 import concurrent.futures
 import json
+import os
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -32,26 +41,84 @@ sys.path.insert(0, str(HERE))
 from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,  # noqa: E402
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout, QWidget)
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript  # noqa: E402
+from PySide6.QtWebEngineCore import (QWebEngineDownloadRequest, QWebEnginePage, QWebEngineProfile,  # noqa: E402
+                                     QWebEngineScript)
 from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 
 import fanfix  # noqa: E402
 import simpcity as sc  # noqa: E402
 import social  # noqa: E402
 
-LANES = 6                     # files downloaded at once
+LANES = 4                     # files downloaded at once (paced like a person browsing)
 SAVE_EVERY = 25               # the records are saved (and the files tagged) after this many files
-TICK_MS = 1200                # one scroll step (and one look at what the page loaded) every this often
+TICK_MS = 1200                # one scroll step (and one look at what the page loaded and shows) every this often
 IDLE_TICKS = 7                # this many steps with no new height and nothing new loaded: the end of the page
+CHECK_MINUTES = 3             # how long a Cloudflare check on the page is waited for
 MAX_MINUTES = 90              # a page that never ends is left after this
 KEEP_CHARS = 60_000_000       # what the page loaded, kept for a troubleshooting file (the last run's)
+NO_START_S = 40               # a browser download that hasn't started after this is given up
+STALL_S = 120                 # …and one that has received nothing for this long
 
 _PROFILE: QWebEngineProfile | None = None
 
 
+@dataclass
+class _Job:
+    """One file the browser is asked to download (made on a worker thread, run on the GUI thread)."""
+    url: str
+    folder: str
+    name: str
+    owner: object = None
+    done: threading.Event = field(default_factory=threading.Event)
+    path: str = ""
+    why: str = ""
+    started: bool = False
+    moved: float = field(default_factory=time.monotonic)
+    request: object = None
+
+
+_JOBS: dict[str, list[_Job]] = {}     # waiting for Chromium's downloadRequested, by address (GUI thread only)
+
+
+def _key(url: QUrl) -> str:
+    return bytes(url.toEncoded()).decode("ascii", "replace")
+
+
+def _on_download(req: QWebEngineDownloadRequest) -> None:
+    """Chromium is about to download something: one of ours goes into its job's folder under its name; anything
+    else (a link clicked in the page) is left alone."""
+    key = _key(req.url())
+    if key not in _JOBS:
+        bare = key.split("?", 1)[0]
+        key = next((k for k in _JOBS if k.split("?", 1)[0] == bare), "")
+    jobs = _JOBS.get(key)
+    if not jobs:
+        return
+    job = jobs.pop(0)
+    if not jobs:
+        _JOBS.pop(key, None)
+    job.request, job.started, job.moved = req, True, time.monotonic()
+    req.setDownloadDirectory(job.folder)
+    req.setDownloadFileName(job.name)
+    req.receivedBytesChanged.connect(lambda: setattr(job, "moved", time.monotonic()))
+    req.isFinishedChanged.connect(lambda: _download_finished(job))
+    req.accept()
+
+
+def _download_finished(job: _Job) -> None:
+    req = job.request
+    if req is None or job.done.is_set() or not req.isFinished():
+        return
+    if req.state() == QWebEngineDownloadRequest.DownloadState.DownloadCompleted:
+        job.path = os.path.join(req.downloadDirectory(), req.downloadFileName())
+    else:
+        job.why = req.interruptReasonString() or "the download was stopped"
+    job.done.set()
+
+
 def profile() -> QWebEngineProfile:
     """Fanfix's own lasting browser profile (its login survives restarts), with the watching script put into
-    every page before the page's own (`fanfix.HOOK_JS`)."""
+    every page before the page's own (`fanfix.HOOK_JS`), and its downloads sorted to their jobs."""
     global _PROFILE
     if _PROFILE is None:
         _PROFILE = QWebEngineProfile("fanfix", QApplication.instance())
@@ -63,6 +130,7 @@ def profile() -> QWebEngineProfile:
         script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
         script.setRunsOnSubFrames(False)
         _PROFILE.scripts().insert(script)
+        _PROFILE.downloadRequested.connect(_on_download)
     return _PROFILE
 
 
@@ -79,15 +147,16 @@ class FanfixWindow(QMainWindow):
         super().__init__(parent)
         self.person = Path(folder)
         self.tags = tags
-        self.running = self.stopping = False
+        self.running = self.stopping = self.closed = False
         self.cookies: dict[str, dict[str, str]] = {}
         self.bridge = _Bridge()
         self.bridge.call.connect(lambda cb, value: cb(value))
         self.settings = QSettings("PhotoBrowser", "SafeFinder")
         self.exiftool = sc.find_exiftool()
         self.captured: list[dict] = []
+        self.report: dict = {}
         self.setWindowTitle(f"Fanfix — {self.person.name}")
-        self.resize(1100, 880)
+        self.resize(1100, 900)
 
         prof = profile()
         self.ua = prof.httpUserAgent() or social.UA
@@ -102,18 +171,25 @@ class FanfixWindow(QMainWindow):
         self.field = QLineEdit(start or rec.get("handle") or "")
         self.field.setPlaceholderText("creator (filled in from the page you open)")
         self.field.textEdited.connect(lambda _t: setattr(self, "_typed", True))
+        self.field.returnPressed.connect(self.open_creator)
         self._typed = bool(start)
         self.go_btn = QPushButton("Download from This Page")
         self.go_btn.setDefault(True)
         self.go_btn.setToolTip("Loads the page afresh, scrolls it to the end, and downloads every photo and video on "
-                               "it that your account can see")
+                               "it that your account can open")
         self.go_btn.clicked.connect(self.start)
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.stop)
         open_btn = QPushButton("Open Creator")
-        open_btn.setToolTip("Opens the creator's page on Fanfix")
+        open_btn.setToolTip("Opens the creator's page on Fanfix (app.fanfix.io/@name)")
         open_btn.clicked.connect(self.open_creator)
+        self.page_btns = []
+        for label, path, tip in fanfix.PAGES:
+            b = QPushButton(label)
+            b.setToolTip(f"Opens {tip}")
+            b.clicked.connect(lambda _c=False, p=path: self.view.load(QUrl(fanfix.HOME + p)))
+            self.page_btns.append(b)
 
         def option(text: str, key: str, default: bool, tip: str) -> QCheckBox:
             box = QCheckBox(text)
@@ -137,8 +213,8 @@ class FanfixWindow(QMainWindow):
         login = QPushButton("Log In to Fanfix")
         login.clicked.connect(lambda: self.view.load(QUrl(fanfix.LOGIN)))
         self.trouble_btn = QPushButton("Save Troubleshooting File")
-        self.trouble_btn.setToolTip("Writes what the page loaded in the last run to a file in ~/Library/Logs/Safe "
-                                    "Finder — for when something you can see wasn't downloaded")
+        self.trouble_btn.setToolTip("Writes the last run — what the page loaded and showed, what was found, what "
+                                    "failed and why — to a file in ~/Library/Logs/Safe Finder")
         self.trouble_btn.clicked.connect(self.save_troubleshooting)
         self.trouble_btn.setEnabled(False)
 
@@ -146,6 +222,8 @@ class FanfixWindow(QMainWindow):
         top.addWidget(QLabel("Creator:"))
         top.addWidget(self.field, 1)
         top.addWidget(open_btn)
+        for b in self.page_btns:
+            top.addWidget(b)
         top.addWidget(self.go_btn)
         top.addWidget(self.stop_btn)
         row2 = QHBoxLayout()
@@ -154,9 +232,9 @@ class FanfixWindow(QMainWindow):
         row2.addStretch(1)
         row2.addWidget(self.trouble_btn)
         row2.addWidget(login)
-        self.status = QLabel("Log in to Fanfix below if you haven't, open a creator's page (or Messages, or your "
-                             f"purchases) and press Download. Files go into a folder for the creator inside "
-                             f"“{self.person.name}”, tagged “{fanfix.TAG}”.")
+        self.status = QLabel("Log in to Fanfix below if you haven't, open a creator's page — or Home Feed, Purchases, "
+                             "or a chat in Messages — and press Download. Files go into a folder for each creator "
+                             f"inside “{self.person.name}”, tagged “{fanfix.TAG}”.")
         self.status.setWordWrap(True)
         self.bar = QProgressBar()
         self.bar.setVisible(False)
@@ -178,7 +256,7 @@ class FanfixWindow(QMainWindow):
         lay.addWidget(self.log)
         self.setCentralWidget(box)
         handle = fanfix.clean_handle(self.field.text())
-        self.view.load(QUrl(fanfix.HOME + handle if handle else fanfix.HOME))
+        self.view.load(QUrl(fanfix.profile_url(handle) if handle else fanfix.HOME))
         if not self.exiftool:
             self._log("ExifTool isn't installed, so a post's date only goes on the file's dates, and no caption goes "
                       "into the files (install it with: brew install exiftool).")
@@ -196,7 +274,7 @@ class FanfixWindow(QMainWindow):
             cookie.value().data().decode("latin-1")
 
     def cookie_header(self) -> str:
-        """The person's Fanfix cookies — sent only to Fanfix's own hosts (fanfix.tries_for)."""
+        """The person's Fanfix cookies — sent only to Fanfix's own hosts, on a plain request (fanfix.tries_for)."""
         pairs: dict[str, str] = {}
         for domain, jar in self.cookies.items():
             if domain == fanfix.DOMAIN or domain.endswith("." + fanfix.DOMAIN):
@@ -212,13 +290,56 @@ class FanfixWindow(QMainWindow):
         handle = fanfix.clean_handle(self.field.text())
         if handle:
             self.field.setText(handle)
-            self.view.load(QUrl(fanfix.HOME + handle))
+            self.view.load(QUrl(fanfix.profile_url(handle)))
 
     def _shown(self, p: Path) -> str:
         try:
             return str(p.relative_to(self.person.parent))
         except ValueError:
             return str(p)
+
+    # ------------------------------------------------------------------ downloading through the browser
+    def _browser_fetch(self, url: str, folder: str, name: str) -> tuple[str | None, str]:
+        """`url` downloaded by this window's Chromium into `folder` as `name` (on a worker thread: waits)."""
+        if self.closed:
+            return None, "the window was closed"
+        job = _Job(url, folder, name, owner=self)
+        self.bridge.call.emit(self._begin_download, job)
+        while not job.done.wait(0.5):
+            idle = time.monotonic() - job.moved
+            if self.stopping or self.closed or idle > (STALL_S if job.started else NO_START_S):
+                self.bridge.call.emit(self._cancel_download, job)
+                job.done.wait(10)
+                if self.stopping or self.closed:
+                    return None, "stopped"
+                return None, "the download stalled" if job.started else "the browser didn't start the download"
+        return (job.path or None), job.why
+
+    def _begin_download(self, job: _Job) -> None:
+        if self.closed:
+            job.why = "the window was closed"
+            job.done.set()
+            return
+        _JOBS.setdefault(_key(QUrl(job.url)), []).append(job)
+        self.view.page().download(QUrl(job.url), job.name)
+
+    def _cancel_download(self, job: _Job) -> None:
+        for key, jobs in list(_JOBS.items()):
+            if job in jobs:
+                jobs.remove(job)
+                if not jobs:
+                    _JOBS.pop(key, None)
+        if job.request is not None and not job.request.isFinished():
+            job.request.cancel()
+        if not job.why:
+            job.why = "stopped"
+        job.done.set()
+
+    def _cancel_all(self) -> None:
+        for jobs in list(_JOBS.values()):
+            for job in list(jobs):
+                if job.owner is self:
+                    self._cancel_download(job)
 
     # ------------------------------------------------------------------ run / stop
     def start(self) -> None:
@@ -227,9 +348,11 @@ class FanfixWindow(QMainWindow):
         url = self.view.url().toString()
         if not fanfix.fanfix_host(url) or url.rstrip("/").endswith("/login"):
             QMessageBox.information(self, "Fanfix", "Open a creator's page on Fanfix first (log in if you haven't) — "
-                                    "or Messages, or your purchases.")
+                                    "or Home Feed, Purchases, or a chat in Messages.")
             return
-        self.hint = fanfix.clean_handle(self.field.text()) or fanfix.creator_from_url(url)
+        on_page = fanfix.creator_from_url(url)
+        typed = fanfix.clean_handle(self.field.text()) if self._typed else ""
+        self.hint = on_page or typed
         if self.hint:
             self.field.setText(self.hint)
         self.running, self.stopping = True, False
@@ -237,7 +360,7 @@ class FanfixWindow(QMainWindow):
         self.opts = social.Options(photos_2x=self.photos_2x.isChecked(),
                                    ai=self.ai.isChecked() and self.engine is not None and self.photos_2x.isChecked(),
                                    videos_1080=self.videos_1080.isChecked())
-        for w in (self.go_btn, self.photos_2x, self.ai, self.videos_1080, self.field, self.trouble_btn):
+        for w in (self.go_btn, self.photos_2x, self.ai, self.videos_1080, self.field, self.trouble_btn, *self.page_btns):
             w.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.bar.setVisible(True)
@@ -246,7 +369,9 @@ class FanfixWindow(QMainWindow):
         self.queued = self.settled_n = self.failed = self.present = self.drm = 0
         self.photos = self.videos = 0
         self.undated = 0
+        self.from_page = self.page_videos = 0
         self.written: list[str] = []
+        self.failures: list[dict] = []
         self.to_tag: list[str] = []
         self.to_upscale_tag: list[str] = []
         self.futures: list[concurrent.futures.Future] = []
@@ -257,14 +382,19 @@ class FanfixWindow(QMainWindow):
         self.counts: dict[Path, list[int]] = {}      # photos, videos written there (since the last save)
         self.handles: dict[Path, str] = {}
         self.captured = []
+        self.kinds: dict[str, int] = {}              # answers read, by how they came (fetch, xhr, inline-rsc…)
+        self.shown: dict[str, dict] = {}             # what the page showed, by address
+        self.streamed = 0                            # most videos seen playing from a stream at once
         self.kept_chars = 0
         self.responses = 0
         self.idle = 0
+        self.checking = 0
         self.last_state: dict = {}
         self.crawl_done = False
         self.exif = sc.ExifSession(self.exiftool) if self.exiftool else None
         self.heavy = threading.Lock()
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=LANES, thread_name_prefix="fanfix-dl")
+        self.fetch = fanfix.fetcher(self.ua, self.cookie_header(), self._browser_fetch)
         if self.opts.videos_1080:
             import video_tools
             threading.Thread(target=video_tools.available, daemon=True).start()
@@ -287,7 +417,8 @@ class FanfixWindow(QMainWindow):
         QTimer.singleShot(TICK_MS, self._tick)
 
     def _tick(self) -> None:
-        """One step: what the page loaded since the last step taken and read, then the page scrolled on."""
+        """One step: what the page loaded since the last step taken and read, what it shows noted, then the page
+        scrolled on."""
         if not self.running or self.crawl_done:
             return
         self.view.page().runJavaScript(fanfix.DRAIN_JS, 0, self._drained)
@@ -303,10 +434,11 @@ class FanfixWindow(QMainWindow):
             self._log(f"Still going after {MAX_MINUTES} minutes — stopping here.")
             self._crawl_end()
             return
-        self.view.page().runJavaScript(fanfix.SCROLL_JS, 0, lambda r: self._scrolled(r, got))
+        self.view.page().runJavaScript(fanfix.DOM_JS, 0, lambda r: (
+            self._harvest(r), self.view.page().runJavaScript(fanfix.SCROLL_JS, 0, lambda s: self._scrolled(s, got))))
 
     def _read_answers(self, raw) -> int:
-        """Reads the answers the page received (fanfix.extract) and queues what's new. Returns how many."""
+        """Reads the answers the page received (fanfix.extract_text) and queues what's new. Returns how many."""
         try:
             answers = json.loads(raw) if isinstance(raw, str) else []
         except ValueError:
@@ -317,14 +449,31 @@ class FanfixWindow(QMainWindow):
             if not isinstance(a, dict) or not isinstance(a.get("t"), str):
                 continue
             self.responses += 1
+            kind = str(a.get("k") or "?")
+            self.kinds[kind] = self.kinds.get(kind, 0) + 1
             if self.kept_chars + len(a["t"]) <= KEEP_CHARS:
-                self.captured.append({"url": a.get("u", ""), "body": a["t"]})
+                self.captured.append({"url": a.get("u", ""), "how": kind, "body": a["t"]})
                 self.kept_chars += len(a["t"])
             before = set(self.haul.found)
             fanfix.extract_text(a["t"], self.haul)
             for key in set(self.haul.found) - before:
                 self._queue(self.haul.found[key])
         return len(answers)
+
+    def _harvest(self, raw) -> None:
+        """What the page shows now, noted (taken at the end for what its data didn't name)."""
+        try:
+            got = json.loads(raw) if isinstance(raw, str) else {}
+        except ValueError:
+            got = {}
+        if not isinstance(got, dict):
+            return
+        for m in got.get("media") or []:
+            if isinstance(m, dict) and isinstance(m.get("src"), str):
+                old = self.shown.get(m["src"])
+                if old is None or (m.get("creator") and not old.get("creator")):
+                    self.shown[m["src"]] = m
+        self.streamed = max(self.streamed, int(got.get("streamed") or 0))
 
     def _scrolled(self, raw, got: int) -> None:
         if not self.running:
@@ -333,6 +482,19 @@ class FanfixWindow(QMainWindow):
             state = json.loads(raw) if isinstance(raw, str) else {}
         except ValueError:
             state = {}
+        title, url = str(state.get("title") or ""), str(state.get("url") or "")
+        if title.lower().startswith("just a moment") or "challenges.cloudflare.com" in url:
+            self.checking += 1
+            if self.checking * TICK_MS / 60000 > CHECK_MINUTES:
+                self._finish("Cloudflare's check didn't finish — answer it in the page below, then press Download again.")
+                return
+            self._say("Cloudflare is checking the browser — answer its check in the page below if it asks; the run "
+                      "goes on by itself after.")
+            QTimer.singleShot(TICK_MS, self._tick)
+            return
+        if "/login" in url.split("?", 1)[0] and not self.haul.found:
+            self._finish("Fanfix asked to log in — log in in the page below, open the page again, and press Download.")
+            return
         grew = state.get("height") != self.last_state.get("height") or bool(state.get("moved"))
         self.last_state = state
         self.idle = 0 if (grew or got) else self.idle + 1
@@ -342,32 +504,27 @@ class FanfixWindow(QMainWindow):
             self.view.reload()
             return
         self._say(f"Scrolling… {self.responses} answer(s) read · {len(self.haul.found)} photo(s)/video(s) found · "
-                  f"{len(self.written)} downloaded")
+                  f"{len(self.written)} downloaded" + (f" · {self.haul.locked} locked" if self.haul.locked else ""))
         if self.idle >= IDLE_TICKS:
-            # the end: one last look at what came in, then the page itself if its data named nothing
-            self.view.page().runJavaScript(fanfix.DRAIN_JS, 0, lambda r: (self._read_answers(r), self._last_look()))
+            # the end: one last look at what came in and what's shown, then what the data didn't name
+            self.view.page().runJavaScript(fanfix.DRAIN_JS, 0, lambda r: (
+                self._read_answers(r),
+                self.view.page().runJavaScript(fanfix.DOM_JS, 0, lambda d: (self._harvest(d), self._last_look()))))
             return
         QTimer.singleShot(TICK_MS, self._tick)
 
     def _last_look(self) -> None:
-        if self.haul.found or not self.running:
-            self._crawl_end()
+        if not self.running:
             return
-        self.view.page().runJavaScript(fanfix.DOM_JS, 0, self._dom)
-
-    def _dom(self, raw) -> None:
-        try:
-            shown = json.loads(raw) if isinstance(raw, str) else []
-        except ValueError:
-            shown = []
-        if isinstance(shown, list) and shown:
-            before = set(self.haul.found)
-            fanfix.from_page([m for m in shown if isinstance(m, dict)], self.haul)
-            new = set(self.haul.found) - before
-            if new:
-                self._log(f"The page's data named no media — taking the {len(new)} picture(s)/video(s) it shows.")
-            for key in new:
-                self._queue(self.haul.found[key])
+        new = fanfix.from_page(list(self.shown.values()), self.haul, self.hint)
+        self.from_page = len(new)
+        self.page_videos = sum(f.video for f in new)
+        before = self.queued
+        for f in new:
+            self._queue(f)
+        if self.queued > before:
+            self._log(f"{self.queued - before} photo(s)/video(s) on the page that its data didn't name — taking them "
+                      "as shown.")
         self._crawl_end()
 
     def stop(self) -> None:
@@ -375,6 +532,7 @@ class FanfixWindow(QMainWindow):
             self.stopping = True
             for f in getattr(self, "futures", []):
                 f.cancel()                                 # not started yet: left for the next run
+            self._cancel_all()
             self._say("Stopping after the files in hand…")
 
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt override
@@ -385,6 +543,8 @@ class FanfixWindow(QMainWindow):
                 return
             self.stopping = True
             self._finish("Stopped.")
+        self.closed = True
+        self._cancel_all()
         super().closeEvent(event)
 
     # ------------------------------------------------------------------ downloads
@@ -414,8 +574,7 @@ class FanfixWindow(QMainWindow):
         item = fanfix.item_for(f, dest)
         self.queued += 1
         self.bar.setRange(0, self.queued)
-        fut = self.pool.submit(social.settle, item, [], self.opts, self.exif, self.engine, self.heavy,
-                               fanfix.fetcher(self.ua, self.cookie_header()))
+        fut = self.pool.submit(social.settle, item, [], self.opts, self.exif, self.engine, self.heavy, self.fetch)
         self.futures.append(fut)
         fut.add_done_callback(lambda done: self.bridge.call.emit(self._settled, done))
 
@@ -448,8 +607,9 @@ class FanfixWindow(QMainWindow):
             elif "DRM" in s.why:
                 self.drm += 1
                 self._log(f"   {s.item.filename}: {s.why}")
-            else:
+            elif s.why != "stopped":
                 self.failed += 1
+                self.failures.append({"file": s.item.filename, "url": s.item.url, "why": s.why})
                 self._log(f"   couldn't download {s.item.filename}: {s.why}")
         self.settled_n += 1
         self.bar.setValue(self.settled_n)
@@ -493,22 +653,26 @@ class FanfixWindow(QMainWindow):
         self.running = False
         if getattr(self, "pool", None):
             self.pool.shutdown(wait=False, cancel_futures=True)
+        self._cancel_all()
         self._save()
         if self.exif is not None:
             self.exif.close()
         who = self.hint or "Fanfix"
         h = self.haul
+        # videos the data named with only a poster, less the videos the page itself showed and gave
+        missing = max(0, len(h.unresolved - set(h.found)) - self.page_videos)
         if problem:
             line = problem
-        elif not self.responses:
-            line = ("The page loaded no data to read — is it a creator's page, and are you logged in? If you can see "
-                    "posts there, press Save Troubleshooting File and send it over.")
+        elif not self.responses and not self.shown:
+            line = ("The page loaded nothing to read and showed nothing to save — is it a creator's page, and are you "
+                    "logged in? If you can see posts there, press Save Troubleshooting File and send it over.")
         elif not h.found:
             line = (f"{who}: nothing to download on this page" +
-                    (f" — {h.locked} locked post item(s) need buying first." if h.locked else
+                    (f" — {h.locked} locked item(s) need buying first." if h.locked else
                      ". If you can see posts here, press Save Troubleshooting File and send it over."))
         elif not self.written:
-            line = f"{who}: nothing new" + (f" ({self.present} already here)" if self.present else "") + "."
+            line = f"{who}: nothing new" + (f" ({self.present} already here)" if self.present else "") + \
+                   (f" · {self.failed} couldn't be downloaded" if self.failed else "") + "."
         else:
             line = (f"{who}: downloaded {self.photos} photo{'s' if self.photos != 1 else ''} and {self.videos} "
                     f"video{'s' if self.videos != 1 else ''}" + (f" · {self.failed} couldn't be" if self.failed else "")
@@ -520,29 +684,42 @@ class FanfixWindow(QMainWindow):
             line += f" {self.drm} video{'s' if self.drm != 1 else ''} protected by DRM left out."
         if h.locked and h.found:
             line += f" {h.locked} locked item{'s' if h.locked != 1 else ''} (not bought) left out."
+        if missing:
+            line += (f" {missing} video{'s' if missing != 1 else ''} came with no address (Fanfix gives it when "
+                     "it plays) — play one and press Download again to see if it's taken.")
+        if self.failed:
+            line += " Save Troubleshooting File shows why."
         self._log(line)
         self._say(line)
-        for w in (self.go_btn, self.photos_2x, self.videos_1080, self.field):
+        self.report = {
+            "page": self.view.url().toString(), "creator": self.hint, "answers": self.responses, "by_kind": self.kinds,
+            "found": len(h.found), "from_page": self.from_page, "locked": h.locked, "profile_pictures": h.profile,
+            "videos_without_address": sorted(h.unresolved - set(h.found)), "streamed_videos_seen": self.streamed,
+            "downloaded": len(self.written), "failed": self.failures, "drm": self.drm, "present": self.present,
+            "items": [{"key": f.key, "url": f.url, "video": f.video, "creator": f.creator, "date": f.date,
+                       "post": f.post, "from_page": f.shown} for f in h.found.values()],
+            "shown": list(self.shown.values()),
+        }
+        for w in (self.go_btn, self.photos_2x, self.videos_1080, self.field, *self.page_btns):
             w.setEnabled(True)
         self.ai.setEnabled(self.photos_2x.isChecked())
-        self.trouble_btn.setEnabled(bool(self.captured))
+        self.trouble_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.bar.setVisible(False)
         self.finished.emit(str(self.person), list(self.written))
 
     # ------------------------------------------------------------------ troubleshooting
     def save_troubleshooting(self) -> None:
-        """What the page loaded in the last run, to ~/Library/Logs/Safe Finder — stays on this Mac."""
-        if not self.captured:
-            return
+        """The last run — what the page loaded and showed, what was found, what failed — to ~/Library/Logs/Safe
+        Finder. It holds addresses from the person's own account: it stays on this Mac."""
         folder = Path.home() / "Library" / "Logs" / "Safe Finder"
         try:
             folder.mkdir(parents=True, exist_ok=True)
             path = folder / f"fanfix-{time.strftime('%Y%m%d-%H%M%S')}.json"
-            h = getattr(self, "haul", fanfix.Haul())
-            doc = {"page": self.view.url().toString(), "found": len(h.found), "locked": h.locked,
-                   "profile_pictures": h.profile, "answers": self.captured}
-            path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+            doc = dict(self.report or {"page": self.view.url().toString()})
+            doc["log"] = self.log.toPlainText().splitlines()
+            doc["answers_received"] = self.captured
+            path.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
         except OSError as e:
             QMessageBox.warning(self, "Fanfix", f"Couldn't write the file: {e}")
             return
