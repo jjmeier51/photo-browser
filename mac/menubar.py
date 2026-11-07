@@ -213,6 +213,8 @@ def install(win, sf) -> None:
         folder_target)
     act(t, "Download Facebook Profile…", lambda: sf.open_social("facebook", folder_target(), win), None,
         folder_target)
+    act(t, "Download from Fanfix…", lambda: sf.open_fanfix(folder_target(), win), None, folder_target,
+        "Your purchased content from Fanfix creators, into a folder for each creator")
     act(t, sf.passes_label(folder_target()) if folder_target() else "Download Passes…",
         lambda: sf.open_passes(folder_target(), win), None, folder_target)
     act(t, "Browse taylorpictures.net…", lambda: pane().open_taylor(

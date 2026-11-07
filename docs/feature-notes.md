@@ -2166,6 +2166,58 @@ in any 60 s (≈ the old fixed pace — the ceiling, not the gap, bounds the rat
 hidden page for an answer every 40 ms (was 100 + 150 ms) — up to ~150 ms of dead time per read. (5) Files
 6 at a time (was 4): those come from Facebook's photo/video CDN, not its pages. The log ends with pages read.
 
+### 7.4f Fanfix in Safe Finder — `mac/fanfix.py`, `mac/fanfix_downloader.py` (Nov 7, 2026)
+
+The person's own purchased content from Fanfix creators (subscriptions, bought posts and messages), for a
+personal archive. Mac only (no iPhone twin yet); `.fanfix.json` uses `social.Record`'s shape so one could
+share it later.
+
+**Watch, don't call.** Fanfix has no public API, and app.fanfix.io answers anything but a real browser with a
+Cloudflare managed challenge — its JS can't even be read from outside (checked from the sandbox: the login
+page is the challenge). So nothing is reverse-engineered: the window's Qt WebEngine profile ("fanfix",
+persistent) carries a `QWebEngineScript` at `DocumentCreation` in the main world (`HOOK_JS`) that wraps
+`fetch` and `XMLHttpRequest` and keeps a copy of every JSON answer the page receives (plus inline
+`__NEXT_DATA__` / `application/json` scripts) in `window.__pbCaptured`. Download = reload the page (a page
+reached inside the SPA would carry earlier pages' answers), then every 1.2 s: take the copies (`DRAIN_JS`,
+spliced so each is read once) → `extract` → queue the new media, and scroll one step (`SCROLL_JS`: the biggest
+scrollable box, else the page). The end: 7 steps with no new height and nothing new loaded. If the page's
+data named no media at all (a server-drawn page), `DOM_JS` takes the big, unblurred `<img>`s and real-address
+`<video>`s it shows.
+
+**`extract` on JSON of unknown shape**: walk with the enclosing post as context (id, date — ISO or s/ms epoch —
+caption, creator handle from a nested user object, locked). Media object = a dict with a direct media
+address (by extension: images, mp4/mov/m4v/webm, m3u8/mpd), or whose type says image/video, or an id whose
+URL-bearing children carry no ids (variants of one media). Best address: video file > HLS > DASH, then key
+words (original/full/large +, thumb/preview/blur/poster −), then width. Left out: locked context (`isLocked`,
+`hasAccess: false`, `isPurchased: false`…), only-a-teaser (blur/preview/teaser keys or "blur" in the URL),
+user objects' own pictures (avatar/banner/cover keys, or a URL directly on a user object) — but posts nested
+*under* a creator object are walked and get that creator's handle. Key = the media id, else a hash of the URL
+without its query (signatures change, the picture doesn't). Tests cover seven shapes (media lists, variants,
+source lists with qualities, flat posts, a profile with nested posts, purchased vs unbought messages, DASH).
+
+**Streams and DRM** (`fetch_stream`): the manifest is read first; FairPlay / Widevine / PlayReady markers
+(`SAMPLE-AES`, `com.apple.streamingkeydelivery`, the Widevine/PlayReady system ids, `ContentProtection`) →
+"protected by DRM — not downloaded", nothing more fetched. Unprotected HLS/DASH via yt-dlp (which refuses DRM
+itself), ffmpeg for HLS without it. No DRM is worked around (unlike `passes_decrypt.py`).
+`social.settle` gained a `fetcher` parameter for this; Instagram/Facebook pass none and are unchanged.
+
+**Cookies only to Fanfix** (`tries_for`): plain request first; the session cookie added only for `*.fanfix.io`
+hosts — media on another company's CDN comes from signed URLs and never gets the person's session.
+
+**Folders**: `destination` — the right-clicked folder when its record names the creator or it's named for
+them, a matching subfolder, else `<folder>/<creator>`; media with no creator (a mixed purchases page with no
+handles in its data) → `<folder>/Fanfix`. Handle from the page URL (`creator_from_url`, minus app routes
+such as messages/settings/purchases) or from the posts' data.
+
+**Tested** only against a local mock (no Fanfix account here): an app loading its feed page by page on scroll
+by fetch *and* XHR, inline `__NEXT_DATA__`, signed-style URLs, a cookie-gated photo, locked posts with blurred
+teasers, avatar/banner, MP4, HLS, a SAMPLE-AES playlist. The real window offscreen: 5 photos + 2 videos, byte-
+identical originals (not thumbnails), cookie sent only on the retry, DRM skipped after reading only its
+playlist, 2 locked left out, avatars never fetched, record + tags written, second run "nothing new"; both the
+yt-dlp and the ffmpeg stream paths. **Untested on real Fanfix** — the troubleshooting file (`~/Library/Logs/
+Safe Finder/fanfix-*.json`: the page URL, counts, every captured answer) is how to tune `extract` to Fanfix's
+real shapes.
+
 ### 7.4d SimpCity threads — `SimpCityService.swift` / `SimpCityRecord.swift` / `SimpCityHosts.swift` / `SimpCityImportView.swift`, `mac/simpcity.py` / `mac/filehosts.py` / `mac/simpcity_downloader.py` (Oct 28, 2026)
 "Download from SimpCity…" on a person's folder (iPhone: the download menu; Safe Finder: right-click a
 folder, or the empty area of one): paste a `simpcity.cr/threads/…` address; every page is read, each

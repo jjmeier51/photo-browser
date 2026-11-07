@@ -615,6 +615,7 @@ def open_simpcity(folder: str, parent: QWidget | None = None, scores_only: bool 
 
 _SOCIAL_WINDOWS: list = []
 _PASSES_WINDOWS: list = []
+_FANFIX_WINDOWS: list = []
 
 
 def passes_label(folder: str) -> str:
@@ -642,6 +643,28 @@ def open_passes(folder: str, parent=None) -> None:
     win.destroyed.connect(
         lambda _=None, w=win: _PASSES_WINDOWS.remove(w) if w in _PASSES_WINDOWS else None)
     _PASSES_WINDOWS.append(win)
+    win.show()
+
+
+def fanfix_label(folder: str) -> str:
+    """Menu label for the Fanfix downloader on a folder: "Get New Fanfix Posts" when it's a creator's already."""
+    return "Get New Fanfix Posts" if os.path.isfile(os.path.join(folder, ".fanfix.json")) else "Download from Fanfix…"
+
+
+def open_fanfix(folder: str, parent=None) -> None:
+    """Right-click a folder ▸ "Download from Fanfix…": the downloader window (fanfix_downloader.py) — the person's
+    own purchased content from creators on Fanfix, into a folder for each creator."""
+    try:
+        import fanfix_downloader
+    except ModuleNotFoundError:
+        QMessageBox.information(parent, "Fanfix", "The downloader needs Qt WebEngine (part of PySide6).\n"
+                                "Run mac/run.sh once to set it up, then try again.")
+        return
+    win = fanfix_downloader.FanfixWindow(folder, tags=tag_store())
+    win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    win.finished.connect(lambda _folder, files: files and tags_changed())
+    win.destroyed.connect(lambda _=None, w=win: _FANFIX_WINDOWS.remove(w) if w in _FANFIX_WINDOWS else None)
+    _FANFIX_WINDOWS.append(win)
     win.show()
 
 
@@ -4742,6 +4765,7 @@ class Pane(QWidget):
             dl.addAction("Get Reaction Scores", lambda: open_simpcity(scored, self.window(), scores_only=True))
         for kind in ("instagram", "facebook"):
             dl.addAction(social_label(folder, kind), lambda _=False, kind=kind: open_social(kind, folder, self.window()))
+        dl.addAction(fanfix_label(folder), lambda: open_fanfix(folder, self.window()))
         dl.addSeparator()
         dl.addAction("Browse taylorpictures.net…", lambda: self.open_taylor(folder))
         ai = menu.addMenu("AI")

@@ -246,6 +246,14 @@ Python. (`SimpCityService`,
   `.instagram.json` / `.facebook.json` is the shared record** (`SocialRecord.swift` / `social.Record`):
   both apps read its ids into "already downloaded" and merge theirs in after a run, so neither re-downloads
   the other's posts — or ones deleted since. `docs/feature-notes.md` §7.4e.
+- **Fanfix in Safe Finder** (Mac only) — right-click a folder ▸ Download ▸ Download from Fanfix… (`mac/fanfix_downloader.py`,
+  `mac/fanfix.py`): the person's own purchased content from Fanfix creators, from a logged-in Qt WebEngine browser.
+  Fanfix has no public API and sits behind Cloudflare, so it **watches** rather than calls: a script injected at
+  document creation keeps the JSON the page itself loads, the page is reloaded and scrolled to its end, and
+  `extract` picks media out of JSON of any shape (best variant; locked teasers, avatars/banners left out). Into
+  `<folder>/<creator>`, named by media id, tagged "fanfix", record `.fanfix.json`. **DRM-protected streams are
+  skipped, never worked around**; the session cookie goes only to *.fanfix.io hosts. Tested on a local mock only —
+  "Save Troubleshooting File" captures real answers for tuning. §7.4f.
 - **Receive from the Mac (AirDrop / Share sheet)** — the app opens `.pbgallery` archives (its own
   type, made by `mac/airdrop_to_iphone.py`; also offered by the pornpics browser, the star
   downloader's `--airdrop`, and Safe Finder's context menu) and, as an Alternate handler, **any

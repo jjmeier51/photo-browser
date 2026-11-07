@@ -335,14 +335,15 @@ def place(src: str, folder: Path, name: str) -> str | None:
 
 
 def settle(item: Item, tries: list[dict[str, str]], opts: Options, tool=None, engine=None,
-           heavy=None) -> Settled:
+           heavy=None, fetcher=None) -> Settled:
     """One item, from the web to its folder (see the module notes). `heavy` (a lock) keeps the upscales
-    to one at a time — they hold whole photos and videos in memory. Runs on a worker thread."""
+    to one at a time — they hold whole photos and videos in memory. `fetcher(item, tmp, tries)` replaces
+    `download` (Fanfix's streamed videos). Runs on a worker thread."""
     if os.path.lexists(item.folder / item.filename):
         return Settled(item, str(item.folder / item.filename), present=True)
     tmp = tempfile.mkdtemp(prefix="safe-finder-social-")
     try:
-        path, why = download(item, tmp, tries)
+        path, why = (fetcher or download)(item, tmp, tries)
         if not path:
             return Settled(item, why=why)
         upscaled = small = False
