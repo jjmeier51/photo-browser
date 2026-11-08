@@ -259,8 +259,12 @@ Python. (`SimpCityService`,
   manager** (Cloudflare's clearance is the browser's — `urllib` gets the "Just a moment…" page; a web page that
   comes down is refused). Bought beats locked (`isPurchased` over `isLocked`). Creator pages are `/@handle`; Home
   Feed / Purchases (`/gallery`) / Messages sort into each creator's folder. Named by media id, tagged "fanfix",
-  record `.fanfix.json`. **DRM is never worked around** (DRM playlists and `encv`/`pssh` MP4s skipped). Untested on
-  real Fanfix — "Save Troubleshooting File" captures a run. §7.4f.
+  record `.fanfix.json`. **Fanfix's own media objects first** (`_take_asset`, learned from a real troubleshooting
+  file: `messageAssets[].asset` with `sourceUrl` = the original; data via Next.js server actions): a chat is read
+  upward through its whole history, Messages ▸ Download reads every chat; avatars (`static.fanfix.io/Public`,
+  chat-list `imageUrl`, `/@` links, `_thumbnail`) are never media, and the earlier version's avatar files are offered
+  for the Trash. **Bought pay-per-view is delivered only as FairPlay/Widevine DRM (photos too): counted, never
+  downloaded — DRM is never worked around** (also DRM playlists and `encv`/`pssh` MP4s). §7.4f.
 - **Receive from the Mac (AirDrop / Share sheet)** — the app opens `.pbgallery` archives (its own
   type, made by `mac/airdrop_to_iphone.py`; also offered by the pornpics browser, the star
   downloader's `--airdrop`, and Safe Finder's context menu) and, as an Alternate handler, **any

@@ -838,7 +838,20 @@ it, the way browser-extension downloaders do it:
 - full size: the original of each photo (a WebP saved as a real JPEG), not its thumbnail; a video as its own
   file, or as one MP4 put together from its stream; pay-per-view posts you bought included;
 - **left out** (and counted): posts you haven't bought (their blurred teasers), creators' avatars and banners,
-  and videos protected by DRM — those can only be watched on Fanfix.
+  and anything protected by DRM — those can only be watched on Fanfix.
+
+**Chats.** Open a chat and press Download: its whole history is read (the chat scrolls up until Fanfix has
+nothing older). Open **Messages** itself and press Download: every chat, one after another, each into its
+creator's folder.
+
+**What Fanfix won't let anyone save.** Fanfix delivers what you've *bought* — pay-per-view messages and sets,
+photos as well as videos — only as DRM-protected streams (FairPlay/Widevine); there's no plain file for them.
+Safe Finder doesn't break DRM, so it counts those ("N bought photos/videos … protected by DRM") and leaves them on
+Fanfix. Free messages and posts come down as their full-size originals.
+
+**Profile pictures from the earlier version.** It mistook creators' avatars for posts. After a run, Safe Finder
+lists any such files it recorded as downloads and offers to move them (and any folder made only for them) to the
+Trash; nothing else is touched.
 
 The creator's folder keeps a hidden record (`.fanfix.json`) of everything downloaded, so **Get New Fanfix
 Posts** takes only what's new, and a file you delete stays deleted. Your Fanfix login never leaves that browser

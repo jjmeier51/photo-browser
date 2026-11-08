@@ -38,7 +38,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal  # noqa: E402
+from PySide6.QtCore import QFile, QObject, QSettings, Qt, QTimer, QUrl, Signal  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,  # noqa: E402
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout, QWidget)
 from PySide6.QtWebEngineCore import (QWebEngineDownloadRequest, QWebEnginePage, QWebEngineProfile,  # noqa: E402
@@ -114,6 +114,16 @@ def _download_finished(job: _Job) -> None:
     else:
         job.why = req.interruptReasonString() or "the download was stopped"
     job.done.set()
+
+
+def _trash(path: str) -> bool:
+    """To the system Trash (Put Back works)."""
+    try:
+        r = QFile.moveToTrash(path)
+    except Exception:  # noqa: BLE001
+        return False
+    ok = r[0] if isinstance(r, tuple) else bool(r)
+    return bool(ok) and not os.path.lexists(path)
 
 
 def profile() -> QWebEngineProfile:
@@ -232,9 +242,10 @@ class FanfixWindow(QMainWindow):
         row2.addStretch(1)
         row2.addWidget(self.trouble_btn)
         row2.addWidget(login)
-        self.status = QLabel("Log in to Fanfix below if you haven't, open a creator's page — or Home Feed, Purchases, "
-                             "or a chat in Messages — and press Download. Files go into a folder for each creator "
-                             f"inside “{self.person.name}”, tagged “{fanfix.TAG}”.")
+        self.status = QLabel("Log in to Fanfix below if you haven't, open a creator's page — or Home Feed, Purchases, a "
+                             "chat (its whole history is read), or Messages itself (every chat, one after another) — "
+                             "and press Download. Files go into a folder for each creator inside "
+                             f"“{self.person.name}”, tagged “{fanfix.TAG}”.")
         self.status.setWordWrap(True)
         self.bar = QProgressBar()
         self.bar.setVisible(False)
@@ -356,7 +367,12 @@ class FanfixWindow(QMainWindow):
         if self.hint:
             self.field.setText(self.hint)
         self.running, self.stopping = True, False
-        self.started = time.monotonic()
+        self.started = self.page_started = time.monotonic()
+        self.all_chats = fanfix.chats_page(url)          # the Messages list: every chat in it, one after another
+        self.chats_listed = False
+        self.pages: list[tuple[str, str]] = []           # (address, creator) still to read after this page
+        self.chats_read = 0
+        self.direction = -1 if fanfix.chat_id(url) else 1     # a chat's history loads above it
         self.opts = social.Options(photos_2x=self.photos_2x.isChecked(),
                                    ai=self.ai.isChecked() and self.engine is not None and self.photos_2x.isChecked(),
                                    videos_1080=self.videos_1080.isChecked())
@@ -430,12 +446,13 @@ class FanfixWindow(QMainWindow):
         if self.stopping:
             self._crawl_end()
             return
-        if (time.monotonic() - self.started) / 60 > MAX_MINUTES:
-            self._log(f"Still going after {MAX_MINUTES} minutes — stopping here.")
-            self._crawl_end()
+        if (time.monotonic() - self.page_started) / 60 > MAX_MINUTES:
+            self._log(f"Still going on this page after {MAX_MINUTES} minutes — moving on.")
+            self._end_of_page()
             return
+        scroll = fanfix.scroll_js(self.direction)
         self.view.page().runJavaScript(fanfix.DOM_JS, 0, lambda r: (
-            self._harvest(r), self.view.page().runJavaScript(fanfix.SCROLL_JS, 0, lambda s: self._scrolled(s, got))))
+            self._harvest(r), self.view.page().runJavaScript(scroll, 0, lambda s: self._scrolled(s, got))))
 
     def _read_answers(self, raw) -> int:
         """Reads the answers the page received (fanfix.extract_text) and queues what's new. Returns how many."""
@@ -452,7 +469,11 @@ class FanfixWindow(QMainWindow):
             kind = str(a.get("k") or "?")
             self.kinds[kind] = self.kinds.get(kind, 0) + 1
             if self.kept_chars + len(a["t"]) <= KEEP_CHARS:
-                self.captured.append({"url": a.get("u", ""), "how": kind, "body": a["t"]})
+                entry = {"url": a.get("u", ""), "how": kind, "body": a["t"]}
+                for k, name in (("m", "method"), ("b", "request_body"), ("a", "next_action")):
+                    if a.get(k):
+                        entry[name] = a[k]
+                self.captured.append(entry)
                 self.kept_chars += len(a["t"])
             before = set(self.haul.found)
             fanfix.extract_text(a["t"], self.haul)
@@ -503,29 +524,62 @@ class FanfixWindow(QMainWindow):
             self.view.loadFinished.connect(self._reloaded)
             self.view.reload()
             return
-        self._say(f"Scrolling… {self.responses} answer(s) read · {len(self.haul.found)} photo(s)/video(s) found · "
-                  f"{len(self.written)} downloaded" + (f" · {self.haul.locked} locked" if self.haul.locked else ""))
-        if self.idle >= IDLE_TICKS:
-            # the end: one last look at what came in and what's shown, then what the data didn't name
-            self.view.page().runJavaScript(fanfix.DRAIN_JS, 0, lambda r: (
-                self._read_answers(r),
-                self.view.page().runJavaScript(fanfix.DOM_JS, 0, lambda d: (self._harvest(d), self._last_look()))))
+        where = "Reading the chat's history (scrolling up)" if self.direction < 0 else "Scrolling"
+        self._say(f"{where}… {self.responses} answer(s) read · {len(self.haul.found)} photo(s)/video(s) found · "
+                  f"{len(self.written)} downloaded" + (f" · {self.haul.locked} locked" if self.haul.locked else "")
+                  + (f" · {len(self.haul.drm)} DRM-protected" if self.haul.drm else "")
+                  + (f" · chat {self.chats_read + 1} of {self.chats_read + 1 + len(self.pages)}" if self.chats_listed else ""))
+        # the top of a chat's history (Fanfix says there's nothing older) needs only a moment more
+        limit = 2 if self.direction < 0 and self.haul.older is False else IDLE_TICKS
+        if self.idle >= limit:
+            self._end_of_page()
             return
         QTimer.singleShot(TICK_MS, self._tick)
 
-    def _last_look(self) -> None:
+    def _end_of_page(self) -> None:
+        """One last look at what came in and what's shown, then on to the next page (or the end)."""
+        self.view.page().runJavaScript(fanfix.DRAIN_JS, 0, lambda r: (
+            self._read_answers(r),
+            self.view.page().runJavaScript(fanfix.DOM_JS, 0, lambda d: (self._harvest(d), self._page_done()))))
+
+    def _page_done(self) -> None:
         if not self.running:
             return
+        here = self.view.url().toString()
+        if not self.hint and fanfix.chat_id(here):
+            self.hint = self.haul.channels.get(fanfix.chat_id(here), "")
         new = fanfix.from_page(list(self.shown.values()), self.haul, self.hint)
-        self.from_page = len(new)
-        self.page_videos = sum(f.video for f in new)
+        self.from_page += len(new)
+        self.page_videos += sum(f.video for f in new)
         before = self.queued
         for f in new:
             self._queue(f)
         if self.queued > before:
             self._log(f"{self.queued - before} photo(s)/video(s) on the page that its data didn't name — taking them "
                       "as shown.")
+        self.shown = {}
+        if fanfix.chat_id(here):
+            self.chats_read += 1
+        if self.all_chats and not self.chats_listed:
+            self.chats_listed = True
+            self.pages = [(fanfix.chat_url(cid), name) for cid, name in self.haul.channels.items()]
+            self._log(f"{len(self.pages)} chat(s) in Messages — reading each one's whole history.")
+        if self.pages and not self.stopping:
+            url, hint = self.pages.pop(0)
+            self._open_page(url, hint)
+            return
         self._crawl_end()
+
+    def _open_page(self, url: str, hint: str) -> None:
+        self.hint = hint
+        self.direction = -1 if fanfix.chat_id(url) else 1
+        self.haul.older = None
+        self.idle = self.checking = 0
+        self.last_state = {}
+        self.page_started = time.monotonic()
+        self._log(f"→ chat with {hint}" if hint and fanfix.chat_id(url) else f"→ {url}")
+        self.view.loadFinished.connect(self._reloaded)
+        self.view.load(QUrl(url))
 
     def stop(self) -> None:
         if self.running:
@@ -657,7 +711,7 @@ class FanfixWindow(QMainWindow):
         self._save()
         if self.exif is not None:
             self.exif.close()
-        who = self.hint or "Fanfix"
+        who = f"Your {self.chats_read} chats" if self.chats_read > 1 else (self.hint or "Fanfix")
         h = self.haul
         # videos the data named with only a poster, less the videos the page itself showed and gave
         missing = max(0, len(h.unresolved - set(h.found)) - self.page_videos)
@@ -668,7 +722,7 @@ class FanfixWindow(QMainWindow):
                     "logged in? If you can see posts there, press Save Troubleshooting File and send it over.")
         elif not h.found:
             line = (f"{who}: nothing to download on this page" +
-                    (f" — {h.locked} locked item(s) need buying first." if h.locked else
+                    ("." if h.locked or h.drm else
                      ". If you can see posts here, press Save Troubleshooting File and send it over."))
         elif not self.written:
             line = f"{who}: nothing new" + (f" ({self.present} already here)" if self.present else "") + \
@@ -680,9 +734,12 @@ class FanfixWindow(QMainWindow):
             if self.undated:
                 line += (f" {self.undated} had no date on Fanfix — {'they keep' if self.undated != 1 else 'it keeps'} "
                          "the download date.")
-        if self.drm:
-            line += f" {self.drm} video{'s' if self.drm != 1 else ''} protected by DRM left out."
-        if h.locked and h.found:
+        protected = len(h.drm) + self.drm
+        if protected:
+            line += (f" {protected} bought photo{'s' if protected != 1 else ''}/video{'s' if protected != 1 else ''} "
+                     "Fanfix only delivers protected by DRM (FairPlay/Widevine) — Safe Finder doesn't break DRM, so "
+                     f"{'those stay' if protected != 1 else 'that stays'} viewable on Fanfix only.")
+        if h.locked:
             line += f" {h.locked} locked item{'s' if h.locked != 1 else ''} (not bought) left out."
         if missing:
             line += (f" {missing} video{'s' if missing != 1 else ''} came with no address (Fanfix gives it when "
@@ -695,7 +752,9 @@ class FanfixWindow(QMainWindow):
             "page": self.view.url().toString(), "creator": self.hint, "answers": self.responses, "by_kind": self.kinds,
             "found": len(h.found), "from_page": self.from_page, "locked": h.locked, "profile_pictures": h.profile,
             "videos_without_address": sorted(h.unresolved - set(h.found)), "streamed_videos_seen": self.streamed,
-            "downloaded": len(self.written), "failed": self.failures, "drm": self.drm, "present": self.present,
+            "downloaded": len(self.written), "failed": self.failures, "drm_at_download": self.drm,
+            "drm_protected": sorted(h.drm), "removed_by_moderation": h.removed, "own_uploads": h.own,
+            "other": h.other, "chats": h.channels, "chats_read": self.chats_read, "present": self.present,
             "items": [{"key": f.key, "url": f.url, "video": f.video, "creator": f.creator, "date": f.date,
                        "post": f.post, "from_page": f.shown} for f in h.found.values()],
             "shown": list(self.shown.values()),
@@ -707,6 +766,66 @@ class FanfixWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.bar.setVisible(False)
         self.finished.emit(str(self.person), list(self.written))
+        if not problem:
+            QTimer.singleShot(0, self._offer_cleanup)
+
+    # ------------------------------------------------------------------ an earlier version's mistakes
+    def _offer_cleanup(self) -> None:
+        """An earlier version saved creators' profile pictures as if they were posts (named by the chat or the
+        picture). The ones it recorded as downloads, whose names match a picture seen in this run, are offered for
+        the Trash — after asking; folders it made for them alone go too."""
+        keys = getattr(self, "haul", fanfix.Haul()).avatar_keys
+        if not keys:
+            return
+        folders = [self.person]
+        try:
+            folders += [Path(e.path) for e in os.scandir(self.person)
+                        if e.is_dir() and (Path(e.path) / fanfix.RECORD).is_file()]
+        except OSError:
+            pass
+        hits: list[str] = []
+        for folder in folders:
+            rec = fanfix.record(folder)
+            if not rec.downloaded:
+                continue
+            try:
+                entries = list(os.scandir(folder))
+            except OSError:
+                continue
+            for e in entries:
+                stem = e.name.rsplit(".", 1)[0]
+                if e.is_file() and not e.name.startswith(".") and stem in keys and stem in rec.downloaded:
+                    hits.append(e.path)
+        if not hits:
+            return
+        empty = []
+        for folder in folders[1:]:
+            left = [n for n in os.listdir(folder) if not n.startswith(".") and str(folder / n) not in hits]
+            if not left:
+                empty.append(str(folder))
+        names = "\n".join(sorted(self._shown(Path(p)) for p in hits)[:12]) + ("\n…" if len(hits) > 12 else "")
+        box = QMessageBox(self)
+        box.setWindowTitle("Fanfix")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"{len(hits)} file{'s' if len(hits) != 1 else ''} here {'are' if len(hits) != 1 else 'is'} "
+                    "creators' profile pictures that an earlier version downloaded by mistake. Move "
+                    f"{'them' if len(hits) != 1 else 'it'} to the Trash?")
+        box.setInformativeText(names + (f"\n\nAnd {len(empty)} folder{'s' if len(empty) != 1 else ''} made only for "
+                                        f"them: " + ", ".join(Path(f).name for f in empty) if empty else ""))
+        go = box.addButton("Move to Trash", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Keep Them", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not go:
+            return
+        gone = [p for p in hits + empty if _trash(p)]
+        if self.tags is not None and gone:
+            try:
+                self.tags.forget(gone)
+            except (OSError, AttributeError):
+                pass
+        self._log(f"Moved {len(gone)} mistaken profile picture file(s)/folder(s) to the Trash.")
+        if gone:
+            self.finished.emit(str(self.person), [])
 
     # ------------------------------------------------------------------ troubleshooting
     def save_troubleshooting(self) -> None:

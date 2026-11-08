@@ -2295,6 +2295,49 @@ Gallery (no data) sort into `kim/` and `jane/`, dated. Stop ends in ~1 s with no
 untested on real Fanfix** (no account here): if a run misses something, the troubleshooting file shows which
 answers came in and what the page showed.
 
+**Nov 8 — what the real site sends** (from the person's troubleshooting file of a real chat; all of this is
+now in `fanfix.py`, and `extract` reads it first — the shape-guessing walk only runs on a document with no Fanfix
+asset objects in it):
+- **Data comes from Next.js server actions**: POSTs to the page's own address with a `Next-Action` header,
+  answering `0:{"a":"$@1",…}` + `1:{"ok":true,"data":{"hasMore":…,"messageChannels"|"messages":[…]}}`. A page's
+  first data is inline (`self.__next_f`); `?_rsc=` fetches are only prefetched page shells. The hook now records
+  each request's method, body (the action's arguments) and action id into the troubleshooting file.
+- **Fanfix's media object** (`_is_asset`): `{id, type, mimeType, name, sourceUrl, thumbnailUrl,
+  durationInSeconds, removedByModeration, manifests: {fairplay: {url}, widevine: {url}}}`, wrapped as
+  `{id, order, showAsset, asset}` in a message's `messageAssets` (posts presumably alike). Messages: `{id, content
+  (HTML), senderUserId, unlockPriceInCents, unlockedAt, createdAt, messageAssets, parent}`; the chat's props
+  `{channelId, viewerUserId, partnerUsername, partnerAvatarUrl, … initialMessages, initialHasMoreOlder}`.
+- `_take_asset`: a **free** message's photo has its original in `sourceUrl` (`…_original.heic` / `_original.jpg`,
+  often WebP behind .jpg) — taken, named by the asset id, dated from the message, captioned with its text (HTML
+  stripped, `clean_text`), creator = `partnerUsername`. A **bought pay-per-view** (`unlockedAt` set) delivers *every*
+  asset — photos too — with an empty `sourceUrl` and only FairPlay/Widevine manifests: **DRM-protected, counted
+  (`Haul.drm`) and never downloaded** (fanripper decrypts these; Safe Finder doesn't and won't). **Not bought**
+  (`unlockPriceInCents` > 0, `unlockedAt` null): `showAsset: false` + `…_blurred.jpg` → locked. Left out too:
+  `removedByModeration`, the account's own uploads (`senderUserId == viewerUserId`), audio.
+- **Why it saved avatars "over and over"**: the old walk took each Messages-list chat (`{id, name, imageUrl,
+  ownerId, lastMessage}`) as a photo — its avatar, named by the chat id — and the same avatar again elsewhere under
+  a URL hash; and it took the chat's props (`partnerAvatarUrl`) for one avatar and never looked inside, where all
+  31 messages were. Now: `static.fanfix.io/Public/<user>/…` is people's own pictures (`is_profile_picture`),
+  `…_thumbnail` / `_blurred` / `_preview` names are never content (`not_content`), a dict holding a list of objects
+  is never one photo (`_container`), a chat-list entry's `imageUrl` and anything inside a link to `/@someone` are
+  avatars, and inside React element props the guessing walk only takes objects with an id or media type
+  (`_Ctx.element`). `tokens` matches pictures by the last UUID in the path, so a thumbnail and its original are one.
+  Checked on the real file: 4 free originals found, 7 DRM, 6 locked, 0 of 44 profile pictures, all 9 of the old
+  version's downloads recognised as avatars.
+- **Chats are read upward** (`scroll_js(-1)` on `/messages/<id>`): older messages load when the chat reaches its
+  top (`initialHasMoreOlder` / a non-empty `messages` page's `hasMore` → `Haul.older`; once false, 2 quiet steps end
+  the chat). **Messages ▸ Download** (`chats_page`) reads the list (`messageChannels` → `Haul.channels`) and then
+  each chat in turn (`_page_done` → `_open_page`), every chat into its creator's folder; the page harvest runs per
+  page with that page's creator.
+- **Cleanup** (`_offer_cleanup`): files in the right-clicked folder or its record-holding subfolders that the
+  Fanfix record lists as downloaded *and* whose name is a chat id or an avatar's URL hash seen in the run
+  (`Haul.avatar_keys`) are offered for the Trash (Qt's `QFile.moveToTrash`) after a question listing them — plus a
+  folder left with nothing else; tags forgotten. Nothing else is touched.
+- Tested on the real troubleshooting file and on a chat mock shaped like it (3 pages of history behind a
+  server action, free / bought-DRM / locked / own / moderated / voice assets, two chats): every free photo and
+  video of both chats, dated, all through Chromium; both older pages requested; DRM 3, locked 2; the old avatars
+  (and a folder made for one) trashed after the question, the person's own file left alone.
+
 ### 7.4d SimpCity threads — `SimpCityService.swift` / `SimpCityRecord.swift` / `SimpCityHosts.swift` / `SimpCityImportView.swift`, `mac/simpcity.py` / `mac/filehosts.py` / `mac/simpcity_downloader.py` (Oct 28, 2026)
 "Download from SimpCity…" on a person's folder (iPhone: the download menu; Safe Finder: right-click a
 folder, or the empty area of one): paste a `simpcity.cr/threads/…` address; every page is read, each

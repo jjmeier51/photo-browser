@@ -25,6 +25,16 @@ real Chromium logged in as the person, and three things come from it:
   is a plain request tried (`fetcher`). A download that turns out to be a web page (a login or Cloudflare page,
   an error) isn't kept (`sniff`).
 
+**Fanfix's own media objects come first** (`_fanfix_walk`, `_take_asset` — learned from a real chat, Nov 8): data
+arrives inline and from Next.js server actions (`{"ok":true,"data":{"hasMore":…,"messages":[…]}}`), and every
+photo or video is an asset `{id, type, mimeType, sourceUrl, thumbnailUrl, manifests…}` in a message's
+`messageAssets`. A free one's `sourceUrl` is the original — taken. A bought pay-per-view's assets, photos too, have
+no `sourceUrl`, only FairPlay/Widevine manifests — DRM, counted and left (`Haul.drm`). Not bought: `showAsset:
+false` and a blurred picture. People's own pictures (`static.fanfix.io/Public/…`, the Messages list's `imageUrl`,
+pictures inside `/@` links) and thumbnails are never media. A chat's older messages load at its top
+(`Haul.older`), and the Messages list names every chat (`Haul.channels`). Only where an answer holds no asset
+objects does the shape-guessing below run.
+
 **Picking media out of unknown JSON** (`extract`): a walk over every answer, keeping the post it's inside (id,
 date, caption, creator, open or locked) as context. A media object is a dict with a media address (by its
 extension — jpg/png/webp/heic/gif/avif, mp4/mov/m4v/webm, an HLS .m3u8 or DASH .mpd — or, in a dict whose type
@@ -84,7 +94,7 @@ FALLBACK_FOLDER = "Fanfix"                   # media whose creator couldn't be t
 # Fanfix's own pages the window offers besides a creator's: (button, path, what it is).
 PAGES = (("Home Feed", "home", "the posts of everyone you subscribe to"),
          ("Purchases", "gallery", "everything you've bought (your Gallery)"),
-         ("Messages", "messages", "your chats — open one, then Download"))
+         ("Messages", "messages", "your chats — Download here reads every chat; or open one"))
 
 IMAGE_EXT = {"jpg", "jpeg", "png", "webp", "heic", "heif", "gif", "avif"}
 VIDEO_EXT = {"mp4", "mov", "m4v", "webm"}
@@ -116,13 +126,25 @@ HOOK_JS = r"""
   window.__pbCaptured = [];
   var MAX = 6000, LONGEST = 15000000;
   var NOT_DATA = /^(image|video|audio|font)\/|text\/(css|html|javascript)|javascript|ecmascript|wasm|octet-stream|mpegurl|dash\+xml|protobuf|grpc/i;
-  function keep(url, text, how) {
+  function keep(url, text, how, req) {
     try {
       if (!text || typeof text !== 'string' || text.length < 2 || text.length > LONGEST) return;
-      var box = window.__pbCaptured;
-      box.push({u: String(url || location.href), t: text, k: how || ''});
+      var box = window.__pbCaptured, e = {u: String(url || location.href), t: text, k: how || ''};
+      if (req) { e.m = req.m; e.b = req.b; e.a = req.a; if (req.a) e.k = 'action'; }
+      box.push(e);
       if (box.length > MAX) box.splice(0, box.length - MAX);
     } catch (e) {}
+  }
+  function asked(input, init) {
+    // what the page asked for — the method, the body (a Next.js server action's arguments) and the action id
+    var req = {m: 'GET', b: '', a: ''};
+    try {
+      req.m = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+      if (init && typeof init.body === 'string') req.b = init.body.slice(0, 4000);
+      var h = (init && init.headers) || (input && input.headers);
+      if (h) req.a = String((typeof h.get === 'function' ? h.get('Next-Action') : (h['Next-Action'] || h['next-action'])) || '');
+    } catch (e) {}
+    return req;
   }
   function wanted(ct, text) {
     ct = String(ct || '');
@@ -134,11 +156,12 @@ HOOK_JS = r"""
   window.__pbKeep = keep;
   var realFetch = window.fetch;
   if (realFetch) {
-    window.fetch = function () {
+    window.fetch = function (input, init) {
+      var req = asked(input, init);
       return realFetch.apply(this, arguments).then(function (r) {
         try {
           var ct = (r.headers && r.headers.get('content-type')) || '';
-          if (!NOT_DATA.test(ct)) r.clone().text().then(function (t) { if (wanted(ct, t)) keep(r.url, t, 'fetch'); }, function () {});
+          if (!NOT_DATA.test(ct)) r.clone().text().then(function (t) { if (wanted(ct, t)) keep(r.url, t, 'fetch', req); }, function () {});
         } catch (e) {}
         return r;
       });
@@ -179,11 +202,13 @@ HOOK_JS = r"""
 # The copies so far, taken (so each is read once) — after a look for data the page has written into itself since.
 DRAIN_JS = "(window.__pbInline && window.__pbInline(), JSON.stringify((window.__pbCaptured || []).splice(0, 60)))"
 
-# One step down the page: the scrolling part of the page (the biggest scrollable box, else the page) moved on
-# by most of a screen. Returns where it is, so the window can tell the end (no further, and nothing new) — and
-# what page it's on (a Cloudflare check, the login page).
-SCROLL_JS = r"""
+# One step along the page: the scrolling part of the page (the biggest scrollable box, else the page) moved on by
+# most of a screen — down (a feed, a gallery), or up (a chat: its older messages load at the top; `scroll_js(-1)`;
+# "up" is also right for a chat drawn bottom-up, where scrollTop runs negative). Returns where it is, so the
+# window can tell the end (no further, and nothing new) — and what page it's on (a Cloudflare check, the login).
+_SCROLL = r"""
 (function () {
+  var dir = __DIR__;
   var best = document.scrollingElement || document.documentElement;
   var room = best.scrollHeight - best.clientHeight;
   var els = document.querySelectorAll('div, main, section, ul');
@@ -196,13 +221,20 @@ SCROLL_JS = r"""
     if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') { best = el; room = r; }
   }
   var before = best.scrollTop;
-  best.scrollTop = before + Math.max(400, best.clientHeight * 0.85);
-  if (best !== document.scrollingElement) window.scrollBy(0, Math.max(400, window.innerHeight * 0.85));
+  best.scrollTop = before + dir * Math.max(400, best.clientHeight * 0.85);
+  if (best !== document.scrollingElement) window.scrollBy(0, dir * Math.max(400, window.innerHeight * 0.85));
   return JSON.stringify({top: best.scrollTop, height: best.scrollHeight, client: best.clientHeight,
                          moved: best.scrollTop !== before, url: location.href, title: document.title,
                          captured: (window.__pbCaptured || []).length, hooked: !!window.__pbHooked});
 })()
 """
+
+
+def scroll_js(direction: int = 1) -> str:
+    return _SCROLL.replace("__DIR__", "-1" if direction < 0 else "1")
+
+
+SCROLL_JS = scroll_js(1)
 
 # What the page shows now: full-size pictures that aren't blurred (nor avatars, banners, logos — small, very wide,
 # in the page's header, or named so), and videos — with the creator and time of the post card around each. A
@@ -244,11 +276,13 @@ DOM_JS = r"""
     return abs(best);
   }
   var NOT = /avatar|profile-pic|profilepic|banner|cover|logo|icon|emoji|sticker|badge|header/;
+  // thumbnails, blurred teasers, and Fanfix's people's own pictures (static.fanfix.io/Public/<user>/…)
+  var NOT_SRC = /[_\-.](thumbnail|thumb|blurred|blur|preview|poster)\.[a-z0-9]+(\?|$)|\/\/static\.fanfix\.io\/Public\//i;
   var imgs = document.querySelectorAll('img');
   for (var i = 0; i < imgs.length; i++) {
     var im = imgs[i], src = largest(im), w = im.naturalWidth, h = im.naturalHeight;
-    if (!/^https?:/.test(src) || w < 320 || h < 320 || w > h * 2.5) continue;
-    if (im.closest('header, nav, footer') || NOT.test(words(im))) continue;
+    if (!/^https?:/.test(src) || w < 320 || h < 320 || w > h * 2.5 || NOT_SRC.test(src)) continue;
+    if (im.closest('header, nav, footer, a[href^="/@"], a[href*="fanfix.io/@"]') || NOT.test(words(im))) continue;
     var c = card(im);
     out.push({src: src, w: w, h: h, video: false, blurred: blurred(im), creator: c.creator, date: c.date});
   }
@@ -362,6 +396,30 @@ class Found:
 
 _IDLIKE = re.compile(r"^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}|\d{8,}|"
                      r"[A-Za-z0-9_-]{20,})$", re.I)
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+_NOT_CONTENT = re.compile(r"(?:^|[_\-.])(thumbnail|thumb|blurred|blur|preview|poster)(?:$|[_\-.])", re.I)
+DRM_SYSTEMS = {"fairplay", "widevine", "playready"}
+
+
+def is_profile_picture(url: str) -> bool:
+    """Fanfix keeps people's own pictures (avatars, banners) under static.fanfix.io/Public/<user id>/…; what they
+    post is on images.fanfix.io."""
+    p = urlsplit(url or "")
+    return (p.hostname or "").lower() == f"static.{DOMAIN}" and p.path.startswith("/Public/")
+
+
+def not_content(url: str) -> bool:
+    """A thumbnail, blurred teaser or poster, by its file name ("…_thumbnail.jpg", "…_blurred.jpg")."""
+    stem = urlsplit(unwrap(url) or "").path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    return bool(_NOT_CONTENT.search(stem))
+
+
+def clean_text(text: str) -> str:
+    """A caption as plain text: Fanfix's messages are HTML ("<p><strong>…</strong></p>")."""
+    import html
+    t = re.sub(r"<\s*br\s*/?>|</p>\s*<p[^>]*>", "\n", text or "", flags=re.I)
+    t = html.unescape(re.sub(r"<[^>]+>", "", t))
+    return re.sub(r"[ \t]+", " ", t).strip()[:2000]
 
 
 @dataclass
@@ -373,6 +431,14 @@ class Haul:
     unresolved: set[str] = field(default_factory=set)        # videos named with only a poster
     creators: dict[str, int] = field(default_factory=dict)   # handles seen on posts, how often
     seen: set[str] = field(default_factory=set)              # every media address the data named (`tokens`)
+    assets: int = 0                  # Fanfix asset objects read (`_take_asset`)
+    drm: set[str] = field(default_factory=set)               # bought, but given only as a DRM-protected stream
+    removed: int = 0                 # taken down by Fanfix's moderation
+    own: int = 0                     # sent by this account itself (a fan's own uploads in a chat)
+    other: int = 0                   # audio (voice notes) and thumbnails-only — not photos or videos
+    channels: dict[str, str] = field(default_factory=dict)   # the chats in the Messages list: id → creator
+    older: bool | None = None        # a chat: more history above what's loaded (None: not said)
+    avatar_keys: set[str] = field(default_factory=set)       # names an earlier version gave people's pictures
 
     def add(self, f: Found) -> bool:
         """Keeps `f` (or the better of it and one already kept under its key). True when it's new."""
@@ -414,8 +480,9 @@ _NO_ACCESS = ("hasAccess", "has_access", "canView", "can_view", "canAccess", "ca
 _BOUGHT = ("isPurchased", "is_purchased", "purchased", "isUnlocked", "is_unlocked", "unlocked", "isBought", "bought",
            "hasPurchased", "has_purchased", "isOpened", "is_opened")
 _OPEN = _NO_ACCESS + _BOUGHT
-_PRICE_KEYS = ("price", "priceInCents", "price_in_cents", "priceCents", "price_cents", "unlockPrice", "ppvPrice",
-               "amount", "cost")
+_PRICE_KEYS = ("unlockPriceInCents", "price", "priceInCents", "price_in_cents", "priceCents", "price_cents",
+               "unlockPrice", "ppvPrice", "amount", "cost")
+_UNLOCKED_AT = ("unlockedAt", "unlocked_at", "purchasedAt", "purchased_at")   # Fanfix: set once it's bought
 _MEDIA_LISTS = ("media", "medias", "attachments", "assets", "images", "videos", "photos", "items", "contents",
                 "mediaItems", "media_items", "files")
 
@@ -484,11 +551,15 @@ def stable_key(url: str) -> str:
 
 
 def tokens(url: str) -> set[str]:
-    """What tells one picture from another in its address: the address without its query, and the last id-like
-    part of its path (a media id or hash — "/m/1f0c…/1080.jpg" → "1f0c…"), so another size of the same picture is
-    known too."""
+    """What tells one picture from another in its address: the address without its query, and its media id — the
+    last UUID in its path ("…/1f0c…-…_thumbnail.jpg" and "…/1f0c…-…_original.heic" are the same picture), else the
+    last id-like part of the path ("/m/1f0c…/1080.jpg" → "1f0c…") — so another size of the same picture is known."""
     p = urlsplit(unwrap(url) or "")
     out = {urlunsplit((p.scheme, p.netloc.lower(), p.path, "", ""))}
+    ids = _UUID.findall(p.path)
+    if ids:
+        out.add(ids[-1].lower())
+        return out
     for seg in reversed([x for x in p.path.split("/") if x]):
         stem = seg.rsplit(".", 1)[0]
         if _IDLIKE.match(stem):
@@ -546,13 +617,14 @@ def _access(d: dict) -> bool | None:
     """What a dict says about this account's access: True (bought, unlocked, viewable), False (locked, blurred,
     no access, or not bought with a price on it), None (nothing). Bought beats locked — a pay-per-view post can
     stay "locked" once it's bought. "Not bought" with no price means nothing: every subscription post says it."""
-    if any(d.get(k) is True for k in _OPEN):
+    if any(d.get(k) is True for k in _OPEN) or any(isinstance(d.get(k), str) and d[k] for k in _UNLOCKED_AT):
         return True
-    if any(d.get(k) is True for k in _LOCK_FLAGS) or any(d.get(k) is False for k in _NO_ACCESS):
+    if any(d.get(k) is True for k in _LOCK_FLAGS) or any(d.get(k) is False for k in _NO_ACCESS) \
+            or d.get("showAsset") is False:
         return False
-    if any(d.get(k) is False for k in _BOUGHT) and any(
-            isinstance(d.get(k), (int, float)) and not isinstance(d.get(k), bool) and d[k] > 0 for k in _PRICE_KEYS):
-        return False
+    priced = any(isinstance(d.get(k), (int, float)) and not isinstance(d.get(k), bool) and d[k] > 0 for k in _PRICE_KEYS)
+    if priced and (any(d.get(k) is False for k in _BOUGHT) or any(k in d and not d[k] for k in _UNLOCKED_AT)):
+        return False                         # a price on it, and not bought (Fanfix: unlockedAt still null)
     return None
 
 
@@ -575,25 +647,39 @@ class _Ctx:
     caption: str = ""
     creator: str = ""
     locked: bool = False
-    profile: bool = False            # inside a user object's avatar / banner
+    profile: bool = False            # inside a user object's avatar / banner, or a link to someone's profile
+    viewer: str = ""                 # this account's user id (a chat's props say it)
+    sender: str = ""                 # who sent the message the media is in
+    element: bool = False            # inside a React element's props (layout: only objects with an id or type count)
 
 
 def _post_ctx(d: dict, ctx: _Ctx) -> _Ctx:
     """The context below a dict: a post's id, date, caption and creator taken over; open or locked as it says."""
     a = _access(d)
-    out = _Ctx(ctx.post, ctx.date, ctx.caption, ctx.creator, ctx.locked if a is None else not a, ctx.profile)
+    out = _Ctx(ctx.post, ctx.date, ctx.caption, ctx.creator, ctx.locked if a is None else not a, ctx.profile,
+               ctx.viewer, ctx.sender, ctx.element)
+    href = d.get("href")
+    if isinstance(href, str) and (href.startswith("/@") or "fanfix.io/@" in href):
+        out.profile = True                               # a link to someone's profile: its picture is theirs
+    if isinstance(d.get("viewerUserId"), str):
+        out.viewer = d["viewerUserId"]
+    partner = d.get("partnerUsername")                   # a Fanfix chat: whose it is
+    if isinstance(partner, str) and re.fullmatch(r"@?[A-Za-z0-9_.\-]{1,60}", partner):
+        out.creator = partner.lstrip("@")
     date = next((when(d[k]) for k in _DATE_KEYS if k in d and when(d[k])), 0.0)
     text = next((d[k] for k in _TEXT_KEYS if isinstance(d.get(k), str) and d[k].strip()
                  and not d[k].startswith(("http://", "https://", "$"))), "")
-    posty = bool(date or text or any(isinstance(d.get(k), list) for k in _MEDIA_LISTS))
+    posty = bool(date or text or any(isinstance(d.get(k), list) for k in _MEDIA_LISTS)
+                 or isinstance(d.get("messageAssets"), list))
     if posty and not _user_like(d):
         pid = next((_as_id(d[k]) for k in ("postId", "post_id", "id", "uuid", "_id") if _as_id(d.get(k))), "")
         if pid:
             out.post = pid
         if date:
             out.date = date
-        if text:
-            out.caption = text.strip()[:2000]
+        out.caption = clean_text(text) if text else ("" if pid else out.caption)
+        if isinstance(d.get("senderUserId"), str):
+            out.sender = d["senderUserId"]
         for k in _PERSON_KEYS:
             if isinstance(d.get(k), dict) and _handle_of(d[k]):
                 out.creator = _handle_of(d[k])
@@ -605,6 +691,124 @@ def _post_ctx(d: dict, ctx: _Ctx) -> _Ctx:
                     break
     return out
 
+
+# ----------------------------------------------------------------------------- Fanfix's own media objects
+
+def _is_asset(d) -> bool:
+    """Fanfix's media object — `{id, type, mimeType, name, sourceUrl, thumbnailUrl, durationInSeconds,
+    removedByModeration, manifests: {fairplay: {url}, widevine: {url}}}` — wrapped in a message's or post's list
+    as `{id, order, showAsset, asset}`."""
+    return (isinstance(d, dict) and isinstance(d.get("type"), str)
+            and ("sourceUrl" in d or "manifests" in d) and ("mimeType" in d or "thumbnailUrl" in d))
+
+
+def _ext_for(mime, video: bool) -> str:
+    m = str(mime or "").lower()
+    for key, ext in (("heic", "heic"), ("heif", "heic"), ("png", "png"), ("gif", "gif"), ("webp", "webp"),
+                     ("quicktime", "mov"), ("mp4", "mp4"), ("jpeg", "jpg"), ("jpg", "jpg")):
+        if key in m:
+            return ext
+    return "mp4" if video else "jpg"
+
+
+def _take_asset(asset: dict, wrapper: dict | None, ctx: _Ctx, haul: Haul) -> None:
+    """One Fanfix asset, by Fanfix's rules (checked on a real chat, Nov 8):
+    - a free message's or post's photo carries its original in `sourceUrl` ("…_original.heic"/".jpg") — taken;
+    - a bought pay-per-view's photos *and* videos come with an empty `sourceUrl` and only FairPlay/Widevine
+      manifests — DRM-protected: counted (`drm`), never downloaded;
+    - not bought: `showAsset: false` and a "…_blurred.jpg" — counted as locked;
+    - taken down by moderation, the account's own uploads, and audio — left out."""
+    haul.assets += 1
+    aid = _as_id(asset.get("id")) or _as_id((wrapper or {}).get("id"))
+    src = asset.get("sourceUrl") if isinstance(asset.get("sourceUrl"), str) else ""
+    thumb = asset.get("thumbnailUrl") if isinstance(asset.get("thumbnailUrl"), str) else ""
+    for u in (src, thumb):
+        if u.startswith(("http://", "https://")):
+            haul.note(u)
+    if asset.get("removedByModeration"):
+        haul.removed += 1
+        return
+    if ctx.viewer and ctx.sender and ctx.sender == ctx.viewer:
+        haul.own += 1
+        return
+    a = _access(wrapper) if wrapper else None
+    if (ctx.locked if a is None else not a) or (src and "blur" in src.lower()):
+        haul.locked += 1
+        return
+    kind = asset.get("type", "").lower()
+    if kind.startswith("audio"):
+        haul.other += 1
+        return
+    video = kind.startswith("video")
+    if not src.startswith(("http://", "https://")):
+        manifests = asset.get("manifests") if isinstance(asset.get("manifests"), dict) else {}
+        plain = [m.get("url") for k, m in manifests.items() if str(k).lower() not in DRM_SYSTEMS
+                 and isinstance(m, dict) and isinstance(m.get("url"), str) and m["url"].startswith("http")]
+        if plain and video:
+            src = plain[0]                                    # an unprotected stream (checked again when fetched)
+        elif manifests:
+            haul.drm.add(aid or thumb)
+            return
+        else:
+            if video:
+                haul.unresolved.add(aid)
+            else:
+                haul.locked += 1
+            return
+    if not_content(src):
+        haul.other += 1
+        return
+    ext = ext_of(src) if ext_of(src) in IMAGE_EXT | VIDEO_EXT | STREAM_EXT else _ext_for(asset.get("mimeType"), video)
+    date = when(asset.get("createdAt") or "") or ctx.date
+    haul.add(Found(aid or stable_key(src), src, video, ext, ctx.post, date, ctx.caption, ctx.creator, 10.0))
+    if ctx.creator:
+        haul.creators[ctx.creator] = haul.creators.get(ctx.creator, 0) + 1
+
+
+def _note_fanfix(d: dict, haul: Haul, ctx: _Ctx) -> None:
+    """What a Fanfix dict says beside its media: the chats in the Messages list, whether a chat has older messages
+    to load, and people's pictures (whose names an earlier version saved them under — `avatar_keys`)."""
+    chans = d.get("messageChannels")
+    if isinstance(chans, list):
+        for ch in chans:
+            if isinstance(ch, dict) and _as_id(ch.get("id")):
+                name = ch.get("name") if isinstance(ch.get("name"), str) else ""
+                haul.channels.setdefault(ch["id"], name.lstrip("@"))
+                haul.avatar_keys.add(_as_id(ch["id"]))
+    if isinstance(d.get("initialHasMoreOlder"), bool):
+        haul.older = d["initialHasMoreOlder"]
+    if isinstance(d.get("messages"), list) and d["messages"] and isinstance(d.get("hasMore"), bool):
+        haul.older = d["hasMore"]                            # a page of older messages: more above it or not
+    for k, v in d.items():
+        if isinstance(v, str) and v.startswith(("http://", "https://")) and is_media_url(v) and (
+                ctx.profile or is_profile_picture(v) or "avatar" in k.lower()
+                or (k == "imageUrl" and ("ownerId" in d or "lastMessage" in d))):
+            haul.avatar_keys.add(stable_key(v))
+            haul.profile += 1
+
+
+def _fanfix_walk(node, ctx: _Ctx, haul: Haul, depth: int = 0) -> None:
+    if depth > 120:
+        return
+    if isinstance(node, dict):
+        if _is_asset(node):
+            _take_asset(node, None, ctx, haul)
+            return
+        here = _post_ctx(node, ctx)
+        _note_fanfix(node, haul, here)
+        if _is_asset(node.get("asset")):
+            _take_asset(node["asset"], node, here, haul)
+            return
+        for v in node.values():
+            if isinstance(v, (dict, list)):
+                _fanfix_walk(v, here, haul, depth + 1)
+    elif isinstance(node, list):
+        for x in node:
+            if isinstance(x, (dict, list)):
+                _fanfix_walk(x, ctx, haul, depth + 1)
+
+
+# ----------------------------------------------------------------------------- any other shape
 
 def _addresses(d: dict, typed: bool = False, depth: int = 0, via: tuple = ()) -> list[tuple[tuple, str, int]]:
     """Media addresses in a dict and its variants (dicts and lists of dicts, two levels down): (the keys on the
@@ -650,9 +854,19 @@ def _score(keys: tuple, url: str, width: int, video: bool) -> float:
             s -= 50                          # a picture: the video's poster
     elif e and e not in IMAGE_EXT:
         s -= 50
-    if "blur" in url.lower():
+    if "blur" in url.lower() or not_content(url):
         s -= 8
     return s + min(width, 8000) / 1000
+
+
+_VARIANT_LISTS = {"variants", "sources", "sizes", "renditions", "versions", "formats", "qualities", "resolutions"}
+
+
+def _container(d: dict) -> bool:
+    """A dict that holds a list of other objects (a page of posts, a chat's messages, a React element's children)
+    is never itself one photo, whatever picture sits on it (a chat's partnerAvatarUrl hid every message once)."""
+    return any(isinstance(v, list) and any(isinstance(x, (dict, list)) for x in v[:8]) and k not in _VARIANT_LISTS
+               for k, v in d.items()) or "children" in d
 
 
 def _media(d: dict, ctx: _Ctx, haul: Haul) -> bool:
@@ -660,6 +874,12 @@ def _media(d: dict, ctx: _Ctx, haul: Haul) -> bool:
     was taken as media — its variants aren't then looked at again as media of their own."""
     direct = [k for k, v in d.items() if is_media_url(v)]
     kind = _type_of(d)
+    if ctx.element and not kind and not any(_as_id(d.get(k)) for k in _ID_KEYS[:9]):
+        return False                         # a layout prop ({"src": …} of an avatar, an icon): not a post's media
+    if _container(d):
+        for k in direct:                                  # its pictures are someone's avatar, at most
+            haul.note(d[k])
+        return False
     if not direct and not kind:
         # an id with variants under it that carry no ids of their own: one media object in several sizes
         if not any(_as_id(d.get(k)) for k in _ID_KEYS[:9]):
@@ -674,8 +894,12 @@ def _media(d: dict, ctx: _Ctx, haul: Haul) -> bool:
     for _k, u, _w in found:
         haul.note(u)
     video = kind == "video" or (kind != "image" and any(ext_of(u) in VIDEO_EXT | STREAM_EXT for _k, u, _w in found))
-    if ctx.profile or _user_like(d) or any(set(_words(k)) & _PROFILE for k in direct) and not video:
+    channel = "imageUrl" in d and ("ownerId" in d or "lastMessage" in d)        # a chat in the Messages list
+    if ctx.profile or _user_like(d) or channel or (any(set(_words(k)) & _PROFILE for k in direct) and not video) \
+            or all(is_profile_picture(u) for _k, u, _w in found):
         haul.profile += 1
+        for _k, u, _w in found:
+            haul.avatar_keys.add(stable_key(u))
         return True
     a = _access(d)
     if ctx.locked if a is None else not a:
@@ -696,6 +920,9 @@ def _media(d: dict, ctx: _Ctx, haul: Haul) -> bool:
     if words & _TEASER or "blur" in url.lower():
         haul.locked += 1                     # only a teaser is there: a post not bought
         return True
+    if not_content(url) or is_profile_picture(url):
+        haul.other += 1                      # only a thumbnail is there: not the photo itself
+        return True
     key = mid or stable_key(url)
     date = next((when(d[k]) for k in _DATE_KEYS if k in d and when(d[k])), 0.0) or ctx.date
     ext = ext_of(url) or ("mp4" if video else "jpg")
@@ -703,6 +930,13 @@ def _media(d: dict, ctx: _Ctx, haul: Haul) -> bool:
     if ctx.creator:
         haul.creators[ctx.creator] = haul.creators.get(ctx.creator, 0) + 1
     return True
+
+
+def _element(node) -> bool:
+    """A React element in a Server Components stream: ["$", type, key, props]. Its props are mostly layout —
+    avatars in profile links, icons — so inside them the shape-guessing walk takes only objects with an id or a
+    media type (`_Ctx.element`); Fanfix's own media objects are found by `_fanfix_walk` either way."""
+    return isinstance(node, list) and len(node) >= 3 and node[0] == "$" and isinstance(node[1], str)
 
 
 def _walk(node, ctx: _Ctx, haul: Haul, key: str = "", depth: int = 0) -> None:
@@ -714,11 +948,13 @@ def _walk(node, ctx: _Ctx, haul: Haul, key: str = "", depth: int = 0) -> None:
             for k, v in node.items():         # …and posts under a creator's object are that creator's
                 if isinstance(v, (dict, list)):
                     sub = _Ctx(here.post, here.date, here.caption, here.creator or _handle_of(node), here.locked,
-                               here.profile or bool(set(_words(k)) & (_PROFILE | {"profile", "picture", "photo", "image"})))
+                               here.profile or bool(set(_words(k)) & (_PROFILE | {"profile", "picture", "photo", "image"})),
+                               here.viewer, here.sender, here.element)
                     _walk(v, sub, haul, k, depth + 1)
                 elif is_media_url(v):
                     haul.profile += 1
                     haul.note(v)
+                    haul.avatar_keys.add(stable_key(v))
             return
         if set(_words(key)) & _PROFILE:
             here.profile = True
@@ -728,15 +964,22 @@ def _walk(node, ctx: _Ctx, haul: Haul, key: str = "", depth: int = 0) -> None:
             if isinstance(v, (dict, list)):
                 _walk(v, here, haul, k, depth + 1)
     elif isinstance(node, list):
+        if _element(node) and not ctx.element:
+            ctx = _Ctx(ctx.post, ctx.date, ctx.caption, ctx.creator, ctx.locked, ctx.profile, ctx.viewer, ctx.sender,
+                       True)
         for x in node:
             if isinstance(x, (dict, list)):
                 _walk(x, ctx, haul, key, depth + 1)
 
 
 def extract(doc, haul: Haul | None = None) -> Haul:
-    """The photos and videos named in one JSON value (parsed), added to `haul`."""
+    """The photos and videos named in one JSON value (parsed), added to `haul`: by Fanfix's own media objects
+    (`_fanfix_walk`) — and, only where there are none, by guessing from the shape (`_walk`)."""
     haul = haul if haul is not None else Haul()
-    _walk(doc, _Ctx(), haul)
+    before = haul.assets
+    _fanfix_walk(doc, _Ctx(), haul)
+    if haul.assets == before:
+        _walk(doc, _Ctx(), haul)
     return haul
 
 
@@ -749,14 +992,15 @@ def extract_text(text: str, haul: Haul | None = None) -> Haul:
 
 
 def from_page(shown: list[dict], haul: Haul, hint: str = "") -> list[Found]:
-    """What the page showed (`DOM_JS`) that its data didn't name — not blurred, not known to the haul by address
-    or media id — added to the haul under its address. Returns the new ones."""
+    """What the page showed (`DOM_JS`) that its data didn't name — not blurred, not a thumbnail or anyone's own
+    picture, not known to the haul by address or media id — added to the haul under its address. Returns the new
+    ones."""
     out = []
     for m in shown:
         url = unwrap(m.get("src") or "")
         if not url.startswith(("http://", "https://")) or m.get("blurred") or "blur" in url.lower():
             continue
-        if haul.knows(url):
+        if haul.knows(url) or not_content(url) or is_profile_picture(url):
             continue
         video = bool(m.get("video"))
         ext = ext_of(url)
@@ -798,6 +1042,23 @@ def clean_handle(text: str) -> str:
 def profile_url(handle: str) -> str:
     """A creator's page: app.fanfix.io/@<handle>."""
     return HOME + "@" + handle.lstrip("@")
+
+
+def chat_id(url: str) -> str:
+    """The chat a page is (app.fanfix.io/messages/<id>), else "" — its gallery and the list aren't."""
+    p = urlsplit(url or "")
+    parts = [x for x in p.path.split("/") if x]
+    return parts[1] if len(parts) == 2 and parts[0] == "messages" and fanfix_host(url) else ""
+
+
+def chats_page(url: str) -> bool:
+    """The Messages list itself (app.fanfix.io/messages): Download goes through every chat in it."""
+    p = urlsplit(url or "")
+    return fanfix_host(url) and p.path.rstrip("/") == "/messages"
+
+
+def chat_url(chat: str) -> str:
+    return HOME + "messages/" + chat
 
 
 def record(folder: str | Path) -> social.Record:
