@@ -92,6 +92,7 @@ import places
 import safe_transfer as engine
 import shared_tags
 import spare_folders
+import webp_convert
 from safe_copy_to_ssd import human, safe_name
 
 try:
@@ -4737,6 +4738,12 @@ class Pane(QWidget):
             folders = [p for p in paths if os.path.isdir(p)]
             if folders:
                 menu.addAction("Remove Watermark from Photos Inside…", lambda: self.remove_watermark(folders))
+            webps = [p for p in paths if webp_convert.is_webp(p) and not os.path.isdir(p)]
+            if webps:
+                menu.addAction("Convert to JPEG…" if len(webps) == 1 else f"Convert {len(webps)} WebPs to JPEG…",
+                               lambda: self.convert_webp(webps))
+            elif folders:
+                menu.addAction("Convert WebP Photos Inside to JPEG…", lambda: self.convert_webp(folders))
             texts = [p for p in paths if os.path.splitext(p)[1].lower() in (".txt", ".text", ".md", ".markdown", ".rtf")
                      and not os.path.isdir(p)]
             if texts:
@@ -4756,6 +4763,7 @@ class Pane(QWidget):
             menu.addAction("New Folder", self.new_folder)
             if not paths and os.path.isdir(self.location):
                 menu.addAction("Edit Metadata of Everything Here…", lambda: self.edit_metadata([self.location]))
+                menu.addAction("Convert WebP Photos Here to JPEG…", lambda: self.convert_webp([self.location]))
                 self._folder_tools(menu, self.location, "Find Duplicates in This Folder…")
         menu.exec(view.viewport().mapToGlobal(pos))
         menu.deleteLater()                                 # a new menu each right-click: don't keep them all
@@ -4918,6 +4926,43 @@ class Pane(QWidget):
         """Right-click a folder ▸ CapCut ▸ Import from CapCut…: CapCut's finished videos, brought onto the drive."""
         import capcut_window
         capcut_window.CapCutImportDialog(folder or "", self._capcut_hooks(), self.window()).open()
+
+    # -- Convert WebP to JPEG (webp_window.py / webp_convert.py)
+    def convert_webp(self, paths: list[str]) -> None:
+        """Right-click ▸ Convert WebP to JPEG…: every .webp photo selected, or in the selected folder (and its subfolders,
+        if wanted), made a full-resolution, quality-95 JPEG beside it — the originals to the Trash if wanted, their
+        tags and Favorites / To AI moving to the JPEG as for a move (kept originals: the JPEG gets their tags, as a
+        copy does)."""
+        import webp_window
+
+        def done(result, moved: bool) -> None:
+            pairs = result.converted
+            gone = set(result.trashed)
+            try:
+                if pairs:
+                    tag_store().carry(pairs)                                    # the JPEG has its WebP's tags…
+                if gone:
+                    tag_store().carry_labels([(s, d) for s, d in pairs if s in gone])    # …and, replacing it, its labels
+                    tag_store().forget(list(gone))
+            except OSError as e:
+                QMessageBox.warning(self.window(), "Convert WebP to JPEG", f"Couldn't move the tags over: {e}")
+            if pairs:
+                tags_changed()
+            n = len(pairs)
+            note = f"Made {n:,} JPEG{'s' if n != 1 else ''} from WebP"
+            if gone:
+                note += "; the originals are in the Trash"
+            if result.untrashed:
+                note += f"; {len(result.untrashed):,} original(s) couldn't go to the Trash"
+            if result.animated:
+                note += f"; {len(result.animated):,} animated left as they are"
+            if result.failed:
+                note += f"; {len(result.failed):,} couldn't be"
+            self._airdrop_noted(note + ".")
+
+        dlg = webp_window.WebPDialog(self.window(), paths, self.settings,
+                                     lambda p: MainWindow.trash_item(Path(p)), done)
+        dlg.open()
 
     # -- Remove Watermark (watermark_window.py / watermark.py — one's own see-through mark, learned and taken out)
     def remove_watermark(self, paths: list[str]) -> None:

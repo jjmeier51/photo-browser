@@ -77,6 +77,12 @@ def install(win, sf) -> None:
     def videos() -> list[str]:
         return [p for p in sel() if sf.kind_of(p) == "video"]
 
+    def webp_targets() -> list[str]:
+        """Selected WebPs, else selected folders, else the folder you're in."""
+        s = sel()
+        webps = [p for p in s if sf.webp_convert.is_webp(p) and not os.path.isdir(p)]
+        return webps or [p for p in s if os.path.isdir(p)] or ([pane().location] if real_folder() else [])
+
     def sendable() -> list[str]:
         """Selected photos, videos and folders for CapCut — else the folder you're in."""
         s = [p for p in sel() if os.path.isdir(p) or sf.capcut.is_clip(p)]
@@ -203,6 +209,8 @@ def install(win, sf) -> None:
     act(t, "Import from CapCut…", lambda: pane().import_from_capcut(folder_target()), None, None,
         "CapCut's finished videos, onto the drive — into this folder, or back where their clips came from")
     t.addSeparator()
+    act(t, "Convert WebP to JPEG…", lambda: pane().convert_webp(webp_targets()), None, lambda: bool(webp_targets()),
+        "Every WebP selected (or in the selected folder, or this one) as a full-resolution, quality-95 JPEG")
     act(t, "Crop…", lambda: pane().crop_photos(photos()), None, lambda: bool(photos()))
     act(t, "AI Upscale 2×…", lambda: pane().ai_upscale(photos()), None, lambda: bool(photos()))
     act(t, "Erase Area…", lambda: pane().erase_area(photos()), None, lambda: bool(photos()))

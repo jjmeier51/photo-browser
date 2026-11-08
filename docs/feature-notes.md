@@ -1829,6 +1829,24 @@ another folder and greying it after; inside Safe Finder the menu lines, ⇧⌘K,
 **Untested with the real CapCut** — the drag itself (CapCut takes Finder drags; Safe Finder's drags are the same
 file URLs) and the export folder, which the window lets the person pick.
 
+## 6z. Safe Finder Convert WebP to JPEG — `mac/webp_convert.py`, `mac/webp_window.py` (Nov 8, 2026)
+
+Right-click a folder / its empty area / selected `.webp` files, or Photos ▸ Convert WebP to JPEG… (`Pane.convert_webp`).
+`webps_in` finds `.webp` (any case, not hidden; `os.walk` for subfolders, skipping hidden and the drive's own folders).
+`jpeg_bytes`: Pillow decodes; **quality 95, `subsampling=0` (4:4:4), `optimize`**, never resized; ICC
+(`icc_profile`), EXIF (`getexif().tobytes()` — normalised with its `Exif\0\0` header, which WebP's raw chunk may lack)
+and XMP passed through; RGBA/LA/P-with-transparency flattened onto white; animated (`n_frames > 1`) refused; a JPEG
+only named `.webp` returned byte for byte. `to_jpeg`: `target` = "name.jpg", else "name 2.jpg"… (never overwrites),
+`simpcity.write_file` (temp → fsync → rename; straight in on exFAT), read back (`verify` + same size), file
+dates copied (`os.utime`). `convert`: four at a time (Pillow releases the GIL while coding), `trash(path)` per
+original only after its JPEG checked out — `trashed` / `untrashed` (the Trash refused: the original stays) —
+progress and Stop. Safe Finder's `done`: `carry` the tags to every JPEG; for trashed originals `carry_labels` then
+`forget` (a replacement is a move: Favorites / To AI follow); kept originals keep their labels (copy rule).
+Tested: a 3000×2000 photo with EXIF date/camera + sRGB ICC (all kept, 4:4:4, PSNR 39.6 dB against heavy synthetic
+noise — the worst case for JPEG), transparency onto white, animated left, a clash → "clash 2.jpg" with the old
+untouched, a misnamed JPEG byte-identical, a corrupt file reported, subfolders only when asked; inside Safe Finder
+(offscreen) the menu lines, the count, the conversion, the originals to the Trash and the tags + Favorite on the JPEG.
+
 ## 6s. Safe Finder Edit Metadata — `mac/metadata_edit.py`, `mac/metadata_window.py` (Nov 3, 2026)
 
 Bulk metadata for any number of photos and videos (or everything under picked folders — `media_in`: hidden

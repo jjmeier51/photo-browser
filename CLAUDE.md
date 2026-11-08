@@ -148,6 +148,10 @@ actions the app makes no network calls.
   CapCut opened and a floating tray beside it with the clips in timeline order to drag in at once (never writes
   CapCut drafts — encrypted and version-bound); the tray (and Import from CapCut…) brings CapCut's exports back into
   the clips' folder, tagged "capcut" + the clips' tags, optionally dated like the earliest clip — §6y.
+  Safe Finder's **Convert WebP to JPEG** (right-click a folder / selected WebPs / Photos menu; `mac/webp_convert.py`,
+  `mac/webp_window.py`): full resolution, quality 95, 4:4:4, ICC/EXIF/XMP and file dates kept, transparency onto
+  white, animated left, never overwrites ("name 2.jpg"); originals to the Trash only if asked and after the JPEG
+  checks out — then tags and Favorites/To AI move to the JPEG (`carry` + `carry_labels` + `forget`) — §6z.
   Safe Finder's **Photos view** (⌘3, the iPhone's square grid with video lengths) and its **viewer** (double-click:
   the window is the full height of its display and takes each item's shape at that height, bars above/below the
   picture — never over it — a resolution + HDR badge top right, ♡/✦ labels, zoom for photos and videos, a

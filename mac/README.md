@@ -255,7 +255,7 @@ out when it can't): **File** (New Folder ⇧⌘N, Open ⌘↓, Open With Default
 Copy/Move to the other side ⇧⌘C / ⇧⌘M — in one window they open Split View, AirDrop to iPhone, Move to Trash ⌘⌫), **Edit** (Select All, Find ⌘F,
 Tags… ⌘T), **View** (as Icons/List/Photos ⌘1–3, Split View ⌘\\, Sort By, bigger/smaller thumbnails ⌘= / ⌘−), **Go** (Back ⌘[,
 Forward ⌘], Enclosing Folder ⌘↑, Home ⇧⌘H, Desktop ⇧⌘D, Downloads ⌥⌘L, Pictures, All Videos, Empty Folders, Favorites, To AI,
-Drives), **Photos** (Edit Metadata ⌘I, Favorite ⇧⌘F, To AI ⇧⌘A, Find Duplicates, Export All Frames, Send to CapCut ⇧⌘K, Import from CapCut, Crop, AI Upscale, Erase Area, Remove Watermark, Remove Objects, Edit/Create with AI, the
+Drives), **Photos** (Edit Metadata ⌘I, Favorite ⇧⌘F, To AI ⇧⌘A, Find Duplicates, Export All Frames, Send to CapCut ⇧⌘K, Import from CapCut, Convert WebP to JPEG, Crop, AI Upscale, Erase Area, Remove Watermark, Remove Objects, Edit/Create with AI, the
 Astria.ai Browser, the SimpCity / Instagram / Facebook downloaders, taylorpictures.net) and **Window** (every
 viewer and tool window that's open). The right-click menu keeps the everyday commands at the top and puts a
 folder's downloaders under **Download ▸**, its AI under **AI ▸** and the CapCut round trip under **CapCut ▸**.
@@ -690,6 +690,22 @@ holds a 12 MP photo's worth of work plus the result. A result over 400 MP (a 100
 its format can hold (JPEG 65,500 px, WebP 16,383 px), isn't attempted, and the window says which.
 
 (The iPhone app's "AI Upscale" is not a neural network — it's Lanczos with denoise and sharpen.)
+
+### Convert WebP to JPEG (`webp_window.py`, `webp_convert.py`)
+
+Right-click a folder (or its empty area) ▸ **Convert WebP Photos Inside / Here to JPEG…**, or select some `.webp`
+files ▸ **Convert to JPEG…** (also Photos ▸ Convert WebP to JPEG…). Safe Finder counts them, offers **Include
+subfolders** and **Move the WebP originals to the Trash when their JPEG is saved** (both remembered), and makes
+each one a JPEG beside it:
+
+- **full resolution** — never scaled — at **quality 95 with full colour detail** (4:4:4, so colour edges stay
+  sharp);
+- the colour profile, EXIF (capture date, camera, GPS) and XMP kept, and the file's own dates, so it sorts where
+  the WebP did; transparency goes onto white;
+- a JPEG that only had a .webp name is kept byte for byte (no re-encoding); an animated WebP is left as it is (a
+  JPEG can't move); a JPEG of the same name already there is never overwritten ("name 2.jpg");
+- the tags go with each photo — and when the original goes to the Trash (only after its JPEG has been written and
+  checked), its Favorites / To AI follow it too, as for a move.
 
 ### Erase Area — take a watermark off photos (`erase_window.py`, `retouch.py`)
 
