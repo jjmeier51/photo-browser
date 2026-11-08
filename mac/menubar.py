@@ -77,6 +77,11 @@ def install(win, sf) -> None:
     def videos() -> list[str]:
         return [p for p in sel() if sf.kind_of(p) == "video"]
 
+    def sendable() -> list[str]:
+        """Selected photos, videos and folders for CapCut — else the folder you're in."""
+        s = [p for p in sel() if os.path.isdir(p) or sf.capcut.is_clip(p)]
+        return s or ([pane().location] if real_folder() else [])
+
     def texts() -> list[str]:
         return [p for p in sel() if os.path.splitext(p)[1].lower() in (".txt", ".text", ".md", ".markdown", ".rtf")
                 and not os.path.isdir(p)]
@@ -191,6 +196,12 @@ def install(win, sf) -> None:
     act(t, "Find Duplicates…", lambda: pane().find_duplicates(folder_target()), None, folder_target,
         "Likely copies in the selected folder (or this one)")
     act(t, "Export All Frames…", lambda: pane().export_frames(videos()), None, lambda: bool(videos()))
+    t.addSeparator()
+    act(t, "Send to CapCut", lambda: pane().send_to_capcut(sendable()), "Ctrl+Shift+K", lambda: bool(sendable()),
+        "Opens CapCut with the selected clips (or this folder's) beside it, in order, to drag in — and brings "
+        "CapCut's exports back")
+    act(t, "Import from CapCut…", lambda: pane().import_from_capcut(folder_target()), None, None,
+        "CapCut's finished videos, onto the drive — into this folder, or back where their clips came from")
     t.addSeparator()
     act(t, "Crop…", lambda: pane().crop_photos(photos()), None, lambda: bool(photos()))
     act(t, "AI Upscale 2×…", lambda: pane().ai_upscale(photos()), None, lambda: bool(photos()))

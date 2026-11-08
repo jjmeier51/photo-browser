@@ -144,6 +144,10 @@ actions the app makes no network calls.
   "(no watermark)" or Replace; tagged "retouched" (`mac/watermark.py`, `mac/watermark_window.py`, §6x).
   And right-click ▸ **Remove Objects…** — TouchRetouch-style: lasso/brush round anything and it's filled from the
   photo itself (multi-scale PatchMatch completion, `mac/inpaint.py`; window `mac/remove_window.py`; §6t).
+  Safe Finder's **Send to CapCut** (⇧⌘K / right-click / a folder's CapCut ▸; `mac/capcut.py`, `mac/capcut_window.py`):
+  CapCut opened and a floating tray beside it with the clips in timeline order to drag in at once (never writes
+  CapCut drafts — encrypted and version-bound); the tray (and Import from CapCut…) brings CapCut's exports back into
+  the clips' folder, tagged "capcut" + the clips' tags, optionally dated like the earliest clip — §6y.
   Safe Finder's **Photos view** (⌘3, the iPhone's square grid with video lengths) and its **viewer** (double-click:
   the window is the full height of its display and takes each item's shape at that height, bars above/below the
   picture — never over it — a resolution + HDR badge top right, ♡/✦ labels, zoom for photos and videos, a

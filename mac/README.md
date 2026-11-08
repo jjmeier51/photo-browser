@@ -255,10 +255,10 @@ out when it can't): **File** (New Folder ⇧⌘N, Open ⌘↓, Open With Default
 Copy/Move to the other side ⇧⌘C / ⇧⌘M — in one window they open Split View, AirDrop to iPhone, Move to Trash ⌘⌫), **Edit** (Select All, Find ⌘F,
 Tags… ⌘T), **View** (as Icons/List/Photos ⌘1–3, Split View ⌘\\, Sort By, bigger/smaller thumbnails ⌘= / ⌘−), **Go** (Back ⌘[,
 Forward ⌘], Enclosing Folder ⌘↑, Home ⇧⌘H, Desktop ⇧⌘D, Downloads ⌥⌘L, Pictures, All Videos, Empty Folders, Favorites, To AI,
-Drives), **Photos** (Edit Metadata ⌘I, Favorite ⇧⌘F, To AI ⇧⌘A, Find Duplicates, Export All Frames, Crop, AI Upscale, Erase Area, Remove Watermark, Remove Objects, Edit/Create with AI, the
+Drives), **Photos** (Edit Metadata ⌘I, Favorite ⇧⌘F, To AI ⇧⌘A, Find Duplicates, Export All Frames, Send to CapCut ⇧⌘K, Import from CapCut, Crop, AI Upscale, Erase Area, Remove Watermark, Remove Objects, Edit/Create with AI, the
 Astria.ai Browser, the SimpCity / Instagram / Facebook downloaders, taylorpictures.net) and **Window** (every
 viewer and tool window that's open). The right-click menu keeps the everyday commands at the top and puts a
-folder's downloaders under **Download ▸** and its AI under **AI ▸**.
+folder's downloaders under **Download ▸**, its AI under **AI ▸** and the CapCut round trip under **CapCut ▸**.
 
 ### Edit Metadata — many photos and videos at once
 
@@ -461,6 +461,34 @@ Without the helper — no Xcode Command Line Tools, or it didn't build (the comp
 `~/Library/Caches/PhotoBrowser/video_helper.log`) — ffmpeg does them instead: JPEG frames, always standard
 range, tone-mapped with ffmpeg's own curve when that ffmpeg has `zscale`. Those look different from
 QuickTime, so the result says "made with ffmpeg, not the Mac's own tools" and why.
+
+### Send to CapCut, and bring the edit back (`capcut_window.py`, `capcut.py`)
+
+For editing clips in the CapCut desktop app and getting the finished video back onto the drive in one go.
+
+**Send.** Select videos and photos (or a folder) ▸ right-click ▸ **Send to CapCut** (⇧⌘K, also Photos ▸ Send to
+CapCut; on a folder's empty area: **CapCut ▸ Send Photos & Videos Here to CapCut**). CapCut opens, and beside it a
+small tray that floats over CapCut with the clips **in timeline order** — by date taken (the default), by name,
+or as you selected them. Drag the big **Drag all into CapCut** tile onto CapCut's media panel or straight onto
+its timeline and every clip goes in, in that order (or drag single rows). The clips stay where they are on the
+drive — CapCut uses them from there; tick **Copy to this Mac first** for a project that has to work with the
+drive unplugged (they're copied, numbered, into `~/Movies/Safe Finder for CapCut/`). **Copy** puts them on the
+clipboard and **Show in Finder** reveals them.
+
+**Back.** Keep the tray open while you edit. When you **Export** in CapCut, the video appears in the tray's
+**Back from CapCut** list ("exporting…" until CapCut has finished writing it), and **Import into “<folder>”**
+moves it onto the drive, into the folder the clips came from (**Change…** for another): tagged **capcut** plus
+every tag its clips carry, and — with **Date it like its clips** — given the earliest clip's date (with ExifTool),
+so it sorts with them by year on the iPhone. **Take it off the Mac** unticked copies it instead.
+
+**Import from CapCut…** (right-click a folder ▸ CapCut ▸, or Photos ▸) does the same for any of CapCut's exports,
+newest first, the ones already brought in greyed: tick them and bring them into that folder or each back to where
+its clips came from. CapCut saves exports wherever its Export panel last pointed, so Safe Finder looks in the
+usual places (~/Movies/CapCut, ~/Movies, Desktop, Downloads, Documents) and remembers the folder after the first
+import; pick it in the window if yours is elsewhere.
+
+Safe Finder never writes CapCut projects itself: recent CapCut versions encrypt them and reject ones made by
+other tools, so dragging the clips in is what works with every version.
 
 ### Find Duplicates (`duplicates_window.py`, `duplicates.py`)
 

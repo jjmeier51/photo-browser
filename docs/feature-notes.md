@@ -1782,6 +1782,53 @@ and the job is simply picked up again later. The library is touched only by the 
 photo at full size and applies the copies found (`clean`, through `batch_crop`); Safe Finder carries tags to
 new photos and adds "retouched". Smoke-tested offscreen (box → learn → step → box → plain piece → Save as New).
 
+## 6y. Safe Finder ↔ CapCut — `mac/capcut.py`, `mac/capcut_window.py` (Nov 8, 2026)
+
+Clips out to the CapCut desktop app, finished videos back onto the drive. Entry points: right-click ▸ **Send to
+CapCut** (a selection with photos/videos or folders; ⇧⌘K in the menu bar — the context menu only shows the key), a
+folder's **CapCut ▸** submenu (`_folder_tools`: Send Photos & Videos Here / Import from CapCut…), Photos ▸ both.
+`Pane.send_to_capcut` / `import_from_capcut` / `_capcut_hooks` (thumbnails, tag store, settings, a status-line note).
+
+**Why not write CapCut projects.** Drafts live in `~/Movies/CapCut/User Data/Projects/com.lveditor.draft/<name>/`
+(third-party reports, CapCut 5.7), but JianYing/CapCut 6+ store `draft_content.json` encrypted, community tools
+report later builds (8.4–9.3) rejecting drafts made from older templates, and none of it is documented. A draft
+written here would break on the next update or damage the person's drafts. So the hand-off is what every version
+takes: **file drags**. `open -b com.lemon.lvoverseas` opens it (CapCut for Mac's bundle id; then `open -a
+CapCut`, then mdfind); handing files to `open -b … file.mp4` is deliberately not done (if CapCut doesn't claim the
+type, macOS shows an error).
+
+**The tray** (`CapCutTray`): a `Qt.Tool | WindowStaysOnTopHint` window with `WA_MacAlwaysShowToolWindow` — a tool
+window on macOS hides when its app deactivates, which is exactly when the person is in CapCut. Clips ordered on a
+worker (`capcut.order`: "taken" reads each file's own date — `media_info` mvhd / EXIF — falling back to the
+file's date; "name" natural; "selected"); `ClipList.mimeData` and `DragTile` give `text/uri-list` in list order
+(CapCut lays a multi-file drop on the timeline in that order). "Copy to this Mac first" (`capcut.stage`) copies into
+`~/Movies/Safe Finder for CapCut/<session>/` as "01 name.mp4"… (Import + Finder's name order keep the order); not
+remembered between sends (it would silently copy gigabytes). Each send is a `Session` (id, name, start, clips in
+order, the clips' commonest folder, copies) in `~/Library/Application Support/Safe Finder/capcut.json` (last 60).
+
+**Finding exports**: CapCut's Export panel reuses the last folder and no default is documented (sources disagree:
+Movies, Downloads…). `candidate_folders`: the remembered folder, `~/Movies/CapCut` + its subfolders except
+`User Data`, `~/Movies`, Desktop, Downloads, Documents, and the same under
+`~/Library/Containers/com.lemon.lvoverseas/Data` (App Store sandbox) — never the staging folder. `exports()`
+lists .mp4/.mov/.m4v directly in them, newest first; one written to in the last 4 s is still exporting
+(`Export.busy`). The tray polls every 2 s for exports since its session started (a file that grew is the same row);
+the import window lists all (or since the last send), greying ones in the record's `imported` (path|size|mtime
+→ dest). The first import remembers its folder as `exports`.
+
+**Bringing one in** (`bring_in`, on a worker): unique name ("name 2.mp4"), `sc.make_folder`, copy temp → fsync →
+rename (straight in on exFAT, CLAUDE.md #12), size checked, mtime kept; Move = `os.remove` after the checked copy
+(a plain rename on the same non-exFAT disk). Optional date = the session clips' earliest capture date via
+`social.write_meta` (QuickTime tags + file dates; just the file dates without ExifTool). Tags on the GUI thread:
+"capcut" + the union of the clips' tags (the copyTags rule — a new file made from files gets their tags). An export
+is matched to the latest session started before it (60 s grace, 14 days max): its folder is the destination and its
+clips give the tags and date.
+
+**Tested** offscreen (no CapCut here): ordering, drag data order, staging, an export appearing while "exporting…"
+then importable, moved into the clips' folder with "capcut" + the clips' tags, the import window copying into
+another folder and greying it after; inside Safe Finder the menu lines, ⇧⌘K, the status-line note.
+**Untested with the real CapCut** — the drag itself (CapCut takes Finder drags; Safe Finder's drags are the same
+file URLs) and the export folder, which the window lets the person pick.
+
 ## 6s. Safe Finder Edit Metadata — `mac/metadata_edit.py`, `mac/metadata_window.py` (Nov 3, 2026)
 
 Bulk metadata for any number of photos and videos (or everything under picked folders — `media_in`: hidden

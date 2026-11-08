@@ -85,6 +85,7 @@ except ModuleNotFoundError:
 
 import airdrop_to_iphone as airdrop
 import batch_crop
+import capcut
 import media_info
 import metadata_edit
 import places
@@ -4712,6 +4713,10 @@ class Pane(QWidget):
                     f"Edit Metadata of {len(editable)} Items…"
                 menu.addAction(label, lambda: self.edit_metadata(editable)).setShortcut(QKeySequence("Ctrl+I"))
             videos = [p for p in paths if kind_of(p) == "video"]
+            sendable = [p for p in paths if os.path.isdir(p) or capcut.is_clip(p)]
+            if sendable and not (len(paths) == 1 and os.path.isdir(paths[0])):      # (a folder: its CapCut menu)
+                menu.addAction("Send to CapCut" if len(sendable) == 1 else f"Send {len(sendable)} Items to CapCut",
+                               lambda: self.send_to_capcut(sendable)).setShortcut(QKeySequence("Ctrl+Shift+K"))
             if videos:
                 menu.addAction("Export All Frames…" if len(videos) == 1 else f"Export All Frames of {len(videos)} Videos…",
                                lambda: self.export_frames(videos))
@@ -4771,6 +4776,9 @@ class Pane(QWidget):
         ai = menu.addMenu("AI")
         ai.addAction("Create with AI…", lambda: self.ai_create(folder))
         ai.addAction("Astria.ai Browser…", lambda: self.astria_browser(folder))
+        cc = menu.addMenu("CapCut")
+        cc.addAction("Send Photos & Videos Here to CapCut", lambda: self.send_to_capcut([folder]))
+        cc.addAction("Import from CapCut…", lambda: self.import_from_capcut(folder))
 
     # -- metadata (metadata_window.py / metadata_edit.py — ExifTool)
     def edit_metadata(self, paths: list[str]) -> None:
@@ -4866,6 +4874,50 @@ class Pane(QWidget):
         dlg = erase_window.EraseDialog(self.window(), photos, self.settings, done)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.open()
+
+    # -- CapCut (capcut_window.py / capcut.py — clips out to the desktop editor, finished videos back)
+    def _capcut_hooks(self):
+        import capcut_window
+
+        def thumb(p: str) -> QPixmap | None:
+            try:
+                return THUMBS.get(p, os.stat(p).st_mtime) if THUMBS is not None else None
+            except OSError:
+                return None
+
+        def imported(paths: list[str]) -> None:
+            tags_changed()
+            n = len(paths)
+            self._airdrop_noted(f"Brought {n:,} video{'s' if n != 1 else ''} in from CapCut, tagged “{capcut.TAG}”.")
+
+        return capcut_window.CapCutHooks(thumb=thumb, thumbs_ready=THUMBS.ready if THUMBS is not None else None,
+                                         store=tag_store(), settings=self.settings, imported=imported)
+
+    def send_to_capcut(self, paths: list[str]) -> None:
+        """Right-click ▸ Send to CapCut: CapCut opened, and beside it a small tray with the clips in timeline order —
+        dragged into CapCut in one go — that also brings CapCut's exports back onto the drive."""
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            clips = capcut.clips_in(paths)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not clips:
+            QMessageBox.information(self.window(), "CapCut", "There are no photos or videos here to send to CapCut.")
+            return
+        import capcut_window
+        why = capcut.open_app()
+        tray = capcut_window.CapCutTray(clips, self._capcut_hooks(), self.window())
+        tray.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        _VIEWERS.append(tray)
+        tray.destroyed.connect(lambda _=None, w=tray: _VIEWERS.remove(w) if w in _VIEWERS else None)
+        tray.show()
+        if why:
+            tray.warn(why)
+
+    def import_from_capcut(self, folder: str | None) -> None:
+        """Right-click a folder ▸ CapCut ▸ Import from CapCut…: CapCut's finished videos, brought onto the drive."""
+        import capcut_window
+        capcut_window.CapCutImportDialog(folder or "", self._capcut_hooks(), self.window()).open()
 
     # -- Remove Watermark (watermark_window.py / watermark.py — one's own see-through mark, learned and taken out)
     def remove_watermark(self, paths: list[str]) -> None:
