@@ -27,6 +27,18 @@ limit; the profile page, what a browser loads anyway, goes first, and an id writ
 taken even when `users/<id>/info/` is throttled). Every way throttled: one 60 s pause and one retry, then "Instagram
 is limiting requests from this account — wait 10–15 minutes". The crawl's own 429 backoff is 15/45/120 s.
 
+**When Instagram refuses its internal reads** (Nov 9, a real log: every `/api/v1/` read 404, `users/search` 400, for
+an account the person was looking at): the window opens the real pages, as the person does — `("visit", url,
+scroll, press)` loads it in the window's browser, whose watcher (fanfix.HOOK_JS, put into Instagram's pages) keeps
+every data answer the page receives, and hands them back with the page's HTML (`page_docs` reads the answers and
+the `<script type="application/json">` blobs, layers of ScheduledServerJS/__bbox/Relay deep). The account comes from
+its profile page (`profile_from_page`: the object with the exact username and an id), and from then on the API is
+asked from that real page (`api_page`) rather than a bare one. A tab whose feed is refused — posts, tagged, reels —
+is read from its page scrolled to the end (`_watch`, `posts_in`: post objects carry the API's shapes; another
+account's suggested posts left out); stories from instagram.com/stories/<handle>/ and each highlight from its own
+page, the desktop site's "View story" pressed (`reel_items_in`); highlight names from the profile page's data
+(`highlights_in`).
+
 **How it asks Instagram.** Through the logged-in browser: every API call is a `fetch()` from a page on
 www.instagram.com (`API_JS`, the iPhone's `InstagramWebFetcher`) — the browser's own cookies and headers,
 so it's exactly what Instagram's site sends. The run is a generator: it yields `("api", url, form,
@@ -144,15 +156,21 @@ def profile_from_user(user: dict, handle: str) -> Profile | None:
 
 
 def profile_in(doc, handle: str, depth: int = 0) -> Profile | None:
-    """Any answer (a search of whichever kind Instagram serves this year): the first object whose username is
-    the handle and that has an id."""
-    if depth > 12:
+    """Any answer (a search of whichever kind Instagram serves this year, or what a page loaded): the first object
+    whose username is the handle and that has an id. Deep: a page's data sits inside layers of
+    ScheduledServerJS / __bbox / Relay wrappers."""
+    if depth > 120:
         return None
     if isinstance(doc, dict):
         if (doc.get("username") or "").lower() == handle.lower() and \
                 (id_string(doc.get("pk")) or id_string(doc.get("pk_id")) or id_string(doc.get("id"))):
+            edge = doc.get("edge_owner_to_timeline_media") if isinstance(doc.get("edge_owner_to_timeline_media"), dict) else {}
+            try:
+                posts = int(doc.get("media_count") or edge.get("count") or 0)
+            except (TypeError, ValueError):
+                posts = 0
             return Profile(id_string(doc.get("pk")) or id_string(doc.get("pk_id")) or id_string(doc.get("id")),
-                           doc.get("username"), doc.get("full_name") or "", doc.get("profile_pic_url") or "", 0,
+                           doc.get("username"), doc.get("full_name") or "", doc.get("profile_pic_url") or "", posts,
                            doc.get("is_private", True) is not False)
         for v in doc.values():
             if isinstance(v, (dict, list)) and (p := profile_in(v, handle, depth + 1)):
@@ -202,6 +220,99 @@ def page_missing(status: int, html: str) -> bool:
         return True
     m = re.search(r"<title[^>]*>([^<]{0,300})</title>", html or "", re.I)
     return bool(m) and "page not found" in m.group(1).lower()
+
+
+def page_docs(seen: dict) -> list:
+    """The JSON in what a visited page loaded (`("visit", …)`'s answer: its own fetch/XHR answers and the data
+    written into it) — whole answers, React/Relay streams row by row, `<script type="application/json">` blobs."""
+    import fanfix                                          # its parser takes any of those shapes
+    docs: list = []
+    for text in (seen or {}).get("answers") or []:
+        if isinstance(text, str):
+            docs += fanfix.documents(text)
+    html = (seen or {}).get("html") or ""
+    for m in re.finditer(r"<script[^>]*type=\"application/json\"[^>]*>([\s\S]*?)</script>", html):
+        docs += fanfix.documents(m.group(1))
+    return docs
+
+
+def profile_from_page(seen: dict, handle: str) -> Profile | None:
+    """The account as the profile page itself has it: the object with the exact username and an id, in what the
+    page loaded to draw the profile — else an id written beside the handle in the page."""
+    for doc in page_docs(seen):
+        p = profile_in(doc, handle)
+        if p is not None:
+            return p
+    beside = ids_beside((seen or {}).get("html") or "", handle)
+    return Profile(beside[0], handle) if beside else None
+
+
+def posts_in(doc, out: list | None = None, depth: int = 0) -> list[dict]:
+    """Every post object in what a page loaded: a dict with a shortcode and Instagram's media fields — the web's
+    GraphQL answers carry the same shapes as the API's feed (`image_versions2`, `carousel_media`,
+    `video_versions`, `taken_at`, `caption`, `user`), so `items_for` reads them alike."""
+    out = [] if out is None else out
+    if depth > 120:
+        return out
+    if isinstance(doc, dict):
+        if isinstance(doc.get("code"), str) and any(k in doc for k in ("image_versions2", "carousel_media",
+                                                                       "video_versions")):
+            out.append(doc)
+            return out
+        for v in doc.values():
+            if isinstance(v, (dict, list)):
+                posts_in(v, out, depth + 1)
+    elif isinstance(doc, list):
+        for v in doc:
+            if isinstance(v, (dict, list)):
+                posts_in(v, out, depth + 1)
+    return out
+
+
+def reel_items_in(doc, profile_id: str, out: list | None = None, depth: int = 0) -> list[dict]:
+    """Every story item in what a story or highlight page loaded: a dict with a pk, Instagram's media fields and a
+    time, not a carousel's child — the account's own (a viewer's tray holds other people's too)."""
+    out = [] if out is None else out
+    if depth > 120:
+        return out
+    if isinstance(doc, dict):
+        if (id_string(doc.get("pk")) or id_string(doc.get("id"))) and doc.get("taken_at") and \
+                any(k in doc for k in ("image_versions2", "video_versions")):
+            u = doc.get("user") if isinstance(doc.get("user"), dict) else doc.get("owner")
+            if not isinstance(u, dict) or (id_string(u.get("pk")) or id_string(u.get("id"))) in (None, profile_id):
+                out.append(doc)
+            return out
+        for v in doc.values():
+            if isinstance(v, (dict, list)):
+                reel_items_in(v, profile_id, out, depth + 1)
+    elif isinstance(doc, list):
+        for v in doc:
+            if isinstance(v, (dict, list)):
+                reel_items_in(v, profile_id, out, depth + 1)
+    return out
+
+
+def highlights_in(doc, out: list | None = None, depth: int = 0) -> list[tuple[str, str]]:
+    """(reel id "highlight:<n>", title) for every highlight a page's data names (the profile page lists them)."""
+    out = [] if out is None else out
+    if depth > 120:
+        return out
+    if isinstance(doc, dict):
+        hid = id_string(doc.get("id"))
+        if hid and hid.startswith("highlight:") and isinstance(doc.get("title"), str):
+            if hid not in [h for h, _t in out]:
+                out.append((hid, doc["title"] or "Highlight"))
+        for v in doc.values():
+            if isinstance(v, (dict, list)):
+                highlights_in(v, out, depth + 1)
+    elif isinstance(doc, list):
+        for v in doc:
+            if isinstance(v, (dict, list)):
+                highlights_in(v, out, depth + 1)
+    return out
+
+
+VIEW_STORY = r"^\s*view story\s*$"           # the desktop site's button in front of someone's stories
 
 
 def refusal(status: int, text: str) -> str:
@@ -658,6 +769,18 @@ def look_up(calls: _Calls, handle: str):
     counts."""
     q = quote(handle, safe="")
     missing = page_gone = False
+    # 0. the profile page opened in the window's browser, as the person opens it: what it loads to draw the
+    # profile names the account (and from then on the reads are made from that page — `api_page`)
+    seen = yield ("visit", f"{HOME}{q}/", False)
+    profile = profile_from_page(seen or {}, handle)
+    if profile is not None:
+        yield ("note", f"   found @{profile.handle} on its profile page (account {profile.user_id})")
+        return profile, False, []
+    shown = (seen or {}).get("html") or ""
+    page_gone = page_missing(int((seen or {}).get("status") or 200), shown)
+    yield ("note", "   the profile page " + ("says not found" if page_gone else
+                                            f"loaded {len((seen or {}).get('answers') or [])} answer(s) but none "
+                                            "named the account") + " — asking Instagram directly")
     for attempt in range(2):
         tried: list[str] = []
         throttled = 0
@@ -731,6 +854,37 @@ def look_up(calls: _Calls, handle: str):
     return None, missing, tried
 
 
+WATCH_PATHS = {"feed": "", "tagged": "tagged/", "clips": "reels/"}
+
+
+def _owned(item: dict, profile: Profile) -> bool:
+    """A post the profile itself posted (the page also shows suggested accounts' posts)."""
+    u = item.get("user") if isinstance(item.get("user"), dict) else item.get("owner")
+    if not isinstance(u, dict):
+        return True
+    return (id_string(u.get("pk")) or id_string(u.get("id"))) == profile.user_id or \
+        (u.get("username") or "").lower() == profile.handle.lower()
+
+
+def _watch(kind: str, profile: Profile, folder: Path, already: set[str], seen_keys: set[str]):
+    """yield from: the posts of one tab of the profile (posts / tagged / reels) read from the page itself — opened
+    in the window and scrolled to its end, every post object the page loaded taken (`posts_in`). For when
+    Instagram refuses its own feed endpoints to these reads. Returns how many answers the page loaded."""
+    tagged = (profile.user_id, profile.handle) if kind == "tagged" else None
+    seen = yield ("visit", f"{HOME}{quote(profile.handle, safe='')}/{WATCH_PATHS[kind]}", True)
+    batch: list[social.Item] = []
+    for doc in page_docs(seen or {}):
+        for item in posts_in(doc):
+            key = item_id(item)
+            if not key or key in already or key in seen_keys or (kind != "tagged" and not _owned(item, profile)):
+                continue
+            seen_keys.add(key)
+            batch += items_for(item, key, folder, profile.handle, tagged)
+    if batch:
+        yield ("emit", batch)
+    return len((seen or {}).get("answers") or [])
+
+
 def run(handle: str, folder: Path, already: set[str], opts: social.Options, since: float = 0,
         known_user_id: str = ""):
     """One profile into `folder` (see the module notes). A generator: yields requests, returns an Outcome."""
@@ -774,18 +928,31 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
             result = stop.value
         return result
 
-    yield ("note", "Finding posts…")
-    feed_failure = yield from counting(_crawl(calls, "feed", profile, folder, already, since, seen_keys))
+    def tab(kind: str, label: str):
+        """yield from: one tab through the API, else read from the page itself. Returns the failure, if both."""
+        yield ("note", f"Finding {label}…")
+        before = found[0]
+        failure = yield from counting(_crawl(calls, kind, profile, folder, already, since, seen_keys))
+        if not failure:
+            return ""
+        yield ("note", f"   Instagram's {label} feed didn't answer ({failure.rstrip('.')}) — reading them from the "
+                       "profile page instead")
+        loaded = yield from counting(_watch(kind, profile, folder, already, seen_keys))
+        yield ("note", f"   {found[0] - before} new from the page" + ("" if loaded else " (it loaded nothing)"))
+        return "" if loaded else failure
+
+    feed_failure = yield from tab("feed", "posts")
     if opts.tagged:
-        yield ("note", "Finding tagged posts…")
-        yield from counting(_crawl(calls, "tagged", profile, folder, already, since, seen_keys))
-    yield ("note", "Finding reels…")
-    yield from counting(_crawl(calls, "clips", profile, folder, already, since, seen_keys))
+        yield from tab("tagged", "tagged posts")
+    yield from tab("clips", "reels")
     if opts.stories:
         yield ("note", "Finding stories…")
         stories: dict[str, dict] = {}
+        refused = []
         for path in (f"feed/reels_media/?reel_ids={profile.user_id}", f"feed/user/{profile.user_id}/reel_media/"):
-            _s, doc, _t = yield from calls.call(API + path)
+            st, doc, _t = yield from calls.call(API + path)
+            if doc is None:
+                refused.append(f"HTTP {st}" if st else "no answer")
             for it in reel_items(doc or {}, every=True):
                 stories.setdefault(id_string(it.get("pk")) or id_string(it.get("id")) or str(len(stories)), it)
         _s, tray, _t = yield from calls.call(API + "feed/reels_tray/")
@@ -793,16 +960,34 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
             _s, doc, _t = yield from calls.call(f"{API}feed/reels_media/?reel_ids={rid.replace(':', '%3A')}")
             for it in reel_items(doc or {}, every=True):
                 stories.setdefault(id_string(it.get("pk")) or id_string(it.get("id")) or str(len(stories)), it)
+        if len(refused) == 2:
+            yield ("note", f"   Instagram didn't answer for the stories ({', '.join(refused)}) — opening them on the "
+                           "page instead")
+            seen = yield ("visit", f"{HOME}stories/{quote(profile.handle, safe='')}/", False, VIEW_STORY)
+            for doc in page_docs(seen or {}):
+                for it in reel_items_in(doc, profile.user_id):
+                    stories.setdefault(id_string(it.get("pk")) or id_string(it.get("id")) or str(len(stories)), it)
         batch = reel_downloads(list(stories.values()), folder / STORIES, already | seen_keys, profile.handle)
         if batch:
             found[0] += len(batch)
             yield ("emit", batch)
         yield ("note", "Finding highlights…")
-        _s, tray, _t = yield from calls.call(f"{API}highlights/{profile.user_id}/highlights_tray/")
-        for rid, title in highlights(tray or {}):
+        st, tray, _t = yield from calls.call(f"{API}highlights/{profile.user_id}/highlights_tray/")
+        listed = highlights(tray or {})
+        if tray is None:
+            yield ("note", f"   Instagram didn't answer for the highlights ({f'HTTP {st}' if st else 'no answer'}) — "
+                           "reading them from the profile page instead")
+            seen = yield ("visit", f"{HOME}{quote(profile.handle, safe='')}/", False)
+            listed = []
+            for doc in page_docs(seen or {}):
+                highlights_in(doc, listed)
+        for rid, title in listed:
             _s, doc, _t = yield from calls.call(f"{API}feed/reels_media/?reel_ids={rid.replace(':', '%3A')}")
-            batch = reel_downloads(reel_items(doc or {}, key=rid), folder / folder_name(title),
-                                   already | seen_keys, profile.handle)
+            items = reel_items(doc or {}, key=rid)
+            if doc is None:                                  # the highlight's own page, as the person opens it
+                seen = yield ("visit", f"{HOME}stories/highlights/{rid.split(':', 1)[-1]}/", False, VIEW_STORY)
+                items = [it for d in page_docs(seen or {}) for it in reel_items_in(d, profile.user_id)]
+            batch = reel_downloads(items, folder / folder_name(title), already | seen_keys, profile.handle)
             if batch:
                 found[0] += len(batch)
                 yield ("emit", batch)

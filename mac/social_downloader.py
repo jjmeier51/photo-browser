@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import concurrent.futures
 import itertools
+import json
 import os
+import re
 import shutil
 import sys
 import threading
@@ -63,14 +65,26 @@ KINDS = {
 }
 
 _PROFILE: QWebEngineProfile | None = None
+WATCH_HOST = r"(^|\.)instagram\.com$"     # the pages the watcher goes into (a regular expression on the host)
 
 
 def profile() -> QWebEngineProfile:
-    """One lasting browser profile for both sites: the logins survive restarts."""
+    """One lasting browser profile for both sites: the logins survive restarts. Instagram's pages carry a small
+    watcher put in before their own scripts (fanfix.HOOK_JS — a copy of each data answer the page receives, and
+    of the data written into it), so a profile page opened in the window can be read for what it shows."""
     global _PROFILE
     if _PROFILE is None:
+        import fanfix
+        from PySide6.QtWebEngineCore import QWebEngineScript
         _PROFILE = QWebEngineProfile("social", QApplication.instance())
         _PROFILE.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
+        script = QWebEngineScript()
+        script.setName("photobrowser-watch")
+        script.setSourceCode(f"if (/{WATCH_HOST}/.test(location.hostname)) {{\n" + fanfix.HOOK_JS + "\n}")
+        script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+        script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+        script.setRunsOnSubFrames(False)
+        _PROFILE.scripts().insert(script)
     return _PROFILE
 
 
@@ -442,7 +456,10 @@ class SocialWindow(QMainWindow):
         if kind == "api":
             url, form, app_id = req[1], req[2], req[3]
             start, result = ig.api_js(f"c{next(self.calls)}", url, form, app_id)
-            self._call(start, result, lambda r: cb((int(r.get("status") or 0), r.get("body") or "")))
+            self._call(start, result, lambda r: cb((int(r.get("status") or 0), r.get("body") or "")),
+                       page=self.api_page())
+        elif kind == "visit":
+            self._visit(req[1], bool(req[2]), cb, req[3] if len(req) > 3 else "")
         elif kind == "page":
             start, result = fb.page_js(f"p{next(self.calls)}", req[1])
             self._call(start, result, lambda r: cb((int(r.get("status") or 0), r.get("body") or "",
@@ -462,12 +479,109 @@ class SocialWindow(QMainWindow):
         else:
             raise ValueError(kind)
 
-    def _call(self, start_js: str, result_js: str, done) -> None:
-        """Runs `start_js` (a fetch) on the hidden page and polls `result_js` until it answers."""
+    def api_page(self) -> QWebEnginePage:
+        """Where Instagram's API is asked from: the profile page the window opened (`_visit`) while it's still on
+        Instagram — a real page, with the session state Instagram's own scripts set up (a bare page's reads were
+        all answered 404, Nov 9) — else the hidden page."""
+        page = self.view.page()
+        if getattr(self, "visited", False) and page.url().host().endswith(self.k["domain"]):
+            return page
+        return self.api
+
+    def _visit(self, url: str, scroll: bool, done, press: str = "") -> None:
+        """Opens `url` in the window's browser, as the person would, and hands back what the page loaded to draw
+        it — its own data answers and its HTML — after it has settled, or (`scroll`) after it's been scrolled to
+        its end, so it loads every post: {"answers": [...], "html": ..., "url": ..., "status": 200/404}. `press`: a
+        button whose words match it (a regular expression) is pressed once the page is up — the desktop site's
+        "View story" in front of someone's stories — as the person would."""
+        import fanfix
+        page = self.view.page()
+        answers: list[str] = []
+        state = {"idle": 0, "ticks": 0, "height": None, "began": time.monotonic(), "done": False}
+        limit = 15 * 60 if scroll else 25
+
+        def finish() -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+
+            def got_html(html) -> None:
+                html = html if isinstance(html, str) else ""
+                title = re.search(r"<title[^>]*>([^<]*)</title>", html, re.I)
+                self.visited = True
+                done({"answers": answers, "html": html, "url": page.url().toString(),
+                      "status": 404 if title and "page not found" in title.group(1).lower() else 200})
+            page.runJavaScript("document.documentElement.outerHTML", 0, got_html)
+
+        def drained(raw) -> None:
+            if state["done"]:
+                return
+            try:
+                got = json.loads(raw) if isinstance(raw, str) else []
+            except ValueError:
+                got = []
+            for a in got if isinstance(got, list) else []:
+                if isinstance(a, dict) and isinstance(a.get("t"), str):
+                    answers.append(a["t"])
+            if got:                                          # more waiting: take it before doing anything else
+                page.runJavaScript(fanfix.DRAIN_JS, 0, drained)
+                return
+            state["ticks"] += 1
+            if self.stopping or time.monotonic() - state["began"] > limit:
+                finish()
+                return
+            if not scroll:
+                state["idle"] += 1
+                if state["idle"] >= 4:                       # ~4 s with nothing new: the page has drawn
+                    finish()
+                    return
+                QTimer.singleShot(1000, tick)
+                return
+            page.runJavaScript(fanfix.scroll_js(1), 0, scrolled)
+
+        def scrolled(raw) -> None:
+            try:
+                st = json.loads(raw) if isinstance(raw, str) else {}
+            except ValueError:
+                st = {}
+            grew = st.get("height") != state["height"] or bool(st.get("moved"))
+            state["height"] = st.get("height")
+            state["idle"] = 0 if grew else state["idle"] + 1
+            if state["idle"] >= 6:                           # the end of the page: nothing more loads
+                finish()
+                return
+            self._say(f"Reading the page… {len(answers)} answer(s) so far")
+            QTimer.singleShot(1300, tick)
+
+        def tick() -> None:
+            if not state["done"]:
+                page.runJavaScript(fanfix.DRAIN_JS, 0, drained)
+
+        def loaded(_ok: bool) -> None:
+            try:
+                page.loadFinished.disconnect(loaded)
+            except (RuntimeError, TypeError):
+                pass
+            if press:
+                js = ("(function(){var re=new RegExp(%s,'i');var b=[].slice.call(document.querySelectorAll("
+                      "'button,[role=button],div[role=button]')).find(function(e){return re.test(e.innerText||'');});"
+                      "if(b){b.click();return true;}return false;})()") % json.dumps(press)
+                QTimer.singleShot(2000, lambda: page.runJavaScript(js, 0, lambda _r: QTimer.singleShot(2000, tick)))
+                return
+            QTimer.singleShot(1500, tick)
+
+        self._log(f"   opening {url}")
+        page.loadFinished.connect(loaded)
+        page.load(QUrl(url))
+
+    def _call(self, start_js: str, result_js: str, done, page: QWebEnginePage | None = None) -> None:
+        """Runs `start_js` (a fetch) on the page (the hidden one by default) and polls `result_js` until it
+        answers."""
         began = time.monotonic()
+        page = page or self.api
 
         def poll() -> None:
-            self.api.runJavaScript(result_js, 0, got)
+            page.runJavaScript(result_js, 0, got)
 
         def got(raw) -> None:
             if raw:
@@ -485,7 +599,7 @@ class SocialWindow(QMainWindow):
             # arriving and the next step was dead time on every one of thousands of reads
             QTimer.singleShot(40 if time.monotonic() - began < 5 else 150, poll)
 
-        self.api.runJavaScript(start_js, 0, lambda _ok: QTimer.singleShot(20, poll))
+        page.runJavaScript(start_js, 0, lambda _ok: QTimer.singleShot(20, poll))
 
     def _profile(self, value) -> None:
         if self.kind == "instagram":

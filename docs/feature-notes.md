@@ -2255,6 +2255,19 @@ built-in translations and scripts, existing accounts' included. Now `page_missin
 with every other way tried first; pages (the profile page, the home page) are fetched plainly, without the API
 headers (`call(page=True)` → app id "" → `API_JS` sends only an HTML Accept). The test's fake pages now carry that
 boilerplate, so this can't pass unnoticed again.
+Then the real answers (a log for an account the person had open): profile page HTTP 200 with no id in its raw HTML,
+`web_profile_info` 404, `fbsearch` 404, topsearch 404, `users/search` 400 — every internal read refused, from a bare
+`robots.txt` page. So the reads no longer depend on them: **the window opens the real pages** (a `("visit", url,
+scroll, press)` request; `SocialWindow._visit` loads it in the visible browser, the social profile now carries
+fanfix.HOOK_JS on instagram.com pages (`WATCH_HOST`), drains the page's own data answers, scrolls to the end when
+asked, presses "View story" when asked, and returns them with the final HTML). `look_up` starts there
+(`profile_from_page` — `profile_in` now looks 120 deep: the page's data is wrapped in ScheduledServerJS/__bbox/Relay
+layers); the API is then asked from that real page (`api_page`); a refused posts / tagged / reels feed is read from
+its page scrolled to the end (`_watch`/`posts_in`, owner-checked); refused stories from /stories/<handle>/ and
+highlights from the profile page's list + /stories/highlights/<n>/ (`reel_items_in`, `highlights_in`). Tested with
+the real window against a local stand-in where every /api/v1/ read is 404 (embedded profile data, posts loaded by
+the page as it scrolls, tagged and reels tabs, story pages that load only after "View story"): account, 4 posts
+(not a suggested one), tagged, reel, 2 stories, 2 highlights into their folders. Untested on instagram.com itself.
 Checked with a scripted Instagram: throttled / null-user / missing / logged-out / foreign app id lookups, and a full
 crawl (two feed pages, carousel `_1…_3`, DASH-over-progressive with audio, tagged carousel → only the tagged slide,
 reels without the feed's duplicate, stories incl. a subscriber reel without the duplicate, two highlights into
