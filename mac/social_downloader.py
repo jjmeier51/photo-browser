@@ -688,10 +688,14 @@ class SocialWindow(QMainWindow):
     def _profile(self, value) -> None:
         if self.kind == "instagram":
             p: ig.Profile = value
-            self.info = dict(handle=p.handle, user_id=p.user_id, full_name=p.full_name)
+            name = p.full_name or (str(self.record.get("full_name") or "") if self.record is not None else "")
+            self.info = dict(handle=p.handle, user_id=p.user_id, full_name=name)
             self.private = p.private
-            self._log(f"@{p.handle} — {p.full_name or 'no name'}, {p.posts or '?'} posts"
-                      + (" (private)" if p.private else ""))
+            if p.full_name or p.posts:
+                self._log(f"@{p.handle} — {p.full_name or 'no name'}, {p.posts or '?'} posts"
+                          + (" (private)" if p.private else ""))
+            else:                                       # only the number is known (the record's, or the page's)
+                self._log(f"@{p.handle}" + (f" — {name}" if name else "") + f" (account {p.user_id})")
         else:
             p, folder = value
             self.info = dict(profile_name=p.name, profile_id=p.id, profile_url=p.url)

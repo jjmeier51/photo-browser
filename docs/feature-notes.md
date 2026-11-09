@@ -2308,7 +2308,7 @@ direct route; `users/search/` is gone from `look_up`; a throttled lookup uses th
 (the iPhone's `knownUserID`) instead of searching on into the limit; and a feed that fails because of the limit is
 reported ("will come next time") rather than read by scrolling the profile page, which only adds to it. Checked
 against a stand-in of that log (lookups 429, a search 400 to direct asks, the page's feed asks told to log in): no
-switch, every feed direct, all 10 files; with a known number the lookup is one call.
+switch, every feed direct, all 10 files; with the number already in the record, the lookup stops after its throttled call and goes straight to the feeds.
 
 ### 7.4f Fanfix in Safe Finder — `mac/fanfix.py`, `mac/fanfix_downloader.py` (Nov 7, 2026; reworked the same day)
 
