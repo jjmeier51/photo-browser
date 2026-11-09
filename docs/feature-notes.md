@@ -338,6 +338,23 @@ prepended after the prefix — so a Flux LoRA prompt reads "ohwx woman <lora:11:
   save is reported. No notifications — a Mac process isn't suspended mid-job the way iOS's is.
 - Not ported: Surprise Me, Extend with AI (Flux outpaint), creating tunes, live activities.
 
+**Nov 9 — "moderated" in Astria, nothing back in Safe Finder.** An SFW edit showed "moderated" on Astria while
+Safe Finder waited and got nothing. The two apps' requests are field-for-field the same (fields, model ids,
+pinned 2K, upload sizes, prompt composition), so the moderation itself is Astria's or its partner model's
+(Seedream is ByteDance's, Nano Banana Google's, each with its own filter, and a run can trip it one time and
+not the next). Two things were Safe Finder's own, both fixed:
+- **It couldn't see the refusal.** Astria's API documents no failure field for a prompt (docs.astria.ai: no
+  status, no moderation flag); both apps read only `error`, so a prompt stopped some other way was polled for
+  ~25 minutes and then reported as "still working". `astria.prompt_failure` (and the iPhone's
+  `AIExtend.promptFailure`, the same rule) also takes any value saying moderated / nsfw / flagged / censored /
+  blocked, or a true flag so named — never the prompt's own words — and ends the job at once, terminal (not
+  recovered later). A job that brings nothing back saves Astria's answer to
+  `~/Library/Logs/Safe Finder/astria-prompt-<id>-<time>.json`, so a new kind of refusal can be read.
+- **Its photo wasn't the iPhone's.** Pillow sent the photo's numbers with no colour conversion and no profile
+  (Display P3 / Adobe RGB read as sRGB: duller, shifted skin tones), and a transparent PNG's clear pixels as
+  black. `upload_jpeg` now does what the iPhone's Core Image encode does: converts from the photo's embedded
+  profile to sRGB (perceptual) and tags it sRGB, lays transparency on white, brings 16-bit down properly.
+
 ### 1.11 Reusable Prompts, prompt history with hearts, prompting reminder — `AIPromptSections.swift`
 
 The prompt-helper sections are shared views (one file) used by both `AICreateView` and

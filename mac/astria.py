@@ -58,6 +58,7 @@ UA = "PhotoBrowser/1.0 (macOS; Safe Finder Astria client)"
 SUPPORT = Path.home() / "Library" / "Application Support" / "Safe Finder"
 THUMB_CACHE = Path.home() / "Library" / "Caches" / "PhotoBrowser" / "astria"
 KEYCHAIN_SERVICE = "Safe Finder Astria"
+LOGS = Path.home() / "Library" / "Logs" / "Safe Finder"
 DEFAULT_FLUX_TUNE = 1504944
 MAX_TUNES = 10
 REFERENCE_TITLE = "Photo Browser reference · "
@@ -329,6 +330,39 @@ def _int(v) -> int | None:
         return None
 
 
+# Astria's API documents no failure field for a prompt (docs.astria.ai, prompt object: id, text, images…).
+# `error` is the one it has been seen to fill — the iPhone reads only that. A prompt its moderation stopped shows
+# "moderated" in Astria's own pages; where that sits in the JSON isn't documented, so any value that says so
+# (outside the prompt's own words) counts, as does a true flag whose name does.
+_PROSE_KEYS = {"text", "negative_prompt", "prompt", "url", "callback", "title", "name", "images", "input_image",
+               "orig_images", "video_prompt"}
+_FLAG_WORDS = ("moderat", "nsfw", "flagged", "censor", "blocked")
+
+
+def prompt_failure(j: dict) -> str | None:
+    """What stopped a prompt, or None while nothing has."""
+    for k in ("error", "error_message", "failure_reason"):
+        v = j.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+
+    def look(d: dict, depth: int) -> str | None:
+        for k, v in d.items():
+            key = str(k).lower()
+            if key in _PROSE_KEYS:
+                continue
+            if v is True and any(w in key for w in _FLAG_WORDS):
+                return f"Astria's moderation stopped it ({k})"
+            if isinstance(v, str) and any(w in v.lower() for w in _FLAG_WORDS):
+                return f"Astria's moderation stopped it ({k}: {v.strip()[:120]})"
+            if isinstance(v, dict) and depth < 2:
+                hit = look(v, depth + 1)
+                if hit:
+                    return hit
+        return None
+    return look(j, 0)
+
+
 def _images_of(p: dict) -> list[str]:
     imgs = p.get("images")
     if isinstance(imgs, list):
@@ -542,8 +576,24 @@ class Client:
         j = self._get_json(f"/tunes/{tune}/prompts/{pid}", timeout=25)
         if not isinstance(j, dict):
             return None
-        err = j.get("error")
-        return _images_of(j), _int(j.get("num_images")), (err.strip() if isinstance(err, str) and err.strip() else None)
+        self.last_prompt = j
+        return _images_of(j), _int(j.get("num_images")), prompt_failure(j)
+
+    def keep_prompt(self, tune: int, pid: int) -> str:
+        """The prompt as Astria last described it, saved for a look when a job brought nothing back (the API
+        documents no failure field, so this is how a new kind of refusal gets seen). → the file, or ""."""
+        j = getattr(self, "last_prompt", None)
+        if not (isinstance(j, dict) and _int(j.get("id")) == pid):
+            j = self._get_json(f"/tunes/{tune}/prompts/{pid}", timeout=25)
+        if not isinstance(j, dict):
+            return ""
+        try:
+            LOGS.mkdir(parents=True, exist_ok=True)
+            path = LOGS / f"astria-prompt-{pid}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+            path.write_text(json.dumps(j, indent=1, ensure_ascii=False), encoding="utf-8")
+            return str(path)
+        except OSError:
+            return ""
 
     def download(self, url: str, attempts: int = 3) -> bytes | None:
         for attempt in range(max(1, attempts)):
@@ -594,6 +644,8 @@ class Client:
                 if not known and err:
                     failed_msg = err
                     break
+            if not known and failed_msg is None and self.last_prompt_failure(pid):
+                failed_msg = self.last_prompt_failure(pid)
             for i, f in futures.items():
                 results[i] = f.result()
             missing = [i for i in range(len(known)) if not results.get(i)]
@@ -603,11 +655,16 @@ class Client:
                 for i in missing:
                     results[i] = self.download(urls[i], attempts=2)
         got = [results[i] for i in sorted(results) if results[i]]
-        if not got:
+        if not got and not (stop is not None and stop.is_set()):
+            kept = self.keep_prompt(tune, pid)
             if failed_msg:
-                raise AIError("failed", failed_msg)
+                raise AIError("failed", failed_msg + (f" (what Astria said is saved in {kept})" if kept else ""))
             raise AIError("timed_out" if not known else "network")
         return got
+
+    def last_prompt_failure(self, pid: int) -> str | None:
+        j = getattr(self, "last_prompt", None)
+        return prompt_failure(j) if isinstance(j, dict) and _int(j.get("id")) == pid else None
 
     # -- references
     def reference_mentions(self, refs: list[tuple[bytes, str, str]], base_tune: int) -> tuple[list[str], list[str], int, str | None]:
@@ -760,8 +817,9 @@ class Client:
 # ----------------------------------------------------------------------------- photos in and out
 
 def upload_jpeg(path: str, max_px: int = 2048) -> tuple[bytes, int, int]:
-    """The photo as Astria should see it: upright, standard range (a HEIC's base image), sRGB, long side
-    ≤ `max_px`, JPEG 92."""
+    """The photo as Astria should see it — the iPhone's `uploadJPEG`: upright, standard range (a HEIC's base
+    image), **converted to sRGB from the photo's own colour profile** and tagged sRGB (the iPhone's Core Image
+    encode does both; Pillow alone sends Display P3 / Adobe RGB numbers unlabelled, read as sRGB), transparency onto white, long side ≤ `max_px`, JPEG 92, no metadata."""
     from PIL import Image, ImageOps
     try:
         import batch_crop  # noqa: F401 — registers HEIC with Pillow
@@ -770,17 +828,51 @@ def upload_jpeg(path: str, max_px: int = 2048) -> tuple[bytes, int, int]:
     try:
         with Image.open(path) as im:
             im = ImageOps.exif_transpose(im)
-            if im.mode not in ("RGB", "L"):
-                im = im.convert("RGB")
-            if im.mode == "L":
-                im = im.convert("RGB")
+            im = _to_srgb(im)
             if max(im.size) > max_px:
                 im.thumbnail((max_px, max_px), Image.Resampling.LANCZOS)
             out = io.BytesIO()
-            im.save(out, "JPEG", quality=92)
+            im.save(out, "JPEG", quality=92, icc_profile=_srgb_icc())
             return out.getvalue(), im.width, im.height
     except Exception as e:  # noqa: BLE001
         raise AIError("bad_image", str(e))
+
+
+def _srgb_icc() -> bytes | None:
+    try:
+        from PIL import ImageCms
+        return ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    except Exception:  # noqa: BLE001 — no LittleCMS: untagged, which reads as sRGB anyway
+        return None
+
+
+def _to_srgb(im):
+    """8-bit RGB in sRGB. The photo's embedded profile drives the conversion (perceptual); without one it's
+    taken as sRGB already. Alpha is laid on white; 16-bit and float modes are brought to 8 bits first."""
+    from PIL import Image
+    icc = im.info.get("icc_profile")
+    if im.mode in ("I;16", "I;16B", "I;16L", "I"):
+        im = im.point(lambda v: v * (1 / 256)).convert("L")
+    elif im.mode == "F":
+        im = im.convert("L")
+    if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
+        rgba = im.convert("RGBA")
+        flat = Image.new("RGB", rgba.size, (255, 255, 255))
+        flat.paste(rgba, mask=rgba.getchannel("A"))
+        im = flat
+    if icc:
+        try:
+            from PIL import ImageCms
+            src = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+            if im.mode not in ("RGB", "CMYK", "L"):
+                im = im.convert("RGB")
+            out = ImageCms.profileToProfile(im, src, ImageCms.createProfile("sRGB"),
+                                            renderingIntent=ImageCms.Intent.PERCEPTUAL, outputMode="RGB")
+            if out is not None:
+                return out
+        except Exception:  # noqa: BLE001 — an unreadable profile: the numbers as they are
+            pass
+    return im.convert("RGB") if im.mode != "RGB" else im
 
 
 def reference(path: str) -> tuple[bytes, str, str]:

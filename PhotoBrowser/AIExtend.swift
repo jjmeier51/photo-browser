@@ -701,9 +701,38 @@ enum AIExtend {
         } else if let images = json["images"] as? [[String: Any]] {
             urls = images.compactMap { ($0["url"] as? String).flatMap { URL(string: $0) } }
         }
-        var error: String?
-        if let e = json["error"] as? String, !e.trimmingCharacters(in: .whitespaces).isEmpty { error = e }
-        return PromptState(urls: urls, expected: intValue(json["num_images"]), error: error)
+        return PromptState(urls: urls, expected: intValue(json["num_images"]), error: promptFailure(json))
+    }
+
+    /// What stopped a prompt, or nil while nothing has. Astria documents no failure field: `error` is the one
+    /// it has been seen to fill, and a prompt its moderation stopped shows "moderated" in Astria's own pages
+    /// with no documented place in the JSON — so any value saying so (outside the prompt's own words), or a
+    /// true flag whose name does, ends the wait at once instead of polling ~25 minutes for nothing.
+    /// Safe Finder's `astria.prompt_failure` is the same rule — keep the two in step.
+    nonisolated static func promptFailure(_ json: [String: Any]) -> String? {
+        for key in ["error", "error_message", "failure_reason"] {
+            if let e = json[key] as? String, !e.trimmingCharacters(in: .whitespaces).isEmpty { return e }
+        }
+        let prose: Set<String> = ["text", "negative_prompt", "prompt", "url", "callback", "title", "name", "images",
+                                  "input_image", "orig_images", "video_prompt"]
+        let words = ["moderat", "nsfw", "flagged", "censor", "blocked"]
+        func look(_ d: [String: Any], _ depth: Int) -> String? {
+            for (k, v) in d {
+                let key = k.lowercased()
+                if prose.contains(key) { continue }
+                // A real JSON `true` only — an NSNumber 1 (a count, a level) also bridges to Bool.
+                if let n = v as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID(), n.boolValue,
+                   words.contains(where: { key.contains($0) }) {
+                    return "Astria’s moderation stopped it (\(k))"
+                }
+                if let s = v as? String, words.contains(where: { s.lowercased().contains($0) }) {
+                    return "Astria’s moderation stopped it (\(k): \(s.prefix(120)))"
+                }
+                if let sub = v as? [String: Any], depth < 2, let hit = look(sub, depth + 1) { return hit }
+            }
+            return nil
+        }
+        return look(json, 0)
     }
 
     /// Polls a created prompt to completion and downloads its image(s). Split out from `submit` so a
