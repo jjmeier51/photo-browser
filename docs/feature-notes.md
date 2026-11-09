@@ -2268,6 +2268,17 @@ highlights from the profile page's list + /stories/highlights/<n>/ (`reel_items_
 the real window against a local stand-in where every /api/v1/ read is 404 (embedded profile data, posts loaded by
 the page as it scrolls, tagged and reels tabs, story pages that load only after "View story"): account, 4 posts
 (not a suggested one), tagged, reel, 2 stories, 2 highlights into their folders. Untested on instagram.com itself.
+Next real log: the window opened the profile (the person could see it), the page loaded **42 answers, and none was
+recognised as the account** — so it fell back to the refused API again. Two likely misses, both fixed: the watcher
+dropped fetch/XHR answers labelled JavaScript (Meta sends GraphQL that way, `for (;;);` first — `HOOK_JS` now keeps
+them, `documents` strips the guard), and the id may sit under `strong_id__` (`_USER_ID_KEYS`). And the lookup no
+longer *needs* the number: when the page plainly is the account's (`page_names`: its title "(@handle)" or its
+`instagram://user?username=` link) it's found by handle (`instapp:owner_user_id` if the page has it), and everything
+is read from the pages — posts/tagged/reels (`_watch`, which learns the number from the account's own posts),
+stories from /stories/<handle>/, highlights from the profile page's list; owner checks go by username first
+(`_owned`, `_theirs`). Whenever the page's data didn't name the account, what it loaded is saved to
+`~/Library/Logs/Safe Finder/instagram-<handle>-<time>.json` (`dump_visit`) and the log says where — the next fix comes
+from Instagram's real answers.
 Checked with a scripted Instagram: throttled / null-user / missing / logged-out / foreign app id lookups, and a full
 crawl (two feed pages, carousel `_1…_3`, DASH-over-progressive with audio, tagged carousel → only the tagged slide,
 reels without the feed's duplicate, stories incl. a subscriber reel without the duplicate, two highlights into

@@ -155,6 +155,9 @@ def profile_from_user(user: dict, handle: str) -> Profile | None:
                    user.get("is_private", True) is not False)
 
 
+_USER_ID_KEYS = ("pk", "pk_id", "id", "strong_id__", "user_id", "fbid_v2")
+
+
 def profile_in(doc, handle: str, depth: int = 0) -> Profile | None:
     """Any answer (a search of whichever kind Instagram serves this year, or what a page loaded): the first object
     whose username is the handle and that has an id. Deep: a page's data sits inside layers of
@@ -162,15 +165,14 @@ def profile_in(doc, handle: str, depth: int = 0) -> Profile | None:
     if depth > 120:
         return None
     if isinstance(doc, dict):
-        if (doc.get("username") or "").lower() == handle.lower() and \
-                (id_string(doc.get("pk")) or id_string(doc.get("pk_id")) or id_string(doc.get("id"))):
+        uid = next((id_string(doc.get(k)) for k in _USER_ID_KEYS if id_string(doc.get(k))), None)
+        if (doc.get("username") or "").lower() == handle.lower() and uid and uid.isdigit():
             edge = doc.get("edge_owner_to_timeline_media") if isinstance(doc.get("edge_owner_to_timeline_media"), dict) else {}
             try:
                 posts = int(doc.get("media_count") or edge.get("count") or 0)
             except (TypeError, ValueError):
                 posts = 0
-            return Profile(id_string(doc.get("pk")) or id_string(doc.get("pk_id")) or id_string(doc.get("id")),
-                           doc.get("username"), doc.get("full_name") or "", doc.get("profile_pic_url") or "", posts,
+            return Profile(uid, doc.get("username"), doc.get("full_name") or "", doc.get("profile_pic_url") or "", posts,
                            doc.get("is_private", True) is not False)
         for v in doc.values():
             if isinstance(v, (dict, list)) and (p := profile_in(v, handle, depth + 1)):
@@ -236,15 +238,51 @@ def page_docs(seen: dict) -> list:
     return docs
 
 
+def page_names(seen: dict, handle: str) -> bool:
+    """Whether the page is the account's own profile, by what it shows: its title ("savannah (@savmaritheia) •
+    Instagram photos and videos") or its app link (instagram://user?username=…)."""
+    html = (seen or {}).get("html") or ""
+    m = re.search(r"<title[^>]*>([^<]{0,400})</title>", html, re.I)
+    h = re.escape(handle)
+    return bool(m and re.search(rf"\(@{h}\)", m.group(1), re.I)) or \
+        bool(re.search(rf"instagram://user\?username={h}[\"&]", html, re.I))
+
+
 def profile_from_page(seen: dict, handle: str) -> Profile | None:
     """The account as the profile page itself has it: the object with the exact username and an id, in what the
-    page loaded to draw the profile — else an id written beside the handle in the page."""
+    page loaded to draw the profile — else an id written beside the handle in the page, or in its
+    `instapp:owner_user_id` meta — else, when the page plainly is the account's (`page_names`), the account with
+    no id: everything is then read from the pages, which need only the handle."""
     for doc in page_docs(seen):
         p = profile_in(doc, handle)
         if p is not None:
             return p
-    beside = ids_beside((seen or {}).get("html") or "", handle)
-    return Profile(beside[0], handle) if beside else None
+    html = (seen or {}).get("html") or ""
+    beside = ids_beside(html, handle)
+    if beside:
+        return Profile(beside[0], handle)
+    if page_names(seen, handle):
+        m = re.search(r'instapp:owner_user_id"\s+content="(\d+)"', html) or \
+            re.search(r'content="(\d+)"\s+property="instapp:owner_user_id"', html)
+        return Profile(m.group(1) if m else "", handle)
+    return None
+
+
+def dump_visit(seen: dict, handle: str) -> str:
+    """What a visited page loaded, saved to ~/Library/Logs/Safe Finder/instagram-<handle>-<time>.json — for when its
+    data didn't name the account, so the next fix is made from Instagram's real answers. Stays on this Mac."""
+    import time as _time
+    folder = Path.home() / "Library" / "Logs" / "Safe Finder"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"instagram-{handle}-{_time.strftime('%Y%m%d-%H%M%S')}.json"
+        doc = {"url": (seen or {}).get("url"), "status": (seen or {}).get("status"),
+               "answers": [a[:3_000_000] for a in (seen or {}).get("answers") or [] if isinstance(a, str)][:400],
+               "html": ((seen or {}).get("html") or "")[:8_000_000]}
+        path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        return str(path)
+    except OSError:
+        return ""
 
 
 def posts_in(doc, out: list | None = None, depth: int = 0) -> list[dict]:
@@ -269,7 +307,18 @@ def posts_in(doc, out: list | None = None, depth: int = 0) -> list[dict]:
     return out
 
 
-def reel_items_in(doc, profile_id: str, out: list | None = None, depth: int = 0) -> list[dict]:
+def _theirs(u, profile_id: str, handle: str) -> bool:
+    """A story item's owner is the account: by username, else by number (when either is known)."""
+    if not isinstance(u, dict):
+        return True
+    name = (u.get("username") or "").lower()
+    if name and handle:
+        return name == handle.lower()
+    uid = id_string(u.get("pk")) or id_string(u.get("id"))
+    return not profile_id or not uid or uid == profile_id
+
+
+def reel_items_in(doc, profile_id: str, out: list | None = None, depth: int = 0, handle: str = "") -> list[dict]:
     """Every story item in what a story or highlight page loaded: a dict with a pk, Instagram's media fields and a
     time, not a carousel's child — the account's own (a viewer's tray holds other people's too)."""
     out = [] if out is None else out
@@ -278,17 +327,16 @@ def reel_items_in(doc, profile_id: str, out: list | None = None, depth: int = 0)
     if isinstance(doc, dict):
         if (id_string(doc.get("pk")) or id_string(doc.get("id"))) and doc.get("taken_at") and \
                 any(k in doc for k in ("image_versions2", "video_versions")):
-            u = doc.get("user") if isinstance(doc.get("user"), dict) else doc.get("owner")
-            if not isinstance(u, dict) or (id_string(u.get("pk")) or id_string(u.get("id"))) in (None, profile_id):
+            if _theirs(doc.get("user") if isinstance(doc.get("user"), dict) else doc.get("owner"), profile_id, handle):
                 out.append(doc)
             return out
         for v in doc.values():
             if isinstance(v, (dict, list)):
-                reel_items_in(v, profile_id, out, depth + 1)
+                reel_items_in(v, profile_id, out, depth + 1, handle)
     elif isinstance(doc, list):
         for v in doc:
             if isinstance(v, (dict, list)):
-                reel_items_in(v, profile_id, out, depth + 1)
+                reel_items_in(v, profile_id, out, depth + 1, handle)
     return out
 
 
@@ -774,8 +822,20 @@ def look_up(calls: _Calls, handle: str):
     seen = yield ("visit", f"{HOME}{q}/", False)
     profile = profile_from_page(seen or {}, handle)
     if profile is not None:
-        yield ("note", f"   found @{profile.handle} on its profile page (account {profile.user_id})")
+        if profile.user_id and profile.posts:
+            yield ("note", f"   found @{profile.handle} on its profile page (account {profile.user_id})")
+        else:
+            saved = dump_visit(seen or {}, handle)
+            yield ("note", f"   found @{profile.handle} on its profile page" +
+                           (f" (account {profile.user_id})" if profile.user_id else
+                            " — its data didn't give the account's number, so everything is read from the pages") +
+                           (f"; what the page loaded is saved in {saved} — send it over if anything's missing"
+                            if saved else ""))
         return profile, False, []
+    if (seen or {}).get("answers"):
+        saved = dump_visit(seen or {}, handle)
+        if saved:
+            yield ("note", f"   what the profile page loaded is saved in {saved} — send it over")
     shown = (seen or {}).get("html") or ""
     page_gone = page_missing(int((seen or {}).get("status") or 200), shown)
     yield ("note", "   the profile page " + ("says not found" if page_gone else
@@ -862,8 +922,10 @@ def _owned(item: dict, profile: Profile) -> bool:
     u = item.get("user") if isinstance(item.get("user"), dict) else item.get("owner")
     if not isinstance(u, dict):
         return True
-    return (id_string(u.get("pk")) or id_string(u.get("id"))) == profile.user_id or \
-        (u.get("username") or "").lower() == profile.handle.lower()
+    uid, name = id_string(u.get("pk")) or id_string(u.get("id")), (u.get("username") or "").lower()
+    if name:
+        return name == profile.handle.lower()
+    return not profile.user_id or uid == profile.user_id      # no name to go by: its number, when known
 
 
 def _watch(kind: str, profile: Profile, folder: Path, already: set[str], seen_keys: set[str]):
@@ -875,6 +937,9 @@ def _watch(kind: str, profile: Profile, folder: Path, already: set[str], seen_ke
     batch: list[social.Item] = []
     for doc in page_docs(seen or {}):
         for item in posts_in(doc):
+            u = item.get("user") if isinstance(item.get("user"), dict) else {}
+            if not profile.user_id and (u.get("username") or "").lower() == profile.handle.lower():
+                profile.user_id = id_string(u.get("pk")) or id_string(u.get("id")) or ""   # learnt from its own posts
             key = item_id(item)
             if not key or key in already or key in seen_keys or (kind != "tagged" and not _owned(item, profile)):
                 continue
@@ -932,11 +997,14 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
         """yield from: one tab through the API, else read from the page itself. Returns the failure, if both."""
         yield ("note", f"Finding {label}…")
         before = found[0]
-        failure = yield from counting(_crawl(calls, kind, profile, folder, already, since, seen_keys))
-        if not failure:
-            return ""
-        yield ("note", f"   Instagram's {label} feed didn't answer ({failure.rstrip('.')}) — reading them from the "
-                       "profile page instead")
+        if profile.user_id:
+            failure = yield from counting(_crawl(calls, kind, profile, folder, already, since, seen_keys))
+            if not failure:
+                return ""
+            yield ("note", f"   Instagram's {label} feed didn't answer ({failure.rstrip('.')}) — reading them from the "
+                           "profile page instead")
+        else:
+            failure = "Instagram didn't give the account's number"
         loaded = yield from counting(_watch(kind, profile, folder, already, seen_keys))
         yield ("note", f"   {found[0] - before} new from the page" + ("" if loaded else " (it loaded nothing)"))
         return "" if loaded else failure
@@ -948,31 +1016,36 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
     if opts.stories:
         yield ("note", "Finding stories…")
         stories: dict[str, dict] = {}
-        refused = []
-        for path in (f"feed/reels_media/?reel_ids={profile.user_id}", f"feed/user/{profile.user_id}/reel_media/"):
+        refused = [] if profile.user_id else ["no account number", "no account number"]
+        for path in ((f"feed/reels_media/?reel_ids={profile.user_id}", f"feed/user/{profile.user_id}/reel_media/")
+                     if profile.user_id else ()):
             st, doc, _t = yield from calls.call(API + path)
             if doc is None:
                 refused.append(f"HTTP {st}" if st else "no answer")
             for it in reel_items(doc or {}, every=True):
                 stories.setdefault(id_string(it.get("pk")) or id_string(it.get("id")) or str(len(stories)), it)
-        _s, tray, _t = yield from calls.call(API + "feed/reels_tray/")
+        tray = None
+        if profile.user_id:
+            _s, tray, _t = yield from calls.call(API + "feed/reels_tray/")
         for rid in subscriber_reels(tray or {}, profile.user_id):
             _s, doc, _t = yield from calls.call(f"{API}feed/reels_media/?reel_ids={rid.replace(':', '%3A')}")
             for it in reel_items(doc or {}, every=True):
                 stories.setdefault(id_string(it.get("pk")) or id_string(it.get("id")) or str(len(stories)), it)
         if len(refused) == 2:
-            yield ("note", f"   Instagram didn't answer for the stories ({', '.join(refused)}) — opening them on the "
-                           "page instead")
+            yield ("note", "   opening the stories page" if not profile.user_id else
+                   f"   Instagram didn't answer for the stories ({', '.join(refused)}) — opening them on the page instead")
             seen = yield ("visit", f"{HOME}stories/{quote(profile.handle, safe='')}/", False, VIEW_STORY)
             for doc in page_docs(seen or {}):
-                for it in reel_items_in(doc, profile.user_id):
+                for it in reel_items_in(doc, profile.user_id, handle=profile.handle):
                     stories.setdefault(id_string(it.get("pk")) or id_string(it.get("id")) or str(len(stories)), it)
         batch = reel_downloads(list(stories.values()), folder / STORIES, already | seen_keys, profile.handle)
         if batch:
             found[0] += len(batch)
             yield ("emit", batch)
         yield ("note", "Finding highlights…")
-        st, tray, _t = yield from calls.call(f"{API}highlights/{profile.user_id}/highlights_tray/")
+        st, tray = 0, None
+        if profile.user_id:
+            st, tray, _t = yield from calls.call(f"{API}highlights/{profile.user_id}/highlights_tray/")
         listed = highlights(tray or {})
         if tray is None:
             yield ("note", f"   Instagram didn't answer for the highlights ({f'HTTP {st}' if st else 'no answer'}) — "
@@ -982,11 +1055,13 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
             for doc in page_docs(seen or {}):
                 highlights_in(doc, listed)
         for rid, title in listed:
-            _s, doc, _t = yield from calls.call(f"{API}feed/reels_media/?reel_ids={rid.replace(':', '%3A')}")
+            doc = None
+            if profile.user_id:
+                _s, doc, _t = yield from calls.call(f"{API}feed/reels_media/?reel_ids={rid.replace(':', '%3A')}")
             items = reel_items(doc or {}, key=rid)
             if doc is None:                                  # the highlight's own page, as the person opens it
                 seen = yield ("visit", f"{HOME}stories/highlights/{rid.split(':', 1)[-1]}/", False, VIEW_STORY)
-                items = [it for d in page_docs(seen or {}) for it in reel_items_in(d, profile.user_id)]
+                items = [it for d in page_docs(seen or {}) for it in reel_items_in(d, profile.user_id, handle=profile.handle)]
             batch = reel_downloads(items, folder / folder_name(title), already | seen_keys, profile.handle)
             if batch:
                 found[0] += len(batch)

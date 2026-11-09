@@ -125,7 +125,9 @@ HOOK_JS = r"""
   window.__pbHooked = true;
   window.__pbCaptured = [];
   var MAX = 6000, LONGEST = 15000000;
-  var NOT_DATA = /^(image|video|audio|font)\/|text\/(css|html|javascript)|javascript|ecmascript|wasm|octet-stream|mpegurl|dash\+xml|protobuf|grpc/i;
+  // (a fetch/XHR answer labelled JavaScript is still data — Meta's sites send their GraphQL that way, "for (;;);"
+  // first; scripts themselves come by <script>, never by these)
+  var NOT_DATA = /^(image|video|audio|font)\/|text\/(css|html)|wasm|octet-stream|mpegurl|dash\+xml|protobuf|grpc/i;
   function keep(url, text, how, req) {
     try {
       if (!text || typeof text !== 'string' || text.length < 2 || text.length > LONGEST) return;
@@ -150,7 +152,10 @@ HOOK_JS = r"""
     ct = String(ct || '');
     if (NOT_DATA.test(ct)) return false;
     if (/json|x-component|text\/plain/i.test(ct)) return true;
-    var c = String(text || '').replace(/^\s+/, '').charAt(0);
+    var t = String(text || '').replace(/^\s+/, '');
+    if (t.indexOf('for (;;);') === 0) return true;
+    if (/javascript|ecmascript/i.test(ct)) return t.charAt(0) === '{' || t.charAt(0) === '[';
+    var c = t.charAt(0);
     return c === '{' || c === '[' || /[0-9a-f]/i.test(c);
   }
   window.__pbKeep = keep;
@@ -351,6 +356,8 @@ def documents(text: str) -> list:
     s = (text or "").lstrip()
     if s.startswith(")]}'"):
         s = s.split("\n", 1)[1] if "\n" in s else ""
+    if s.startswith("for (;;);"):                          # Meta's guard in front of its JSON
+        s = s[len("for (;;);"):]
     out: list = []
     try:
         out = [json.loads(s)]
