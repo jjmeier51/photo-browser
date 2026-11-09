@@ -15,6 +15,14 @@ post a run left behind, isn't missed.
 (`.instagram.json`, shared with the iPhone — social.py) + every post id named in the folder and its
 subfolders (`ids_on_disk`, the iPhone's `postIDsOnDisk`).
 
+**Finding the account** (`look_up`, Nov 9): `web_profile_info` answers 404 or `"user": null` for accounts that
+plainly exist when it's throttling, and `web/search/topsearch/` is gone from the site — so the old "no account named
+@…" came for real, public, correctly spelled handles. Now four ways in turn: `web_profile_info` (the declared web
+app id, then the standard one — another app's id on the home page, Threads' say, is never used); the profile page
+itself, whose ids are each confirmed by `users/<id>/info/` (the page names the viewer too); then the site's searches
+(`fbsearch/web/top_serp/`, topsearch, `users/search/`) — an exact username match only. "No such account" is said
+only when the profile page itself says it; otherwise the problem line lists what each step answered.
+
 **How it asks Instagram.** Through the logged-in browser: every API call is a `fetch()` from a page on
 www.instagram.com (`API_JS`, the iPhone's `InstagramWebFetcher`) — the browser's own cookies and headers,
 so it's exactly what Instagram's site sends. The run is a generator: it yields `("api", url, form,
@@ -114,6 +122,69 @@ def profile_from_search(doc: dict, handle: str) -> Profile | None:
             return Profile(uid, u.get("username") or handle, u.get("full_name") or "",
                            u.get("profile_pic_url") or "", 0, u.get("is_private", True) is not False)
     return None
+
+
+def profile_from_user(user: dict, handle: str) -> Profile | None:
+    """From a full user object (`users/<id>/info/`'s "user") — only when it's the handle asked for."""
+    if not isinstance(user, dict) or (user.get("username") or "").lower() != handle.lower():
+        return None
+    uid = id_string(user.get("pk")) or id_string(user.get("pk_id")) or id_string(user.get("id"))
+    if not uid:
+        return None
+    hd = user.get("hd_profile_pic_url_info") if isinstance(user.get("hd_profile_pic_url_info"), dict) else {}
+    return Profile(uid, user.get("username") or handle, user.get("full_name") or "",
+                   hd.get("url") or user.get("profile_pic_url") or "", int(user.get("media_count") or 0),
+                   user.get("is_private", True) is not False)
+
+
+def profile_in(doc, handle: str, depth: int = 0) -> Profile | None:
+    """Any answer (a search of whichever kind Instagram serves this year): the first object whose username is
+    the handle and that has an id."""
+    if depth > 12:
+        return None
+    if isinstance(doc, dict):
+        if (doc.get("username") or "").lower() == handle.lower() and \
+                (id_string(doc.get("pk")) or id_string(doc.get("pk_id")) or id_string(doc.get("id"))):
+            return Profile(id_string(doc.get("pk")) or id_string(doc.get("pk_id")) or id_string(doc.get("id")),
+                           doc.get("username"), doc.get("full_name") or "", doc.get("profile_pic_url") or "", 0,
+                           doc.get("is_private", True) is not False)
+        for v in doc.values():
+            if isinstance(v, (dict, list)) and (p := profile_in(v, handle, depth + 1)):
+                return p
+    elif isinstance(doc, list):
+        for v in doc:
+            if isinstance(v, (dict, list)) and (p := profile_in(v, handle, depth + 1)):
+                return p
+    return None
+
+
+_PAGE_IDS = (r'"profilePage_(\d+)"', r'"profile_id"\s*:\s*"(\d+)"', r'"target_id"\s*:\s*"(\d+)"',
+             r'"page_id"\s*:\s*"profilePage_(\d+)"', r'"owner_id"\s*:\s*"(\d+)"', r'"user_id"\s*:\s*"(\d+)"')
+
+
+def ids_in_page(html: str, handle: str = "") -> list[str]:
+    """The account ids a profile page names, surest first (an id written beside the handle itself) — each is
+    checked against the handle before it's used (`users/<id>/info/`): the page also names the logged-in viewer
+    and people it suggests."""
+    out: list[str] = []
+    pats = list(_PAGE_IDS)
+    if handle:
+        h = re.escape(handle)
+        pats = [rf'"(?:pk|id|pk_id)"\s*:\s*"?(\d+)"?\s*,\s*"username"\s*:\s*"{h}"',
+                rf'"username"\s*:\s*"{h}"[^{{}}]{{0,600}}?"(?:pk|id|pk_id)"\s*:\s*"?(\d+)'] + pats
+    for pat in pats:
+        for m in re.finditer(pat, html or ""):
+            if m.group(1) not in out:
+                out.append(m.group(1))
+    return out
+
+
+def page_missing(status: int, html: str) -> bool:
+    """Instagram's own "Sorry, this page isn't available." for a handle with no account."""
+    if status == 404:
+        return True
+    h = (html or "")[:400_000]
+    return "httpErrorPage" in h or "Sorry, this page isn" in h or "Page Not Found" in h
 
 
 def refusal(status: int, text: str) -> str:
@@ -440,11 +511,11 @@ def api_js(ident: str, url: str, form: str | None, app_id: str) -> tuple[str, st
 
 def app_id_from(home_html: str) -> str:
     """The app id the home page Instagram serves this browser declares."""
-    m = re.search(r'"X-IG-App-ID":"(\d{6,})"', home_html)
-    if m:
-        return m.group(1)
-    m = re.search(r'"appId":"(\d{6,})"', home_html)
-    return m.group(1) if m and m.group(1) in WEB_APP_IDS else APP_ID
+    for pat in (r'"X-IG-App-ID":"(\d{6,})"', r'"appId":"(\d{6,})"', r'"app_id":"(\d{6,})"'):
+        for m in re.finditer(pat, home_html or ""):
+            if m.group(1) in WEB_APP_IDS:                  # another app's id (Threads, ads…) answers nothing here
+                return m.group(1)
+    return APP_ID
 
 
 # ----------------------------------------------------------------------------- a run
@@ -540,6 +611,58 @@ def _crawl(calls: _Calls, kind: str, profile: Profile, folder: Path, already: se
     return failure
 
 
+def _said(name: str, status: int, doc) -> str:
+    """One lookup step's answer, for the log and the problem line."""
+    if not status:
+        return f"{name}: no answer"
+    if 200 <= status < 300:
+        return f"{name}: HTTP {status}, " + ("not this account" if doc is not None else "not JSON")
+    return f"{name}: HTTP {status}"
+
+
+def look_up(calls: _Calls, handle: str):
+    """yield from: (Profile | None, missing, what each step said). Four independent ways, because Instagram
+    turns them off and on — `web_profile_info` answers 404 or `"user": null` for accounts that plainly exist
+    when it's throttling or the app id isn't one it likes, and `web/search/topsearch/` is gone from the site:
+    1. `users/web_profile_info/` (with the app id the site declares, then with the standard web one);
+    2. the profile page itself (www.instagram.com/<handle>/): the ids it names, each confirmed by
+       `users/<id>/info/` — and its "Sorry, this page isn't available" is the only "no such account" believed;
+    3. the site's searches — `fbsearch/web/top_serp/`, `web/search/topsearch/`, `users/search/`.
+    Only a match on the exact handle counts."""
+    tried: list[str] = []
+    q = quote(handle, safe="")
+    ids = [calls.app_id] + ([APP_ID] if calls.app_id != APP_ID else [])
+    for app in ids:
+        calls.app_id = app
+        status, doc, text = yield from calls.call(f"{API}users/web_profile_info/?username={q}")
+        profile = profile_from_info(doc, handle) if doc is not None else None
+        if profile is not None:
+            return profile, False, tried
+        tried.append(_said("profile info" + ("" if app == ids[0] else " (web app id)"), status, doc))
+        if status in (401, 403) or (status and "login" in (text or "")[:2000].lower() and status >= 400):
+            tried[-1] = refusal(status, text)
+    calls.app_id = ids[0]
+    status, _doc, html = yield from calls.call(f"{HOME}{q}/")
+    missing = bool(status) and page_missing(status, html if isinstance(html, str) else "")
+    for uid in ids_in_page(html if isinstance(html, str) and 200 <= status < 300 else "", handle)[:4]:
+        s2, d2, _t2 = yield from calls.call(f"{API}users/{uid}/info/")
+        profile = profile_from_user((d2 or {}).get("user") if isinstance(d2, dict) else None, handle)
+        if profile is not None:
+            return profile, False, tried
+    tried.append("profile page: " + ("not found" if missing else f"HTTP {status}" if status else "no answer"))
+    for name, path in (("search", f"fbsearch/web/top_serp/?enable_metadata=true&query={q}"),
+                       ("top search", f"web/search/topsearch/?context=blended&query={quote(handle.lower(), safe='')}"),
+                       ("user search", f"users/search/?q={q}&count=30")):
+        status, doc, _text = yield from calls.call(API + path)
+        profile = profile_in(doc, handle) if doc is not None else None
+        if profile is not None:
+            return profile, False, tried
+        tried.append(_said(name, status, doc))
+    for line in tried:
+        yield ("note", f"   {line}")
+    return None, missing, tried
+
+
 def run(handle: str, folder: Path, already: set[str], opts: social.Options, since: float = 0,
         known_user_id: str = ""):
     """One profile into `folder` (see the module notes). A generator: yields requests, returns an Outcome."""
@@ -550,25 +673,14 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
         calls.app_id = app_id_from(home_html)
 
     yield ("note", f"Looking up @{handle}…")
-    profile = None
-    problem = ""
-    status, doc, text = yield from calls.call(f"{API}users/web_profile_info/?username={quote(handle, safe='')}")
-    if doc is not None:
-        profile = profile_from_info(doc, handle)
-    missing = status == 404
-    if profile is None:
-        if status and status != 404 and not (200 <= status < 300):
-            problem = refusal(status, text)
-        s2, doc2, _t2 = yield from calls.call(
-            f"{API}web/search/topsearch/?context=blended&query={quote(handle.lower(), safe='')}")
-        if doc2 is not None:
-            profile = profile_from_search(doc2, handle)
+    profile, missing, tried = yield from look_up(calls, handle)
     if profile is None and known_user_id:
         profile = Profile(known_user_id, handle)
+        yield ("note", f"   using @{handle}'s id from the folder's record ({known_user_id})")
     if profile is None:
-        out.problem = (f"Instagram has no account named @{handle} — check the spelling." if missing
-                       else problem or f"Couldn’t open @{handle}. Check the handle, that you’re logged in, "
-                                       "and that the profile is public or one you follow.")
+        out.problem = (f"Instagram has no account named @{handle} — check the spelling." if missing else
+                       f"Couldn’t open @{handle} — " + "; ".join(t.rstrip(". ") for t in tried) + ". Check that you’re logged in in the "
+                       "window above and that the profile is public or one you follow.")
         return out
     out.profile = profile
     yield ("profile", profile)

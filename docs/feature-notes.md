@@ -2231,6 +2231,22 @@ in any 60 s (≈ the old fixed pace — the ceiling, not the gap, bounds the rat
 hidden page for an answer every 40 ms (was 100 + 150 ms) — up to ~150 ms of dead time per read. (5) Files
 6 at a time (was 4): those come from Facebook's photo/video CDN, not its pages. The log ends with pages read.
 
+
+**Nov 9 — "it can't find accounts".** `run` trusted `web_profile_info`'s 404 as "no such account", and its only
+fallback was `web/search/topsearch/`, which the site no longer uses — so real, public, correctly spelled handles
+came back "Instagram has no account named @…" whenever `web_profile_info` was throttling (it answers 404 or
+`"user": null` then). `app_id_from` also took any `X-IG-App-ID` the home page named, another app's included.
+Now `look_up` tries four ways — `web_profile_info` (declared web app id, then 936619743392459), the profile page
+(`ids_in_page`: an id written beside the handle, `profilePage_<id>`, `profile_id`… each confirmed by
+`users/<id>/info/` because the page also names the viewer), `fbsearch/web/top_serp/`, topsearch, `users/search/` —
+taking an exact username match only, and says "no account" only when the profile page itself is Instagram's
+"Sorry, this page isn't available"; otherwise the problem line lists each step's answer. The iPhone's
+`InstagramService.resolveProfile` still has the old two-step lookup — port `look_up` if it shows the same symptom.
+Checked with a scripted Instagram: throttled / null-user / missing / logged-out / foreign app id lookups, and a full
+crawl (two feed pages, carousel `_1…_3`, DASH-over-progressive with audio, tagged carousel → only the tagged slide,
+reels without the feed's duplicate, stories incl. a subscriber reel without the duplicate, two highlights into
+their own folders), second run downloads nothing.
+
 ### 7.4f Fanfix in Safe Finder — `mac/fanfix.py`, `mac/fanfix_downloader.py` (Nov 7, 2026; reworked the same day)
 
 The person's own purchased content from Fanfix creators (subscriptions, bought posts and messages), for a
