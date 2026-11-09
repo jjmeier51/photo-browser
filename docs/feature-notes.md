@@ -2242,6 +2242,12 @@ Now `look_up` tries four ways — `web_profile_info` (declared web app id, then 
 taking an exact username match only, and says "no account" only when the profile page itself is Instagram's
 "Sorry, this page isn't available"; otherwise the problem line lists each step's answer. The iPhone's
 `InstagramService.resolveProfile` still has the old two-step lookup — port `look_up` if it shows the same symptom.
+Same day, a real run: `web_profile_info` answered **429** to the very first call, and the old retry (5/15/45 s on
+the same endpoint, then the same again for every step) sat waiting. Lookup steps now never wait a 429 out — they
+move to the next way (`call(retries=0)`); the profile page goes first; an id written beside the handle in it
+(`ids_beside`) is taken even if `users/<id>/info/` is throttled; all ways throttled → one 60 s pause + one retry, then
+a plain "Instagram is limiting requests from this account — wait 10–15 minutes" (pressing Download again and again
+keeps such a limit going). Login problems are said once. The crawl's backoff became 15/45/120 s.
 Checked with a scripted Instagram: throttled / null-user / missing / logged-out / foreign app id lookups, and a full
 crawl (two feed pages, carousel `_1…_3`, DASH-over-progressive with audio, tagged carousel → only the tagged slide,
 reels without the feed's duplicate, stories incl. a subscriber reel without the duplicate, two highlights into
