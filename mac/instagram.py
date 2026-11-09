@@ -194,11 +194,14 @@ def ids_in_page(html: str, handle: str = "") -> list[str]:
 
 
 def page_missing(status: int, html: str) -> bool:
-    """Instagram's own "Sorry, this page isn't available." for a handle with no account."""
+    """The profile page's own title saying there's no such page — read from <title> only: every Instagram page
+    carries "Sorry, this page isn't available" and "httpErrorPage" in its built-in strings and scripts, existing
+    accounts' included (believing those said "no account" for real ones, Nov 9). A 404 counts too. Even then it's
+    only one witness: `look_up` says "no account" only when `web_profile_info` agrees."""
     if status == 404:
         return True
-    h = (html or "")[:400_000]
-    return "httpErrorPage" in h or "Sorry, this page isn" in h or "Page Not Found" in h
+    m = re.search(r"<title[^>]*>([^<]{0,300})</title>", html or "", re.I)
+    return bool(m) and "page not found" in m.group(1).lower()
 
 
 def refusal(status: int, text: str) -> str:
@@ -489,6 +492,10 @@ API_JS = r"""(function () {
       'X-IG-WWW-Claim': (() => { try { return sessionStorage.getItem('www-claim-v2') || '0'; } catch (e) { return '0'; } })()
     };
     if (m) headers['X-CSRFToken'] = m[1];
+    if (!appID) {                                   // a page, read as the browser reads one: no API headers
+      for (const k of Object.keys(headers)) delete headers[k];
+      headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+    }
     const init = { method: form === null ? 'GET' : 'POST', headers, credentials: 'include' };
     if (form !== null) { headers['Content-Type'] = 'application/x-www-form-urlencoded'; init.body = form; }
     const ctl = new AbortController();
@@ -548,7 +555,7 @@ class _Calls:
         self.app_id = app_id
         self.penalty = 0.0
 
-    def call(self, url: str, form: str | None = None, retries: int | None = None):
+    def call(self, url: str, form: str | None = None, retries: int | None = None, page: bool = False):
         """yield from: (status, parsed JSON or None, raw text). Retries "slow down" and server errors — `retries`
         times (all of BACKOFF by default; 0 for a lookup step, which moves on to another way instead)."""
         status, text = 0, ""
@@ -556,7 +563,7 @@ class _Calls:
         for attempt in range(len(backoff) + 1):
             yield ("sleep", GAP * (1 + random.uniform(-JITTER, JITTER)) + self.penalty)
             self.penalty = max(0.0, self.penalty - GAP)
-            status, text = yield ("api", url, form, self.app_id)
+            status, text = yield ("api", url, form, "" if page else self.app_id)
             if status == 429 or status >= 500 or status == 0:
                 self.penalty = min(self.penalty + 2.0, 10.0)
                 if attempt < len(backoff):
@@ -650,7 +657,7 @@ def look_up(calls: _Calls, handle: str):
     own limit. Only when every way was throttled is there one pause and one quiet retry. Only an exact handle
     counts."""
     q = quote(handle, safe="")
-    missing = False
+    missing = page_gone = False
     for attempt in range(2):
         tried: list[str] = []
         throttled = 0
@@ -665,10 +672,10 @@ def look_up(calls: _Calls, handle: str):
             else:
                 tried.append(_said(name, status, doc))
 
-        status, _doc, html = yield from calls.call(f"{HOME}{q}/", retries=0)
+        status, _doc, html = yield from calls.call(f"{HOME}{q}/", retries=0, page=True)
         html = html if isinstance(html, str) else ""
-        missing = bool(status) and status != 429 and page_missing(status, html)
-        page_ok = 200 <= status < 300 and not missing
+        page_gone = bool(status) and status != 429 and page_missing(status, html)
+        page_ok = 200 <= status < 300 and not page_gone
         beside = ids_beside(html, handle) if page_ok else []
         anchored_id = beside[0] if beside else ""
         for uid in (ids_in_page(html, handle)[:4] if page_ok else []):
@@ -685,10 +692,10 @@ def look_up(calls: _Calls, handle: str):
         if status == 429:
             note("profile page", status)
         else:
-            tried.append("profile page: " + ("not found" if missing else "no account id in it" if page_ok
+            tried.append("profile page: " + ("says not found" if page_gone else
+                                             f"HTTP {status}, no account id in it" if page_ok
                                              else f"HTTP {status}" if status else "no answer"))
-        if missing:
-            break
+        info_gone = False
         apps = [calls.app_id] + ([APP_ID] if calls.app_id != APP_ID else [])
         for app in apps:
             calls.app_id = app
@@ -696,6 +703,7 @@ def look_up(calls: _Calls, handle: str):
             profile = profile_from_info(doc, handle) if doc is not None else None
             if profile is not None:
                 return profile, False, tried
+            info_gone = info_gone or status == 404
             note("profile info" + ("" if app == apps[0] else " (web app id)"), status, doc, text)
             if status == 429:
                 break                                        # the same endpoint again won't answer either
@@ -708,6 +716,7 @@ def look_up(calls: _Calls, handle: str):
             if profile is not None:
                 return profile, False, tried
             note(name, status, doc, text)
+        missing = page_gone and info_gone                    # two witnesses, and no search found it
         for line in tried:
             yield ("note", f"   {line}")
         if attempt == 0 and throttled and throttled >= len(tried) - 2:
@@ -727,7 +736,7 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
     """One profile into `folder` (see the module notes). A generator: yields requests, returns an Outcome."""
     out = Outcome()
     calls = _Calls()
-    home_status, home_html = yield ("api", HOME, None, APP_ID)
+    home_status, home_html = yield ("api", HOME, None, "")
     if 200 <= home_status < 300:
         calls.app_id = app_id_from(home_html)
 

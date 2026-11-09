@@ -2248,6 +2248,13 @@ move to the next way (`call(retries=0)`); the profile page goes first; an id wri
 (`ids_beside`) is taken even if `users/<id>/info/` is throttled; all ways throttled → one 60 s pause + one retry, then
 a plain "Instagram is limiting requests from this account — wait 10–15 minutes" (pressing Download again and again
 keeps such a limit going). Login problems are said once. The crawl's backoff became 15/45/120 s.
+Then the same handle came back "no account" in a second: the profile-page step trusted "Sorry, this page isn't
+available" / "httpErrorPage" anywhere in the HTML — but **every Instagram page carries those strings** in its
+built-in translations and scripts, existing accounts' included. Now `page_missing` reads only the page's
+`<title>` ("Page not found") or a 404, and "no account" needs two witnesses — that and `web_profile_info`'s 404 —
+with every other way tried first; pages (the profile page, the home page) are fetched plainly, without the API
+headers (`call(page=True)` → app id "" → `API_JS` sends only an HTML Accept). The test's fake pages now carry that
+boilerplate, so this can't pass unnoticed again.
 Checked with a scripted Instagram: throttled / null-user / missing / logged-out / foreign app id lookups, and a full
 crawl (two feed pages, carousel `_1…_3`, DASH-over-progressive with audio, tagged carousel → only the tagged slide,
 reels without the feed's duplicate, stories incl. a subscriber reel without the duplicate, two highlights into
