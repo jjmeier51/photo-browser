@@ -2299,6 +2299,17 @@ crawl (two feed pages, carousel `_1…_3`, DASH-over-progressive with audio, tag
 reels without the feed's duplicate, stories incl. a subscriber reel without the duplicate, two highlights into
 their own folders), second run downloads nothing.
 
+**Then: a false switch to the page.** The next log: profile info throttled (429), then "Instagram refused Safe Finder's
+own requests — asking from the logged-in page from now on", and every feed after that came back "asked for a login".
+The switch came from `users/search/` — a phone-app endpoint the site never calls, which answers 400 to anything — and
+`_api` flipped to the page whenever the page's answer wasn't a refusal (its 404 counted). Now, as on the iPhone: the
+page takes over only when it brings back data (2xx JSON); a page refused later sends the call straight back to the
+direct route; `users/search/` is gone from `look_up`; a throttled lookup uses the folder record's `user_id` at once
+(the iPhone's `knownUserID`) instead of searching on into the limit; and a feed that fails because of the limit is
+reported ("will come next time") rather than read by scrolling the profile page, which only adds to it. Checked
+against a stand-in of that log (lookups 429, a search 400 to direct asks, the page's feed asks told to log in): no
+switch, every feed direct, all 10 files; with a known number the lookup is one call.
+
 ### 7.4f Fanfix in Safe Finder — `mac/fanfix.py`, `mac/fanfix_downloader.py` (Nov 7, 2026; reworked the same day)
 
 The person's own purchased content from Fanfix creators (subscriptions, bought posts and messages), for a

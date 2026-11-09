@@ -837,7 +837,7 @@ def _said(name: str, status: int, doc) -> str:
     return f"{name}: HTTP {status}"
 
 
-def look_up(calls: _Calls, handle: str):
+def look_up(calls: _Calls, handle: str, known_user_id: str = ""):
     """yield from: (Profile | None, missing, what each step said). The iPhone's order (`lookupProfile`), then the
     page as a last resort:
     1. `users/web_profile_info/` — retried through "slow down" (BACKOFF), with the declared web app id, then the
@@ -848,7 +848,10 @@ def look_up(calls: _Calls, handle: str):
     4. the profile page opened in the window (`profile_from_page`) — what it loads to draw the profile, or plainly
        its title "(@handle)": found by handle, everything then read from the pages.
     "No such account" only when the page says it and `web_profile_info` agrees. Once a step has been told to slow
-    down, the rest are asked once each (no retries piling up the wait)."""
+    down, the rest are asked once each (no retries piling up the wait) — and when the folder's record already has
+    the account's number, a throttled lookup stops there and uses it, as the iPhone does (`knownUserID`): every
+    further call only feeds the limit. (`users/search/` is the phone app's, not the site's: it always answered 400,
+    which once read as the session being refused.)"""
     q = quote(handle, safe="")
     tried: list[str] = []
     throttled = 0
@@ -874,11 +877,14 @@ def look_up(calls: _Calls, handle: str):
         info_gone = info_gone or status == 404
         note("profile info" + ("" if app == apps[0] else " (web app id)"), status, doc, text)
         if status == 429:
+            if known_user_id:
+                yield ("note", f"   Instagram is slowing lookups down — using @{handle}'s number from the folder's "
+                               f"record ({known_user_id})")
+                return Profile(known_user_id, handle), False, tried
             break
     calls.app_id = apps[0]
     for name, path in (("top search", f"web/search/topsearch/?context=blended&query={quote(handle.lower(), safe='')}"),
-                       ("search", f"fbsearch/web/top_serp/?enable_metadata=true&query={q}"),
-                       ("user search", f"users/search/?q={q}&count=30")):
+                       ("search", f"fbsearch/web/top_serp/?enable_metadata=true&query={q}")):
         status, doc, text = yield from calls.call(API + path, retries=0 if throttled else 1)
         profile = profile_in(doc, handle) if doc is not None else None
         if profile is not None:
@@ -967,7 +973,7 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
 
     calls.referer = f"{HOME}{quote(handle, safe='')}/"
     yield ("note", f"Looking up @{handle}…")
-    profile, missing, tried = yield from look_up(calls, handle)
+    profile, missing, tried = yield from look_up(calls, handle, known_user_id)
     if profile is None and known_user_id:
         profile = Profile(known_user_id, handle)
         yield ("note", f"   using @{handle}'s id from the folder's record ({known_user_id})")
@@ -1008,6 +1014,10 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
             failure = yield from counting(_crawl(calls, kind, profile, folder, already, since, seen_keys))
             if not failure:
                 return ""
+            if "limiting requests" in failure:
+                yield ("note", f"   Instagram is limiting requests right now — the {label} will come next time "
+                               "(reading the pages would only add to the limit)")
+                return failure
             yield ("note", f"   Instagram's {label} feed didn't answer ({failure.rstrip('.')}) — reading them from the "
                            "profile page instead")
         else:

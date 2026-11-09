@@ -480,16 +480,33 @@ class SocialWindow(QMainWindow):
     def _api(self, url: str, form: str | None, app_id: str, referer: str, cb) -> None:
         """One call, the way the iPhone app's `InstagramService.apiData` makes it: straight from here with the
         login's cookies and the headers Instagram's own site sends (`_direct`); only when Instagram refuses that
-        (400/401/403, a login page — `ig.is_refusal`) is it asked again from the logged-in page, which then takes
-        over for the rest of the window's life once it's let in. Pages themselves (no app id) are read in the
-        page."""
+        (400/401/403, a login page — `ig.is_refusal`) is it asked again from the logged-in page. The page takes
+        over for the rest of the run only once it brings back real data (a 2xx JSON answer) — a 404 or a 429 from
+        it proves nothing, and once switching on a search's 400 sent every feed to a page Instagram then told to
+        log in. If the page is refused later, the call goes straight back to the direct route. Pages themselves
+        (no app id) are read in the page."""
         def in_page(done) -> None:
             start, result = ig.api_js(f"c{next(self.calls)}", url, form, app_id, referer)
             self._call(start, result, lambda r: done((int(r.get("status") or 0), r.get("body") or "")),
                        page=self.api_page())
 
-        if not app_id or getattr(self, "via_browser", False):
+        def good(answer) -> bool:
+            """Data, not just "not refused": a 404 or a 429 from the page proves nothing about its route."""
+            status, text = answer
+            return 200 <= status < 300 and not ig.is_refusal(status, text)
+
+        if not app_id:
             in_page(cb)
+            return
+        if getattr(self, "via_browser", False):
+            def sticky_done(answer) -> None:
+                if not ig.is_refusal(*answer):
+                    cb(answer)
+                    return
+                self.via_browser = False                     # the page is refused now: back to asking directly
+                self._log("   the logged-in page was refused — asking directly again")
+                self._direct(url, form, app_id, referer, cb)
+            in_page(sticky_done)
             return
 
         def direct_done(answer) -> None:
@@ -498,11 +515,11 @@ class SocialWindow(QMainWindow):
                 return
 
             def page_done(again) -> None:
-                if not ig.is_refusal(*again) and not getattr(self, "via_browser", False):
+                if good(again) and not getattr(self, "via_browser", False):
                     self.via_browser = True
                     self._log("   Instagram refused Safe Finder's own requests — asking from the logged-in page "
                               "from now on")
-                cb(again if again[0] else answer)
+                cb(again if good(again) or not answer[0] else answer)
             in_page(page_done)
         self._direct(url, form, app_id, referer, direct_done)
 
