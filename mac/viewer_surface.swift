@@ -543,6 +543,12 @@ public func pbv_set_muted(_ handle: UnsafeMutableRawPointer?, _ on: Int32) {
     withSurface(handle, ()) { $0.player.isMuted = on != 0 }
 }
 
+/// The player's loudness, 0…1 (as AVPlayer.volume: a gain on the sound, not the Mac's own volume).
+@_cdecl("pbv_set_volume")
+public func pbv_set_volume(_ handle: UnsafeMutableRawPointer?, _ volume: Double) {
+    withSurface(handle, ()) { $0.player.volume = Float(max(0, min(1, volume))) }
+}
+
 /// The picture's size in pixels as shown (a video's once it's loaded, a photo's as read); 0 × 0 until known.
 @_cdecl("pbv_content_size")
 public func pbv_content_size(_ handle: UnsafeMutableRawPointer?, _ width: UnsafeMutablePointer<Double>?,

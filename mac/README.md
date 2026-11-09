@@ -353,14 +353,14 @@ several).
   tools, and for videos macOS can't play (MKV, WebM, AVI…), Qt's player is used as before. If it won't build,
   the compiler's message is in `~/Library/Caches/PhotoBrowser/viewer_surface.log`.
 - **Zoom** — the − / Fit / + buttons at the bottom right (or +, −, 0), for photos **and videos**; click the
-  percentage for fit ⇄ actual size. **The mouse wheel zooms** photos and videos, about the pointer (out no further
-  than the fit); on a trackpad or Magic Mouse a two-finger scroll still swipes to the next item (and pans when
+  percentage for fit ⇄ actual size. **The mouse wheel zooms** photos and videos, about the pointer — roll it toward you to zoom
+  in, away to zoom out (out no further than the fit); on a trackpad or Magic Mouse a two-finger scroll still swipes to the next item (and pans when
   zoomed in), and pinch or ⌘-scroll zoom. Double-click toggles fit ⇄ actual size; drag to pan.
   Photos fill the window (a small one is enlarged rather than framed in black). The ones either side are read
   ahead, so ←/→ is instant.
 - **Videos** play and loop, as on the iPhone. Below the picture: the **scrubber** across the whole width —
   click anywhere along it to jump there, or drag (the video holds still while you drag, and hovering shows the
-  time under the pointer) — then ‹ ›, **play/pause**, mute and speed (½×, ¼×, ⅛× — the iPhone's Slo-Mo). J / L
+  time under the pointer) — then ‹ ›, **play/pause**, mute, a **volume slider** (remembered between videos and launches; turning it up takes the mute off) and speed (½×, ¼×, ⅛× — the iPhone's Slo-Mo). J / L
   skip 15 s, , and . step a frame. **Save Frame** saves the frame on screen as a standard-range PNG in a
   "Screenshots" folder beside the video (the iPhone's press-and-hold screenshot); ⋯ ▸ **Export All Frames…**
   opens Export All Frames (below).

@@ -18,13 +18,14 @@ map applied) and AppKit, in HDR on a display with the headroom. Qt still says wh
 pan) and gets every click. Qt's player stays for what AVFoundation can't open (MKV, WebM, AVI…) or turns down,
 and for everything while the Swift library is being built or can't be (no Xcode tools).
 
-- **Photos** (`_ImageStage`): fitted to the window; the mouse wheel, pinch, ⌘-scroll, +/− or the zoom buttons, a double-click
+- **Photos** (`_ImageStage`): fitted to the window; the mouse wheel (toward you zooms in, away zooms out), pinch, ⌘-scroll, +/− or the zoom buttons, a double-click
   toggles fit / actual size at the point clicked, drag to pan. Read with Qt (its HEIC plug-in on the Mac) or,
   failing that, Pillow (pillow-heif), off the main thread, the neighbours read ahead so ←/→ is instant. An HDR
   photo shows Qt's picture first, then macOS's HDR one in its place (`_NativeStage`, the same zoom and pan).
 - **Videos** (`_VideoStage`): AVFoundation on the Mac (Qt Multimedia otherwise) — play/pause, a scrubber you
   click or drag anywhere along (the video pauses while you drag; hovering shows the time there), looping like the
-  iPhone's, ±15 s (J/L), a frame step (, and .), slow motion (½×, ¼×, ⅛×, as the iPhone's Slo-Mo), mute,
+  iPhone's, ±15 s (J/L), a frame step (, and .), slow motion (½×, ¼×, ⅛×, as the iPhone's Slo-Mo), mute and a volume slider (remembered; squared to
+  sound even, `loudness`),
   **zoom** (the same buttons and keys, the mouse wheel, pinch, double-click; under Qt's player, zoomed in, the video is drawn by
   a `QGraphicsVideoItem` that can be scaled and dragged — fitted, by the faster `QVideoWidget`), and **Save
   Frame** (the camera — a standard-range PNG in a "Screenshots" folder beside the video,
@@ -330,8 +331,10 @@ def wheel_zooms(event) -> bool:
 
 
 def wheel_factor(event) -> float:
+    """Wheel toward you (down) zooms in, away from you (up) zooms out — the way the person asked for it (Nov 9;
+    it was the other way round)."""
     steps = event.angleDelta().y() or event.angleDelta().x()     # ⇧-scroll turns a wheel's notches sideways
-    return WHEEL_STEP ** steps
+    return WHEEL_STEP ** -steps
 
 
 def _double_click_ms() -> int:
@@ -746,6 +749,26 @@ class _NativeStage(QWidget):
 
 # ----------------------------------------------------------------------------- the video stage
 
+def saved_volume() -> float:
+    """The viewer's volume, 0…1, as last set (full at first)."""
+    from PySide6.QtCore import QSettings
+    try:
+        return max(0.0, min(1.0, float(QSettings("PhotoBrowser", "SafeFinder").value("viewer/volume", 1.0))))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def remember_volume(volume: float) -> None:
+    from PySide6.QtCore import QSettings
+    QSettings("PhotoBrowser", "SafeFinder").setValue("viewer/volume", round(volume, 3))
+
+
+def loudness(volume: float) -> float:
+    """The slider's 0…1 to the players' gain. Both take a straight amplitude, which makes the top half of a
+    linear slider sound all the same; squared, each part of the slider changes the sound about evenly."""
+    return max(0.0, min(1.0, volume)) ** 2
+
+
 def multimedia():
     """Qt Multimedia's classes, or None when this PySide6 hasn't got them."""
     try:
@@ -786,6 +809,7 @@ class _VideoStage(QWidget):
         self.backend = ""                      # "native", "qt", or "" (nothing playing)
         self._loop = True
         self._muted = False
+        self._volume = saved_volume()
         self._autoplay = True
         self._length_ms = 0
         self._poster_image: QImage | None = None
@@ -806,6 +830,7 @@ class _VideoStage(QWidget):
             self.video.setStyleSheet("background: black;")
             self.player = QMediaPlayer(self)
             self.audio = QAudioOutput(self)
+            self.audio.setVolume(loudness(self._volume))
             self.player.setAudioOutput(self.audio)
             self.player.setVideoOutput(self.video)
             # Only while Qt is the one playing: a late "stopped" from the last video mustn't reach the bars
@@ -866,6 +891,7 @@ class _VideoStage(QWidget):
             s = native.surface
             s.set_loop(self._loop)
             s.set_muted(self._muted)
+            s.set_volume(loudness(self._volume))
             s.set_rate(1.0)
             if autoplay:
                 s.play()
@@ -1009,6 +1035,15 @@ class _VideoStage(QWidget):
             self.native.surface.set_muted(muted)
         if self.audio is not None:
             self.audio.setMuted(muted)
+
+    def set_volume(self, volume: float) -> None:
+        """0…1 as the slider shows it; the players get `loudness` of it."""
+        self._volume = max(0.0, min(1.0, volume))
+        gain = loudness(self._volume)
+        if self.native is not None and self.native.surface is not None:
+            self.native.surface.set_volume(gain)
+        if self.audio is not None:
+            self.audio.setVolume(gain)
 
     def position_s(self) -> float:
         s = self._surface()
@@ -1214,6 +1249,10 @@ QSlider#Scrubber {{ min-height: 18px; }}
 QSlider#Scrubber::groove:horizontal {{ height: 4px; background: rgba(255,255,255,0.25); border-radius: 2px; }}
 QSlider#Scrubber::sub-page:horizontal {{ background: #F2F2F7; border-radius: 2px; }}
 QSlider#Scrubber::handle:horizontal {{ background: #FFFFFF; width: 13px; height: 13px; margin: -5px 0; border-radius: 6px; }}
+QSlider#Volume {{ min-height: 18px; }}
+QSlider#Volume::groove:horizontal {{ height: 3px; background: rgba(255,255,255,0.25); border-radius: 1px; }}
+QSlider#Volume::sub-page:horizontal {{ background: #F2F2F7; border-radius: 1px; }}
+QSlider#Volume::handle:horizontal {{ background: #FFFFFF; width: 11px; height: 11px; margin: -4px 0; border-radius: 5px; }}
 #ViewerToast {{ background: rgba(44,44,46,0.95); color: #F2F2F7; border-radius: 10px; padding: 6px 14px; }}
 """
 FAVORITE_RED = "#FF375F"
@@ -1446,13 +1485,23 @@ class MediaViewer(QWidget):
         self.play_btn = _bar_button("", "Play (Space)", lambda: self.video.toggle(), "play")
         self.mute_btn = _bar_button("", "Mute (M)", self._toggle_mute, "speaker")
         self.mute_btn.setCheckable(True)
+        self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume.setObjectName("Volume")
+        self.volume.setRange(0, 100)
+        self.volume.setValue(round(self.video._volume * 100))
+        self.volume.setFixedWidth(96)
+        self.volume.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.volume.setToolTip("Volume")
+        self.volume.valueChanged.connect(self._volume_moved)
+        if self.volume.value() == 0:
+            self.mute_btn.setIcon(icon("speaker.off"))
         self.speed_btn = _bar_button("1×", "Speed — slow motion like the iPhone's Slo-Mo", None)
         menu = QMenu(self.speed_btn)
         for label, rate in (("1×", 1.0), ("½×", 0.5), ("¼× (Slo-Mo)", 0.25), ("⅛× (Slo-Mo)", 0.125), ("2×", 2.0)):
             menu.addAction(label, lambda r=rate, t=label.split()[0]: (self.video.set_rate(r), self.speed_btn.setText(t)))
         self.speed_btn.setMenu(menu)
         self.speed_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.play_controls = [self.play_btn, self.mute_btn, self.speed_btn]
+        self.play_controls = [self.play_btn, self.mute_btn, self.volume, self.speed_btn]
         for b in self.play_controls:
             row.addWidget(b)
         row.addStretch(1)
@@ -1729,7 +1778,18 @@ class MediaViewer(QWidget):
     def _toggle_mute(self) -> None:
         on = self.mute_btn.isChecked()
         self.video.set_muted(on)
-        self.mute_btn.setIcon(icon("speaker.off" if on else "speaker"))
+        self.mute_btn.setIcon(icon("speaker.off" if on or self.volume.value() == 0 else "speaker"))
+
+    def _volume_moved(self, value: int) -> None:
+        """The volume slider: the player follows, it's remembered for the next video and the next launch, and
+        turning it up takes the mute off (as the Mac's own volume does)."""
+        self.video.set_volume(value / 100)
+        remember_volume(value / 100)
+        if value > 0 and self.mute_btn.isChecked():
+            self.mute_btn.setChecked(False)
+            self.video.set_muted(False)
+        self.mute_btn.setIcon(icon("speaker.off" if self.mute_btn.isChecked() or value == 0 else "speaker"))
+        self.volume.setToolTip(f"Volume {value}%")
 
     # ------------------------------------------------------------------ resolution, HDR, labels
     def _show_badges(self, path: str) -> None:

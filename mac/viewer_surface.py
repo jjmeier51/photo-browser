@@ -122,6 +122,14 @@ def _declare(lib: ctypes.CDLL) -> None:
         fn = getattr(lib, name)
         fn.argtypes = args
         fn.restype = res
+    for name, (args, res) in OPTIONAL.items():           # newer additions: a library built before them lacks them
+        fn = getattr(lib, name, None)
+        if fn is not None:
+            fn.argtypes = args
+            fn.restype = res
+
+
+OPTIONAL = {"pbv_set_volume": ([ctypes.c_void_p, ctypes.c_double], None)}
 
 
 def library() -> ctypes.CDLL | None:
@@ -220,6 +228,11 @@ class Surface:
 
     def set_muted(self, on: bool) -> None:
         self._call("pbv_set_muted", 1 if on else 0)
+
+    def set_volume(self, volume: float) -> None:
+        """0…1. Does nothing with a library built before it existed (it's rebuilt when the source is newer)."""
+        if self.handle and hasattr(self.lib, "pbv_set_volume"):
+            self.lib.pbv_set_volume(self.handle, float(volume))
 
     def content_size(self) -> tuple[float, float]:
         w, h = ctypes.c_double(0), ctypes.c_double(0)
