@@ -2279,6 +2279,21 @@ stories from /stories/<handle>/, highlights from the profile page's list; owner 
 (`_owned`, `_theirs`). Whenever the page's data didn't name the account, what it loaded is saved to
 `~/Library/Logs/Safe Finder/instagram-<handle>-<time>.json` (`dump_visit`) and the log says where — the next fix comes
 from Instagram's real answers.
+**Then: the iPhone's own route, ported.** The person: "it downloaded some posts and then got rate limited; it couldn't
+find highlights — the iOS app does it nearly perfectly." The iPhone's `InstagramService.apiData` makes every call
+**directly** (URLSession) with the login's cookies and the site's own headers — Referer = the profile page, Sec-Fetch
+same-origin, X-IG-App-ID 936619743392459, X-ASBD-ID, X-IG-WWW-Claim 0, X-CSRFToken — and only on a refusal
+(400/401/403/login page, `isRefusal`) asks again from its `InstagramWebFetcher` page, which then takes over; it paces
+with `Pacer(baseMS: 170, jitter: 0.5)` + rare pauses + a 2.5 s-per-429 penalty, retries after 2 s × attempt, and gets
+highlights from `highlights_tray` + `reels_media`. Safe Finder had copied only the fallback (every call a fetch from a
+bare robots.txt page — Referer robots.txt) with slow, heavy pacing, and the page-reading workaround made the page fire
+its own GraphQL on top (more rate limit). Now: `SocialWindow._api` → `_direct` (urllib on a worker thread, the browser's
+cookies incl. HttpOnly, the browser's UA = the login's) → on `ig.is_refusal` the in-page fetch (now with
+`referrer` = the profile page) and `via_browser` from then on; `_Calls` paces like `Pacer`; `look_up` is the iPhone's
+order (profile info → topsearch/top_serp/users search → the profile page's HTML ids) with the page opened in the window
+only last. Tested with the real window against a stand-in whose API answers only iPhone-shaped requests (404 to a
+robots.txt Referer): 11 of 11 calls answered, no page opened, posts (2 pages), tagged, reel, 2 stories and both
+highlights in 3 s; against the all-refusing stand-in the page fallback still gets all 11 files.
 Checked with a scripted Instagram: throttled / null-user / missing / logged-out / foreign app id lookups, and a full
 crawl (two feed pages, carousel `_1…_3`, DASH-over-progressive with audio, tagged carousel → only the tagged slide,
 reels without the feed's duplicate, stories incl. a subscriber reel without the duplicate, two highlights into

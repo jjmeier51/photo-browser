@@ -454,10 +454,7 @@ class SocialWindow(QMainWindow):
             self._after_crawl()
             return
         if kind == "api":
-            url, form, app_id = req[1], req[2], req[3]
-            start, result = ig.api_js(f"c{next(self.calls)}", url, form, app_id)
-            self._call(start, result, lambda r: cb((int(r.get("status") or 0), r.get("body") or "")),
-                       page=self.api_page())
+            self._api(req[1], req[2], req[3], req[4] if len(req) > 4 else self.k["referer"], cb)
         elif kind == "visit":
             self._visit(req[1], bool(req[2]), cb, req[3] if len(req) > 3 else "")
         elif kind == "page":
@@ -478,6 +475,76 @@ class SocialWindow(QMainWindow):
             cb(None)
         else:
             raise ValueError(kind)
+
+    # ------------------------------------------------------------------ asking Instagram (the iPhone's route)
+    def _api(self, url: str, form: str | None, app_id: str, referer: str, cb) -> None:
+        """One call, the way the iPhone app's `InstagramService.apiData` makes it: straight from here with the
+        login's cookies and the headers Instagram's own site sends (`_direct`); only when Instagram refuses that
+        (400/401/403, a login page — `ig.is_refusal`) is it asked again from the logged-in page, which then takes
+        over for the rest of the window's life once it's let in. Pages themselves (no app id) are read in the
+        page."""
+        def in_page(done) -> None:
+            start, result = ig.api_js(f"c{next(self.calls)}", url, form, app_id, referer)
+            self._call(start, result, lambda r: done((int(r.get("status") or 0), r.get("body") or "")),
+                       page=self.api_page())
+
+        if not app_id or getattr(self, "via_browser", False):
+            in_page(cb)
+            return
+
+        def direct_done(answer) -> None:
+            if not ig.is_refusal(*answer):
+                cb(answer)
+                return
+
+            def page_done(again) -> None:
+                if not ig.is_refusal(*again) and not getattr(self, "via_browser", False):
+                    self.via_browser = True
+                    self._log("   Instagram refused Safe Finder's own requests — asking from the logged-in page "
+                              "from now on")
+                cb(again if again[0] else answer)
+            in_page(page_done)
+        self._direct(url, form, app_id, referer, direct_done)
+
+    def _cookie(self, name: str) -> str:
+        for domain, jar in self.cookies.items():
+            if (domain == self.k["domain"] or domain.endswith("." + self.k["domain"])) and jar.get(name):
+                return jar[name]
+        return ""
+
+    def _direct(self, url: str, form: str | None, app_id: str, referer: str, done) -> None:
+        """The request on a worker thread with the iPhone's `apiRequest` headers — the login's cookies (the
+        browser's own, HttpOnly session included), its CSRF token, this browser's User-Agent (the one the login
+        was made with), the profile page as Referer, the same-origin Sec-Fetch trio. Answers (status, text) on the
+        GUI thread."""
+        import urllib.error
+        import urllib.request
+        headers = {
+            "Accept": "*/*", "X-IG-App-ID": app_id, "X-ASBD-ID": ig.ASBD_ID, "X-IG-WWW-Claim": "0",
+            "X-Requested-With": "XMLHttpRequest", "X-CSRFToken": self._cookie("csrftoken"),
+            "Cookie": self.cookie_header(), "User-Agent": self.ua, "Referer": referer,
+            "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-origin",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        if form is not None:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+
+        def work() -> None:
+            try:
+                req = urllib.request.Request(url, data=form.encode() if form is not None else None, headers=headers,
+                                             method="POST" if form is not None else "GET")
+                with urllib.request.urlopen(req, timeout=30, context=sc.ssl_context()) as r:
+                    answer = (r.status, r.read(40_000_000).decode("utf-8", "replace"))
+            except urllib.error.HTTPError as e:
+                try:
+                    body = e.read(2_000_000).decode("utf-8", "replace")
+                except OSError:
+                    body = ""
+                answer = (e.code, body)
+            except Exception as e:  # noqa: BLE001 — no connection, a timeout: an unanswered call
+                answer = (0, str(e))
+            self.bridge.call.emit(done, answer)
+        threading.Thread(target=work, daemon=True, name="instagram-api").start()
 
     def api_page(self) -> QWebEnginePage:
         """Where Instagram's API is asked from: the profile page the window opened (`_visit`) while it's still on

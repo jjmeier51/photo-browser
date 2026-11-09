@@ -39,7 +39,16 @@ account's suggested posts left out); stories from instagram.com/stories/<handle>
 page, the desktop site's "View story" pressed (`reel_items_in`); highlight names from the profile page's data
 (`highlights_in`).
 
-**How it asks Instagram.** Through the logged-in browser: every API call is a `fetch()` from a page on
+**How it asks Instagram — the iPhone's way (Nov 9).** As `InstagramService.apiData` does: each call straight from
+here (`SocialWindow._direct`) with the login's cookies and the headers Instagram's own site sends — the profile page
+as Referer (`_Calls.referer`), the same-origin Sec-Fetch trio, X-IG-App-ID / X-ASBD-ID / X-CSRFToken / X-IG-WWW-Claim;
+only when Instagram refuses that (`is_refusal`: 400/401/403, a login page) is the call asked again from the logged-in
+page, which then takes over (`via_browser`). Paced as the iPhone paces (`_Calls.call`: 0.17 s ± half, a rare 0.5–1.5 s
+pause, +2.5 s per "slow down" up to 12 s easing off per call, retries after 2 s and 4 s). The lookup runs in the
+iPhone's order (`look_up`), and reading the pages themselves is only the last resort. Before this every call was a
+`fetch()` from a bare robots.txt page, which Instagram answered 404 for everything.
+
+**The in-page route.** Every API call made in the page is a `fetch()` from a page on
 www.instagram.com (`API_JS`, the iPhone's `InstagramWebFetcher`) — the browser's own cookies and headers,
 so it's exactly what Instagram's site sends. The run is a generator: it yields `("api", url, form,
 app_id)` and gets back `(status, text)`; `("sleep", s)` spaces the calls out (and backs off when Instagram
@@ -77,9 +86,10 @@ STORIES = "Stories"
 KEYWORD = "Instagram"
 SEEN_RUN = 15                    # posts in a row already done before a crawl may stop…
 FLOOR = 14 * 86_400              # …once they're older than this before the last run
-GAP, JITTER = 0.6, 0.25          # seconds between API calls
-BACKOFF = (15, 45, 120)          # seconds to wait after "slow down" (429) or a server error, then again (its limits
-                                 # last minutes; the lookup doesn't wait them out — it tries the next way, `look_up`)
+GAP, JITTER = 0.17, 0.5          # seconds between API calls, ± half — the iPhone's InstagramService.Pacer
+RARE_PAUSE = (0.05, 0.5, 1.5)    # 1 call in 20 waits 0.5–1.5 s more: a person stops now and then
+PENALTY_STEP, PENALTY_MAX = 2.5, 12.0   # each "slow down" widens the gap this much (up to this), easing off per call
+BACKOFF = (2, 4)                 # seconds before retrying a throttled / failed call (the iPhone's 2 s × attempt)
 LOOKUP_PAUSE = 60                # every way into the profile throttled: one pause, then one quiet retry
 
 MEDIA_EXTS = {"jpg", "jpeg", "png", "webp", "heic", "mp4", "mov", "m4v", "webm"}
@@ -642,7 +652,7 @@ def destination(person: str | Path, handle: str) -> Path:
 
 API_JS = r"""(function () {
   window.__pbig = window.__pbig || {};
-  const id = __ID__, url = __URL__, form = __FORM__, appID = __APP__, asbd = __ASBD__;
+  const id = __ID__, url = __URL__, form = __FORM__, appID = __APP__, asbd = __ASBD__, ref = __REF__;
   window.__pbig[id] = null;
   (async () => {
     const m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
@@ -656,6 +666,7 @@ API_JS = r"""(function () {
       headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
     }
     const init = { method: form === null ? 'GET' : 'POST', headers, credentials: 'include' };
+    if (ref) init.referrer = ref;                   // the profile page, as Instagram's own site asks from
     if (form !== null) { headers['Content-Type'] = 'application/x-www-form-urlencoded'; init.body = form; }
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 45000);
@@ -681,11 +692,11 @@ RESULT_JS = r"""(function () {
 })()"""
 
 
-def api_js(ident: str, url: str, form: str | None, app_id: str) -> tuple[str, str]:
+def api_js(ident: str, url: str, form: str | None, app_id: str, referer: str = "") -> tuple[str, str]:
     """The start and result scripts for one call (`fetch` resolves later; the result is polled)."""
     q = json.dumps
     start = (API_JS.replace("__ID__", q(ident)).replace("__URL__", q(url)).replace("__FORM__", q(form))
-             .replace("__APP__", q(app_id)).replace("__ASBD__", q(ASBD_ID)))
+             .replace("__APP__", q(app_id)).replace("__ASBD__", q(ASBD_ID)).replace("__REF__", q(referer)))
     return start, RESULT_JS.replace("__ID__", q(ident))
 
 
@@ -707,26 +718,50 @@ class Outcome:
     problem: str = ""                # why the profile couldn't be read, or a crawl failed
 
 
+def is_refusal(status: int, text: str) -> bool:
+    """Whether Instagram turned a call away for who/what was asking (rather than "slow down" or "no such thing"):
+    400/401/403, a login or checkpoint flag, or a page where JSON belongs — the iPhone's `isRefusal`. A refused
+    call is asked again from the logged-in page (the window's route)."""
+    if status in (400, 401, 403):
+        return True
+    try:
+        j = json.loads(text)
+    except (ValueError, TypeError):
+        return 200 <= status < 300
+    if not isinstance(j, dict):
+        return False
+    msg = str(j.get("message") or "")
+    return j.get("require_login") is True or "checkpoint_url" in j or \
+        msg in ("checkpoint_required", "challenge_required", "login_required", "useragent mismatch")
+
+
 class _Calls:
-    """API calls with the spacing and the backing off (a generator helper)."""
+    """API calls with the iPhone's pacing (a generator helper): a gap of GAP ± JITTER, a rare longer pause, and a
+    penalty that widens the gap after each "slow down" and eases off call by call. Every call says which page it's
+    asked from (`referer`, the profile page once the handle is known) — what Instagram's own site sends."""
 
     def __init__(self, app_id: str = APP_ID) -> None:
         self.app_id = app_id
         self.penalty = 0.0
+        self.referer = HOME
 
     def call(self, url: str, form: str | None = None, retries: int | None = None, page: bool = False):
-        """yield from: (status, parsed JSON or None, raw text). Retries "slow down" and server errors — `retries`
-        times (all of BACKOFF by default; 0 for a lookup step, which moves on to another way instead)."""
+        """yield from: (status, parsed JSON or None, raw text). A throttled (429), failed (5xx) or unanswered call is
+        tried again `retries` times (both of BACKOFF by default) — then it's the caller's to move on."""
         status, text = 0, ""
         backoff = BACKOFF if retries is None else BACKOFF[:retries]
         for attempt in range(len(backoff) + 1):
-            yield ("sleep", GAP * (1 + random.uniform(-JITTER, JITTER)) + self.penalty)
+            gap = GAP * (1 + random.uniform(-JITTER, JITTER)) + self.penalty
+            if random.random() < RARE_PAUSE[0]:
+                gap += random.uniform(RARE_PAUSE[1], RARE_PAUSE[2])
+            yield ("sleep", gap)
             self.penalty = max(0.0, self.penalty - GAP)
-            status, text = yield ("api", url, form, "" if page else self.app_id)
+            status, text = yield ("api", url, form, "" if page else self.app_id, self.referer)
             if status == 429 or status >= 500 or status == 0:
-                self.penalty = min(self.penalty + 2.0, 10.0)
+                if status == 429:
+                    self.penalty = min(self.penalty + PENALTY_STEP, PENALTY_MAX)
                 if attempt < len(backoff):
-                    yield ("note", f"   Instagram asked to slow down (HTTP {status}) — waiting {backoff[attempt]} s")
+                    yield ("note", f"   Instagram asked to slow down (HTTP {status}) — trying again in {backoff[attempt]} s")
                     yield ("sleep", backoff[attempt])
                     continue
             break
@@ -803,115 +838,86 @@ def _said(name: str, status: int, doc) -> str:
 
 
 def look_up(calls: _Calls, handle: str):
-    """yield from: (Profile | None, missing, what each step said). Several independent ways, because Instagram
-    turns them off and on — `web_profile_info` answers 404 or `"user": null` for accounts that plainly exist
-    when it's throttling (or 429 straight away), and `web/search/topsearch/` is gone from the site:
-    1. the profile page itself (www.instagram.com/<handle>/ — what a browser loads to show the profile, the
-       least throttled read): an id written beside the handle is taken as it is; other ids it names are each
-       confirmed by `users/<id>/info/` (the page names the viewer too). Its "Sorry, this page isn't available" is
-       the only "no such account" believed;
-    2. `users/web_profile_info/` (the app id the site declares, then the standard web one);
-    3. the site's searches — `fbsearch/web/top_serp/`, `web/search/topsearch/`, `users/search/`.
-    A step that's told to slow down (429) isn't waited out: the next way is tried at once, since each has its
-    own limit. Only when every way was throttled is there one pause and one quiet retry. Only an exact handle
-    counts."""
+    """yield from: (Profile | None, missing, what each step said). The iPhone's order (`lookupProfile`), then the
+    page as a last resort:
+    1. `users/web_profile_info/` — retried through "slow down" (BACKOFF), with the declared web app id, then the
+       standard one;
+    2. the site's searches — `web/search/topsearch/`, `fbsearch/web/top_serp/`, `users/search/` (an exact
+       username match only);
+    3. the profile page's HTML: the ids it names, each confirmed by `users/<id>/info/`;
+    4. the profile page opened in the window (`profile_from_page`) — what it loads to draw the profile, or plainly
+       its title "(@handle)": found by handle, everything then read from the pages.
+    "No such account" only when the page says it and `web_profile_info` agrees. Once a step has been told to slow
+    down, the rest are asked once each (no retries piling up the wait)."""
     q = quote(handle, safe="")
-    missing = page_gone = False
-    # 0. the profile page opened in the window's browser, as the person opens it: what it loads to draw the
-    # profile names the account (and from then on the reads are made from that page — `api_page`)
+    tried: list[str] = []
+    throttled = 0
+    info_gone = False
+
+    def note(name: str, status: int, doc=None, text: str = "") -> None:
+        nonlocal throttled
+        if status == 429:
+            throttled += 1
+            tried.append(f"{name}: slowed down (HTTP 429)")
+        elif status in (401, 403):
+            tried.append(refusal(status, text))
+        else:
+            tried.append(_said(name, status, doc))
+
+    apps = [calls.app_id] + ([APP_ID] if calls.app_id != APP_ID else [])
+    for app in apps:
+        calls.app_id = app
+        status, doc, text = yield from calls.call(f"{API}users/web_profile_info/?username={q}")
+        profile = profile_from_info(doc, handle) if doc is not None else None
+        if profile is not None:
+            return profile, False, tried
+        info_gone = info_gone or status == 404
+        note("profile info" + ("" if app == apps[0] else " (web app id)"), status, doc, text)
+        if status == 429:
+            break
+    calls.app_id = apps[0]
+    for name, path in (("top search", f"web/search/topsearch/?context=blended&query={quote(handle.lower(), safe='')}"),
+                       ("search", f"fbsearch/web/top_serp/?enable_metadata=true&query={q}"),
+                       ("user search", f"users/search/?q={q}&count=30")):
+        status, doc, text = yield from calls.call(API + path, retries=0 if throttled else 1)
+        profile = profile_in(doc, handle) if doc is not None else None
+        if profile is not None:
+            return profile, False, tried
+        note(name, status, doc, text)
+    status, _doc, html = yield from calls.call(f"{HOME}{q}/", retries=0 if throttled else 1, page=True)
+    html = html if isinstance(html, str) else ""
+    page_gone = bool(status) and status != 429 and page_missing(status, html)
+    if 200 <= status < 300 and not page_gone:
+        beside = ids_beside(html, handle)
+        for uid in ids_in_page(html, handle)[:4]:
+            s2, d2, _t2 = yield from calls.call(f"{API}users/{uid}/info/", retries=0 if throttled else 1)
+            profile = profile_from_user((d2 or {}).get("user") if isinstance(d2, dict) else None, handle)
+            if profile is not None:
+                return profile, False, tried
+            if beside and uid == beside[0] and s2 in (0, 429):
+                return Profile(uid, handle), False, tried
+    tried.append("profile page: " + ("says not found" if page_gone else f"HTTP {status}" if status else "no answer"))
+    for line in tried:
+        yield ("note", f"   {line}")
+    # 4. the page itself, as the person sees it
     seen = yield ("visit", f"{HOME}{q}/", False)
     profile = profile_from_page(seen or {}, handle)
     if profile is not None:
-        if profile.user_id and profile.posts:
-            yield ("note", f"   found @{profile.handle} on its profile page (account {profile.user_id})")
-        else:
-            saved = dump_visit(seen or {}, handle)
-            yield ("note", f"   found @{profile.handle} on its profile page" +
-                           (f" (account {profile.user_id})" if profile.user_id else
-                            " — its data didn't give the account's number, so everything is read from the pages") +
-                           (f"; what the page loaded is saved in {saved} — send it over if anything's missing"
-                            if saved else ""))
-        return profile, False, []
+        saved = "" if profile.user_id and profile.posts else dump_visit(seen or {}, handle)
+        yield ("note", f"   found @{profile.handle} on its profile page" +
+                       (f" (account {profile.user_id})" if profile.user_id else
+                        " — Instagram didn't give its number, so everything is read from the pages") +
+                       (f"; what the page loaded is saved in {saved}" if saved else ""))
+        return profile, False, tried
+    page_gone = page_gone or page_missing(int((seen or {}).get("status") or 200), (seen or {}).get("html") or "")
     if (seen or {}).get("answers"):
         saved = dump_visit(seen or {}, handle)
         if saved:
             yield ("note", f"   what the profile page loaded is saved in {saved} — send it over")
-    shown = (seen or {}).get("html") or ""
-    page_gone = page_missing(int((seen or {}).get("status") or 200), shown)
-    yield ("note", "   the profile page " + ("says not found" if page_gone else
-                                            f"loaded {len((seen or {}).get('answers') or [])} answer(s) but none "
-                                            "named the account") + " — asking Instagram directly")
-    for attempt in range(2):
-        tried: list[str] = []
-        throttled = 0
-
-        def note(name: str, status: int, doc=None, text: str = "") -> None:
-            nonlocal throttled
-            if status == 429:
-                throttled += 1
-                tried.append(f"{name}: slowed down (HTTP 429)")
-            elif status in (401, 403):
-                tried.append(refusal(status, text))
-            else:
-                tried.append(_said(name, status, doc))
-
-        status, _doc, html = yield from calls.call(f"{HOME}{q}/", retries=0, page=True)
-        html = html if isinstance(html, str) else ""
-        page_gone = bool(status) and status != 429 and page_missing(status, html)
-        page_ok = 200 <= status < 300 and not page_gone
-        beside = ids_beside(html, handle) if page_ok else []
-        anchored_id = beside[0] if beside else ""
-        for uid in (ids_in_page(html, handle)[:4] if page_ok else []):
-            s2, d2, t2 = yield from calls.call(f"{API}users/{uid}/info/", retries=0)
-            profile = profile_from_user((d2 or {}).get("user") if isinstance(d2, dict) else None, handle)
-            if profile is not None:
-                return profile, False, tried
-            if uid == anchored_id and s2 in (0, 429):
-                yield ("note", f"   @{handle} is account {uid} (from its profile page — Instagram is slowing the "
-                               "details down)")
-                return Profile(uid, handle), False, tried
-            if s2 == 429:
-                throttled += 1
-        if status == 429:
-            note("profile page", status)
-        else:
-            tried.append("profile page: " + ("says not found" if page_gone else
-                                             f"HTTP {status}, no account id in it" if page_ok
-                                             else f"HTTP {status}" if status else "no answer"))
-        info_gone = False
-        apps = [calls.app_id] + ([APP_ID] if calls.app_id != APP_ID else [])
-        for app in apps:
-            calls.app_id = app
-            status, doc, text = yield from calls.call(f"{API}users/web_profile_info/?username={q}", retries=0)
-            profile = profile_from_info(doc, handle) if doc is not None else None
-            if profile is not None:
-                return profile, False, tried
-            info_gone = info_gone or status == 404
-            note("profile info" + ("" if app == apps[0] else " (web app id)"), status, doc, text)
-            if status == 429:
-                break                                        # the same endpoint again won't answer either
-        calls.app_id = apps[0]
-        for name, path in (("search", f"fbsearch/web/top_serp/?enable_metadata=true&query={q}"),
-                           ("top search", f"web/search/topsearch/?context=blended&query={quote(handle.lower(), safe='')}"),
-                           ("user search", f"users/search/?q={q}&count=30")):
-            status, doc, text = yield from calls.call(API + path, retries=0)
-            profile = profile_in(doc, handle) if doc is not None else None
-            if profile is not None:
-                return profile, False, tried
-            note(name, status, doc, text)
-        missing = page_gone and info_gone                    # two witnesses, and no search found it
-        for line in tried:
-            yield ("note", f"   {line}")
-        if attempt == 0 and throttled and throttled >= len(tried) - 2:
-            yield ("note", f"   Instagram is slowing this account's requests down — one pause of {LOOKUP_PAUSE} s, "
-                           "then one more try")
-            yield ("sleep", LOOKUP_PAUSE)
-            continue
-        if throttled and throttled >= len(tried) - 2:
-            tried = ["Instagram is limiting requests from this account right now (HTTP 429 to every way in). Wait "
-                     "10–15 minutes before pressing Download again — trying again and again keeps the limit going"]
-        break
-    return None, missing, tried
+    if throttled and throttled >= len(tried) - 1:
+        tried = ["Instagram is limiting requests from this account right now (HTTP 429). Wait 10–15 minutes before "
+                 "pressing Download again — trying again and again keeps the limit going"]
+    return None, page_gone and info_gone, tried
 
 
 WATCH_PATHS = {"feed": "", "tagged": "tagged/", "clips": "reels/"}
@@ -959,6 +965,7 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
     if 200 <= home_status < 300:
         calls.app_id = app_id_from(home_html)
 
+    calls.referer = f"{HOME}{quote(handle, safe='')}/"
     yield ("note", f"Looking up @{handle}…")
     profile, missing, tried = yield from look_up(calls, handle)
     if profile is None and known_user_id:
