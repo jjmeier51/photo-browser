@@ -1864,6 +1864,114 @@ noise — the worst case for JPEG), transparency onto white, animated left, a cl
 untouched, a misnamed JPEG byte-identical, a corrupt file reported, subfolders only when asked; inside Safe Finder
 (offscreen) the menu lines, the count, the conversion, the originals to the Trash and the tags + Favorite on the JPEG.
 
+## 6aa. Safe Finder Rename, Remove Leading Spaces, Duplicate, Rotate — `mac/rename_tools.py`, `mac/rename_window.py`, `RenameJournal.swift` (Nov 10, 2026)
+
+Safe Finder had no way to rename anything; the person asked for "a function to remove spaces at the very
+beginning of file names for an entire folder", and Duplicate / Rotate are the iPhone's that were missing.
+
+- **Remove Leading Spaces from Names…** (right-click a folder, the empty area, or File menu): `leading_space_plan`
+  walks the folder (subfolders too — a checkbox) for names that start with whitespace — a space, tab, no-break
+  space, or a zero-width character (`INVISIBLE`; Python doesn't call those spaces) — files **and folders**. The
+  window lists `old → new` before anything is touched. Never onto a taken name (`free_name`: "a 2.jpg",
+  compared without case), never to a hidden name (" .x" is left) or an empty one; deepest items first so every
+  old path is still valid when its turn comes. Also `python3 mac/rename_tools.py <folder> [--apply] [--top]`.
+- **Rename…** (F2): one file or folder (`single` — no "/" or ":", exFAT's characters refused on exFAT, a
+  capitals-only change goes through a two-step rename).
+- **What follows a rename** (`apply`): `TagStore.renamed(pairs)` re-keys tags *and* labels in the shared tag
+  file — a folder's whole subtree, merged into anything already at the new key, the carried attribute rewritten —
+  and **the rename journal**: every rename is appended to `<drive>/.Photo Browser Metadata/renames.json`
+  (`{"renames": [{"id", "from", "to", "dir", "at"}]}`; drive-relative, NFC; `from` = the path before the batch,
+  `to` = where it ended up after the folders above it were renamed too; last 20,000 / 180 days).
+  **Why the journal:** everything the iPhone keeps *on the phone* is keyed by path (captions, covers, birthdays,
+  hidden items, profile records, likes); a rename on the Mac orphaned it, as one in Finder does. Now
+  `Library.applyMacRenames()` (`RenameJournal.swift`), called at the top of `syncDriveTags` (drive opened / back /
+  foreground), reads the entries this phone hasn't applied (`photoBrowser.appliedRenames` in `FilePrefs`), folds
+  chains (a→b then b→c; a folder renamed after its contents), and puts them through one `itemsMoved` — longest
+  paths first, because `itemsMoved` takes the first folder prefix that matches. Applied whether or not the item
+  is still there (the rename happened; re-keying to a path since gone is no worse than the old key).
+- **Duplicate** (⌘D): `rename_tools.duplicate` — "name copy.ext" (then "copy 2"), temp → fsync → rename (straight
+  in on exFAT), attributes and dates kept; tags and Favorites/To AI go to the copy (`carry` + `carry_labels`).
+- **Rotate ▸ Left / Right / 180°** (`Pane.rotate_items`): photos through `batch_crop.apply(CropSpec(quarters=n))`
+  (the crop path: re-encoded like the original, metadata kept, in place); videos through `video_tools.rotate` —
+  **no re-encode**: ffmpeg rewrites the file with `-c copy` and a new `-display_rotation` (the current one from
+  ffprobe, minus 90° per clockwise quarter), every track kept where the container allows (else picture + sound),
+  metadata/dates/attributes kept. MP4/MOV/M4V only (a WebM has no such note); needs ffmpeg.
+
+Tested offscreen: the plan (taken names, hidden, all-space, nested folders), tags/labels/journal after the
+renames, a failed rename reported with the rest going on; the window and the menus in Safe Finder; rotate
+(photo pixels, video display size and rotation back to 0 after right + 180° + right, size unchanged = not
+re-encoded) and duplicate. The Swift side is read, not built (no compiler here).
+
+## 6ab. Safe Finder Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
+
+The iPhone's video upscale (`MediaEditing.upscaleVideo`, §6f) on the Mac: right-click videos ▸ **Upscale Video…**
+(Photos menu too). The window: **1080p or 4K** (short side 1080 / 2160 — never down; videos already that size
+are counted and left), **frame rate** (the video's own, 30 or 60 — retimed as on the iPhone: frames repeated or
+dropped, nothing interpolated), and **Replace the video** or **As a new video beside it** ("name (1080p).mp4",
+never over a file). One at a time, a bar that follows the encoder, Stop leaves nothing behind.
+
+- `video_tools.upscale(path, target, fps, out, progress, stop)`; `upscale_1080` (the downloaders') is now a call
+  to it. **Helper** (AVFoundation, `video_helper upscale <in> <out.mov> <short> [<fps> [progress]]`): the
+  iPhone's own composition code, H.264 highest quality, HEVC for HDR so it stays HDR; prints `progress <0–1>`
+  lines then the outcome (callers read the *last* line). **ffmpeg** otherwise: Lanczos, x264 CRF 17 — or, for a
+  PQ/HLG source (ffprobe `color_transfer`), 10-bit HEVC with the HDR curve and BT.2020 tags kept (libx265, else
+  `hevc_videotoolbox`); `-progress pipe:1` drives the bar.
+- In place: written beside under a hidden name, the original's extended attributes copied on (`_keep_attributes`
+  — the carried tags, "where from"), `os.replace`, dates put back. A WebM/MKV can't be replaced in place (what
+  comes out is an MP4) — always saved as new.
+- Results are tagged "upscaled"; a new video gets its original's tags (`carry`).
+
+Tested with ffmpeg here (640×360 → 1920×1080 new, portrait → 2160×3840 at 60 fps in place, creation_time and
+audio kept, already-1080p skipped, stopped mid-run leaves no file) and the window offscreen. The helper's new
+arguments are read, not built.
+
+## 6ac. Clone Drive to a New SSD — `mac/clone_drive.py`, `mac/clone_window.py` (Nov 10, 2026)
+
+"Ensure that I can safely transfer all of my data to a new APFS SSD without data or metadata loss." The
+existing engine (`safe_transfer.py`) is built for *putting things on exFAT* — it adjusts names, drops
+dot-files, and deliberately doesn't flush; a whole-drive move wants the opposite. So a separate tool:
+File ▸ **Clone Drive to a New SSD…**, or `python3 mac/clone_drive.py OLD NEW [--apply | --verify [--deep [--repair]]]`.
+
+- **The old drive is only read.** Everything is copied to the same relative path under the same name:
+  files, empty folders, links, **every dot-file** — `.Photo Browser Metadata` (the app's backup +
+  `shared-tags.json` + `renames.json`), the download records, `.Trash` (the app's Recently Deleted).
+  Left out (and counted): `.DS_Store`, `._*` companions, `.Spotlight-V100`, `.fseventsd`, `.Trashes`,
+  `.TemporaryItems`, `$RECYCLE.BIN`, `System Volume Information`, and the exFAT workarounds `.Spare Folders` /
+  `.Safe Finder Staging`.
+- **Each file**: read once with its BLAKE2 taken as it's read → written as `.<name>.cloning` → fsync → **read
+  back from the drive** (`F_NOCACHE`) and compared → attributes, permissions, dates put on → renamed. So a file
+  under its real name is whole and checked. One retry, then it's a listed problem.
+- **Metadata** (`copy_meta`): extended attributes through libc (`shared_tags.xattr_*` — on an exFAT source
+  macOS serves the `._` companions' contents as attributes, so they become real ones), mode (not from
+  exFAT/FAT/NTFS, which have none), mtime/atime to the nanosecond, **creation date via `setattrlist`
+  (`ATTR_CMN_CRTIME`)** — `utime` can't set it, and the app falls back on it — then the user flags
+  (hidden/locked; after the rename, a locked file can't be renamed). Folders get theirs last, deepest first
+  (filling a folder changes its date). Not carried: `com.apple.quarantine`, `provenance`, `macl` (the system's).
+- **Re-runs**: a file there with the same size and mtime is left (its attributes topped up if one is missing);
+  same size, other mtime → hashed, and if equal only the metadata is put right; **different and older than the
+  old drive's** → brought up to date (our earlier copy of a file that has since changed — the app's backup after
+  "Back Up Metadata Now"); **different and as new or newer** → reported, never overwritten. Temp files of a cut
+  run are cleared first.
+- **`compare`** afterwards: every item present, same kind and size, mtime, creation date, attributes; `--deep`
+  reads every byte of both. `recopy` (the window's "Copy N Different Files Again", `--repair`) replaces a copy
+  whose contents differ — only where it's ours (the original's size and date) — and puts the folder's date back.
+- **Report** to the window and `~/Library/Logs/Safe Finder/clone-<time>.txt`, ending with the iPhone steps.
+- **The phone's side.** What the app keeps on the phone is path-keyed. (1) Before cloning: Drive Health ▸ Back
+  Up Metadata Now — `metadata.json` there is drive-relative and covers every re-keyed store (checked against
+  `applyRemap`'s list; not the Recently Deleted records, so empty that first). (2) **"Give the New Drive the Old
+  Drive's Name…"** (`swap_names`: `diskutil rename` old → "<name> (old)", new → "<name>"): `chooseFolder` →
+  `rekeyRootIfRemounted` re-keys everything when the path after the mount id is unchanged, and Safe Finder's own
+  `/Volumes/<name>/…` records keep working. (3) Whatever the path is, Drive Health ▸ Restore from the Drive's
+  Backup merges the copied backup under the new root (adds only), and tags/Favorites/To AI come from
+  `shared-tags.json` (its `id` is copied, so the phone's sync base still matches).
+- The destination must not be exFAT/FAT (refused; `--allow-exfat` on the command line).
+
+Tested on a mock drive (Linux: user xattrs stand in; `setattrlist` and `diskutil` are macOS-only and unrun
+here — the comparison reports a creation date that didn't take, so it can't fail silently): cut mid-file and
+carried on, hidden records in / junk out, dates and attributes equal, a flipped byte found by `--deep` and
+re-copied, a missing file / changed date / lost attribute repaired by a re-run, the old drive's newer backup
+brought across, a file changed on the new drive left alone; the window offscreen.
+
 ## 6s. Safe Finder Edit Metadata — `mac/metadata_edit.py`, `mac/metadata_window.py` (Nov 3, 2026)
 
 Bulk metadata for any number of photos and videos (or everything under picked folders — `media_in`: hidden
@@ -2816,6 +2924,39 @@ same inbox; the downloader posts `BackgroundDownloader.landed` and the app files
 (`applyFiledTikTok`), one pass at a time (`filingTikTok`), re-running if more landed meanwhile —
 copying a video onto the drive used to block the UI. The listing and per-video HD resolve are
 still paced at ~1 request/s: that is tikwm's limit, not ours.
+
+### 7.4b-2 TikTok in Safe Finder, and the shared record — `mac/tiktok.py`, `mac/tiktok_downloader.py`, `SocialRecord.swift` (Nov 10, 2026)
+
+Right-click a folder ▸ Download ▸ **Download TikTok Profile…** / **Get New TikTok Videos**. A port of
+`TikTokService`: the same tikwm calls (`user/posts` 35 a page, ~1 a second; `hd=1`; the single-video endpoint
+for a post the listing gives no HD address; Referer/Origin/X-Requested-With; `code != 0` retried with a
+growing pause over both hosts), the same names (`<post id>.mp4`, `<post id>_<n>.jpg`) in the same `@handle`
+folder. Each file through `social.settle` (date into the file and as its dates, caption, `@handle`), checked to
+be a video/photo and not a block page (`tiktok.fetcher`), tagged "tiktok".
+
+- **Finding the iPhone's folders** (`profile_of`, first that applies): the shared record; the app's backup on
+  the drive (`.Photo Browser Metadata/metadata.json` → `tiktokFolders`: handle, ids, and `tiktokLikes`) — so a
+  renamed folder is still recognised; an `@name` folder holding files named like TikTok ids (15–20 digits —
+  `ProfileReconnect.classifyTikTok`'s rule). `destination` = the folder itself, else the child that is that
+  handle's (any name or case), else a new `@handle`. "Already downloaded" = the record's ids ∪ the backup's ∪
+  the ids in the file names.
+- **The shared record, `.tiktok.json`** (`photobrowser-tiktok`; `SocialRecord.Kind.tiktok`): `handle`,
+  `author_id`, `nickname`, `downloaded` (only ever added to), `profile_video_count`, **`likes`** (post id →
+  count) and `likes_updated`. The iPhone now reads it at the start of a run (ids count as downloaded; a folder
+  Safe Finder made is adopted — `Snapshot.tiktokInfo`; its likes go through `applyTikTokLikes`), writes ids +
+  likes after listing and as each download is filed (`applyFiledTikTok`), and tags its TikTok files "tiktok".
+- **Likes on every run.** The iPhone stops paging after 15 posts it already has; Safe Finder lists the whole
+  profile every time (asked for: "every time it runs it should recalculate the number of likes"), so `likes`
+  is rewritten for every post still on TikTok (a deleted post keeps its last count). Shown in the viewer's Info
+  and sorted by "Reactions / Likes" (`reaction_score` falls back to `tiktok.likes_of`).
+- **Cloudflare.** A 403 / HTML answer hands the same URL to a Qt WebEngine page at the bottom of the window
+  (`Resolver.browser`): polled until its text is JSON; shown, with a sentence, only when a check has been up for
+  a few seconds. Its `cf_clearance` + User-Agent then go on the plain requests (they only work together); two
+  blocks *with* a clearance and the rest of the run stays in the browser.
+
+Tested against a stand-in tikwm (80 posts: slideshows, SD-only posts, every 5th call rate-capped; and a mode
+that blocks plain requests until a browser has run its challenge): recognition by all three rules, the run,
+record and likes; the window offscreen incl. the browser fallback. Not run against the real tikwm from here.
 
 ### 7.4a MPEG-TS → MP4 — `TSRemuxer.swift`
 

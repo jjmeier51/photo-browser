@@ -876,6 +876,80 @@ File** — it writes the last run (what the page loaded and showed, what was fou
 `~/Library/Logs/Safe Finder`, on this Mac only — and send it over. Streams need yt-dlp (`run.sh` installs it) or
 ffmpeg.
 
+### Download a TikTok profile (`tiktok_downloader.py`, `tiktok.py`)
+
+Right-click a folder ▸ **Download ▸ Download TikTok Profile…** — the iPhone app's TikTok downloader on the
+Mac. Type the handle (or paste a profile link) and press Download: the profile's own videos come down
+watermark-free at the highest quality offered, as `<post id>.mp4` (a slideshow's photos as
+`<post id>_1.jpg`, `_2.jpg`…) in an `@handle` folder — exactly the names and folder the iPhone uses. No
+login; only the public handle goes out.
+
+- **It carries on from the iPhone.** A folder the iPhone downloaded into is recognised (by its record, by the
+  app's backup on the drive, or simply by being an `@handle` folder of TikTok-named videos), the menu says
+  **Get New TikTok Videos**, and only what isn't there yet is fetched. Both apps keep a record in the folder
+  (`.tiktok.json`), so neither downloads what the other has.
+- **Likes are read again every run** — for every video on the profile, not just the new ones — and saved in
+  the record. Sort the folder by **Reactions / Likes** to see the most-liked first; the viewer's Info shows
+  the count. The iPhone picks the counts up on its next run.
+- Each file gets the post's date and caption and the tag **tiktok**.
+- If the listing service (tikwm.com) puts up a "checking you're human" page, a small browser appears at the
+  bottom of the window — tick its box if it asks; the download carries on by itself.
+
+### Rename, Duplicate, Rotate — and Remove Leading Spaces from Names (`rename_tools.py`, `rename_window.py`)
+
+- **Rename…** (F2, or right-click): a new name for one file or folder.
+- **Remove Leading Spaces from Names…** (right-click a folder, or the empty area for the folder you're in):
+  every file *and folder* inside whose name starts with a space (or a tab, or an invisible space) gets the
+  name without it. The window lists every `old → new` first; untick **Include subfolders** to do just the
+  folder's own items. A name is never put over one that's taken — it gets a number instead ("a 2.jpg").
+  From Terminal: `python3 mac/rename_tools.py "/Volumes/SSD/Folder"` (a dry run; `--apply` renames).
+- **Duplicate** (⌘D): a copy beside each selected file — "name copy.jpg" — with its tags and Favorites.
+- **Rotate ▸ Left / Right / 180°**: turns the selected photos and videos in place. A video isn't re-encoded
+  (only its "show it turned" note changes, so nothing is lost and it takes a moment) — the quick fix for
+  videos that play upside down. Needs ffmpeg for videos (`brew install ffmpeg`).
+
+**Nothing is lost by a rename.** Tags, Favorites and To AI move to the new name at once. Everything the
+iPhone app keeps itself — captions, covers, birthdays, hidden items, a download folder's link to its
+profile — follows too: Safe Finder notes each rename on the drive, and the app applies them the next time
+it opens the drive.
+
+### Upscale Video — 1080p or 4K (`video_upscale_window.py`, `video_tools.py`)
+
+Right-click one or more videos ▸ **Upscale Video…**. Choose **1080p** or **4K**, the **frame rate** (the
+video's own, 30 or 60 — a different rate repeats or drops frames; nothing is invented), and whether to
+**replace the video** or save the result **as a new video beside it** ("name (1080p).mp4"). Videos already
+that size are left as they are — nothing is ever scaled down. The capture date, metadata and tags are kept;
+results are tagged **upscaled**. HDR videos stay HDR. 4K is slow and makes large files. It uses the Mac's
+own video engine when Xcode's Command Line Tools are installed, else ffmpeg.
+
+### Clone Drive to a New SSD — move the whole library without losing anything (`clone_window.py`, `clone_drive.py`)
+
+**File ▸ Clone Drive to a New SSD…** copies everything on one drive to the same place on another, and
+proves it.
+
+1. **On the iPhone first:** open the old drive in Photo Browser ▸ Drive Health ▸ **Back Up Metadata Now**
+   (so the drive carries everything the phone knows). Restore or empty Recently Deleted if you can.
+2. Erase the new SSD as **APFS** in Disk Utility. Plug both drives into the Mac.
+3. In the window choose the old drive and the new one, and press **Clone**.
+   - The old drive is only read — nothing on it changes.
+   - Every file is written, **read back from the new drive and checked** before it counts; its dates
+     (created and modified), tags and other attributes come with it, folders' too.
+   - The hidden records come along: the iPhone app's backup and shared tags, each download folder's
+     record, Recently Deleted. macOS's own clutter (`.DS_Store`, `._` files, Spotlight) doesn't.
+   - **Stop**, a pulled cable or a sleeping Mac lose nothing: press Clone again and it carries on.
+     Nothing of yours on the new drive is ever overwritten.
+4. When it finishes the two drives are compared and a report is shown (and saved in
+   `~/Library/Logs/Safe Finder/`). **"0 problems"** means everything is there. Tick *read every byte of both
+   drives again* for the surest check (it takes about as long as the copy); if it ever finds a file that
+   differs, **Copy … Different Files Again** fixes it.
+5. Press **Give the New Drive the Old Drive's Name…** (the old one becomes "Name (old)").
+6. Plug the new SSD into the iPhone and choose its top folder. If any Favorites, captions or covers are
+   missing: Drive Health ▸ **Restore from the Drive's Backup** — it only adds what's missing.
+7. Keep the old drive as it is until you've looked through the new one.
+
+From Terminal: `python3 mac/clone_drive.py "/Volumes/Old" "/Volumes/New"` (a dry run), `--apply` to copy,
+`--verify --deep` to compare byte for byte.
+
 ### Browse taylorpictures.net — and see what's already in your Taylor Swift folder (`taylor_window.py`, `taylor.py`)
 
 Right-click your Taylor Swift folder ▸ **Browse taylorpictures.net…** — the iPhone app's gallery browser, with
@@ -1029,7 +1103,7 @@ again. Deleting a downloaded file doesn't bring it back next time. Run it on its
 **Reaction scores.** Every page read also notes how many reactions each post with a photo or video has
 (the names under the post plus "and N others" — the post's own count, not the "Reaction score" next to a
 member's name, which is their lifetime total). They're kept in the same record, so the iPhone reads them
-too. Sort a `simpcity` folder by **Reaction Score** (sort menu; highest first) to see the most-reacted
+too. Sort a `simpcity` folder by **Reactions / Likes** (sort menu; highest first) to see the most-reacted
 downloads first — the score shows on each tile while you do; the iPhone app's sort is **Most reactions**.
 For things downloaded before scores were kept — or to bring old scores up to date — right-click the
 person's folder (or its `simpcity` folder) ▸ **Get Reaction Scores**: it reads every page of the threads

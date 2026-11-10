@@ -254,6 +254,30 @@ Python. (`SimpCityService`,
   `.instagram.json` / `.facebook.json` is the shared record** (`SocialRecord.swift` / `social.Record`):
   both apps read its ids into "already downloaded" and merge theirs in after a run, so neither re-downloads
   the other's posts — or ones deleted since. `docs/feature-notes.md` §7.4e.
+- **TikTok in Safe Finder too** — right-click a folder ▸ Download ▸ Download TikTok Profile… / Get New TikTok Videos
+  (`mac/tiktok.py`, `mac/tiktok_downloader.py` — a port of `TikTokService`: tikwm, the same `<post id>.mp4` /
+  `_<n>.jpg` names in the same `@handle` folder; a Cloudflare block is answered in a small browser in the window).
+  A profile folder is recognised by its **shared record `.tiktok.json`** (`SocialRecord.Kind.tiktok`: ids +
+  `likes` by post id — both apps read and write it), by the app's backup on the drive (`metadata.json` →
+  `tiktokFolders`/`tiktokLikes`), or as an `@folder` of TikTok-id files. **Safe Finder lists the whole profile on
+  every run so every video's like count is read again**; sort "Reactions / Likes", viewer Info ▸ Likes. Files
+  tagged "tiktok" on both apps. `docs/feature-notes.md` §7.4b-2.
+- **Safe Finder Rename / Remove Leading Spaces / Duplicate / Rotate** (`mac/rename_tools.py`, `mac/rename_window.py`):
+  Rename… (F2); right-click a folder ▸ Remove Leading Spaces from Names… (files and folders, listed first, never
+  onto a taken name); Duplicate (⌘D); Rotate ▸ Left/Right/180° (photos via `batch_crop`, videos by display
+  rotation with `ffmpeg -c copy` — no re-encode). **Any rename Safe Finder makes must go through
+  `rename_tools.apply`**: it re-keys the shared tags/labels (`TagStore.renamed`) and appends to the drive's
+  `.Photo Browser Metadata/renames.json`, which the iPhone applies to its path-keyed stores on the next drive open
+  (`RenameJournal.swift` → `applyMacRenames` → `itemsMoved`, called from `syncDriveTags`). §6aa.
+- **Safe Finder Upscale Video** — right-click videos ▸ Upscale Video… : 1080p or 4K (never down), source / 30 / 60 fps,
+  replace or save as new "name (1080p).mp4", tagged "upscaled" (`video_tools.upscale`, `mac/video_upscale_window.py`;
+  the helper's AVFoundation code, else ffmpeg with HDR kept as 10-bit HEVC). §6ab.
+- **Clone Drive to a New SSD** — File menu / `mac/clone_drive.py OLD NEW --apply`: the whole drive copied to a new
+  (APFS) one, old drive read-only, every file read back and checksummed before it gets its name; creation dates
+  (`setattrlist`), mtimes, xattrs, flags kept; dot-records (`.Photo Browser Metadata`, download records, `.Trash`)
+  copied, macOS junk and exFAT workarounds not; resumable, never overwrites (only brings its own outdated copies up
+  to date); `compare` (+ `--deep`, re-copy) and a report with the iPhone steps (Back Up Metadata Now before, same
+  drive name → `rekeyRootIfRemounted`, else Restore from the Drive's Backup). §6ac.
 - **Fanfix in Safe Finder** (Mac only) — right-click a folder ▸ Download ▸ Download from Fanfix… (`mac/fanfix_downloader.py`,
   `mac/fanfix.py`): the person's own purchased content from Fanfix creators, from a logged-in Qt WebEngine browser,
   **everything through that browser** (fanripper's documented model — its code is closed and its licence forbids
