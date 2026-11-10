@@ -7,7 +7,8 @@
 // installed.
 //
 //   video_helper mux <video> <audio> <out.mp4> <unix time> [<lat> <lng>]   → exit 0 when <out> is written
-//   video_helper upscale <in> <out.mov> <short side>                       → prints upscaled / skipped / failed
+//   video_helper upscale <in> <out.mov> <short side> [<fps|0> [progress]]  → prints upscaled / skipped / failed
+//                                       (with `progress`: "progress <0–1>" lines first, the outcome last)
 //   video_helper size <in>                                                 → prints "<width> <height>" (as shown)
 //   video_helper frame <in> <seconds> <out.png>                            → exit 0 when <out> is written
 //   video_helper frames <in> <dir> <base> <fps|0> <sdr|hdr> <start> <atomic|direct>
@@ -30,8 +31,10 @@
 // temporary name and a rename (APFS); `direct` writes it in place (exFAT: no renames — CLAUDE.md #12).
 //
 // The mux copies the streams as they are (no re-encode, HDR kept) and writes the post's date and place as
-// the iPhone does. The upscale scales so the short side is <short side> (never down), H.264 at the highest
-// quality — HEVC for HDR, so it stays HDR — with the source's metadata and capture date carried over.
+// the iPhone does. The upscale scales so the short side is <short side> (1080, or 2160 for 4K — never down),
+// H.264 at the highest quality — HEVC for HDR, so it stays HDR — with the source's metadata and capture date
+// carried over. <fps> 30 or 60 retimes the output as the iPhone's upscale does (frames repeated or dropped,
+// nothing interpolated); 0 keeps the source's rate.
 import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
@@ -91,13 +94,15 @@ func shownSize(_ url: URL) async -> CGSize? {
     return CGSize(width: abs(r.width), height: abs(r.height))
 }
 
-func upscale(_ url: URL, to dest: URL, short targetShort: CGFloat) async -> String {
+func upscale(_ url: URL, to dest: URL, short targetShort: CGFloat, fps requested: Double = 0,
+             progress: Bool = false) async -> String {
     let asset = AVURLAsset(url: url)
     guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return "failed" }
     let natural = (try? await track.load(.naturalSize)) ?? .zero
     let pt = (try? await track.load(.preferredTransform)) ?? .identity
     let duration = (try? await asset.load(.duration)) ?? .zero
-    let fps = (try? await track.load(.nominalFrameRate)).map { $0 > 0 ? $0 : 30 } ?? 30
+    let sourceFPS = (try? await track.load(.nominalFrameRate)).map { $0 > 0 ? $0 : 30 } ?? 30
+    let fps: Float = requested > 0 ? Float(requested) : sourceFPS
     guard natural.width > 0, natural.height > 0, duration.seconds > 0 else { return "failed" }
     let shown = CGRect(origin: .zero, size: natural).applying(pt)
     let w = abs(shown.width), h = abs(shown.height)
@@ -137,7 +142,17 @@ func upscale(_ url: URL, to dest: URL, short targetShort: CGFloat) async -> Stri
     session.outputURL = dest
     session.outputFileType = .mov
     session.metadata = meta
+    var poll: Task<Void, Never>? = nil
+    if progress {
+        poll = Task {
+            while !Task.isCancelled {
+                say("progress \(session.progress)")
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+        }
+    }
     await export(session)
+    poll?.cancel()
     return session.status == .completed ? "upscaled" : "failed"
 }
 
@@ -405,8 +420,9 @@ struct VideoHelper {
                                to: URL(fileURLWithPath: a[4]), date: date, lat: lat, lng: lng)
             exit(ok ? 0 : 1)
         case "upscale" where a.count >= 5:
-            let r = await upscale(URL(fileURLWithPath: a[2]), to: URL(fileURLWithPath: a[3]), short: CGFloat(Double(a[4]) ?? 1080))
-            print(r)
+            let r = await upscale(URL(fileURLWithPath: a[2]), to: URL(fileURLWithPath: a[3]), short: CGFloat(Double(a[4]) ?? 1080),
+                                  fps: a.count >= 6 ? (Double(a[5]) ?? 0) : 0, progress: a.count >= 7 && a[6] == "progress")
+            say(r)
             exit(r == "failed" ? 1 : 0)
         case "size":
             guard let s = await shownSize(URL(fileURLWithPath: a[2])) else { exit(1) }

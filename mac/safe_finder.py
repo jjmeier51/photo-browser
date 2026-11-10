@@ -4819,6 +4819,8 @@ class Pane(QWidget):
             if videos:
                 menu.addAction("Export All Frames…" if len(videos) == 1 else f"Export All Frames of {len(videos)} Videos…",
                                lambda: self.export_frames(videos))
+                menu.addAction("Upscale Video…" if len(videos) == 1 else f"Upscale {len(videos)} Videos…",
+                               lambda: self.upscale_videos(videos))
             photos = [p for p in paths if os.path.splitext(p)[1].lower() in batch_crop.CROPPABLE]
             if photos:
                 menu.addAction("Crop…" if len(photos) == 1 else f"Crop {len(photos)} Photos…",
@@ -5232,6 +5234,55 @@ class Pane(QWidget):
                                         lanes=ai_upscale.lanes(len(photos)), allow_large=choice.allow_large)
         run.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         run.open()
+
+    # -- video upscale (video_upscale_window.py / video_tools.py — the iPhone app's 1080p / 4K upscale)
+    def upscale_videos(self, paths: list[str]) -> None:
+        """Right-click ▸ Upscale Video…: each video upscaled to 1080p or 4K (never down), at its own frame rate
+        or 30 / 60 — replacing it, or saved as a new video beside it with the same metadata, dates and tags —
+        and the result tagged "upscaled"."""
+        import video_tools
+        import video_upscale_window
+        videos = [p for p in paths if kind_of(p) == "video" and not os.path.isdir(p)]
+        if not videos:
+            return
+        started = time.monotonic()
+
+        def done(upscaled: list[tuple[str, str]], skipped: list[str], failed: list[str], as_new: bool) -> None:
+            made = [result for _src, result in upscaled]
+            if upscaled:
+                try:
+                    tag_store().carry([(a, b) for a, b in upscaled if a != b])     # a new video has its original's tags…
+                    tag_store().add(made, [video_tools.SIZE_TAG])                   # …and "upscaled"
+                except OSError as e:
+                    QMessageBox.warning(self.window(), "Upscale Video", f"Couldn't save the tags: {e}")
+                tags_changed()
+            media_info.forget(made)
+            if THUMBS is not None:
+                THUMBS.forget(made)
+            self.grid.viewport().update()
+            self.list.viewport().update()
+            note = f"Upscaled {len(upscaled):,} video{'s' if len(upscaled) != 1 else ''}"
+            fresh = sum(1 for a, b in upscaled if a != b)
+            if fresh and fresh == len(upscaled):
+                note += " — saved beside the original" + ("s" if fresh != 1 else "")
+            elif fresh:
+                note += f" ({fresh:,} saved as new beside the original{'s' if fresh != 1 else ''})"
+            secs = time.monotonic() - started
+            note += f" in {secs / 60:.0f} min" if secs >= 90 else f" in {secs:.0f} s"
+            if skipped:
+                note += f"; {len(skipped):,} already that size (left as {'it was' if len(skipped) == 1 else 'they were'})"
+            if failed:
+                note += f"; {len(failed):,} couldn't be"
+            self._airdrop_noted(note + ".")
+            if failed:
+                QMessageBox.warning(self.window(), "Upscale Video", "Couldn't upscale:\n\n" +
+                                    "\n".join(os.path.basename(p) for p in failed[:15]) +
+                                    (f"\n… and {len(failed) - 15:,} more" if len(failed) > 15 else "") +
+                                    ("\n\n" + video_tools.problem if video_tools.problem else ""))
+
+        dlg = video_upscale_window.VideoUpscaleDialog(self.window(), videos, self.settings, done)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.open()
 
     # -- tags (shared with the Photo Browser app — see shared_tags.py)
     def _labels_menu(self, menu: QMenu, paths: list[str]) -> None:

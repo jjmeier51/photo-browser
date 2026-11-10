@@ -1,5 +1,6 @@
-"""Video work for Safe Finder's downloaders: putting a DASH video's two halves together (`mux`), upscaling a
-video to 1080p (`upscale_1080`), in place, its metadata and dates kept — and turning a WebM into an MP4
+"""Video work for Safe Finder: putting a DASH video's two halves together (`mux`), upscaling a video to 1080p
+or 4K (`upscale` — in place or as a new file, its metadata and dates kept; `upscale_1080` for the downloaders)
+— and turning a WebM into an MP4
 (`webm_to_mp4`, the SimpCity downloader), which only ffmpeg can do: AVFoundation doesn't open WebM.
 
 On a Mac it's AVFoundation, through `video_helper.swift` — the iPhone app's own code for both, built once
@@ -158,39 +159,184 @@ def size(path: str) -> tuple[int, int] | None:
     return None
 
 
+TARGETS = {"1080p": 1080, "4K": 2160}           # the short side each one means
+SIZE_TAG = "upscaled"
+
+
+def _last_line(text: str | None) -> str:
+    lines = [x.strip() for x in (text or "").splitlines() if x.strip()]
+    return lines[-1] if lines else ""
+
+
 def upscale_1080(path: str) -> str:
     """The video at `path`, upscaled so its short side is 1080 (never down), in place: "upscaled",
     "skipped" (already 1080p or more) or "failed" (left as it was). Its metadata and file dates are kept."""
+    return upscale(path, TARGET)
+
+
+def probe(path: str) -> dict:
+    """What ffprobe says of the first video stream: {"duration", "fps", "transfer"} — what it can read."""
+    ff = ffmpeg()
+    if not ff:
+        return {}
+    exe = os.path.join(os.path.dirname(ff), os.path.basename(ff).replace("ffmpeg", "ffprobe"))
+    r = _run([exe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+              "stream=avg_frame_rate,r_frame_rate,color_transfer,codec_name:format=duration", "-of", "json", path], 120)
+    try:
+        doc = json.loads(r.stdout)
+        st = (doc.get("streams") or [{}])[0]
+        out: dict = {"transfer": st.get("color_transfer") or "", "codec": st.get("codec_name") or ""}
+        for key in ("avg_frame_rate", "r_frame_rate"):
+            num, _, den = str(st.get(key) or "").partition("/")
+            if num and float(num) > 0 and float(den or 1) > 0:
+                out["fps"] = float(num) / float(den or 1)
+                break
+        out["duration"] = float((doc.get("format") or {}).get("duration") or 0)
+        return out
+    except (AttributeError, ValueError, KeyError, IndexError, TypeError, ZeroDivisionError):
+        return {}
+
+
+def new_name(path: str, label: str) -> str:
+    """Where an upscale saved as a new file goes: "<name> (1080p).<ext>" beside the original (a WebM/MKV
+    becomes an .mp4 — what comes out isn't one), never over a file that's there ("… (1080p) 2")."""
+    folder, name = os.path.split(path)
+    stem, ext = os.path.splitext(name)
+    if ext.lower() not in (".mp4", ".mov", ".m4v"):
+        ext = ".mp4"
+    out = os.path.join(folder, f"{stem} ({label}){ext}")
+    n = 2
+    while os.path.lexists(out):
+        out = os.path.join(folder, f"{stem} ({label}) {n}{ext}")
+        n += 1
+    return out
+
+
+def _keep_attributes(src: str, dst: str) -> None:
+    """The original's extended attributes onto the file replacing it — the tags a file carries
+    (`com.photobrowser.tags`), Finder's tags and "where from". Best effort; nothing on a drive without them."""
+    try:
+        import shared_tags
+        for name in shared_tags.xattr_names(src):
+            if name == "com.apple.quarantine":
+                continue
+            value = shared_tags.xattr_get(src, name)
+            if value is not None:
+                try:
+                    shared_tags.xattr_set(dst, name, value)
+                except OSError:
+                    pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _stream(cmd: list[str], on_line, stop, timeout: float) -> tuple[int, str]:
+    """Runs `cmd`, handing each line it prints to `on_line`; `stop()` true kills it. → (exit code, last line)."""
+    import time as _time
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    except OSError:
+        return 1, ""
+    last = ""
+    started = _time.monotonic()
+    killer_done = threading.Event()
+
+    def watch() -> None:
+        while not killer_done.wait(0.3):
+            if (stop is not None and stop()) or _time.monotonic() - started > timeout:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                return
+    threading.Thread(target=watch, daemon=True).start()
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if line:
+                last = line
+                on_line(line)
+    finally:
+        code = proc.wait()
+        killer_done.set()
+    return code, last
+
+
+def upscale(path: str, target: int = TARGET, fps: float | None = None, out: str | None = None,
+            progress=None, stop=None) -> str:
+    """The video at `path` upscaled so its short side is `target` (1080, or 2160 for 4K) — never down. In
+    place (`out` None: the file is replaced, its name, dates, metadata and attributes kept) or written to
+    `out` (a new file; the original untouched). `fps` 30 or 60 retimes it as the iPhone's upscale does — frames
+    repeated or dropped, none interpolated; None keeps the source's rate. `progress(0–1)` is called as it goes,
+    `stop()` true abandons it (nothing is left behind). Returns "upscaled", "skipped" (already that size or
+    more), "stopped" or "failed" (the original as it was).
+
+    AVFoundation does it where the helper is built (H.264 at the highest quality; HEVC for HDR, which stays
+    HDR); else ffmpeg (Lanczos, x264 CRF 17 — or 10-bit HEVC with the HDR curve kept for an HDR source)."""
     st = os.stat(path)
     shown = size(path)
-    if shown and min(shown) >= TARGET:
+    if shown and min(shown) >= target:
         return "skipped"
     tool = available()
     folder, name = os.path.split(path)
-    tmp = os.path.join(folder, f".{name}.upscaling.mov" if tool == "helper" else f".{name}.upscaling.mp4")
+    final = out or path
+    tmp_ext = ".mov" if tool == "helper" else (os.path.splitext(final)[1].lower() if
+                                              os.path.splitext(final)[1].lower() in (".mp4", ".mov", ".m4v") else ".mp4")
+    tmp = os.path.join(os.path.dirname(final), f".{os.path.basename(final)}.upscaling{tmp_ext}")
+    say = progress or (lambda _f: None)
+    outcome = "failed"
     if tool == "helper":
-        r = _run([*helper(), "upscale", path, tmp, str(TARGET)], 7200)
-        outcome = (r.stdout.strip() if r is not None else "") or "failed"
+        def line(text: str) -> None:
+            if text.startswith("progress "):
+                try:
+                    say(max(0.0, min(1.0, float(text.split()[1]))))
+                except (ValueError, IndexError):
+                    pass
+        _code, last = _stream([*helper(), "upscale", path, tmp, str(target), str(fps or 0), "progress"], line, stop, 6 * 3600)
+        outcome = last if last in ("upscaled", "skipped", "failed") else "failed"
     elif tool == "ffmpeg":
         if shown is None:
             return "failed"
-        scale = (f"scale={TARGET}:-2" if shown[0] <= shown[1] else f"scale=-2:{TARGET}") + ":flags=lanczos"
-        outcome = "failed"
-        for codec in (["-c:v", "libx264", "-crf", "17", "-preset", "medium", "-pix_fmt", "yuv420p"],
-                      ["-c:v", "h264_videotoolbox", "-q:v", "75", "-pix_fmt", "yuv420p"]):
-            r = _run([ffmpeg(), "-y", "-v", "error", "-i", path, "-map", "0:v:0", "-map", "0:a?", "-vf", scale, *codec,
-                      "-c:a", "copy", "-map_metadata", "0", "-movflags", "+faststart+use_metadata_tags", tmp], 7200)
-            if r is not None and r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
+        info = probe(path)
+        total = info.get("duration") or 0
+        hdr = info.get("transfer") in ("smpte2084", "arib-std-b67")
+        scale = (f"scale={target}:-2" if shown[0] <= shown[1] else f"scale=-2:{target}") + ":flags=lanczos"
+        vf = scale + (f",fps={int(fps)}" if fps else "")
+        if hdr:
+            color = ["-color_primaries", "bt2020", "-color_trc", info["transfer"], "-colorspace", "bt2020nc"]
+            codecs = (["-c:v", "libx265", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1", *color],
+                      ["-c:v", "hevc_videotoolbox", "-q:v", "70", "-profile:v", "main10", "-pix_fmt", "p010le", "-tag:v", "hvc1", *color])
+        else:
+            codecs = (["-c:v", "libx264", "-crf", "17", "-preset", "medium", "-pix_fmt", "yuv420p"],
+                      ["-c:v", "h264_videotoolbox", "-q:v", "75", "-pix_fmt", "yuv420p"])
+
+        def line(text: str) -> None:
+            if total and text.startswith("out_time_ms="):
+                try:
+                    say(max(0.0, min(1.0, int(text.split("=", 1)[1]) / 1e6 / total)))
+                except ValueError:
+                    pass
+        for codec in codecs:
+            code, _last = _stream([ffmpeg(), "-y", "-v", "error", "-nostats", "-progress", "pipe:1", "-i", path,
+                                   "-map", "0:v:0", "-map", "0:a?", "-vf", vf, *codec, "-c:a", "copy",
+                                   "-map_metadata", "0", "-movflags", "+faststart+use_metadata_tags", tmp], line, stop, 12 * 3600)
+            if code == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
                 outcome = "upscaled"
+                break
+            if stop is not None and stop():
                 break
     else:
         return "failed"
+    if stop is not None and stop():
+        outcome = "stopped"
     if outcome != "upscaled" or not os.path.isfile(tmp):
         if os.path.exists(tmp):
             os.remove(tmp)
-        return outcome if outcome == "skipped" else "failed"
-    os.replace(tmp, path)
-    os.utime(path, (st.st_atime, st.st_mtime))
+        return outcome if outcome in ("skipped", "stopped") else "failed"
+    _keep_attributes(path, tmp)
+    os.replace(tmp, final)
+    os.utime(final, (st.st_atime, st.st_mtime))
+    say(1.0)
     return "upscaled"
 
 

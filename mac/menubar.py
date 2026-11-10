@@ -207,6 +207,8 @@ def install(win, sf) -> None:
     act(t, "Find Duplicates…", lambda: pane().find_duplicates(folder_target()), None, folder_target,
         "Likely copies in the selected folder (or this one)")
     act(t, "Export All Frames…", lambda: pane().export_frames(videos()), None, lambda: bool(videos()))
+    act(t, "Upscale Video…", lambda: pane().upscale_videos(videos()), None, lambda: bool(videos()),
+        "The selected videos upscaled to 1080p or 4K — replaced, or saved as new videos beside them")
     t.addSeparator()
     act(t, "Send to CapCut", lambda: pane().send_to_capcut(sendable()), "Ctrl+Shift+K", lambda: bool(sendable()),
         "Opens CapCut with the selected clips (or this folder's) beside it, in order, to drag in — and brings "
