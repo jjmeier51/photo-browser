@@ -340,6 +340,70 @@ def upscale(path: str, target: int = TARGET, fps: float | None = None, out: str 
     return "upscaled"
 
 
+# ----------------------------------------------------------------------------- turning a video
+
+def rotation(path: str) -> int | None:
+    """How the video is turned for showing, counter-clockwise in degrees (ffprobe's sense): 0, 90, 180, -90.
+    None when ffprobe isn't here or can't read it."""
+    ff = ffmpeg()
+    if not ff:
+        return None
+    exe = os.path.join(os.path.dirname(ff), os.path.basename(ff).replace("ffmpeg", "ffprobe"))
+    r = _run([exe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+              "stream_side_data=rotation:stream_tags=rotate", "-of", "json", path], 120)
+    try:
+        st = (json.loads(r.stdout).get("streams") or [{}])[0]
+        for d in st.get("side_data_list") or []:
+            if "rotation" in d:
+                return int(round(float(d["rotation"])))
+        old = (st.get("tags") or {}).get("rotate")              # the older tag: clockwise
+        return -int(round(float(old))) if old not in (None, "") else 0
+    except (AttributeError, ValueError, KeyError, IndexError, TypeError):
+        return None
+
+
+def rotate(path: str, quarters: int) -> str:
+    """Turns the video `quarters` quarter-turns clockwise (2 = upside down → upright), in place and **without
+    re-encoding**: only the "show it turned" note in the file changes (what a phone writes when it's held
+    sideways), so nothing is lost and it takes a moment. Its metadata, dates and attributes are kept.
+    Returns "rotated", "unchanged" (a full turn), "no-tool" (needs ffmpeg), "unsupported" (a WebM/MKV has no
+    such note) or "failed" (left as it was)."""
+    q = quarters % 4
+    if q == 0:
+        return "unchanged"
+    ff = ffmpeg()
+    if not ff:
+        return "no-tool"
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".mp4", ".mov", ".m4v"):
+        return "unsupported"
+    now = rotation(path)
+    if now is None:
+        return "failed"
+    new = (now - 90 * q) % 360
+    if new > 180:
+        new -= 360
+    st = os.stat(path)
+    folder, name = os.path.split(path)
+    tmp = os.path.join(folder, f".{name}.turning{ext}")
+    done = False
+    for maps in (["-map", "0"], ["-map", "0:v", "-map", "0:a?"]):       # every track; else the picture and sound
+        r = _run([ff, "-y", "-v", "error", "-display_rotation", str(new), "-i", path, *maps, "-c", "copy",
+                  "-map_metadata", "0", "-movflags", "+faststart+use_metadata_tags", tmp], 3600)
+        if r is not None and r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0 \
+                and rotation(tmp) == new:
+            done = True
+            break
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    if not done:
+        return "failed"
+    _keep_attributes(path, tmp)
+    os.replace(tmp, path)
+    os.utime(path, (st.st_atime, st.st_mtime))
+    return "rotated"
+
+
 # ----------------------------------------------------------------------------- WebM → MP4
 
 def is_matroska(path: str) -> bool:

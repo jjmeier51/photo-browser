@@ -147,6 +147,60 @@ def single(path: str, new_name: str) -> Rename:
     return Rename(os.path.abspath(path), target, os.path.isdir(path), target)
 
 
+# ----------------------------------------------------------------------------- a copy beside the original
+
+def duplicate_name(path: str) -> str:
+    """"name copy.ext", then "name copy 2.ext"… — Finder's names for a duplicate."""
+    folder, name = os.path.split(os.path.abspath(path))
+    stem, ext = os.path.splitext(name) if not os.path.isdir(path) else (name, "")
+    out = os.path.join(folder, f"{stem} copy{ext}")
+    n = 2
+    while os.path.lexists(out):
+        out = os.path.join(folder, f"{stem} copy {n}{ext}")
+        n += 1
+    return out
+
+
+def duplicate(path: str) -> str:
+    """A copy of the file beside it (its dates and attributes too). Written under a temporary name and renamed
+    once whole — straight in on exFAT (CLAUDE.md #12). Returns the copy's path. Files only."""
+    import shutil
+    if not os.path.isfile(path) or os.path.islink(path):
+        raise OSError("only files can be duplicated")
+    out = duplicate_name(path)
+    st = os.stat(path)
+    if spare_folders.on_exfat(os.path.dirname(out)):
+        shutil.copyfile(path, out)
+        target = out
+    else:
+        target = os.path.join(os.path.dirname(out), f".{os.path.basename(out)}.copying")
+        try:
+            shutil.copyfile(path, target)
+            with open(target, "rb+") as f:
+                os.fsync(f.fileno())
+        except BaseException:
+            if os.path.exists(target):
+                os.remove(target)
+            raise
+    try:
+        import shared_tags
+        for name in shared_tags.xattr_names(path):
+            if name in ("com.apple.quarantine", "com.photobrowser.tags"):     # the tags go through the tag store
+                continue
+            value = shared_tags.xattr_get(path, name)
+            if value is not None:
+                try:
+                    shared_tags.xattr_set(target, name, value)
+                except OSError:
+                    pass
+    except ImportError:
+        pass
+    if target != out:
+        os.replace(target, out)
+    os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns))
+    return out
+
+
 # ----------------------------------------------------------------------------- the journal
 
 def drive_base(path: str) -> str | None:

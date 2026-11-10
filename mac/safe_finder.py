@@ -4756,6 +4756,79 @@ class Pane(QWidget):
         self._names_changed(res)
         QTimer.singleShot(300, lambda: self.reveal(res.done[0].new) if os.path.dirname(res.done[0].new) == self.location else None)
 
+    def duplicate_items(self, paths: list[str]) -> None:
+        """Duplicate (⌘D): a copy of each selected file beside it ("name copy.ext"), with its tags, Favorites
+        and To AI — the iPhone app's Duplicate."""
+        import rename_tools
+        files = [p for p in paths if os.path.isfile(p)]
+        if not files:
+            QMessageBox.information(self.window(), "Duplicate", "Select files to duplicate (folders are copied "
+                                    "with Copy in Split View).")
+            return
+        made: list[tuple[str, str]] = []
+        failed: list[str] = []
+        for p in files:
+            try:
+                made.append((p, rename_tools.duplicate(p)))
+            except OSError as e:
+                failed.append(f"{os.path.basename(p)}: {e.strerror or e}")
+        if made:
+            try:
+                tag_store().carry(made)
+                tag_store().carry_labels(made)
+            except OSError as e:
+                failed.append(f"the tags: {e}")
+            tags_changed()
+        n = len(made)
+        self._airdrop_noted(f"Duplicated {n:,} file{'s' if n != 1 else ''}." if n else "Nothing was duplicated.")
+        if failed:
+            QMessageBox.warning(self.window(), "Duplicate", "Couldn't duplicate:\n\n" + "\n".join(failed[:12]))
+        if len(made) == 1:
+            QTimer.singleShot(400, lambda: self.reveal(made[0][1]))
+
+    def rotate_items(self, paths: list[str], quarters: int) -> None:
+        """Rotate ▸ Left / Right / 180°: each selected photo and video turned in place — the iPhone app's bulk
+        rotate (mainly for videos that play upside down). A photo is re-encoded like a crop (metadata kept);
+        a video only has its "show it turned" note changed — nothing is re-encoded."""
+        import video_tools
+        photos = [p for p in paths if batch_crop.can_crop(p)]
+        videos = [p for p in paths if kind_of(p) == "video" and not os.path.isdir(p)]
+        todo = photos + videos
+        if not todo:
+            return
+        self._airdrop_noted(f"Rotating {len(todo):,} item{'s' if len(todo) != 1 else ''}…")
+
+        def work() -> None:
+            done: list[str] = []
+            failed: list[str] = []
+            for p in photos:
+                try:
+                    batch_crop.apply(batch_crop.CropSpec(quarters=quarters), p)
+                    done.append(p)
+                except (batch_crop.CropError, OSError) as e:
+                    failed.append(f"{os.path.basename(p)}: {e}")
+            for p in videos:
+                outcome = video_tools.rotate(p, quarters)
+                if outcome == "rotated":
+                    done.append(p)
+                elif outcome != "unchanged":
+                    why = {"no-tool": "rotating a video needs ffmpeg (brew install ffmpeg)",
+                           "unsupported": "a WebM/MKV can't be turned without re-encoding"}.get(outcome, "couldn't be rotated")
+                    failed.append(f"{os.path.basename(p)}: {why}")
+            QTimer.singleShot(0, self, lambda: finished(done, failed))
+
+        def finished(done: list[str], failed: list[str]) -> None:
+            media_info.forget(done)
+            if THUMBS is not None:
+                THUMBS.forget(done)
+            self.grid.viewport().update()
+            self.list.viewport().update()
+            n = len(done)
+            self._airdrop_noted(f"Rotated {n:,} item{'s' if n != 1 else ''}." + (f" {len(failed):,} couldn't be." if failed else ""))
+            if failed:
+                QMessageBox.warning(self.window(), "Rotate", "Couldn't rotate:\n\n" + "\n".join(failed[:12]))
+        threading.Thread(target=work, daemon=True, name="rotate").start()
+
     def remove_leading_spaces(self, folder: str) -> None:
         """Right-click a folder ▸ Remove Leading Spaces from Names…: every file and folder inside whose name
         starts with a space gets the name without it (rename_window.py lists them first)."""
@@ -4806,6 +4879,13 @@ class Pane(QWidget):
                 menu.addAction("AirDrop to iPhone…", lambda: self.airdrop(paths))
             if len(paths) == 1:
                 menu.addAction("Rename…", lambda: self.rename_item(paths[0])).setShortcut(QKeySequence("F2"))
+            if any(os.path.isfile(p) for p in paths):
+                menu.addAction("Duplicate", lambda: self.duplicate_items(paths)).setShortcut(QKeySequence("Ctrl+D"))
+            if any(batch_crop.can_crop(p) or kind_of(p) == "video" for p in paths if not os.path.isdir(p)):
+                turn = menu.addMenu("Rotate")
+                turn.addAction("Left", lambda: self.rotate_items(paths, 3))
+                turn.addAction("Right", lambda: self.rotate_items(paths, 1))
+                turn.addAction("180°", lambda: self.rotate_items(paths, 2))
             if len(paths) == 1 and os.path.isdir(paths[0]):
                 self._folder_tools(menu, paths[0], "Find Duplicates…")
             menu.addSeparator()

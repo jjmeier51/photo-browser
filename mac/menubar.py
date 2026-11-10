@@ -108,6 +108,8 @@ def install(win, sf) -> None:
         lambda: bool(sel()) and sf.IS_MAC)
     act(f, "Rename…", lambda: pane().rename_item(sel()[0]) if len(sel()) == 1 else None, "F2", lambda: len(sel()) == 1,
         "A new name for the selected file or folder — its tags, Favorites and the iPhone app's own metadata follow")
+    act(f, "Duplicate", lambda: pane().duplicate_items(sel()), "Ctrl+D", lambda: any(os.path.isfile(p) for p in sel()),
+        "A copy of each selected file beside it, with its tags and Favorites")
     act(f, "Remove Leading Spaces from Names…", lambda: pane().remove_leading_spaces(folder_target()), None,
         folder_target, "Every file and folder in the selected folder (or this one) whose name starts with a space "
         "gets the name without it")
@@ -223,6 +225,9 @@ def install(win, sf) -> None:
     act(t, "Convert WebP to JPEG…", lambda: pane().convert_webp(webp_targets()), None, lambda: bool(webp_targets()),
         "Every WebP selected (or in the selected folder, or this one) as a full-resolution, quality-95 JPEG")
     act(t, "Crop…", lambda: pane().crop_photos(photos()), None, lambda: bool(photos()))
+    for label, quarters in (("Rotate Left", 3), ("Rotate Right", 1), ("Rotate 180°", 2)):
+        act(t, label, lambda quarters=quarters: pane().rotate_items(sel(), quarters), None,
+            lambda: bool(photos() or videos()), "The selected photos and videos turned in place")
     act(t, "AI Upscale 2×…", lambda: pane().ai_upscale(photos()), None, lambda: bool(photos()))
     act(t, "Erase Area…", lambda: pane().erase_area(photos()), None, lambda: bool(photos()))
     act(t, "Remove Watermark…", lambda: pane().remove_watermark(watermarkable()), None, lambda: bool(watermarkable()),
