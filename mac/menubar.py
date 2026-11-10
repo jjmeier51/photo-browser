@@ -120,6 +120,10 @@ def install(win, sf) -> None:
     act(f, "Make Book PDF…", lambda: pane().make_book(texts()), None, lambda: bool(texts()),
         "The selected .txt / .md / .rtf typeset like a printed book (bookify) — a PDF beside it")
     f.addSeparator()
+    act(f, "Clone Drive to a New SSD…", lambda: sf.open_clone(pane().location if real_folder() else "", win), None, None,
+        "Everything on a drive copied to a new one — each file checked, dates, tags and the apps' hidden records "
+        "kept — and the two drives compared afterwards. The old drive is only read.")
+    f.addSeparator()
     act(f, "Move to Trash", lambda: pane().delete_selection(), "Ctrl+Backspace", lambda: bool(sel()))
 
     # -- Edit

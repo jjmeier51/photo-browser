@@ -699,6 +699,19 @@ def open_social(kind: str, folder: str, parent: QWidget | None = None) -> None:
 _TIKTOK_WINDOWS: list = []
 
 
+def open_clone(start: str = "", parent: QWidget | None = None) -> None:
+    """File ▸ Clone Drive to a New SSD…: the whole library copied to a new drive, every file checked, dates,
+    attributes and the apps' hidden records kept, and the two drives compared afterwards (clone_window.py)."""
+    import clone_window
+    root = str(engine.volume_root(Path(start))) if start and os.path.exists(start) else ""
+    if root in ("/", ""):
+        root = ""
+    win = clone_window.CloneWindow(parent, external_volumes, root)
+    win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    win.setModal(False)
+    win.show()
+
+
 def tiktok_label(folder: str) -> str:
     """The menu line: "Get New TikTok Videos" on a TikTok profile's folder (or a folder holding one)."""
     try:
