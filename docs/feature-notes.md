@@ -1902,6 +1902,27 @@ renames, a failed rename reported with the rest going on; the window and the men
 (photo pixels, video display size and rotation back to 0 after right + 180° + right, size unchanged = not
 re-encoded) and duplicate. The Swift side is read, not built (no compiler here).
 
+## 6ad. Safe Finder: the Dock icon brings every window forward; the volume slider takes a click (Nov 10, 2026)
+
+- **Dock icon.** "It just brings the main Safe Finder to the forefront." macOS brings all of an app's windows
+  forward when a Dock click *activates* it — but a click on one window brings only that window, and a Dock
+  click on an app that's already in front does nothing more, so a viewer or Edit with AI stayed behind another
+  app's windows. Qt reports every Dock click as `applicationStateChanged(ApplicationActive)` — forced through
+  even when already active (its `applicationShouldHandleReopen`). `safe_finder.on_app_state` answers it with
+  `raise_all_windows()`: every visible, un-minimized top-level window (`app_windows` — not pop-ups or tooltips)
+  raised, the main window first and the window in use last so it stays on top with the keyboard. The same
+  signal fires when a click *on a window* activates the app; then only that window should come forward, so
+  nothing is raised when the pointer is over one of our windows and away from the screen's edge
+  (`_pointer_on_a_window` — the Dock and a hidden Dock's edge are outside `availableGeometry` less a margin).
+  Window ▸ **Bring All to Front** calls the same, and the Window menu now lists every open window (it listed
+  only viewers). Minimized windows stay minimized.
+- **Volume.** The slider was a plain `QSlider`: a click off the handle only paged a step. It's now
+  `_JumpSlider` — the scrubber's click-to-jump pulled into a base class (`_Scrubber` inherits it): a press
+  anywhere sets that value, and since the handle is then under the pointer the same press carries on as a drag.
+
+Checked offscreen (clicks and a drag on the slider; which windows are raised and in what order; the pointer
+rule). The Dock behaviour itself is macOS's and wasn't run here.
+
 ## 6ab. Safe Finder Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
 
 The iPhone's video upscale (`MediaEditing.upscaleVideo`, §6f) on the Mac: right-click videos ▸ **Upscale Video…**

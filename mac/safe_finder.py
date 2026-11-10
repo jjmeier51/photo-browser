@@ -699,6 +699,77 @@ def open_social(kind: str, folder: str, parent: QWidget | None = None) -> None:
 _TIKTOK_WINDOWS: list = []
 
 
+def app_windows() -> list[QWidget]:
+    """Every window of Safe Finder that's on screen (not minimized): the main one, viewers, the AI and
+    downloader windows, dialogs — not menus, tooltips or other pop-ups."""
+    out = []
+    for w in QApplication.topLevelWidgets():
+        try:
+            if not (w.isWindow() and w.isVisible()) or w.isMinimized():
+                continue
+            kind = w.windowType()
+        except RuntimeError:                              # deleted under us
+            continue
+        if kind in (Qt.WindowType.Popup, Qt.WindowType.ToolTip, Qt.WindowType.SplashScreen, Qt.WindowType.Desktop):
+            continue
+        out.append(w)
+    return out
+
+
+_RAISED_AT = 0.0
+
+
+def raise_all_windows() -> int:
+    """Brings every Safe Finder window in front of other apps' windows, the one in use last so it stays on top
+    and keeps the keyboard. Returns how many came forward."""
+    global _RAISED_AT
+    _RAISED_AT = time.monotonic()
+    wins = app_windows()
+    active = QApplication.activeWindow()
+    main = [w for w in wins if isinstance(w, MainWindow)]
+    order = main + [w for w in wins if w not in main and w is not active]
+    if active in wins and active not in order:
+        order.append(active)
+    elif active in main and len(order) > 1:               # the main window was in use: it goes on top
+        order.remove(active)
+        order.append(active)
+    for w in order:
+        try:
+            w.raise_()
+        except RuntimeError:
+            pass
+    if order:
+        try:
+            order[-1].activateWindow()
+        except RuntimeError:
+            pass
+    return len(order)
+
+
+def _pointer_on_a_window() -> bool:
+    """Whether the pointer is over one of our windows, away from the screen's edge — i.e. Safe Finder was just
+    brought forward by a click *on a window* (then only that window should come forward, as on any Mac app),
+    not by its Dock icon or ⌘-Tab."""
+    pos = QCursor.pos()
+    screen = QApplication.screenAt(pos)
+    if screen is not None:
+        if not screen.availableGeometry().adjusted(6, 6, -6, -6).contains(pos):
+            return False                                  # on the Dock or the menu bar, or at an edge (a hidden Dock)
+    return any(w.frameGeometry().contains(pos) for w in app_windows())
+
+
+def on_app_state(state) -> None:
+    """Safe Finder was activated. macOS sends this every time the Dock icon is clicked — also when Safe Finder
+    is already the app in front, which is when its other windows (a viewer, Edit with AI, a downloader) can
+    still be sitting behind another app's: a click on one window brings only that one forward. So a click on
+    the Dock icon (or ⌘-Tab) brings them all; a click on a window is left alone."""
+    if state != Qt.ApplicationState.ApplicationActive:
+        return
+    if time.monotonic() - _RAISED_AT < 0.4 or QApplication.activePopupWidget() is not None:
+        return
+    QTimer.singleShot(0, lambda: None if _pointer_on_a_window() else raise_all_windows())
+
+
 def open_clone(start: str = "", parent: QWidget | None = None) -> None:
     """File ▸ Clone Drive to a New SSD…: the whole library copied to a new drive, every file checked, dates,
     attributes and the apps' hidden records kept, and the two drives compared afterwards (clone_window.py)."""
@@ -6962,6 +7033,7 @@ def main() -> None:
     apply_theme(app)
     win = MainWindow(args.src, args.dst)
     app.styleHints().colorSchemeChanged.connect(lambda _s: apply_theme(app, win))
+    app.applicationStateChanged.connect(on_app_state)        # the Dock icon brings every window forward
     win.show()
     sys.exit(app.exec())
 

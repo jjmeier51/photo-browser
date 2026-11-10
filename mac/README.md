@@ -360,7 +360,7 @@ several).
   ahead, so ←/→ is instant.
 - **Videos** play and loop, as on the iPhone. Below the picture: the **scrubber** across the whole width —
   click anywhere along it to jump there, or drag (the video holds still while you drag, and hovering shows the
-  time under the pointer) — then ‹ ›, **play/pause**, mute, a **volume slider** (remembered between videos and launches; turning it up takes the mute off) and speed (½×, ¼×, ⅛× — the iPhone's Slo-Mo). J / L
+  time under the pointer) — then ‹ ›, **play/pause**, mute, a **volume slider** (click anywhere along it for that volume, or drag; remembered between videos and launches; turning it up takes the mute off) and speed (½×, ¼×, ⅛× — the iPhone's Slo-Mo). J / L
   skip 15 s, , and . step a frame. **Save Frame** saves the frame on screen as a standard-range PNG in a
   "Screenshots" folder beside the video (the iPhone's press-and-hold screenshot); ⋯ ▸ **Export All Frames…**
   opens Export All Frames (below).
@@ -514,6 +514,13 @@ tags, then a plain name (not "(1)" or "copy"), then the oldest — so clearing o
 clicks; check the ticks, then Move to Trash. **Include subfolders** looks through everything inside the
 folder (each tile then says which folder it's in), and **Leave out “Frame” files** skips video-frame
 screenshots; both are remembered. The photos' fingerprints are kept, so Rescan is quick.
+
+### All of Safe Finder's windows, at once
+
+Click **Safe Finder's icon in the Dock** and every Safe Finder window comes forward — the main window, an open
+viewer, Edit with AI, a downloader — not just the main one, even when Safe Finder is already the app in
+front. (Clicking one window still brings only that window forward, as in any Mac app.) **Window ▸ Bring All
+to Front** does the same, and the Window menu lists every open window, minimized ones too.
 
 ### Sizes, filters, empty folders, and the Trash
 

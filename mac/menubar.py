@@ -264,19 +264,29 @@ def install(win, sf) -> None:
     act(w, "Minimize", win.showMinimized, "Ctrl+M")
     act(w, "Zoom", lambda: win.showNormal() if win.isMaximized() else win.showMaximized())
     w.addSeparator()
+    act(w, "Bring All to Front", sf.raise_all_windows, None, None,
+        "Every Safe Finder window in front of other apps' windows — what a click on the Dock icon does")
+    w.addSeparator()
     act(w, "Safe Finder", lambda: (win.showNormal() if win.isMinimized() else None, win.raise_(),
                                    win.activateWindow()))
     others = []
 
     def fill_windows() -> None:
+        """Every other window that's open — viewers, Edit with AI, downloaders, minimized ones too."""
         for a in others:
             w.removeAction(a)
         others.clear()
-        for x in list(sf._VIEWERS):
+        seen = [win]
+        for x in list(sf._VIEWERS) + list(sf.QApplication.topLevelWidgets()):
             try:
+                if x in seen or not x.isWindow() or not (x.isVisible() or x.isMinimized()):
+                    continue
+                if x.windowType() in (sf.Qt.WindowType.Popup, sf.Qt.WindowType.ToolTip, sf.Qt.WindowType.SplashScreen):
+                    continue
                 title = x.windowTitle()
             except RuntimeError:
                 continue
+            seen.append(x)
             if not title:
                 continue
             a = QAction(title, win)

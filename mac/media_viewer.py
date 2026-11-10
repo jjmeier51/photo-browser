@@ -454,16 +454,9 @@ def icon(name: str, color: str = "#F2F2F7", size: int = 18) -> QIcon:
 
 # ----------------------------------------------------------------------------- the scrubber
 
-class _Scrubber(QSlider):
-    """The video's timeline: a click anywhere along it jumps there (a plain slider would only page a step), then
-    drags on; hovering shows the time under the pointer."""
-
-    def __init__(self) -> None:
-        super().__init__(Qt.Orientation.Horizontal)
-        self.setObjectName("Scrubber")
-        self.setMouseTracking(True)
-        self.setRange(0, 0)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+class _JumpSlider(QSlider):
+    """A slider where a click anywhere along it puts the handle there — and the drag carries on from that spot.
+    (A plain QSlider only pages a step towards the click.) `sliderMoved` is sent for the jump too."""
 
     def _value_at(self, x: float) -> int:
         opt = QStyleOptionSlider()
@@ -477,7 +470,7 @@ class _Scrubber(QSlider):
                                               int(x - groove.x() - handle.width() / 2), span)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and self.maximum() > 0:
+        if event.button() == Qt.MouseButton.LeftButton and self.maximum() > self.minimum():
             opt = QStyleOptionSlider()
             self.initStyleOption(opt)
             handle = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, opt,
@@ -486,7 +479,19 @@ class _Scrubber(QSlider):
                 v = self._value_at(event.position().x())
                 self.setValue(v)
                 self.sliderMoved.emit(v)
-        super().mousePressEvent(event)
+        super().mousePressEvent(event)          # the handle is under the pointer now: the press starts a drag
+
+
+class _Scrubber(_JumpSlider):
+    """The video's timeline: a click anywhere along it jumps there, then drags on; hovering shows the time
+    under the pointer."""
+
+    def __init__(self) -> None:
+        super().__init__(Qt.Orientation.Horizontal)
+        self.setObjectName("Scrubber")
+        self.setMouseTracking(True)
+        self.setRange(0, 0)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         super().mouseMoveEvent(event)
@@ -1249,7 +1254,7 @@ QSlider#Scrubber {{ min-height: 18px; }}
 QSlider#Scrubber::groove:horizontal {{ height: 4px; background: rgba(255,255,255,0.25); border-radius: 2px; }}
 QSlider#Scrubber::sub-page:horizontal {{ background: #F2F2F7; border-radius: 2px; }}
 QSlider#Scrubber::handle:horizontal {{ background: #FFFFFF; width: 13px; height: 13px; margin: -5px 0; border-radius: 6px; }}
-QSlider#Volume {{ min-height: 18px; }}
+QSlider#Volume {{ min-height: 22px; }}
 QSlider#Volume::groove:horizontal {{ height: 3px; background: rgba(255,255,255,0.25); border-radius: 1px; }}
 QSlider#Volume::sub-page:horizontal {{ background: #F2F2F7; border-radius: 1px; }}
 QSlider#Volume::handle:horizontal {{ background: #FFFFFF; width: 11px; height: 11px; margin: -4px 0; border-radius: 5px; }}
@@ -1485,8 +1490,9 @@ class MediaViewer(QWidget):
         self.play_btn = _bar_button("", "Play (Space)", lambda: self.video.toggle(), "play")
         self.mute_btn = _bar_button("", "Mute (M)", self._toggle_mute, "speaker")
         self.mute_btn.setCheckable(True)
-        self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume = _JumpSlider(Qt.Orientation.Horizontal)      # a click anywhere along it sets that volume
         self.volume.setObjectName("Volume")
+        self.volume.setCursor(Qt.CursorShape.PointingHandCursor)
         self.volume.setRange(0, 100)
         self.volume.setValue(round(self.video._volume * 100))
         self.volume.setFixedWidth(96)
