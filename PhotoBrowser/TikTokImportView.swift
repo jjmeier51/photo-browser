@@ -123,9 +123,16 @@ struct TikTokImportView: View {
             // older backup, or rebuilt, mustn't make it fetch what's on the drive. The record is
             // brought up to date with what's on disk first.
             let onDisk = await Task.detached(priority: .userInitiated) { Library.postIDsOnDisk(in: dest, tiktok: true) }.value
+            // The folder's shared record (`.tiktok.json` — Safe Finder writes it too): its ids count as
+            // downloaded, and a folder Safe Finder made (no record on the phone yet) is taken over from it.
+            let shared = await Task.detached(priority: .userInitiated) { SocialRecord.snapshot(.tiktok, in: dest) }.value
+            if library.tiktokInfo(for: dest) == nil, let info = shared.tiktokInfo {
+                library.setTikTokInfo(info, for: dest)
+                if dest.path != targetFolder.path { library.setLastTikTokHandle(user, for: parent) }
+            }
             library.addKnownTikTokIDs(onDisk, for: dest)
             let prior = library.tiktokInfo(for: dest)
-            let already = Set(prior?.downloaded ?? []).union(onDisk)
+            let already = Set(prior?.downloaded ?? []).union(onDisk).union(shared.ids)
             // Already downloaded this profile? Only check for videos newer than the most recent one
             // we have — the resolver stops paging once it reaches older posts.
             let since = prior?.newestDate.map { Date(timeIntervalSince1970: $0) }
@@ -191,8 +198,9 @@ struct TikTokImportView: View {
                 },
                 progress: { p in Task { @MainActor in phase = p.phase } })
 
-            // Refresh like counts on already-downloaded videos too (not just the new ones).
-            library.applyTikTokLikes(result.allStats, in: dest)
+            // Refresh like counts on already-downloaded videos too (not just the new ones) — this run's
+            // over the ones the shared record has (Safe Finder reads every video's count on each run).
+            library.applyTikTokLikes(shared.likes.merging(result.allStats) { _, fresh in fresh }, in: dest)
             // Record the resolved author id. The incremental cutoff (`newestDate`) is
             // deliberately NOT advanced here — at this point the videos are only
             // *queued* on the background session. It advances in
@@ -205,6 +213,20 @@ struct TikTokImportView: View {
                 // whether everything's downloaded (→ fast incremental) or some are still missing.
                 if didFullList, result.totalFound > 0 { info.profileVideoCount = result.totalFound }
                 library.setTikTokInfo(info, for: dest)
+            }
+            // The shared record: what's on the drive so far and this run's like counts (the videos still
+            // downloading are added as they're filed — `Library.applyFiledTikTok`).
+            if let info = library.tiktokInfo(for: dest) {
+                let ids = Set(info.downloaded).union(onDisk)
+                let likes = result.allStats
+                let fields = ["handle": info.handle, "author_id": result.authorId, "nickname": result.nickname]
+                let numbers: [String: Double] = (didFullList && result.totalFound > 0)
+                    ? ["profile_video_count": Double(result.totalFound)] : [:]
+                Task.detached(priority: .utility) {
+                    guard FileManager.default.fileExists(atPath: dest.path) else { return }
+                    SocialRecord.save(.tiktok, in: dest, done: ids, photos: 0, videos: 0, info: fields,
+                                      likes: likes, numbers: numbers)
+                }
             }
             resolving = false
             note = (queued == 0) ? (result.note ?? "Nothing to download.") : nil

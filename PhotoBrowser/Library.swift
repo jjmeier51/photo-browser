@@ -619,8 +619,19 @@ final class Library {
                 info.newestDate = newest
             }
             tiktokFolders[folder] = info
+            // The folder's shared record (`.tiktok.json`, Safe Finder's too): these ids and their likes.
+            let folderURL = URL(fileURLWithPath: folder, isDirectory: true)
+            let doneIDs = Set(fresh), handle = info.handle, added = fresh.count
+            let likes = Dictionary(filed.filter { $0.folder == folder && $0.likes > 0 }.map { ($0.id, $0.likes) },
+                                   uniquingKeysWith: { first, _ in first })
+            Task.detached(priority: .utility) {
+                SocialRecord.save(.tiktok, in: folderURL, done: doneIDs, photos: 0, videos: added,
+                                  info: ["handle": handle], likes: likes)
+            }
         }
         if !idsByFolder.isEmpty { persistTikTokFolders() }
+        // Tagged "tiktok", as Safe Finder tags its TikTok downloads.
+        _ = addTag(SocialRecord.Kind.tiktok.tag, to: filed.map { URL(fileURLWithPath: $0.dest) })
         contentDidChange()
     }
 

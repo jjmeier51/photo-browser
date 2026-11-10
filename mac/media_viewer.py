@@ -1988,6 +1988,13 @@ class MediaViewer(QWidget):
             lat, lng = meta["place"]
             row("Place", f"{lat:.5f}, {lng:.5f}", f"https://maps.apple.com/?ll={lat},{lng}&q=Photo")
         row("Caption", meta.get("caption", ""))
+        try:                                         # a TikTok download's like count (the iPhone's Info shows it too)
+            import tiktok
+            likes = tiktok.likes_of(path)
+        except Exception:  # noqa: BLE001
+            likes = None
+        if likes is not None:
+            row("Likes", f"{likes:,}")
         row("Folder", os.path.dirname(path))
         if self.hooks.labels_of is not None:
             have = self.hooks.labels_of(path)

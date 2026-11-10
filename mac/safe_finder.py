@@ -696,6 +696,33 @@ def open_social(kind: str, folder: str, parent: QWidget | None = None) -> None:
     win.show()
 
 
+_TIKTOK_WINDOWS: list = []
+
+
+def tiktok_label(folder: str) -> str:
+    """The menu line: "Get New TikTok Videos" on a TikTok profile's folder (or a folder holding one)."""
+    try:
+        import tiktok
+        return tiktok.menu_label(folder)
+    except Exception:  # noqa: BLE001 — a folder that can't be read still gets its menu
+        return "Download TikTok Profile…"
+
+
+def open_tiktok(folder: str, parent: QWidget | None = None) -> None:
+    """Right-click a folder ▸ Download ▸ "Download TikTok Profile…" / "Get New TikTok Videos": the downloader
+    window (tiktok_downloader.py) — the iPhone app's TikTok downloader, into the same `@handle` folder and
+    file names, with every video's like count read again on each run."""
+    import tiktok
+    import tiktok_downloader
+    win = tiktok_downloader.TikTokWindow(folder, tags=tag_store())
+    win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    win.finished.connect(lambda dest, files: (tiktok.forget_likes(dest), files and tags_changed(),
+                                              tag_events().scores.emit()))
+    win.destroyed.connect(lambda _=None, w=win: _TIKTOK_WINDOWS.remove(w) if w in _TIKTOK_WINDOWS else None)
+    _TIKTOK_WINDOWS.append(win)
+    win.show()
+
+
 def heart_path(r: QRectF) -> QPainterPath:
     """A heart filling `r`."""
     x, y, w, h = r.x(), r.y(), r.width(), r.height()
@@ -2146,19 +2173,27 @@ _SKIP_ANYWHERE = {"node_modules"}
 _BUNDLE_EXT = {".app", ".photoslibrary", ".imovielibrary", ".fcpbundle", ".fcpcache", ".tvlibrary",
                ".musiclibrary", ".bundle", ".framework", ".xcarchive", ".playground", ".pkg", ".lrlibrary"}
 SORT_KEYS = [("name", "Name"), ("kind", "Kind"), ("modified", "Date Modified"), ("created", "Date Created"),
-             ("added", "Date Added"), ("size", "Size"), ("reactions", "Reaction Score")]
+             ("added", "Date Added"), ("size", "Size"), ("reactions", "Reactions / Likes")]
 DATE_KEYS = {"modified", "created", "added"}
 HIGH_FIRST = DATE_KEYS | {"reactions"}            # keys the menu sorts highest / newest first
 
 
 def reaction_score(path: str) -> int | None:
-    """A SimpCity download's reaction score (from its folder's `.simpcity.json` — simpcity.folder_scores),
-    or None for anything else."""
+    """A SimpCity download's reaction score (from its folder's `.simpcity.json` — simpcity.folder_scores), or a
+    TikTok video's like count (its folder's `.tiktok.json`, else what the iPhone app's backup noted —
+    tiktok.likes_of); None for anything else."""
     try:
         import simpcity
+        score = simpcity.score_of(path)
     except ImportError:
-        return None
-    return simpcity.score_of(path)
+        score = None
+    if score is None:
+        try:
+            import tiktok
+            score = tiktok.likes_of(path)
+        except Exception:  # noqa: BLE001
+            score = None
+    return score
 
 
 def compact_count(n: int) -> str:
@@ -4778,6 +4813,7 @@ class Pane(QWidget):
             dl.addAction("Get Reaction Scores", lambda: open_simpcity(scored, self.window(), scores_only=True))
         for kind in ("instagram", "facebook"):
             dl.addAction(social_label(folder, kind), lambda _=False, kind=kind: open_social(kind, folder, self.window()))
+        dl.addAction(tiktok_label(folder), lambda: open_tiktok(folder, self.window()))
         dl.addAction(fanfix_label(folder), lambda: open_fanfix(folder, self.window()))
         dl.addSeparator()
         dl.addAction("Browse taylorpictures.net…", lambda: self.open_taylor(folder))

@@ -232,6 +232,9 @@ def install(win, sf) -> None:
         folder_target)
     act(t, "Download Facebook Profile…", lambda: sf.open_social("facebook", folder_target(), win), None,
         folder_target)
+    act(t, "Download TikTok Profile…", lambda: sf.open_tiktok(folder_target(), win), None, folder_target,
+        "A TikTok profile's videos, watermark-free, into its @handle folder (the iPhone app's) — with every "
+        "video's like count read again")
     act(t, "Download from Fanfix…", lambda: sf.open_fanfix(folder_target(), win), None, folder_target,
         "Your purchased content from Fanfix creators, into a folder for each creator")
     act(t, sf.passes_label(folder_target()) if folder_target() else "Download Passes…",
