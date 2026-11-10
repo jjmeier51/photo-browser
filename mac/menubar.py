@@ -106,6 +106,11 @@ def install(win, sf) -> None:
     act(f, "Quick Look  (Space)", lambda: pane().quick_look(), None, lambda: bool(sel()) and sf.IS_MAC)
     act(f, "Show in Finder", lambda: sf.subprocess.Popen(["open", "-R", sel()[0]]) if sel() else None, None,
         lambda: bool(sel()) and sf.IS_MAC)
+    act(f, "Rename…", lambda: pane().rename_item(sel()[0]) if len(sel()) == 1 else None, "F2", lambda: len(sel()) == 1,
+        "A new name for the selected file or folder — its tags, Favorites and the iPhone app's own metadata follow")
+    act(f, "Remove Leading Spaces from Names…", lambda: pane().remove_leading_spaces(folder_target()), None,
+        folder_target, "Every file and folder in the selected folder (or this one) whose name starts with a space "
+        "gets the name without it")
     f.addSeparator()
     act(f, "Copy to the Other Side", lambda: win.transfer_selection(False), "Ctrl+Shift+C",
         lambda: not win.split or win.copy_btn.isEnabled())

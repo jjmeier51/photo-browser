@@ -372,6 +372,10 @@ extension Library {
         guard let root = rootURL, !waitingForDrive else { return }
         if tagSyncRunning { tagSyncAgain = true; return }
         tagSyncRunning = true
+        // Renames Safe Finder made while the drive was on the Mac: everything kept by path here
+        // follows them first, so the merge below sees the tags under their new names.
+        await applyMacRenames()
+        guard rootURL?.path == root.path, !waitingForDrive else { tagSyncRunning = false; return }
         let rootPath = root.path
         let prefix = Self.canonicalPath(rootPath) + "/"
         // The store's tags under this drive, drive-relative — remembering the key each is stored

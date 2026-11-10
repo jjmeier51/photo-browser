@@ -4702,6 +4702,67 @@ class Pane(QWidget):
                 + ", so it may not open on the iPhone. In Terminal:\n\n"
                 + engine.spares_command(engine.volume_root(target)))
 
+    # -- names (rename_tools.py)
+    def _names_changed(self, res) -> None:
+        """After renames: the caches keyed by the old names go, the views follow, tags repaint."""
+        old = [r.old for r in res.done]
+        media_info.forget(old)
+        if THUMBS is not None:
+            THUMBS.forget(old)
+        tags_changed()
+        self.grid.viewport().update()
+        self.list.viewport().update()
+
+    def rename_item(self, path: str) -> None:
+        """Rename… (F2): one file or folder. Its tags, Favorites and To AI go with it — a folder's contents'
+        too — and the rename is noted for the iPhone app, which moves its own captions, covers and the rest."""
+        import rename_tools
+        old = os.path.basename(path.rstrip("/"))
+        box = QInputDialog(self.window())
+        box.setWindowTitle("Rename")
+        box.setLabelText(f"New name for “{old}”:")
+        box.setTextValue(old)
+        box.resize(460, box.height())
+        edit = box.findChild(QLineEdit)
+        if edit is not None and not os.path.isdir(path) and "." in old[1:]:
+            QTimer.singleShot(0, lambda: edit.setSelection(0, len(os.path.splitext(old)[0])))     # the name, not its extension
+        if box.exec() != QInputDialog.DialogCode.Accepted:
+            return
+        new = box.textValue()
+        if new == old:
+            return
+        try:
+            plan = [rename_tools.single(path, new)]
+        except ValueError as e:
+            QMessageBox.information(self.window(), "Rename", str(e))
+            return
+        res = rename_tools.apply(plan, tag_store())
+        if res.failed:
+            QMessageBox.warning(self.window(), "Rename", f"Couldn't rename “{old}”: {res.failed[0][1]}")
+            return
+        self._names_changed(res)
+        QTimer.singleShot(300, lambda: self.reveal(res.done[0].new) if os.path.dirname(res.done[0].new) == self.location else None)
+
+    def remove_leading_spaces(self, folder: str) -> None:
+        """Right-click a folder ▸ Remove Leading Spaces from Names…: every file and folder inside whose name
+        starts with a space gets the name without it (rename_window.py lists them first)."""
+        import rename_window
+
+        def done(res) -> None:
+            self._names_changed(res)
+            n = len(res.done)
+            line = f"Took the leading spaces off {n:,} name{'s' if n != 1 else ''}."
+            if res.failed:
+                line += f" {len(res.failed):,} couldn't be renamed."
+                QMessageBox.warning(self.window(), "Remove Leading Spaces",
+                                    line + "\n\n" + "\n".join(f"{os.path.basename(r.old)}: {why}"
+                                                                 for r, why in res.failed[:12]))
+            self._airdrop_noted(line)
+
+        dlg = rename_window.LeadingSpacesDialog(self.window(), folder, tag_store(), done)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.open()
+
     def set_drop_target(self, path: str | None) -> None:
         if path != self.drop_target:
             self.drop_target = path
@@ -4730,6 +4791,8 @@ class Pane(QWidget):
             menu.addAction("Show in Safe Finder", lambda: self.reveal(paths[0]))
             if IS_MAC:
                 menu.addAction("AirDrop to iPhone…", lambda: self.airdrop(paths))
+            if len(paths) == 1:
+                menu.addAction("Rename…", lambda: self.rename_item(paths[0])).setShortcut(QKeySequence("F2"))
             if len(paths) == 1 and os.path.isdir(paths[0]):
                 self._folder_tools(menu, paths[0], "Find Duplicates…")
             menu.addSeparator()
@@ -4799,6 +4862,7 @@ class Pane(QWidget):
             if not paths and os.path.isdir(self.location):
                 menu.addAction("Edit Metadata of Everything Here…", lambda: self.edit_metadata([self.location]))
                 menu.addAction("Convert WebP Photos Here to JPEG…", lambda: self.convert_webp([self.location]))
+                menu.addAction("Remove Leading Spaces from Names Here…", lambda: self.remove_leading_spaces(self.location))
                 self._folder_tools(menu, self.location, "Find Duplicates in This Folder…")
         menu.exec(view.viewport().mapToGlobal(pos))
         menu.deleteLater()                                 # a new menu each right-click: don't keep them all
@@ -4807,6 +4871,7 @@ class Pane(QWidget):
         """A folder's tools in the right-click menu: Find Duplicates, then the downloaders and the AI grouped
         (the menu had grown past a screenful)."""
         menu.addAction(dups_label, lambda: self.find_duplicates(folder))
+        menu.addAction("Remove Leading Spaces from Names…", lambda: self.remove_leading_spaces(folder))
         dl = menu.addMenu("Download")
         dl.addAction("Download from SimpCity…", lambda: open_simpcity(folder, self.window()))
         if (scored := simpcity_scores_folder(folder)) is not None:

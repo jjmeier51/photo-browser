@@ -628,6 +628,43 @@ class TagStore:
                 by_tags.setdefault(tuple(tags), []).append(dst)
         return sum(self.add(dsts, list(tags)) for tags, dsts in by_tags.items())
 
+    def renamed(self, pairs: Iterable[tuple[str, str]]) -> int:
+        """Items renamed where they are — files or folders, in the order the renames were made: each one's
+        tags and labels, and those of everything inside a folder, go to the new name (added to any already
+        there). The old entries are dropped. Returns how many entries moved."""
+        by_table: dict[int, tuple[TagFile, list[tuple[str, str]]]] = {}
+        for old, new in pairs:
+            t = self.table_for(new)
+            ko, kn = t.key(old), t.key(new)
+            if ko is None or kn is None or ko == kn:
+                continue
+            by_table.setdefault(id(t), (t, []))[1].append((ko.rstrip("/"), kn.rstrip("/")))
+        moved = 0
+        writes: list[tuple[str, str, list[str]]] = []
+        for t, moves in by_table.values():
+            t.refresh(force=True)
+            touched: dict[str, None] = {}
+            before = moved
+            for ko, kn in moves:
+                for table, is_tags in ((t.files, True), (t.labels, False)):
+                    for k in [x for x in table if x == ko or x.startswith(ko + "/")]:
+                        dest = kn + k[len(ko):]
+                        vals = table.pop(k)
+                        have = table.get(dest, [])
+                        seen = {fold(x) for x in have} if is_tags else set(have)
+                        table[dest] = have + [x for x in vals if (fold(x) if is_tags else x) not in seen]
+                        moved += 1
+                        if is_tags:
+                            touched.pop(k, None)
+                            touched[dest] = None
+            if moved > before:
+                t.save()
+                writes += [(t.path(k), k, t.files[k]) for k in touched if k in t.files]
+        if moved:
+            self.version += 1
+        self._carry_out([w for w in writes if os.path.isfile(w[0])])
+        return moved
+
     def read_folder(self, paths: Iterable[str]) -> list[tuple[str, list[str] | None, dict | None]]:
         """What each file (or folder — a folder carries its own tags too) carries — for `apply_carried`.
         Only reads; safe on a worker thread. Items on exFAT, hidden ones and sidecars are skipped."""
