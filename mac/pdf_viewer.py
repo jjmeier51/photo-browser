@@ -599,7 +599,7 @@ class PdfViewer(QWidget):
         chapters = self.reader.chapters()
         name = chapters[i].title if i >= 0 else "Chapters"
         shown = self.chapter_btn.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, 190)
-        self.chapter_btn.setText(shown + " ▾")
+        self.chapter_btn.setText(shown)
         items = self._contents_items()               # in the chapters' own order
         self.contents.blockSignals(True)
         self.contents.setCurrentItem(items[i] if 0 <= i < len(items) else None)

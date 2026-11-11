@@ -405,6 +405,19 @@ searchable and selectable — and the file stays small. Without it (or if it won
 `~/Library/Caches/PhotoBrowser/pdf_helper.log`) Qt draws the same layout from pictures of the pages at the iPhone's
 3 pixels a point: sharp on the phone, but the text can't be searched or selected, and the viewer says so.
 
+**Getting around a PDF.**
+
+- **Click the contents page.** On a book's table of contents, click an entry — its **page number** or its
+  title — and the viewer goes straight to that page. It works where the PDF has real links, and also where the
+  contents page is only printed text (scanned books, exported documents): the viewer reads the line you clicked
+  and works out which page the printed number means, even when the book's page 1 isn't the file's first page.
+  **‹ Back** (⌘[) at the bottom returns to where you were.
+- **Contents** (top left) opens the list of chapters beside the pages — click one to go there; the chapter
+  you're reading is marked. The chapter's name in the bottom bar opens the same list as a menu, and **[** and
+  **]** step to the chapter before and the next.
+- **Any page**: type its number in the page box (⌘G puts the cursor there; it also takes a printed label like
+  "xii"), ←/→ a page at a time, Home / End for the first and last page, ☰ for page thumbnails.
+
 ### Make Book PDF — a text file typeset like a printed book (`book_window.py`, `bookify.py`)
 
 Right-click a **.txt, .md or .rtf** file ▸ **Make Book PDF…** (several selected: a book of each), or File ▸ Make
@@ -435,6 +448,29 @@ for iPhone works on it too). The first book downloads EB Garamond once. It needs
 into the app; if they're still missing, the window's main button is **Install ReportLab** instead of Make Book — it
 fetches them (into Safe Finder's own Python, or for the built app into ~/Library/Application Support/Safe
 Finder/python, with any Python on the Mac), then Make Book appears. `bookify.py` still works on its own: `python3 bookify.py story.txt --size iphone`.
+
+**Pictures in the book.** When you press Make Book it first asks **"Would you like to add pictures to this
+book?"** — Add Pictures, No Pictures, or Cancel. Either way the book is made. With Add Pictures, the **Pictures**
+window then opens over the finished book:
+
+- **Add Pictures…** — choose one or more photos, from the Mac or the drive (JPEG, PNG, HEIC, WebP, TIFF…).
+  **Open the Book** shows the book just made, so you can look through it while you decide.
+- For each picture say **where** it goes: *At the front* (after the title page), *At the start of a chapter*
+  or *At the end of a chapter* (pick the chapter — the list shows each one's page), *On a page* (type a page
+  number of the book as it is now), or *At the end of the book*.
+- …and **how**: *A page of its own* (the whole page, nothing else on it), *Across the text*, or *Half the
+  width* — plus an optional **caption** under it.
+- **Add … to the Book** sets the book again with the pictures in and puts it in place of the one just made.
+
+A picture placed "on a page" stays with the text that was on that page, so it lands there or just after, and the
+pages after it move on (the contents page is renumbered by itself). Your choices are remembered for that text —
+the next time you make it into a book they're offered again — and **Pictures…** beside Open reopens the window to
+add, move or remove pictures. From Terminal:
+`python3 bookify.py story.txt --picture "map.jpg@front" --picture "storm.jpg@chapter 4,wide,The storm"`.
+
+**A contents page you can click.** In a book made here, every line of the contents page — the chapter's name and
+its page number — is a link to that chapter, and the chapters are the PDF's outline (the sidebar in Preview and
+Books, and the Contents list in Safe Finder's viewer).
 
 ### Export All Frames and Save Frame (`frame_export.py`)
 

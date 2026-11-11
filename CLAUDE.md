@@ -185,6 +185,14 @@ actions the app makes no network calls.
   plans, `mac/pdf_helper.swift` draws vectors (Qt pictures as fallback) — §6v.
   Safe Finder's **Make Book PDF** (right-click a .txt/.md/.rtf, or File menu; `mac/book_window.py` → the person's
   `mac/bookify.py`, ReportLab): the text typeset like a printed book beside it, incl. an iPhone-screen page size — §6w.
+  **Make Book asks "add pictures?" first, makes the book, then opens the Pictures window** (`PicturesDialog`: each
+  picture at the front / a chapter's start or end / on a page / the end; a page of its own, across the text or half
+  width; a caption) and sets the book again in place (`BookHooks.replace`; `bookify.make_book(pictures=…)`, "on a
+  page" kept as "after that paragraph"). bookify's contents entries are links and the chapters are the PDF outline.
+  **The PDF viewer follows a click on a contents entry** — real links itself (`follow_link`: this Qt's `QPdfView`
+  doesn't), and contents pages that are only text by reading the clicked line and resolving the printed number
+  (`mac/pdf_contents.py`: labels, folio offset, the chapter's title); a **Contents** list, a chapter menu, `[`/`]`,
+  ‹ Back, ⌘G. The viewer re-derives `QPdfView`'s page layout (`_page_rects`) to map clicks — §6w-2.
   Safe Finder opens as **one window**; **Split View** (header button, View ▸ Split View ⌘\\, remembered; `--to`
   forces it) adds the To pane and the Move/Copy bar for transfers (`MainWindow.set_split` — §6r).
 - **PhotoKit** — browse iOS albums in-app, import into the drive folder,

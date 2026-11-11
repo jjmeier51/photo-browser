@@ -1609,6 +1609,72 @@ would otherwise scroll) about the pointer, 1.0015^angleDelta (≈ 1.2× a notch)
 and Magic Mouse scrolls begin/update/end/momentum phases), so two-finger scrolling keeps swiping to the next item
 and panning a zoomed picture; ⌘/Ctrl-scroll zooms from either.
 
+## 6w-2. Books with pictures and a clickable contents; getting around a PDF — `mac/bookify.py`, `mac/book_window.py`, `mac/pdf_contents.py`, `mac/pdf_viewer.py` (Nov 11, 2026)
+
+Asked for: click the numbers in a table of contents to go to that page; get to any page or chapter easily; and
+Make Book should ask about pictures, make the book, then ask which pictures and where.
+
+**bookify.**
+- *Contents that link.* Each chapter's `Mark` now carries a key (`chapter-<n>`): `Mark.draw` calls
+  `bookmarkPage(key, fit="XYZ", left=0, top=<page height>, zoom=0)` and `addOutlineEntry`, and `afterFlowable`
+  passes the key in the `TOCEntry` notification — ReportLab then makes the entry's text *and* its page number
+  links. (`fit="Fit"` gives a destination with no place on the page; Qt logs "link with invalid location and/or
+  zoom" for every one. XYZ with zoom 0 = "leave the zoom".) The chapters are the PDF's outline.
+- *Where things landed.* `BookPara` (a `Paragraph` whose split pieces keep `_book_el`, the element's index) lets
+  `afterFlowable` record each paragraph's first and last page (`state.el_pages`); chapters record (title, page).
+  `make_book` returns `chapter_list` and `el_pages` — what a picture's "on page N" is resolved against.
+  `with_opening` (the untitled first chapter) now runs in `make_book`, before the story, so the indices mean the
+  same in every build.
+- *Pictures* (`pictures=` / `--picture FILE@WHERE[,SIZE][,CAPTION]`): `where` front / chapter_start / chapter_end
+  (`index` = chapter from 0) / after (`index` = element) / page (`index` = a page of the book *without* the
+  page-placed pictures: one silent build first, then `element_for_page`: a page of its own goes after the last
+  paragraph ending before page N, one in the text after the first paragraph ending on N or later) / end; `size`
+  page / wide / half. `prepare_picture`: upright, RGB (alpha on white), ≤ 220 dpi for the page, JPEG in the temp
+  folder (Pillow; HEIC when pillow_heif is there). `Picture` (a Flowable) keeps the proportion and draws the
+  caption; a full page is `NewPage, Mark("blank"), Picture(full), NewPage` — no running head or folio. A "page"
+  picture at a chapter's start goes *before* the chapter's page break (a plate facing the opening); an inline
+  one goes under the heading.
+
+**Make Book window.** `start()` asks first (`ask_about_pictures`: Add Pictures / No Pictures / Cancel — Cancel
+makes nothing). The book is made and placed as before; with a yes, `_finished` queues `PicturesDialog` for each
+book made. A row per picture: where (chapter choices only when the book has named chapters), the chapter or the
+page, the size, a caption. `placement()` turns "on a page" into `after` + the element (so the choice survives
+re-builds); a kept "after" row shows the page that paragraph is on *now* and keeps its element unless the page or
+size is changed. `_add_pictures` builds to a temp file and `BookHooks.replace` puts it over the book made a moment
+ago (Safe Finder's: temp → fsync → rename with the carried attributes copied on; straight in on exFAT). Choices
+are kept per text in `book/pictures/<sha1 of the path>` and in the window (`Pictures…` reopens). A picture that's
+gone is said and the book left as it was.
+
+**The viewer.**
+- *This Qt's `QPdfView` doesn't follow links* (6.12: a click on a link does nothing), so the viewer does:
+  an event filter on the viewport; a click (press and release within 5 px) → `follow_link` (the page's
+  `QPdfLinkModel.linkAt`; an internal link jumps through the navigator, a web link opens in the browser).
+- *Viewport ↔ page.* `QPdfView` doesn't say where it draws pages, so `_page_rects` works its layout out again
+  (from Qt's `calculateDocumentLayout`: sizes by zoom mode — Custom = points × dpi/72 × zoom, FitToWidth scaled to
+  the viewport less the margins, FitInView scaled into it — stacked `pageSpacing` apart inside `documentMargins`,
+  centred); `page_point` / `viewport_pos` convert. **If a Qt update changes that layout, clicks will land off** —
+  the viewer test clicks by `viewport_pos` at fit-width and at 160 %, which would show it.
+- *Contents pages that are only text* (`pdf_contents.Reader`): `entries(page)` reads the page's text lines for
+  "title … number" (dot leaders or a gap; the number on its own line at the same height is paired with the line
+  before; roman numerals only after leaders — "…said I" isn't a page), with each line's rectangle from
+  `getSelectionAtIndex` (indices in UTF-16 units); a page is a contents page with ≥ 3 such lines whose numbers
+  rise. `resolve(title, number)`: the PDF's page labels when they're real; else `number − 1 + offset()` — the
+  offset voted by the folios (first/last line of a page that's only a number) on a spread of pages; then the
+  earliest page within ±3 whose first 700 characters hold the title (whole, or without its "Chapter 3"), which
+  mends an offset that's slightly out and never picks a contents page. A click on such a line jumps and says
+  "‹ Back returns to the contents".
+- *Chapters.* `Reader.chapters()` = the outline (`QPdfBookmarkModel`, nested), else the resolved entries of the
+  contents pages in the first 40 pages. The **Contents** button shows them in a tree beside the pages (page
+  numbers right-aligned, the current chapter selected as you scroll); the bottom bar's chapter button is a menu of
+  them; `[` / `]` step chapters; **‹ Back** / ⌘[ and ⌘] use the navigator's history; ⌘G focuses the page box,
+  which takes labels via `pageIndexForLabel`; Home / End.
+
+Tested offscreen: bookify (outline pages = chapter pages; 12 links on the contents page; seven pictures in every
+kind of place, captions, plates with no text, contents renumbered; bad pictures refused), the reader on PDFs made
+without links or outline (leaders with 4 front-matter pages; no leaders with 6; a wrong offset mended by the
+title), the viewer (real mouse clicks on numbers and titles at fit-width and zoomed, Back, the list, the menu,
+chapter steps, the page box) and the window's whole pictures flow.
+
 ## 6q. Safe Finder Find Duplicates — `mac/duplicates.py`, `mac/duplicates_window.py` (Nov 3, 2026)
 
 A port of §2 (same three kinds, kept apart, same threshold 6, same normalized names, same Oldest/Newest from

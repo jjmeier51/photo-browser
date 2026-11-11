@@ -4489,8 +4489,23 @@ class Pane(QWidget):
             except OSError:
                 pass
 
+        def replace(tmp: str, book: str) -> None:
+            """The book set again (with its pictures) over the one made a moment ago: whole before it takes the
+            name (straight in on exFAT), the tags it carries kept."""
+            if spare_folders.on_exfat(book):
+                with open(tmp, "rb") as src, open(book, "r+b") as dst:
+                    shutil.copyfileobj(src, dst)
+                    dst.truncate()
+                return
+            part = os.path.join(os.path.dirname(book), f".{os.path.basename(book)}.part")
+            shutil.copyfile(tmp, part)
+            with open(part, "rb+") as f:
+                os.fsync(f.fileno())
+            batch_crop.copy_xattrs(book, part)
+            os.replace(part, book)
+
         hooks = book_window.BookHooks(
-            place=lambda tmp, folder, name: str(simpcity.place(tmp, folder, name)), carry_tags=carry,
+            place=lambda tmp, folder, name: str(simpcity.place(tmp, folder, name)), replace=replace, carry_tags=carry,
             reveal=self._reveal_from_viewer,
             open_pdf=lambda p: self.view_pdf(p) if self._pdf_viewer_ok(p) else
             QDesktopServices.openUrl(QUrl.fromLocalFile(p)),
