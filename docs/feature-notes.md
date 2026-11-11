@@ -2184,6 +2184,31 @@ carried on, hidden records in / junk out, dates and attributes equal, a flipped 
 re-copied, a missing file / changed date / lost attribute repaired by a re-run, the old drive's newer backup
 brought across, a file changed on the new drive left alone; the window offscreen.
 
+**Nov 11, 2026 — "NOT KEPT: Keri/Stories — modification date, creation date … and 150 more".** The first real
+clone's comparison listed ~350 of these, and the wording read as if the *items* hadn't been kept. They had: the
+comparison's `metadata` list is items that are there, same kind and size, whose dates or attributes differ.
+- **A real fault behind some of them: creation dates.** `copy_meta` ran `utime` → `set_birth` → `utime` again
+  ("in case setting the creation date touched the others"). macOS pulls an item's creation date back to its
+  modification date whenever the modification date *alone* is set to something earlier (the `touch` trick;
+  HFS+ did it and APFS kept it — §7 notes the same for uploads). So every file created after it was last
+  modified — anything downloaded or copied with its date kept — lost its creation date to that last `utime`.
+  Now `put_dates`: `utime`, then **one `setattrlist` with creation + modification + access together**
+  (`set_dates`; the clamp doesn't apply when the creation date is in the same call), `set_birth` alone as the
+  fallback, **nothing after it**, and the result read back with `lstat` — what the drive says is what's
+  reported, not the calls' return values. Don't put a bare `utime` after a creation date again.
+- Other honest causes, now said in the report (`DETAILS_NOTE`): a folder's modification date moves when
+  anything is added to or removed from it afterwards (the report had "9 items on the new drive that the old
+  one doesn't have" — the drive was in use); folders get their dates last, so a stopped clone hasn't dated them.
+- **Match Dates and Attributes** (window button after a comparison; `--verify --match-dates`;
+  `match_details`): the old drive's dates and attributes put on those items, files first, then folders deepest
+  first. No contents touched. A file whose modification date differs is read on both drives first — only an
+  identical one gets the old dates; one changed on the new drive is left and said so. Then compared again.
+- A Clone re-run now also puts a lost creation date right on a file that's already there (`_same_already`
+  compares it alongside the attributes).
+- Report lines now read "COPIED, but not with the same <what>: <item>".
+Checked here with a stand-in for macOS's rule (modification date set alone → creation date clamped): the old
+order loses the creation date, both new routes keep it. `setattrlist` itself is still unrun here.
+
 ## 6s. Safe Finder Edit Metadata — `mac/metadata_edit.py`, `mac/metadata_window.py` (Nov 3, 2026)
 
 Bulk metadata for any number of photos and videos (or everything under picked folders — `media_in`: hidden

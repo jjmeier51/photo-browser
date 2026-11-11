@@ -146,8 +146,23 @@ if IS_MAC:
         ts = _Timespec(ns // 1_000_000_000, ns % 1_000_000_000)
         return _libc.setattrlist(os.fsencode(path), ctypes.byref(al), ctypes.byref(ts), ctypes.sizeof(ts),
                                  _FSOPT_NOFOLLOW) == 0
+
+    _ATTR_CMN_MODTIME, _ATTR_CMN_ACCTIME = 0x00000400, 0x00001000
+
+    def set_dates(path: str, birth: int, modified: int, accessed: int) -> bool:
+        """Creation, modification and access dates in one call. Together matters: macOS pulls an item's creation
+        date back to its modification date whenever the modification date *alone* is set to something earlier
+        (how `touch` changes creation dates) — so a file created after it was last modified, which is every file
+        that was ever downloaded or copied with its date kept, lost its creation date to a later `utime`."""
+        al = _AttrList(_ATTR_BIT_MAP_COUNT, 0, _ATTR_CMN_CRTIME | _ATTR_CMN_MODTIME | _ATTR_CMN_ACCTIME, 0, 0, 0, 0)
+        ts = (_Timespec * 3)(*(_Timespec(v // 1_000_000_000, v % 1_000_000_000) for v in (birth, modified, accessed)))
+        return _libc.setattrlist(os.fsencode(path), ctypes.byref(al), ctypes.byref(ts), ctypes.sizeof(ts),
+                                 _FSOPT_NOFOLLOW) == 0
 else:
     def set_birth(path: str, ns: int) -> bool:
+        return False
+
+    def set_dates(path: str, birth: int, modified: int, accessed: int) -> bool:
         return False
 
 
@@ -178,21 +193,35 @@ def copy_meta(src: str, dst: str, st: os.stat_result, perms: bool, flags: bool =
                 os.chmod(dst, statmod.S_IMODE(st.st_mode))
             except OSError:
                 missed.append("its permissions")
-    b = birth_ns(st)
+    missed += put_dates(dst, st, link)
+    if flags:
+        put_flags(dst, st, missed)
+    return missed
+
+
+def put_dates(dst: str, st: os.stat_result, link: bool = False) -> list[str]:
+    """`st`'s modification, access and creation dates onto `dst`, then read back: what the drive now says is
+    what counts, not what the calls returned. The creation date goes on last (or in the same call as the
+    others — `set_dates`): nothing may set the modification date by itself after it."""
+    missed: list[str] = []
+    b = birth_ns(st) if IS_MAC else None
     try:
         os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns), follow_symlinks=False)
     except (OSError, NotImplementedError):
-        if not link:
-            missed.append("its modification date")
-    if b is not None and IS_MAC and not set_birth(dst, b):
-        missed.append("its creation date")
-    if b is not None and IS_MAC:                     # setting the creation date can touch the others: once more
-        try:
-            os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns), follow_symlinks=False)
-        except (OSError, NotImplementedError):
-            pass
-    if flags:
-        put_flags(dst, st, missed)
+        pass                                             # the reading back below says whether it matters
+    if b is not None and not set_dates(dst, b, st.st_mtime_ns, st.st_atime_ns):
+        set_birth(dst, b)
+    try:
+        now = os.lstat(dst)
+    except OSError:
+        return [] if link else ["its dates"]
+    if abs(now.st_mtime_ns - st.st_mtime_ns) > TIME_SLACK_NS and not link:
+        missed.append("its modification date")
+    if b is not None:
+        nb = birth_ns(now)
+        if nb is not None and abs(nb - b) > TIME_SLACK_NS:
+            if not set_birth(dst, b) or abs((birth_ns(os.lstat(dst)) or b) - b) > TIME_SLACK_NS:
+                missed.append("its creation date")
     return missed
 
 
@@ -472,7 +501,9 @@ class Clone:
             return None
         if dt.st_size == st.st_size and abs(dt.st_mtime_ns - st.st_mtime_ns) <= TIME_SLACK_NS:
             want, have = xattrs_of(s), xattrs_of(d)
-            if any(have.get(k) != v for k, v in want.items()):       # there, but an attribute didn't make it
+            sb, db = (birth_ns(st), birth_ns(dt)) if IS_MAC else (None, None)
+            born = sb is not None and db is not None and abs(sb - db) > TIME_SLACK_NS
+            if born or any(have.get(k) != v for k, v in want.items()):   # there, but a date or attribute isn't
                 missed = copy_meta(s, d, st, self.perms)
                 if missed:
                     self._problem(rel, "there already, but couldn't keep " + ", ".join(missed))
@@ -626,6 +657,7 @@ class Comparison:
     missing: list[str] = field(default_factory=list)
     different: list[tuple[str, str]] = field(default_factory=list)       # (rel, what differs) — content, kind, size
     metadata: list[tuple[str, str]] = field(default_factory=list)        # (rel, what differs) — dates, attributes
+    folder_dates: int = 0                                                 # of `metadata`: folders, by their own date
     extra: int = 0                                                        # on the new drive only (not a problem)
     stopped: bool = False
     deep: bool = False
@@ -686,6 +718,8 @@ def compare(src: str, dst: str, plan: Scan, deep: bool = False,
         what: list[str] = []
         if abs(ss.st_mtime_ns - ds.st_mtime_ns) > TIME_SLACK_NS:
             what.append("modification date")
+            if it.kind == "dir":
+                out.folder_dates += 1
         sb, db = birth_ns(ss), birth_ns(ds)
         if has_birth and sb is not None and db is not None and abs(sb - db) > TIME_SLACK_NS:
             what.append("creation date")
@@ -699,6 +733,60 @@ def compare(src: str, dst: str, plan: Scan, deep: bool = False,
     if not out.stopped:
         out.extra = count_extra(dst, known, stop)
     return out
+
+
+def match_details(src: str, dst: str, rels: list[str], perms: bool | None = None,
+                  progress: Callable[[int, int, str], None] = lambda done, total, name: None,
+                  stop: Callable[[], bool] = lambda: False) -> tuple[int, list[tuple[str, str]]]:
+    """The old drive's dates and attributes put onto items the comparison found there but not the same in those
+    (`Comparison.metadata`). No file's contents are touched. A file whose modification date differs is first
+    read on both drives: only an identical file gets the old dates — one that was changed on the new drive is
+    left as it is and said so. Files first, then folders, deepest first (a folder's own date is the last thing
+    that may change in it). Returns (how many were matched, [(rel, why not)])."""
+    src, dst = os.path.abspath(src), os.path.abspath(dst)
+    if perms is None:
+        perms = fs_type(src) not in ("exfat", "msdos")
+    done, left = 0, []
+    files, folders = [], []
+    for rel in rels:
+        (folders if os.path.isdir(os.path.join(src, rel)) and not os.path.islink(os.path.join(src, rel)) else files).append(rel)
+    folders.sort(key=lambda r: r.count(os.sep), reverse=True)
+    order = files + folders
+    for i, rel in enumerate(order):
+        if stop():
+            break
+        if i % 50 == 0:
+            progress(i, len(order), rel)
+        s, d = os.path.join(src, rel), os.path.join(dst, rel)
+        try:
+            ss, ds = os.lstat(s), os.lstat(d)
+        except OSError as e:
+            left.append((rel, f"couldn't be read ({e.strerror or e})"))
+            continue
+        if statmod.S_IFMT(ss.st_mode) != statmod.S_IFMT(ds.st_mode):
+            left.append((rel, "a file on one drive, a folder on the other"))
+            continue
+        if statmod.S_ISREG(ss.st_mode):
+            if ss.st_size != ds.st_size:
+                left.append((rel, "the file on the new drive is a different size — it was changed there"))
+                continue
+            if abs(ss.st_mtime_ns - ds.st_mtime_ns) > TIME_SLACK_NS:
+                progress(i, len(order), rel)
+                try:
+                    same = hash_file(Path(s)) == hash_file(Path(d))
+                except OSError as e:
+                    left.append((rel, f"couldn't be read ({e.strerror or e})"))
+                    continue
+                if not same:
+                    left.append((rel, "the file was changed on the new drive (left as it is)"))
+                    continue
+        missed = copy_meta(s, d, ss, perms)
+        if missed:
+            left.append((rel, "couldn't keep " + ", ".join(missed)))
+        else:
+            done += 1
+    progress(len(order), len(order), "")
+    return done, left
 
 
 def count_extra(dst: str, known: set[str], stop: Callable[[], bool] = lambda: False) -> int:
@@ -765,6 +853,19 @@ IPHONE_STEPS = """On the iPhone:
   5. Keep the old drive untouched until you've looked through the new one."""
 
 
+DETAILS_NOTE = """
+   About those {count}: each one IS on the new drive (a file, at the same size) — none of them is missing.
+   Only the dates or attributes named are not the old drive's. The usual reasons:
+     - a folder's modification date moves whenever something is added to it or removed from it, so any folder
+       touched on the new drive since the clone shows here ({folders} of these are folders by their own date);
+     - folders are given their dates last, so a clone that was stopped before the end hasn't dated them yet;
+     - a file made after it was last modified (anything downloaded or copied with its date kept) could lose
+       its creation date in the first version of this tool.
+   To give them the old drive's dates and attributes: “Match Dates and Attributes” in the Clone Drive window
+   (or `clone_drive.py OLD NEW --verify --match-dates`). No file's contents are touched; a file that was
+   really changed on the new drive is left as it is."""
+
+
 def report(src: str, dst: str, plan: Scan, result: Result | None, cmp: Comparison | None) -> str:
     def n(count: int, word: str) -> str:
         return f"{count:,} {word}{'' if count == 1 else 's'}"
@@ -804,9 +905,12 @@ def report(src: str, dst: str, plan: Scan, result: Result | None, cmp: Compariso
         for rel, what in cmp.different[:200]:
             lines.append(f"   DIFFERENT: {rel} — {what}")
         for rel, what in cmp.metadata[:200]:
-            lines.append(f"   NOT KEPT: {rel} — {what}")
+            lines.append(f"   COPIED, but not with the same {what}: {rel}")
         if len(cmp.metadata) > 200:
-            lines.append(f"   … and {len(cmp.metadata) - 200:,} more with dates or attributes not kept")
+            lines.append(f"   … and {len(cmp.metadata) - 200:,} more copied, but not with the same dates or attributes")
+        if cmp.metadata:
+            lines.append(DETAILS_NOTE.format(count=n(len(cmp.metadata), "item"),
+                                             folders=n(cmp.folder_dates, "folder")))
         if cmp.extra:
             lines.append(f"   ({n(cmp.extra, 'item')} on the new drive that the old one doesn't have — left alone.)")
     lines += ["", IPHONE_STEPS, ""]
@@ -832,6 +936,8 @@ def main() -> None:
     ap.add_argument("--verify", action="store_true", help="only compare the two drives")
     ap.add_argument("--deep", action="store_true", help="with --verify (or after --apply): read every byte of both again")
     ap.add_argument("--repair", action="store_true", help="with --verify --deep: copy again the files whose contents differ")
+    ap.add_argument("--match-dates", action="store_true",
+                    help="with --verify: give items whose dates or attributes differ the old drive's (contents untouched)")
     ap.add_argument("--allow-exfat", action="store_true", help="let the new drive be exFAT (dates/attributes will suffer)")
     a = ap.parse_args()
     print(f"Reading “{a.old}”…")
@@ -868,6 +974,13 @@ def main() -> None:
         print(f"Copying {len(bad):,} file(s) again…")
         result = Clone(a.old, a.new, plan, log=print).recopy(bad)
         cmp = compare(a.old, a.new, plan, deep=a.deep)
+    if cmp.metadata and a.match_dates:
+        print(f"Matching the dates and attributes of {len(cmp.metadata):,} item(s)…")
+        done, left = match_details(a.old, a.new, [rel for rel, _ in cmp.metadata])
+        for rel, why in left[:200]:
+            print(f"  left: {rel} — {why}")
+        print(f"  {done:,} matched, {len(left):,} left as they are.")
+        cmp = compare(a.old, a.new, plan, deep=False)
     text = report(a.old, a.new, plan, result, cmp)
     print("\n" + text)
     saved = save_report(text)

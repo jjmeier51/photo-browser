@@ -1023,13 +1023,19 @@ proves it.
    `~/Library/Logs/Safe Finder/`). **"0 problems"** means everything is there. Tick *read every byte of both
    drives again* for the surest check (it takes about as long as the copy); if it ever finds a file that
    differs, **Copy … Different Files Again** fixes it.
+   Lines that say **"COPIED, but not with the same modification date / creation date / attribute"** are
+   items that *are* on the new drive — only that date or attribute isn't the old drive's (a folder's date moves
+   as soon as anything is added to it; a stopped clone hasn't dated its folders yet). **Match Dates and
+   Attributes** gives them the old drive's; it sets dates and attributes only, never a file's contents, and
+   leaves a file that was really changed on the new drive as it is.
 5. Press **Give the New Drive the Old Drive's Name…** (the old one becomes "Name (old)").
 6. Plug the new SSD into the iPhone and choose its top folder. If any Favorites, captions or covers are
    missing: Drive Health ▸ **Restore from the Drive's Backup** — it only adds what's missing.
 7. Keep the old drive as it is until you've looked through the new one.
 
 From Terminal: `python3 mac/clone_drive.py "/Volumes/Old" "/Volumes/New"` (a dry run), `--apply` to copy,
-`--verify --deep` to compare byte for byte.
+`--verify --deep` to compare byte for byte, `--verify --match-dates` to give items whose dates or
+attributes differ the old drive's.
 
 ### Browse taylorpictures.net — and see what's already in your Taylor Swift folder (`taylor_window.py`, `taylor.py`)
 

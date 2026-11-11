@@ -103,6 +103,11 @@ class CloneWindow(QDialog):
         self.again = QPushButton("")
         self.again.setVisible(False)
         self.again.clicked.connect(lambda: self._begin("recopy"))
+        self.match = QPushButton("")
+        self.match.setToolTip("Give the items listed as copied with different dates or attributes the old drive's.\n"
+                              "No file's contents are touched; a file changed on the new drive is left as it is.")
+        self.match.setVisible(False)
+        self.match.clicked.connect(lambda: self._begin("details"))
         self.rename = QPushButton("Give the New Drive the Old Drive's Name…")
         self.rename.setToolTip("So every path that names the drive still points at the library")
         self.rename.setVisible(False)
@@ -110,6 +115,7 @@ class CloneWindow(QDialog):
         buttons = QHBoxLayout()
         buttons.addWidget(self.show_report)
         buttons.addWidget(self.again)
+        buttons.addWidget(self.match)
         buttons.addWidget(self.rename)
         buttons.addStretch(1)
         buttons.addWidget(self.pause)
@@ -169,11 +175,12 @@ class CloneWindow(QDialog):
         self.what, self.src, self.dst = what, src, dst
         self.running, self.stop_flag = True, False
         self.job = None
-        for w in (self.go, self.verify, self.old, self.new, self.deep, self.again):
+        for w in (self.go, self.verify, self.old, self.new, self.deep, self.again, self.match):
             w.setEnabled(False)
         self.stop.setEnabled(True)
         self.show_report.setVisible(False)
         self.again.setVisible(False)
+        self.match.setVisible(False)
         self.rename.setVisible(False)
         self.bar.setVisible(True)
         self.bar.setRange(0, 0)
@@ -211,8 +218,18 @@ class CloneWindow(QDialog):
             if QMessageBox.question(self, "Clone Drive", text) != QMessageBox.StandardButton.Yes:
                 self._finished(None)
                 return
+        if self.what == "details":
+            name_new = os.path.basename(self.dst.rstrip("/")) or self.dst
+            if QMessageBox.question(
+                    self, "Clone Drive",
+                    f"Give {len(self.details):,} item(s) on “{name_new}” the old drive's dates and attributes?\n\n"
+                    "Only dates and attributes are set — no file's contents are touched, and the old drive is only "
+                    "read. A file that was changed on the new drive since the clone is left as it is.") \
+                    != QMessageBox.StandardButton.Yes:
+                self._finished(None)
+                return
         self.bar.setRange(0, 1000)
-        self.pause.setEnabled(self.what != "verify")
+        self.pause.setEnabled(self.what in ("clone", "recopy"))
         threading.Thread(target=self._work, daemon=True, name="clone").start()
 
     def _work(self) -> None:
@@ -233,7 +250,16 @@ class CloneWindow(QDialog):
             else:
                 self.bridge.phase.emit(f"Copying {len(self.different):,} file(s) again…")
                 result = self.job.recopy(list(self.different))
-        deep = self.deep.isChecked() or self.what == "recopy"
+        if self.what == "details":
+            rels = list(self.details)
+            self.bridge.phase.emit(f"Matching the dates and attributes of {len(rels):,} item(s)…")
+            done, left = cd.match_details(
+                src, dst, rels, stop=lambda: self.stop_flag,
+                progress=lambda i, total, name: self.bridge.progress.emit(i, total, 0, 0, os.path.basename(name), "matching"))
+            for rel, why in left[:200]:
+                self.bridge.log.emit(f"Left as it is: {rel} — {why}")
+            self.bridge.log.emit(f"{done:,} item(s) given the old drive's dates and attributes; {len(left):,} left as they are.")
+        deep = (self.deep.isChecked() and self.what != "details") or self.what == "recopy"
         cmp = None
         if not (result is not None and result.stopped):
             self.bridge.phase.emit("Comparing the two drives" + (" — every byte…" if deep else "…"))
@@ -249,9 +275,10 @@ class CloneWindow(QDialog):
         self.bridge.finished.emit(text)
 
     def _progress(self, df: int, tf: int, db, tb, name: str, phase: str) -> None:
-        if phase == "comparing":
+        if phase in ("comparing", "matching"):
             self.bar.setValue(int(1000 * df / max(tf, 1)))
-            self.status.setText(f"Comparing — {df:,} of {tf:,} items" + (f"  ·  {name}" if name else ""))
+            word = "Comparing" if phase == "comparing" else "Matching dates and attributes"
+            self.status.setText(f"{word} — {df:,} of {tf:,} items" + (f"  ·  {name}" if name else ""))
             return
         frac = (db / tb) if tb else (df / max(tf, 1))
         self.bar.setValue(int(1000 * frac))
@@ -285,7 +312,7 @@ class CloneWindow(QDialog):
     def _finished(self, text) -> None:
         self.running = False
         self.bar.setVisible(False)
-        for w in (self.go, self.verify, self.old, self.new, self.deep, self.again):
+        for w in (self.go, self.verify, self.old, self.new, self.deep, self.again, self.match):
             w.setEnabled(True)
         self.pause.setChecked(False)
         self.pause.setEnabled(False)
@@ -301,6 +328,10 @@ class CloneWindow(QDialog):
         if self.different:
             self.again.setText(f"Copy {len(self.different):,} Different File{'s' if len(self.different) != 1 else ''} Again")
             self.again.setVisible(True)
+        self.details = [rel for rel, _what in cmp.metadata] if cmp is not None and not cmp.stopped else []
+        if self.details:
+            self.match.setText(f"Match Dates and Attributes ({len(self.details):,})")
+            self.match.setVisible(True)
         problems = (len(result.problems) if result is not None else 0) + (cmp.problems if cmp is not None else 0)
         if (result is not None and result.stopped) or (cmp is not None and cmp.stopped):
             line = "Stopped before the end — press Clone again to carry on where it was."

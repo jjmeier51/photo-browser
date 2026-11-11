@@ -300,7 +300,10 @@ Python. (`SimpCityService`,
   (`setattrlist`), mtimes, xattrs, flags kept; dot-records (`.Photo Browser Metadata`, download records, `.Trash`)
   copied, macOS junk and exFAT workarounds not; resumable, never overwrites (only brings its own outdated copies up
   to date); `compare` (+ `--deep`, re-copy) and a report with the iPhone steps (Back Up Metadata Now before, same
-  drive name → `rekeyRootIfRemounted`, else Restore from the Drive's Backup). §6ac.
+  drive name → `rekeyRootIfRemounted`, else Restore from the Drive's Backup). **Dates go on through `put_dates`**
+  (creation + modification in one `setattrlist`; a bare `utime` after a creation date pulls it back to the
+  modification date on macOS — never add one); "COPIED, but not with the same …" items are there, only a date or
+  attribute differs — **Match Dates and Attributes** / `--match-dates` (`match_details`) puts them right. §6ac.
 - **Fanfix in Safe Finder** (Mac only) — right-click a folder ▸ Download ▸ Download from Fanfix… (`mac/fanfix_downloader.py`,
   `mac/fanfix.py`): the person's own purchased content from Fanfix creators, from a logged-in Qt WebEngine browser,
   **everything through that browser** (fanripper's documented model — its code is closed and its licence forbids
