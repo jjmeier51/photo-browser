@@ -12,6 +12,8 @@
 // then renamed), or {"id": "…", "ok": false}. Requests run concurrently; Safe Finder bounds how many are
 // in flight. Ends when stdin closes, after the ones in hand.
 import AVFoundation
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
@@ -29,7 +31,7 @@ func reply(_ id: String, _ ok: Bool) {
 }
 
 /// A frame a moment in (a tenth of the way, at most a second — past a fade from black), upright, at
-/// most `px` on its long side. Standard range: the generator tone-maps HDR video.
+/// most `px` on its long side. The generator usually tone-maps HDR video; `standardRange` sees to the rest.
 func videoFrame(_ url: URL, px: Int) -> CGImage? {
     let asset = AVURLAsset(url: url)
     let generator = AVAssetImageGenerator(asset: asset)
@@ -54,6 +56,37 @@ func imagePreview(_ url: URL, px: Int) -> CGImage? {
         kCGImageSourceThumbnailMaxPixelSize: px,
     ]
     return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+}
+
+let ciContext = CIContext()
+
+/// A real HDR curve (PQ / HLG) or extended range — not merely wide colour: a frame the video generator has
+/// already tone-mapped can come tagged BT.2020, and mapping it again would dull it (as video_helper.swift).
+func isHDRSpace(_ cs: CGColorSpace?) -> Bool {
+    guard let cs else { return false }
+    if CGColorSpaceUsesITUR_2100TF(cs) || CGColorSpaceUsesExtendedRange(cs) { return true }
+    let name = (cs.name as String?) ?? ""
+    return name.contains("2100") || name.contains("HLG") || name.contains("PQ")
+}
+
+/// `image` as an 8-bit sRGB picture. Safe Finder draws its tiles with Qt, which shows a JPEG's numbers as
+/// they are and takes no notice of the colour profile inside it — so a thumbnail left in the photo's own
+/// space came out washed (Display P3, BT.2020) or flat and grey (an HDR photo or frame in HLG / PQ). HDR is
+/// brought to standard range first (macOS 15+: highlights eased from HLG's 4.93× SDR white down to SDR
+/// white, the screenshot mapping; before that Core Image's own conversion, which clips them).
+func standardRange(_ image: CGImage) -> CGImage {
+    guard let srgb = CGColorSpace(name: CGColorSpace.sRGB) else { return image }
+    let name = (image.colorSpace?.name as String?) ?? ""
+    if name == (CGColorSpace.sRGB as String), image.bitsPerComponent <= 8 { return image }
+    var ci = CIImage(cgImage: image)
+    if isHDRSpace(image.colorSpace), #available(macOS 15.0, *) {
+        let tone = CIFilter.toneMapHeadroom()
+        tone.inputImage = ci
+        tone.sourceHeadroom = 4.93
+        tone.targetHeadroom = 1
+        ci = tone.outputImage ?? ci
+    }
+    return ciContext.createCGImage(ci, from: ci.extent, format: .RGBA8, colorSpace: srgb) ?? image
 }
 
 /// `image` as a JPEG at `out`: written beside it, then renamed, so a half-written file never shows.
@@ -87,7 +120,7 @@ while let line = readLine(strippingNewline: true) {
         let ok: Bool = autoreleasepool {
             let url = URL(fileURLWithPath: path)
             guard let image = video ? videoFrame(url, px: px) : imagePreview(url, px: px) else { return false }
-            return writeJPEG(image, to: out)
+            return writeJPEG(standardRange(image), to: out)
         }
         reply(id, ok)
     }

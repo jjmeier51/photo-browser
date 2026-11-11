@@ -165,6 +165,10 @@ actions the app makes no network calls.
   — AVFoundation/AppKit through `mac/viewer_surface.swift`, a Swift library loaded with ctypes — so HDR looks as in
   QuickTime/Preview; Qt's player is only the fallback, §6p) and **Export All Frames** (`mac/frame_export.py` + `video_helper.swift` `frames`; same names,
   rates and standard-range/HDR choice as the iPhone; resumes only the same export, else "<name> 2") — §6p.
+  Safe Finder's **thumbnails are made in the screen's colours** (`mac/thumb_color.py`, from `_ThumbJob._load`; Qt does
+  no colour management): PQ/HLG photos tone-mapped to standard range, Display P3 converted by profile; the HDR curve
+  is read from the **main picture's** colour box only (a gain-map photo's other items say PQ — never scan the file
+  for it); `thumb_helper.swift` writes 8-bit sRGB; `thumb_key` versions HEIF/AVIF/JXL (no file reads there) — §6ag.
   Safe Finder's **Find Duplicates** (right-click a folder; `mac/duplicates.py`, `mac/duplicates_window.py`): the
   iPhone's exact / visually similar / similar-name groups, plus an Identical (SHA-256) check and Select Extra
   Copies for identical groups only — it ticks, the person trashes — §6q.

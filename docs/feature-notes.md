@@ -2071,6 +2071,49 @@ Tested (Mac): the file and settings stores, the merge, a later "off"/"on" from a
 panes — a remembered folder opens videos-first, both sort directions, off again, another folder untouched, the
 menu-bar tick, a new file landing in the right group. The Swift is read, not built.
 
+## 6ag. Safe Finder thumbnails of HDR and wide-colour photos — `mac/thumb_color.py`, `mac/thumb_helper.swift` (Nov 11, 2026)
+
+**What was wrong.** The viewer showed HDR photos properly (macOS draws them, §6p) but their tiles in the grid
+didn't. A tile is a small JPEG Safe Finder makes itself and Qt draws — and Qt shows a picture's numbers as
+they are, with no colour management. `_ThumbJob._load` took Pillow's pixels straight (`im.convert("RGBA")`):
+
+- a photo stored with an **HDR curve** (PQ or HLG — the 10-bit HEICs from the iPhone's Save Frame / Export All
+  Frames on HDR video, HDR AVIFs, `cICP` PNGs) has numbers that aren't screen brightness: mid grey sits at
+  130/255 in PQ where sRGB wants 188, white at 148. So: flat, grey, dull;
+- a **Display P3** photo read as sRGB loses saturation (mild, but every iPhone photo);
+- what `thumb_helper.swift` made (RAW, anything Pillow can't open, video frames) was written as a JPEG *in the
+  image's own colour space* with the profile embedded — which Qt ignores.
+
+**What it does now.**
+- `thumb_color.standard(im, path)` runs on the thumbnail-sized picture (≤ 512 px: ~30 ms for HDR, ~12 ms for P3).
+  `curve_of` decides whether the pixels are PQ/HLG; if so `tone_mapped` (numpy): curve undone to light (PQ EOTF;
+  HLG inverse OETF + the 1.2 system gamma for a 1000-nit display), ÷ 203 nits (standard white, BT.2408),
+  BT.2020/P3 → sRGB matrix, a shoulder by the brightest channel (identity below 0.75 of white, eased to white
+  above — hue kept), sRGB curve. Otherwise `from_profile`: the embedded ICC profile → sRGB with LittleCMS
+  (skipped when the profile is sRGB).
+- **Only the main picture's colour counts** (`heif_curve`): `meta` → `pitm` → `ipma`/`ipco` → that item's `colr`
+  (its first tile's, for a grid without one). An iPhone HDR photo is a standard-range picture plus a gain map,
+  and iOS 18+ files also hold a "tone-mapped" item whose colour box says PQ/HLG — scanning the file for any
+  `nclx` 16/18 (what `media_info.image_hdr` does, rightly, for the *badge*) would tone-map every one of those
+  standard pictures into a dark tile. Don't reuse `image_hdr` for this. The curve is also taken from an ICC
+  profile's `cicp` tag or its name ("ITU-R BT.2100 HLG", "Display P3; PQ" — macOS writes these; LittleCMS can't
+  convert them usefully), and from a PNG's `cICP` chunk.
+- A gain-map photo's tile is its standard picture (P3 → sRGB) — what Finder shows. The viewer shows the HDR.
+- `thumb_helper.swift` renders everything through Core Image to 8-bit sRGB before writing (`standardRange`:
+  `CIFilter.toneMapHeadroom` 4.93 → 1 on macOS 15+ when the space is a real HDR one — `isHDRSpace`, the same test
+  as `video_helper.swift`, so a frame the generator already tone-mapped but tagged BT.2020 isn't mapped twice).
+- `thumb_key` carries a version (`|c2`) for `.heic/.heif/.hif/.heics/.avif/.jxl`, so those are made again once.
+  JPEG/PNG keys are unchanged on purpose — re-making every thumbnail in the library for P3's mild shift isn't
+  worth it; a P3 JPEG gets the right colours whenever its thumbnail is next made. `thumb_key` runs on every
+  paint: keep it free of file reads.
+- `build_thumb_helper` now compiles beside the helper in use and swaps it in only on success, so a source this
+  Mac's Swift rejects leaves the working helper (video thumbnails) instead of dropping to Quick Look.
+
+**Checked** (Linux, synthesised files): 10-bit PQ and HLG HEICs (x265, `nclx`), a two-picture HEIF whose second
+picture is PQ (not taken for the main one), a `cICP` PNG, an HLG-named ICC on a JPEG, a hand-built Display P3
+profile; a grey ramp comes back within 2/255 of sRGB below the knee, white → 244, 5× white → 255; the whole
+`Thumbnails` pipeline offscreen. **Not checked:** real iPhone files, and the Swift (not compiled here).
+
 ## 6ab. Safe Finder Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
 
 The iPhone's video upscale (`MediaEditing.upscaleVideo`, §6f) on the Mac: right-click videos ▸ **Upscale Video…**

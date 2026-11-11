@@ -316,6 +316,15 @@ into `~/Library/Caches/PhotoBrowser/`. Until it's built, without Xcode's tools, 
 read, Quick Look does those thumbnails, four at a time. The system may clear the Caches folder under
 disk pressure; the thumbnails just render again.
 
+**A thumbnail is in the screen's colours** (`thumb_color.py`). Qt draws a tile's numbers as they are, so
+the photo's own colour has to be dealt with as the thumbnail is made: an HDR photo stored in PQ or HLG —
+the 10-bit HEICs that Save Frame and Export All Frames make from HDR video, HDR AVIFs — is brought to
+standard range (highlights eased in under white, BT.2020 colours into sRGB), and a wide-colour (Display
+P3) photo is converted by its profile. They used to come out flat and grey, or washed. The iPhone's own
+HDR photos (a standard picture plus a gain map) show their standard picture, as in Finder. The helper
+does the same for what it makes. Thumbnails of HEIC / HEIF / AVIF / JPEG XL photos made before this are
+made again, once, the first time each folder is shown.
+
 ### Photos view and the viewer — the iPhone app's grid and viewer (`media_viewer.py`, `media_info.py`)
 
 The third view button in each pane (⌘3, beside icons and list) shows a folder the way Photo Browser on the

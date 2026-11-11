@@ -85,6 +85,7 @@ except ModuleNotFoundError:
 
 import airdrop_to_iphone as airdrop
 import batch_crop
+import thumb_color
 import capcut
 import media_info
 import metadata_edit
@@ -1019,7 +1020,14 @@ def thumb_cache_dir() -> Path:
     return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "PhotoBrowser" / "SafeFinderThumbs"
 
 
+# Photos whose tiles were made before their colours were handled (thumb_color.py — HDR and Display P3 came out
+# washed): the HEIF family, AVIF and JPEG XL. Their key carries a version, so each is made again, once.
+_RECOLOURED = (".heic", ".heif", ".hif", ".heics", ".avif", ".jxl")
+
+
 def thumb_key(path: str, mtime: float) -> str:
+    if path[-6:].lower().endswith(_RECOLOURED):
+        return f"{path}|{int(mtime)}|c2"
     return f"{path}|{int(mtime)}"
 
 
@@ -1119,7 +1127,8 @@ def thumb_helper_source() -> Path | None:
 
 def build_thumb_helper() -> list[str] | None:
     """The command that runs the thumbnail helper, building it (once, into ~/Library/Caches/PhotoBrowser)
-    when it's missing or older than its source. None without Xcode's tools — Quick Look does it all then.
+    when it's missing or older than its source (a build that fails keeps the older one). None without
+    Xcode's tools — Quick Look does it all then.
     SAFE_FINDER_THUMB_HELPER names a stand-in command (tests)."""
     env = os.environ.get("SAFE_FINDER_THUMB_HELPER")
     if env:
@@ -1132,14 +1141,26 @@ def build_thumb_helper() -> list[str] | None:
         return [str(out)]
     # Don't call swiftc when the Command Line Tools aren't installed: the stub would pop an installer.
     if subprocess.run(["xcode-select", "-p"], capture_output=True).returncode != 0:
-        return None
+        return [str(out)] if out.is_file() else None
     out.parent.mkdir(parents=True, exist_ok=True)
+    # Built beside the one in use and swapped in only when it compiled: a source this Mac's Swift won't take
+    # leaves the helper that was working (video thumbnails) rather than none.
+    new = out.with_name(out.name + ".new")
+    built = False
     try:
-        r = subprocess.run(["xcrun", "swiftc", "-O", "-swift-version", "5", "-o", str(out), str(src)],
+        r = subprocess.run(["xcrun", "swiftc", "-O", "-swift-version", "5", "-o", str(new), str(src)],
                            capture_output=True, text=True, timeout=600)
+        if r.returncode == 0 and new.is_file():
+            os.replace(new, out)
+            built = True
     except (OSError, subprocess.SubprocessError):
-        return None
-    return [str(out)] if r.returncode == 0 and out.is_file() else None
+        pass
+    if not built:
+        try:
+            new.unlink()
+        except OSError:
+            pass
+    return [str(out)] if out.is_file() else None
 
 
 class _FrameRunner:
@@ -1376,6 +1397,9 @@ class _ThumbJob(QRunnable):
                     im.draft("RGB", (THUMB_PX * 2, THUMB_PX * 2))
                     im = ImageOps.exif_transpose(im)
                     im.thumbnail((THUMB_PX, THUMB_PX))
+                    # In the screen's colours: an HDR photo (PQ / HLG) brought to standard range, a wide-colour
+                    # one out of Display P3 — as they came they made flat, washed-out tiles (thumb_color.py).
+                    im = thumb_color.standard(im, self.path)
                     im = im.convert("RGBA")
                     data = im.tobytes("raw", "RGBA")
                     return QImage(data, im.width, im.height, im.width * 4, QImage.Format.Format_RGBA8888).copy()
