@@ -406,6 +406,7 @@ struct FolderView: View {
         "\(url.path)|\(library.sort.rawValue)|\(submittedQuery)|\(typeFilter)|\(formatFilter)|\(yearFilter ?? -1)|\(locationFilter ?? "-")|"
             + "\(categoryFilter.sorted())|\(tagFilters.sorted())|\(noTagsFilter)|\(tagMatchAny)|\(showFavoritesOnly)\(showAIOnly)\(showEditedOnly)|"
             + "\(videoRes)\(imageRes)\(hdrOnly)|\(ageFilter ?? -1)|\(tsLabelFilter.sorted())|\(tsNoLabel)|\(labelKind)"
+            + "|\(library.videosAtTop(in: url))"
     }
 
     /// An upscale waiting on the frame-rate prompt (1080p / 4K ask for 30, 60 or the source rate).
@@ -488,11 +489,15 @@ struct FolderView: View {
     private var filtered: [Entry] {
         filteredMemo.value(for: filterKey + "|r\(reactionsVersion)") {
             let list = applyFormat(filteredRaw)
-            if library.sort.isAge { return sortByAge(list) }
-            if library.sort.isLikes { return sortByLikes(list) }
-            if library.sort.isReactions { return sortByReactions(list) }
-            if library.sort.isDuration { return sortByDuration(list) }
-            return list
+            let sorted: [Entry]
+            if library.sort.isAge { sorted = sortByAge(list) }
+            else if library.sort.isLikes { sorted = sortByLikes(list) }
+            else if library.sort.isReactions { sorted = sortByReactions(list) }
+            else if library.sort.isDuration { sorted = sortByDuration(list) }
+            else { sorted = list }
+            // This folder's "Videos at the Top": the videos ahead of the photos, each group still in
+            // the sort's order; folders (and the highlight bubbles above the grid) stay first.
+            return library.videosAtTop(in: url) ? Library.videosAhead(sorted) : sorted
         }
     }
 
@@ -511,6 +516,7 @@ struct FolderView: View {
             "\(favoriteEntries.count)/\(aiEntries.count)/\(tagEntries.count)/\(tsLabelEntries.count)/\(searchResults.count)",
             "\(agedList.count)/\(fileSpecs.count)/\(captureDates.count)/\(placeLabels.count)/\(folderYears.count)/\(galleryCategories.count)",
             "\(library.captions.count)/\(fileCaptions.count)/\(library.tiktokLikes.count)",
+            library.videosAtTop(in: url) ? "videosFirst" : "",
         ].joined(separator: "|")
     }
 
@@ -2562,8 +2568,14 @@ struct FolderView: View {
                             Button { library.sort = key } label: { check(key.rawValue, key == library.sort) }
                         }
                     }
+                    // This folder's own: its videos ahead of its photos (remembered for the folder, and
+                    // shared with Safe Finder — `FolderOptions`).
+                    Divider()
+                    Button { library.setVideosAtTop(!library.videosAtTop(in: url), in: url) } label: {
+                        check("Videos at the Top", library.videosAtTop(in: url))
+                    }
                 } label: {
-                    chip("Sort: \(library.sort.rawValue)")
+                    chip("Sort: \(library.sort.rawValue)" + (library.videosAtTop(in: url) ? " · Videos first" : ""))
                 }
 
                 if !labelMode {

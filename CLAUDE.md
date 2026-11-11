@@ -64,6 +64,11 @@ actions the app makes no network calls.
   for what's untagged), resolution/HDR, age; the chip bar runs Favorites, Type, Format, Sort, Year,
   then the rest; **at Home every one of these filters looks through the whole drive** (the full
   index — `deepFilterActive` in `FolderView`), not just the top level;
+  **"Videos at the Top"** — a folder's own choice (Sort menu tick, both apps): its videos listed before its photos,
+  folders/highlights still first, each group in the sort's order. `Library.videosFirst` (path → stamp, + on / − off)
+  ↔ the drive's `.Photo Browser Metadata/folder-options.json`, which Safe Finder reads and writes too
+  (`FolderOptions.swift`, `mac/folder_options.py`; later stamp wins; `FolderView.filtered` ends in
+  `Library.videosAhead`) — `docs/feature-notes.md` §6af.
   Favorites / "To AI" modes; a **Categories** filter on folders whose subfolders hold
   `gallery.json` sidecars (from `mac/pornpics_*.py` and `mac/imagefap_downloader.py`) — galleries
   must carry every selected category; the sidecars (`gallery.json`, `pornstar.json`, `search.json`)

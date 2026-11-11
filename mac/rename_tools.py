@@ -382,6 +382,7 @@ def apply_bulk(plan: list[Rename], tags=None, progress=lambda done, total: None,
                 tags.renamed([(x.old, x.new) for x in steps])
             except OSError:
                 pass
+        _folder_choices([(x.old, x.new) for x in steps if x.is_dir])
         note_renames(steps)
     return Result([r for r, _p in done], failed, [])
 
@@ -545,8 +546,20 @@ def apply(plan: list[Rename], tags=None, progress=lambda done, total: None, stop
                 tags.renamed([(r.old, r.new) for r in done])
             except OSError:
                 pass
+        _folder_choices([(r.old, r.new) for r in done if r.is_dir])
         note_renames(done)
     return Result(done, failed, skipped or [])
+
+
+def _folder_choices(pairs: list[tuple[str, str]]) -> None:
+    """A renamed folder keeps its own choices (Videos at the Top — folder_options.py)."""
+    if not pairs:
+        return
+    try:
+        import folder_options
+        folder_options.default().renamed(pairs)
+    except Exception:  # noqa: BLE001 — best effort: a choice lost is set again with a click
+        pass
 
 
 def fix_finals(done: list[Rename], failed: list[tuple[Rename, str]]) -> None:

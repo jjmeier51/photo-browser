@@ -2038,6 +2038,39 @@ Tested: the plan (the example: three photos named by clock time → 1, 2, 3 by c
 folder/camera, find/replace, duplicates, a taken name), straight renames with tags + journal, a full exchange,
 a block mid-batch (everything back, no passing names left), a stop mid-exchange; and the window in Safe Finder.
 
+## 6af. Videos at the Top — a per-folder choice in both apps — `FolderOptions.swift`, `mac/folder_options.py` (Nov 11, 2026)
+
+"For each folder, an option for 'Videos at the top': videos are the first files shown underneath the folders,
+then photos. Folders and folder highlights still first. Both Safe Finder and the iOS app, remembered for that
+folder."
+
+- **One store both apps read**: `<drive>/.Photo Browser Metadata/folder-options.json` —
+  `{"format": "photobrowser-folder-options", "videos_first": {"<folder, drive-relative; "" = the drive>": stamp}}`.
+  A **stamp** is the Unix time the choice was made, **positive = on, negative = off**; a merge keeps, per
+  folder, the stamp with the larger magnitude (`merged` — the same four lines in Swift and Python). That gives
+  last-change-wins across the two apps with no base to remember (the tag file needed one; a single switch
+  doesn't), and "off" survives the other side's older "on".
+- **iPhone**: `Library.videosFirst` ([path: stamp], `FilePrefs` `photoBrowser.videosFirst`; re-keyed in
+  `applyRemap`, so renames, moves and a new mount carry it). `setVideosAtTop` stamps and schedules the tag sync;
+  `syncDriveTags` now also runs `syncFolderOptions` (after `applyMacRenames`): local entries under the open drive
+  → relative, merged with the file off the main actor, the file written only when it lacks something, and
+  anything newer from the file taken in. **Ordering**: `FolderView.filtered` — the one list every sort ends in —
+  finishes with `Library.videosAhead` (a stable three-way split: folders, videos, the rest) when the folder has
+  the choice; the flag is in `filterKey` and `filterSignature` (the memo and the paging). The highlight bubbles
+  are drawn above the grid and aren't in this list. The Sort chip's menu has the tick ("Videos at the Top") and
+  the chip reads "Sort: … · Videos first".
+- **Safe Finder**: `folder_options.FolderOptions` — the drive file for a folder under a `.Photo Browser Metadata`
+  (re-read when its mtime/size changes; a save re-reads first), else Safe Finder's settings by full path (a Mac
+  folder, or a drive the app never opened — no metadata folder is created for it). `PaneModel.videos_first` adds
+  a group to the sort key (0 folder, 1 video by extension, 2 other), which `lessThan` already keeps in place
+  whichever way the order runs. `Pane._apply_videos_first` on arriving at a folder; the Sort menu and View menu
+  have the tick; a results list (search, tags, All Videos) has none. `rename_tools` carries a renamed folder's
+  entry (`renamed`, subfolders too); the iPhone re-keys its own copy from the rename journal.
+
+Tested (Mac): the file and settings stores, the merge, a later "off"/"on" from another writer picked up, renames;
+panes — a remembered folder opens videos-first, both sort directions, off again, another folder untouched, the
+menu-bar tick, a new file landing in the right group. The Swift is read, not built.
+
 ## 6ab. Safe Finder Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
 
 The iPhone's video upscale (`MediaEditing.upscaleVideo`, §6f) on the Mac: right-click videos ▸ **Upscale Video…**

@@ -158,6 +158,11 @@ def install(win, sf) -> None:
     split.setCheckable(True)
     split.setChecked(win.split)
     v.addSeparator()
+    vtop = act(v, "Videos at the Top", lambda: pane().set_videos_first(not pane().model.videos_first), None, real_folder,
+               "In this folder: the videos first (after the folders), then the photos — remembered for the folder, "
+               "and shown the same way on the iPhone")
+    vtop.setCheckable(True)
+    v.aboutToShow.connect(lambda: vtop.setChecked(bool(pane().model.videos_first)))
     sort = v.addMenu("Sort By")
     sort_group = QActionGroup(win)
     sort_acts = {}

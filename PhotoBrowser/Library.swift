@@ -2883,6 +2883,10 @@ final class Library {
         contentDidChange(under: url.deletingLastPathComponent())
     }
 
+    /// Folder path → when "Videos at the Top" was last switched there (positive: on, negative: off).
+    /// Shared with Safe Finder through the drive's `folder-options.json` — see `FolderOptions.swift`.
+    var videosFirst: [String: Double] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.videosFirst") as? [String: Double]) ?? [:]
+
     /// Individual files hidden from browsing — same idea as `hiddenFolders`, but per file (nothing on
     /// the drive is touched). Revealed by the same "Show Hidden Items" toggle.
     var hiddenFiles: Set<String> = Set(FilePrefs.shared.stringArray(forKey: "photoBrowser.hiddenFiles") ?? [])
@@ -3282,6 +3286,11 @@ final class Library {
         reviewsFolders = Set(reviewsFolders.map(remap))
         hiddenFolders = Set(hiddenFolders.map(remap))
         hiddenFiles = Set(hiddenFiles.map(remap))
+        let movedVideosFirst = remapKeys(videosFirst, remap)
+        if movedVideosFirst != videosFirst {            // a renamed folder keeps its "Videos at the Top"
+            videosFirst = movedVideosFirst
+            FilePrefs.shared.set(videosFirst, forKey: FolderOptions.prefsKey)
+        }
         customLabels = customLabels.mapValues { Set($0.map(remap)) }
         captions = remapKeys(captions, remap)
         tags = remapKeys(tags, remap)

@@ -3045,6 +3045,7 @@ class PaneModel(QSortFilterProxyModel):
         self.place: str | None = None                # a Location label ("" = no location), None = any
         self.label_of: Callable[[str, int, int], str | None] | None = None   # (path, mtime, size) → label
         self.root_path = ""                          # the folder listed — only its own rows are filtered
+        self.videos_first = False                    # this folder's "Videos at the Top" (folder_options.py)
         self.setDynamicSortFilter(True)
         # Sizes come in one folder at a time: the order (by size) and the size filter catch up a few
         # times a second, not once per folder — a full re-sort per folder was quadratic in a big listing.
@@ -3135,6 +3136,17 @@ class PaneModel(QSortFilterProxyModel):
         self.sort(-1)                                  # a new key with the same column is still a new order
         self.sort(_KEY_COLUMN.get(key, 0), order)
 
+    def set_videos_first(self, on: bool) -> None:
+        """Videos before the other files (folders still first), whatever the sort — which then orders the
+        videos among themselves and the rest among themselves."""
+        if on == self.videos_first:
+            return
+        self.videos_first = on
+        self._keys.clear()
+        order = self.sortOrder()
+        self.sort(-1)
+        self.sort(_KEY_COLUMN.get(self.key, 0), order)
+
     def forget_keys(self) -> None:
         self._keys.clear()
 
@@ -3181,6 +3193,8 @@ class PaneModel(QSortFilterProxyModel):
         is_dir = src.isDir(idx)
         name = src.fileName(idx)
         group, nat = (0 if is_dir else 1), natural_key(name)
+        if self.videos_first and not is_dir:           # folders, then videos, then everything else
+            group = 1 if os.path.splitext(name)[1].lower() in VIDEO_EXT else 2
         key = self.key
         if key == "kind":
             return (group, "" if is_dir else os.path.splitext(name)[1].lower(), nat)
@@ -3552,6 +3566,13 @@ class Pane(QWidget):
             a.setCheckable(True)
             orders.addAction(a)
             a.triggered.connect(lambda _=False, o=order: self.set_sort(self.current_sort()[0], o))
+        menu.addSeparator()
+        self.videos_first_action = menu.addAction("Videos at the Top")
+        self.videos_first_action.setCheckable(True)
+        self.videos_first_action.setToolTip("In this folder: the videos first (after the folders), then the photos "
+                                            "and other files. Remembered for this folder — and shown the same way "
+                                            "by Photo Browser on the iPhone")
+        self.videos_first_action.triggered.connect(self.set_videos_first)
         menu.addSeparator()
         self.sizes_action = menu.addAction("Calculate Folder Sizes")
         self.sizes_action.setCheckable(True)
@@ -3993,6 +4014,33 @@ class Pane(QWidget):
         hdr.blockSignals(False)
         self.sort_btn.setToolTip(f"Sort by {dict(SORT_KEYS)[key]} — click to change")
 
+    # -- videos at the top (folder_options.py — the folder's own choice, shared with the iPhone app)
+    def _apply_videos_first(self) -> None:
+        """Arrived somewhere: this folder's choice (results lists have none)."""
+        import folder_options
+        real = not self.is_virtual and os.path.isdir(self.location)
+        on = real and folder_options.default(self.settings).videos_first(self.location)
+        self.model.set_videos_first(bool(on))
+        self.videos_first_action.setEnabled(real)
+        self.videos_first_action.setChecked(bool(on))
+
+    def set_videos_first(self, on: bool) -> None:
+        """Sort menu ▸ Videos at the Top: for this folder, remembered (on the drive, where the iPhone app reads
+        it too; in Safe Finder's settings for a folder that isn't on such a drive)."""
+        import folder_options
+        if self.is_virtual or not os.path.isdir(self.location):
+            return
+        try:
+            folder_options.default(self.settings).set_videos_first(self.location, bool(on))
+        except OSError as e:
+            QMessageBox.warning(self.window(), "Videos at the Top", f"Couldn't remember that for this folder: {e}")
+        self.model.set_videos_first(bool(on))
+        self.videos_first_action.setChecked(bool(on))
+        win = self.window()                              # the other pane, if it shows the same folder
+        for other in (getattr(win, "src", None), getattr(win, "dst", None)):
+            if other is not None and other is not self and other.location == self.location:
+                other._apply_videos_first()
+
     def _header_sort(self, column: int, order: Qt.SortOrder) -> None:
         if column in _COLUMN_KEY:
             self.set_sort(_COLUMN_KEY[column], order)
@@ -4028,6 +4076,7 @@ class Pane(QWidget):
         self.location = self.folder = path
         self.model.root_path = path
         self._restore_view()
+        self._apply_videos_first()
         if THUMBS is not None:
             THUMBS.new_listing()
         idx = self.model.mapFromSource(self.fs.setRootPath(path))
@@ -4106,6 +4155,7 @@ class Pane(QWidget):
         self.list.setRootIndex(QModelIndex())
         self._apply_sort(*self.results_sort)
         self._restore_view()
+        self._apply_videos_first()
         self.grid.clearSelection()
         self.grid.scrollToTop()
         self.list.scrollToTop()

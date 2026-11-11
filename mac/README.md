@@ -558,6 +558,17 @@ viewer, Edit with AI, a downloader — not just the main one, even when Safe Fin
 front. (Clicking one window still brings only that window forward, as in any Mac app.) **Window ▸ Bring All
 to Front** does the same, and the Window menu lists every open window, minimized ones too.
 
+### Videos at the Top — a folder's own choice
+
+In the **Sort** menu (or **View ▸ Videos at the Top**), tick **Videos at the Top** and that folder lists its
+**videos first** — right after its folders — and then its photos and other files. Whatever sort you've chosen
+still orders the videos among themselves and the photos among themselves. It's remembered **for that
+folder**: other folders stay as they are, and the folder comes back that way next time.
+
+It's the same choice as **Photo Browser on the iPhone** (its Sort menu has the same tick): for a folder on
+the drive the choice is kept on the drive itself, so a folder you set here is shown videos-first on the
+iPhone too, and one you set on the iPhone is shown that way here.
+
 ### Sizes, filters, empty folders, and the Trash
 
 - **Folder sizes.** Each pane adds up what its folders hold, in the background, and shows it in the
