@@ -4,9 +4,18 @@ dark look: the pages scrolling one after another, fitted to the width, with sear
 **The window** opens over Safe Finder's window, on its display, as tall as the display (like the photo viewer),
 and as wide as the first page's shape at that height allows.
 
-- **Reading**: scroll, ←/→ (or Page Up / Page Down) a page at a time, the page box at the bottom to jump; zoom with
+- **Reading**: scroll, ←/→ (or Page Up / Page Down) a page at a time, the page box at the bottom to jump (⌘G puts
+  the cursor there; it takes the page's printed label too — "xii"); Home / End for the first and last page; zoom with
   −/+ (or ⌘-scroll, pinch), the zoom menu for Fit Width / Fit Page / sizes; ⌘F searches — every match marked,
   Return for the next (⇧Return the one before); ☰ shows the pages as thumbnails. Esc closes.
+- **Contents**: click an entry on the book's contents page — its page number or its title — and the viewer goes
+  there. Where the PDF has real links they're followed; where the contents page is only text (no links — scans,
+  word-processor exports) the viewer reads the line under the click and works out which page the printed number
+  means (`pdf_contents`: page labels, the offset between printed and real numbers, the chapter's own title). A real
+  link is followed here too — `follow_link`; QPdfView draws links but a click on one does nothing in this Qt. The
+  **Contents** button opens the chapters as a list beside the pages — the PDF's outline, else the entries read from
+  its contents pages — with the chapter being read marked; the chapter's name in the bottom bar is a menu of them
+  all, [ and ] step a chapter back and on, and **Back** (⌘[) returns to where a jump was made from.
 - **Optimize for Safe Finder** — a new PDF beside the original, trimmed to its content (the same box on every
   page) with blank pages left out, so the page — not its margins — fills this viewer. **Optimize for iPhone** — a
   new PDF made for the iPhone 17 Pro Max: pages the shape of its screen, margins trimmed, two-column pages read a
@@ -25,12 +34,14 @@ import threading
 from dataclasses import dataclass
 from typing import Callable
 
-from PySide6.QtCore import QModelIndex, QPointF, QRect, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, QPointF, QRect, QSize, QSizeF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QKeySequence, QPalette, QPixmap, QShortcut
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMenu, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget)
+                               QListWidgetItem, QMenu, QPushButton, QSizePolicy, QToolButton, QTreeWidget,
+                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
 import media_viewer as mv
+import pdf_contents
 import pdf_optimize
 
 
@@ -69,6 +80,11 @@ QLineEdit#PdfSearch, QLineEdit#PdfPage { color: #F2F2F7; background: rgba(255,25
                        border: 1px solid rgba(255,255,255,0.14); border-radius: 6px; padding: 3px 7px; font-size: 12px; }
 QListWidget#PdfThumbs { background: #1C1C1E; border: none; border-right: 1px solid #2C2C2E; color: #C7C7CC; }
 QListWidget#PdfThumbs::item:selected { background: rgba(10,132,255,0.35); border-radius: 6px; }
+QTreeWidget#PdfContents { background: #1C1C1E; border: none; border-right: 1px solid #2C2C2E; color: #E5E5EA;
+                          font-size: 13px; outline: none; }
+QTreeWidget#PdfContents::item { padding: 5px 4px; }
+QTreeWidget#PdfContents::item:hover { background: rgba(255,255,255,0.07); }
+QTreeWidget#PdfContents::item:selected { background: rgba(10,132,255,0.35); color: #FFFFFF; }
 """
 ZOOMS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0)
 
@@ -142,11 +158,29 @@ class PdfViewer(QWidget):
         self._thumb_timer.setInterval(15)
         self._thumb_timer.timeout.connect(self._render_thumbs)
 
+        # The chapters, beside the pages (pdf_contents: the PDF's outline, else its contents pages read as text).
+        self.reader: pdf_contents.Reader | None = None
+        self.contents = QTreeWidget(objectName="PdfContents")
+        self.contents.setHeaderHidden(True)
+        self.contents.setColumnCount(2)
+        self.contents.setRootIsDecorated(False)
+        self.contents.setIndentation(14)
+        self.contents.setFixedWidth(270)
+        self.contents.setVisible(False)
+        self.contents.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.contents.itemClicked.connect(lambda item, _c: self.go_to(item.data(0, Qt.ItemDataRole.UserRole)))
+        self._press: QPoint | None = None
+        self._hand = False
+        self.view.viewport().setMouseTracking(True)
+        self.view.viewport().installEventFilter(self)
+        self.nav.backAvailableChanged.connect(lambda on: self.back_btn.setVisible(bool(on)))
+
         self.top = self._top_bar()
         self.bottom = self._bottom_bar()
         middle = QHBoxLayout()
         middle.setContentsMargins(0, 0, 0, 0)
         middle.setSpacing(0)
+        middle.addWidget(self.contents)
         middle.addWidget(self.thumbs)
         middle.addWidget(self.view, 1)
         col = QVBoxLayout(self)
@@ -178,6 +212,9 @@ class PdfViewer(QWidget):
         self.thumbs_btn = mv._bar_button("☰", "Page thumbnails", self.toggle_thumbs)
         self.thumbs_btn.setCheckable(True)
         h.addWidget(self.thumbs_btn)
+        self.contents_btn = mv._bar_button("Contents", "The chapters — click one to go there", self.toggle_contents)
+        self.contents_btn.setCheckable(True)
+        h.addWidget(self.contents_btn)
         titles = QVBoxLayout()
         titles.setSpacing(0)
         self.title = QLabel(objectName="ViewerTitle")
@@ -246,6 +283,19 @@ class PdfViewer(QWidget):
         self.page_total.setObjectName("ViewerTime")
         row.addWidget(self.page_total)
         row.addWidget(mv._bar_button("", "Next page (→)", lambda: self.step(1), "next"))
+        self.back_btn = mv._bar_button("‹ Back", "Back to where you jumped from (⌘[)", lambda: self.nav.back())
+        self.back_btn.setVisible(False)
+        row.addWidget(self.back_btn)
+        # The chapter being read: a menu of every chapter (filled when the PDF has any).
+        self.chapter_btn = QToolButton(objectName="ZoomLabel")
+        self.chapter_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.chapter_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.chapter_btn.setToolTip("Chapters — [ and ] step to the one before and the next")
+        self.chapter_btn.setMaximumWidth(230)
+        self.chapter_menu = QMenu(self.chapter_btn)
+        self.chapter_btn.setMenu(self.chapter_menu)
+        self.chapter_btn.setVisible(False)
+        row.addWidget(self.chapter_btn)
         row.addStretch(1)
         # The two Optimize buttons, in the middle of the bottom bar (the top one holds the name and the search).
         self.mac_btn = QPushButton("Optimize for Safe Finder", objectName="Optimize")
@@ -284,7 +334,11 @@ class PdfViewer(QWidget):
                            ("PgUp", lambda: self.step(-1)), ("PgDown", lambda: self.step(1)),
                            ("Ctrl+F", self._focus_search), ("+", lambda: self.zoom(1.25)),
                            ("=", lambda: self.zoom(1.25)), ("-", lambda: self.zoom(1 / 1.25)), ("0", self.fit_width),
-                           ("Shift+Return", lambda: self.next_hit(-1)), ("Ctrl+W", self.close)):
+                           ("Shift+Return", lambda: self.next_hit(-1)), ("Ctrl+W", self.close),
+                           ("Ctrl+G", self._focus_page), ("Home", lambda: self.go_to(0)),
+                           ("End", lambda: self.go_to(self.doc.pageCount() - 1)),
+                           ("[", lambda: self.step_chapter(-1)), ("]", lambda: self.step_chapter(1)),
+                           ("Ctrl+[", lambda: self.nav.back()), ("Ctrl+]", lambda: self.nav.forward())):
             QShortcut(QKeySequence(keys), self).activated.connect(slot)
 
     # ------------------------------------------------------------------ the document
@@ -315,8 +369,11 @@ class PdfViewer(QWidget):
             self.search_model.setSearchString(self.search.text())
         self.fit_width()
         self.go_to(0)
+        self.reader = pdf_contents.Reader(self.doc)
+        self._links = None
         self._page_changed(0)
         self._reset_thumbs()
+        QTimer.singleShot(0, self._reset_contents)      # after the first paint: reading a contents page takes a moment
         return True
 
     def go_to(self, page: int) -> None:
@@ -337,12 +394,240 @@ class PdfViewer(QWidget):
             self.thumbs.blockSignals(True)
             self.thumbs.setCurrentRow(page)
             self.thumbs.blockSignals(False)
+        self._mark_chapter(page)
 
     def _page_typed(self) -> None:
+        """The page box: a page number — or the label printed on the page ("xii", "A-3") when the PDF has them."""
+        text = self.page_box.text().strip()
+        page = -1
+        if text.isdigit():
+            page = int(text) - 1
+        elif text and hasattr(self.doc, "pageIndexForLabel"):
+            page = self.doc.pageIndexForLabel(text)
+        if 0 <= page < self.doc.pageCount():
+            self.go_to(page)
+            self.view.setFocus()
+        else:
+            self.say(f"There's no page “{text}” — this PDF has {self.doc.pageCount():,} pages.")
+            self.page_box.setText(str(self.nav.currentPage() + 1))
+
+    def _focus_page(self) -> None:
+        self.page_box.setFocus()
+        self.page_box.selectAll()
+
+    # -- the contents: clicks on a contents page, the chapter list, chapter steps
+    def _page_rects(self) -> list[QRect]:
+        """Where each page is drawn, in the scrolled document's own coordinates — QPdfView's layout, worked out
+        again (it doesn't say): pages one under another, `pageSpacing` apart inside `documentMargins`, each
+        centred, sized by the zoom mode."""
+        from PySide6.QtPdfWidgets import QPdfView
+        v = self.view
+        m, spacing, vp = v.documentMargins(), v.pageSpacing(), v.viewport().size()
+        res, mode = self._screen_res(), v.zoomMode()
+        sizes: list[QSize] = []
+        for i in range(self.doc.pageCount()):
+            pt = self.doc.pagePointSize(i)
+            if mode == QPdfView.ZoomMode.Custom:
+                size = QSizeF(pt * res * v.zoomFactor()).toSize()
+            else:
+                size = QSizeF(pt * res).toSize()
+                if mode == QPdfView.ZoomMode.FitToWidth:
+                    size = size * ((vp.width() - m.left() - m.right()) / max(1, size.width()))
+                else:
+                    size = size.scaled(QSize(vp.width() - m.left() - m.right(), vp.height() - spacing),
+                                       Qt.AspectRatioMode.KeepAspectRatio)
+            sizes.append(size)
+        total = max((s.width() for s in sizes), default=0) + m.left() + m.right()
+        rects, y = [], m.top()
+        for size in sizes:
+            rects.append(QRect(QPoint((max(total, vp.width()) - size.width()) // 2, y), size))
+            y += size.height() + spacing
+        return rects
+
+    def page_point(self, pos: QPoint) -> tuple[int, QPointF] | None:
+        """(page, the spot on it in points) under `pos` in the viewport — None between pages."""
+        doc_pos = pos + QPoint(self.view.horizontalScrollBar().value(), self.view.verticalScrollBar().value())
+        for i, r in enumerate(self._page_rects()):
+            if r.contains(doc_pos):
+                pt = self.doc.pagePointSize(i)
+                return i, QPointF((doc_pos.x() - r.x()) * pt.width() / max(1, r.width()),
+                                  (doc_pos.y() - r.y()) * pt.height() / max(1, r.height()))
+            if r.top() > doc_pos.y():
+                break
+        return None
+
+    def viewport_pos(self, page: int, point: QPointF) -> QPoint:
+        """Where a spot on a page (points) is in the viewport now — the other way round (the tests click by it)."""
+        r = self._page_rects()[page]
+        pt = self.doc.pagePointSize(page)
+        return QPoint(round(r.x() + point.x() * r.width() / pt.width()) - self.view.horizontalScrollBar().value(),
+                      round(r.y() + point.y() * r.height() / pt.height()) - self.view.verticalScrollBar().value())
+
+    def link_at(self, page: int, point: QPointF):
+        """The PDF's own link at a spot on a page (a QPdfLink), or None."""
         try:
-            self.go_to(int(self.page_box.text()) - 1)
-        except ValueError:
-            pass
+            from PySide6.QtPdf import QPdfLinkModel
+            if self._links is None:
+                self._links = QPdfLinkModel(self)
+                self._links.setDocument(self.doc)
+            if self._links.page() != page:
+                self._links.setPage(page)
+            link = self._links.linkAt(point)
+            return link if link.isValid() else None
+        except Exception:  # noqa: BLE001 — an older Qt without linkAt: nothing is taken for a link
+            return None
+
+    def _real_link(self, page: int, point: QPointF) -> bool:
+        return self.link_at(page, point) is not None
+
+    def follow_link(self, pos: QPoint) -> bool:
+        """Follows the PDF's own link under `pos`: to its page (the top of it, at this zoom), or out to the web
+        in the browser. (This Qt's page view draws links but doesn't follow a click on one.)"""
+        hit = self.page_point(pos)
+        link = self.link_at(*hit) if hit is not None else None
+        if link is None:
+            return False
+        if 0 <= link.page() < self.doc.pageCount():
+            self.nav.jump(link.page(), link.location(), self.nav.currentZoom())
+            return True
+        url = link.url()
+        if url.isValid() and url.scheme() in ("http", "https", "mailto"):
+            QDesktopServices.openUrl(url)
+            return True
+        return False
+
+    def contents_target(self, pos: QPoint) -> tuple[int, str] | None:
+        """The page a click at `pos` asks for when it's on a contents entry that isn't a real link: (page, the
+        entry's title)."""
+        if self.reader is None:
+            return None
+        hit = self.page_point(pos)
+        if hit is None:
+            return None
+        page, point = hit
+        entry = self.reader.entry_at(page, point)
+        if entry is None or self._real_link(page, point):
+            return None
+        target = self.reader.resolve(entry.title, entry.number)
+        return (target, entry.title) if target is not None else None
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self.view.viewport():
+            kind = event.type()
+            if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self._press = event.position().toPoint()
+            elif kind == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                press, self._press = self._press, None
+                pos = event.position().toPoint()
+                if press is not None and (pos - press).manhattanLength() <= 5:
+                    if self.follow_link(pos):
+                        return True
+                    target = self.contents_target(pos)
+                    if target is not None:
+                        self.go_to(target[0])
+                        self.say(f"“{target[1]}” — page {target[0] + 1:,}.  ‹ Back returns to the contents.", 3500)
+                        return True
+            elif kind == QEvent.Type.MouseMove and not event.buttons():
+                at = event.position().toPoint()
+                spot = self.page_point(at)
+                hand = (spot is not None and self._real_link(*spot)) or self.contents_target(at) is not None
+                if hand != self._hand:
+                    self._hand = hand
+                    if hand:
+                        self.view.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+                    else:
+                        self.view.viewport().unsetCursor()
+        return super().eventFilter(obj, event)
+
+    def toggle_contents(self) -> None:
+        on = not self.contents.isVisible()
+        if on and self.contents.topLevelItemCount() == 0:
+            self.contents_btn.setChecked(False)
+            self.say("This PDF has no list of chapters — ☰ shows its pages instead.")
+            return
+        self.contents.setVisible(on)
+        self.contents_btn.setChecked(on)
+        if on:
+            self._mark_chapter(self.nav.currentPage())
+
+    def _reset_contents(self) -> None:
+        """The chapter list and menu for the document just opened."""
+        self.contents.clear()
+        self.chapter_menu.clear()
+        self._chapter = -2
+        if self.reader is None or not self.path:
+            return
+        try:
+            chapters = self.reader.chapters()
+        except Exception:  # noqa: BLE001 — a PDF whose text can't be read just has no list
+            chapters = []
+        parents: dict[int, QTreeWidgetItem] = {}
+        for i, c in enumerate(chapters):
+            label = self.doc.pageLabel(c.page) if hasattr(self.doc, "pageLabel") else ""
+            item = QTreeWidgetItem([c.title, label or str(c.page + 1)])
+            item.setData(0, Qt.ItemDataRole.UserRole, c.page)
+            item.setToolTip(0, c.title)
+            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            parent = parents.get(c.level - 1) if c.level > 0 else None
+            (parent.addChild(item) if parent is not None else self.contents.addTopLevelItem(item))
+            parents[c.level] = item
+            if c.level == 0 and i < 400:
+                self.chapter_menu.addAction(f"{c.title}    {label or c.page + 1}", lambda page=c.page: self.go_to(page))
+        self.contents.expandAll()
+        self.contents.setRootIsDecorated(any(c.level > 0 for c in chapters))
+        self.contents.header().setStretchLastSection(False)
+        from PySide6.QtWidgets import QHeaderView
+        self.contents.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.contents.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        have = bool(chapters)
+        self.chapter_btn.setVisible(have)
+        self.contents_btn.setToolTip("The chapters — click one to go there" if have else
+                                     "This PDF has no list of chapters")
+        if not have and self.contents.isVisible():
+            self.contents.setVisible(False)
+            self.contents_btn.setChecked(False)
+        self._mark_chapter(max(0, self.nav.currentPage()))
+
+    def _mark_chapter(self, page: int) -> None:
+        """The chapter `page` is in: named in the bottom bar, marked in the list."""
+        if self.reader is None or self.reader._chapters is None or not self.reader._chapters:
+            return
+        i = self.reader.chapter_at(page)
+        if i == getattr(self, "_chapter", -2):
+            return
+        self._chapter = i
+        chapters = self.reader.chapters()
+        name = chapters[i].title if i >= 0 else "Chapters"
+        shown = self.chapter_btn.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, 190)
+        self.chapter_btn.setText(shown + " ▾")
+        items = self._contents_items()               # in the chapters' own order
+        self.contents.blockSignals(True)
+        self.contents.setCurrentItem(items[i] if 0 <= i < len(items) else None)
+        self.contents.blockSignals(False)
+
+    def _contents_items(self) -> list[QTreeWidgetItem]:
+        out: list[QTreeWidgetItem] = []
+
+        def walk(item: QTreeWidgetItem) -> None:
+            out.append(item)
+            for k in range(item.childCount()):
+                walk(item.child(k))
+        for k in range(self.contents.topLevelItemCount()):
+            walk(self.contents.topLevelItem(k))
+        return out
+
+    def step_chapter(self, d: int) -> None:
+        """[ and ]: the chapter before (or this one's start, when you're into it) and the next."""
+        if self.reader is None or not self.reader.chapters():
+            return
+        page = self.nav.currentPage()
+        starts = sorted({c.page for c in self.reader.chapters()})
+        if d > 0:
+            nxt = next((p for p in starts if p > page), None)
+        else:
+            nxt = next((p for p in reversed(starts) if p < page), None)
+        if nxt is not None:
+            self.go_to(nxt)
         self.view.setFocus()
 
     # -- zoom
