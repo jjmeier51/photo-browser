@@ -2005,6 +2005,39 @@ re-encoded) and duplicate. The Swift side is read, not built (no compiler here).
 Checked offscreen (clicks and a drag on the slider; which windows are raised and in what order; the pointer
 rule). The Dock behaviour itself is macOS's and wasn't run here.
 
+## 6ae. Safe Finder Rename Files… (many, by a pattern) — `mac/rename_tools.py`, `mac/rename_window.py` (Nov 11, 2026)
+
+"Bulk rename files, and rename them based on certain attributes — by Capture Date: Photo-11:01:23.jpg to be '1'
+and 11:01:26.jpg to be '2'." Select ≥ 2 items ▸ Rename N Items… (F2), a folder ▸ Rename Files Inside… (its files,
+not its folders), File ▸ Rename Files….
+
+- `facts(path)`: stem, extension, folder, sizes, file dates and — through `media_info` (Pillow's EXIF
+  `DateTimeOriginal`, a video's own creation date; no ExifTool run) — the **capture date**, with the file's
+  modification date standing in when there's none (`has_capture` False; the window says how many). Read once per
+  window on a thread.
+- `bulk_plan(items, pattern, order, descending, start, digits, find, replace)`: `ordered` sorts by capture / name
+  (natural: IMG_9 before IMG_10) / modified / created / size / as given, ties by name; `render` fills `{n}`
+  `{name}` `{date}` `{time}` `{year}` `{month}` `{day}` `{hour}` `{minute}` `{second}` `{folder}` `{camera}`
+  `{width}` `{height}` (time as `14.30.05` — a ":" can't be in a name; `clean_name` turns any that a pattern
+  makes into "-"). The extension is always kept. Same name twice in the batch → " 2", " 3" in order. **A name
+  held by something outside the batch, an empty or hidden name, an unknown token → `problems`, and the window
+  won't rename.** Unchanged names aren't renamed.
+- `apply_bulk`: when no new name is another item's old one it's `apply`. When names trade places it goes in
+  two steps — every item to a passing name (`renaming-<id>-<n>.ext`, deliberately *not* hidden: the tag file has
+  no keys for hidden paths), then each to its new name. Before the second step it works out who can't have
+  their name (held by something that didn't move) **and, in turn, whoever was to take the name such an item goes
+  back to**, and those all go back to the names they had — found by a test where 4→5 was blocked and 3→4 had
+  already been promised 4's name. Tags/labels (`TagStore.renamed`) and the journal are given the same two
+  steps: an exchange can't be written as one simultaneous pair for the sequential re-key, and the iPhone's
+  `RenameJournal.pending` folds a→passing, passing→b back into a→b.
+- `BulkRenameDialog`: presets + the pattern field (typing a pattern selects "My own pattern"), order + "Last
+  first", start + digits, Find → Replace, and a three-column list (Now / Becomes / Capture date) rebuilt 120 ms
+  after a keystroke; choices remembered (`bulkRename/*`).
+
+Tested: the plan (the example: three photos named by clock time → 1, 2, 3 by capture date; padding, dates,
+folder/camera, find/replace, duplicates, a taken name), straight renames with tags + journal, a full exchange,
+a block mid-batch (everything back, no passing names left), a stop mid-exchange; and the window in Safe Finder.
+
 ## 6ab. Safe Finder Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
 
 The iPhone's video upscale (`MediaEditing.upscaleVideo`, §6f) on the Mac: right-click videos ▸ **Upscale Video…**

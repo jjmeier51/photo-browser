@@ -4918,6 +4918,39 @@ class Pane(QWidget):
                 QMessageBox.warning(self.window(), "Rotate", "Couldn't rotate:\n\n" + "\n".join(failed[:12]))
         threading.Thread(target=work, daemon=True, name="rotate").start()
 
+    def rename_many(self, paths: list[str]) -> None:
+        """Rename N Items… / Rename Files Inside…: a pattern for all of them — numbers, the capture date, the name
+        they have — numbered in an order (by capture date, name, …), every new name shown before anything is
+        renamed (rename_window.BulkRenameDialog). Tags, Favorites and the iPhone app's metadata follow."""
+        import rename_window
+        items = [p for p in paths if os.path.lexists(p) and not os.path.basename(p).startswith(".")]
+        if len(items) == 1 and os.path.isdir(items[0]):               # a folder: the files in it
+            try:
+                with os.scandir(items[0]) as it:
+                    items = sorted((e.path for e in it if e.is_file(follow_symlinks=False)
+                                    and not e.name.startswith(".")), key=str.casefold)
+            except OSError as e:
+                QMessageBox.warning(self.window(), "Rename Files", f"Couldn't read the folder: {e}")
+                return
+        if not items:
+            QMessageBox.information(self.window(), "Rename Files", "There are no files here to rename.")
+            return
+
+        def done(res) -> None:
+            self._names_changed(res)
+            n = len(res.done)
+            line = f"Renamed {n:,} item{'s' if n != 1 else ''}."
+            if res.failed:
+                line += f" {len(res.failed):,} couldn't be renamed."
+                QMessageBox.warning(self.window(), "Rename Files",
+                                    line + "\n\n" + "\n".join(f"{os.path.basename(r.old)}: {why}"
+                                                                 for r, why in res.failed[:12]))
+            self._airdrop_noted(line)
+
+        dlg = rename_window.BulkRenameDialog(self.window(), items, tag_store(), done, self.settings)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.open()
+
     def remove_leading_spaces(self, folder: str) -> None:
         """Right-click a folder ▸ Remove Leading Spaces from Names…: every file and folder inside whose name
         starts with a space gets the name without it (rename_window.py lists them first)."""
@@ -4968,6 +5001,8 @@ class Pane(QWidget):
                 menu.addAction("AirDrop to iPhone…", lambda: self.airdrop(paths))
             if len(paths) == 1:
                 menu.addAction("Rename…", lambda: self.rename_item(paths[0])).setShortcut(QKeySequence("F2"))
+            else:
+                menu.addAction(f"Rename {len(paths)} Items…", lambda: self.rename_many(paths)).setShortcut(QKeySequence("F2"))
             if any(os.path.isfile(p) for p in paths):
                 menu.addAction("Duplicate", lambda: self.duplicate_items(paths)).setShortcut(QKeySequence("Ctrl+D"))
             if any(batch_crop.can_crop(p) or kind_of(p) == "video" for p in paths if not os.path.isdir(p)):
@@ -5046,6 +5081,7 @@ class Pane(QWidget):
             if not paths and os.path.isdir(self.location):
                 menu.addAction("Edit Metadata of Everything Here…", lambda: self.edit_metadata([self.location]))
                 menu.addAction("Convert WebP Photos Here to JPEG…", lambda: self.convert_webp([self.location]))
+                menu.addAction("Rename Files Here…", lambda: self.rename_many([self.location]))
                 menu.addAction("Remove Leading Spaces from Names Here…", lambda: self.remove_leading_spaces(self.location))
                 self._folder_tools(menu, self.location, "Find Duplicates in This Folder…")
         menu.exec(view.viewport().mapToGlobal(pos))
@@ -5055,6 +5091,7 @@ class Pane(QWidget):
         """A folder's tools in the right-click menu: Find Duplicates, then the downloaders and the AI grouped
         (the menu had grown past a screenful)."""
         menu.addAction(dups_label, lambda: self.find_duplicates(folder))
+        menu.addAction("Rename Files Inside…", lambda: self.rename_many([folder]))
         menu.addAction("Remove Leading Spaces from Names…", lambda: self.remove_leading_spaces(folder))
         dl = menu.addMenu("Download")
         dl.addAction("Download from SimpCity…", lambda: open_simpcity(folder, self.window()))

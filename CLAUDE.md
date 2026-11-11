@@ -274,10 +274,13 @@ Python. (`SimpCityService`,
   every run so every video's like count is read again**; sort "Reactions / Likes", viewer Info ▸ Likes. Files
   tagged "tiktok" on both apps. `docs/feature-notes.md` §7.4b-2.
 - **Safe Finder Rename / Remove Leading Spaces / Duplicate / Rotate** (`mac/rename_tools.py`, `mac/rename_window.py`):
-  Rename… (F2); right-click a folder ▸ Remove Leading Spaces from Names… (files and folders, listed first, never
-  onto a taken name); Duplicate (⌘D); Rotate ▸ Left/Right/180° (photos via `batch_crop`, videos by display
+  Rename… (F2); **Rename N Items… / Rename Files Inside…** — many at once by a pattern (`{n}` `{name}` `{date}`
+  `{time}` `{folder}` `{camera}`…) numbered in an order (**capture date**, name, file dates, size), Find → Replace,
+  every new name previewed, blocked when a name is taken outside the batch; names may trade places (`bulk_plan`,
+  `apply_bulk` — two steps through passing names, with a consistent roll-back; §6ae); right-click a folder ▸
+  Remove Leading Spaces from Names… (files and folders, listed first, never onto a taken name); Duplicate (⌘D); Rotate ▸ Left/Right/180° (photos via `batch_crop`, videos by display
   rotation with `ffmpeg -c copy` — no re-encode). **Any rename Safe Finder makes must go through
-  `rename_tools.apply`**: it re-keys the shared tags/labels (`TagStore.renamed`) and appends to the drive's
+  `rename_tools.apply` / `apply_bulk`**: it re-keys the shared tags/labels (`TagStore.renamed`) and appends to the drive's
   `.Photo Browser Metadata/renames.json`, which the iPhone applies to its path-keyed stores on the next drive open
   (`RenameJournal.swift` → `applyMacRenames` → `itemsMoved`, called from `syncDriveTags`). §6aa.
 - **Safe Finder Upscale Video** — right-click videos ▸ Upscale Video… : 1080p or 4K (never down), source / 30 / 60 fps,

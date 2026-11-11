@@ -941,6 +941,24 @@ login; only the public handle goes out.
 ### Rename, Duplicate, Rotate — and Remove Leading Spaces from Names (`rename_tools.py`, `rename_window.py`)
 
 - **Rename…** (F2, or right-click): a new name for one file or folder.
+- **Rename several at once.** Select the files and right-click ▸ **Rename N Items…** (F2) — or right-click a
+  folder ▸ **Rename Files Inside…** for every file in it. Choose how to name them and in what order:
+  - **Name them** — a ready-made pattern or your own: *1, 2, 3 …*; *Photo 1, Photo 2 …*; *the capture date and
+    time* (2024-03-15 14.30.05); *the capture date, then a number*; *the capture date, then the name it has*;
+    *the folder's name and a number*. In your own pattern, `{n}` is the number, `{name}` the name it has now,
+    `{date}` and `{time}` the capture date (also `{year}` `{month}` `{day}`), `{folder}`, `{camera}`,
+    `{width}` `{height}` — so `Paris {n}` or `{date} {name}`.
+  - **In the order of** — **Capture date** (when the photo or video was taken, read from the file), Name, Date
+    modified, Date created, Size, or the order they're in now; *Last first* turns it round. So photos named
+    for the time they were taken become **1, 2, 3 …** in the order they were shot: pattern `{n}`, order
+    Capture date.
+  - **Numbers** — where they start, and plain (1, 2, 3) or padded (01, 001…).
+  - **Find → Replace** changes text inside `{name}`.
+  The list shows every *now → becomes* and updates as you type. Extensions are kept. If a new name is already
+  used by a file you're not renaming it says so in red and won't rename anything until the pattern (or the
+  starting number) is changed; two files that would get the same name are told apart with " 2". A file with
+  no capture date inside uses its file date (the list marks it). Names can swap ("2.jpg" becoming "1.jpg"
+  while "1.jpg" becomes "2.jpg") — nothing is overwritten on the way.
 - **Remove Leading Spaces from Names…** (right-click a folder, or the empty area for the folder you're in):
   every file *and folder* inside whose name starts with a space (or a tab, or an invisible space) gets the
   name without it. The window lists every `old → new` first; untick **Include subfolders** to do just the

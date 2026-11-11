@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Renaming on the drive without losing what's attached to the names — Safe Finder's Rename and "Remove
-Leading Spaces from Names…" (no Qt here).
+"""Renaming on the drive without losing what's attached to the names — Safe Finder's Rename, Rename Files…
+(many at once, by a pattern) and "Remove Leading Spaces from Names…" (no Qt here).
 
     python3 mac/rename_tools.py "/Volumes/SSD/Some Folder"            # dry run: what would be renamed
     python3 mac/rename_tools.py "/Volumes/SSD/Some Folder" --apply
@@ -10,6 +10,15 @@ before everything else and is easy to mistype; downloads and exports leave them 
 finds every file and folder under a folder whose name starts with one and plans the name without it —
 never onto a name that's taken (" a.jpg" beside "a.jpg" becomes "a 2.jpg"), never to a hidden name (" .x"
 is left alone) and never to an empty one. Folders are renamed too, deepest items first.
+
+**Many at once** (`bulk_plan`, `apply_bulk`). A pattern makes each name — `{n}` a number, `{name}` the name it
+has, `{date}` `{time}` (and `{year}` `{month}` `{day}` …) the capture date, `{folder}`, `{camera}`, `{width}`
+`{height}` — with the items numbered in an order: by **capture date** (a photo's EXIF, a video's own creation
+date; the file's date when there's none), name, file dates, size, or as they're given. So "the photos in the order
+they were taken, called 1, 2, 3…" is the pattern `{n}` ordered by capture date. Find/replace works on `{name}`.
+Extensions are kept; two that come out the same are told apart (" 2"); a name taken by something outside the batch
+stops the whole thing before it starts. Names may trade places within a batch — `apply_bulk` goes through passing
+names when they do, and puts back any item whose new name it couldn't have.
 
 **What follows a rename** (`apply`):
 - the tags, Favorites and To AI in the shared tag file (`TagStore.renamed` — a folder's contents too);
@@ -145,6 +154,236 @@ def single(path: str, new_name: str) -> Rename:
     if os.path.lexists(target) and not same_file:
         raise ValueError(f"“{new_name}” is already taken in this folder.")
     return Rename(os.path.abspath(path), target, os.path.isdir(path), target)
+
+
+# ----------------------------------------------------------------------------- many names at once
+
+ORDERS = [("capture", "Capture date"), ("name", "Name"), ("modified", "Date modified"), ("created", "Date created"),
+          ("size", "Size"), ("given", "The order they're in now")]
+PRESETS = [("1, 2, 3 …", "{n}"), ("Photo 1, Photo 2 …", "Photo {n}"),
+           ("The capture date and time — 2024-03-15 14.30.05", "{date} {time}"),
+           ("The capture date, then a number — 2024-03-15 1", "{date} {n}"),
+           ("The capture date, then the name it has", "{date} {name}"),
+           ("The folder's name and a number — Paris 1", "{folder} {n}"),
+           ("The name it has (for Find and Replace)", "{name}")]
+TOKENS = ("n", "name", "date", "time", "year", "month", "day", "hour", "minute", "second", "folder", "camera",
+          "width", "height")
+TOKEN_HELP = ("{n} a number · {name} the name now · {date} {time} the capture date · {year} {month} {day} · "
+              "{folder} · {camera} · {width} {height}")
+
+
+@dataclass
+class Facts:
+    """What a name can be made from."""
+    path: str
+    stem: str
+    ext: str                  # with its dot, as it is
+    is_dir: bool
+    folder: str               # the name of the folder it's in
+    when: float               # the capture date — or the file's own date when it has none
+    has_capture: bool
+    modified: float
+    created: float
+    size: int
+    width: int = 0
+    height: int = 0
+    camera: str = ""
+
+
+def facts(path: str) -> Facts:
+    """Reads one item: its capture date from the file itself (a photo's EXIF, a video's own creation date —
+    media_info), else the file's modification date."""
+    path = os.path.abspath(path)
+    st = os.stat(path)
+    is_dir = os.path.isdir(path)
+    name = os.path.basename(path)
+    stem, ext = (name, "") if is_dir else os.path.splitext(name)
+    info: dict = {}
+    if not is_dir:
+        try:
+            import media_info
+            info = media_info.video_info(path) or media_info.image_info(path)
+        except Exception:  # noqa: BLE001 — a file that can't be read as a photo or video has only its dates
+            info = {}
+    taken = info.get("taken") or info.get("created")
+    created = getattr(st, "st_birthtime", None) or st.st_mtime
+    return Facts(path, stem, ext, is_dir, os.path.basename(os.path.dirname(path)),
+                 float(taken) if taken else st.st_mtime, bool(taken), st.st_mtime, created, st.st_size,
+                 int(info.get("width") or 0), int(info.get("height") or 0), str(info.get("camera") or ""))
+
+
+def natural_key(name: str):
+    """"IMG_9" before "IMG_10"."""
+    import re
+    return [int(x) if x.isdigit() else x.casefold() for x in re.split(r"(\d+)", name)]
+
+
+def ordered(items: list[Facts], order: str, descending: bool = False) -> list[Facts]:
+    """`items` in the order they're numbered by; ties go by name (so two shots in one second stay in order)."""
+    if order == "given":
+        out = list(items)
+    else:
+        key = {"capture": lambda f: f.when, "modified": lambda f: f.modified, "created": lambda f: f.created,
+               "size": lambda f: f.size, "name": lambda f: 0}[order]
+        out = sorted(items, key=lambda f: (key(f), natural_key(f.stem), f.ext.casefold()))
+    return out[::-1] if descending else out
+
+
+def clean_name(name: str, exfat: bool) -> str:
+    """What a pattern made, as a name a folder can hold: no "/" or ":" (nor exFAT's others), no leading or
+    trailing spaces or trailing dots."""
+    bad = '/:' + ('\\*?"<>|' if exfat else "")
+    out = "".join("-" if c in bad or ord(c) < 32 else c for c in unicodedata.normalize("NFC", name))
+    return out.strip().rstrip(". ").lstrip()
+
+
+def render(pattern: str, f: Facts, n: int, digits: int = 0, find: str = "", replace: str = "",
+           match_case: bool = False) -> str:
+    """The new name (without its extension) for `f`, the n-th item."""
+    import re
+    stem = f.stem
+    if find:
+        stem = stem.replace(find, replace) if match_case else re.sub(re.escape(find), lambda _m: replace, stem, flags=re.I)
+    t = time.localtime(f.when)
+    values = {"n": str(n).zfill(digits) if digits else str(n), "name": stem,
+              "date": time.strftime("%Y-%m-%d", t), "time": time.strftime("%H.%M.%S", t),
+              "year": time.strftime("%Y", t), "month": time.strftime("%m", t), "day": time.strftime("%d", t),
+              "hour": time.strftime("%H", t), "minute": time.strftime("%M", t), "second": time.strftime("%S", t),
+              "folder": f.folder, "camera": f.camera, "width": str(f.width or ""), "height": str(f.height or "")}
+    return re.sub(r"\{(\w+)\}", lambda m: values.get(m.group(1).lower(), m.group(0)), pattern)
+
+
+@dataclass
+class BulkPlan:
+    renames: list[Rename]                     # what changes, in order
+    rows: list[tuple[Facts, str, str]]        # every item in order: (it, its new name, "" or what's wrong)
+    problems: list[str]                       # sentences; any of them means nothing should be renamed
+    no_capture: int = 0                       # items whose file date stood in for a capture date
+
+
+def bulk_plan(items: list[Facts], pattern: str, order: str = "capture", descending: bool = False, start: int = 1,
+              digits: int = 0, find: str = "", replace: str = "", match_case: bool = False) -> BulkPlan:
+    """New names for `items` from `pattern` (TOKENS), numbered in `order` from `start`. Extensions are kept.
+    Two items that would get the same name are told apart with " 2", " 3" (in order). A name that's taken by
+    something that isn't being renamed, an empty name, or a hidden one is a problem — the plan says so and
+    nothing should be applied."""
+    import re
+    exfat_cache: dict[str, bool] = {}
+    seq = ordered(items, order, descending)
+    uses_date = bool(re.search(r"\{(date|time|year|month|day|hour|minute|second)\}", pattern, re.I)) or order == "capture"
+    unknown = sorted({m.lower() for m in re.findall(r"\{(\w+)\}", pattern)} - set(TOKENS))
+    problems = [f"“{{{u}}}” isn't something a name can be made from." for u in unknown]
+    if not pattern.strip():
+        problems.append("Type what the names should be.")
+    sources = {os.path.join(os.path.dirname(f.path), os.path.basename(f.path)).casefold() for f in items}
+    taken: dict[str, int] = {}
+    rows: list[tuple[Facts, str, str]] = []
+    renames: list[Rename] = []
+    clashes = 0
+    for i, f in enumerate(seq):
+        folder = os.path.dirname(f.path)
+        if folder not in exfat_cache:
+            exfat_cache[folder] = spare_folders.on_exfat(folder)
+        stem = clean_name(render(pattern, f, start + i, digits, find, replace, match_case), exfat_cache[folder])
+        wrong = ""
+        if not stem:
+            wrong = "the name would be empty"
+        elif stem.startswith("."):
+            wrong = "the name would be hidden"
+        name = stem + f.ext
+        key = os.path.join(folder, name).casefold()
+        if not wrong:
+            k = taken.get(key, 0) + 1
+            taken[key] = k
+            if k > 1:                                      # the same name twice in this batch: numbered apart
+                while True:
+                    name = f"{stem} {k}{f.ext}"
+                    if os.path.join(folder, name).casefold() not in taken:
+                        break
+                    k += 1
+                taken[os.path.join(folder, name).casefold()] = 1
+            if len(name.encode("utf-8")) > 255:
+                wrong = "the name would be too long"
+        target = os.path.join(folder, name)
+        if not wrong and target != f.path and target.casefold() not in sources and os.path.lexists(target):
+            wrong = "that name is taken by something that isn't being renamed"
+            clashes += 1
+        rows.append((f, name, wrong))
+        if not wrong and target != f.path:
+            renames.append(Rename(f.path, target, f.is_dir, target))
+    bad = sum(1 for _f, _n, w in rows if w)
+    if clashes:
+        problems.append(f"{clashes:,} of the new names {'is' if clashes == 1 else 'are'} already taken by other "
+                        "items in the folder — change the pattern or where the numbers start.")
+    if bad - clashes:
+        problems.append(f"{bad - clashes:,} of the new names can't be used (empty, hidden or too long).")
+    return BulkPlan(renames, rows, problems,
+                    sum(1 for f in items if not f.has_capture and not f.is_dir) if uses_date else 0)
+
+
+def apply_bulk(plan: list[Rename], tags=None, progress=lambda done, total: None, stop=lambda: False) -> Result:
+    """Makes a batch of renames whose names may trade places ("2.jpg" becomes "1.jpg" while "1.jpg" becomes
+    "2.jpg"). When no new name is another item's old one, it's `apply`. Otherwise in two steps: every item to
+    a passing name ("renaming-<id>-<n>.ext"), then each to its new one — and an item whose new name turns out
+    to be held (something failed, or was stopped) goes back to the name it had, so nothing is ever left under a
+    passing name or lost. Tags, labels and the journal follow the same two steps (a passing name is a step
+    for them too — an exchange can't be told in one)."""
+    old_names = {r.old.casefold() for r in plan}
+    if not any(r.new.casefold() in old_names and r.new.casefold() != r.old.casefold() for r in plan):
+        return apply(plan, tags, progress, stop)
+    token = uuid.uuid4().hex[:8]
+    staged: list[tuple[Rename, str]] = []
+    failed: list[tuple[Rename, str]] = []
+    total = len(plan) * 2
+    for i, r in enumerate(plan):
+        if stop():
+            break
+        passing = os.path.join(os.path.dirname(r.old), f"renaming-{token}-{i}{os.path.splitext(r.old)[1] if not r.is_dir else ''}")
+        try:
+            os.rename(r.old, passing)
+            staged.append((r, passing))
+        except OSError as e:
+            failed.append((r, e.strerror or str(e)))
+        if i % 50 == 0:
+            progress(i + 1, total)
+    # Which staged items can't have their new name: it's held by something that didn't move (a file outside the
+    # batch, an item that couldn't be staged, or stopped before its turn) — and then, in turn, whoever was to take
+    # the name such an item is going back to. Those go back to the names they had; the rest go on.
+    back: set[int] = {i for i, (r, _p) in enumerate(staged) if os.path.lexists(r.new)}
+    grew = True
+    while grew:
+        grew = False
+        reclaimed = {staged[i][0].old.casefold() for i in back}
+        for i, (r, _p) in enumerate(staged):
+            if i not in back and r.new.casefold() in reclaimed:
+                back.add(i)
+                grew = True
+    done: list[tuple[Rename, str]] = []
+    for i, (r, passing) in enumerate(staged):
+        try:
+            if i in back:
+                os.rename(passing, r.old)
+                failed.append((r, "its new name is in use — left as it was"))
+            else:
+                if os.path.lexists(r.new):
+                    raise FileExistsError(17, "its new name is still in use", r.new)
+                os.rename(passing, r.new)
+                done.append((r, passing))
+        except OSError as e:
+            failed.append((r, f"it's now “{os.path.basename(passing)}” ({e.strerror or e}) — rename it by hand"))
+        if i % 50 == 0:
+            progress(len(plan) + i + 1, total)
+    progress(total, total)
+    if done:
+        steps = [Rename(r.old, passing, r.is_dir, passing) for r, passing in done] + \
+                [Rename(passing, r.new, r.is_dir, r.new) for r, passing in done]
+        if tags is not None:
+            try:
+                tags.renamed([(x.old, x.new) for x in steps])
+            except OSError:
+                pass
+        note_renames(steps)
+    return Result([r for r, _p in done], failed, [])
 
 
 # ----------------------------------------------------------------------------- a copy beside the original

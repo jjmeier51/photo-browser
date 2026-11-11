@@ -106,8 +106,14 @@ def install(win, sf) -> None:
     act(f, "Quick Look  (Space)", lambda: pane().quick_look(), None, lambda: bool(sel()) and sf.IS_MAC)
     act(f, "Show in Finder", lambda: sf.subprocess.Popen(["open", "-R", sel()[0]]) if sel() else None, None,
         lambda: bool(sel()) and sf.IS_MAC)
-    act(f, "Rename…", lambda: pane().rename_item(sel()[0]) if len(sel()) == 1 else None, "F2", lambda: len(sel()) == 1,
-        "A new name for the selected file or folder — its tags, Favorites and the iPhone app's own metadata follow")
+    act(f, "Rename…", lambda: pane().rename_item(sel()[0]) if len(sel()) == 1 else
+        pane().rename_many(sel()) if sel() else None, "F2", lambda: bool(sel()),
+        "A new name for the selected file or folder — or, with several selected, names for them all by a pattern "
+        "(numbers, the capture date…). Tags, Favorites and the iPhone app's own metadata follow")
+    act(f, "Rename Files…", lambda: pane().rename_many(sel() if len(sel()) > 1 else [folder_target()]), None,
+        lambda: len(sel()) > 1 or folder_target() is not None,
+        "The selected items — or every file in the selected folder, or this one — renamed by a pattern: 1, 2, 3… in "
+        "the order they were taken, the capture date, text and a number…")
     act(f, "Duplicate", lambda: pane().duplicate_items(sel()), "Ctrl+D", lambda: any(os.path.isfile(p) for p in sel()),
         "A copy of each selected file beside it, with its tags and Favorites")
     act(f, "Remove Leading Spaces from Names…", lambda: pane().remove_leading_spaces(folder_target()), None,
