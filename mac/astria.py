@@ -477,6 +477,9 @@ def is_picture(data: bytes | None) -> bool:
 
 # ----------------------------------------------------------------------------- the client
 
+_REF_LOCK = threading.Lock()
+
+
 class Client:
     def __init__(self, key: str | None = None, transport: Transport | None = None,
                  sleep: Callable[[float], None] = time.sleep) -> None:
@@ -668,7 +671,13 @@ class Client:
 
     # -- references
     def reference_mentions(self, refs: list[tuple[bytes, str, str]], base_tune: int) -> tuple[list[str], list[str], int, str | None]:
-        """refs: (jpeg, key, title). → (mentions, cache keys reused, failed, last error)."""
+        """refs: (jpeg, key, title). → (mentions, cache keys reused, failed, last error). One at a time across
+        threads: a batch of photos sent together shares its reference photos, and the first job's reference
+        tunes are the ones the others then find remembered (not made again by each)."""
+        with _REF_LOCK:
+            return self._reference_mentions(refs, base_tune)
+
+    def _reference_mentions(self, refs: list[tuple[bytes, str, str]], base_tune: int) -> tuple[list[str], list[str], int, str | None]:
         mentions, reused, failed, last = [], [], 0, None
         cache = store().get("reference_tunes", {}) or {}
         for data, key, title in refs:

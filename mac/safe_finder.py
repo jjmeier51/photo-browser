@@ -4648,10 +4648,13 @@ class Pane(QWidget):
                                  reveal=self._reveal_from_viewer,
                                  view=lambda paths, start: self.view_media(start, among=paths), keep_open=keep)
 
-    def ai_edit(self, photo: str) -> None:
+    def ai_edit(self, photo: str | list[str]) -> None:
+        """Edit with AI…: one photo — or several at once: the same prompt goes to each, and the results come back
+        together in one window (ai_window.BatchResultsWindow), each saved beside its own photo."""
         import ai_window
         hooks = self._ai_hooks()
-        win = ai_window.RequestWindow("edit", photo, hooks, THEME, self.window())
+        photos = [photo] if isinstance(photo, str) else list(photo)
+        win = ai_window.RequestWindow("edit", photos[0] if len(photos) == 1 else photos, hooks, THEME, self.window())
         hooks.keep_open(win)
         win.show()
 
@@ -5012,8 +5015,8 @@ class Pane(QWidget):
                                lambda: self.remove_watermark(photos))
                 if len(photos) == 1:
                     menu.addAction("Remove Objects…", lambda: self.remove_objects(photos[0]))
-                if len(photos) == 1:
-                    menu.addAction("Edit with AI…", lambda: self.ai_edit(photos[0]))
+                menu.addAction("Edit with AI…" if len(photos) == 1 else f"Edit {len(photos)} Photos with AI…",
+                               lambda: self.ai_edit(photos))
             folders = [p for p in paths if os.path.isdir(p)]
             if folders:
                 menu.addAction("Remove Watermark from Photos Inside…", lambda: self.remove_watermark(folders))

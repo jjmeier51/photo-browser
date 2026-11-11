@@ -338,6 +338,22 @@ prepended after the prefix — so a Flux LoRA prompt reads "ohwx woman <lora:11:
   save is reported. No notifications — a Mac process isn't suspended mid-job the way iOS's is.
 - Not ported: Surprise Me, Extend with AI (Flux outpaint), creating tunes, live activities.
 
+**Nov 11 — several photos, one prompt (Safe Finder).** "Select 5 photos, prompt 'Remove the bookshelf behind
+Johnny' for all 5, send them to Astria and get them back together." Astria has no batch call — an edit is one
+prompt with one `input_image` — so a batch is **a job per photo** with the same text, tune and settings:
+`RequestWindow` takes a list (`targets`; the form shows the photos and "5 photos × 2 = 10 images"), `generate`
+makes the jobs and opens one `BatchResultsWindow` for them. `Jobs._run` now takes a lane first
+(`LANES = 4` at once; the rest say "Waiting its turn…") — a 30-photo batch doesn't open 30 uploads. The window
+has a section per photo (original, state, its result tiles as they arrive, **Try Again** on a final failure —
+a new job in the same place; a recoverable one is left to the recovery), a bar counting photos back, and
+**Save All** only once every job is done — "back together" — which runs `save_edit` per photo (its own "AI"
+folder, EXIF and tags) and drops each pending note. Each job still writes its own pending note, so a quit
+mid-batch is finished by the existing recovery. Reference photos shared by a batch are prepared once
+(`_REF_LOCK` round `reference_mentions`: the first job makes the reference tunes, the rest find them
+remembered). More than `BATCH_ASK` (20) images asks first. Not on the iPhone yet (its Edit with AI is one
+photo at a time). Tested against a stand-in client: five photos, one prompt, ≤ 4 at once, one refused then
+tried again, a result left out, nine files saved beside their photos with tags carried.
+
 **Nov 9 — "moderated" in Astria, nothing back in Safe Finder.** An SFW edit showed "moderated" on Astria while
 Safe Finder waited and got nothing. The two apps' requests are field-for-field the same (fields, model ids,
 pinned 2K, upload sizes, prompt composition), so the moderation itself is Astria's or its partner model's

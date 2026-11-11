@@ -170,6 +170,9 @@ actions the app makes no network calls.
   (`TaylorRecord.swift`) — §7.4c.
   Safe Finder's **Edit with AI / Create with AI / Astria.ai Browser** (`mac/astria.py`, `mac/ai_window.py`): the
   iPhone's Astria request path field for field (keep the two in step), key in the Mac's Keychain — §1.13.
+  **Several photos, one prompt** (select photos ▸ Edit N Photos with AI…): a job per photo with the same prompt and
+  settings, four at a time (`ai_window.LANES`), one `BatchResultsWindow` with every photo's results, Save All once
+  they're all back (each into the "AI" folder beside its own photo), Try Again per failed photo. Safe Finder only.
   Safe Finder's **menu bar** (`mac/menubar.py`) holds every command and its ⌘ shortcut (one binding per key —
   panes keep only Return/Space); the right-click menu groups a folder's tools under Download ▸ / AI ▸.
   Safe Finder's **Edit Metadata** (right-click ▸ Edit Metadata… / ⌘I; `mac/metadata_edit.py`, `mac/metadata_window.py`):

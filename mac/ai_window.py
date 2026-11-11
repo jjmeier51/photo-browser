@@ -48,6 +48,9 @@ import astria as A
 from duplicates_window import FlowLayout
 
 CLIENT: Callable[[], A.Client] = lambda: A.Client()          # tests hand in a client on a fake Astria
+LANES = 4                     # generations sent to Astria at once (a batch of photos takes turns)
+BATCH_ASK = 20                # a batch that would be more generations than this is confirmed first
+BATCH_SHOWN = 7               # photos of a batch pictured in the form (the rest are counted)
 
 
 @dataclass
@@ -226,6 +229,7 @@ class Jobs(QObject):
         super().__init__()
         self.jobs: dict[str, Job] = {}
         self.resumed = False
+        self._lanes = threading.BoundedSemaphore(LANES)
 
     def start(self, job: Job) -> None:
         self.jobs[job.id] = job
@@ -233,6 +237,18 @@ class Jobs(QObject):
         self.resume()
 
     def _run(self, job: Job) -> None:
+        """One job, start to finish — at most LANES at a time (a batch of photos queues behind them)."""
+        if not self._lanes.acquire(blocking=False):
+            self.progress.emit(job.id, "Waiting its turn…")
+            self._lanes.acquire()
+        try:
+            self._generate(job)
+        finally:
+            self._lanes.release()
+        job.done = True
+        self.finished.emit(job.id)
+
+    def _generate(self, job: Job) -> None:
         client = CLIENT()
         try:
             image, w, h = None, None, None
@@ -274,8 +290,6 @@ class Jobs(QObject):
         except Exception as e:  # noqa: BLE001 — anything else reads as a refusal, never a crash
             job.error = A.AIError("server", str(e))
             A.drop_pending(job.id)
-        job.done = True
-        self.finished.emit(job.id)
 
     def resume(self) -> None:
         """Once a run: finish what a quit cut short (quietly; only saves are reported)."""
@@ -319,11 +333,16 @@ class RequestWindow(QWidget):
                  settings: dict | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        # Edit with AI takes one photo or several: the same prompt and settings go to each (a job a photo), and
+        # the results come back together in one window (BatchResultsWindow).
+        self.targets = [target] if isinstance(target, str) else list(target)
+        target = self.targets[0]
         self.mode, self.target, self.hooks, self.theme = mode, target, hooks, theme
         self.all_tunes: list[A.Tune] = []
         self.picked_tunes: list[int] = []
         self.refs: list[str] = []
-        self.setWindowTitle("Edit with AI" if mode == "edit" else "Create with AI")
+        self.setWindowTitle(("Edit with AI" if len(self.targets) == 1 else f"Edit {len(self.targets)} Photos with AI")
+                            if mode == "edit" else "Create with AI")
         self.setStyleSheet(_style(theme))
         self.resize(640, 860)
         s = settings or A.store().get(f"run_{mode}", {}) or {}
@@ -345,14 +364,34 @@ class RequestWindow(QWidget):
         v.setContentsMargins(18, 16, 18, 16)
         v.setSpacing(8)
         head = QHBoxLayout()
-        title = QLabel("Edit with AI" if self.mode == "edit" else "Create with AI")
+        many = self.mode == "edit" and len(self.targets) > 1
+        title = QLabel((f"Edit {len(self.targets)} Photos with AI" if many else "Edit with AI")
+                       if self.mode == "edit" else "Create with AI")
         title.setObjectName("SheetTitle")
         head.addWidget(title, 1)
         gear = QPushButton("Astria Settings…")
         gear.clicked.connect(self._settings)
         head.addWidget(gear)
         v.addLayout(head)
-        if self.mode == "edit":
+        if many:
+            strip = QHBoxLayout()
+            strip.setSpacing(6)
+            self.previews: list[QLabel] = []
+            for _p in self.targets[:BATCH_SHOWN]:
+                lab = QLabel()
+                lab.setFixedSize(64, 64)
+                lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                strip.addWidget(lab)
+                self.previews.append(lab)
+            if len(self.targets) > BATCH_SHOWN:
+                strip.addWidget(_small(f"+{len(self.targets) - BATCH_SHOWN} more", wrap=False))
+            strip.addStretch(1)
+            v.addLayout(strip)
+            v.addWidget(_small(f"The same prompt goes to each of the {len(self.targets)} photos, and the results "
+                               "come back together in one window. Each photo's results are saved into an “AI” "
+                               "folder beside it, with its date, place and tags."))
+            QTimer.singleShot(0, self._load_preview)
+        elif self.mode == "edit":
             row = QHBoxLayout()
             self.preview = QLabel()
             self.preview.setFixedSize(96, 96)
@@ -368,7 +407,8 @@ class RequestWindow(QWidget):
         self.key_row.saved.connect(self._key_saved)
         self.key_row.setVisible(not A.get_key())
         v.addWidget(self.key_row)
-        v.addWidget(self._head("What would you like to change?" if self.mode == "edit" else "Describe the image"))
+        v.addWidget(self._head(("What would you like to change in every photo?" if many else
+                                "What would you like to change?") if self.mode == "edit" else "Describe the image"))
         self.prompt = QPlainTextEdit(s.get("prompt", ""))
         self.prompt.setObjectName("AIPrompt")
         self.prompt.setPlaceholderText("e.g. make the sky a sunset, remove the sign…" if self.mode == "edit"
@@ -445,7 +485,7 @@ class RequestWindow(QWidget):
         strip = QWidget()
         strip.setLayout(self.ref_strip)
         v.addWidget(strip)
-        self.refs = [p for p in s.get("references", []) if os.path.exists(p) and p != self.target]
+        self.refs = [p for p in s.get("references", []) if os.path.exists(p) and p not in self.targets]
         v.addWidget(self._head("Output"))
         form = QFormLayout()
         self.res_box, self.res = _seg(self, list(A.RESOLUTIONS), s.get("resolution", "2K"))
@@ -483,6 +523,16 @@ class RequestWindow(QWidget):
         return lab
 
     def _load_preview(self) -> None:
+        if len(self.targets) > 1:
+            for path, lab in zip(self.targets, self.previews):
+                try:
+                    pm = _thumb_of(A.upload_jpeg(path, 128)[0], 64)
+                except A.AIError:
+                    pm = None
+                if pm is not None:
+                    lab.setPixmap(pm)
+                    lab.setToolTip(os.path.basename(path))
+            return
         try:
             data, _w, _h = A.upload_jpeg(self.target, 256)
         except A.AIError:
@@ -631,8 +681,14 @@ class RequestWindow(QWidget):
             self.status.setText("Add your Astria API key first.")
         elif not self.prompt.toPlainText().strip():
             self.status.setText("Write a prompt.")
+        elif self.mode == "edit" and len(self.targets) > 1:
+            n, each = len(self.targets), int(_checked(self.cnt) or 1)
+            self.status.setText(f"{n} photos × {each} = {n * each} images from Astria." if each > 1
+                                else f"{n} photos — one image each.")
         else:
             self.status.setText("")
+        if self.mode == "edit" and len(self.targets) > 1:
+            self.go.setText(f"Generate for {len(self.targets)} Photos")
 
     # -- references
     def _add_refs(self) -> None:
@@ -690,6 +746,23 @@ class RequestWindow(QWidget):
         resolution = (pinned or s["resolution"]) if gen.supports_resolution else None
         text = gen.prefix + A.compose_prompt(s["prompt"], s["negative"] if s["negative_on"] else None)
         aspect = A.ASPECTS.get(s["aspect"]) if self.mode == "edit" else (A.ASPECTS.get(s["aspect"]) or "1:1")
+        if self.mode == "edit" and len(self.targets) > 1:
+            total = len(self.targets) * s["count"]
+            if total > BATCH_ASK and QMessageBox.question(
+                    self, "Edit with AI", f"That's {total} images from Astria ({len(self.targets)} photos × "
+                    f"{s['count']}). Send them all?") != QMessageBox.StandardButton.Yes:
+                return None
+            refs = list(s["references"]) if A.MODELS[model][1] else []
+            batch = [Job(uuid.uuid4().hex, "edit", text, gen.label, gen, s["count"], aspect, resolution, source=path,
+                         references=refs, settings=s) for path in self.targets]
+            win = BatchResultsWindow(batch, self.hooks, self.theme, self.parentWidget())
+            if self.hooks.keep_open:
+                self.hooks.keep_open(win)
+            win.show()
+            for job in batch:
+                jobs().start(job)
+            self.close()
+            return batch[0]
         job = Job(uuid.uuid4().hex, self.mode, text, gen.label, gen, s["count"], aspect, resolution,
                   source=self.target if self.mode == "edit" else "",
                   folder=self.target if self.mode == "create" else "",
@@ -943,6 +1016,344 @@ class ResultsWindow(QWidget):
         except (RuntimeError, TypeError):
             pass
         super().closeEvent(event)
+
+
+# ----------------------------------------------------------------------------- several photos, one prompt
+
+class _PhotoSection(QFrame):
+    """One photo of a batch: the original, how its generation is going, and its results."""
+
+    def __init__(self, job: Job, side: int, parent=None) -> None:
+        super().__init__(parent)
+        self.job = job
+        self.tiles: list[_Result] = []
+        self.setObjectName("AISection")
+        col = QVBoxLayout(self)
+        col.setContentsMargins(0, 4, 0, 10)
+        col.setSpacing(6)
+        head = QHBoxLayout()
+        self.thumb = QLabel()
+        self.thumb.setFixedSize(52, 52)
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb.setToolTip("The original")
+        head.addWidget(self.thumb)
+        names = QVBoxLayout()
+        names.setSpacing(0)
+        self.name = QLabel(os.path.basename(job.source))
+        self.name.setObjectName("AIHead")
+        self.name.setToolTip(job.source)
+        self.state = _small("Waiting…", wrap=True)
+        names.addWidget(self.name)
+        names.addWidget(self.state)
+        head.addLayout(names, 1)
+        self.retry = QPushButton("Try Again")
+        self.retry.setVisible(False)
+        head.addWidget(self.retry)
+        col.addLayout(head)
+        self.box = QWidget()
+        self.flow = FlowLayout(self.box, 10)
+        self.flow.setContentsMargins(58, 0, 0, 0)
+        col.addWidget(self.box)
+        self.side = side
+
+
+class BatchResultsWindow(QWidget):
+    """Edit with AI on several photos: one window for all of them. Each photo is its own generation on Astria
+    (the same prompt and settings); they're sent a few at a time and their results appear under each photo as
+    they arrive. **Save** is for the whole batch — offered once every photo has come back (or failed) — and
+    puts each photo's kept results in the "AI" folder beside it, with its metadata and tags. A photo that
+    failed can be tried again on its own."""
+
+    def __init__(self, batch: list[Job], hooks: AIHooks, theme, parent=None) -> None:
+        super().__init__(parent, Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.batch, self.hooks, self.theme = list(batch), hooks, theme
+        self.saved: list[str] = []
+        self.sections: dict[str, _PhotoSection] = {}
+        first = batch[0]
+        self.setWindowTitle(f"Edit with AI — {len(batch)} photos")
+        self.setStyleSheet(_style(theme))
+        self.resize(980, 780)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        top = QFrame()
+        tv = QVBoxLayout(top)
+        tv.setContentsMargins(18, 14, 18, 10)
+        self.title = QLabel(f"{first.model_label} — {len(batch)} photos")
+        self.title.setObjectName("SheetTitle")
+        tv.addWidget(self.title)
+        shown = first.settings.get("prompt", first.prompt)
+        pl = _small(shown if len(shown) < 400 else shown[:400] + "…")
+        pl.setToolTip(first.prompt)
+        tv.addWidget(pl)
+        self.state = _small("Sending the photos to Astria…")
+        tv.addWidget(self.state)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, len(batch))
+        self.bar.setFormat("%v of %m photos back")
+        tv.addWidget(self.bar)
+        v.addWidget(top)
+        scroll = QScrollArea()
+        scroll.setObjectName("AIScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.body = QWidget()
+        self.body.setObjectName("AIBody")
+        self.col = QVBoxLayout(self.body)
+        self.col.setContentsMargins(18, 10, 18, 14)
+        self.col.setSpacing(4)
+        for job in batch:
+            self._add_section(job)
+        self.col.addStretch(1)
+        scroll.setWidget(self.body)
+        v.addWidget(scroll, 1)
+        bar = QFrame()
+        bar.setObjectName("AIBar")
+        bh = QHBoxLayout(bar)
+        bh.setContentsMargins(16, 10, 16, 10)
+        self.summary = _small("", wrap=False)
+        bh.addWidget(self.summary, 1)
+        self.again = QPushButton("Run Again")
+        self.again.setToolTip("The form again, for the same photos")
+        self.again.clicked.connect(self.run_again)
+        self.show_btn = QPushButton("Show in Safe Finder")
+        self.show_btn.setVisible(False)
+        self.show_btn.clicked.connect(lambda: self.hooks.reveal(self.saved[0]) if self.saved and self.hooks.reveal else None)
+        self.save_btn = QPushButton("Save All")
+        self.save_btn.setObjectName("Primary")
+        self.save_btn.setEnabled(False)
+        self.save_btn.clicked.connect(self.save)
+        for b in (self.again, self.show_btn, self.save_btn):
+            bh.addWidget(b)
+        v.addWidget(bar)
+        jobs().progress.connect(self._progress)
+        jobs().finished.connect(self._finished)
+        QTimer.singleShot(0, self._load_thumbs)
+        for job in batch:
+            if job.done:
+                QTimer.singleShot(0, lambda jid=job.id: self._finished(jid))
+
+    # -- the photos
+    def _add_section(self, job: Job, at: int | None = None) -> _PhotoSection:
+        sec = _PhotoSection(job, 220, self.body)
+        sec.retry.clicked.connect(lambda _=False, jid=job.id: self.try_again(jid))
+        self.sections[job.id] = sec
+        if at is None:
+            self.col.addWidget(sec)
+        else:
+            self.col.insertWidget(at, sec)
+        return sec
+
+    def _load_thumbs(self) -> None:
+        """The originals' thumbnails, a few a tick (each is a read of the photo)."""
+        todo = [s for s in self.sections.values() if s.thumb.pixmap().isNull()][:3]
+        for sec in todo:
+            try:
+                pm = _thumb_of(A.upload_jpeg(sec.job.source, 128)[0], 52)
+            except A.AIError:
+                pm = None
+            if pm is None:
+                pm = QPixmap(52, 52)
+                pm.fill(QColor("#3A3A3C"))
+            sec.thumb.setPixmap(pm)
+        if any(s.thumb.pixmap().isNull() for s in self.sections.values()):
+            QTimer.singleShot(10, self._load_thumbs)
+
+    def _job(self, jid: str) -> Job | None:
+        return next((j for j in self.batch if j.id == jid), None)
+
+    def _progress(self, jid: str, text: str) -> None:
+        sec = self.sections.get(jid)
+        if sec is not None and not sec.job.done:
+            sec.state.setText(text)
+
+    def _finished(self, jid: str) -> None:
+        sec = self.sections.get(jid)
+        job = self._job(jid)
+        if sec is None or job is None or sec.tiles or sec.retry.isVisible():
+            return
+        if job.error is not None and not job.images:
+            sec.state.setText(job.error.describe() + (f" ({job.error.message})" if job.error.kind == "server"
+                                                      and job.error.message not in job.error.describe() else ""))
+            sec.state.setStyleSheet("color: #FF453A;")
+            sec.retry.setVisible(not job.error.recoverable)        # one Astria may still deliver isn't asked twice
+        else:
+            n = len(job.images)
+            sec.state.setText(job.note or f"{n} result{'s' if n != 1 else ''}")
+            for i, data in enumerate(job.images):
+                t = _Result(i, data, sec.side, sec.box)
+                t.toggled.connect(self._update)
+                t.opened.connect(lambda _i, t=t: self._open(t))
+                sec.flow.addWidget(t)
+                sec.tiles.append(t)
+        self._update()
+
+    def all_done(self) -> bool:
+        return all(j.done for j in self.batch)
+
+    def tiles(self) -> list[tuple[Job, _Result]]:
+        return [(self.sections[j.id].job, t) for j in self.batch for t in self.sections[j.id].tiles]
+
+    def _update(self) -> None:
+        done = sum(1 for j in self.batch if j.done)
+        failed = sum(1 for j in self.batch if j.done and j.error is not None and not j.images)
+        got = self.tiles()
+        keep = sum(1 for _j, t in got if t.keep)
+        self.bar.setValue(done)
+        n = len(self.batch)
+        if self.saved:
+            return
+        if done < n:
+            self.state.setText(f"{done} of {n} photos back" + (f" · {failed} couldn't be done" if failed else "")
+                               + " — the results are saved together once they're all in.")
+            self.save_btn.setText("Save All")
+            self.save_btn.setEnabled(False)
+            self.summary.setText(f"{len(got)} result{'s' if len(got) != 1 else ''} so far.")
+            return
+        self.bar.setVisible(False)
+        if not got:
+            self.state.setText("None of the photos could be done." if failed else "Astria returned no images.")
+            self.summary.setText("")
+            self.save_btn.setEnabled(False)
+            return
+        self.state.setText(f"All {n} photos are back" + (f" — {failed} couldn't be done (Try Again beside "
+                           f"{'it' if failed == 1 else 'them'})." if failed else ".")
+                           + " Click a result to leave it out, double-click to see it full size.")
+        self.save_btn.setText(f"Save All {keep}" if keep else "Save All")
+        self.save_btn.setEnabled(keep > 0)
+        self.summary.setText(f"{keep} of {len(got)} kept — each saved into the “AI” folder beside its photo.")
+
+    def _open(self, tile: _Result) -> None:
+        """Full size, through the viewer: every result of the batch, in order, from temporary copies."""
+        tmp = Path(tempfile.gettempdir()) / "SafeFinderAI" / self.batch[0].id
+        tmp.mkdir(parents=True, exist_ok=True)
+        paths, start = [], ""
+        for job, t in self.tiles():
+            p = tmp / f"{Path(job.source).stem} — result {t.i + 1}.jpg"
+            if not p.exists():
+                p.write_bytes(t.data)
+            paths.append(str(p))
+            if t is tile:
+                start = str(p)
+        if self.hooks.view is not None and start:
+            self.hooks.view(paths, start)
+        elif start:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(start))
+
+    def try_again(self, jid: str) -> None:
+        """A photo whose generation failed, sent again (the others stay as they are)."""
+        old = self._job(jid)
+        sec = self.sections.get(jid)
+        if old is None or sec is None or self.saved:
+            return
+        new = Job(uuid.uuid4().hex, "edit", old.prompt, old.model_label, old.gen, old.count, old.aspect,
+                  old.resolution, source=old.source, references=list(old.references), settings=old.settings)
+        at = self.col.indexOf(sec)
+        self.batch[self.batch.index(old)] = new
+        self.sections.pop(jid, None)
+        sec.setParent(None)
+        sec.deleteLater()
+        fresh = self._add_section(new, at)
+        fresh.state.setText("Sending to Astria again…")
+        self.bar.setVisible(True)
+        QTimer.singleShot(0, self._load_thumbs)
+        jobs().start(new)
+        self._update()
+
+    def save(self) -> list[str]:
+        out, failed = [], 0
+        photos = 0
+        for job in self.batch:
+            made = []
+            for t in self.sections[job.id].tiles:
+                if not t.keep:
+                    continue
+                try:
+                    made.append(A.save_edit(t.data, job.source, job.model_label, job.settings.get("prompt", "")))
+                except (OSError, ValueError) as e:
+                    failed += 1
+                    self.sections[job.id].state.setText(f"Couldn't save one: {e}")
+            if made and self.hooks.carry_tags is not None:
+                self.hooks.carry_tags([(job.source, p) for p in made])
+            A.drop_pending(job.id)
+            photos += bool(made)
+            out += made
+        self.saved = out
+        self.save_btn.setEnabled(False)
+        self.save_btn.setText("Saved")
+        self.show_btn.setVisible(bool(out) and self.hooks.reveal is not None)
+        folders = {os.path.dirname(p) for p in out}
+        where = f"“{os.path.basename(next(iter(folders)))}”" if len(folders) == 1 else "the “AI” folders beside the photos"
+        self.summary.setText(f"Saved {len(out)} result{'s' if len(out) != 1 else ''} for {photos} "
+                             f"photo{'s' if photos != 1 else ''} into {where}."
+                             + (f" {failed} couldn't be saved." if failed else ""))
+        return out
+
+    def run_again(self) -> None:
+        win = RequestWindow("edit", [j.source for j in self.batch], self.hooks, self.theme, self.parentWidget(),
+                            settings=self.batch[0].settings)
+        if self.hooks.keep_open:
+            self.hooks.keep_open(win)
+        win.show()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        unsaved = [t for _j, t in self.tiles() if t.keep] if not self.saved else []
+        running = sum(1 for j in self.batch if not j.done)
+        if unsaved or running:
+            box = QMessageBox(self)
+            box.setWindowTitle("Edit with AI")
+            if running:
+                box.setText(f"{running} of the {len(self.batch)} photos {'is' if running == 1 else 'are'} still with "
+                            "Astria.")
+                box.setInformativeText("Close anyway? What's still coming is saved into its photo's “AI” folder "
+                                       "when it arrives (the next time Safe Finder's AI is used)."
+                                       + (f" The {len(unsaved)} kept result{'s' if len(unsaved) != 1 else ''} here "
+                                          "can be saved now." if unsaved else ""))
+            else:
+                box.setText(f"Save the {len(unsaved)} kept result{'s' if len(unsaved) != 1 else ''} before closing?")
+            save = box.addButton("Save" if unsaved else "Close", QMessageBox.ButtonRole.AcceptRole)
+            discard = box.addButton("Don't Save", QMessageBox.ButtonRole.DestructiveRole) if unsaved else None
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(save)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is save:
+                if unsaved:
+                    self.save_finished_only()
+            elif discard is not None and clicked is discard:
+                for j in self.batch:
+                    if j.done:
+                        A.drop_pending(j.id)
+            else:
+                event.ignore()
+                return
+        try:
+            jobs().progress.disconnect(self._progress)
+            jobs().finished.disconnect(self._finished)
+        except (RuntimeError, TypeError):
+            pass
+        super().closeEvent(event)
+
+    def save_finished_only(self) -> list[str]:
+        """Closing with photos still out: what's here is saved; the rest keep their note for later."""
+        out = []
+        for job in self.batch:
+            if not job.done:
+                continue
+            made = []
+            for t in self.sections[job.id].tiles:
+                if t.keep:
+                    try:
+                        made.append(A.save_edit(t.data, job.source, job.model_label, job.settings.get("prompt", "")))
+                    except (OSError, ValueError):
+                        pass
+            if made and self.hooks.carry_tags is not None:
+                self.hooks.carry_tags([(job.source, p) for p in made])
+            A.drop_pending(job.id)
+            out += made
+        self.saved = out
+        return out
 
 
 # ----------------------------------------------------------------------------- the Astria.ai Browser

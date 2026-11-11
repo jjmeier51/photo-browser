@@ -1062,6 +1062,16 @@ model and the models' tune ids).
   own tunes (only the ones that can run on that model are listed), reference photos (any photos; up to 10 or
   14, none on Flux), resolution (1K/2K/4K — Seedream 5.0 Pro is always 2K, Flux takes none), the shape
   (Original keeps the photo's) and how many (1–8). Everything is remembered for next time.
+- **Several photos, one prompt.** Select the photos (2, 5, 30…), right-click ▸ **Edit N Photos with AI…**, and
+  write the prompt once — "Remove the bookshelf behind Johnny". **Generate for N Photos** sends each photo to
+  Astria with that prompt and the same settings (four at a time; the rest wait their turn) and opens **one
+  window for all of them**: each photo with its original beside its name, its results appearing under it as they
+  arrive. When every photo is back, **Save All** puts each photo's results in the "AI" folder beside it
+  ("<name> AI.jpg", with that photo's date, place and tags). Click a result to leave it out; double-click to
+  see it full size (←/→ then goes through the whole batch). A photo Astria couldn't do says why and has
+  **Try Again** — the others aren't sent again. "How many" is per photo (5 photos × 2 = 10 images; over 20
+  images it asks first). Closing while some are still with Astria is fine: they're saved to their folders when
+  they arrive, the next time Safe Finder's AI is used.
 - **Create with AI** — right-click a folder (or its empty space): the same, from a prompt alone.
 - **Generate** opens the job's window: it shows what Astria's doing ("2 of 4 ready…"), then the results.
   Click one to leave it out, double-click to see it full size in the viewer, then **Save** — an edit's

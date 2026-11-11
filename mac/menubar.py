@@ -236,7 +236,8 @@ def install(win, sf) -> None:
     act(t, "Remove Objects…", lambda: pane().remove_objects(photos()[0]) if len(photos()) == 1 else None, None,
         lambda: len(photos()) == 1, "Draw round anything in the photo and it's gone — filled in from the photo itself")
     t.addSeparator()
-    act(t, "Edit with AI…", lambda: pane().ai_edit(photos()[0]), None, lambda: len(photos()) == 1)
+    act(t, "Edit with AI…", lambda: pane().ai_edit(photos()), None, lambda: bool(photos()),
+        "The selected photo — or every selected photo, with the same prompt, the results back together")
     act(t, "Create with AI…", lambda: pane().ai_create(folder_target()), None, folder_target)
     act(t, "Astria.ai Browser…", lambda: pane().astria_browser(folder_target() or str(home / "Pictures")))
     t.addSeparator()
