@@ -6,6 +6,7 @@ bookify.py — typeset a plain-text or RTF file as a PDF that looks and reads li
     python3 bookify.py story.txt -o Story.pdf --title "The Long Road" --author "J. Smith"
     python3 bookify.py story.txt --size 5x8 --paper flat --recto
     python3 bookify.py story.txt --size iphone          # pages the shape of an iPhone 17 Pro Max screen
+    python3 bookify.py story.txt --picture "map.jpg@front" --picture "storm.jpg@chapter 4,wide,The storm"
 
 Safe Finder runs it too: right-click a .txt / .md / .rtf file ▸ Make Book PDF… (book_window.py), which calls
 `make_book` — the same book, with progress and Stop, placed beside the original.
@@ -16,6 +17,11 @@ What it does
   * Title page, contents page, chapters that open part-way down the page
     with a drop cap, small-caps lead-in and a fleuron
   * Running heads (book title on the left, chapter on the right) and folios
+  * A contents page you can click: every entry — its title and its page number — jumps to the chapter,
+    and the chapters are the PDF's outline too (the sidebar in Preview, Books and Safe Finder's viewer)
+  * Pictures (--picture, or `pictures=` to make_book): a page of its own, across the text or half
+    width, with an optional caption — at the front, at the start or end of a chapter, on a page, or
+    at the end of the book
   * Mirrored inside/outside margins like a bound book
   * --size iphone: pages the shape of the iPhone 17 Pro Max's screen (1320 × 2868), equal narrow margins and
     10 pt text that reads at about 15 on the phone — one page per screen in Books, Files or Photo Browser
@@ -558,6 +564,15 @@ class Mark(Flowable):
         elif self.kind == "chapter":
             doc.state.openers.add(page)
             doc.state.chapter = self.value[0]
+            key = self.value[2] if len(self.value) > 2 else None
+            if key:                                  # somewhere for the contents page and the outline to point
+                # The top of the page, zoom left as it is (a bare "Fit" has no place on the page, and some
+                # viewers — Qt's among them — then complain the link has nowhere exact to go).
+                self.canv.bookmarkPage(key, fit="XYZ", left=0, top=doc.cfg.page[1], zoom=0)
+                title = self.value[1] or self.value[0]
+                if title and self.value[1]:
+                    self.canv.addOutlineEntry(re.sub(r"<[^>]+>", "", title), key, 0, 0)
+                doc.state.chapters.append((re.sub(r"<[^>]+>", "", title or ""), page))
 
 
 class NewPage(Flowable):
@@ -647,6 +662,94 @@ class DropCap(Flowable):
 
 # ───────────────────────────── paper ─────────────────────────────────
 
+class BookPara(Paragraph):
+    """A paragraph that remembers which element of the text it is — through page breaks too — so the book
+    can say which page each paragraph landed on (pictures are placed "on page N" by it)."""
+    _book_el = None
+
+    def split(self, aw, ah):
+        parts = super().split(aw, ah)
+        for part in parts:
+            part._book_el = self._book_el
+        return parts
+
+
+class Picture(Flowable):
+    """A picture in the book, kept in proportion, with an optional caption under it.
+    `full`: a page of its own (as large as the page's text area allows, centred); else `frac` of the text
+    width, no taller than `max_h`."""
+    def __init__(self, path, iw, ih, caption, style, full=False, frac=1.0, max_h=None, pad=0):
+        super().__init__()
+        self.path, self.iw, self.ih = path, max(iw, 1), max(ih, 1)
+        self.cap = Paragraph(caption, style) if caption else None
+        self.full, self.frac, self.max_h, self.pad = full, frac, max_h, pad
+
+    def wrap(self, aw, ah):
+        self.aw = aw
+        cap_h = self.cap.wrap(aw, ah)[1] + self.pad * 0.5 if self.cap else 0
+        room = (ah if self.full else min(self.max_h or ah, ah)) - cap_h - (0 if self.full else 2 * self.pad)
+        w = aw * (1.0 if self.full else self.frac)
+        h = w * self.ih / self.iw
+        if h > room > 0:
+            h = room
+            w = h * self.iw / self.ih
+        self.w, self.h, self.cap_h = w, h, cap_h
+        self.height = ah if self.full else h + cap_h + 2 * self.pad
+        self.width = aw
+        return aw, self.height
+
+    def draw(self):
+        c = self.canv
+        block = self.h + self.cap_h
+        top = self.height - (self.height - block) / 2 if self.full else self.height - self.pad
+        x = (self.aw - self.w) / 2
+        c.drawImage(self.path, x, top - self.h, self.w, self.h, preserveAspectRatio=True, mask="auto")
+        if self.cap:
+            self.cap.drawOn(c, 0, top - self.h - self.cap_h)
+
+
+PICTURE_PLACES = ("front", "chapter_start", "chapter_end", "after", "page", "end")
+PICTURE_SIZES = ("page", "wide", "half")
+
+
+def prepare_picture(path, workdir, n, max_pt):
+    """The picture as ReportLab should embed it: upright, RGB, no larger than the page needs (220 dpi at
+    `max_pt` points on its long side), a JPEG in `workdir`. Without Pillow it's used as it is (JPEGs only).
+    Returns (file, width, height) in pixels. Raises ValueError when it can't be read."""
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        from reportlab.lib.utils import ImageReader
+        try:
+            w, h = ImageReader(str(path)).getSize()
+        except Exception as e:                         # noqa: BLE001 — whatever ReportLab can't read
+            raise ValueError(f"{Path(path).name} can't be read as a picture ({e})")
+        return str(path), w, h
+    try:
+        try:
+            import pillow_heif                         # iPhone photos, when the Mac has it
+            pillow_heif.register_heif_opener()
+        except ImportError:
+            pass
+        with Image.open(path) as im:
+            im = ImageOps.exif_transpose(im)
+            if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
+                rgba = im.convert("RGBA")
+                flat = Image.new("RGB", rgba.size, (255, 255, 255))
+                flat.paste(rgba, mask=rgba.getchannel("A"))
+                im = flat
+            elif im.mode != "RGB":
+                im = im.convert("RGB")
+            limit = int(max_pt / 72 * 220)
+            if max(im.size) > limit:
+                im.thumbnail((limit, limit), Image.Resampling.LANCZOS)
+            out = Path(workdir) / f"picture-{n}.jpg"
+            im.save(out, "JPEG", quality=90)
+            return str(out), im.width, im.height
+    except (OSError, ValueError) as e:
+        raise ValueError(f"{Path(path).name} can't be read as a picture ({e})")
+
+
 def make_paper(page_w, page_h, workdir, gutter_shadow=True):
     """Two textured paper images (recto/verso, with a soft gutter shadow on the spine side — none for a screen,
     which has no spine)."""
@@ -698,11 +801,18 @@ class BookDoc(BaseDocTemplate):
         self.frame_h = fh
 
     def beforeDocument(self):
-        self.state = SimpleNamespace(blank=set(), openers=set(), chapter=None)
+        self.state = SimpleNamespace(blank=set(), openers=set(), chapter=None, chapters=[], el_pages={})
 
     def afterFlowable(self, f):
         if isinstance(f, Mark) and f.kind == "chapter" and f.value[1]:
-            self.notify("TOCEntry", (0, f.value[1], self.page))
+            key = f.value[2] if len(f.value) > 2 else None
+            self.notify("TOCEntry", (0, f.value[1], self.page, key))     # with a key the entry is a link
+        el = getattr(f, "_book_el", None)
+        if el is None:
+            el = getattr(getattr(f, "P", None), "_book_el", None)        # a drop-cap opening wraps its paragraph
+        if el is not None:                                               # which pages each paragraph is on
+            first, last = self.state.el_pages.get(el, (self.page, self.page))
+            self.state.el_pages[el] = (min(first, self.page), max(last, self.page))
 
     def handle_flowable(self, flowables):
         f = flowables[0]
@@ -771,6 +881,8 @@ def make_styles(cfg):
                                      alignment=TA_CENTER, textColor=HexColor(INK)),
         toc=ParagraphStyle("toc", fontName=f.regular, fontSize=fs, leading=fs * 1.9,
                            textColor=HexColor(INK), leftIndent=0, firstLineIndent=0),
+        caption=ParagraphStyle("caption", fontName=f.italic, fontSize=fs * 0.88, leading=fs * 1.2,
+                               alignment=TA_CENTER, textColor=HexColor(GREY_INK)),
         item=ParagraphStyle("item", parent=body, alignment=0, firstLineIndent=0, leftIndent=fs * 1.8,
                             bulletIndent=fs * 0.5, bulletFontName=f.regular, bulletFontSize=fs,
                             spaceBefore=lead * 0.15),
@@ -802,21 +914,41 @@ def opening_paragraph(raw, cfg, st):
     m = re.match(r"^([“‘(]*)([^\W_])", re.sub(r"^[*_]+", "", raw))
     if not cfg.dropcaps or not m or raw.startswith("<br/>") or len(raw) < 80:
         lead_in, rest = split_leadin(raw)
-        return Paragraph(small_caps(lead_in, fs) + inline_markup(rest), st.first)
+        return BookPara(small_caps(lead_in, fs) + inline_markup(rest), st.first)
     raw = re.sub(r"^[*_]+", "", raw)
     cap, rest = m.group(1) + m.group(2), raw[m.end():]
     lead_in, rest = split_leadin(rest, min_chars=12)
-    para = Paragraph(small_caps(lead_in, fs) + inline_markup(rest), st.first)
+    para = BookPara(small_caps(lead_in, fs) + inline_markup(rest), st.first)
     lines = 3
     cap_size = ((lines - 1) * lead + f.cap * fs) / f.cap        # cap spans exactly 3 lines
     drop = DropCap(cap, f.regular, cap_size, cfg.accent, height=(lines - 1) * lead + f.ascent * fs)
     return ParagraphAndImage(para, drop, xpad=fs * 0.35, ypad=0, side="left")
 
 
-def build_story(doc, cfg, elements):
+def picture_flowables(doc, cfg, st, pic, inline_only=False):
+    """What goes in the story for one prepared picture. A page of its own: a fresh page with nothing else on it
+    (no running head or folio); else the picture across the text (or half its width), kept clear of the lines
+    around it."""
+    cap = inline_markup(smarten(pic["caption"])) if pic.get("caption") else None
+    lead = cfg.leading
+    if pic["size"] == "page" and not inline_only:
+        return [NewPage(), Mark("blank"),
+                Picture(pic["file"], pic["w"], pic["h"], cap, st.caption, full=True, pad=lead), NewPage()]
+    frac = 0.5 if pic["size"] == "half" else 1.0
+    return [CondPageBreak(lead * 6),
+            Picture(pic["file"], pic["w"], pic["h"], cap, st.caption, frac=frac, max_h=doc.frame_h * 0.62, pad=lead)]
+
+
+def build_story(doc, cfg, elements, pictures=()):
     st, fs, lead = make_styles(cfg), cfg.font_size, cfg.leading
     f = cfg.fonts
     story = []
+    at = {"front": [], "end": [], "chapter_start": {}, "chapter_end": {}, "after": {}}
+    for pic in pictures:
+        if pic["where"] in ("front", "end"):
+            at[pic["where"]].append(pic)
+        else:
+            at[pic["where"]].setdefault(pic["index"], []).append(pic)
 
     # title page
     story += [Mark("blank"), Spacer(1, doc.frame_h * 0.24),
@@ -824,6 +956,8 @@ def build_story(doc, cfg, elements):
               Ornament(f, fs * 1.3, cfg.accent)]
     if cfg.author:
         story += [Spacer(1, fs * 1.6), TrackedLine(smarten(cfg.author).upper(), f.regular, fs * 1.0, INK, 0.2)]
+    for pic in at["front"]:                                  # a frontispiece: after the title page
+        story += picture_flowables(doc, cfg, st, dict(pic, size="page"))
 
     chapters = [e for e in elements if e["kind"] == "chapter"]
     if cfg.toc and len(chapters) >= 2:
@@ -833,19 +967,30 @@ def build_story(doc, cfg, elements):
                   TrackedLine("CONTENTS", f.regular, fs * 0.95, INK, 0.22),
                   Ornament(f, fs, cfg.accent, space=fs * 0.6), Spacer(1, fs), toc]
 
-    if not elements or elements[0]["kind"] != "chapter":     # untitled opening section
-        elements = [{"kind": "chapter", "label": None, "title": None}] + elements
+    def para(text, style, el, **kw):
+        p = BookPara(text, style, **kw)
+        p._book_el = el
+        return p
 
     first_chapter, next_is_opening, after_break = True, False, False
-    for el in elements:
+    chapter = -1
+    for i, el in enumerate(elements):
         k = el["kind"]
         if k == "chapter":
+            if chapter >= 0:                                 # what closes the chapter before this one
+                for pic in at["chapter_end"].get(chapter, ()):
+                    story += picture_flowables(doc, cfg, st, pic)
+            chapter += 1
+            starts = at["chapter_start"].get(chapter, ())
+            for pic in starts:                               # a plate facing the chapter's opening
+                if pic["size"] == "page":
+                    story += picture_flowables(doc, cfg, st, pic)
             story.append(NewPage(recto=(first_chapter or cfg.recto) and not cfg.screen))   # no blank pages on a screen
             first_chapter = False
             head = el["title"] or el["label"] or cfg.title
             toc_text = (f"{el['label']}: {el['title']}" if cfg.toc_labels and el["label"] and el["title"]
                         else el["title"] or el["label"])
-            story += [Mark("chapter", (smarten(head), smarten(toc_text) if toc_text else None)),
+            story += [Mark("chapter", (smarten(head), smarten(toc_text) if toc_text else None, f"chapter-{chapter}")),
                       Spacer(1, doc.frame_h * 0.17)]
             if el["label"]:
                 story.append(TrackedLine(el["label"].upper(), f.regular, fs * 0.92, cfg.accent, 0.24,
@@ -854,6 +999,9 @@ def build_story(doc, cfg, elements):
                 story.append(Paragraph(inline_markup(smarten(el["title"])), st.chapter_title))
             if el["label"] or el["title"]:
                 story += [Ornament(f, fs * 1.05, cfg.accent, space=fs * 0.7), Spacer(1, lead * 1.6)]
+            for pic in starts:                               # in the text: under the chapter's heading
+                if pic["size"] != "page":
+                    story += picture_flowables(doc, cfg, st, pic, inline_only=True)
             next_is_opening = True
         elif k == "section":
             story += [CondPageBreak(lead * 5), Spacer(1, lead),
@@ -864,16 +1012,26 @@ def build_story(doc, cfg, elements):
             story += [CondPageBreak(lead * 4), Ornament(f, fs, cfg.accent, style="scene", space=lead * 0.45)]
             after_break = True
         elif k == "item":
-            story.append(Paragraph(inline_markup(smarten(el["text"])), st.item,
-                                   bulletText=el["bullet"]))
+            story.append(para(inline_markup(smarten(el["text"])), st.item, i, bulletText=el["bullet"]))
             next_is_opening, after_break = False, True
         else:
             if next_is_opening:
-                story.append(opening_paragraph(el["text"], cfg, st))
+                opening = opening_paragraph(el["text"], cfg, st)
+                (opening.P if isinstance(opening, ParagraphAndImage) else opening)._book_el = i
+                opening._book_el = i
+                story.append(opening)
             else:
                 style = st.first if after_break else st.body
-                story.append(Paragraph(inline_markup(smarten(el["text"])), style))
+                story.append(para(inline_markup(smarten(el["text"])), style, i))
             next_is_opening = after_break = False
+        for pic in at["after"].get(i, ()):                   # after this very paragraph
+            story += picture_flowables(doc, cfg, st, pic)
+            after_break = after_break or pic["size"] != "page"     # the line after a picture isn't indented
+    if chapter >= 0:
+        for pic in at["chapter_end"].get(chapter, ()):
+            story += picture_flowables(doc, cfg, st, pic)
+    for pic in at["end"]:
+        story += picture_flowables(doc, cfg, st, dict(pic, size="page") if pic["size"] == "page" else pic)
     return story
 
 
@@ -915,12 +1073,60 @@ def preview(src):
     return title, author, sum(1 for e in elements if e["kind"] == "chapter")
 
 
+def with_opening(elements):
+    """The elements as the book is built from them: an untitled chapter in front when the text doesn't open
+    with one. Their positions in this list are what "after paragraph N" and the page map count by."""
+    if not elements or elements[0]["kind"] != "chapter":
+        return [{"kind": "chapter", "label": None, "title": None}] + elements
+    return elements
+
+
+def element_for_page(el_pages, page, own_page):
+    """Which paragraph a picture asked for "on page N" goes after, from where the paragraphs landed in a
+    book already made (`el_pages`: element → (first page, last page)). A page of its own goes after the last
+    paragraph that ends before page N — so the picture becomes about page N; one in the text goes after the
+    first paragraph that ends on page N or later. None: before any paragraph (it goes to the front)."""
+    if own_page:
+        before = [i for i, (_a, b) in el_pages.items() if b < page]
+        return max(before) if before else None
+    onward = [i for i, (_a, b) in el_pages.items() if b >= page]
+    return min(onward) if onward else (max(el_pages) if el_pages else None)
+
+
+def _check_pictures(pictures, chapters):
+    out = []
+    for n, pic in enumerate(pictures or ()):
+        pic = dict(pic)
+        where, size = pic.get("where", "end"), pic.get("size", "page")
+        if where not in PICTURE_PLACES:
+            raise ValueError(f"picture {n + 1}: unknown place {where!r}")
+        if size not in PICTURE_SIZES:
+            raise ValueError(f"picture {n + 1}: unknown size {size!r}")
+        if not Path(pic.get("path", "")).is_file():
+            raise FileNotFoundError(f"No such picture: {pic.get('path')}")
+        if where in ("chapter_start", "chapter_end"):
+            if not 0 <= int(pic.get("index", -1)) < chapters:
+                raise ValueError(f"picture {n + 1}: the book has {chapters} chapter{'s' if chapters != 1 else ''}")
+        pic.update(where=where, size=size, index=int(pic.get("index", 0) or 0), caption=pic.get("caption") or "")
+        out.append(pic)
+    return out
+
+
 def make_book(src, out=None, *, title=None, author=None, size="6x9", font_size=None, paper="texture",
               recto=False, symmetric=False, toc=True, toc_labels=False, dropcaps=True, accent=ACCENT,
-              fonts=None, lang="en_US", progress=None, stop=None):
+              fonts=None, lang="en_US", pictures=None, progress=None, stop=None):
     """Typesets `src` as a book PDF at `out` (default: beside it, .pdf). `progress(text)` hears how it's going;
-    `stop` (a threading.Event) stops it (raises Stopped). Returns a summary: out, pages, title, author,
-    chapters, size, font_size, font. Raises FileNotFoundError / ValueError when it can't."""
+    `stop` (a threading.Event) stops it (raises Stopped).
+
+    `pictures`: a list of dicts — `path`; `where`: "front" (after the title page), "chapter_start" /
+    "chapter_end" (`index`: the chapter, counting from 0), "after" (`index`: the paragraph, as `el_pages`
+    numbers them), "page" (`index`: a page number of the book *without* these page-placed pictures — it's made
+    once without them to see where the paragraphs fall) or "end"; `size`: "page" (a page of its own), "wide"
+    (across the text) or "half"; `caption` (optional).
+
+    Returns a summary: out, pages, title, author, chapters, size, font_size, font, and — for placing pictures —
+    `chapter_list` [(title, page)], `el_pages` {paragraph: (first page, last page)} and `pictures` (how many
+    went in). Raises FileNotFoundError / ValueError when it can't."""
     say = progress or (lambda _t: None)
     src = Path(src)
     if not src.exists():
@@ -934,6 +1140,10 @@ def make_book(src, out=None, *, title=None, author=None, size="6x9", font_size=N
     text, meta = load_text(src)
     elements = build_elements(text)
     title, author = detect_title(elements, meta, src, title, author)
+    found_chapters = sum(1 for e in elements if e["kind"] == "chapter")      # the headings in the text
+    elements = with_opening(elements)
+    n_chapters = sum(1 for e in elements if e["kind"] == "chapter")
+    pictures = _check_pictures(pictures, n_chapters)
 
     w_in, h_in = PAGE_SIZES[size]
     fs = font_size or round(10.5 + (w_in - 5) * 0.5, 1)
@@ -962,14 +1172,58 @@ def make_book(src, out=None, *, title=None, author=None, size="6x9", font_size=N
         cfg.paper_images = make_paper(*cfg.page, tmp, gutter_shadow=not screen) if paper == "texture" else None
         if paper == "texture" and not cfg.paper_images:
             print("  (tip: pip install pillow numpy for paper texture; using flat cream)", file=sys.stderr)
-        doc = BookDoc(str(out), cfg)
-        doc.setProgressCallBack(on_progress)
-        doc.multiBuild(build_story(doc, cfg, elements))
+        for n, pic in enumerate(pictures):
+            say(f"Reading picture {n + 1} of {len(pictures)}…")
+            pic["file"], pic["w"], pic["h"] = prepare_picture(pic["path"], tmp, n, max(cfg.page))
+
+        def build(target, pics):
+            doc = BookDoc(str(target), cfg)
+            doc.setProgressCallBack(on_progress)
+            doc.multiBuild(build_story(doc, cfg, elements, pics))
+            return doc
+
+        by_page = [p for p in pictures if p["where"] == "page"]
+        if by_page:                                    # where do the paragraphs fall without them?
+            say("Finding the pages…")
+            base = build(Path(tmp) / "without-pictures.pdf", [p for p in pictures if p["where"] != "page"])
+            for pic in by_page:
+                el = element_for_page(base.state.el_pages, pic["index"], pic["size"] == "page")
+                pic.update(where="front", index=0) if el is None else pic.update(where="after", index=el)
+            if pictures:
+                say("Setting the pages with the pictures…")
+        doc = build(out, pictures)
 
     return SimpleNamespace(out=out, pages=doc.page, title=title, author=author,
-                           chapters=sum(1 for e in elements if e["kind"] == "chapter"),
+                           chapters=found_chapters,
                            size=size, font_size=fs,
-                           font="EB Garamond" if cfg.fonts.regular == "Book" else cfg.fonts.regular)
+                           font="EB Garamond" if cfg.fonts.regular == "Book" else cfg.fonts.regular,
+                           chapter_list=list(doc.state.chapters), el_pages=dict(doc.state.el_pages),
+                           pictures=len(pictures))
+
+
+def parse_picture(spec):
+    """"photo.jpg@chapter 3", "…@after chapter 3", "…@page 12", "…@front", "…@end" — then ",wide" / ",half"
+    (default: a page of its own) and ",a caption". → a `pictures` entry for make_book."""
+    path, _, rest = spec.rpartition("@")
+    if not path:
+        path, rest = spec, "end"
+    parts = [x.strip() for x in rest.split(",")]
+    where = parts[0].lower()
+    pic = {"path": path, "size": "page", "caption": ""}
+    m = re.fullmatch(r"(after\s+)?chapter\s+(\d+)", where)
+    if m:
+        pic.update(where="chapter_end" if m.group(1) else "chapter_start", index=int(m.group(2)) - 1)
+    elif (m := re.fullmatch(r"page\s+(\d+)", where)):
+        pic.update(where="page", index=int(m.group(1)))
+    elif where in ("front", "end"):
+        pic.update(where=where)
+    else:
+        raise ValueError(f"--picture: where is {parts[0]!r}? Use front, end, chapter N, after chapter N or page N")
+    rest = parts[1:]
+    if rest and rest[0].lower() in PICTURE_SIZES:
+        pic["size"] = rest.pop(0).lower()
+    pic["caption"] = ", ".join(rest)
+    return pic
 
 
 def main(argv=None):
@@ -991,12 +1245,15 @@ def main(argv=None):
     ap.add_argument("--accent", default=ACCENT, help=f"hex colour for drop caps and ornaments (default {ACCENT})")
     ap.add_argument("--fonts", help="folder of .ttf files to use instead of EB Garamond (needs Regular and Italic)")
     ap.add_argument("--lang", default="en_US", help="hyphenation language, e.g. en_GB, de_DE ('' to disable)")
+    ap.add_argument("--picture", action="append", default=[], metavar="FILE@WHERE[,SIZE][,CAPTION]",
+                    help="add a picture: WHERE is front, end, 'chapter 3', 'after chapter 3' or 'page 12'; SIZE is "
+                         "page (its own page, the default), wide or half. Repeat for more pictures")
     a = ap.parse_args(argv)
     try:
         r = make_book(a.input, a.output, title=a.title, author=a.author, size=a.size, font_size=a.font_size,
                       paper=a.paper, recto=a.recto, symmetric=a.symmetric, toc=not a.no_toc,
                       toc_labels=a.toc_labels, dropcaps=not a.no_dropcaps, accent=a.accent, fonts=a.fonts,
-                      lang=a.lang)
+                      lang=a.lang, pictures=[parse_picture(p) for p in a.picture])
     except (FileNotFoundError, ValueError) as e:
         sys.exit(str(e))
     chap = f"{r.chapters} chapter{'s' if r.chapters != 1 else ''}" if r.chapters else "no chapter headings found"
