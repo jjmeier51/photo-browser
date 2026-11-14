@@ -1183,10 +1183,41 @@ model and the models' tune ids).
   a creation's into the folder's "AI" folder; the model and prompt are written into each file. Closing with
   results unsaved asks first. **Run Again** opens the form as it was. If you quit while Astria is still
   working, the images are saved to the folder the next time you use Safe Finder's AI (within two hours).
-- **Astria.ai Browser…** — right-click a folder: every generation on your account, newest first, a card per
-  prompt (model, date, text, Copy Prompt). Search by any words of the prompt or the model. Click images to
-  pick them (Select All on a card), then **Save to “<last folder>”** or **Save to Folder…**; saved images get
-  a ✓ and the prompt's date. Double-click an image for it full size with its prompt.
+- **Astria.ai Browser…** — see the next section.
+
+### The Astria.ai Browser (`astria_browser.py`)
+
+Right-click a folder ▸ AI ▸ **Astria.ai Browser…** (or Photos ▸ Astria.ai Browser…): everything your Astria
+account has made — from Safe Finder, the iPhone app, or Astria's own site — newest first.
+
+- **Looking.** Each prompt has a heading (its model, date, how many pictures, how many you've downloaded) with
+  the prompt under it and its pictures in a tight grid. **All Pictures** (top right) drops the headings for one
+  dense grid; hold the pointer over any picture for its prompt. The Size slider sets the tiles. A green ✓ marks
+  what's already downloaded. It opens on what it showed last time and brings itself up to date in the
+  background; **Reload** (⌘R) reads again, **Load Older** goes further back.
+- **Finding.** The search field (⌘F) takes words from the prompt, the model or the date — all must match;
+  `"golden hour"` keeps words together, `-blurry` leaves a word out, `date:2026-10`, `before:2026`,
+  `after:2026-06` go by when it was made. Capitals and accents don't matter. Beside it: one model, **Not
+  Downloaded** / **Downloaded**, newest or oldest first.
+- **Picking.** Click selects one; ⌘-click adds or removes; ⇧-click takes everything between; the circle in a
+  tile's corner ticks it without touching the rest; a heading's **Select All**; ⌘A for everything shown.
+- **Viewing.** Double-click (or Space): the picture as large as the window, ← → through everything shown,
+  with its model, date, size and whole prompt beside it — Download, Copy Prompt, **Use Prompt in Create with
+  AI…** (the prompt and model filled in), Copy Image, Show in Safe Finder.
+- **Downloading.** **Download N Selected**, or with nothing selected **Download All N New** (everything shown
+  that you don't have yet; more than 50 asks first). Four come down at a time with a progress bar and Stop;
+  any that fail are counted and **Retry** fetches just those. Right-click a picture for the same on it alone.
+- **Where to.** The **Download to:** button — *This Folder* (whatever folder Safe Finder is showing, so it
+  follows you), *Its AI Folder*, one of the last few folders you chose, or **Choose Folder…**. The choice is
+  remembered.
+- **What you get.** The file exactly as Astria made it — nothing re-compressed, in its own format, with all of
+  its own metadata — and added to that metadata, only where the file has none: the **prompt** (as its
+  description/caption, and in the app's "AI-generated · Prompt: …" comment), the model, the date it was made,
+  and the standard "made by AI" label. The file's date is when it was made. With ExifTool installed every
+  format is handled; without it JPEG and PNG still are (the rest are kept as they came, and it says so).
+  Every download gets the **AI** tag — in Safe Finder's Tags and, through the drive, on the iPhone.
+
+It only reads from Astria: nothing is uploaded and nothing on your account is changed.
 
 ### AI models — a person, pet, object or style from your photos (`ai_models_window.py`, `ai_models.py`, `local_ai.py`)
 

@@ -2254,6 +2254,47 @@ person sends them to Astria themselves, outputs are labelled AI-made; nothing he
 sexual imagery of real people (an offence to create without consent in England and Wales since Feb 2026;
 publishing is a US federal offence; the model licences forbid it too).
 
+## 6aj. Safe Finder's Astria.ai Browser, rebuilt — `mac/astria_browser.py`, `astria.save_download` (Nov 15, 2026)
+
+The first browser (in `ai_window.py`) built a widget per prompt and a widget per image, 25 prompts at a time
+behind "Show More", searched only prompt + model, saved by **re-encoding** every picture to JPEG (so whatever
+metadata the file came with was dropped, PNGs became JPEGs), and didn't tag what it saved.
+
+- **One painted surface** (`BrowserView`, a `QAbstractScrollArea`): sections (a prompt's heading + its tiles) are
+  laid out as numbers and only what's on screen is painted; thumbnails are requested from paint, so only what's
+  seen is fetched (6 at a time, disk cache as before, 1,500 kept in memory). 800+ pictures scroll like 8.
+  "All Pictures" is the same view with one heading-less section. Items carry their section and place
+  (`Item.sec`, `Item.n`) so hit-testing and `item_rect` are arithmetic.
+- **Listing**: `Client.prompt_page(offset)` a page at a time, shown as it arrives; the listing and tunes are
+  kept in `~/Library/Caches/PhotoBrowser/astria-listing.json`, so the window opens full and refreshes behind.
+  A read from the newest right to the end removes what wasn't seen (deleted on Astria); a partial read never
+  removes anything. `MAX_PAGES` (60 × 50) then **Load Older**. If `/prompts` isn't answered the old per-tune
+  assembly (`list_prompts`) is the fallback. Pictures are known by their URL without its query (`_key`) —
+  Astria's links carry a signature that changes.
+- **Search** reuses `search_query` (tokens, folding, `date_range`) over prompt + model + date words + id.
+- **Selection**: click / ⌘-click / ⇧-click (anchor in the flattened order) / the corner circle / a heading's
+  Select All / ⌘A; arrows move, Space or Return opens the viewer.
+- **`ViewerWindow`**: full picture, ← →, neighbours pre-fetched, last 8 full pictures kept so a download from
+  the viewer doesn't fetch again.
+- **`Destination`** (store key `browser_dest`: mode `current` | `ai` | `fixed` + path; `browser_recent`):
+  "current" is resolved when a download starts, from `AIHooks.current_folder` — the pane's live location — so
+  it follows the folder Safe Finder is in; a fixed folder that's gone (drive unplugged) falls back to current.
+- **Downloads**: 4 workers; `_PLACE_LOCK` around naming (two pictures of one prompt were racing for the same
+  name); failures kept for Retry; a batch over 50 asks first; at the end of a batch the `saved` map is stored
+  and `AIHooks.add_tags(paths, ["AI"])` tags them (the shared tag store, so the iPhone sees it).
+- **`astria.save_download` — the file as it came.** The bytes are written unchanged (extension from what they
+  are), then metadata is *added where missing*: EXIF UserComment `AI-generated · Prompt: …` (the apps' own
+  convention), ImageDescription + XMP `dc:description` = the prompt (what the iPhone, Finder and Photos show as
+  the caption), Software / `xmp:CreatorTool` = `PhotoBrowser AI — <model>`, DateTimeOriginal/CreateDate = when
+  it was made, `Iptc4xmpExt:DigitalSourceType` = trainedAlgorithmicMedia. With ExifTool: one call using its
+  "`-TAG-=` then `-TAG=value`" form, which writes only where the tag doesn't exist. Without: `_jpeg_with`
+  splices a merged EXIF segment (and an XMP packet if there's none) into the JPEG's segment list, `_png_with`
+  inserts `eXIf` / XMP `iTXt` before `IDAT` — the compressed picture is never decoded. Other formats without
+  ExifTool are left exactly as they came (reported as "kept"). Checked against real ExifTool 12.76: pixels
+  identical, a file's own Make / Software / date / GPS / ICC all still there, ours added.
+- `save_created` (Create/Edit results) still re-encodes to JPEG as before — those are new files Safe Finder
+  makes from results, with the source photo's EXIF; only browser downloads are "as Astria made them".
+
 ## 6ab. Safe Finder Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
 
 The iPhone's video upscale (`MediaEditing.upscaleVideo`, §6f) on the Mac: right-click videos ▸ **Upscale Video…**

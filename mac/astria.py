@@ -855,6 +855,21 @@ class Client:
                 break
         return out
 
+    def prompt_page(self, offset: int, size: int = 50) -> list[Prompt] | None:
+        """One page of the account's prompts, newest first, starting `offset` in — for a listing shown as it
+        loads (the Astria.ai Browser). None when Astria can't be asked this way just now; [] past the end."""
+        if not self.configured:
+            return []
+        arr = self._get_json(f"/prompts?limit={size}&offset={offset}", timeout=40)
+        if not isinstance(arr, list):
+            return None
+        out: list[Prompt] = []
+        for p in arr:
+            if isinstance(p, dict) and (pid := _int(p.get("id"))) is not None:
+                out.append(Prompt(pid, str(p.get("text") or ""), _int(p.get("tune_id")),
+                                  parse_iso(p.get("created_at")), _images_of(p), _int(p.get("num_images"))))
+        return out
+
     def list_prompts(self, max_pages: int = 12, size: int = 50) -> list[Prompt]:
         """Every prompt on the account, newest first: the cross-tune listing, else assembled per tune."""
         if not self.configured:
@@ -1047,6 +1062,215 @@ def save_created(result: bytes, folder: str, model: str = "", prompt: str = "", 
     sc.make_folder(target)
     base = prompt.strip()[:40] or "AI Creation"
     return _place(data, target, f"{_safe_name(base)}.jpg", stamp)
+
+
+# ----------------------------------------------------------------------------- downloads from the browser
+#
+# A picture taken down from the Astria.ai Browser is kept **exactly as Astria made it** — the same bytes, in its
+# own format, with whatever EXIF, XMP and colour profile it came with — and what Safe Finder knows about it is
+# *added* to its metadata in place: the prompt (as the caption every app shows, and in the app's own "AI-generated
+# · Prompt: …" comment), the model, the date it was made and the IPTC label that says a picture is AI-made.
+# Nothing already in the file is replaced: each field is written only where the file has none.
+#
+# ExifTool does the writing when it's installed (every format, and it merges into existing XMP properly). Without
+# it, JPEG and PNG are still done here, losslessly — the metadata block is spliced into the file, the picture data
+# is never decoded or re-compressed; other formats are kept untouched and the caller is told.
+
+AI_SOURCE_TYPE = "http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia"
+_PLACE_LOCK = threading.Lock()
+
+
+def image_ext(data: bytes) -> str:
+    """The file extension for a downloaded picture, by what it is."""
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if data[4:8] == b"ftyp":
+        return ".avif" if b"avif" in data[8:32] else ".heic"
+    return ".jpg"
+
+
+def find_exiftool() -> str | None:
+    import shutil
+    return shutil.which("exiftool") or next((x for x in ("/opt/homebrew/bin/exiftool", "/usr/local/bin/exiftool")
+                                             if os.path.isfile(x)), None)
+
+
+def _ai_comment(prompt: str) -> str:
+    p = prompt.strip()
+    return f"AI-generated · Prompt: {p}" if p else "AI-generated"
+
+
+def _software(model: str) -> str:
+    return f"PhotoBrowser AI — {model}" if model else "PhotoBrowser AI"
+
+
+def _exiftool_embed(tool: str, path: str, prompt: str, model: str, when: datetime | None) -> bool:
+    def only_if_missing(tag: str, value: str) -> list[str]:
+        return [f"-{tag}-=", f"-{tag}={value}"]            # ExifTool: "write it only where there is none"
+    args = [tool, "-overwrite_original", "-m", "-q", "-charset", "exif=utf8"]
+    args += only_if_missing("EXIF:UserComment", _ai_comment(prompt))
+    args += only_if_missing("EXIF:Software", _software(model))
+    args += only_if_missing("XMP-xmp:CreatorTool", _software(model))
+    args += only_if_missing("XMP-iptcExt:DigitalSourceType", AI_SOURCE_TYPE)
+    if prompt.strip():
+        args += only_if_missing("EXIF:ImageDescription", prompt.strip())
+        args += only_if_missing("XMP-dc:Description", prompt.strip())
+    if when is not None:
+        stamp = when.strftime("%Y:%m:%d %H:%M:%S")
+        args += only_if_missing("EXIF:DateTimeOriginal", stamp)
+        args += only_if_missing("EXIF:CreateDate", stamp)
+    try:
+        r = subprocess.run(args + [path], capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+def _exif_with(data: bytes, prompt: str, model: str, when: datetime | None) -> bytes | None:
+    """The picture's own EXIF with our fields added where it has none — as an "Exif\\0\\0…" block. None when
+    there's nothing to add or it can't be made."""
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            exif = im.getexif()
+            sub = dict(exif.get_ifd(0x8769))
+    except Exception:  # noqa: BLE001
+        return None
+    if 37510 not in sub:
+        sub[37510] = _user_comment(_ai_comment(prompt))
+    if 305 not in exif:
+        exif[305] = _software(model).encode("utf-8")
+    if prompt.strip() and 270 not in exif:
+        exif[270] = prompt.strip().encode("utf-8")
+    if when is not None:
+        stamp = when.strftime("%Y:%m:%d %H:%M:%S")
+        sub.setdefault(36867, stamp)
+        sub.setdefault(36868, stamp)
+    exif[0x8769] = sub
+    try:
+        return exif.tobytes()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _xmp_packet(prompt: str, model: str) -> bytes:
+    from xml.sax.saxutils import escape
+    desc = f'<dc:description><rdf:Alt><rdf:li xml:lang="x-default">{escape(prompt.strip())}</rdf:li></rdf:Alt>' \
+           f'</dc:description>' if prompt.strip() else ""
+    return ('<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/">'
+            '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:xmp="http://ns.adobe.com/xap/1.0/" '
+            'xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/" '
+            f'xmp:CreatorTool="{escape(_software(model), {chr(34): "&quot;"})}" '
+            f'Iptc4xmpExt:DigitalSourceType="{AI_SOURCE_TYPE}">{desc}</rdf:Description></rdf:RDF></x:xmpmeta>'
+            '<?xpacket end="w"?>').encode("utf-8")
+
+
+def _jpeg_with(data: bytes, prompt: str, model: str, when: datetime | None) -> bytes | None:
+    """A JPEG with our metadata spliced in: its segments are walked, the EXIF block replaced by the merged one
+    (or added), an XMP packet added when it has none. The compressed picture isn't touched."""
+    exif = _exif_with(data, prompt, model, when)
+    if exif is None or len(exif) > 65000:
+        return None
+    segments: list[bytes] = []
+    has_xmp = False
+    i = 2
+    n = len(data)
+    while i + 4 <= n and data[i] == 0xFF:
+        marker = data[i + 1]
+        if marker == 0xDA or marker == 0xD9:               # the picture starts: everything from here is kept whole
+            break
+        size = int.from_bytes(data[i + 2:i + 4], "big")
+        if size < 2 or i + 2 + size > n:
+            return None
+        seg = data[i:i + 2 + size]
+        body = seg[4:]
+        if marker == 0xE1 and body[:6] == b"Exif\0\0":
+            pass                                           # replaced by the merged one below
+        else:
+            if marker == 0xE1 and body.startswith(b"http://ns.adobe.com/xap/1.0/\0"):
+                has_xmp = True
+            segments.append(seg)
+        i += 2 + size
+    rest = data[i:]
+    if not rest:
+        return None
+    ours = [b"\xff\xe1" + (len(exif) + 2).to_bytes(2, "big") + exif]
+    if not has_xmp:
+        xmp = b"http://ns.adobe.com/xap/1.0/\0" + _xmp_packet(prompt, model)
+        if len(xmp) < 65000:
+            ours.append(b"\xff\xe1" + (len(xmp) + 2).to_bytes(2, "big") + xmp)
+    head = [s_ for s_ in segments if s_[1] == 0xE0]         # JFIF stays first, as the format wants
+    tail = [s_ for s_ in segments if s_[1] != 0xE0]
+    return b"\xff\xd8" + b"".join(head) + b"".join(ours) + b"".join(tail) + rest
+
+
+def _png_with(data: bytes, prompt: str, model: str, when: datetime | None) -> bytes | None:
+    """A PNG with an eXIf chunk (merged with its own) and, when it has no XMP, an XMP text chunk — put before
+    the picture data, which is copied as it is."""
+    import zlib
+    exif = _exif_with(data, prompt, model, when)
+    if exif is None:
+        return None
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return len(body).to_bytes(4, "big") + kind + body + zlib.crc32(kind + body).to_bytes(4, "big")
+    out = [data[:8]]
+    i, n = 8, len(data)
+    has_xmp = b"XML:com.adobe.xmp" in data[:min(n, 1 << 20)]
+    placed = False
+    while i + 12 <= n:
+        size = int.from_bytes(data[i:i + 4], "big")
+        kind = data[i + 4:i + 8]
+        end = i + 12 + size
+        if end > n:
+            return None
+        if kind == b"IDAT" and not placed:
+            out.append(chunk(b"eXIf", exif[6:]))
+            if not has_xmp:
+                out.append(chunk(b"iTXt", b"XML:com.adobe.xmp\0\0\0\0\0" + _xmp_packet(prompt, model)))
+            placed = True
+        if kind != b"eXIf":                                 # its own EXIF is in the merged one
+            out.append(data[i:end])
+        i = end
+    return b"".join(out) if placed else None
+
+
+def save_download(data: bytes, folder: str, model: str = "", prompt: str = "", when: float | None = None) -> tuple[str, str]:
+    """A picture from the Astria.ai Browser into `folder`: the file as Astria made it, with the prompt, the model,
+    its date and the AI-made label added to its metadata (see above). Returns (the new file, how the metadata
+    went in: "exiftool", "written" — done here, losslessly — or "kept" when it couldn't be added and the file is
+    as it came)."""
+    import simpcity as sc
+    stamp = datetime.fromtimestamp(when) if when else datetime.now()
+    ext = image_ext(data)
+    target = Path(folder)
+    sc.make_folder(target)
+    name = f"{_safe_name(prompt.strip()[:40] or 'AI Creation')}{ext}"
+    tool = find_exiftool()
+    how = "kept"
+    if tool is None:
+        made = _jpeg_with(data, prompt, model, stamp) if ext == ".jpg" else \
+            _png_with(data, prompt, model, stamp) if ext == ".png" else None
+        if made is not None:
+            data, how = made, "written"
+    with _PLACE_LOCK:                                      # downloads run several at a time: one name at a time
+        path = _place(data, target, name, stamp)
+    if tool is not None:
+        if _exiftool_embed(tool, path, prompt, model, stamp):
+            how = "exiftool"
+            ts = stamp.timestamp()
+            try:
+                os.utime(path, (ts, ts))                   # the write moved its date: back to when it was made
+            except OSError:
+                pass
+    return path, how
 
 
 # ----------------------------------------------------------------------------- history, jobs cut short

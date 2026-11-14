@@ -192,6 +192,12 @@ actions the app makes no network calls.
   **Several photos, one prompt** (select photos ▸ Edit N Photos with AI…): a job per photo with the same prompt and
   settings, four at a time (`ai_window.LANES`), one `BatchResultsWindow` with every photo's results, Save All once
   they're all back (each into the "AI" folder beside its own photo), Try Again per failed photo. Safe Finder only.
+  Safe Finder's **Astria.ai Browser** (`mac/astria_browser.py`): one painted, virtualised grid (`BrowserView`) by
+  prompt or as All Pictures; listing paged and cached; search via `search_query`; a viewer with ← →; downloads
+  four at a time with Retry, to a remembered `Destination` (this folder — live from `AIHooks.current_folder` — its
+  AI folder, or a chosen one). **A download is the file as Astria made it** (`astria.save_download`: bytes
+  untouched, the prompt / model / date / AI-made label added to its metadata only where missing — ExifTool, else a
+  lossless JPEG/PNG splice) and gets the **AI** tag (`AIHooks.add_tags`). Don't re-encode browser downloads. §6aj.
   Safe Finder's **AI models** (`mac/ai_models.py`, `mac/ai_models_window.py`; Make AI Model… / AI ▸ AI Models…): a
   person, pet, object or style kept as its best varied photos (`curate`: 5–500 in, ~30 kept — blur, tiny and
   near-copies out, farthest-first), drawn by (1) **this Mac** — `mac/local_ai.py`: FLUX.2 klein 4B through **mflux

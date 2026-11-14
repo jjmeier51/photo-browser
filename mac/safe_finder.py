@@ -5173,9 +5173,20 @@ class Pane(QWidget):
         if not getattr(Pane, "_ai_recovery_hooked", False):
             Pane._ai_recovery_hooked = True
             ai_window.jobs().recovered.connect(self._airdrop_noted)
+        def add_tags(paths: list[str], tags: list[str]) -> None:
+            tag_store().add(paths, tags)                  # e.g. "AI" on what the Astria.ai Browser downloads
+            tags_changed()
+            search_query.NAMES.forget()
+
+        def current_folder() -> str:
+            return self.location if not self.is_virtual and os.path.isdir(self.location) else ""
+
         return ai_window.AIHooks(tags_of=lambda p: tag_store().tags(p, fresh=False), carry_tags=carry,
                                  reveal=self._reveal_from_viewer,
-                                 view=lambda paths, start: self.view_media(start, among=paths), keep_open=keep)
+                                 view=lambda paths, start: self.view_media(start, among=paths), keep_open=keep,
+                                 add_tags=add_tags, current_folder=current_folder,
+                                 create=lambda settings: self.ai_create(current_folder() or str(Path.home() / "Pictures"),
+                                                                        settings))
 
     def ai_edit(self, photo: str | list[str]) -> None:
         """Edit with AI…: one photo — or several at once: the same prompt goes to each, and the results come back
@@ -5244,14 +5255,16 @@ class Pane(QWidget):
         expand_files(paths, go)
 
     def astria_browser(self, folder: str) -> None:
-        import ai_window
+        """Astria.ai Browser… (astria_browser.py): everything the account has made — look, search, download."""
+        import astria_browser
         for w in _VIEWERS:
-            if isinstance(w, ai_window.BrowserWindow):
+            if isinstance(w, astria_browser.BrowserWindow):
+                w.show()
                 w.raise_()
                 w.activateWindow()
                 return
         hooks = self._ai_hooks()
-        win = ai_window.BrowserWindow(folder, hooks, THEME, self.window())
+        win = astria_browser.BrowserWindow(folder, hooks, THEME, self.window())
         hooks.keep_open(win)
         win.show()
 
