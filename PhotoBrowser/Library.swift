@@ -659,6 +659,10 @@ final class Library {
     var tagSyncStatus: SharedTags.Status?
     /// Folder path → cover-image filename (stored under Application Support/folderCovers).
     var folderCovers: [String: String] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.folderCovers") as? [String: String]) ?? [:]
+    /// Folder path → when its cover was chosen (Unix time). A folder with a cover but no stamp has an
+    /// automatic one (`ensureRandomCover`). Shared with Safe Finder through the drive's
+    /// `folder-covers.json`, where the later choice wins — see `FolderCovers.swift`.
+    var coverStamps: [String: Double] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.coverStamps") as? [String: Double]) ?? [:]
     /// Item file path → custom-thumbnail filename (stored under Application Support/itemThumbs).
     /// A per-item override of the auto-generated grid thumbnail — the item equivalent of a folder cover.
     var itemThumbnails: [String: String] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.itemThumbnails") as? [String: String]) ?? [:]
@@ -743,6 +747,7 @@ final class Library {
             try data.write(to: coversDirectory.appendingPathComponent(name))
             folderCovers[folder.path] = name
             FilePrefs.shared.set(folderCovers, forKey: "photoBrowser.folderCovers")
+            noteCoverChosen(for: folder)
         } catch {}
     }
 
@@ -757,6 +762,7 @@ final class Library {
             try data.write(to: coversDirectory.appendingPathComponent(name))
             folderCovers[folder.path] = name
             FilePrefs.shared.set(folderCovers, forKey: "photoBrowser.folderCovers")
+            noteCoverChosen(for: folder)
         } catch {}
     }
 
@@ -3295,6 +3301,11 @@ final class Library {
         captions = remapKeys(captions, remap)
         tags = remapKeys(tags, remap)
         folderCovers = remapKeys(folderCovers, remap)
+        let movedCoverStamps = remapKeys(coverStamps, remap)
+        if movedCoverStamps != coverStamps {            // a renamed folder's cover is still a chosen one
+            coverStamps = movedCoverStamps
+            FilePrefs.shared.set(coverStamps, forKey: FolderCovers.stampsKey)
+        }
         itemThumbnails = remapKeys(itemThumbnails, remap)
         photoOrigins = remapKeys(photoOrigins, remap)
         igPostedBy = remapKeys(igPostedBy, remap)

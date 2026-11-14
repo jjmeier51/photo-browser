@@ -81,7 +81,7 @@ from safe_copy_to_ssd import CHUNK, hash_file, human  # noqa: E402
 
 SKIP_AT_ROOT = {".Spotlight-V100", ".fseventsd", ".Trashes", ".TemporaryItems", ".DocumentRevisions-V100",
                 ".apdisk", ".com.apple.timemachine.donotpresent", "$RECYCLE.BIN", "System Volume Information",
-                ".Spare Folders", ".Safe Finder Staging", ".PKInstallSandboxManager",
+                ".Spare Folders", ".Safe Finder Staging", ".Safe Finder Checksums", ".PKInstallSandboxManager",
                 ".PKInstallSandboxManager-SystemSoftware", ".HFS+ Private Directory Data\r", ".journal",
                 ".journal_info_block", "lost+found"}
 SKIP_ANYWHERE = {".DS_Store", ".localized"}
@@ -147,6 +147,15 @@ if IS_MAC:
         return _libc.setattrlist(os.fsencode(path), ctypes.byref(al), ctypes.byref(ts), ctypes.sizeof(ts),
                                  _FSOPT_NOFOLLOW) == 0
 
+    _libc.copyfile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32]
+    _libc.copyfile.restype = ctypes.c_int
+    _COPYFILE_ACL, _COPYFILE_NOFOLLOW = 1 << 0, (1 << 18) | (1 << 19)
+
+    def copy_acl(src: str, dst: str) -> bool:
+        """`src`'s access-control list onto `dst` (copyfile(3) with COPYFILE_ACL alone: nothing else of the
+        file is touched). An item without one — nearly every file on a photo drive — just has none copied."""
+        return _libc.copyfile(os.fsencode(src), os.fsencode(dst), None, _COPYFILE_ACL | _COPYFILE_NOFOLLOW) == 0
+
     _ATTR_CMN_MODTIME, _ATTR_CMN_ACCTIME = 0x00000400, 0x00001000
 
     def set_dates(path: str, birth: int, modified: int, accessed: int) -> bool:
@@ -159,6 +168,9 @@ if IS_MAC:
         return _libc.setattrlist(os.fsencode(path), ctypes.byref(al), ctypes.byref(ts), ctypes.sizeof(ts),
                                  _FSOPT_NOFOLLOW) == 0
 else:
+    def copy_acl(src: str, dst: str) -> bool:
+        return True
+
     def set_birth(path: str, ns: int) -> bool:
         return False
 
@@ -193,6 +205,10 @@ def copy_meta(src: str, dst: str, st: os.stat_result, perms: bool, flags: bool =
                 os.chmod(dst, statmod.S_IMODE(st.st_mode))
             except OSError:
                 missed.append("its permissions")
+            try:
+                copy_acl(src, dst)                      # best effort: a drive that keeps no access lists has none
+            except (OSError, AttributeError, ctypes.ArgumentError):
+                pass
     missed += put_dates(dst, st, link)
     if flags:
         put_flags(dst, st, missed)
@@ -389,6 +405,8 @@ class Clone:
         self.done_bytes = 0
         self._last_tick = 0.0
         self.perms = fs_type(self.src) not in ("exfat", "msdos", "ntfs")       # those have no permissions to carry
+        self.sums: Sums = load_sums(self.dst)           # the checksum of every file written (see check_drive)
+        self._sums_dirty = False
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -449,6 +467,18 @@ class Clone:
             r.stopped = True
             if str(e):
                 self._problem(".", str(e))
+            elif os.path.isdir(self.dst) and os.path.isdir(self.src):
+                # Stopped by hand, both drives still here: the folders reached so far get their dates now
+                # (the next run sets them again once their last files are in), so what's on the new drive
+                # is dated like the old one even if the clone is never carried on.
+                for rel, st in reversed(dirs):
+                    try:
+                        copy_meta(os.path.join(self.src, rel), os.path.join(self.dst, rel), st, self.perms)
+                    except OSError:
+                        pass
+        if self._sums_dirty and os.path.isdir(self.dst):
+            if save_sums(self.dst, self.sums):
+                self._sums_dirty = False
         r.seconds = time.monotonic() - started
         self._tick("", "done", force=True)
         return r
@@ -549,6 +579,8 @@ class Clone:
                 put_flags(d, st, missed)                             # a locked file couldn't have been renamed
                 if missed:
                     self._problem(rel, "copied, but couldn't keep " + ", ".join(missed))
+                self.sums[rel] = (digest, st.st_size, st.st_mtime_ns)
+                self._sums_dirty = True
                 self.result.copied += 1
                 self.result.copied_bytes += st.st_size
                 break
@@ -648,6 +680,195 @@ def clear_leftovers(dst: str) -> int:
     return n
 
 
+# ----------------------------------------------------------------------------- the drive's checksums
+#
+# APFS checksums its own records but not what's in the files: a photo that goes bad on the drive reads back
+# without complaint, wrong. So the clone keeps the checksum it already worked out for every file it wrote —
+# on the new drive, in `.Safe Finder Checksums/checksums.tsv` (digest, size, modified, path) — and `check_drive`
+# can later read the drive again and say which files no longer are what was written. A file whose size or
+# date has changed was edited, not damaged: it's counted apart, and re-recorded with `update`.
+
+SUMS_DIR, SUMS_FILE = ".Safe Finder Checksums", "checksums.tsv"
+SUMS_HEAD = "# Safe Finder checksums v1 — blake2b-160\tsize\tmodified (ns)\tpath"
+Sums = dict                      # rel → (digest, size, mtime_ns)
+
+
+def sums_path(drive: str) -> str:
+    return os.path.join(drive, SUMS_DIR, SUMS_FILE)
+
+
+def load_sums(drive: str) -> Sums:
+    out: Sums = {}
+    try:
+        with open(sums_path(drive), encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t", 3)
+                if len(parts) == 4 and len(parts[0]) == 40:
+                    try:
+                        out[parts[3]] = (parts[0], int(parts[1]), int(parts[2]))
+                    except ValueError:
+                        continue
+    except OSError:
+        pass
+    return out
+
+
+def save_sums(drive: str, sums: Sums) -> bool:
+    folder = os.path.join(drive, SUMS_DIR)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        tmp = os.path.join(folder, f".{SUMS_FILE}{TEMP_SUFFIX}")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(SUMS_HEAD + "\n")
+            for rel in sorted(sums):
+                if "\n" in rel or "\t" in rel:
+                    continue                             # a name the file's format can't hold: not recorded
+                digest, size, mtime = sums[rel]
+                f.write(f"{digest}\t{size}\t{mtime}\t{rel}\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, sums_path(drive))
+        return True
+    except OSError:
+        return False
+
+
+@dataclass
+class Check:
+    files: int = 0                    # regular files on the drive
+    intact: int = 0                   # read again: what was written
+    damaged: list[str] = field(default_factory=list)      # same size and date, different contents
+    missing: list[str] = field(default_factory=list)      # recorded, no longer there
+    changed: int = 0                  # size or date differs from the record: edited since
+    unrecorded: int = 0               # no checksum yet (new since the clone)
+    recorded: int = 0                 # checksums added or renewed by this run (`update`)
+    unreadable: list[tuple[str, str]] = field(default_factory=list)
+    bytes_read: int = 0
+    stopped: bool = False
+    seconds: float = 0.0
+
+
+def check_drive(drive: str, update: bool = False,
+                progress: Callable[[int, int, str], None] = lambda done, total, name: None,
+                stop: Callable[[], bool] = lambda: False) -> Check:
+    """Every file on `drive` read again and held against the checksum recorded for it. With `update`, files
+    that have none yet — or were changed since — are read and recorded, so the next check covers them. Nothing
+    but the checksum file is ever written; no file is changed, moved or removed."""
+    drive = os.path.abspath(drive)
+    sums = load_sums(drive)
+    out = Check()
+    started = time.monotonic()
+    seen: set[str] = set()
+    todo: list[str] = []
+    for root, dirs, files in os.walk(drive):
+        rel_root = os.path.relpath(root, drive)
+        rel_root = "" if rel_root == "." else rel_root
+        dirs[:] = sorted(x for x in dirs if not skipped_name(x, not rel_root))
+        for name in sorted(files):
+            if not skipped_name(name, not rel_root):
+                todo.append(os.path.join(rel_root, name) if rel_root else name)
+        if stop():
+            out.stopped = True
+            return out
+    dirty = False
+    for i, rel in enumerate(todo):
+        if stop():
+            out.stopped = True
+            break
+        path = os.path.join(drive, rel)
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if not statmod.S_ISREG(st.st_mode):
+            continue
+        out.files += 1
+        seen.add(rel)
+        known = sums.get(rel)
+        same = known is not None and known[1] == st.st_size and abs(known[2] - st.st_mtime_ns) <= TIME_SLACK_NS
+        if known is None:
+            out.unrecorded += 1
+        elif not same:
+            out.changed += 1
+        if not same and not update:
+            continue
+        progress(i, len(todo), rel)
+        try:
+            digest = hash_file(Path(path), no_cache=True)
+        except OSError as e:
+            out.unreadable.append((rel, e.strerror or str(e)))
+            continue
+        out.bytes_read += st.st_size
+        if same:
+            if digest == known[0]:
+                out.intact += 1
+            else:
+                out.damaged.append(rel)
+        else:
+            sums[rel] = (digest, st.st_size, st.st_mtime_ns)
+            out.recorded += 1
+            dirty = True
+    if not out.stopped:
+        out.missing = sorted(rel for rel in sums if rel not in seen)
+        if update and out.missing:
+            for rel in out.missing:
+                sums.pop(rel, None)
+            dirty = True
+    if dirty:
+        save_sums(drive, sums)
+    progress(len(todo), len(todo), "")
+    out.seconds = time.monotonic() - started
+    return out
+
+
+def check_report(drive: str, c: Check, update: bool) -> str:
+    def n(count: int, word: str) -> str:
+        return f"{count:,} {word}{'' if count == 1 else 's'}"
+    lines = [f"Check of “{drive}” — {time.strftime('%Y-%m-%d %H:%M')}", "",
+             f"{n(c.files, 'file')} on the drive; {human(c.bytes_read)} read again"
+             + (" — STOPPED before the end." if c.stopped else ".")]
+    if c.intact or not (c.damaged or c.recorded):
+        lines.append(f"   {c.intact:,} read back exactly as written.")
+    for rel in c.damaged[:200]:
+        lines.append(f"   DAMAGED: {rel} — same size and date as when it was written, but its contents have changed")
+    if len(c.damaged) > 200:
+        lines.append(f"   … and {len(c.damaged) - 200:,} more damaged")
+    if c.damaged:
+        lines.append("   A damaged file can't be mended from the drive itself: put it back from another copy "
+                     "(the old drive, a backup).")
+    for rel, why in c.unreadable[:50]:
+        lines.append(f"   COULDN'T READ: {rel} — {why}")
+    for rel in c.missing[:50]:
+        lines.append(f"   GONE since it was recorded: {rel}")
+    if len(c.missing) > 50:
+        lines.append(f"   … and {len(c.missing) - 50:,} more gone (moved, renamed or deleted)")
+    if update:
+        if c.recorded:
+            lines.append(f"   {n(c.recorded, 'file')} recorded for next time (new, or changed since).")
+    else:
+        if c.changed:
+            lines.append(f"   {n(c.changed, 'file')} changed since recorded (a different size or date — edited, not damaged).")
+        if c.unrecorded:
+            lines.append(f"   {n(c.unrecorded, 'file')} with no checksum yet (added since). “Record New Files” reads and records them.")
+    if not c.files:
+        lines.append("   Nothing to check.")
+    return "\n".join(lines) + "\n"
+
+
+def keep_awake() -> "subprocess.Popen | None":
+    """Keeps the Mac (and its drives) from sleeping until `.terminate()` — or this program ends. A clone of a
+    few terabytes runs for hours; a Mac that dozes off unmounts the drives under it."""
+    if not IS_MAC or not shutil.which("caffeinate"):
+        return None
+    try:
+        return subprocess.Popen(["caffeinate", "-i", "-m", "-s", "-w", str(os.getpid())],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+
 # ----------------------------------------------------------------------------- comparing the two drives
 
 @dataclass
@@ -659,6 +880,7 @@ class Comparison:
     metadata: list[tuple[str, str]] = field(default_factory=list)        # (rel, what differs) — dates, attributes
     folder_dates: int = 0                                                 # of `metadata`: folders, by their own date
     extra: int = 0                                                        # on the new drive only (not a problem)
+    extra_names: list[str] = field(default_factory=list)                 # the first of them
     stopped: bool = False
     deep: bool = False
 
@@ -669,7 +891,7 @@ class Comparison:
 
 def compare(src: str, dst: str, plan: Scan, deep: bool = False,
             progress: Callable[[int, int, str], None] = lambda done, total, name: None,
-            stop: Callable[[], bool] = lambda: False) -> Comparison:
+            stop: Callable[[], bool] = lambda: False, collect: Sums | None = None) -> Comparison:
     """Every item in `plan` looked for on the new drive: there, the same kind and size, the same dates and
     attributes — and with `deep`, the same bytes (both drives read from the drive, not from memory)."""
     out = Comparison(deep=deep)
@@ -708,9 +930,12 @@ def compare(src: str, dst: str, plan: Scan, deep: bool = False,
             if deep:
                 progress(i, total, it.rel)
                 try:
-                    if hash_file(Path(s), no_cache=True) != hash_file(Path(d), no_cache=True):
+                    digest = hash_file(Path(d), no_cache=True)
+                    if hash_file(Path(s), no_cache=True) != digest:
                         out.different.append((it.rel, "the contents differ"))
                         continue
+                    if collect is not None:              # read and found right: its checksum, for check_drive
+                        collect[it.rel] = (digest, ds.st_size, ds.st_mtime_ns)
                     out.bytes_read += ss.st_size * 2
                 except OSError as e:
                     out.different.append((it.rel, f"couldn't be read ({e.strerror or e})"))
@@ -731,7 +956,7 @@ def compare(src: str, dst: str, plan: Scan, deep: bool = False,
             out.metadata.append((it.rel, ", ".join(what)))
     progress(total, total, "")
     if not out.stopped:
-        out.extra = count_extra(dst, known, stop)
+        out.extra = count_extra(dst, known, stop, out.extra_names)
     return out
 
 
@@ -789,19 +1014,26 @@ def match_details(src: str, dst: str, rels: list[str], perms: bool | None = None
     return done, left
 
 
-def count_extra(dst: str, known: set[str], stop: Callable[[], bool] = lambda: False) -> int:
+def count_extra(dst: str, known: set[str], stop: Callable[[], bool] = lambda: False,
+                names: list[str] | None = None) -> int:
+    """How many items are on the new drive only; the first 40 of them into `names`. (A folder that's only
+    there counts once — what's inside it isn't listed too.)"""
     n = 0
     for root, dirs, files in os.walk(dst):
         if stop():
             break
         rel_root = os.path.relpath(root, dst)
         rel_root = "" if rel_root == "." else rel_root
-        dirs[:] = [x for x in dirs if not skipped_name(x, not rel_root)]
-        for name in dirs + files:
+        dirs[:] = sorted(x for x in dirs if not skipped_name(x, not rel_root))
+        for name in dirs + sorted(files):
             if skipped_name(name, not rel_root):
                 continue
-            if (os.path.join(rel_root, name) if rel_root else name) not in known:
+            rel = os.path.join(rel_root, name) if rel_root else name
+            if rel not in known:
                 n += 1
+                if names is not None and len(names) < 40:
+                    names.append(rel)
+        dirs[:] = [x for x in dirs if (os.path.join(rel_root, x) if rel_root else x) in known]
     return n
 
 
@@ -912,7 +1144,13 @@ def report(src: str, dst: str, plan: Scan, result: Result | None, cmp: Compariso
             lines.append(DETAILS_NOTE.format(count=n(len(cmp.metadata), "item"),
                                              folders=n(cmp.folder_dates, "folder")))
         if cmp.extra:
-            lines.append(f"   ({n(cmp.extra, 'item')} on the new drive that the old one doesn't have — left alone.)")
+            lines.append(f"   ({n(cmp.extra, 'item')} on the new drive that the old one doesn't have — left alone"
+                         + (":" if cmp.extra_names else ".)"))
+            for rel in cmp.extra_names:
+                lines.append(f"      {rel}")
+            if cmp.extra_names:
+                more = cmp.extra - len(cmp.extra_names)
+                lines.append(f"      … and {more:,} more.)" if more > 0 else "   )")
     lines += ["", IPHONE_STEPS, ""]
     return "\n".join(lines)
 
@@ -930,8 +1168,12 @@ def save_report(text: str) -> str:
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser(description="Copy a whole drive to a new one, checking every file, and compare them.")
-    ap.add_argument("old")
-    ap.add_argument("new")
+    ap.add_argument("old", help="the old drive — or, with --check, the drive to check")
+    ap.add_argument("new", nargs="?")
+    ap.add_argument("--check", action="store_true",
+                    help="read every file on the one drive given again and compare with its recorded checksum")
+    ap.add_argument("--record", action="store_true",
+                    help="with --check: also record checksums for files that have none yet or were changed")
     ap.add_argument("--apply", action="store_true", help="copy (default: only say what would be copied)")
     ap.add_argument("--verify", action="store_true", help="only compare the two drives")
     ap.add_argument("--deep", action="store_true", help="with --verify (or after --apply): read every byte of both again")
@@ -940,6 +1182,21 @@ def main() -> None:
                     help="with --verify: give items whose dates or attributes differ the old drive's (contents untouched)")
     ap.add_argument("--allow-exfat", action="store_true", help="let the new drive be exFAT (dates/attributes will suffer)")
     a = ap.parse_args()
+    awake = keep_awake()                                  # until this program ends
+    if a.check:
+        print(f"Checking “{a.old}”…" + (" (recording files that have no checksum yet)" if a.record else ""))
+        last = [0.0]
+
+        def tick(done: int, total: int, name: str) -> None:
+            if time.monotonic() - last[0] > 2:
+                last[0] = time.monotonic()
+                print(f"\r  {done:,}/{total:,}  {name[-60:]:60}", end="", flush=True)
+        c = check_drive(a.old, update=a.record, progress=tick)
+        text = check_report(a.old, c, a.record)
+        print("\n" + text)
+        sys.exit(2 if c.damaged or c.unreadable else 0)
+    if not a.new:
+        ap.error("the new drive is missing")
     print(f"Reading “{a.old}”…")
     plan = scan(a.old)
     print(f"  {plan.files:,} files in {plan.folders:,} folders, {human(plan.bytes)}; "
@@ -968,7 +1225,10 @@ def main() -> None:
         print(f"  {human(need)} would be copied. Run again with --apply.")
         return
     print("Comparing the two drives…" + (" (every byte — this takes as long as the copy)" if a.deep else ""))
-    cmp = compare(a.old, a.new, plan, deep=a.deep)
+    sums = load_sums(a.new) if a.deep else None
+    cmp = compare(a.old, a.new, plan, deep=a.deep, collect=sums)
+    if sums:
+        save_sums(a.new, sums)
     bad = [rel for rel, what in cmp.different if what == "the contents differ"]
     if bad and a.repair:
         print(f"Copying {len(bad):,} file(s) again…")

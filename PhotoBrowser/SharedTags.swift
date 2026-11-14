@@ -379,6 +379,9 @@ extension Library {
         // Each folder's own choices ("Videos at the Top"), shared with Safe Finder the same way.
         await syncFolderOptions()
         guard rootURL?.path == root.path, !waitingForDrive else { tagSyncRunning = false; return }
+        // Folder covers, likewise: Safe Finder's choices in, this phone's out (`FolderCovers.swift`).
+        await syncFolderCovers()
+        guard rootURL?.path == root.path, !waitingForDrive else { tagSyncRunning = false; return }
         let rootPath = root.path
         let prefix = Self.canonicalPath(rootPath) + "/"
         // The store's tags under this drive, drive-relative — remembering the key each is stored

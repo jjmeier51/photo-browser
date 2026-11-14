@@ -103,6 +103,16 @@ class CloneWindow(QDialog):
         self.again = QPushButton("")
         self.again.setVisible(False)
         self.again.clicked.connect(lambda: self._begin("recopy"))
+        self.check = QPushButton("Check Files")
+        self.check.setToolTip("Reads every file on the new drive again and compares it with the checksum recorded "
+                              "when it was written — the way to find a file that has gone bad on the drive.\n"
+                              "The old drive isn't needed. Nothing is changed.")
+        self.check.clicked.connect(lambda: self._begin_check(False))
+        self.record = QPushButton("")
+        self.record.setToolTip("Reads the files that have no checksum yet (added or changed since) and records "
+                               "them, so the next check covers them")
+        self.record.setVisible(False)
+        self.record.clicked.connect(lambda: self._begin_check(True))
         self.match = QPushButton("")
         self.match.setToolTip("Give the items listed as copied with different dates or attributes the old drive's.\n"
                               "No file's contents are touched; a file changed on the new drive is left as it is.")
@@ -115,11 +125,13 @@ class CloneWindow(QDialog):
         buttons = QHBoxLayout()
         buttons.addWidget(self.show_report)
         buttons.addWidget(self.again)
+        buttons.addWidget(self.record)
         buttons.addWidget(self.match)
         buttons.addWidget(self.rename)
         buttons.addStretch(1)
         buttons.addWidget(self.pause)
         buttons.addWidget(self.stop)
+        buttons.addWidget(self.check)
         buttons.addWidget(self.verify)
         buttons.addWidget(self.go)
         lay = QVBoxLayout(self)
@@ -175,8 +187,9 @@ class CloneWindow(QDialog):
         self.what, self.src, self.dst = what, src, dst
         self.running, self.stop_flag = True, False
         self.job = None
-        for w in (self.go, self.verify, self.old, self.new, self.deep, self.again, self.match):
+        for w in (self.go, self.verify, self.check, self.record, self.old, self.new, self.deep, self.again, self.match):
             w.setEnabled(False)
+        self.record.setVisible(False)
         self.stop.setEnabled(True)
         self.show_report.setVisible(False)
         self.again.setVisible(False)
@@ -232,7 +245,49 @@ class CloneWindow(QDialog):
         self.pause.setEnabled(self.what in ("clone", "recopy"))
         threading.Thread(target=self._work, daemon=True, name="clone").start()
 
+    def _begin_check(self, update: bool) -> None:
+        """Check Files: the new drive read again against its recorded checksums (clone_drive.check_drive)."""
+        if self.running:
+            return
+        dst = self.new.currentData()
+        if not dst or not os.path.isdir(dst):
+            QMessageBox.information(self, "Clone Drive", "Choose the drive to check as the new drive.")
+            return
+        self.what, self.dst = "check", dst
+        self.running, self.stop_flag = True, False
+        self.job = None
+        for w in (self.go, self.verify, self.check, self.record, self.old, self.new, self.deep, self.again, self.match):
+            w.setEnabled(False)
+        for w in (self.show_report, self.again, self.match, self.record, self.rename):
+            w.setVisible(False)
+        self.stop.setEnabled(True)
+        self.bar.setVisible(True)
+        self.bar.setRange(0, 1000)
+        self.started = time.monotonic()
+        self._phase("Recording the files that have no checksum yet…" if update else "Reading every file again…")
+        threading.Thread(target=self._check_work, args=(dst, update), daemon=True, name="clone-check").start()
+
+    def _check_work(self, dst: str, update: bool) -> None:
+        awake = cd.keep_awake()
+        try:
+            c = cd.check_drive(dst, update=update, stop=lambda: self.stop_flag,
+                               progress=lambda i, total, name: self.bridge.progress.emit(
+                                   i, total, 0, 0, os.path.basename(name), "checking files"))
+        finally:
+            if awake is not None:
+                awake.terminate()
+        self.result, self.cmp, self.checked = None, None, (c, update)
+        self.bridge.finished.emit(cd.check_report(dst, c, update))
+
     def _work(self) -> None:
+        awake = cd.keep_awake()                          # a clone runs for hours: the Mac mustn't doze off
+        try:
+            self._work_awake()
+        finally:
+            if awake is not None:
+                awake.terminate()
+
+    def _work_awake(self) -> None:
         plan, src, dst = self.plan, self.src, self.dst
         result = None
         if self.what in ("clone", "recopy"):
@@ -269,15 +324,18 @@ class CloneWindow(QDialog):
                 if time.monotonic() - last[0] > 0.2 or done == total:
                     last[0] = time.monotonic()
                     self.bridge.progress.emit(done, total, 0, 0, os.path.basename(name), "comparing")
-            cmp = cd.compare(src, dst, plan, deep=deep, progress=tick, stop=lambda: self.stop_flag)
+            sums = cd.load_sums(dst) if deep else None   # a byte-for-byte comparison records what it read
+            cmp = cd.compare(src, dst, plan, deep=deep, progress=tick, stop=lambda: self.stop_flag, collect=sums)
+            if sums:
+                cd.save_sums(dst, sums)
         text = cd.report(src, dst, plan, result, cmp)
         self.result, self.cmp = result, cmp
         self.bridge.finished.emit(text)
 
     def _progress(self, df: int, tf: int, db, tb, name: str, phase: str) -> None:
-        if phase in ("comparing", "matching"):
+        if phase in ("comparing", "matching", "checking files"):
             self.bar.setValue(int(1000 * df / max(tf, 1)))
-            word = "Comparing" if phase == "comparing" else "Matching dates and attributes"
+            word = {"comparing": "Comparing", "matching": "Matching dates and attributes"}.get(phase, "Checking files")
             self.status.setText(f"{word} — {df:,} of {tf:,} items" + (f"  ·  {name}" if name else ""))
             return
         frac = (db / tb) if tb else (df / max(tf, 1))
@@ -312,7 +370,7 @@ class CloneWindow(QDialog):
     def _finished(self, text) -> None:
         self.running = False
         self.bar.setVisible(False)
-        for w in (self.go, self.verify, self.old, self.new, self.deep, self.again, self.match):
+        for w in (self.go, self.verify, self.check, self.record, self.old, self.new, self.deep, self.again, self.match):
             w.setEnabled(True)
         self.pause.setChecked(False)
         self.pause.setEnabled(False)
@@ -323,6 +381,26 @@ class CloneWindow(QDialog):
         self.log.appendPlainText("\n" + text)
         self.report_path = cd.save_report(text)
         self.show_report.setVisible(bool(self.report_path))
+        if self.what == "check":
+            c, update = self.checked
+            if c.stopped:
+                line = "Stopped before the end."
+            elif c.damaged or c.unreadable:
+                line = f"{len(c.damaged) + len(c.unreadable):,} file(s) are damaged or can't be read — listed above."
+            elif update:
+                line = f"Recorded {c.recorded:,} file(s). Check Files reads them all against their checksums."
+            elif not c.intact and (c.unrecorded or c.changed):
+                line = "No checksums recorded for this drive yet — Record New Files reads every file once and keeps them."
+            else:
+                line = f"{c.intact:,} file(s) read back exactly as written."
+            pending = 0 if update or c.stopped else c.unrecorded + c.changed
+            if pending:
+                self.record.setText(f"Record {pending:,} New File{'s' if pending != 1 else ''}")
+                self.record.setVisible(True)
+                if c.intact:
+                    line += f" {pending:,} more have no checksum yet."
+            self.status.setText(line)
+            return
         result, cmp = getattr(self, "result", None), getattr(self, "cmp", None)
         self.different = [rel for rel, what in cmp.different if what == "the contents differ"] if cmp is not None else []
         if self.different:
