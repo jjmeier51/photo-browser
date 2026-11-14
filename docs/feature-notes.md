@@ -2184,6 +2184,76 @@ on Return. Now:
 - Scope bar ▸ **Add Filter** (Favorites, To AI, tags with counts, Modified, Size, Recent Searches); the
   field completes from the last 15 searches.
 
+## 6ai. Safe Finder AI models, and pictures made on the Mac — `mac/ai_models.py`, `mac/local_ai.py`, `mac/ai_models_window.py` (Nov 14, 2026)
+
+**The ask.** "Local AI image generation: train a model on 5–500 photos of a person, object etc., then generate
+brand-new images from it" — and to use Seedream 5.0 Pro and Nano Banana Pro with it too. The Mac is a late-2020
+M1 mini with **16 GB**.
+
+**What the research found** (four threads, ~80 sources, Nov 2026; nothing was run on a Mac):
+- **Engine.** The PyTorch/MPS trainers are experimental or documented as not working for current models on
+  Macs (SimpleTuner: "Apple GPUs do not currently work for training Flux"; ai-toolkit "experimental";
+  musubi-tuner's MPS path "not tested"). The MLX route works: **mflux** (MIT, `mflux-community/mflux`, 0.24.0,
+  27 Oct 2026) generates *and* trains from one pip-installable package. Draw Things also trains (and has an
+  official `draw-things-cli train lora` since Mar 2026) but is GPL-3 with a rule against bundling, and writes
+  its own `.ckpt`.
+- **Model.** mflux 0.24.0 no longer trains FLUX.1; it trains Z-Image and **FLUX.2 klein** base 4B/9B (and a few
+  others). klein 4B is Apache-2.0, ungated, 4 steps when distilled, and takes reference images. The 2026 recipe
+  everywhere is "train on the undistilled base, generate on the distilled sibling".
+- **Memory.** The only guidance for *training* klein 4B on a Mac starts at **32 GB** (512 px, 8-bit, gradient
+  checkpointing). No measured training time or peak exists for any named Mac. *Generating* with klein 4B at
+  4-bit loads 3.3–4.3 GB and peaks about 10 GB at 1024 px (measured on 64 GB Macs; 27–30 s a picture on an
+  M1 Max). So a 16 GB M1 can generate, not train.
+- **Method.** 15–40 curated photos beat hundreds for one subject (BFL: 10–15 for a character, 20–40 for a
+  style; gains flatten past 40–50). With too few photos — or no way to train — reference-image generation is
+  the alternative; a trained LoRA is still better for fine likeness reused many times.
+- **Seedream / Nano Banana** are cloud models: they can't run on a Mac at all. Astria already carries them
+  (and "Nano Banana Pro", tune 3618064 — added to both apps' model lists here; there is no "Nano Banana 2 Pro").
+
+**So, what a "model" is here** — `ai_models.py`: a person / pet / object / style kept as its **best varied
+photos** (`~/Library/Application Support/Safe Finder/AI/Models/<name>/`: `model.json` + `photos/001.jpg…`,
+copies at ≤ 1536 px). `curate` reads the 5–500 offered once: unreadable and tiny (< 384 px) out; blurred out
+(variance of the Laplacian under a quarter of the set's median — judged against the set, so a soft shoot isn't
+all "blurred"); of near-copies (dHash within 6 bits) the best stays; then farthest-first on a small colour
+descriptor, tempered by quality, until 30 are kept (100 for a style). The order is the order to use them in.
+A person needs the "this is me, or someone who has agreed" tick, kept with the model.
+
+**The engines a model is drawn with** (`ModelsWindow`):
+1. **On this Mac** — `local_ai.py`. `plan()` by memory: < 16 GB not offered; 16 GB → 4-bit, `--low-ram`, 2
+   references, 768 px; 24 GB → 8-bit, 3 references; 32 GB+ → 8-bit, 4 references (training would fit there —
+   not built). First use, after a prompt that says what comes down: `uv venv --python 3.12` + `uv pip install
+   mflux==0.24.0` into `…/AI/env` (a frozen app has no Python of its own to run it with; uv must be installed
+   — the window gives the one-line command), then `mflux-save --model flux2-klein-4b --quantize N --path
+   …/AI/engines/FLUX.2-klein-4B-mflux-qN` (about 17 GB down once, ~4 GB kept at 4-bit). A batch is one child
+   process: `mflux-generate-flux2[-edit] --model <that folder> --base-model flux2-klein-4b --prompt … --steps 4
+   --seed a b c --width W --height H --output "… {seed}.png" [--low-ram] [--image-paths refs…]`, run with
+   `HF_HUB_OFFLINE=1`, kept awake, progress read off tqdm's "n/4 [", Stop = terminate. **Every flag is from
+   mflux 0.24.0's own parser (read from the sdist); the version is pinned because they change.** References
+   are resized to the picture's size first (each adds to memory). Results go through `astria.save_created`
+   — the same "AI" folder, JPEG, EXIF as cloud results, written the drive's way — and get IPTC Digital Source
+   Type `trainedAlgorithmicMedia` via ExifTool when it's there.
+2. **Seedream / Nano Banana (Astria)** — opens Create with AI (`Pane.ai_create(folder, settings)`) with the
+   model's first 10–14 photos as references. Nothing new to maintain: same window, history, recovery.
+3. **A trained model (Astria)** — "Train on Astria…" = the iPhone's `createTune` ported
+   (`astria.Client.create_tune`: Flux LoRA, `branch` flux1, `model_type` lora, token `ohwx<name>`); the whole
+   curated set at 1024 px. An ambiguous upload is *not* retried (a second tune is a second charge). The tune
+   id is kept on the model; when ready it's an engine here and a tune in Create / Edit everywhere.
+
+**Unverified — to check on the Mac itself:** that `uv` + mflux install cleanly; that `mflux-save` of klein 4B
+completes in 16 GB (it loads the full model once — the heaviest step). If it doesn't, a Mac under 24 GB falls
+back by itself (`fly_mode`): batches run as `--model flux2-klein-4b --quantize 4 --small-text-encoder` (mflux's
+experimental Qwen3-0.6B encoder + adapter: 3.3 GB loaded instead of 4.3), quantised as each batch starts, and
+offline only after the first batch has fetched the small encoder; the real seconds per picture on a base M1 (expect minutes); that a model
+saved by the text-to-image class loads in the edit command. Tested here against stand-in commands that check
+the arguments the way mflux's parser does.
+
+**Not built, on purpose:** local LoRA training (`mflux-train --config train.json`, checkpoint zips holding
+`NNNNNNN_adapter.safetensors`) — this Mac can't run it and it couldn't be tried; a local captioner; face
+similarity scoring. **Real people:** the consent tick is recorded, likeness models stay on the Mac unless the
+person sends them to Astria themselves, outputs are labelled AI-made; nothing here is aimed at, or tuned for,
+sexual imagery of real people (an offence to create without consent in England and Wales since Feb 2026;
+publishing is a US federal offence; the model licences forbid it too).
+
 ## 6ab. Safe Finder Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
 
 The iPhone's video upscale (`MediaEditing.upscaleVideo`, §6f) on the Mac: right-click videos ▸ **Upscale Video…**

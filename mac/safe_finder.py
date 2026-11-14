@@ -5187,12 +5187,61 @@ class Pane(QWidget):
         hooks.keep_open(win)
         win.show()
 
-    def ai_create(self, folder: str) -> None:
+    def ai_create(self, folder: str, settings: dict | None = None) -> None:
+        """Create with AI… — `settings` opens it filled in (an AI model's photos as references, its tune…)."""
         import ai_window
         hooks = self._ai_hooks()
-        win = ai_window.RequestWindow("create", folder, hooks, THEME, self.window())
+        win = ai_window.RequestWindow("create", folder, hooks, THEME, self.window(), settings=settings)
         hooks.keep_open(win)
         win.show()
+
+    # -- AI models (ai_models.py: a person, pet, object or style kept as its best photos; ai_models_window.py)
+    def _model_hooks(self):
+        import ai_models_window
+
+        def folder() -> str:
+            if not self.is_virtual and os.path.isdir(self.location):
+                return self.location
+            return str(Path.home() / "Pictures")
+
+        return ai_models_window.ModelHooks(
+            folder=folder, create_with_ai=lambda where, settings: self.ai_create(where, settings),
+            view=lambda paths, start: self.view_media(start, among=paths), reveal=self._reveal_from_viewer,
+            trash=lambda path: MainWindow.trash_item(Path(path)))
+
+    def open_ai_models(self, select: str | None = None) -> None:
+        """AI ▸ AI Models…: the models made so far, and pictures from them."""
+        import ai_models_window
+        for w in _VIEWERS:
+            if isinstance(w, ai_models_window.ModelsWindow):
+                w.reload(select)
+                w.show()
+                w.raise_()
+                w.activateWindow()
+                return
+        win = ai_models_window.ModelsWindow(self.window(), self._model_hooks(), select)
+        self._ai_hooks().keep_open(win)
+        win.show()
+
+    def make_ai_model(self, paths: list[str]) -> None:
+        """Make AI Model…: the selected photos — or every photo in the selected folders — looked through, the
+        best varied ones kept as a model."""
+        import ai_models
+        import ai_models_window
+
+        def go(files: list[str], _folders: int) -> None:
+            photos = [f for f in files if kind_of(f) == "image" and os.path.splitext(f)[1].lower() not in RAW_EXT]
+            if len(photos) < ai_models.MIN_PHOTOS:
+                QMessageBox.information(self, "Make AI Model", f"A model needs at least {ai_models.MIN_PHOTOS} photos; "
+                                        f"{len(photos)} {'was' if len(photos) == 1 else 'were'} selected.")
+                return
+            dlg = ai_models_window.MakeModelDialog(self.window(), sorted(photos, key=natural_key))
+            made = dlg.exec() == QDialog.DialogCode.Accepted and dlg.model is not None
+            name = dlg.model.name if made else None
+            dlg.deleteLater()
+            if made:
+                self.open_ai_models(name)
+        expand_files(paths, go)
 
     def astria_browser(self, folder: str) -> None:
         import ai_window
@@ -5584,6 +5633,8 @@ class Pane(QWidget):
                     menu.addAction("Remove Objects…", lambda: self.remove_objects(photos[0]))
                 menu.addAction("Edit with AI…" if len(photos) == 1 else f"Edit {len(photos)} Photos with AI…",
                                lambda: self.ai_edit(photos))
+                if len(photos) >= 5:
+                    menu.addAction(f"Make AI Model from {len(photos)} Photos…", lambda: self.make_ai_model(photos))
             folders = [p for p in paths if os.path.isdir(p)]
             if folders:
                 menu.addAction("Remove Watermark from Photos Inside…", lambda: self.remove_watermark(folders))
@@ -5638,6 +5689,9 @@ class Pane(QWidget):
         ai = menu.addMenu("AI")
         ai.addAction("Create with AI…", lambda: self.ai_create(folder))
         ai.addAction("Astria.ai Browser…", lambda: self.astria_browser(folder))
+        ai.addSeparator()
+        ai.addAction("Make AI Model from Photos Inside…", lambda: self.make_ai_model([folder]))
+        ai.addAction("AI Models…", lambda: self.open_ai_models())
         cc = menu.addMenu("CapCut")
         cc.addAction("Send Photos & Videos Here to CapCut", lambda: self.send_to_capcut([folder]))
         cc.addAction("Import from CapCut…", lambda: self.import_from_capcut(folder))

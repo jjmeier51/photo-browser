@@ -49,6 +49,7 @@ enum AIExtend {
         case seedream5Pro = "Seedream 5.0 Pro"
         case seedream5Lite = "Seedream 5.0 Lite"
         case seedream45 = "Seedream 4.5"
+        case nanoBananaPro = "Nano Banana Pro"
         case nanoBanana21 = "Nano Banana 2.1"
         case nanoBanana2 = "Nano Banana 2"
         case flux = "Flux"           // the LoRA-composable base — pick it to run one of your own tunes on top
@@ -58,11 +59,14 @@ enum AIExtend {
         /// the model was dropped from the picker. Nano Banana 2.1 (Oct 2026): Astria upgraded the
         /// gallery tune this app had been using for Nano Banana 2 (4180298) to 2.1 in place, and the
         /// "Nano Banana 2.0" card moved to its own id (5850983) — so the old id now means 2.1.
+        /// Nano Banana Pro (added here Nov 2026): 3618064 is read off Astria's gallery page by position
+        /// (the same reading gave the five ids above correctly) — it can be overridden in Settings.
         var fallbackTune: Int {
             switch self {
             case .seedream5Pro:  return 5236038
             case .seedream5Lite: return 4160332
             case .seedream45:    return 3691308
+            case .nanoBananaPro: return 3618064
             case .nanoBanana21:  return 4180298
             case .nanoBanana2:   return 5850983
             case .flux:          return AIExtend.defaultFluxTune
@@ -79,7 +83,7 @@ enum AIExtend {
         var maxReferenceImages: Int {
             switch self {
             case .seedream5Pro:                                            return 10
-            case .seedream5Lite, .seedream45, .nanoBanana21, .nanoBanana2: return 14
+            case .seedream5Lite, .seedream45, .nanoBananaPro, .nanoBanana21, .nanoBanana2: return 14
             case .flux:                                                    return 0
             }
         }
@@ -90,7 +94,7 @@ enum AIExtend {
         fileprivate var tuneKey: String { "photoBrowser.astriaTune.\(rawValue)" }
         /// The partner models offered as the built-in default / Settings overrides (Flux is offered
         /// only in the Edit/Create pickers, and shares the separate Flux tune setting).
-        static var partnerModels: [AIModel] { [.seedream5Pro, .seedream5Lite, .seedream45, .nanoBanana21, .nanoBanana2] }
+        static var partnerModels: [AIModel] { [.seedream5Pro, .seedream5Lite, .seedream45, .nanoBananaPro, .nanoBanana21, .nanoBanana2] }
     }
 
     /// One reference photo for Edit/Create: its upload JPEG, a stable identity (`path|mtime|size`)

@@ -192,6 +192,15 @@ actions the app makes no network calls.
   **Several photos, one prompt** (select photos ▸ Edit N Photos with AI…): a job per photo with the same prompt and
   settings, four at a time (`ai_window.LANES`), one `BatchResultsWindow` with every photo's results, Save All once
   they're all back (each into the "AI" folder beside its own photo), Try Again per failed photo. Safe Finder only.
+  Safe Finder's **AI models** (`mac/ai_models.py`, `mac/ai_models_window.py`; Make AI Model… / AI ▸ AI Models…): a
+  person, pet, object or style kept as its best varied photos (`curate`: 5–500 in, ~30 kept — blur, tiny and
+  near-copies out, farthest-first), drawn by (1) **this Mac** — `mac/local_ai.py`: FLUX.2 klein 4B through **mflux
+  pinned at 0.24.0** in its own uv-made environment, a child process per batch, the model's photos as reference
+  images, settings by the Mac's memory (`plan`: 16 GB generates, **training needs 32 GB and isn't built**), every
+  flag taken from that version's parser; (2) Seedream / Nano Banana on Astria — Create with AI opened with the
+  photos as references (`Pane.ai_create(folder, settings)`); (3) a Flux LoRA trained on Astria
+  (`astria.Client.create_tune`, the iPhone's `createTune`). A person's model records consent; outputs are marked
+  AI-made. `AIModel.nanoBananaPro` / "Nano Banana Pro" added to both apps' lists — §6ai.
   Safe Finder's **menu bar** (`mac/menubar.py`) holds every command and its ⌘ shortcut (one binding per key —
   panes keep only Return/Space); the right-click menu groups a folder's tools under Download ▸ / AI ▸.
   Safe Finder's **Edit Metadata** (right-click ▸ Edit Metadata… / ⌘I; `mac/metadata_edit.py`, `mac/metadata_window.py`):

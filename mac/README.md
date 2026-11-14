@@ -1188,6 +1188,34 @@ model and the models' tune ids).
   pick them (Select All on a card), then **Save to “<last folder>”** or **Save to Folder…**; saved images get
   a ✓ and the prompt's date. Double-click an image for it full size with its prompt.
 
+### AI models — a person, pet, object or style from your photos (`ai_models_window.py`, `ai_models.py`, `local_ai.py`)
+
+Select 5 or more photos and right-click ▸ **Make AI Model from N Photos…** (or right-click a folder ▸ AI ▸
+**Make AI Model from Photos Inside…**; up to 500 are looked at). Safe Finder keeps the sharpest, most varied
+ones — about 30 for a person, pet or object, up to 100 for a style — and leaves out blurred shots, tiny ones
+and near-copies; it tells you how many of each. Give it a name and say what it is ("woman", "golden
+retriever", "ceramic mug"). For a person, tick that it's you or someone who has agreed. Your photos aren't
+changed; the model is a set of copies kept on the Mac.
+
+**AI ▸ AI Models…** (also in the Photos menu) lists them. Pick one, describe a picture, and choose what
+makes it:
+
+- **On this Mac — FLUX.2 klein 4B.** Private and free: nothing is uploaded, and after the one-time setup it
+  doesn't use the network. The model's first photos go in as reference images. The first Generate sets it
+  up, after telling you what it downloads (the engine, about 1 GB; the model, about 17 GB, of which about
+  4 GB is kept). It needs **uv** first — `curl -LsSf https://astral.sh/uv/install.sh | sh` in Terminal, or
+  `brew install uv`. What you get depends on the Mac's memory: with **16 GB**, pictures at 768 px by default,
+  two reference photos, and a few minutes each — close other apps while it runs. Pictures go into the "AI"
+  folder of the folder you're in, like any other creation, and are marked as AI-made.
+- **Seedream 5.0 Pro, Nano Banana Pro / 2.1 / 2 … (Astria).** Opens Create with AI with the model's photos
+  already attached as references (10 for Seedream 5.0 Pro, 14 for the others). These run on Astria, on your
+  account, and the photos are uploaded there, as with any Create with AI.
+- **Train on Astria…** makes a real trained model (a Flux LoRA) from the whole set, on Astria — a Mac needs
+  32 GB of memory to train one itself, so a 16 GB Mac can't. Astria charges for it and it takes a while;
+  when it's ready it's one more choice here and a tune in Create / Edit with AI, on the iPhone too.
+
+"Nano Banana Pro" is new in the model list of both apps.
+
 ### Download a SimpCity thread into a person's folder (`simpcity_downloader.py`)
 
 Right-click a person's folder (or the empty area inside it) ▸ **Download from SimpCity…**, paste the

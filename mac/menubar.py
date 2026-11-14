@@ -290,6 +290,12 @@ def install(win, sf) -> None:
         "The selected photo — or every selected photo, with the same prompt, the results back together")
     act(t, "Create with AI…", lambda: pane().ai_create(folder_target()), None, folder_target)
     act(t, "Astria.ai Browser…", lambda: pane().astria_browser(folder_target() or str(home / "Pictures")))
+    act(t, "Make AI Model…", lambda: pane().make_ai_model(
+        photos() if len(photos()) >= 5 else ([folder_target()] if folder_target() else photos())),
+        None, lambda: len(photos()) >= 5 or bool(folder_target()),
+        "A person, pet, object or style from 5–500 photos: the best varied ones are kept, and pictures of it can be "
+        "made on this Mac or with Seedream and Nano Banana")
+    act(t, "AI Models…", lambda: pane().open_ai_models(), None, None, "The models made so far, and pictures from them")
     t.addSeparator()
     act(t, "Download from SimpCity…", lambda: sf.open_simpcity(folder_target(), win), None, folder_target)
     act(t, "Get Reaction Scores", lambda: sf.open_simpcity(sf.simpcity_scores_folder(folder_target()), win,

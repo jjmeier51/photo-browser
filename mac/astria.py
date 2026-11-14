@@ -15,7 +15,7 @@ The requests are the iPhone's, field for field (feature-notes §1), so the two a
   each image is fetched the moment its address appears, the count waited for, and fewer accepted only once
   the list stopped growing for 20 polls; a second sweep re-reads the addresses (they're signed and expire)
   for any that failed. Every download is checked to be a picture before it counts.
-- **Models**: Seedream 5.0 Pro / 5.0 Lite / 4.5, Nano Banana 2.1 / 2, Flux — the same gallery tune ids
+- **Models**: Seedream 5.0 Pro / 5.0 Lite / 4.5, Nano Banana Pro / 2.1 / 2, Flux — the same gallery tune ids
   (overridable), the same reference limits (14; 10 for 5.0 Pro; none on Flux), 5.0 Pro pinned to 2K.
   **Tunes** (the account's own) combine as the iPhone does: one tune runs on its own base (or as a
   `<lora:id:1>` on Flux, with its "<token> <class>" trigger phrase); several stack as `<lora:…>` (Flux) or
@@ -71,6 +71,9 @@ MODELS: dict[str, tuple[int, int, str | None]] = {
     "Seedream 5.0 Pro": (5236038, 10, "2K"),
     "Seedream 5.0 Lite": (4160332, 14, None),
     "Seedream 4.5": (3691308, 14, None),
+    # Nano Banana Pro: the id is read off Astria's gallery page by position (the same reading gives the other
+    # five ids here correctly); Settings can override it, as for every model.
+    "Nano Banana Pro": (3618064, 14, None),
     "Nano Banana 2.1": (4180298, 14, None),
     "Nano Banana 2": (5850983, 14, None),
     "Flux": (DEFAULT_FLUX_TUNE, 0, None),
@@ -696,6 +699,50 @@ class Client:
                 failed += 1
                 last = e.message or last
         return mentions, reused, failed, last
+
+    def create_tune(self, title: str, name: str, token: str, images: list[bytes], branch: str | None = "flux1",
+                    base_tune: int | None = None, model_type: str = "lora") -> int:
+        """Starts training a model of the person's own from `images` (upload JPEGs) — the iPhone's `createTune`,
+        field for field: `title` is its name in the list, `name` the class ("woman", "dog", "style"), `token` the
+        made-up word prompts know the subject by. A Flux LoRA (`branch` "flux1", `model_type` "lora") is the kind
+        that can be put on a prompt afterwards. Returns the new tune's id at once; training runs on Astria
+        (`tune_ready`). Astria charges for a tune."""
+        if not self.configured:
+            raise AIError("not_configured")
+        if not images:
+            raise AIError("bad_image")
+        fields = {"tune[title]": title, "tune[name]": name, "tune[model_type]": model_type}
+        if branch:
+            fields["tune[branch]"] = branch
+        if base_tune:
+            fields["tune[base_tune_id]"] = str(base_tune)
+        if model_type != "faceid" and token:               # FaceID tunes reject a token
+            fields["tune[token]"] = token
+        body, boundary = _multipart(fields, [("tune[images][]", f"img{i}.jpg", "image/jpeg", d)
+                                             for i, d in enumerate(images)])
+        try:
+            r = self.t.send("POST", f"{BASE}/tunes",
+                            self._headers({"Content-Type": f"multipart/form-data; boundary={boundary}"}), body, 600)
+        except Transport.PreSend:
+            raise AIError("network")
+        except Transport.Ambiguous:
+            # The upload may have landed. Don't send it again (a second tune is a second charge): say so.
+            raise AIError("server", "the connection dropped while the photos were going up — look on astria.ai "
+                                    "before trying again, the model may already be training")
+        if not 200 <= r.status < 300:
+            raise AIError("server", _message(r.body))
+        try:
+            tid = _int(json.loads(r.body).get("id"))
+        except (ValueError, AttributeError):
+            tid = None
+        if tid is None:
+            raise AIError("bad_result")
+        return tid
+
+    def tune_ready(self, tid: int) -> bool | None:
+        """Whether the tune has finished training — None when Astria can't be asked just now."""
+        t = self._get_json(f"/tunes/{tid}", timeout=25)
+        return bool(t.get("trained_at")) if isinstance(t, dict) else None
 
     def create_reference_tune(self, data: bytes, title: str, base_tune: int) -> tuple[int, str]:
         fields = {"tune[title]": REFERENCE_TITLE + title, "tune[name]": REFERENCE_CLASS,
