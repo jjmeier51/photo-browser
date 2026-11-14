@@ -68,7 +68,7 @@ try:
                                QImage, QImageReader, QKeySequence, QLinearGradient, QMouseEvent, QPainter,
                                QPainterPath, QPalette,
                                QPen, QPixmap, QShortcut, QStandardItem, QStandardItemModel)
-    from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
+    from PySide6.QtWidgets import (QFileDialog, QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
                                    QCompleter, QFileIconProvider, QFileSystemModel, QFrame, QHBoxLayout,
                                    QHeaderView, QInputDialog, QLabel, QLayout, QLineEdit, QListView, QMainWindow,
                                    QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QRubberBand,
@@ -85,6 +85,8 @@ except ModuleNotFoundError:
 
 import airdrop_to_iphone as airdrop
 import batch_crop
+import search_query
+import themes
 import thumb_color
 import capcut
 import media_info
@@ -119,10 +121,19 @@ RAW_EXT = {".dng", ".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".rw2"}
 
 
 class Theme:
-    """Finder's light and dark looks. Colours are read by the painted parts (tiles, glyphs) and
-    turned into one stylesheet for the widgets."""
+    """The window's colours: Finder's light and dark looks, or — with a `look` (themes.py: the iPhone app's
+    themes, or a custom one) — colours worked out from its background and accent. Read by the painted parts
+    (tiles, glyphs) and turned into one stylesheet for the widgets."""
 
-    def __init__(self, dark: bool) -> None:
+    def __init__(self, dark: bool, look: "themes.Look | None" = None) -> None:
+        self.look = look
+        self.on_accent = "#FFFFFF"                     # text and marks drawn on the accent colour
+        self.content_css = ""                          # the file views' background, when it's a gradient
+        if look is not None:
+            self.dark = not look.light
+            for name, value in themes.derive(look).items():
+                setattr(self, name, value)
+            return
         self.dark = dark
         if dark:
             self.window, self.content, self.header = "#1E1E1E", "#1E1E1E", "#2B2B2D"
@@ -151,10 +162,14 @@ class Theme:
                         (QPalette.ColorRole.AlternateBase, self.zebra), (QPalette.ColorRole.Text, self.text),
                         (QPalette.ColorRole.WindowText, self.text), (QPalette.ColorRole.ButtonText, self.text),
                         (QPalette.ColorRole.Button, self.button), (QPalette.ColorRole.Highlight, self.accent_pill),
-                        (QPalette.ColorRole.HighlightedText, "#FFFFFF"), (QPalette.ColorRole.ToolTipBase, self.panel),
+                        (QPalette.ColorRole.HighlightedText, self.on_accent), (QPalette.ColorRole.ToolTipBase, self.panel),
                         (QPalette.ColorRole.ToolTipText, self.text), (QPalette.ColorRole.PlaceholderText, self.tertiary)):
-            p.setColor(role, QColor(c))
+            p.setColor(role, qc(c))
         return p
+
+    def font_families(self) -> list[str]:
+        """The theme's typeface as font families to try (none: the system's own)."""
+        return themes.TYPEFACES[self.look.typeface][1] if self.look is not None else []
 
     def stylesheet(self) -> str:
         t = self
@@ -170,7 +185,7 @@ class Theme:
         #PaneTitle {{ font-size: 14px; font-weight: 600; }}
         #RoleChip {{ font-size: 10px; font-weight: 700; letter-spacing: 0.6px; padding: 2px 7px;
                      border-radius: 8px; color: {t.secondary}; border: 1px solid {t.button_border}; }}
-        #RoleChip[active="true"] {{ color: white; background: {t.accent}; border-color: {t.accent}; }}
+        #RoleChip[active="true"] {{ color: {t.on_accent}; background: {t.accent}; border-color: {t.accent}; }}
         #PathBar, #StatusBar {{ background: {t.header}; border-top: 1px solid {t.border}; }}
         #StatusBar QLabel, #PathBar QLabel {{ color: {t.secondary}; font-size: 11px; }}
         #FsChip {{ font-size: 10px; font-weight: 600; color: {t.secondary}; border: 1px solid {t.button_border};
@@ -189,12 +204,12 @@ class Theme:
         QToolButton#Scope {{ border: 1px solid transparent; border-radius: 9px; padding: 1px 9px; font-size: 11px;
                              color: {t.text}; }}
         QToolButton#Scope:hover {{ background: {t.hover}; }}
-        QToolButton#Scope:checked {{ background: {t.accent_pill}; color: white; }}
+        QToolButton#Scope:checked {{ background: {t.accent_pill}; color: {t.on_accent}; }}
         #ScopeBar QComboBox {{ font-size: 11px; padding: 1px 6px; min-height: 18px; }}
-        QListView, QTreeView {{ background: {t.content}; border: none; outline: 0; }}
+        QListView, QTreeView {{ background: {t.content_css or t.content}; border: none; outline: 0; }}
         QAbstractItemView[dropActive="true"] {{ border: 2px solid {t.accent}; border-radius: 4px; }}
         QTreeView::item {{ height: 24px; border: none; }}
-        QTreeView::item:selected {{ background: {t.accent_pill}; color: white; }}
+        QTreeView::item:selected {{ background: {t.accent_pill}; color: {t.on_accent}; }}
         QTreeView::item:selected:!active {{ background: {t.select_inactive}; color: {t.text}; }}
         QHeaderView::section {{ background: {t.content}; color: {t.secondary}; border: none;
                                 border-bottom: 1px solid {t.border}; border-right: 1px solid {t.hairline};
@@ -215,7 +230,7 @@ class Theme:
                        padding: 5px 14px; min-height: 18px; }}
         QPushButton:hover {{ background: {t.hover}; }}
         QPushButton:disabled {{ color: {t.tertiary}; }}
-        QPushButton#Primary {{ background: {t.accent}; color: white; border: 1px solid {t.accent}; font-weight: 600; }}
+        QPushButton#Primary {{ background: {t.accent}; color: {t.on_accent}; border: 1px solid {t.accent}; font-weight: 600; }}
         QPushButton#Primary:hover {{ background: {t.accent_pill}; }}
         QPushButton#Primary:disabled {{ background: {t.select_inactive}; border-color: {t.select_inactive};
                                         color: {"#8E8E93" if t.dark else "#FFFFFF"}; }}
@@ -223,7 +238,7 @@ class Theme:
         QPushButton#SegLeft, QPushButton#SegRight {{ padding: 4px 18px; }}
         QPushButton#SegLeft {{ border-top-right-radius: 0; border-bottom-right-radius: 0; }}
         QPushButton#SegRight {{ border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: none; }}
-        QPushButton#SegLeft:checked, QPushButton#SegRight:checked {{ background: {t.accent}; color: white;
+        QPushButton#SegLeft:checked, QPushButton#SegRight:checked {{ background: {t.accent}; color: {t.on_accent};
                                                                      border-color: {t.accent}; }}
         #TransferPanel {{ background: {t.panel}; border-top: 1px solid {t.border}; }}
         #TransferTitle {{ font-weight: 600; }}
@@ -238,12 +253,12 @@ class Theme:
         QCheckBox {{ spacing: 6px; }}
         QMenu {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 8px; padding: 4px; }}
         QMenu::item {{ padding: 4px 18px; border-radius: 4px; }}
-        QMenu::item:selected {{ background: {t.accent}; color: white; }}
+        QMenu::item:selected {{ background: {t.accent}; color: {t.on_accent}; }}
         QMenu::separator {{ height: 1px; background: {t.border}; margin: 4px 6px; }}
         QToolButton#TagChip {{ border: 1px solid {t.button_border}; border-radius: 11px; padding: 3px 10px 3px 7px;
                                background: {t.button}; font-size: 12px; }}
         QToolButton#TagChip:hover {{ background: {t.hover}; }}
-        QToolButton#TagChip[state="on"] {{ background: {t.accent}; border-color: {t.accent}; color: white; }}
+        QToolButton#TagChip[state="on"] {{ background: {t.accent}; border-color: {t.accent}; color: {t.on_accent}; }}
         QToolButton#TagChip[state="part"] {{ border: 1px solid {t.accent}; color: {t.accent}; }}
         QLineEdit#TagField {{ background: {t.content}; border: 1px solid {t.button_border}; border-radius: 7px;
                               padding: 5px 8px; font-size: 13px; }}
@@ -1522,7 +1537,8 @@ class GridDelegate(QStyledItemDelegate):
         path = model.filePath(index)
         is_dir = model.isDir(index)
         r = option.rect
-        s = self.pane.icon_px
+        s = self.pane.picture_px()
+        tight = self.pane.tight()
         pad, inset = self.pane.tile_pad(), self.pane.tile_inset()
         icon_rect = QRect(r.x() + (r.width() - s) // 2, r.y() + pad, s, s)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
@@ -1539,11 +1555,16 @@ class GridDelegate(QStyledItemDelegate):
             p.setPen(QPen(QColor(THEME.accent), 2))
             p.setBrush(QColor(THEME.accent).lighter(170) if not THEME.dark else QColor(10, 132, 255, 50))
             p.drawRoundedRect(QRectF(icon_rect.adjusted(-inset, -inset, inset, inset)), 7, 7)
-        thumb = None
-        if not is_dir and kind_of(path) != "other" and THUMBS is not None:
+        thumb = cover = None
+        if is_dir:
+            if self.pane.folder_covers:
+                cover = folder_picture(path, model.lastModified(index).toSecsSinceEpoch())
+        elif kind_of(path) != "other" and THUMBS is not None:
             thumb = THUMBS.get(path, model.lastModified(index).toSecsSinceEpoch(), s)
-        if thumb is not None:
-            shown = self._draw_thumb(p, thumb, icon_rect, kind_of(path) == "video")
+        if cover is not None:
+            shown = self._draw_cover(p, cover, icon_rect, model.fileIcon(index), tight)
+        elif thumb is not None:
+            shown = self._draw_thumb(p, thumb, icon_rect, kind_of(path) == "video", fill=tight)
         else:
             shown = icon_rect.adjusted(2, 2, -2, -2)
             model.fileIcon(index).paint(p, shown)
@@ -1567,7 +1588,7 @@ class GridDelegate(QStyledItemDelegate):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(THEME.accent_pill if focused else THEME.select_inactive))
             p.drawRoundedRect(pill, 5, 5)
-        p.setPen(QColor("white") if (selected and focused) else QColor(THEME.text))
+        p.setPen(QColor(THEME.on_accent) if (selected and focused) else QColor(THEME.text))
         for i, line in enumerate(lines):
             p.drawText(QRect(r.x() + inset, top + i * lh, width, lh), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, line)
         p.restore()
@@ -1633,18 +1654,51 @@ class GridDelegate(QStyledItemDelegate):
         p.restore()
 
     @staticmethod
-    def _draw_thumb(p: QPainter, pm: QPixmap, rect: QRect, video: bool) -> QRect:
-        size = pm.size().scaled(rect.size() - QSize(6, 6), Qt.AspectRatioMode.KeepAspectRatio)
-        target = QRect(rect.x() + (rect.width() - size.width()) // 2, rect.y() + (rect.height() - size.height()) // 2,
-                       size.width(), size.height())
+    def _draw_cover(p: QPainter, pm: QPixmap, rect: QRect, icon: QIcon, tight: bool) -> QRect:
+        """A folder's picture: filling a rounded square, the folder's own icon small in a corner — still a
+        folder at a glance, as the iPhone's folder tiles are."""
+        target = rect if tight else rect.adjusted(3, 3, -3, -3)
+        radius = 2.5 if tight else min(10.0, target.width() * 0.09)
+        if not tight:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 40))
+            p.drawRoundedRect(QRectF(target.adjusted(-1, 0, 1, 2)), radius, radius)
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(target), radius, radius)
+        p.save()
+        p.setClipPath(clip)
+        PhotoDelegate.draw_cover(p, pm, target)
+        p.restore()
+        p.setPen(QPen(QColor(255, 255, 255, 60 if THEME.dark else 200), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(target).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+        d = max(16, min(34, target.width() // 4))
+        badge = QRect(target.x() + 4, target.bottom() - d - 2, d, d)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(0, 0, 0, 40))
-        p.drawRoundedRect(QRectF(target.adjusted(-1, 0, 1, 2)), 3, 3)
+        p.setBrush(QColor(0, 0, 0, 90))
+        p.drawRoundedRect(QRectF(badge.adjusted(-2, -1, 2, 1)), 5, 5)
+        icon.paint(p, badge)
+        return target
+
+    @staticmethod
+    def _draw_thumb(p: QPainter, pm: QPixmap, rect: QRect, video: bool, fill: bool = False) -> QRect:
+        if fill:                                           # tight tiles: the picture fills its square (cropped)
+            target = rect
+        else:
+            size = pm.size().scaled(rect.size() - QSize(6, 6), Qt.AspectRatioMode.KeepAspectRatio)
+            target = QRect(rect.x() + (rect.width() - size.width()) // 2,
+                           rect.y() + (rect.height() - size.height()) // 2, size.width(), size.height())
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 40))
+            p.drawRoundedRect(QRectF(target.adjusted(-1, 0, 1, 2)), 3, 3)
         clip = QPainterPath()
         clip.addRoundedRect(QRectF(target), 2.5, 2.5)
         p.save()
         p.setClipPath(clip)
-        p.drawPixmap(target, pm)
+        if fill:
+            PhotoDelegate.draw_cover(p, pm, target)
+        else:
+            p.drawPixmap(target, pm)
         p.restore()
         p.setPen(QPen(QColor(255, 255, 255, 60 if THEME.dark else 200), 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -1711,27 +1765,36 @@ def _read_duration(key) -> float | None:
 
 
 def _read_cover(key) -> tuple[str, float] | None:
-    """The first photo or video in a folder (by name, hidden files left out), with its modified time."""
-    folder = key[0]
-    best: str | None = None
-    try:
-        with os.scandir(folder) as it:
-            for n, e in enumerate(it):
-                if n > 5000:
-                    break
-                if e.name.startswith(".") or kind_of(e.name) == "other":
-                    continue
-                if best is None or natural_key(e.name) < natural_key(best):
-                    best = e.name
-    except OSError:
+    """The first photo or video in a folder (by name, hidden files left out) — in its subfolders when it holds
+    only folders — with its modified time."""
+    import folder_covers
+    path = folder_covers.first_media(key[0], kind_of, natural_key)
+    if path is None:
         return None
-    if best is None:
-        return None
-    path = os.path.join(folder, best)
     try:
         return path, os.stat(path).st_mtime
     except OSError:
         return None
+
+
+def folder_picture(path: str, mtime: int) -> QPixmap | None:
+    """What a folder shows instead of a plain folder icon: the cover chosen for it — here or in the iPhone app
+    (folder_covers.py) — else the first photo or video in it. None while it's being made, or when the folder
+    holds no pictures. `mtime`: the folder's own, so a folder that gains a first photo gets its picture."""
+    if THUMBS is None:
+        return None
+    import folder_covers
+    cover = folder_covers.default().cover(path)
+    if cover is None:
+        cover = facts()[1].get((path, mtime))
+    return THUMBS.get(cover[0], cover[1]) if cover else None
+
+
+def covers_changed() -> None:
+    """A folder's cover was set or removed: every pane shows it."""
+    for w in QApplication.topLevelWidgets():
+        for pane in w.findChildren(Pane):
+            pane.grid.viewport().update()
 
 
 DURATIONS: _Facts | None = None
@@ -1749,8 +1812,8 @@ class PhotoDelegate(QStyledItemDelegate):
     """The Photos view — the iPhone app's grid: square tiles a hair apart, each picture cropped to fill its
     square; a video's length bottom left and its play badge bottom right; tags top right (the reaction score
     top left while sorting by it); a folder shows the first photo or video in it, its name across the bottom.
-    A selected tile is lightened and carries the iPhone's blue check. `bodies` as GridDelegate's (the tile)."""
-    GAP = 2
+    A selected tile is lightened and carries the iPhone's blue check. `bodies` as GridDelegate's (the tile).
+    The space between tiles is the pane's (`photo_gap`, the spacing slider: 0–12, 2 as on the iPhone)."""
 
     def __init__(self, pane: "Pane") -> None:
         super().__init__(pane)
@@ -1772,9 +1835,10 @@ class PhotoDelegate(QStyledItemDelegate):
         path = model.filePath(index)
         is_dir = model.isDir(index)
         kind = "folder" if is_dir else kind_of(path)
-        r = option.rect.adjusted(0, 0, -self.GAP, -self.GAP)
+        gap = self.pane.photo_gap
+        r = option.rect.adjusted(0, 0, -gap, -gap)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        durations, covers = facts()
+        durations, _covers = facts()
         p.save()
         p.setClipRect(option.rect)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -1783,12 +1847,8 @@ class PhotoDelegate(QStyledItemDelegate):
         pic = None
         if THUMBS is not None:
             if is_dir:
-                try:
-                    cover = covers.get((path, os.stat(path).st_mtime))
-                except OSError:
-                    cover = None
-                if cover:
-                    pic = THUMBS.get(cover[0], cover[1])
+                if self.pane.folder_covers:
+                    pic = folder_picture(path, model.lastModified(index).toSecsSinceEpoch())
             elif kind != "other":
                 pic = THUMBS.get(path, model.lastModified(index).toSecsSinceEpoch())
         if pic is not None:
@@ -1869,7 +1929,7 @@ class PhotoDelegate(QStyledItemDelegate):
             p.setPen(QPen(QColor("white"), 1.6))
             p.setBrush(QColor(THEME.accent))
             p.drawEllipse(ring)
-            p.setPen(QPen(QColor("white"), max(1.6, d / 10), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+            p.setPen(QPen(QColor(THEME.on_accent), max(1.6, d / 10), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                           Qt.PenJoinStyle.RoundJoin))
             p.drawPolyline([QPointF(ring.left() + d * 0.28, ring.top() + d * 0.52),
                             QPointF(ring.left() + d * 0.44, ring.top() + d * 0.68),
@@ -1892,7 +1952,7 @@ class ListDelegate(QStyledItemDelegate):
             p.setBrush(QColor(THEME.accent))
             p.drawRect(option.rect)
             p.restore()
-            option.palette.setColor(QPalette.ColorRole.Text, QColor("white"))
+            option.palette.setColor(QPalette.ColorRole.Text, QColor(THEME.on_accent))
         tags = []
         score = None
         if index.column() == 0:
@@ -1956,7 +2016,7 @@ class ListDelegate(QStyledItemDelegate):
                 p.setBrush(QColor(tag_color(tag)))
                 p.drawEllipse(QRectF(x + 6, y + (h - d) / 2, d, d))
                 tx = x + 6 + d + 4
-            p.setPen(QColor("white") if selected else QColor(THEME.text))
+            p.setPen(QColor(THEME.on_accent) if selected else QColor(THEME.text))
             p.drawText(QRectF(tx, y, w - (tx - x), h), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
             x += w + 4
         p.restore()
@@ -2191,7 +2251,7 @@ class GridView(BoxSelect, DropMixin, QListView):
     def _column(self, idx: QModelIndex) -> QRect:
         """A tile's picture-and-name column: the thumbnail's square and the two lines under it."""
         r = self.visualRect(idx)
-        s, pad = self.pane.icon_px, self.pane.tile_pad()
+        s, pad = self.pane.picture_px(), self.pane.tile_pad()
         return QRect(r.x() + (r.width() - s) // 2, r.y() + pad, s, r.height() - 2 * pad)
 
     def on_body(self, idx: QModelIndex, pos: QPoint) -> bool:
@@ -2212,7 +2272,7 @@ class GridView(BoxSelect, DropMixin, QListView):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        if getattr(self.pane, "photos", False):
+        if getattr(self.pane, "photos", False) or (hasattr(self.pane, "gap") and self.pane.tight()):
             self.pane._relayout()                     # whole columns across the width, as on the iPhone
 
 
@@ -2472,39 +2532,100 @@ def file_times(path: str) -> tuple[float, float]:
 
 
 class Query:
-    """What a search looks for: words that must all appear in the name, extensions (".heic",
-    "*.mov", "ext:mp4,mov"), a kind ("kind:video", or the Kind menu) and a size ("size:>100mb",
-    "size:<1gb", "size:0"). All of it must match."""
+    """What a search looks for (the field's language is described in search_query.py): words and "phrases"
+    that must all be in the name or among the file's tags, -words that mustn't, tags (tag:beach, #beach),
+    labels (is:favorite, is:ai, is:tagged, is:untagged), a folder it's inside (in:seligman), a modified date
+    (date:2020-06, before:2021, after:2020), extensions (".heic", "*.mov", "ext:mp4,mov"), a kind
+    ("kind:video", or the Kind menu) and a size ("size:>100mb", "size:<1gb", "size:0"). All of it must match.
+    Names are matched without regard to case, accents or separators ("img 1003" finds IMG_1003.jpg)."""
 
     def __init__(self, text: str = "", kind: str = "") -> None:
         self.text = text.strip()
-        self.words: list[str] = []
+        self.words: list[str] = []                             # folded: each in the name, or a tag
+        self.without: list[str] = []                           # folded: none of these
+        self.tags: list[tuple[str, bool]] = []                 # (tag, "starts with" rather than "is")
+        self.without_tags: list[tuple[str, bool]] = []
+        self.states: list[tuple[str, bool]] = []               # ("favorite" | "ai" | "tagged", wanted)
+        self.inside: list[str] = []                            # folded: in the name of a folder it's in
+        self.dates: tuple[float | None, float | None] | None = None      # modified: [from, before)
         self.exts: set[str] = set()
         self.size: tuple[int | None, int | None] | None = None   # (min, max) bytes, files only
         self.menu_kind = kind if kind in KIND_EXT else ""      # the Kind menu's choice, as such
         self.kind = self.menu_kind                              # …which "kind:" in the text overrides
-        for tok in self.text.split():
-            low = tok.lower()
-            if low.startswith("kind:"):
-                if low[5:] in KIND_EXT:
-                    self.kind = low[5:]
-            elif low.startswith("size:"):
-                self.size = size_bounds(low[5:])
-            elif low.startswith("ext:"):
-                self.exts |= {"." + e.strip(". ") for e in low[4:].split(",") if e.strip(". ")}
-            elif low.startswith("*.") and len(low) > 2:
+        self._tag_words: set[str] | None = None                # of `words`/`without`: those some tag contains
+        for key, value, neg in search_query.tokens(self.text):
+            low = value.lower()
+            if key == "kind":
+                if low in KIND_EXT:
+                    self.kind = low
+            elif key == "size":
+                self.size = size_bounds(low)
+            elif key == "ext":
+                self.exts |= {"." + e.strip(". ") for e in low.split(",") if e.strip(". ")}
+            elif key == "tag":
+                starts = low.endswith("*")
+                name = search_query.fold(shared_tags.normalized(low.rstrip("*")))
+                if name:
+                    (self.without_tags if neg else self.tags).append((name, starts))
+            elif key == "is":
+                state = {"favorite": "favorite", "favourite": "favorite", "fav": "favorite", "favorites": "favorite",
+                         "ai": "ai", "toai": "ai", "tagged": "tagged", "untagged": "untagged"}.get(low)
+                if state == "untagged":
+                    state, neg = "tagged", not neg
+                if state:
+                    self.states.append((state, not neg))
+            elif key == "in":
+                self.inside.append(search_query.fold(value))
+            elif key in ("date", "before", "after", "modified"):
+                span = search_query.date_range(low)
+                if span is not None:
+                    lo, hi = self.dates or (None, None)
+                    if key == "before":
+                        hi = span[0] if hi is None else min(hi, span[0])
+                    elif key == "after":
+                        lo = span[1] if lo is None else max(lo, span[1])
+                    else:
+                        lo, hi = span
+                    self.dates = (lo, hi)
+            elif key:                                          # "word:word" that isn't one of ours: as written
+                (self.without if neg else self.words).append(search_query.fold(f"{key}:{value}"))
+            elif low.startswith("#") and len(low) > 1 and shared_tags.normalized(low[1:]):
+                (self.without_tags if neg else self.tags).append(
+                    (search_query.fold(shared_tags.normalized(low[1:])), False))
+            elif not neg and low.startswith("*.") and len(low) > 2:
                 self.exts.add(low[1:])
-            elif low.startswith(".") and len(low) > 1 and "." not in low[1:]:
+            elif not neg and low.startswith(".") and len(low) > 1 and "." not in low[1:] and " " not in low:
                 self.exts.add(low)
             else:
-                self.words.append(low)
+                (self.without if neg else self.words).append(search_query.fold(value))
 
     def empty(self) -> bool:
-        return not (self.words or self.exts or self.kind or self.size)
+        return not (self.words or self.without or self.tags or self.without_tags or self.states or self.inside
+                    or self.dates or self.exts or self.kind or self.size)
 
     def wants_folders(self) -> bool:
-        """A search by name finds folders too; one by extension, kind or size is about files."""
-        return bool(self.words) and not self.exts and not self.kind and not self.size
+        """A search by name finds folders too; one by extension, kind, size or date is about files."""
+        return bool(self.words or self.tags or self.states) and not (self.exts or self.kind or self.size or self.dates)
+
+    def needs_tags(self) -> bool:
+        """Whether a file's tags or labels have to be looked at (they live in the drive's tag file, by path)."""
+        return bool(self.tags or self.without_tags or self.states or self._words_in_tags())
+
+    def _words_in_tags(self) -> set[str]:
+        """The plain words that some tag in use contains — only those can match a file by its tags, so a
+        search for a word no tag has never looks at the tags at all."""
+        if self._tag_words is None:
+            try:
+                known = [search_query.fold(name) for name, _n in tag_store().counts()]
+            except Exception:  # noqa: BLE001 — no tag store: names only
+                known = []
+            self._tag_words = {w for w in self.words + self.without if any(w in t for t in known)}
+        return self._tag_words
+
+    def spotlight_ok(self) -> bool:
+        """Whether Spotlight can narrow this search (it knows names, extensions and sizes — not the app's tags,
+        and a search with none of the first would have it list every file on the Mac)."""
+        return bool(self.words or self.exts or self.kind or self.size) and not self._words_in_tags()
 
     def matches_size(self, size: int) -> bool:
         if self.size is None:
@@ -2512,14 +2633,50 @@ class Query:
         lo, hi = self.size
         return (lo is None or size >= lo) and (hi is None or size <= hi)
 
-    def matches(self, name: str) -> bool:
-        low = name.lower()
-        ext = os.path.splitext(low)[1]
+    def matches_date(self, mtime: float) -> bool:
+        if self.dates is None:
+            return True
+        lo, hi = self.dates
+        return (lo is None or mtime >= lo) and (hi is None or mtime < hi)
+
+    def matches(self, name: str, path: str | None = None, parents: str = "") -> bool:
+        """Whether an item called `name` is wanted. `path` (its full path) lets its tags and labels count;
+        `parents` is the folders it's in below where the search started ("Trip/Seligman"), for `in:`."""
+        ext = os.path.splitext(name)[1].lower()
         if self.exts and ext not in self.exts:
             return False
         if self.kind and ext not in KIND_EXT[self.kind]:
             return False
-        return all(w in low for w in self.words)
+        if self.inside:
+            where = search_query.forms(parents)
+            if not all(search_query.has(w, where) for w in self.inside):
+                return False
+        named = search_query.forms(name) if (self.words or self.without) else ("", "", "")
+        missing = [w for w in self.words if not search_query.has(w, named)]
+        if any(search_query.has(w, named) for w in self.without):
+            return False
+        look = path is not None and (self.tags or self.without_tags or self.states
+                                     or (missing and all(w in self._words_in_tags() for w in missing))
+                                     or any(w in self._words_in_tags() for w in self.without))
+        if not look:
+            return not missing and not self.tags and not any(want for _s, want in self.states)
+        store = tag_store()
+        tags = [search_query.fold(t) for t in store.tags(path, fresh=False)]
+        if any(not any(w in t for t in tags) for w in missing):
+            return False
+        if any(any(w in t for t in tags) for w in self.without):
+            return False
+
+        def carries(tag: str, starts: bool) -> bool:
+            return any(t.startswith(tag) if starts else t == tag for t in tags)
+        if not all(carries(t, s) for t, s in self.tags) or any(carries(t, s) for t, s in self.without_tags):
+            return False
+        if self.states:
+            labels = store.labels(path, fresh=False)
+            for state, want in self.states:
+                if (bool(tags) if state == "tagged" else state in labels) != want:
+                    return False
+        return True
 
     def label(self) -> str:
         bits = [self.text] if self.text else []
@@ -2533,7 +2690,7 @@ class Query:
         """The same search as a Spotlight (mdfind) query; what comes back is checked with `matches` too."""
         def quote(s: str) -> str:
             return s.replace("\\", "\\\\").replace('"', '\\"').replace("*", "\\*").replace("?", "\\?")
-        parts = [f'kMDItemFSName == "*{quote(w)}*"cd' for w in self.words]
+        parts = [f'kMDItemFSName == "*{quote(w)}*"cd' for w in self.words if " " not in w]
         exts = self.exts & KIND_EXT[self.kind] if (self.exts and self.kind) else self.exts or (KIND_EXT[self.kind] if self.kind else set())
         if exts:
             parts.append("(" + " || ".join(f'kMDItemFSName == "*{e}"c' for e in sorted(exts)) + ")")
@@ -2598,48 +2755,89 @@ class FileScanner:
         return (top and name in _SKIP_TOP) or name in _SKIP_ANYWHERE \
             or os.path.splitext(name)[1].lower() in _BUNDLE_EXT
 
+    def _folders(self, root: str):
+        """Every folder under `root` as (folder, is it the root, [folder names], [file names]) — from the names
+        kept by the last search of it (search_query.NAMES) when they're fresh, else read from the drive and
+        kept for the next one."""
+        kept = search_query.NAMES.get(root)
+        if kept is not None:
+            yield from kept
+            return
+        try:
+            stack: list[tuple[str, int, bool]] = [(root, os.stat(root).st_dev, True)]   # folder, its volume, the root?
+        except OSError:
+            return
+        listing: list[tuple[str, bool, list[str], list[str]]] = []
+        entries = 0
+        while stack:
+            if self._stop.is_set():
+                return                                         # half a tree isn't kept
+            folder, dev, top = stack.pop()
+            dirs: list[str] = []
+            files: list[str] = []
+            try:
+                with os.scandir(folder) as it:
+                    for e in it:
+                        name = e.name
+                        if name.startswith("."):
+                            continue
+                        try:
+                            if e.is_dir(follow_symlinks=False):
+                                if self._skip_dir(name, top):
+                                    continue
+                                if e.stat(follow_symlinks=False).st_dev != dev:    # another volume mounted here
+                                    continue
+                                dirs.append(name)
+                            elif e.is_file(follow_symlinks=False):
+                                files.append(name)
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+            record = (folder, top, dirs, files)
+            entries += len(dirs) + len(files)
+            if entries <= search_query.NAMES.LIMIT:
+                listing.append(record)
+            else:
+                listing = []
+            stack += [(os.path.join(folder, d), dev, False) for d in dirs]
+            yield record
+        search_query.NAMES.put(root, listing, entries)
+
     def _walk(self) -> int:
         batch: list[tuple[str, int, float, bool]] = []
         flushed = time.monotonic()
         total = 0
-        stack: list[tuple[str, int, bool]] = []            # folder, its volume, is it a root
-        for root in self.roots:
-            try:
-                stack.append((str(root), os.stat(root).st_dev, True))
-            except OSError:
-                continue
-        while stack and not self._stop.is_set():
-            folder, dev, top = stack.pop()
-            try:
-                with os.scandir(folder) as it:
-                    entries = list(it)
-            except OSError:
-                continue
-            for e in entries:
-                name = e.name
-                if name.startswith("."):
-                    continue
-                try:
-                    if e.is_dir(follow_symlinks=False):
-                        if self._skip_dir(name, top):
-                            continue
-                        st = e.stat(follow_symlinks=False)
-                        if st.st_dev != dev:                           # another volume mounted here
-                            continue
-                        if self.folders and self.query.matches(name):
-                            batch.append((e.path, 0, st.st_mtime, True))
-                        stack.append((e.path, dev, False))
-                    elif e.is_file(follow_symlinks=False) and self.query.matches(name):
-                        st = e.stat(follow_symlinks=False)
-                        if not self.query.matches_size(st.st_size):
-                            continue
-                        batch.append((e.path, st.st_size, st.st_mtime, False))
-                except OSError:
-                    continue
-            if batch and (len(batch) >= 250 or time.monotonic() - flushed > 0.4):
-                total += len(batch)
-                self.signals.found.emit(batch)
-                batch, flushed = [], time.monotonic()
+        q = self.query
+        tagged = q.needs_tags()
+        for root in (str(r) for r in self.roots):
+            cut = len(root.rstrip("/")) + 1
+            for folder, _top, dirs, files in self._folders(root):
+                if self._stop.is_set():
+                    break
+                parents = folder[cut:]
+                if self.folders:
+                    for name in dirs:
+                        path = os.path.join(folder, name)
+                        if q.matches(name, path if tagged else None, parents):
+                            try:
+                                batch.append((path, 0, os.stat(path).st_mtime, True))
+                            except OSError:
+                                pass
+                for name in files:
+                    path = os.path.join(folder, name)
+                    if not q.matches(name, path if tagged else None, parents):
+                        continue
+                    try:
+                        st = os.stat(path, follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if q.matches_size(st.st_size) and q.matches_date(st.st_mtime):
+                        batch.append((path, st.st_size, st.st_mtime, False))
+                if batch and (len(batch) >= 250 or time.monotonic() - flushed > 0.4):
+                    total += len(batch)
+                    self.signals.found.emit(batch)
+                    batch, flushed = [], time.monotonic()
         if batch and not self._stop.is_set():
             total += len(batch)
             self.signals.found.emit(batch)
@@ -2671,7 +2869,7 @@ class FileScanner:
                 if not path or self._skip_path(path, str(root)):
                     continue
                 name = os.path.basename(path)
-                if not self.query.matches(name):
+                if not self.query.matches(name, path, os.path.dirname(path)[len(str(root).rstrip("/")) + 1:]):
                     continue
                 try:
                     st = os.lstat(path)
@@ -2682,7 +2880,7 @@ class FileScanner:
                 is_dir = stat.S_ISDIR(st.st_mode)
                 if is_dir and not self.folders:
                     continue
-                if not is_dir and not self.query.matches_size(st.st_size):
+                if not is_dir and not (self.query.matches_size(st.st_size) and self.query.matches_date(st.st_mtime)):
                     continue
                 batch.append((path, 0 if is_dir else st.st_size, st.st_mtime, is_dir))
                 if len(batch) >= 250 or time.monotonic() - flushed > 0.4:
@@ -3281,8 +3479,22 @@ class FolderViews:
         self.views[loc] = v
         while len(self.views) > self.LIMIT:
             self.views.popitem(last=False)
+        self._save()
+
+    def _save(self) -> None:
         self.settings.setValue("views", json.dumps({k: list(x) for k, x in self.views.items()
                                                     if not k.startswith(SEARCH)}))
+
+    def set_all(self, mode: str) -> int:
+        """Every remembered place is shown as `mode` (its sorting kept). Returns how many changed."""
+        changed = 0
+        for loc, v in list(self.views.items()):
+            if v[0] != mode:
+                self.views[loc] = (mode, v[1], v[2])
+                changed += 1
+        if changed:
+            self._save()
+        return changed
 
 
 class Pane(QWidget):
@@ -3311,6 +3523,10 @@ class Pane(QWidget):
         self.drop_target: str | None = None
         self.icon_px = int(settings.value(f"{role}/icon", 84))
         self.gap = int(settings.value(f"{role}/gap", 34))      # room around each tile; 2 packs them edge to edge
+        self.photo_gap = max(0, min(12, int(settings.value(f"{role}/photoGap", 2))))   # the Photos view's, in pixels
+        self.folder_covers = str(settings.value("folderCovers/show", "true")).lower() != "false"
+        import folder_covers
+        folder_covers.default(settings)
         self.active = False
         self.searches: dict[str, SearchRun] = {}               # location → what was searched, and where
         self._search_n = 0
@@ -3389,10 +3605,23 @@ class Pane(QWidget):
         h.addWidget(self.title, 1)
         self.search = QLineEdit(objectName="Search")
         self.search.setPlaceholderText("Search")
-        self.search.setToolTip("Words in the name, an extension (.heic, *.mov) or a kind (kind:video) — "
-                               "press Return. ⌘F from anywhere.")
+        self.search.setToolTip(
+            "Words in the name or tags — press Return (⌘F from anywhere). Then the results follow as you type.\n"
+            "“route 66” together · -blurry not this · tag:beach or #beach · is:favorite · is:ai · is:untagged\n"
+            "in:seligman inside such a folder · date:2020-06 · before:2021 · after:2020 · date:week\n"
+            ".heic · *.mov · kind:video · size:>100mb\n"
+            "Case, accents and separators don't matter: img 1003 finds IMG_1003.jpg")
+        self._recent = QStringListModel(self._recent_searches(), self)
+        completer = QCompleter(self._recent, self)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.search.setCompleter(completer)
+        self._live = QTimer(self)                          # the results follow the typing, a moment behind
+        self._live.setSingleShot(True)
+        self._live.setInterval(280)
+        self._live.timeout.connect(self._live_search)
         self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(150)
+        self.search.setFixedWidth(190)
         self.search.returnPressed.connect(self.run_search)
         self.search.textChanged.connect(self._search_text_changed)
         self.search.installEventFilter(self)
@@ -3414,8 +3643,9 @@ class Pane(QWidget):
         h.addSpacing(6)
         self.grid_btn = self._tool("grid", "as Icons (⌘1)", lambda: self.set_mode("grid"), "Seg")
         self.list_btn = self._tool("list", "as List (⌘2)", lambda: self.set_mode("list"), "Seg")
-        self.photos_btn = self._tool("photos", "as Photos (⌘3) — the iPhone's grid: square tiles, video lengths; "
-                                     "double-click opens the viewer", lambda: self.set_mode("photos"), "Seg")
+        self.photos_btn = self._tool("photos", "as Photo Grid (⌘3) — the iPhone's grid: square pictures edge to "
+                                     "edge at any size, video lengths; double-click opens the viewer",
+                                     lambda: self.set_mode("photos"), "Seg")
         for b in (self.grid_btn, self.list_btn, self.photos_btn):
             b.setCheckable(True)
         group = QButtonGroup(self)
@@ -3452,6 +3682,15 @@ class Pane(QWidget):
         scopes.addButton(self.scope_folder)
         (self.scope_volume if settings.value(f"{role}/scope", "folder") == "volume" else self.scope_folder).setChecked(True)
         sb.addStretch(1)
+        self.add_filter_btn = QToolButton(objectName="Scope")
+        self.add_filter_btn.setText("Add Filter")
+        self.add_filter_btn.setToolTip("Narrow the search: a tag, Favorites, a date, a folder, a word to leave out")
+        self.add_filter_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.add_filter_btn.setAutoRaise(True)
+        filter_menu = QMenu(self.add_filter_btn)
+        filter_menu.aboutToShow.connect(lambda m=filter_menu: self._fill_search_filters(m))
+        self.add_filter_btn.setMenu(filter_menu)
+        sb.addWidget(self.add_filter_btn)
         sb.addWidget(QLabel("Kind:"))
         self.kind_box = QComboBox()
         for key, label in KIND_LABELS:
@@ -3517,7 +3756,6 @@ class Pane(QWidget):
         self.gap_slider.setRange(2, 48)
         self.gap_slider.setValue(self.gap)
         self.gap_slider.setFixedWidth(64)
-        self.gap_slider.setToolTip("Space between thumbnails")
         self.gap_slider.valueChanged.connect(self.set_gap)
         self.size_icon = QLabel()
         self.slider = QSlider(Qt.Orientation.Horizontal)
@@ -3885,7 +4123,8 @@ class Pane(QWidget):
         dpr = self.devicePixelRatioF() or 1.0
         for label, name in ((self.gap_icon, "spacing"), (self.size_icon, "size")):
             label.setPixmap(glyph(name, THEME.tertiary, 14).pixmap(QSize(14, 14), dpr))
-            label.setToolTip("Space between thumbnails" if name == "spacing" else "Thumbnail size")
+            if name == "size":
+                label.setToolTip("Thumbnail size")
 
     def _shortcuts(self) -> None:
         ctx = Qt.ShortcutContext.WidgetWithChildrenShortcut
@@ -3944,20 +4183,47 @@ class Pane(QWidget):
         """How far the selection backdrop reaches past the thumbnail, and the name's side margin."""
         return max(1, min(5, self.gap // 4))
 
+    TIGHT_GAP = 8          # icon view: at this spacing or less it's a true grid (see `tight`)
+
+    def tight(self) -> bool:
+        """Icon view with the spacing slider at its low end: a true grid with names — every picture cropped to
+        fill its square, the squares `gap` apart and reaching both edges of the view at any size."""
+        return not self.photos and self.gap <= self.TIGHT_GAP
+
+    def _columns(self, want: int) -> int:
+        """The width of one of the whole columns that fill the view, each about `want` wide — so the tiles
+        reach both edges, as on the iPhone. (The grid keeps its scroll bar's strip in these two looks —
+        `_relayout` — since a list view otherwise lays out a scroll bar's width short of the edge, which left
+        a blank column on the right.)"""
+        w = max(1, self.grid.viewport().width())
+        cols = max(1, round(w / max(want, 40)))
+        return max(40, w // cols)
+
+    def picture_px(self) -> int:
+        """The side of the square a tile's picture is drawn in."""
+        if self.photos:
+            return self._columns(self.icon_px) - self.photo_gap
+        if self.tight():
+            return self._columns(self.icon_px + self.gap) - self.gap
+        return self.icon_px
+
     def cell_size(self) -> QSize:
         if self.photos:
-            # Whole columns across the width (the size slider picks about how wide a tile is), so the
-            # squares reach both edges as they do on the iPhone.
-            w = max(1, self.grid.viewport().width())
-            cols = max(1, round(w / max(self.icon_px, 40)))
-            side = max(40, w // cols)
+            side = self._columns(self.icon_px)             # the size slider picks about how wide a tile is
             return QSize(side, side)
         lh = QFontMetrics(self.grid.font()).height()
+        if self.tight():
+            side = self._columns(self.icon_px + self.gap)
+            return QSize(side, self.tile_pad() * 2 + (side - self.gap) + 6 + lh * 2)
         return QSize(max(self.icon_px + self.gap, 56), self.tile_pad() * 2 + self.icon_px + 6 + lh * 2)
 
     def _relayout(self) -> None:
+        policy = Qt.ScrollBarPolicy.ScrollBarAlwaysOn if self.photos or self.tight() \
+            else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        if self.grid.verticalScrollBarPolicy() != policy:
+            self.grid.setVerticalScrollBarPolicy(policy)
         self.grid.setGridSize(self.cell_size())
-        self.grid.setIconSize(QSize(self.icon_px, self.icon_px))
+        self.grid.setIconSize(QSize(self.picture_px(), self.picture_px()))
         self.grid.doItemsLayout()
 
     def set_icon_size(self, px: int) -> None:
@@ -3966,9 +4232,108 @@ class Pane(QWidget):
         self._relayout()
 
     def set_gap(self, px: int) -> None:
-        self.gap = px
-        self.settings.setValue(f"{self.role}/gap", px)
+        """The spacing slider: the room around an icon-view tile, or the pixels between the Photos view's squares."""
+        if self.photos:
+            self.photo_gap = max(0, min(12, px))
+            self.settings.setValue(f"{self.role}/photoGap", self.photo_gap)
+        else:
+            self.gap = px
+            self.settings.setValue(f"{self.role}/gap", px)
         self._relayout()
+        self.grid.viewport().update()
+
+    def _gap_slider_for_mode(self) -> None:
+        self.gap_slider.blockSignals(True)
+        if self.photos:
+            self.gap_slider.setRange(0, 12)
+            self.gap_slider.setValue(self.photo_gap)
+            self.gap_slider.setToolTip("Space between the squares (2 is the iPhone's)")
+        else:
+            self.gap_slider.setRange(2, 48)
+            self.gap_slider.setValue(self.gap)
+            self.gap_slider.setToolTip("Space between thumbnails — all the way left for a true grid: "
+                                       "every picture fills its square, edge to edge")
+        self.gap_slider.blockSignals(False)
+
+    def set_folder_covers(self, on: bool) -> None:
+        """Folders show a picture (their cover, else their first photo) — or plain folder icons."""
+        self.settings.setValue("folderCovers/show", "true" if on else "false")
+        for w in QApplication.topLevelWidgets():
+            for pane in w.findChildren(Pane):
+                pane.folder_covers = on
+                pane.grid.viewport().update()
+
+    def set_tight(self, on: bool) -> None:
+        """Icon view as a true grid (the spacing slider's low end) — or back to the spacing it had."""
+        if self.photos or self.stack.currentIndex() == 1:
+            self.set_mode("grid")
+        if on == self.tight():
+            return
+        if on:
+            self.settings.setValue(f"{self.role}/looseGap", self.gap)
+            self.gap_slider.setValue(2)
+        else:
+            self.gap_slider.setValue(max(self.TIGHT_GAP + 1, int(self.settings.value(f"{self.role}/looseGap", 34))))
+
+    # -- folder covers (folder_covers.py — shared with the iPhone app)
+    def cover_picture(self, path: str):
+        """`path` as a Pillow picture for a cover: a photo itself; a video's thumbnail (once it's been made)."""
+        import folder_covers
+        if kind_of(path) == "image" and os.path.splitext(path)[1].lower() not in RAW_EXT:
+            return folder_covers.picture_of(path)
+        f = thumb_file(thumb_key(path, os.stat(path).st_mtime))
+        if not f.is_file():
+            return None
+        with Image.open(f) as im:
+            return im.convert("RGB")
+
+    def set_cover(self, folder: str, picture_path: str) -> None:
+        import folder_covers
+        try:
+            picture = self.cover_picture(picture_path) if PIL_OK else None
+            if picture is None:
+                QMessageBox.information(self, "Folder Cover", "That one's thumbnail isn't ready yet — try again in a "
+                                        "moment, or choose a photo.")
+                return
+            folder_covers.default(self.settings).set(folder, picture)
+        except Exception as e:  # noqa: BLE001 — a picture that can't be read, a drive that can't be written
+            QMessageBox.warning(self, "Folder Cover", f"The cover couldn't be set.\n\n{e}")
+            return
+        covers_changed()
+
+    def choose_cover(self, folder: str) -> None:
+        exts = " ".join(f"*{e}" for e in sorted((IMAGE_EXT - RAW_EXT) | VIDEO_EXT))
+        path, _ = QFileDialog.getOpenFileName(self, f"Cover for “{os.path.basename(folder)}”", folder,
+                                              f"Photos and videos ({exts})")
+        if path:
+            self.set_cover(folder, path)
+
+    def remove_cover(self, folder: str) -> None:
+        import folder_covers
+        try:
+            folder_covers.default(self.settings).clear(folder)
+        except OSError as e:
+            QMessageBox.warning(self, "Folder Cover", f"The cover couldn't be removed.\n\n{e}")
+            return
+        covers_changed()
+
+    def _cover_menu(self, menu: QMenu, paths: list[str]) -> None:
+        import folder_covers
+        if len(paths) != 1:
+            return
+        path = paths[0]
+        if os.path.isdir(path):
+            menu.addAction("Choose Cover…", lambda: self.choose_cover(path))
+            if folder_covers.default(self.settings).cover(path) is not None:
+                menu.addAction("Remove Cover", lambda: self.remove_cover(path))
+        elif kind_of(path) != "other":
+            folder = os.path.dirname(path)
+            menu.addAction(f"Use as Cover of “{os.path.basename(folder) or folder}”", lambda: self.set_cover(folder, path))
+
+    def use_view_everywhere(self) -> int:
+        """Every folder shown before is shown this way from now on (icons, list or Photos) — and so is every
+        folder not yet seen, which takes the view on screen anyway. Returns how many folders changed."""
+        return self.views.set_all(self.mode())
 
     def mode(self) -> str:
         if self.stack.currentIndex() == 1:
@@ -3984,7 +4349,8 @@ class Pane(QWidget):
         self.list_btn.setChecked(mode == "list")
         self.photos_btn.setChecked(mode == "photos")
         for w in self.view_controls:
-            w.setVisible(mode == "grid" or (mode == "photos" and w in (self.size_icon, self.slider)))
+            w.setVisible(mode != "list")
+        self._gap_slider_for_mode()
         self._relayout()
         self.settings.setValue(f"{self.role}/mode", mode)
         self._remember_view()
@@ -4222,10 +4588,14 @@ class Pane(QWidget):
         self.fwd_btn.setEnabled(bool(self.future))
         self.update_pathbar()
         self.location_changed.emit(loc)
-        self._rescan()
+        self._rescan(keep_names=True)                    # names read a moment ago are still good (they expire)
 
-    def _rescan(self) -> None:
+    def _rescan(self, keep_names: bool = False) -> None:
+        """Looks again. Unless `keep_names` (the same place searched for something else), afresh from the
+        drive — the names kept from the last search are let go."""
         self._stop_scan()
+        if not keep_names:
+            search_query.NAMES.forget()
         self.results.clear_all()
         self.model.forget_keys()
         if self.location == VIDEOS:
@@ -4262,6 +4632,7 @@ class Pane(QWidget):
 
     def refresh_results(self) -> None:
         """After a transfer: drop the results that are no longer there."""
+        search_query.NAMES.forget()                        # files came or went: the next search reads the drive
         if self.is_virtual and self.results.remove_missing():
             self.model.forget_keys()
             self.update_status()
@@ -4301,17 +4672,19 @@ class Pane(QWidget):
         self.settings.setValue(f"{self.role}/scope", "volume" if self.scope_volume.isChecked() else "folder")
         self.run_search(if_active=True)
 
-    def run_search(self, if_active: bool = False) -> None:
+    def run_search(self, if_active: bool = False, live: bool = False) -> None:
         """Search for what the field says, in the chosen scope, and show the results here. "tag:beach" (or
-        "#beach") opens the files tagged beach instead."""
+        "#beach") alone opens the files tagged beach instead — on this Mac and every connected drive.
+        `live`: the field changed while a search is up — the same results page is searched again in place
+        (no new step for Back), and the field keeps its cursor."""
         text = self.search.text().strip()
-        m = re.match(r"^(?:tag:\s*|#)(.+)$", text, re.IGNORECASE)
-        if m and not if_active and shared_tags.normalized(m.group(1)):
-            self.go(TAG + shared_tags.normalized(m.group(1)))
+        m = re.match(r"^(?:tag:\s*|#)([^\s\"*]+|\"[^\"]+\")$", text, re.IGNORECASE)
+        if m and not if_active and not live and shared_tags.normalized(m.group(1).strip('"')):
+            self.go(TAG + shared_tags.normalized(m.group(1).strip('"')))
             return
         query = Query(self.search.text(), self.kind_box.currentData() or "")
         if query.empty():
-            if self.is_search:
+            if self.is_search and not live:
                 self.go(self.folder)
             return
         if if_active and not self.is_search and not self.search.text().strip():
@@ -4319,15 +4692,97 @@ class Pane(QWidget):
         volume, folder = self._scope_names()
         scope = "volume" if self.scope_volume.isChecked() else "folder"
         roots, spotlight = self._scope_roots()
+        run = SearchRun(query, self.folder, scope, roots, spotlight and query.spotlight_ok(),
+                        volume if scope == "volume" else f"“{folder}”")
+        if not live:
+            self._note_search(text)
+        if self.is_search and (live or if_active):
+            self.searches[self.location] = run             # the page on screen, searched again
+            self.title.setText(f"“{run.query.label()}” — {run.where}")
+            self.title.setToolTip(f"Searching for {run.query.label()} in {run.where}")
+            self._rescan(keep_names=True)
+            return
         self._search_n += 1
         loc = f"{SEARCH}{self._search_n}"
-        self.searches[loc] = SearchRun(query, self.folder, scope, roots, spotlight,
-                                       volume if scope == "volume" else f"“{folder}”")
+        self.searches[loc] = run
         self._show_results(loc, record=True)
 
     def _search_text_changed(self, text: str) -> None:
-        if not text.strip() and self.is_search:
-            self.go(self.folder)
+        if not text.strip():
+            self._live.stop()
+            if self.is_search:
+                self.go(self.folder)
+        elif self.is_search:
+            self._live.start()
+
+    def _live_search(self) -> None:
+        """The field changed while results are up. Searched again at once when the names are in hand
+        (search_query.NAMES — the first search kept them), so the results follow the typing; a search that
+        would have to read the drive again waits for Return."""
+        if not self.is_search or not self.search.text().strip():
+            return
+        roots, spotlight = self._scope_roots()
+        if search_query.NAMES.fresh([str(r) for r in roots]):
+            self.run_search(live=True)
+
+    def _recent_searches(self) -> list[str]:
+        try:
+            raw = json.loads(str(self.settings.value("search/recent", "") or "[]"))
+        except ValueError:
+            raw = []
+        return [str(x) for x in raw if isinstance(x, str)][:15] if isinstance(raw, list) else []
+
+    def _note_search(self, text: str) -> None:
+        recent = [text] + [t for t in self._recent_searches() if t.lower() != text.lower()]
+        self.settings.setValue("search/recent", json.dumps(recent[:15]))
+        self._recent.setStringList(recent[:15])
+
+    def add_search_term(self, term: str) -> None:
+        """Adds a filter to the field ("is:favorite", "date:week"…) and searches."""
+        text = self.search.text().strip()
+        key = term.split(":", 1)[0] + ":" if ":" in term and not term.startswith("-") else None
+        if key in ("date:", "before:", "after:"):          # one of each: the new one replaces the old
+            text = " ".join(t for t in text.split() if not t.lower().startswith(key))
+        if term.lower() not in text.lower().split():
+            text = (text + " " + term).strip()
+        self.search.blockSignals(True)
+        self.search.setText(text)
+        self.search.blockSignals(False)
+        self._live.stop()
+        self.run_search(if_active=self.is_search)
+
+    def _fill_search_filters(self, menu: QMenu) -> None:
+        menu.clear()
+        menu.addAction("Favorites", lambda: self.add_search_term("is:favorite"))
+        menu.addAction("To AI", lambda: self.add_search_term("is:ai"))
+        menu.addAction("Has Tags", lambda: self.add_search_term("is:tagged"))
+        menu.addAction("No Tags", lambda: self.add_search_term("is:untagged"))
+        tags = menu.addMenu("Tag")
+        try:
+            known = tag_store().counts()[:40]
+        except Exception:  # noqa: BLE001
+            known = []
+        for name, n in known:
+            term = f'tag:"{name}"' if " " in name else f"tag:{name}"
+            tags.addAction(tag_dot(name), f"{name}  ({n:,})", lambda term=term: self.add_search_term(term))
+        tags.setEnabled(bool(known))
+        dates = menu.addMenu("Modified")
+        for label, term in (("Today", "date:today"), ("Yesterday", "date:yesterday"), ("In the Last 7 Days", "date:week"),
+                            ("In the Last 30 Days", "date:month"), ("In the Last Year", "date:year")):
+            dates.addAction(label, lambda term=term: self.add_search_term(term))
+        dates.addSeparator()
+        year = time.localtime().tm_year
+        for y in range(year, year - 8, -1):
+            dates.addAction(str(y), lambda y=y: self.add_search_term(f"date:{y}"))
+        sizes = menu.addMenu("Size")
+        for label, term in (("Over 1 GB", "size:>1gb"), ("Over 100 MB", "size:>100mb"), ("Over 10 MB", "size:>10mb"),
+                            ("Under 1 MB", "size:<1mb"), ("Empty", "size:0")):
+            sizes.addAction(label, lambda term=term: self.add_search_term(term))
+        menu.addSeparator()
+        recent = menu.addMenu("Recent Searches")
+        for text in self._recent_searches():
+            recent.addAction(text, lambda text=text: (self.search.setText(text), self.run_search()))
+        recent.setEnabled(bool(self._recent_searches()))
 
     # -- bars
     def update_pathbar(self) -> None:
@@ -4827,6 +5282,7 @@ class Pane(QWidget):
         paths = self.selected_paths()
         if not paths:
             return
+        search_query.NAMES.forget()
         names = [os.path.basename(p.rstrip(os.sep)) for p in paths]
         detail = "\n".join("• " + n for n in names[:8]) + (f"\n… and {len(names) - 8} more" if len(names) > 8 else "")
         total = self._selection_bytes(paths)
@@ -4882,6 +5338,7 @@ class Pane(QWidget):
     def _names_changed(self, res) -> None:
         """After renames: the caches keyed by the old names go, the views follow, tags repaint."""
         old = [r.old for r in res.done]
+        search_query.NAMES.forget()
         media_info.forget(old)
         if THUMBS is not None:
             THUMBS.forget(old)
@@ -5084,6 +5541,7 @@ class Pane(QWidget):
                 turn.addAction("Left", lambda: self.rotate_items(paths, 3))
                 turn.addAction("Right", lambda: self.rotate_items(paths, 1))
                 turn.addAction("180°", lambda: self.rotate_items(paths, 2))
+            self._cover_menu(menu, paths)
             if len(paths) == 1 and os.path.isdir(paths[0]):
                 self._folder_tools(menu, paths[0], "Find Duplicates…")
             menu.addSeparator()
@@ -6815,7 +7273,7 @@ class MainWindow(QMainWindow):
         self.src.restyle()
         self.dst.restyle()
         self.panel.restyle()
-        self.move_btn.setIcon(glyph("arrow", "#FFFFFF", 14))
+        self.move_btn.setIcon(glyph("arrow", THEME.on_accent, 14))
         self.sidebar.rebuild()
         self.sidebar.select_path(self.active_pane.location)
 
@@ -7131,11 +7589,45 @@ def apply_theme(app: QApplication, window: MainWindow | None = None) -> None:
         app.palette().color(QPalette.ColorRole.Window).lightness() < 128
     if os.environ.get("SAFE_FINDER_THEME") in ("dark", "light"):
         dark = os.environ["SAFE_FINDER_THEME"] == "dark"
-    THEME = Theme(dark)
+    look = themes.Look.from_json(QSettings("PhotoBrowser", "SafeFinder").value("theme", ""))
+    THEME = Theme(dark, look)
     app.setPalette(THEME.palette())
     app.setStyleSheet(THEME.stylesheet())
+    global BASE_FONT
+    if BASE_FONT is None:
+        BASE_FONT = QFont(app.font())                  # the system's, to come back to
+    font = QFont(BASE_FONT)
+    families = THEME.font_families()
+    if families:
+        font.setFamilies(families + [BASE_FONT.family()])
+    app.setFont(font)
     if window is not None:
         window.restyle()
+    for w in app.topLevelWidgets():                    # viewers, tool windows: their painted parts too
+        w.update()
+
+
+BASE_FONT: QFont | None = None
+
+
+def current_look() -> "themes.Look | None":
+    return THEME.look
+
+
+def open_themes(parent: QWidget | None = None) -> None:
+    """View ▸ Theme…: the chooser (theme_window.py)."""
+    import theme_window
+    dlg = theme_window.ThemeDialog(parent, current_look(), set_look)
+    dlg.exec()
+    dlg.deleteLater()
+
+
+def set_look(look: "themes.Look | None") -> None:
+    """Chooses the theme (None: Match macOS) and shows it at once, everywhere."""
+    QSettings("PhotoBrowser", "SafeFinder").setValue("theme", look.to_json() if look is not None else "")
+    app = QApplication.instance()
+    win = next((w for w in app.topLevelWidgets() if isinstance(w, MainWindow)), None)
+    apply_theme(app, win)
 
 
 def main() -> None:

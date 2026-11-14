@@ -552,13 +552,19 @@ def apply(plan: list[Rename], tags=None, progress=lambda done, total: None, stop
 
 
 def _folder_choices(pairs: list[tuple[str, str]]) -> None:
-    """A renamed folder keeps its own choices (Videos at the Top — folder_options.py)."""
+    """A renamed folder keeps its own choices (Videos at the Top — folder_options.py) and its cover
+    (folder_covers.py)."""
     if not pairs:
         return
     try:
         import folder_options
         folder_options.default().renamed(pairs)
     except Exception:  # noqa: BLE001 — best effort: a choice lost is set again with a click
+        pass
+    try:
+        import folder_covers
+        folder_covers.default().renamed(pairs)
+    except Exception:  # noqa: BLE001 — best effort: a cover lost is chosen again
         pass
 
 

@@ -146,12 +146,51 @@ def install(win, sf) -> None:
     modes = QActionGroup(win)
     mode_acts = {}
     for key, label, keys in (("grid", "as Icons", "Ctrl+1"), ("list", "as List", "Ctrl+2"),
-                             ("photos", "as Photos", "Ctrl+3")):
+                             ("photos", "as Photo Grid", "Ctrl+3")):
         a = act(v, label, lambda key=key: pane().set_mode(key), keys)
         a.setCheckable(True)
         modes.addAction(a)
         mode_acts[key] = a
     v.aboutToShow.connect(lambda: mode_acts.get(pane().mode(), mode_acts["grid"]).setChecked(True))
+    tight = act(v, "Tight Icons", lambda: pane().set_tight(not (pane().mode() == "grid" and pane().tight())), None,
+                tip="Icon view as a true grid: every picture fills its square, edge to edge, names underneath "
+                    "(the spacing slider all the way left)")
+    tight.setCheckable(True)
+    v.aboutToShow.connect(lambda: tight.setChecked(pane().mode() == "grid" and pane().tight()))
+
+    act(v, "Use This View for Every Folder", lambda: pane().use_view_everywhere(), None,
+        tip="Folders remember how they were last shown; this shows them all the way this one is")
+    theme = v.addMenu("Theme")
+    theme_group = QActionGroup(win)
+    theme_acts: list[tuple[QAction, object]] = []
+
+    def theme_item(menu, label: str, look) -> None:
+        a = QAction(label, win)
+        a.setCheckable(True)
+        a.triggered.connect(lambda _=False, look=look: sf.set_look(look))
+        theme_group.addAction(a)
+        menu.addAction(a)
+        theme_acts.append((a, look))
+    theme_item(theme, "Match macOS", None)
+    for group_name, looks in sf.themes.groups():
+        theme.addSeparator()
+        theme.addSection(group_name) if hasattr(theme, "addSection") else None
+        for look in looks:
+            theme_item(theme, look.name, look)
+    theme.addSeparator()
+    custom = QAction("Choose or Customize…", win)
+    custom.triggered.connect(lambda _=False: sf.open_themes(win))
+    theme.addAction(custom)
+
+    def tick_theme() -> None:
+        now = sf.current_look()
+        for a, look in theme_acts:
+            a.setChecked((look is None and now is None) or (look is not None and now is not None and look.same_looks(now)))
+    theme.aboutToShow.connect(tick_theme)
+    covers = act(v, "Folder Covers", lambda: pane().set_folder_covers(not pane().folder_covers), None,
+                 tip="Folders show a picture — the cover chosen for them here or on the iPhone, else their first photo")
+    covers.setCheckable(True)
+    v.aboutToShow.connect(lambda: covers.setChecked(bool(pane().folder_covers)))
     v.addSeparator()
     split = act(v, "Split View", lambda: win.set_split(not win.split), "Ctrl+\\",
                 tip="A second pane beside this one, with Move and Copy, for transfers")
