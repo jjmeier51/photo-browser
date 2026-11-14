@@ -402,7 +402,7 @@ enum InstagramService {
     /// already carry their capture date; we copy those filesystem dates across rather than
     /// re-reading EXIF. Returns the paths actually written. Best-effort, off-main.
     @discardableResult
-    nonisolated static func copyToTemp(_ files: [String], handle: String, into tempFolder: URL) async -> [String] {
+    @concurrent nonisolated static func copyToTemp(_ files: [String], handle: String, into tempFolder: URL) async -> [String] {
         let fm = FileManager.default
         // Flat, handle-prefixed names — per-handle subfolders (tried briefly) turned the
         // daily folder into a pile of folders to open one by one instead of a single

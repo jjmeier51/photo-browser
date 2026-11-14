@@ -304,7 +304,7 @@ nonisolated enum DuplicateDetection {
 
         /// Builds the index. Reading properties for thousands of files on an external drive is the
         /// slow part, so it fans out `maxConcurrent` readers and runs entirely off the main actor.
-        nonisolated static func build(folder: URL, cache: HashCache = .shared, maxConcurrent: Int = 8) async -> DestinationIndex {
+        @concurrent nonisolated static func build(folder: URL, cache: HashCache = .shared, maxConcurrent: Int = 8) async -> DestinationIndex {
             let index = DestinationIndex(folder: folder, cache: cache)
             let fm = FileManager.default
             let urls = ((try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isRegularFileKey],

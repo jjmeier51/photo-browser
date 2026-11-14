@@ -224,9 +224,28 @@ bar, or by opening it again — even after quitting), however the folder you wer
 folder you've never opened takes the look of the one you came from. All Videos, Empty Folders and a
 tag's files keep theirs too; the last 1,000 places are remembered, in either pane.
 
-**Search** (the field in each pane's header, or ⌘F) finds files by words in the name, by extension
-(`.heic`, `*.mov`, `ext:mp4,mov`) or by kind (`kind:video`, or the Kind menu — Images, Videos, RAW
-photos, PDFs, Audio, Documents, Archives); everything typed must match. Press Return. The scope
+**Search** (the field in each pane's header, or ⌘F) finds files by words in the name **or among their
+tags**, by extension (`.heic`, `*.mov`, `ext:mp4,mov`) or by kind (`kind:video`, or the Kind menu — Images,
+Videos, RAW photos, PDFs, Audio, Documents, Archives); everything typed must match. Press Return — after
+that the results follow as you type more. It also understands:
+
+| Type | Finds |
+| --- | --- |
+| `"route 66"` | the words together |
+| `-blurry` | leaves out anything with this word |
+| `tag:beach` or `#beach` | files carrying the tag (`tag:bea*` — tags starting with) |
+| `is:favorite` · `is:ai` · `is:tagged` · `is:untagged` | Favorites, To AI, with or without tags |
+| `in:seligman` | anything inside a folder whose name has this |
+| `date:2020` · `date:2020-06` · `date:2020-06-20` | modified in that year, month or day |
+| `date:today` · `yesterday` · `week` · `month` · `year` | modified lately |
+| `before:2021` · `after:2020-06` | modified before / after |
+| `size:>100mb` · `size:<1mb` · `size:0` | by size |
+
+Capitals, accents and separators don't matter: `img 1003` (or `img1003`) finds `IMG_1003.jpg`, `cafe`
+finds `Café.jpg`, `new york` finds `New-York.mov`. **Add Filter** in the scope bar adds these for you
+(Favorites, a tag, a date, a size) and lists your recent searches; the field also suggests them as you
+type. The first search of a place reads its names from the drive; for the next couple of minutes further
+searches there are instant. The scope
 bar picks where: the folder you're in (and everything inside it), or the whole drive — "This Mac"
 on the Mac side, which asks Spotlight and so answers at once, walking your home folder itself only
 when Spotlight has nothing (an external drive is always walked, streaming results as it goes).
@@ -324,6 +343,32 @@ P3) photo is converted by its profile. They used to come out flat and grey, or w
 HDR photos (a standard picture plus a gain map) show their standard picture, as in Finder. The helper
 does the same for what it makes. Thumbnails of HEIC / HEIF / AVIF / JPEG XL photos made before this are
 made again, once, the first time each folder is shown.
+
+### A true grid, folder covers and themes
+
+**A true grid.** Two ways to have the pictures edge to edge, at any thumbnail size:
+- the **Photo Grid** (⌘3, the third view button): squares only, no names, filling the width — the iPhone's
+  grid (below). The spacing slider sets the gap between squares (0–12; 2 is the iPhone's);
+- **icon view with the spacing slider all the way left** (or View ▸ **Tight Icons**): the same squares with
+  the names kept underneath. Every picture is cropped to fill its square and the columns fill the width.
+
+Folders remember how they were last shown, so a folder you looked at as loose icons stays that way. View ▸
+**Use This View for Every Folder** shows them all the way the one on screen is.
+
+**Folder covers** (`folder_covers.py`). A folder shows a picture instead of a plain folder icon: the cover
+chosen for it, else the first photo or video inside it (looking into its subfolders if it only holds
+folders). Right-click a folder ▸ **Choose Cover…** (or **Remove Cover**), or right-click any photo or video ▸
+**Use as Cover of “<its folder>”**. View ▸ Folder Covers turns the pictures off.
+Covers are **shared with Photo Browser on the iPhone**: they're kept on the drive (in its hidden
+`.Photo Browser Metadata` folder), so a cover chosen here is the folder's cover in the app and the covers
+set in the app show here. When both have chosen one, the later choice wins. (The app picks a random photo
+for every folder that has no cover; those show here too, and any cover you choose replaces one.)
+
+**Themes** (`themes.py`, `theme_window.py`). View ▸ **Theme**: *Match macOS* (the Finder look, light or
+dark with your Mac), the iPhone app's themes — Everyday (Photo Browser, Graphite, Midnight, Ocean, Rose,
+Forest, Sunset, Paper), Halloween and Christmas — or **Choose or Customize…** for your own background (one
+colour or a gradient), accent colour, typeface and light or dark. A click shows it at once in every Safe
+Finder window.
 
 ### Photos view and the viewer — the iPhone app's grid and viewer (`media_viewer.py`, `media_info.py`)
 
@@ -1023,6 +1068,7 @@ proves it.
    `~/Library/Logs/Safe Finder/`). **"0 problems"** means everything is there. Tick *read every byte of both
    drives again* for the surest check (it takes about as long as the copy); if it ever finds a file that
    differs, **Copy … Different Files Again** fixes it.
+   The report also names anything that's only on the new drive (things added there since).
    Lines that say **"COPIED, but not with the same modification date / creation date / attribute"** are
    items that *are* on the new drive — only that date or attribute isn't the old drive's (a folder's date moves
    as soon as anything is added to it; a stopped clone hasn't dated its folders yet). **Match Dates and
@@ -1033,9 +1079,23 @@ proves it.
    missing: Drive Health ▸ **Restore from the Drive's Backup** — it only adds what's missing.
 7. Keep the old drive as it is until you've looked through the new one.
 
+**Check Files — is everything on the drive still what was written?** An SSD's file system (APFS) doesn't
+notice when the contents of a file go bad; the file just reads back wrong. So the clone keeps a checksum of
+every file it writes, on the new drive itself (a hidden `.Safe Finder Checksums` folder). Any time later,
+choose the drive as the *new drive* and press **Check Files**: every file is read again and compared. A
+file that has the same size and date as when it was written but different contents is listed as
+**DAMAGED** — put that one back from another copy. Files you've edited since (a different size or date)
+and files added since aren't damage; **Record New Files** reads them once so the next check covers them
+too. On a drive cloned before this existed, tick *read every byte of both drives again* and Verify once
+(with the old drive), or just press Record New Files. The old drive isn't needed for a check, and nothing
+on the drive is changed.
+
+The Mac is kept awake while a clone, a comparison or a check runs.
+
 From Terminal: `python3 mac/clone_drive.py "/Volumes/Old" "/Volumes/New"` (a dry run), `--apply` to copy,
 `--verify --deep` to compare byte for byte, `--verify --match-dates` to give items whose dates or
-attributes differ the old drive's.
+attributes differ the old drive's; `python3 mac/clone_drive.py --check "/Volumes/New"` to check a drive's
+files against their checksums (`--record` to add the ones that have none yet).
 
 ### Browse taylorpictures.net — and see what's already in your Taylor Swift folder (`taylor_window.py`, `taylor.py`)
 

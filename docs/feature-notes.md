@@ -2114,6 +2114,76 @@ picture is PQ (not taken for the main one), a `cICP` PNG, an HLG-named ICC on a 
 profile; a grey ramp comes back within 2/255 of sRGB below the knee, white → 244, 5× white → 255; the whole
 `Thumbnails` pipeline offscreen. **Not checked:** real iPhone files, and the Swift (not compiled here).
 
+## 6ah. Safe Finder: a true grid, folder covers, themes, search (Nov 14, 2026)
+
+**The grid.** "The thumbnails never get close together." Two causes, both real:
+- The **Photo Grid** (⌘3, `PhotoDelegate`) left a blank column at the right. `QListView` in icon mode lays out
+  a scroll bar's width short of the viewport when the bar is "as needed" (it reserves the room so the bar
+  appearing can't re-wrap the rows), while `cell_size` divided the whole viewport width — one column too few
+  fitted. Now the grid keeps its scroll-bar strip in the two justified looks (`_relayout` sets
+  `ScrollBarAlwaysOn`) and `_columns(want)` gives whole columns across what's left. Its spacing slider is
+  now live there too (`photo_gap`, 0–12 px; 2 is the iPhone's).
+- **Icon view** at minimum spacing still showed each picture *fitted* inside its square (portrait photos
+  with air either side) in fixed-width cells with whatever was left over at the right. At spacing ≤
+  `Pane.TIGHT_GAP` (8) it's now a true grid with names (`tight()`): pictures cropped to fill their squares
+  (`_draw_thumb(fill=True)`), whole columns across the width, `gap` px between. `picture_px()` is the side
+  of the square a tile draws in — use it, not `icon_px`, for geometry. View ▸ Tight Icons toggles between 2
+  and the spacing it had.
+- View ▸ **Use This View for Every Folder** (`FolderViews.set_all`): folders remember their own view, which
+  made a newly chosen grid seem not to stick.
+
+**Folder covers — `mac/folder_covers.py`, `FolderCovers.swift`.** Folders show a picture in icon view and
+the Photo Grid: the cover chosen for them, else the first photo or video inside (`first_media`: by name,
+into subfolders when the folder holds only folders, bounded). Right-click a folder ▸ Choose Cover… / Remove
+Cover; a photo or video ▸ Use as Cover of “<its folder>”. View ▸ Folder Covers turns them off.
+- **Shared with the iPhone app** through the drive: image in `.Photo Browser Metadata/covers/<random
+  name>` (the folder the app's backups already use), choice in `.Photo Browser Metadata/folder-covers.json`
+  — `{"covers": {"<folder, drive-relative, NFC>": {"file": name, "at": unix time}}}`. Later `at` wins.
+  `"file": ""` = removed then; `"at": 0` = automatic (the iPhone's random pick), which any chosen cover
+  replaces. File names are checked to be plain names on both sides (never a path out of `covers/`).
+- iPhone: `Library.coverStamps` (path → when chosen; FilePrefs `photoBrowser.coverStamps`, re-keyed in
+  `applyRemap`), stamped by both `setCover` variants via `noteCoverChosen`; `syncFolderCovers` runs in
+  `syncDriveTags` after `syncFolderOptions`. `FolderCovers.merge` (off-main): mine-later → copy the image to
+  the drive, write the entry; theirs-later → copy the image into the app, adopt. Automatic covers go out at
+  most 250 images a sync (a library has thousands; the backup has usually put them there already). A
+  removal from the Mac only removes a cover *chosen* here — an automatic one is what "no cover" looks like
+  in the app, and removing it would only have `ensureRandomCover` pick again, forever. Entries for folders
+  that no longer exist are dropped.
+- Until the iPhone app has written the shared file, Safe Finder shows the app's covers from its last
+  backup (`metadata.json` → `folderCovers`). Folders not on such a drive: `~/Library/Application
+  Support/Safe Finder/Folder Covers` + settings.
+- Renames: `rename_tools._folder_choices` → `FolderCovers.renamed` (which also brings the backup-only
+  covers of the moved folders into the shared file, so they follow).
+
+**Themes — `mac/themes.py`, `mac/theme_window.py`.** View ▸ Theme: Match macOS (the Finder look, as
+before), the iPhone app's presets (`themes.PRESETS` mirrors `AppTheme.groups` — keep the two in step), or
+custom (one or two background colours + direction, accent, typeface, light). `themes.derive(look)` works
+every chrome colour out from the background and accent (dark: lifted towards white in steps, sidebar sunk;
+light: the reverse), `Theme(dark, look)` takes them. New `Theme.on_accent` (black on light accents —
+Candy Cane's is white) replaces the hard-coded white wherever text or a mark sits on the accent; the file
+views get the gradient (`content_css`), everything else the average. Typefaces map to macOS families
+(`TYPEFACES`; the system's rounded/serif/mono are `.AppleSystemUIFont…` names with fallbacks — unverified
+here). Stored as JSON in the settings (`theme`; empty = Match macOS). `set_look` applies at once to every
+window.
+
+**Search — `mac/search_query.py`, `Query`, `FileScanner`.** Was: words in the name, extension, kind, size,
+on Return. Now:
+- Language: `"a phrase"`, `-not`, `tag:x` / `#x` (`tag:x*` = starts with), `is:favorite|ai|tagged|untagged`,
+  `in:folder`, `date:2020|2020-06|2020-06-20|today|yesterday|week|month|year`, `before:` / `after:` (the
+  file's modified date), plus the old ones. Plain words also match a file's **tags** — but the tags are only
+  looked at when some tag in use contains the word (`_words_in_tags`), so an ordinary search costs nothing
+  extra.
+- Matching ignores case, accents, Unicode form (NFD names vs typed NFC) and separators (`forms`, `has`):
+  "img 1003" / "img1003" find `IMG_1003.jpg`.
+- **Names kept between searches** (`search_query.NAMES`, 150 s, ≤ 800k entries, names only): a search's
+  walk records every folder's names; the next search of the same place filters them in memory and stats
+  only what matches. That makes the **results follow the typing** once a search is up (`_live_search`: only
+  when the names are fresh — a search that would read the drive again still waits for Return), in place,
+  without a new Back step. Dropped on delete, rename, transfer and Search Again.
+- Spotlight (This Mac scope) is only used when it can narrow the search (`spotlight_ok`).
+- Scope bar ▸ **Add Filter** (Favorites, To AI, tags with counts, Modified, Size, Recent Searches); the
+  field completes from the last 15 searches.
+
 ## 6ab. Safe Finder Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
 
 The iPhone's video upscale (`MediaEditing.upscaleVideo`, §6f) on the Mac: right-click videos ▸ **Upscale Video…**
@@ -2208,6 +2278,26 @@ comparison's `metadata` list is items that are there, same kind and size, whose 
 - Report lines now read "COPIED, but not with the same <what>: <item>".
 Checked here with a stand-in for macOS's rule (modification date set alone → creation date clamped): the old
 order loses the creation date, both new routes keep it. `setattrlist` itself is still unrun here.
+
+**Nov 14, 2026 — what else a clone needed.** Looked for what a careful macOS copy does that this didn't:
+- **APFS doesn't checksum file contents** (only its own records), so a file that goes bad on the SSD reads
+  back wrong without any error. The clone already computes a BLAKE2 of every file it writes; it now keeps
+  them on the new drive — `.Safe Finder Checksums/checksums.tsv` (digest, size, mtime ns, path; in
+  `SKIP_AT_ROOT`, so it's never cloned or compared). `check_drive` (window: **Check Files**; CLI `--check`)
+  reads the drive again: same size and date but different contents = DAMAGED; a different size or date =
+  edited (counted apart); no entry = new. **Record New Files** / `--record` hashes the last two so later
+  checks cover them. A deep comparison records what it read too (`compare(collect=)`), which is how a drive
+  cloned before this gets its checksums. Nothing but the checksum file is ever written.
+- **Sleep**: a clone runs for hours and a dozing Mac unmounts the drives. `keep_awake()` runs
+  `caffeinate -i -m -s -w <pid>` for the length of a clone, comparison or check.
+- **ACLs**: `copy_acl` = `copyfile(3)` with `COPYFILE_ACL` only (unrun here; failures ignored — a photo
+  drive rarely has any).
+- A clone **stopped by hand** now dates the folders it reached (they were left with today's date until the
+  next full run — one source of the "not the same dates" list).
+- The report **names** what's only on the new drive (first 40; a folder counts once).
+- Looked at and left: hard links and sparse files (copied as ordinary files — more room, nothing lost),
+  parallel copying (the read-back check is the bottleneck by design).
+
 
 ## 6s. Safe Finder Edit Metadata — `mac/metadata_edit.py`, `mac/metadata_window.py` (Nov 3, 2026)
 
@@ -3451,6 +3541,55 @@ these (`tracks.overlays/audio/text/…`, `adjust`, `mask`, `chromaKey`, `animati
 `PhotoBrowserTests/VideoEditorTests.swift` covers the document round-trip, time mapping, canvas
 sizes, placement maths, names/paths, the sandbox audit, undo/redo and recovery. Render and
 performance tests need a device (custom compositors don't run in the Simulator).
+
+## 11b. iOS 27 (27.0 Sep 15, 2026 … 27.2.1 Nov 9, 2026) — what it changes for this app (Nov 14, 2026)
+
+Researched from Apple's release notes and documentation, forum threads and the usual developer blogs.
+27.2.1's own note is only "bug fixes and security updates"; nothing in 27.2/27.2.1 is itemised for external
+storage, Photos, video or SwiftUI.
+
+**Already in order** (checked): the app uses the scene life cycle and a generated launch screen (both
+*mandatory* once built with the iOS 27 SDK — an app without them fails to launch); it doesn't set
+`UIDesignRequiresCompatibility` (ignored from the 27 SDK on); no `TabView`, `canOpenURL`, `BGTaskScheduler`
+or `layoutMargins` use (UIKit's default view margins are zero on 27.1+).
+
+**Done.**
+- **`@State` is a macro in Xcode 27**: a property with a default value may no longer also be assigned in
+  `init`. One place did both — `ViewerView.chromeHidden` — and would have stopped the build. Now declared
+  without a default. (All 28 other `_x = State(initialValue:)` sites declare no default.) Keep it that way.
+- **Video stops after Notification Center.** On iOS 27, anything that makes the app inactive without
+  backgrounding it pauses `AVPlayer` and leaves it paused. `VideoPage` notes it was playing in
+  `willResignActive` and resumes in `didBecomeActive` (not after a real trip to the background), and
+  otherwise makes the play button show the truth.
+- **Main-thread work.** Apple restates that with this project's settings an unannotated `nonisolated async`
+  function runs on the caller's actor. Audited all 166: most hop with `Task.detached` inside or only await
+  the network. Five did their file work inline and were awaited from the main actor — now `@concurrent`:
+  `FileActions.scanTransferItems` (the whole source drive walked on the main thread while "Scanning…"
+  showed), `FileActions.assetsAlreadyInFolder`, `PhotosBackupImporter.scan`,
+  `DuplicateDetection.DestinationIndex.build`, `InstagramService.copyToTemp`.
+- The read-only-drive message adds, on iOS 27, that some exFAT drives have been mounting read-only there
+  (reported through 27.0.1, unacknowledged; APFS unaffected).
+
+**Known, not done — each needs a build and a device, not a guess:**
+- `CLGeocoder` is deprecated since iOS 26 (still works). Replacement: `MKReverseGeocodingRequest(location:)`
+  → `mapItems` (iOS 26+). The app's "City, ST" label needs locality / administrative area / country from the
+  result, and `MKMapItem`'s new address accessors weren't verified — don't write that blind.
+- `BGContinuedProcessingTask` (iOS 26+) would let a drive transfer or a long download keep running in the
+  background with a Live Activity — the real answer to constraint #7. Needs the identifier in
+  `BGTaskSchedulerPermittedIdentifiers` (a wrong or missing one is a **crash** at `register`), progress
+  reporting, one handler per exact identifier, submission from the foreground on a user action; on iOS 27
+  `submit(_:)` is deprecated for `submitTaskRequest(_:) async throws` (not from the main thread).
+- `AVAssetExportSession`'s `outputURL` / `outputFileType` / `progress` / `cancelExport`, and
+  `AVAssetReader/Writer` start/append calls, are deprecated at 27.0 (`export(to:as:)` and
+  `states(updateInterval:)` replace the first, iOS 18+). `PHAssetResource.originalFilename` → `filename`.
+  All still work; they're warnings.
+- `LazyVGrid` can hop when scrolling up on iOS 27 with several grids in one `ScrollView` or per-cell
+  geometry feeding state (FB23182374, open). The main grid is one grid, but every cell publishes its frame
+  through `CellFramesKey` in the *viewport's* coordinate space, so all visible cells re-report on every
+  scroll frame. Measuring in the content's space (plus one scroll offset) would stop that; it touches
+  drag-select and auto-scroll, so it wants testing on a device.
+- `volumeAvailableCapacityKey` is truncated to three significant digits on iOS 27 (it reads slightly low —
+  harmless for the free-space checks).
 
 ## 12. exFAT write durability — `DriveWriter` (the "AI folder corruption" fix)
 

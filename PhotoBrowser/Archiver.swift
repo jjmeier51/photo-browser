@@ -40,7 +40,13 @@ enum Archiver {
             ?? (ns.domain == NSPOSIXErrorDomain ? Int32(ns.code) : nil)
         switch posix ?? 0 {
         case EROFS:
-            return "The drive is mounted read-only. Re-eject it from your Mac cleanly (don’t just unplug it) so exFAT clears its “dirty” flag, then reconnect it to the phone."
+            // iOS 27 note: some exFAT drives have been mounting read-only on iOS 27 even after a clean
+            // eject (reported through 27.0.1; APFS drives aren't affected), so say that too there.
+            var text = "The drive is mounted read-only. Re-eject it from your Mac cleanly (don’t just unplug it) so exFAT clears its “dirty” flag, then reconnect it to the phone."
+            if #available(iOS 27, *) {
+                text += " If it stays read-only: iOS 27 has been mounting some exFAT drives read-only — a drive formatted as APFS isn’t affected."
+            }
+            return text
         case ENOSPC:
             return "The drive is out of space."
         case EPERM, EACCES:

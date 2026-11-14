@@ -12,7 +12,7 @@ struct ViewerView: View {
     let slideshow: Bool
     @State private var index: Int
     @State private var isZoomed = false
-    @State private var chromeHidden = false      // single-tap hides all overlays
+    @State private var chromeHidden: Bool        // single-tap hides all overlays (set in `init`: a slideshow starts hidden)
     /// Moved on from the item the viewer opened on. Only that first page gets a video poster (the grid
     /// tile, so the open lands on a picture); after a swipe a video starts on black and its own first
     /// frame, as it always did — the small tile stretched full-screen and cross-faded into a different

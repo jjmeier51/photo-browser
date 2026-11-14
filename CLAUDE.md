@@ -169,6 +169,16 @@ actions the app makes no network calls.
   no colour management): PQ/HLG photos tone-mapped to standard range, Display P3 converted by profile; the HDR curve
   is read from the **main picture's** colour box only (a gain-map photo's other items say PQ — never scan the file
   for it); `thumb_helper.swift` writes 8-bit sRGB; `thumb_key` versions HEIF/AVIF/JXL (no file reads there) — §6ag.
+  Safe Finder's **true grid**: the Photo Grid (⌘3) and icon view at minimum spacing (`Pane.tight()`, View ▸ Tight
+  Icons) fill the width in whole columns with pictures cropped square — `picture_px()` is a tile's picture side (not
+  `icon_px`); the grid keeps its scroll-bar strip there (a `QListView` lays out a bar's width short otherwise).
+  **Folder covers** (`mac/folder_covers.py` ↔ `FolderCovers.swift`): chosen cover, else first photo inside; shared
+  through the drive's `.Photo Browser Metadata/folder-covers.json` + `covers/` (later `at` wins; `""` = removed,
+  `at` 0 = automatic); the iPhone stamps chosen covers (`coverStamps`, `noteCoverChosen`) and merges in
+  `syncFolderCovers` (from `syncDriveTags`). **Themes** (`mac/themes.py` mirrors `AppTheme.groups` — keep in step;
+  `Theme(dark, look)`, `THEME.on_accent` for anything drawn on the accent). **Search** (`mac/search_query.py`):
+  phrases, `-not`, `tag:`/`#`, `is:`, `in:`, `date:`/`before:`/`after:`, accent- and separator-blind, words match
+  tags too; names kept ~2 min (`NAMES`) so results follow the typing — forget them when files change. §6ah.
   Safe Finder's **Find Duplicates** (right-click a folder; `mac/duplicates.py`, `mac/duplicates_window.py`): the
   iPhone's exact / visually similar / similar-name groups, plus an Identical (SHA-256) check and Select Extra
   Copies for identical groups only — it ticks, the person trashes — §6q.
@@ -303,7 +313,10 @@ Python. (`SimpCityService`,
   drive name → `rekeyRootIfRemounted`, else Restore from the Drive's Backup). **Dates go on through `put_dates`**
   (creation + modification in one `setattrlist`; a bare `utime` after a creation date pulls it back to the
   modification date on macOS — never add one); "COPIED, but not with the same …" items are there, only a date or
-  attribute differs — **Match Dates and Attributes** / `--match-dates` (`match_details`) puts them right. §6ac.
+  attribute differs — **Match Dates and Attributes** / `--match-dates` (`match_details`) puts them right. The clone
+  keeps each written file's checksum on the new drive (`.Safe Finder Checksums/checksums.tsv` — APFS has none for
+  file contents); **Check Files** / `--check` (`check_drive`) finds files gone bad, `--record` covers new ones;
+  `keep_awake()` (caffeinate) wraps every long run. §6ac.
 - **Fanfix in Safe Finder** (Mac only) — right-click a folder ▸ Download ▸ Download from Fanfix… (`mac/fanfix_downloader.py`,
   `mac/fanfix.py`): the person's own purchased content from Fanfix creators, from a logged-in Qt WebEngine browser,
   **everything through that browser** (fanripper's documented model — its code is closed and its licence forbids
@@ -633,6 +646,13 @@ These were discovered the painful way; the current code already respects them.
     `DriveWriter.usableDirectory(named:in:)`, not `fileExists` + `createDirectory` with the error
     swallowed: an unreadable entry holding the name makes that combination fail every save
     (see `docs/feature-notes.md` §3.5).
+
+15. **iOS 27 / Xcode 27** (`docs/feature-notes.md` §11b): `@State` is a macro — a state with a default value must
+    not also be assigned in `init` (`_x = State(initialValue:)` only for states declared without one); an
+    unannotated `nonisolated async` function that does file work inline needs `@concurrent` (#13 again — five were
+    found on the main thread); `AVPlayer` is left paused after Notification Center, so `VideoPage` resumes on
+    `didBecomeActive`. Not yet adopted, on purpose (they need a device): `BGContinuedProcessingTask`,
+    `MKReverseGeocodingRequest`, the new export API.
 
 ## Git workflow
 

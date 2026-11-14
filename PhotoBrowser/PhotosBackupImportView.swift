@@ -412,7 +412,7 @@ enum PhotosBackupImporter {
 
     /// Recursively lists the source's photos/videos and classifies each against what's already in
     /// `destination`: `toMove` (bring over) vs `held` (already has a duplicate/preview match here).
-    nonisolated static func scan(source: URL, destination: URL) async -> (toMove: [ScanItem], held: [HeldItem]) {
+    @concurrent nonisolated static func scan(source: URL, destination: URL) async -> (toMove: [ScanItem], held: [HeldItem]) {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .creationDateKey, .contentModificationDateKey]
 

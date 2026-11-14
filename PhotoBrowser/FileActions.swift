@@ -593,7 +593,7 @@ enum FileActions {
     /// items for a *selective* drive transfer. Off-main (a slow external drive can hold thousands of
     /// files). The `rel` path is kept so the picker can group / show where each file lives, and so the
     /// selective move can recreate the same subfolder layout at the destination.
-    nonisolated static func scanTransferItems(under source: URL) async -> [TransferItem] {
+    @concurrent nonisolated static func scanTransferItems(under source: URL) async -> [TransferItem] {
         let fm = FileManager.default
         let base = source.path
         var out: [TransferItem] = []
@@ -1177,7 +1177,7 @@ enum FileActions {
 
     /// Of `assets`, the localIds already present in `folder` (by stored origin, else
     /// base-name + pixel size) — so an import can skip re-downloading duplicates.
-    nonisolated static func assetsAlreadyInFolder(_ assets: [PHAsset], folder: URL, origins: [String: String]) async -> Set<String> {
+    @concurrent nonisolated static func assetsAlreadyInFolder(_ assets: [PHAsset], folder: URL, origins: [String: String]) async -> Set<String> {
         let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
         var folderSigs = Set<String>(), folderOrigins = Set<String>()
         for f in files {

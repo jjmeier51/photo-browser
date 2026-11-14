@@ -138,6 +138,8 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
     private var hideWork: DispatchWorkItem?
     private var videoSize = CGSize(width: 16, height: 9)
     private var wasPlayingBeforeScrub = false
+    /// Set as the app goes inactive with the video playing — see `appWillResignActive`.
+    private var resumeWhenActive = false
     private var isSeeking = false
     private var pendingSeekValue: Float?
     private var captureFlash: UILabel?
@@ -183,6 +185,13 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(appWillResignActive),
+                           name: UIApplication.willResignActiveNotification, object: nil)
+        center.addObserver(self, selector: #selector(appDidEnterBackground),
+                           name: UIApplication.didEnterBackgroundNotification, object: nil)
+        center.addObserver(self, selector: #selector(appDidBecomeActive),
+                           name: UIApplication.didBecomeActiveNotification, object: nil)
         view.backgroundColor = .black
 
         scrollView.delegate = self
@@ -896,6 +905,35 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         }
     }
 
+    // MARK: - Coming back from Notification Center / Control Center (iOS 27)
+    //
+    // On iOS 27, pulling down Notification Center (or anything else that makes the app inactive
+    // without sending it to the background) pauses an `AVPlayer` and leaves it paused when the
+    // app is active again — the video just sits there with a pause button showing. Earlier
+    // systems kept playing underneath. So: note that it was playing as the app goes inactive,
+    // and pick it up again on return. A trip to the background is different (the system pauses
+    // video there on every version, and the person left on purpose): that stays paused.
+
+    @objc private func appWillResignActive() {
+        resumeWhenActive = appeared && !overlayPaused && !scrubbing && player.timeControlStatus != .paused
+    }
+
+    @objc private func appDidEnterBackground() {
+        resumeWhenActive = false
+    }
+
+    @objc private func appDidBecomeActive() {
+        let resume = resumeWhenActive
+        resumeWhenActive = false
+        guard appeared, !overlayPaused, !scrubbing, player.timeControlStatus == .paused else { return }
+        if resume, player.currentItem?.status == .readyToPlay {
+            resumePlayback()
+            if !controlsHidden { scheduleHide() }
+        } else {
+            playButton.setImage(UIImage(systemName: "play.fill"), for: .normal)     // show what it's doing
+        }
+    }
+
     /// Loop: jump back to the start and keep playing when the video ends (in Slo-Mo if active).
     @objc private func playerDidReachEnd() {
         player.seek(to: .zero)
@@ -974,6 +1012,10 @@ final class ZoomableVideoController: UIViewController, UIScrollViewDelegate, UIG
         statusObservation?.invalidate(); statusObservation = nil
         readyObservation?.invalidate(); readyObservation = nil
         NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: player.currentItem)
+        for name in [UIApplication.willResignActiveNotification, UIApplication.didEnterBackgroundNotification,
+                     UIApplication.didBecomeActiveNotification] {
+            NotificationCenter.default.removeObserver(self, name: name, object: nil)
+        }
         player.pause()
     }
 
