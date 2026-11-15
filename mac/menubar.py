@@ -318,6 +318,10 @@ def install(win, sf) -> None:
     act(g, "Desktop", lambda: pane().go(str(home / "Desktop")), "Ctrl+Shift+D")
     act(g, "Downloads", lambda: pane().go(str(home / "Downloads")), "Ctrl+Alt+L")
     act(g, "Pictures", lambda: pane().go(str(home / "Pictures")))
+    act(g, "Places…", lambda: pane().open_places(), "Ctrl+Shift+L", None,
+        "Where your photos and videos were taken: a list by country and town, and a map")
+    act(g, "People…", lambda: pane().open_people(), "Ctrl+Shift+E", None,
+        "The people in your photos, grouped by face on this Mac and named by you")
     act(g, "All Videos", lambda: win._navigate(sf.VIDEOS))
     act(g, "Empty Folders", lambda: win._navigate(sf.EMPTY))
     act(g, "Favorites", lambda: win._navigate(sf.LABEL + "favorite"))

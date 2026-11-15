@@ -145,6 +145,14 @@ def settings():
     return s
 
 
+def settings_value(key: str, default=None):
+    """One setting, for the modules that work without Qt too (a command-line run, a test): the default there."""
+    try:
+        return settings().value(key, default)
+    except Exception:  # noqa: BLE001 — no Qt: the default
+        return default
+
+
 def keychain_services(what: str) -> list[str]:
     """Keychain service names for `what` ("Astria"), the current one first."""
     return [f"{APP_NAME} {what}", f"{OLD_NAME} {what}"]

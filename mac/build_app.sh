@@ -83,6 +83,7 @@ rm -rf "dist/Photo Browser for Mac" "dist/Photo Browser for Mac.app"
   --add-data "$PWD/geocode_helper.swift:." \
   --add-data "$PWD/pdf_helper.swift:." \
   --add-data "$PWD/README.md:." \
+  --add-data "$PWD/geo:geo" \
   --add-data "$PWD/photo_browser_icon.png:." \
   --workpath build/pyinstaller --distpath dist --specpath build \
   photo_browser.py

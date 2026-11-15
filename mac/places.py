@@ -21,6 +21,19 @@ so its index works here as it is:
 
 Lookups (`label`) never touch the disk — they're made while painting and filtering; `locate` (a worker thread)
 does the reading and naming, and loads a drive's index the first time it's needed.
+
+**A third layer, offline** (`geo_names.py`, Nov 2026): every bin has a name the moment its GPS is read — the
+nearest town from the table that ships with the app — so nothing waits on the geocoder's one-a-second queue and,
+with "Refine Place Names with Apple" off, nothing leaves the Mac at all. A label is the iPhone's (the drive's
+index) when it has one, else Apple's from this Mac, else the offline one. The offline place also says which
+**country and region** a bin is in (`where`), whatever its label — that's what the Location menu's Country ▸
+State ▸ City and the search's `country:` / `state:` go by — and `text` is everything a search may match
+("passy, paris, île-de-france, france"). The offline names live in memory only: written into the index they'd
+pass for refined ones and never be bettered.
+
+**Everything with a location** (`everything`, `summary`): the two indexes list every file whose GPS has been read
+— months of the iPhone's work for the drive — which is what the Places collection, the map and `place:` searches
+are made from, without reading a single photo again. `scan` reads the ones not read yet.
 """
 from __future__ import annotations
 
@@ -36,6 +49,7 @@ from typing import Callable
 
 import media_info
 import app_identity
+import geo_names
 
 META_FOLDER = ".Photo Browser Metadata"
 FILE_NAME = "places.json"
@@ -93,6 +107,9 @@ class Places:
         self.read_gps = read_gps or gps_of
         self.geocode = geocode or geocode_bins
         self.problem = ""                              # why places couldn't be named, when they couldn't
+        self._offline: dict[str, geo_names.Place | None] = {}   # bin → the nearest town (memory only)
+        self._texts: dict[str, str] = {}               # bin → what a search may match
+        self.refine = str(app_identity.settings_value("places/refine", "true")) != "false"   # ask Apple for names too
 
     # -- keys
     def _volume(self, folder: str) -> str:
@@ -166,7 +183,8 @@ class Places:
                                 break
         return b
 
-    def bin_label(self, b: str, folder: str = "") -> str | None:
+    def _refined(self, b: str, folder: str = "") -> str | None:
+        """The bin's name from a geocoder — the iPhone's on the drive, or Apple's asked from this Mac."""
         with self._lock:
             label = self.own.bin_labels.get(b)
             if label is None:
@@ -175,6 +193,49 @@ class Places:
                         label = idx.bin_labels[b]
                         break
         return label
+
+    def place_of(self, b: str) -> "geo_names.Place | None":
+        """The nearest town to the bin, from the table that ships with the app (kept in memory)."""
+        if b in self._offline:
+            return self._offline[b]
+        centre = geo_names.bin_centre(b) if b else None
+        place = None
+        if centre is not None and geo_names.available():
+            try:
+                place = geo_names.nearest(*centre)
+            except Exception:  # noqa: BLE001 — a missing or damaged table: no offline names
+                place = None
+        self._offline[b] = place
+        return place
+
+    def bin_label(self, b: str, folder: str = "") -> str | None:
+        """The bin's label: a geocoder's when there is one, else the nearest town's ("" = a spot with no name)."""
+        label = self._refined(b, folder)
+        if label is None and b:
+            label = geo_names.label(self.place_of(b)) if geo_names.available() else None
+        return label
+
+    def where(self, b: str) -> tuple[str, str, str, str]:
+        """(country code, country, region key "US.NY", region name) of a bin — ("", "", "", "") when unknown."""
+        p = self.place_of(b) if b else None
+        if p is None or p.km > geo_names.FAR_KM * 3:
+            return "", "", "", ""
+        return p.cc, p.country, f"{p.cc}.{p.region_code}", p.region
+
+    def text(self, b: str, folder: str = "") -> str:
+        """Everything a search may match for the bin, folded: the label, the geocoder's own search text, and the
+        nearest town's district, city, region and country."""
+        if not b:
+            return ""
+        hit = self._texts.get(b)
+        if hit is None:
+            parts = [self.bin_label(b, folder) or ""]
+            with self._lock:
+                parts.append(self.own.bin_places.get(b, ""))
+                parts += [idx.bin_places.get(b, "") for idx in self._drives.values()]
+            parts.append(geo_names.search_text(self.place_of(b)) if geo_names.available() else "")
+            hit = self._texts[b] = geo_names.fold(", ".join(x for x in parts if x))
+        return hit
 
     def label(self, path: str, mtime: int, size: int) -> str | None:
         """"Hauppauge, NY"; "" for no location; None while it isn't known (not read, or its place not named yet)."""
@@ -217,8 +278,18 @@ class Places:
                         say(f"Reading locations… {done:,} of {len(todo):,}")
                     if stop is not None and stop.is_set():
                         break
+        if geo_names.available():                       # every place named at once, from the table
+            fresh = sorted({b for p, m, s in files if (b := self.bin(p, m, s)) and b not in self._offline})
+            centres = [(b, geo_names.bin_centre(b)) for b in fresh]
+            centres = [(b, c) for b, c in centres if c is not None]
+            if centres:
+                try:
+                    found = geo_names.nearest_many([c[0] for _b, c in centres], [c[1] for _b, c in centres])
+                    self._offline.update({b: place for (b, _c), place in zip(centres, found)})
+                except Exception:  # noqa: BLE001
+                    pass
         unnamed = sorted({b for p, m, s in files if (b := self.bin(p, m, s))
-                          and self.bin_label(b, os.path.dirname(os.path.abspath(p))) is None})
+                          and self._refined(b, os.path.dirname(os.path.abspath(p))) is None}) if self.refine else []
         if unnamed and not (stop is not None and stop.is_set()):
             say("Naming places…")
             names = self.geocode(unnamed[:NAME_LIMIT], lambda d, t: say(f"Naming places… {d} of {t}"), stop)
@@ -226,10 +297,117 @@ class Places:
                 for b, (label, search) in names.items():
                     self.own.bin_labels[b] = label
                     self.own.bin_places[b] = search
+                    self._texts.pop(b, None)
                     self._dirty = True
             if not names and getattr(self.geocode, "problem", ""):
                 self.problem = self.geocode.problem
         self.save()
+
+    # -- one file, now (a search by place: a worker thread)
+    def bin_now(self, path: str, mtime: int, size: int) -> str:
+        """The file's bin, reading its GPS if that hasn't been done ("" = no location). Kept for next time —
+        `save()` when the run is over."""
+        b = self.bin(path, mtime, size)
+        if b is None:
+            if os.path.splitext(path)[1].lower() in IMAGE_EXTS | VIDEO_EXTS:
+                try:
+                    place = self.read_gps(path)
+                except Exception:  # noqa: BLE001 — a damaged file has no place
+                    place = None
+                b = bin_of(*place) if place else ""
+            else:
+                b = ""
+            with self._lock:
+                self.own.file_bins[self.key(path, mtime, size)] = b
+                self._dirty = True
+        return b
+
+    # -- everything with a location
+    def everything(self, roots: list[str]) -> list[tuple[str, str]]:
+        """(path, bin) of every file known to have a location, on the Mac's own disk and the drives in `roots`
+        — from the indexes alone. The paths are as recorded: a file moved since is simply not there any more
+        (whoever lists them checks)."""
+        for root in roots:
+            self.load_drive(root)
+        out: dict[str, str] = {}
+        with self._lock:
+            own = [(k, b) for k, b in self.own.file_bins.items() if b]
+            drives = [(os.path.dirname(os.path.dirname(f)), [(k, b) for k, b in idx.file_bins.items() if b])
+                      for f, idx in self._drives.items()]
+        for base, items in drives:                       # the iPhone's: paths inside its drive
+            for key, b in items:
+                out[os.path.join(base, key.rsplit("|", 2)[0])] = b
+        for key, b in own:                               # this Mac's: whole paths, or paths inside a drive
+            rel = key.rsplit("|", 2)[0]
+            if rel.startswith(os.sep):
+                out[rel] = b
+            else:
+                for root in roots:
+                    out.setdefault(os.path.join(root, rel), b)
+        return list(out.items())
+
+    def summary(self, roots: list[str]) -> list[dict]:
+        """Every place with photos, most photos first: {label, bins, count, lat, lng, cc, country, region_key,
+        region} — what the Places list and the map show."""
+        by_bin: dict[str, int] = {}
+        for _path, b in self.everything(roots):
+            by_bin[b] = by_bin.get(b, 0) + 1
+        if geo_names.available():                        # name them all in one go
+            fresh = [b for b in by_bin if b not in self._offline]
+            centres = [(b, geo_names.bin_centre(b)) for b in fresh]
+            centres = [(b, c) for b, c in centres if c is not None]
+            if centres:
+                found = geo_names.nearest_many([c[0] for _b, c in centres], [c[1] for _b, c in centres])
+                self._offline.update({b: place for (b, _c), place in zip(centres, found)})
+        places: dict[str, dict] = {}
+        for b, n in by_bin.items():
+            centre = geo_names.bin_centre(b)
+            if centre is None:
+                continue
+            label = self.bin_label(b) or UNNAMED
+            cc, country, region_key, region = self.where(b)
+            p = places.setdefault(label, {"label": label, "bins": [], "count": 0, "lat": 0.0, "lng": 0.0, "cc": cc,
+                                          "country": country, "region_key": region_key, "region": region})
+            p["bins"].append(b)
+            p["count"] += n
+            p["lat"] += centre[0] * n
+            p["lng"] += centre[1] * n
+        for p in places.values():
+            p["lat"] /= p["count"]
+            p["lng"] /= p["count"]
+        return sorted(places.values(), key=lambda p: (-p["count"], p["label"].casefold()))
+
+    def files_at(self, roots: list[str], bins: set[str]) -> list[str]:
+        return sorted(path for path, b in self.everything(roots) if b in bins)
+
+    def scan(self, folder: str, progress: Callable[[str], None] | None = None,
+             stop: threading.Event | None = None) -> int:
+        """Reads the location of every photo and video under `folder` that hasn't been read (a worker thread).
+        Returns how many were read."""
+        todo: list[tuple[str, int, int]] = []
+        for root, dirs, files in os.walk(folder):
+            if stop is not None and stop.is_set():
+                break
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            self.load_drive(root)
+            for name in files:
+                if name.startswith(".") or os.path.splitext(name)[1].lower() not in IMAGE_EXTS | VIDEO_EXTS:
+                    continue
+                path = os.path.join(root, name)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                if self.bin(path, int(st.st_mtime), st.st_size) is None:
+                    todo.append((path, int(st.st_mtime), st.st_size))
+            if progress and len(todo) % 500 < 20:
+                progress(f"Looking for photos to read… {len(todo):,}")
+        for a in range(0, len(todo), 2000):              # in batches: kept as it goes, Stop loses little
+            if stop is not None and stop.is_set():
+                break
+            self.locate(todo[a:a + 2000], lambda t, a=a: progress(f"{t}  ({a:,} of {len(todo):,} done)") if progress
+                        else None, stop)
+        return len(todo)
 
     def save(self) -> None:
         with self._lock:

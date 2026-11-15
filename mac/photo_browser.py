@@ -87,6 +87,7 @@ except ModuleNotFoundError:
 
 import airdrop_to_iphone as airdrop
 import batch_crop
+import geo_names
 import search_query
 import themes
 import ui_extras
@@ -497,6 +498,19 @@ def glyph(name: str, color: str | None = None, size: int = 16) -> QIcon:
                         QPoint(int(s * 0.72), int(s * 0.86)), QPoint(int(s * 0.78), int(s * 0.26))])
         p.drawLine(QPoint(int(s * 0.42), int(s * 0.4)), QPoint(int(s * 0.44), int(s * 0.72)))
         p.drawLine(QPoint(int(s * 0.58), int(s * 0.4)), QPoint(int(s * 0.56), int(s * 0.72)))
+    elif name == "pin":                                    # a map pin: a drop with a hole
+        path = QPainterPath()
+        path.moveTo(s * 0.5, s * 0.9)
+        path.cubicTo(s * 0.18, s * 0.56, s * 0.2, s * 0.14, s * 0.5, s * 0.14)
+        path.cubicTo(s * 0.8, s * 0.14, s * 0.82, s * 0.56, s * 0.5, s * 0.9)
+        p.drawPath(path)
+        p.drawEllipse(QPointF(s * 0.5, s * 0.4), s * 0.1, s * 0.1)
+    elif name == "person":                                 # head and shoulders
+        p.drawEllipse(QPointF(s * 0.5, s * 0.34), s * 0.17, s * 0.17)
+        path = QPainterPath()
+        path.moveTo(s * 0.17, s * 0.86)
+        path.cubicTo(s * 0.2, s * 0.56, s * 0.8, s * 0.56, s * 0.83, s * 0.86)
+        p.drawPath(path)
     elif name == "tag":                                    # a luggage tag, pointing left, with its hole
         path = QPainterPath()
         path.moveTo(s * 0.08, s * 0.5)
@@ -2460,7 +2474,22 @@ FORMAT_FILTERS = [
     ("mp4", "MP4", frozenset({".mp4", ".m4v"})),
     ("avi", "AVI", frozenset({".avi"})),
 ]
-PLACES_CAP = 8000                      # the iPhone's: more files than this in one listing → "open a subfolder"
+PLACES_CAP = 30000                     # more files than this in one listing → "open a subfolder" (the iPhone's is 8,000:
+                                       # naming is instant here — the table ships with the app)
+
+
+def place_filter_name(value: str) -> str:
+    """A Location filter's value as words: a label is itself; "@cc:FR" is France; "@region:US.NY" is New York."""
+    if not value.startswith("@"):
+        return value
+    kind, _, key = value[1:].partition(":")
+    try:
+        if kind == "cc":
+            return geo_names.country_name(key) or key
+        t = geo_names.table()
+        return t.region_names[t.regions.index(key)] or key
+    except Exception:  # noqa: BLE001 — no table: the code
+        return key
 
 
 def type_of(path: str) -> str:
@@ -2621,9 +2650,44 @@ class Query:
         self.menu_kind = kind if kind in KIND_EXT else ""      # the Kind menu's choice, as such
         self.kind = self.menu_kind                              # …which "kind:" in the text overrides
         self._tag_words: set[str] | None = None                # of `words`/`without`: those some tag contains
+        self.where: list[tuple[str, str, bool]] = []           # ("place" | "city" | "state" | "country", folded, not)
+        self.near: list[tuple[float, float, float]] = []       # (lat, lng, km): taken within km of there
+        self.located: bool | None = None                       # is:located / -is:located
+        self.who: list[tuple[str, bool]] = []                  # (a person's name, folded; not)
+        self._place_words: set[str] | None = None              # of `words`: those some place's name contains
+        self._people_paths: dict[str, set[str]] | None = None  # word or name → the photos that person is in
         for key, value, neg in search_query.tokens(self.text):
             low = value.lower()
-            if key == "kind":
+            if key in ("place", "city", "state", "country", "location", "loc"):
+                kind = "place" if key in ("location", "loc") else key
+                if kind == "country":
+                    low = (geo_names.country_code(low) or low).lower() if geo_names.available() else low
+                self.where.append((kind, geo_names.fold(low), neg))
+            elif key == "near":
+                name, _, far = value.partition("~")
+                km = 25.0
+                try:
+                    km = float(far.lower().replace("km", "").strip()) if far.strip() else 25.0
+                except ValueError:
+                    pass
+                hits = geo_names.find(name) if geo_names.available() else []
+                if hits:
+                    self.near.append((hits[0][0], hits[0][1], km))
+                else:
+                    self.where.append(("place", geo_names.fold(name), neg))   # no such town: as a place's name
+            elif not key and low.startswith("~") and self.near:      # near:"new york city" ~80km
+                try:
+                    la, lo, _km = self.near[-1]
+                    self.near[-1] = (la, lo, float(low[1:].replace("km", "").strip()))
+                except ValueError:
+                    pass
+            elif key in ("person", "people", "who", "face"):
+                self.who.append((search_query.fold(value), neg))
+            elif key == "is" and low in ("located", "geotagged", "placed"):
+                self.located = not neg
+            elif key == "has" and low in ("location", "place", "gps"):
+                self.located = not neg
+            elif key == "kind":
                 if low in KIND_EXT:
                     self.kind = low
             elif key == "size":
@@ -2669,7 +2733,83 @@ class Query:
 
     def empty(self) -> bool:
         return not (self.words or self.without or self.tags or self.without_tags or self.states or self.inside
-                    or self.dates or self.exts or self.kind or self.size)
+                    or self.dates or self.exts or self.kind or self.size or self.where or self.near or self.who
+                    or self.located is not None)
+
+    def by_place(self) -> bool:
+        """Whether where a photo was taken has to be known (its GPS read) to answer."""
+        return bool(self.where or self.near or self.located is not None)
+
+    def _words_in_places(self) -> set[str]:
+        """The plain words that some known place's name contains — "paris" finds the photos taken there as well
+        as the files called that. Only places already read count: a plain search never reads a photo's GPS."""
+        if self._place_words is None:
+            self._place_words = set()
+            if self.words:
+                try:
+                    lookup = places.shared()
+                    known = {lookup.text(b) for _p, b in lookup.everything([str(v) for v in external_volumes()])}
+                    self._place_words = {w for w in self.words if len(w) >= 3 and any(w in t for t in known)}
+                except Exception:  # noqa: BLE001 — no index: names only
+                    pass
+        return self._place_words
+
+    def _people(self) -> dict[str, set[str]]:
+        """Each `person:` name — and each plain word that is part of someone's name — with the photos they're
+        in. Worked out once for the search."""
+        if self._people_paths is None:
+            self._people_paths = {}
+            wanted = {n for n, _neg in self.who} | set(self.words)
+            if wanted:
+                try:
+                    import people
+                    store = people.shared()
+                    named = [(search_query.fold(p.name), p.id) for p in store.people(hidden=True) if p.name]
+                    for w in wanted:
+                        ids = [pid for name, pid in named if w and w in name]
+                        if ids or any(w == n for n, _neg in self.who):
+                            self._people_paths[w] = {path for pid in ids for path in store.photos_of(pid)}
+                except Exception:  # noqa: BLE001 — no People yet
+                    pass
+        return self._people_paths
+
+    def _matches_place(self, path: str) -> bool:
+        """The `place:` / `near:` / `country:` / `is:located` part, for a file (its GPS is read if it never was)."""
+        if os.path.splitext(path)[1].lower() not in places.MEDIA_EXTS:
+            return self.located is False and not self.where and not self.near
+        try:
+            st = os.stat(path)
+        except OSError:
+            return False
+        lookup = places.shared()
+        b = lookup.bin_now(path, int(st.st_mtime), st.st_size)
+        if self.located is not None and bool(b) != self.located:
+            return False
+        if not (self.where or self.near):
+            return True
+        if not b:
+            return all(neg for _k, _v, neg in self.where) and not self.near
+        if self.near:
+            centre = geo_names.bin_centre(b)
+            if centre is None or not any(geo_names.distance_km(centre[0], centre[1], la, lo) <= km
+                                         for la, lo, km in self.near):
+                return False
+        if self.where:
+            text = lookup.text(b, os.path.dirname(path))
+            cc, country, region_key, region = lookup.where(b)
+            for kind, value, neg in self.where:
+                if kind == "country":
+                    hit = value == cc.lower() or value == geo_names.fold(country)
+                elif kind == "state":
+                    hit = value in (geo_names.fold(region), region_key.partition(".")[2].lower())
+                elif kind == "city":
+                    hit = geo_names.fold(lookup.bin_label(b) or "").split(",")[0].strip() == value or \
+                        value in text.split(", ")
+                else:
+                    hit = value in text
+                if hit == neg:
+                    return False
+        return True
 
     def wants_folders(self) -> bool:
         """A search by name finds folders too; one by extension, kind, size or date is about files."""
@@ -2677,7 +2817,9 @@ class Query:
 
     def needs_tags(self) -> bool:
         """Whether a file's tags or labels have to be looked at (they live in the drive's tag file, by path)."""
-        return bool(self.tags or self.without_tags or self.states or self._words_in_tags())
+        return bool(self.tags or self.without_tags or self.states or self._words_in_tags()
+                    or self.by_place() or self.who or self._words_in_places()
+                    or any(w in self._people() for w in self.words))      # (…or where it was taken, or who's in it)
 
     def _words_in_tags(self) -> set[str]:
         """The plain words that some tag in use contains — only those can match a file by its tags, so a
@@ -2692,8 +2834,9 @@ class Query:
 
     def spotlight_ok(self) -> bool:
         """Whether Spotlight can narrow this search (it knows names, extensions and sizes — not the app's tags,
-        and a search with none of the first would have it list every file on the Mac)."""
-        return bool(self.words or self.exts or self.kind or self.size) and not self._words_in_tags()
+        places or people, and a search with none of the first would have it list every file on the Mac)."""
+        return bool(self.words or self.exts or self.kind or self.size) and not self._words_in_tags() \
+            and not self._words_in_places() and not any(w in self._people() for w in self.words)
 
     def matches_size(self, size: int) -> bool:
         if self.size is None:
@@ -2723,6 +2866,30 @@ class Query:
         missing = [w for w in self.words if not search_query.has(w, named)]
         if any(search_query.has(w, named) for w in self.without):
             return False
+        if path is not None and (self.by_place() or self.who):
+            if self.by_place() and not self._matches_place(path):
+                return False
+            for who, neg in self.who:
+                if (path in self._people().get(who, ())) == neg:
+                    return False
+        elif self.by_place() or any(not neg for _w, neg in self.who):
+            return False                                   # (a folder, or no path: places and people are files')
+        if missing and path is not None:
+            # a word that isn't in the name may be where it was taken, or who's in it
+            left = []
+            for w in missing:
+                if w in self._people() and path in self._people()[w]:
+                    continue
+                if w in self._words_in_places():
+                    try:
+                        st = os.stat(path)
+                        b = places.shared().bin(path, int(st.st_mtime), st.st_size)
+                    except OSError:
+                        b = None
+                    if b and w in places.shared().text(b, os.path.dirname(path)):
+                        continue
+                left.append(w)
+            missing = left
         look = path is not None and (self.tags or self.without_tags or self.states
                                      or (missing and all(w in self._words_in_tags() for w in missing))
                                      or any(w in self._words_in_tags() for w in self.without))
@@ -2816,6 +2983,8 @@ class FileScanner:
         found = self._spotlight() if self.spotlight else 0
         if not found and not self._stop.is_set():
             self._walk()
+        if getattr(getattr(self, "query", None), "by_place", lambda: False)():
+            places.shared().save()                       # the locations it read, kept for next time
         self.signals.done.emit(not self._stop.is_set())
 
     @staticmethod
@@ -3081,6 +3250,8 @@ class EmptyFolderScanner:
                     batch = []
         if batch and not self._stop.is_set():
             self.signals.found.emit(batch)
+        if getattr(getattr(self, "query", None), "by_place", lambda: False)():
+            places.shared().save()                       # the locations it read, kept for next time
         self.signals.done.emit(not self._stop.is_set())
 
     def _walk(self, folder: str, dev: int, top: bool) -> tuple[int, list[tuple[str, float]]]:
@@ -3158,6 +3329,8 @@ class TagScanner:
                 batch = []
         if batch and not self._stop.is_set():
             self.signals.found.emit(batch)
+        if getattr(getattr(self, "query", None), "by_place", lambda: False)():
+            places.shared().save()                       # the locations it read, kept for next time
         self.signals.done.emit(not self._stop.is_set())
 
 
@@ -3170,7 +3343,13 @@ class ListScanner(TagScanner):
         self._paths_fn = paths
 
     def start(self) -> None:
-        threading.Thread(target=self._run, args=(list(self._paths_fn()),), name="list-scan", daemon=True).start()
+        def work() -> None:
+            try:
+                paths = list(self._paths_fn())            # (a place's or a person's photos: worked out here, not
+            except Exception:  # noqa: BLE001              #  on the window's thread — it can take a moment)
+                paths = []
+            self._run(paths)
+        threading.Thread(target=work, name="list-scan", daemon=True).start()
 
 
 @dataclass
@@ -3194,6 +3373,35 @@ def collection_of(location: str) -> "tuple[Collection, str] | None":
         if location.startswith(prefix):
             return c, location[len(prefix):]
     return None
+
+
+PLACE = app_identity.URL + "place/"                # + a place: "Paris, France", "@cc:FR" (a country), "@region:US.NY"
+PERSON = app_identity.URL + "person/"              # + a person's id (people.py)
+
+
+def _place_bins(arg: str) -> tuple[list[str], set[str]]:
+    roots = [str(v) for v in external_volumes()]
+    lookup = places.shared()
+    summary = lookup.summary(roots)
+    if arg.startswith("@"):
+        kind, _, value = arg[1:].partition(":")
+        found = [p for p in summary if (p["cc"] if kind == "cc" else p["region_key"]) == value]
+    else:
+        found = [p for p in summary if p["label"] == arg]
+    return roots, {b for p in found for b in p["bins"]}
+
+
+def _place_paths(arg: str) -> list[str]:
+    roots, bins = _place_bins(arg)
+    return places.shared().files_at(roots, bins)
+
+
+COLLECTIONS[PLACE] = Collection(
+    title=place_filter_name, paths=_place_paths, icon="pin",
+    tip=lambda arg: f"Every photo and video taken in {place_filter_name(arg)} — on this Mac and the connected drives",
+    status=lambda arg, n: f"{n:,} item{'s' if n != 1 else ''} taken in {place_filter_name(arg)}",
+    empty=lambda arg: ("No Photos From Here", "Nothing with this location is on the drives connected now. "
+                                              "Go ▸ Places… ▸ Read Locations reads the photos not read yet."))
 
 
 class LabelScanner(TagScanner):
@@ -3407,8 +3615,14 @@ class PaneModel(QSortFilterProxyModel):
             if self.type_filter and type_of(path) != self.type_filter:
                 return False
         if self.place is not None and not is_dir:    # folders stay: their places aren't all read
-            if self.label_of is None or self.label_of(src.filePath(idx), src.lastModified(idx).toSecsSinceEpoch(),
-                                                      src.size(idx)) != self.place:
+            path, mtime, size = src.filePath(idx), src.lastModified(idx).toSecsSinceEpoch(), src.size(idx)
+            if self.place.startswith("@"):             # a whole country ("@cc:FR") or region ("@region:US.NY")
+                kind, _, value = self.place[1:].partition(":")
+                b = places.shared().bin(path, mtime, size)
+                cc, _country, region_key, _region = places.shared().where(b) if b else ("", "", "", "")
+                if (cc if kind == "cc" else region_key) != value:
+                    return False
+            elif self.label_of is None or self.label_of(path, mtime, size) != self.place:
                 return False
         if self.size_filter is None:
             return True
@@ -4097,7 +4311,7 @@ class Pane(QWidget):
         if self.format_filter_key:
             parts.append(next(label for k, label, _e in FORMAT_FILTERS if k == self.format_filter_key))
         if self.place_filter is not None:
-            parts.append(self.place_filter or "no location")
+            parts.append(place_filter_name(self.place_filter) if self.place_filter else "no location")
         if self.size_filter_key:
             parts.append(dict(SIZE_FILTERS)[self.size_filter_key].lower())
         return " · ".join(parts)
@@ -4113,7 +4327,7 @@ class Pane(QWidget):
         self.type_menu.setTitle(f"Type: {dict(TYPE_FILTERS)[self.type_filter_key]}")
         self.format_menu.setTitle("Format: " + next(label for k, label, _e in FORMAT_FILTERS
                                                     if k == self.format_filter_key))
-        place = "All" if self.place_filter is None else (self.place_filter or "No Location")
+        place = "All" if self.place_filter is None else (place_filter_name(self.place_filter) or "No Location")
         self.place_menu.setTitle(f"Location: {place}")
         self.size_menu.setTitle(f"Size: {dict(SIZE_FILTERS)[self.size_filter_key]}")
         on = self.any_filter()
@@ -4210,10 +4424,61 @@ class Pane(QWidget):
             info = menu.addAction(note)
             info.setEnabled(False)
         named = sorted(((k, v) for k, v in counts.items() if k), key=lambda kv: (-kv[1], kv[0].lower()))
-        if self.place_filter and self.place_filter not in counts:
+        if self.place_filter and not self.place_filter.startswith("@") and self.place_filter not in counts:
             named.insert(0, (self.place_filter, 0))      # the one chosen, even when nothing here is from there now
-        for label, n in named:
-            choice(f"{label} ({n:,})", label)
+        # Where each place is: country ▸ region ▸ city, when the photos here are from more than one country (or,
+        # in one country, more than one region). A country or a region can be chosen whole.
+        tree: dict[str, dict] = {}
+        if len(files) <= PLACES_CAP:
+            for f in files:
+                label = lookup.label(*f)
+                b = lookup.bin(*f)
+                if not label or not b:
+                    continue
+                cc, country, region_key, region = lookup.where(b)
+                c = tree.setdefault(cc, {"name": country or "Elsewhere", "count": 0, "regions": {}})
+                c["count"] += 1
+                r = c["regions"].setdefault(region_key, {"name": region or country or "Elsewhere", "count": 0, "cities": {}})
+                r["count"] += 1
+                r["cities"][label] = r["cities"].get(label, 0) + 1
+
+        def cities(into: QMenu, found: dict[str, int]) -> None:
+            for label, n in sorted(found.items(), key=lambda kv: (-kv[1], kv[0].lower())):
+                a = into.addAction(f"{label} ({n:,})")
+                a.setCheckable(True)
+                a.setChecked(self.place_filter == label)
+                group.addAction(a)
+                a.triggered.connect(lambda _=False, v=label: self.set_place_filter(v))
+
+        def whole(into: QMenu, text: str, value: str) -> None:
+            a = into.addAction(text)
+            a.setCheckable(True)
+            a.setChecked(self.place_filter == value)
+            group.addAction(a)
+            a.triggered.connect(lambda _=False, v=value: self.set_place_filter(v))
+            into.addSeparator()
+
+        def regions(into: QMenu, country: dict) -> None:
+            if len(country["regions"]) < 2:
+                for r in country["regions"].values():
+                    cities(into, r["cities"])
+                return
+            for key, r in sorted(country["regions"].items(), key=lambda kv: (-kv[1]["count"], kv[1]["name"].lower())):
+                sub = into.addMenu(f"{r['name']} ({r['count']:,})")
+                whole(sub, f"All of {r['name']} ({r['count']:,})", f"@region:{key}")
+                cities(sub, r["cities"])
+
+        if len(tree) > 1:
+            for cc, c in sorted(tree.items(), key=lambda kv: (-kv[1]["count"], kv[1]["name"].lower())):
+                sub = menu.addMenu(f"{c['name']} ({c['count']:,})")
+                if cc:
+                    whole(sub, f"All of {c['name']} ({c['count']:,})", f"@cc:{cc}")
+                regions(sub, c)
+        elif len(tree) == 1 and len(next(iter(tree.values()))["regions"]) > 1:
+            regions(menu, next(iter(tree.values())))
+        else:
+            for label, n in named:
+                choice(f"{label} ({n:,})", label)
         if "" in counts or self.place_filter == "":
             choice(f"No Location ({counts.get('', 0):,})", "")
 
@@ -5450,6 +5715,33 @@ class Pane(QWidget):
             folder=folder, create_with_ai=lambda where, settings: self.ai_create(where, settings),
             view=lambda paths, start: self.view_media(start, among=paths), reveal=self._reveal_from_viewer,
             trash=lambda path: MainWindow.trash_item(Path(path)))
+
+    def open_places(self) -> None:
+        """Go ▸ Places… (places_window.py): where the photos were taken — a list by country and town, and a map."""
+        import places_window
+        for w in _VIEWERS:
+            if isinstance(w, places_window.PlacesWindow):
+                w.show()
+                w.raise_()
+                w.activateWindow()
+                w.reload()
+                return
+        win = self.window()
+
+        def show(arg: str) -> None:
+            win.raise_()
+            win.activateWindow()
+            win._navigate(PLACE + arg)
+
+        def scan_folder() -> str:
+            ext = external_volumes()
+            if ext:
+                return str(ext[0])
+            return self.location if not self.is_virtual and os.path.isdir(self.location) else ""
+        w = places_window.PlacesWindow(places_window.PlaceHooks(
+            show=show, roots=lambda: [str(v) for v in external_volumes()], scan_folder=scan_folder), THEME, win)
+        self._ai_hooks().keep_open(w)
+        w.show()
 
     def open_ai_models(self, select: str | None = None) -> None:
         """AI ▸ AI Models…: the models made so far, and pictures from them."""
@@ -7139,6 +7431,11 @@ class Sidebar(QWidget):
         self._entry(loc, boot_volume_name(), Path("/"))
         for v in external_volumes():
             self._entry(loc, v.name, v, ejectable=True)
+        lib = self._section("Library")
+        self._collection(lib, "Places", "@places", glyph("pin", THEME.accent, 16),
+                         "Where your photos and videos were taken — a list by country and town, and a map")
+        self._collection(lib, "People", "@people", glyph("person", THEME.accent, 16),
+                         "The people in your photos, grouped by face — found on this Mac, named by you")
         self._labels_section = self._section("Labels")
         self._fill_labels()
         self._tags_section = self._section("Tags")
@@ -7703,6 +8000,12 @@ class MainWindow(QMainWindow):
         self.update_actions()
 
     def _navigate(self, path: str) -> None:
+        if path == "@places":                  # the sidebar's Library: windows of their own
+            self.active_pane.open_places()
+            return
+        if path == "@people":
+            self.active_pane.open_people()
+            return
         if path in (VIDEOS, EMPTY):            # a collection of the Mac's own — always the From side
             self.set_active(self.src)
             self.src.go(path)

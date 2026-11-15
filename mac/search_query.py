@@ -11,6 +11,14 @@
     date:2020  date:2020-06  date:2020-06-20  date:today|yesterday|week|month|year
     before:2021  after:2020-06            (by the file's modified date)
     .heic  *.mov  ext:mp4,mov   kind:video   size:>100mb          (as before)
+    place:paris  city:paris  state:ny  country:france|fr          where it was taken (places.py, geo_names.py)
+    near:"lake tahoe"  near:tahoe~50km   within 25 km (or as said) of a town by that name
+    is:located  -is:located              has a location / has none
+    person:anna                          she's in it (people.py — the names you gave)
+
+A plain word also finds photos by **where they were taken** and **who's in them**, when some place already read
+or some person named has it in their name: "paris" finds files called that *and* photos taken there. (A plain
+search never reads a photo's GPS — only `place:` and its kin do, once, and keep what they read.)
 
 **Matching forgives how names are written** (`forms`, `has`): case and accents don't count ("cafe" finds
 "Café"), a file's NFD name matches what was typed in NFC, and separators don't either — "img 1003" and "img1003"
