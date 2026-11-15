@@ -2485,6 +2485,10 @@ def place_filter_name(value: str) -> str:
         return value
     kind, _, key = value[1:].partition(":")
     try:
+        if kind == "bins":                           # spots picked on the map: named after the first, "and around"
+            spots = [b for b in key.split(";") if b]
+            label = places.shared().bin_label(spots[0]) if spots else ""
+            return (f"{label} and around" if len(spots) > 1 else label) if label else "the spot on the map"
         if kind == "cc":
             return geo_names.country_name(key) or key
         t = geo_names.table()
@@ -2656,6 +2660,7 @@ class Query:
         self._tag_words: set[str] | None = None                # of `words`/`without`: those some tag contains
         self.where: list[tuple[str, str, bool]] = []           # ("place" | "city" | "state" | "country", folded, not)
         self.near: list[tuple[float, float, float]] = []       # (lat, lng, km): taken within km of there
+        self.not_near: list[tuple[float, float, float]] = []   # -near: … and not within km of there
         self.located: bool | None = None                       # is:located / -is:located
         self.who: list[tuple[str, bool]] = []                  # (a person's name, folded; not)
         self._place_words: set[str] | None = None              # of `words`: those some place's name contains
@@ -2674,15 +2679,20 @@ class Query:
                     km = float(far.lower().replace("km", "").strip()) if far.strip() else 25.0
                 except ValueError:
                     pass
-                hits = geo_names.find(name) if geo_names.available() else []
-                if hits:
-                    self.near.append((hits[0][0], hits[0][1], km))
+                # A country or a state isn't a point to be near: near:france is "in France".
+                wide = geo_names.wide_place(name) if geo_names.available() else None
+                hits = geo_names.find(name, prefix=False) if geo_names.available() and wide is None else []
+                if wide is not None:
+                    self.where.append((wide[0], wide[1], neg))
+                elif hits:
+                    (self.not_near if neg else self.near).append((hits[0][0], hits[0][1], km))
                 else:
-                    self.where.append(("place", geo_names.fold(name), neg))   # no such town: as a place's name
-            elif not key and low.startswith("~") and self.near:      # near:"new york city" ~80km
+                    self.where.append(("place", geo_names.fold(name), neg))   # no town called that: as a place's name
+            elif not key and low.startswith("~") and (self.near or self.not_near):      # near:"new york city" ~80km
                 try:
-                    la, lo, _km = self.near[-1]
-                    self.near[-1] = (la, lo, float(low[1:].replace("km", "").strip()))
+                    last = self.near if self.near else self.not_near
+                    la, lo, _km = last[-1]
+                    last[-1] = (la, lo, float(low[1:].replace("km", "").strip()))
                 except ValueError:
                     pass
             elif key in ("person", "people", "who", "face"):
@@ -2749,12 +2759,12 @@ class Query:
 
     def empty(self) -> bool:
         return not (self.words or self.without or self.tags or self.without_tags or self.states or self.inside
-                    or self.dates or self.exts or self.kind or self.size or self.where or self.near or self.who
+                    or self.dates or self.exts or self.kind or self.size or self.where or self.near or self.not_near or self.who
                     or self.not_exts or self.not_inside or self.located is not None)
 
     def by_place(self) -> bool:
         """Whether where a photo was taken has to be known (its GPS read) to answer."""
-        return bool(self.where or self.near or self.located is not None)
+        return bool(self.where or self.near or self.not_near or self.located is not None)
 
     def _words_in_places(self) -> set[str]:
         """The plain words that some known place's name contains — "paris" finds the photos taken there as well
@@ -2794,7 +2804,7 @@ class Query:
     def _matches_place(self, path: str) -> bool:
         """The `place:` / `near:` / `country:` / `is:located` part, for a file (its GPS is read if it never was)."""
         if os.path.splitext(path)[1].lower() not in places.MEDIA_EXTS:
-            return self.located is False and not self.where and not self.near
+            return self.located is False and not self.where and not self.near and not self.not_near
         try:
             st = os.stat(path)
         except OSError:
@@ -2803,14 +2813,15 @@ class Query:
         b = lookup.bin_now(path, int(st.st_mtime), st.st_size)
         if self.located is not None and bool(b) != self.located:
             return False
-        if not (self.where or self.near):
+        if not (self.where or self.near or self.not_near):
             return True
         if not b:
             return all(neg for _k, _v, neg in self.where) and not self.near
-        if self.near:
+        if self.near or self.not_near:
             centre = geo_names.bin_centre(b)
-            if centre is None or not any(geo_names.distance_km(centre[0], centre[1], la, lo) <= km
-                                         for la, lo, km in self.near):
+            within = lambda spots: centre is not None and any(                       # noqa: E731
+                geo_names.distance_km(centre[0], centre[1], la, lo) <= km for la, lo, km in spots)
+            if (self.near and not within(self.near)) or (self.not_near and within(self.not_near)):
                 return False
         if self.where:
             text = lookup.text(b, os.path.dirname(path))
@@ -3408,6 +3419,8 @@ def _place_bins(arg: str) -> tuple[list[str], set[str]]:
     roots = [str(v) for v in external_volumes()]
     lookup = places.shared()
     summary = lookup.summary(roots)
+    if arg.startswith("@bins:"):                   # a circle clicked on the Places map: just those spots
+        return roots, {b for b in arg[6:].split(";") if b}
     if arg.startswith("@"):
         kind, _, value = arg[1:].partition(":")
         found = [p for p in summary if (p["cc"] if kind == "cc" else p["region_key"]) == value]
@@ -3699,9 +3712,13 @@ class PaneModel(QSortFilterProxyModel):
             if self.place.startswith("@"):             # a whole country ("@cc:FR") or region ("@region:US.NY")
                 kind, _, value = self.place[1:].partition(":")
                 b = places.shared().bin(path, mtime, size)
-                cc, _country, region_key, _region = places.shared().where(b) if b else ("", "", "", "")
-                if (cc if kind == "cc" else region_key) != value:
-                    return False
+                if kind == "bins":
+                    if not b or b not in value.split(";"):
+                        return False
+                else:
+                    cc, _country, region_key, _region = places.shared().where(b) if b else ("", "", "", "")
+                    if (cc if kind == "cc" else region_key) != value:
+                        return False
             elif self.label_of is None or self.label_of(path, mtime, size) != self.place:
                 return False
         if self.size_filter is None:

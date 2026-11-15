@@ -41,6 +41,9 @@ ARG = Qt.ItemDataRole.UserRole           # a tree item's collection argument ("P
 SPOT = Qt.ItemDataRole.UserRole + 1      # …and (lat, lng, span in degrees) to show it on the map
 
 
+MOST_BINS = 600                          # spots a circle may gather and still be shown as itself (else: its biggest place)
+
+
 @dataclass
 class PlaceHooks:
     show: Callable[[str], None]                          # open the place (a collection argument) in the main window
@@ -185,28 +188,37 @@ class MapView(QWidget):
             return
         min_pop = 3_000_000 if self.zoom < 3.5 else 800_000 if self.zoom < 5 else 150_000 if self.zoom < 6.5 \
             else 30_000 if self.zoom < 8 else 5_000 if self.zoom < 9.5 else 1_000
-        lats, lngs, names, _pops = geo_names.towns(min_pop)
-        lat1, lng0 = unproject(self.cx - self.width() / 2 / self._scale(), self.cy - self.height() / 2 / self._scale())
-        lat0, lng1 = unproject(self.cx + self.width() / 2 / self._scale(), self.cy + self.height() / 2 / self._scale())
+        import numpy as np
+        lats, lngs, names, pops = geo_names.towns(min_pop)
+        scale = self._scale()
+        lat1, _ = unproject(0.0, self.cy - self.height() / 2 / scale)
+        lat0, _ = unproject(0.0, self.cy + self.height() / 2 / scale)
+        mid = self.cx * 360.0 - 180.0
+        half = min(180.0, self.width() / 2 / scale * 360.0)
+        off = (np.asarray(lngs) - mid + 180.0) % 360.0 - 180.0          # degrees east of the middle — across the date line too
+        seen = np.nonzero((np.asarray(lats) >= lat0) & (np.asarray(lats) <= lat1) & (np.abs(off) <= half))[0]
+        seen = seen[np.argsort(-np.asarray(pops)[seen], kind="stable")][:400]     # the biggest first: they get the room
         f = QFont(self.font())
         f.setPointSizeF(max(8.0, f.pointSizeF() - 2))
         p.setFont(f)
+        fm = p.fontMetrics()
         ink = QColor(255, 255, 255, 150) if self.theme.dark else QColor(0, 0, 0, 150)
-        shown = 0
-        for i in range(len(names)):
-            la, lo = float(lats[i]), float(lngs[i])
-            if not (lat0 <= la <= lat1) or (lng0 <= lng1 and not (lng0 <= lo <= lng1)):
-                continue
-            pt = self._screen(*project(la, lo))
+        taken: list[QRectF] = []
+        for i in seen:
+            i = int(i)
+            pt = self._screen(*project(float(lats[i]), float(lngs[i])))
             if not self.rect().contains(pt.toPoint()):
                 continue
+            box = QRectF(pt.x() - 3, pt.y() - fm.ascent() + 4, fm.horizontalAdvance(names[i]) + 10, fm.height())
+            if any(box.intersects(t) for t in taken):                    # a smaller town under a bigger one's name: left out
+                continue
+            taken.append(box)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(ink)
             p.drawEllipse(pt, 1.6, 1.6)
             p.setPen(ink)
             p.drawText(pt + QPointF(5, 4), names[i])
-            shown += 1
-            if shown > 140:
+            if len(taken) >= 90:
                 break
 
     def _bubbles(self, p: QPainter) -> None:
@@ -480,6 +492,7 @@ class PlacesWindow(QWidget):
 
     # -- choosing
     def _selected(self) -> None:
+        self._picked_bins = []                          # the list was used: Show Photos means the place chosen there
         item = self.tree.currentItem()
         self.show_btn.setEnabled(item is not None and bool(item.data(0, ARG)))
         spot = item.data(0, SPOT) if item is not None else None
@@ -488,14 +501,21 @@ class PlacesWindow(QWidget):
 
     def _show(self, item) -> None:
         arg = item.data(0, ARG) if item is not None else ""
+        bins = self._picked_bins
+        if bins and len(bins) <= MOST_BINS:
+            # A circle on the map was clicked: exactly its photos — unless it's one whole place, which has a name.
+            whole = next((p for p in self.summary if set(p["bins"]) == set(bins)), None)
+            arg = whole["label"] if whole is not None and whole.get("label") else "@bins:" + ";".join(bins)
         if arg:
             self.hooks.show(arg)
 
     def _map_picked(self, bins: list[str]) -> None:
-        """A circle on the map: its biggest place is selected in the list (so Show Photos has something)."""
+        """A circle on the map: Show Photos shows that circle's photos; its biggest place is selected in the list
+        (so it's clear where that is)."""
         self._picked_bins = bins
         if not bins:
             return
+        self.show_btn.setEnabled(True)
         best = max((p for p in self.summary if set(p["bins"]) & set(bins)), key=lambda p: p["count"], default=None)
         if best is None:
             return

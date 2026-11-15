@@ -204,14 +204,31 @@ def country_name(cc: str) -> str:
     return table().countries.get(cc.upper(), "")
 
 
-def find(text: str, limit: int = 8) -> list[tuple[float, float, Place]]:
-    """Places called `text` ("lake tahoe", "paris", "paris, tx"), the biggest first: (lat, lng, place)."""
+def wide_place(text: str) -> tuple[str, str] | None:
+    """`text` as a country or a state/region, when it names one: ("country", "fr") or ("state", "california") —
+    in the form the search compares with. None for anything else (a town, or nothing known)."""
+    want = fold(text.strip())
+    if not want:
+        return None
+    cc = country_code(want)
+    if cc and len(want) > 2:                         # (two letters are too easily a word: "in", "la")
+        return "country", cc.lower()
+    t = table()
+    if any(fold(n) == want for n in t.region_names if n):
+        return "state", want
+    return None
+
+
+def find(text: str, limit: int = 8, prefix: bool = True) -> list[tuple[float, float, Place]]:
+    """Places called `text` ("lake tahoe", "paris", "paris, tx"), the biggest first: (lat, lng, place). With
+    `prefix`, a name nothing has exactly is taken as the start of one ("yosemite" → Yosemite Valley) — right for
+    the map's search box, where the result is seen; not for `near:`, which would quietly search somewhere else."""
     t = table()
     name, _, rest = text.partition(",")
     want = fold(name)
     region = fold(rest)
     hits = list(t.by_name().get(want, []))
-    if not hits and len(want) >= 4:                              # the start of a name: "yosemite" → Yosemite Valley
+    if not hits and prefix and len(want) >= 4:                   # the start of a name: "yosemite" → Yosemite Valley
         hits = [i for key, rows in t.by_name().items() if key.startswith(want) for i in rows]
     out = []
     for i in sorted(hits, key=lambda i: -int(t.pop[i])):
