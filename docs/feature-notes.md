@@ -2712,6 +2712,97 @@ seconds)` → `Pane.cover_from_viewer`: a photo as it is, a video's current fram
 `frame_export.frame_image`. The context menu's "Use as Cover of …" is now "Use as Album Cover" (the iPhone's
 words), and it's in the Photos menu.
 
+## 6an. Mac: HDR gain maps kept through edits; a review pass over the week's features (Nov 15–16, 2026)
+
+### HDR gain maps (`mac/gainmap.py`, `mac/gainmap_helper.swift`, `batch_crop.encode_like(gain=…)`)
+
+Asked: "an iPhone photo's HDR gain map is not carried into the edit — can this be fixed?" Yes, on a Mac.
+
+- An iPhone photo's HDR is an auxiliary image (`urn:com:apple:photo:2020:aux:hdrgainmap`: 8-bit grey, half the
+  picture's width and height, stored the same way round as the picture) plus the headroom in Apple's maker
+  note (keys 33 and 48) and a little XMP on the map itself. Pillow reads and writes none of it.
+- **Reading is Python**: `gainmap.sniff` (HEIC: the URN in the `meta` box; JPEG: MPF + the gain-map XMP),
+  `gainmap.read` (pillow-heif's `get_aux_image` — already upright; a JPEG's map is the file's second picture,
+  turned by the EXIF orientation). Both checked here on real iPhone HEICs and an ImageIO-written JPEG.
+- **Writing is ImageIO** (`gainmap_helper.swift`, its own file, built on first use): the edited pixels arrive
+  as an uncompressed TIFF (one encode, not two), `CGImageDestinationAddImage` with the *original's*
+  properties (orientation 1, sizes fixed — MakerApple travels in them), then
+  `CGImageDestinationAddAuxiliaryDataInfo` with the original's own aux dictionary, its data and description
+  replaced (rows padded to a multiple of 4, every description key set — an incomplete one is dropped
+  silently), its `CGImageMetadata` reused (it can't be rebuilt by hand); the result is reopened to check the
+  map and the headroom went in. Written from Apple's docs and working open-source code — **never compiled**
+  (no Swift here). If it doesn't build or fails, `encode_like` falls back to the plain save and
+  `Source.gain_kept` is False; nothing is lost but the HDR.
+- **`encode_like(src, im, gain=…)`** is the one door: `"same"` (tone edits, upscales: the map as it is, at
+  half the new size), `"local"` (things were removed: the map is filled in wherever the picture changed a
+  lot — `gainmap.filled`, from the rim inwards), or a function doing to the map what was done to the picture
+  (`batch_crop.render` turns and crops it; the editor uses `photo_edit.gain_through` → `plane_through`:
+  reshape strokes, heal fills, face warps, geometry, a frame's margins at zero). `None` (the default, and
+  `social.py`'s upscales) leaves it out. **A caller that moves pixels must say how** — "same" on a rotated
+  picture would put the highlights in the wrong place, which is worse than no HDR.
+- iOS 18+ photos carry both Apple's map and an ISO 21496-1 one; the Apple one is read and written (what
+  Apple's own editor does on a crop). An ISO-only file is tried through the helper on macOS 15+, and saved in
+  standard range when its format isn't 8-bit grey.
+- Not kept: a PQ/HLG photo's range (no gain map — tone-mapped as before); collages (photos with different
+  headrooms); depth and portrait mattes.
+
+### The review pass
+
+Three read-only reviews of everything added on the Mac since Nov 8 (about a hundred findings), then fixes.
+What changed, by area — details are in the commit messages and the code's own comments:
+
+- **Photo editor**: Auto on a mostly-white picture; short Reshape drags; transparent PNGs (text, borders,
+  warps follow the alpha — `plane_through` again); tight crops previewed from a larger copy (`_fine` →
+  "close"); Display P3 shown in the screen's colours (`screen_transform`; the file keeps its own); saves can
+  be stopped; redo isn't lost by a press that changes nothing (`_can_redo`); ⌘S guard; Save and Upscale never
+  remembers Overwrite; CMYK / grey-with-colour profiles; `turned_size` rounds like `apply_geometry`. **New**:
+  Copy / Paste Edits and My Looks (`transferable`, `with_pasted`, `apply_to_file`, `PasteRun`,
+  `Pane.paste_edits`), a histogram.
+- **Stitch Videos**: per-clip trim (`Clip.start/end`; concat `inpoint/outpoint` or input `-ss/-to`); Add
+  Clips; mixed HDR + standard clips tone-mapped (`zscale` + `tonemap`) and tagged bt709; `kind()` compares
+  profile, level and colours but treats 29.97 and 30 fps as one (`rate_class`); `.mov` output is `-f mov`; a
+  wrong-length copy join is retried re-encoded with the chosen size and rate (`fallback`); sound found
+  without ffprobe; the joiner is looked for off the UI thread.
+- **Collage**: `oldest()` ranks a real capture date before a file date; save works from a snapshot; only the
+  pixels needed are read (`needed_side`); `clamped` views.
+- **Receive from iPhone**: `targets()` — files sharing a stem share a suffix (Live Photo pairs, `.AAE`);
+  read-back with `F_NOCACHE`; no waiting on old files; one receive at a time; the watcher is off until the
+  window is first opened.
+- **Menus / palette / undo** (`menubar.py`, `ui_extras.py`): commands are disabled only while their menu is
+  open (`rest` on `aboutToHide`) and each `run` re-checks — a disabled `QAction` has a dead shortcut, and
+  enable checks only ran on `aboutToShow`; `menu_commands` records `can_run` and re-enables; the palette runs
+  the clicked row; a toast's Undo is `undo_this(item)`; quitting asks when other windows are busy
+  (`busy_windows`: any top-level with `running` / `saving` / `working` / `busy` true — name a new long job's
+  flag one of these).
+- **Search**: `-in:` `-ext:` `-kind:`; unreadable terms shown; `NAMES.stamp()`.
+- **Themes**: `readable` falls back to the better of black and white; `accent_text`; `from_json` guards.
+  Candy Corn's own stops still can't give 4.5:1 with any one text colour (it mirrors the iPhone's theme).
+- **AI results**: a failed save keeps tiles saveable (`saved_to`) and the pending job; "discard" is never
+  remembered.
+- **Shared files**: `folder-covers.json`, `folder-options.json` and `astria.json` are read through
+  `net_fetch.load_json` (.bak, .damaged) and backed up before a write; folder options round-trip unknown keys.
+- **net_fetch**: 206 validation, `read1` + stall rule, `.part` + `.part.json` kept for the next run,
+  compressed bodies unpacked, cookies not carried to another port. Callers with per-run temp names
+  (SimpCity, social) don't resume across runs yet.
+- **Places**: names asked for once at the end of a full read; circular mean of longitudes; places keyed by
+  (label, country, region); any exception from a metadata read is "no data".
+- **People** (`people.py`, `faces.py`, `people_window.py`): read errors don't wipe faces; `renamed` is safe
+  for chains and swaps and indexed; rejects / confirmed faces survive rescans and grouping; grouping in
+  bounded blocks; Group Again off the UI thread; Forget All cleans thumbnails and the WAL; 4 tiles, not 9.
+- **Clone Drive**: checksums appended as the run goes; "ours to replace" needs the checksum record to match;
+  conflicts counted; `forget_checksum` (called by `batch_crop.write_in_place` and `metadata_edit.write`).
+- **Find Duplicates**: Best = pixels, size, then the ties; exact scope skips `identical is False`; name-only
+  groups are never bulk-ticked; a copy isn't trashed when its keeper has gone.
+
+**Left undone, on purpose or for lack of time** (all from the reviews): the bulk-rename fixes (NFC/NFD
+`samefile`, journal cap, a crash-recovery journal, replan debounce) — a worker's unfinished edits to
+`rename_tools.py` were reverted rather than shipped untested; video upscale's ffmpeg fallback for WebM/MKV,
+container and creation-date handling; People following transfers, viewer / duplicate trashes and a renamed
+drive (still keyed by absolute path); `near:` for lakes / islands / regions and country by polygon; map
+labels by population and "photos in this map view"; heal previewed at full resolution; an edit kept
+re-editable beside its file; duplicates' dHash cache pruning and group indexing; orphaned child processes
+(mflux, ffmpeg) on quit; Undo for Move to Trash.
+
 ## 6ab. Photo Browser for Mac Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
 
 The iPhone's video upscale (`MediaEditing.upscaleVideo`, §6f) on the Mac: right-click videos ▸ **Upscale Video…**

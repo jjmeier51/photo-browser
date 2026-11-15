@@ -290,7 +290,8 @@ Everything Photo Browser for Mac does is in its menus, acting on the pane you're
 - **Go** — Back ⌘[, Forward ⌘] (a mouse's side buttons too), Enclosing Folder ⌘↑, **Go to Folder… ⇧⌘G**, Home,
   Desktop, Downloads, Pictures, All Videos, Empty Folders, Favorites, To AI, Drives ▸.
 - **Photos** — Edit Metadata ⌘I, Favorite ⇧⌘F, To AI ⇧⌘A (they read Unfavorite / Remove To AI when the selection
-  already is), Use as Album Cover, Find People…, Find Duplicates…, **Edit Photo… ⌘E**, **Make Collage…**, then
+  already is), Use as Album Cover, Choose / Remove Folder Cover, Remove All Tags…, Find People…, Find
+  Duplicates…, **Edit Photo… ⌘E**, **Paste Edits…**, **Make Collage…**, then
   the tools in groups: **Adjust ▸** (Crop, Rotate, Convert WebP to JPEG), **Retouch ▸** (AI Upscale 2×, Erase
   Area, Remove Watermark, Remove Objects), **Video ▸** (**Stitch Videos**, Export All Frames, Upscale Video), **CapCut ▸**, **AI ▸** (Edit / Create with AI, Astria.ai Browser, Make AI Model, AI Models),
   **Download ▸** (SimpCity, Instagram, Facebook, TikTok, Fanfix, taylorpictures.net).
@@ -1079,10 +1080,34 @@ Three ways to save, bottom right:
 Whichever you choose, the saved photo is the same kind of file as the original — **a HEIC stays a HEIC**, with
 its colour profile (Display P3 stays Display P3) — and keeps its capture date, camera, GPS, XMP, the file's
 created and modified dates and its extended attributes. A new photo gets the original's **tags**; the result
-is tagged **edited** (and **cropped** / **upscaled** when it was). Two things to know: an HDR photo (PQ / HLG,
-like a frame saved from an HDR video) is edited and saved in standard range, and the editor says so; an
-iPhone photo's HDR gain map isn't carried into the edit. Saving works on every pixel at once — a 48 MP photo
-needs about 3 GB of memory for those few seconds.
+is tagged **edited** (and **cropped** / **upscaled** when it was). Saving works on every pixel at once — a
+48 MP photo needs about 3 GB of memory for those few seconds, and **Stop** (where Close was) ends it while the
+picture is still being worked out.
+
+**An iPhone photo stays HDR.** An iPhone photo is two pictures in one file: the ordinary one, and a small
+grey *gain map* that says how much brighter each part should be on an HDR screen. The editor — and Crop,
+Rotate, Erase Area, Remove Objects, Remove Watermark, AI Upscale and Paste Edits — now carry that map through:
+it's turned, straightened, cropped and reshaped with the picture, filled in where something was removed (so a
+lamp you took out doesn't go on glowing), given no extra brightness under a border, and written back with the
+original's metadata, HEIC or JPEG. The editor says "HDR photo — it stays HDR when saved" under the picture's
+size. Writing the map uses macOS itself (a small helper built the first time; it needs Xcode's Command Line
+Tools — `xcode-select --install`); when it can't be done the photo is saved as before, in standard range, and
+you're told. On macOS 14 and earlier only Photos shows the result as HDR; from macOS 15 Preview and Quick Look
+do too. Filters and adjustments are seen *through* the map, as on the iPhone. A frame saved from an HDR video
+(a PQ / HLG photo, which has no gain map) is still edited and saved in standard range, and collages are
+standard range.
+
+**Edits ▾** (bottom left) carries an edit to other photos:
+
+- **Copy Edits** (⇧⌘C) keeps the filter, adjustments, face sliders, blur and frame — not the crop, brush
+  strokes or text, which belong to this photo. **Paste Edits** (⇧⌘V) puts them on the photo you're editing.
+- From the main window, select photos ▸ right-click ▸ **Edit ▸ Paste Edits onto N Photos…** (or Photos ▸ Paste
+  Edits…): the copied edit on every one of them, saved as new photos or over the originals — metadata, tags
+  and HDR kept, tagged **edited**.
+- **Save as My Look…** keeps the edit by name; your looks are listed in the same menu, for any photo.
+
+The **Adjust** tab begins with a histogram — the picture's tones from dark to light, with a red mark at an end
+when shadows or highlights are clipped.
 
 ### Make Collage — two to nine photos on one picture (`collage_window.py`, `collage.py`)
 
@@ -1126,8 +1151,13 @@ The new video is saved beside the first clip as "name (stitched).mp4" and takes:
 - the oldest clip's camera make and model, title, description and keywords (with ExifTool installed);
 - **every clip's tags**, plus **stitched**.
 
+**Trim** a clip by selecting it and setting *from* and *to* (in seconds) under the list — exact when the clips
+are re-encoded; at the nearest key frames when they're joined as they are (tick **Always re-encode** for exact
+cuts). **Add Clips…** brings in more videos from anywhere. HDR clips mixed with standard ones are brought to
+standard range, so the result looks right on every screen.
+
 The window says all of that before you start. It needs ffmpeg (`brew install ffmpeg`); without it, a built-in
-AVFoundation joiner is used. The clips themselves are never changed.
+AVFoundation joiner is used (no trimming). The clips themselves are never changed.
 
 ### Receive from iPhone — AirDrop into "From iPhone" (`airdrop_window.py`, `airdrop_receive.py`)
 
@@ -1140,12 +1170,13 @@ On the iPhone, select photos and videos in Photos ▸ Share ▸ AirDrop ▸ this
 - Each file is copied onto the drive, **read back and compared** with the original (SHA-256), and given the
   original's dates. Only then does the original go to the Mac's Trash — or stay in Downloads, if you choose that.
 - The very same file already there is skipped. A different file with the same name is kept as "IMG_1234 2.HEIC".
-  Nothing on the drive is replaced. A Live Photo's two halves (HEIC + MOV) both come over.
+  Nothing on the drive is replaced. A Live Photo's two halves (HEIC + MOV) — and an edit's .AAE — come over
+  together and keep one name: if "IMG_1234" is taken, all of them become "IMG_1234 2".
 - Only AirDropped photos and videos are listed (macOS marks what AirDrop received); tick **Show every photo
   and video in Downloads** to see the rest.
 
-**While the app is open it watches for AirDrops** and says so — "3 photos arrived by AirDrop" with a **Move to
-“From iPhone”** button. Tick **Move them without asking** in the window and they go straight to the drive.
+**Once you've opened this window, the app watches for AirDrops** while it's open and says so — "3 photos
+arrived by AirDrop" with a **Move to “From iPhone”** button. Tick **Move them without asking** in the window and they go straight to the drive.
 (The first time, macOS asks whether the app may read your Downloads folder.)
 
 ### Download an Instagram or Facebook profile (`social_downloader.py`, `instagram.py`, `facebook.py`)

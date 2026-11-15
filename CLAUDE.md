@@ -367,6 +367,16 @@ Python. (`SimpCityService`,
   `batch_crop.encode_like` + `write_beside` / `write_in_place`** (HEIC stays HEIC, profile, EXIF, GPS, dates, xattrs
   kept) — never another way; tags carried, tagged "edited". Save as New / Overwrite Original / Save and Upscale
   (`UpscaleChoice`: model, 2–4×, texture → `UpscaleRun(factor=…)`). HDR photos are saved in standard range. §6am.
+- **HDR gain maps stay with an edited iPhone photo** (`mac/gainmap.py`, `mac/gainmap_helper.swift`): read in
+  Python (pillow-heif aux image; a JPEG's second picture), written by ImageIO through the helper (its own file;
+  **never compiled yet**), carried by **`batch_crop.encode_like(src, im, gain=…)`** — `"same"` (pixels didn't
+  move), `"local"` (things were removed: the map is filled in there), or a function that does to the map what was
+  done to the picture (`photo_edit.gain_through`); `None` drops it. **Anything that moves pixels must pass the
+  function, never "same".** Falls back to the plain save (`src.gain_kept` False). The editor also has Edits ▾ —
+  Copy / Paste Edits, My Looks (`photo_edit.transferable` / `apply_to_file`, `Pane.paste_edits`) — and a
+  histogram. Menu commands are disabled only while their menu is open (`menubar.rest`) and re-check when run; a
+  long job's window sets `running` / `saving` / `working` / `busy` so Quit asks (`MainWindow.busy_windows`).
+  Shared JSON on the drive is read with `net_fetch.load_json` and backed up before a write. §6an.
 - **Photo Browser for Mac collages** (select 2–9 photos ▸ Make Collage…; `mac/collage.py`, `mac/collage_window.py`): generated
   row/column layouts (≤40 per count), 32 shapes, sRGB out (JPEG/HEIC/PNG); takes the oldest photo's date and place
   and every photo's tags + "collage". **Stitch Videos** (select ≥2 videos; `mac/video_stitch.py`,
