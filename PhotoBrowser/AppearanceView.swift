@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Settings ▸ Appearance: pick a ready-made theme (everyday, Halloween, Christmas) or build
+/// Settings ▸ Appearance: pick a ready-made theme (everyday, Halloween, Thanksgiving, Christmas, Holiday) or build
 /// your own — background (one colour or a gradient), accent colour, typeface, dark or light.
 /// Every change applies at once, so the app behind the sheet shows it; the pickers always
 /// show what's in force, and choosing a theme loads it into them.

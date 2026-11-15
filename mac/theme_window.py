@@ -1,19 +1,25 @@
 """View ▸ Theme… — Safe Finder's look, chosen the way the iPhone app's Settings ▸ Appearance chooses its own:
 "Match macOS" (the Finder look, light or dark with the Mac), the ready-made themes (Everyday, Halloween,
-Christmas — the iPhone's, `themes.PRESETS`), or a custom background (one colour or a gradient), accent colour,
-typeface and light/dark chrome.
+Thanksgiving, Christmas, Holiday — the iPhone's, `themes.PRESETS`), or a custom background (one colour or a
+gradient), accent colour, typeface and light/dark chrome.
 
-A click shows the theme at once in every Safe Finder window; Revert puts back the one that was on when the
-window opened. `apply(look)` is Safe Finder's `set_look` (None = Match macOS).
+A click shows the theme at once in every Safe Finder window; Revert puts back what was on when the window
+opened. `apply(look)` is Safe Finder's `set_look` (None = Match macOS).
+
+The Mac's own extras (`Extras`, all optional so the window still stands alone): **My Themes** — "Save as My
+Theme…" keeps the custom look under a name (right-click one to rename or remove it); **Follow the Seasons** —
+the holidays' themes by date (`themes.seasonal`), with what December wears; **Surprise Me**.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QAbstractButton, QCheckBox, QColorDialog, QComboBox, QDialog, QGridLayout, QHBoxLayout,
-                               QLabel, QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractButton, QCheckBox, QColorDialog, QComboBox, QDialog, QFrame, QGridLayout,
+                               QHBoxLayout, QInputDialog, QLabel, QMenu, QPushButton, QScrollArea, QVBoxLayout,
+                               QWidget)
 
 import themes
 
@@ -123,33 +129,69 @@ class ColorButton(QPushButton):
             self.changed.emit(self.color)
 
 
+@dataclass
+class Extras:
+    """What Safe Finder lends the chooser beyond applying a look (see the module doc)."""
+    mine: Callable[[], list] | None = None                       # the saved themes
+    save: Callable[[str, themes.Look], None] | None = None
+    remove: Callable[[str], None] | None = None
+    seasonal: Callable[[], bool] | None = None                   # is Follow the Seasons on
+    december: Callable[[], str] | None = None
+    set_seasonal: Callable[[bool, str | None], None] | None = None
+    surprise: Callable[[], themes.Look] | None = None
+    chosen: Callable[[], themes.Look | None] | None = None       # the theme chosen by hand (under the season's)
+    today: Callable[[], object] | None = None
+
+
+PER_ROW = 6
+
+
 class ThemeDialog(QDialog):
-    def __init__(self, parent, current: themes.Look | None, apply: Callable[[themes.Look | None], None]) -> None:
+    def __init__(self, parent, current: themes.Look | None, apply: Callable[[themes.Look | None], None],
+                 extras: Extras | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Theme")
-        self.apply, self.opened_with = apply, current
+        self.apply, self.extras = apply, extras or Extras()
+        self.current = current
+        self.opened_with = self.extras.chosen() if self.extras.chosen else current
+        self.opened_seasonal = bool(self.extras.seasonal()) if self.extras.seasonal else False
         self.swatches: list[Swatch] = []
         lay = QVBoxLayout(self)
         lay.setContentsMargins(18, 16, 18, 14)
         lay.setSpacing(8)
 
-        def section(title: str, looks: list[tuple[themes.Look | None, str]]) -> None:
-            lay.addWidget(QLabel(title, objectName="SheetSub"))
-            grid = QGridLayout()
-            grid.setSpacing(8)
-            for i, (look, name) in enumerate(looks):
-                sw = Swatch(look, name)
-                sw.clicked.connect(lambda _=False, sw=sw: self._choose(sw.look))
-                self.swatches.append(sw)
-                grid.addWidget(sw, i // 6, i % 6)
-            grid.setColumnStretch(6, 1)
-            lay.addLayout(grid)
+        # Follow the Seasons
+        self.seasons = QCheckBox("Follow the Seasons")
+        self.seasons.setToolTip("Through the holidays — Halloween, Thanksgiving, Christmas and the New Year — the "
+                                "window wears that season's themes, a different one each day. The rest of the year "
+                                "it shows the theme chosen here.")
+        self.december = QComboBox()
+        for key, title in themes.DECEMBER.items():
+            self.december.addItem(title, key)
+        self.december.setToolTip("What the weeks from Thanksgiving to Christmas Day wear")
+        self.season_note = QLabel("", objectName="SheetSub")
+        if self.extras.set_seasonal is not None:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            self.seasons.setChecked(self.opened_seasonal)
+            self.december.setCurrentIndex(max(0, self.december.findData(self.extras.december() if self.extras.december
+                                                                         else "both")))
+            row.addWidget(self.seasons)
+            row.addWidget(QLabel("In December:"))
+            row.addWidget(self.december)
+            row.addWidget(self.season_note, 1)
+            lay.addLayout(row)
+            self.seasons.toggled.connect(lambda _on: self._seasonal_changed())
+            self.december.activated.connect(lambda _i: self._seasonal_changed())
 
-        section("Finder", [(None, "Match macOS")])
-        for name, looks in themes.groups():
-            section(name, [(look, look.name) for look in looks])
+        # The themes, in a list that scrolls (five sets and one's own are more than a window's height).
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setMinimumSize(PER_ROW * 120 + 26, 380)
+        lay.addWidget(self.scroll, 1)
 
-        lay.addSpacing(4)
         lay.addWidget(QLabel("Custom", objectName="SheetSub"))
         base = current or themes.PRESETS[0]
         row = QHBoxLayout()
@@ -185,24 +227,118 @@ class ThemeDialog(QDialog):
 
         buttons = QHBoxLayout()
         revert = QPushButton("Revert")
-        revert.setToolTip("Back to the theme that was on when this window opened")
-        revert.clicked.connect(lambda: self._choose(self.opened_with))
+        revert.setToolTip("Back to what was on when this window opened")
+        revert.clicked.connect(self._revert)
+        buttons.addWidget(revert)
+        if self.extras.surprise is not None:
+            surprise = QPushButton("Surprise Me")
+            surprise.setToolTip("A ready-made theme, picked for you")
+            surprise.clicked.connect(lambda: self._choose(self.extras.surprise(), show=True))
+            buttons.addWidget(surprise)
+        self.keep = QPushButton("Save as My Theme…")
+        self.keep.setToolTip("Keeps the look that's on now under a name, in My Themes")
+        self.keep.clicked.connect(self._save_mine)
+        self.keep.setVisible(self.extras.save is not None)
+        buttons.addWidget(self.keep)
+        buttons.addStretch(1)
         done = QPushButton("Done", objectName="Primary")
         done.setDefault(True)
         done.clicked.connect(self.accept)
-        buttons.addWidget(revert)
-        buttons.addStretch(1)
         buttons.addWidget(done)
         lay.addSpacing(6)
         lay.addLayout(buttons)
+        self._fill()
         self._mark(current)
+        self._season_text()
+
+    # ------------------------------------------------------------------------- the swatches
+
+    def _in_season(self) -> list[str]:
+        if self.extras.today is None:
+            return []
+        return themes.season(self.extras.today(), self.december.currentData() or "both")
+
+    def _fill(self) -> None:
+        """Every swatch, by set — made again when My Themes changes."""
+        self.swatches = []
+        body = QWidget()
+        col = QVBoxLayout(body)
+        col.setContentsMargins(0, 0, 8, 0)
+        col.setSpacing(8)
+        in_season = self._in_season()
+
+        def section(title: str, looks: list[tuple[themes.Look | None, str]], mine: bool = False) -> None:
+            col.addWidget(QLabel(title, objectName="SheetSub"))
+            grid = QGridLayout()
+            grid.setSpacing(8)
+            for i, (look, name) in enumerate(looks):
+                sw = Swatch(look, name)
+                sw.clicked.connect(lambda _=False, sw=sw: self._choose(sw.look))
+                if mine:
+                    sw.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                    sw.customContextMenuRequested.connect(lambda pos, sw=sw: self._mine_menu(sw, pos))
+                    sw.setToolTip(f"{name} — right-click to rename or remove")
+                self.swatches.append(sw)
+                grid.addWidget(sw, i // PER_ROW, i % PER_ROW)
+            grid.setColumnStretch(PER_ROW, 1)
+            col.addLayout(grid)
+
+        section("Finder", [(None, "Match macOS")])
+        mine = self.extras.mine() if self.extras.mine else []
+        if mine:
+            section(themes.MINE, [(look, look.name) for look in mine], mine=True)
+        for name, looks in themes.groups():
+            section(f"{name} — in season" if name in in_season else name, [(look, look.name) for look in looks])
+        col.addStretch(1)
+        self.scroll.setWidget(body)
+
+    def _mine_menu(self, sw: Swatch, pos) -> None:
+        menu = QMenu(self)
+        rename = menu.addAction("Rename…")
+        remove = menu.addAction(f"Remove “{sw.name}”")
+        chosen = menu.exec(sw.mapToGlobal(pos))
+        if chosen is rename and self.extras.save is not None and self.extras.remove is not None:
+            name, ok = QInputDialog.getText(self, "Rename Theme", "Name:", text=sw.name)
+            name = " ".join(name.split())
+            if ok and name and name != sw.name:
+                self.extras.remove(sw.name)
+                self.extras.save(name, sw.look)
+        elif chosen is remove and self.extras.remove is not None:
+            self.extras.remove(sw.name)                    # the look stays on; only its place in the list goes
+        else:
+            return
+        self._fill()
+        self._mark(self.current)
+
+    def _save_mine(self) -> None:
+        look = self.current or self._from_controls()
+        taken = {m.name for m in (self.extras.mine() if self.extras.mine else [])}
+        suggestion = look.name if look.name not in ("Custom", "") and themes.preset(look.name) is None else "My Theme"
+        n = 2
+        base = suggestion
+        while suggestion in taken:
+            suggestion = f"{base} {n}"
+            n += 1
+        name, ok = QInputDialog.getText(self, "Save as My Theme", "Name for this theme:", text=suggestion)
+        name = " ".join(name.split())
+        if not ok or not name:
+            return
+        self.extras.save(name, look)                       # a name already there is replaced
+        self._fill()
+        self._mark(self.current)
 
     def _mark(self, look: themes.Look | None) -> None:
+        self.current = look
+        first = None
         for sw in self.swatches:
-            sw.setChecked((sw.look is None and look is None)
-                          or (sw.look is not None and look is not None and sw.look.same_looks(look)))
+            on = ((sw.look is None and look is None)
+                  or (sw.look is not None and look is not None and sw.look.same_looks(look)))
+            sw.setChecked(on)
+            first = first or (sw if on else None)
         self.c2.setEnabled(self.gradient.isChecked())
         self.direction.setEnabled(self.gradient.isChecked())
+        self.keep.setEnabled(look is not None)
+        return first
 
     def _show_in_controls(self, look: themes.Look) -> None:
         for w in (self.gradient, self.light, self.direction, self.typeface):
@@ -218,16 +354,64 @@ class ThemeDialog(QDialog):
         for w in (self.gradient, self.light, self.direction, self.typeface):
             w.blockSignals(False)
 
-    def _choose(self, look: themes.Look | None) -> None:
+    def _choose(self, look: themes.Look | None, show: bool = False) -> None:
+        """A theme chosen by hand: it goes on, and Follow the Seasons goes off (`set_look` does the same)."""
         if look is not None:
             self._show_in_controls(look)
         self.apply(look)
-        self._mark(look)
+        self.seasons.blockSignals(True)
+        self.seasons.setChecked(False)
+        self.seasons.blockSignals(False)
+        on = self._mark(look)
+        if show and on is not None:
+            self.scroll.ensureWidgetVisible(on)
+        self._season_text()
+
+    def _from_controls(self) -> themes.Look:
+        colors = [self.c1.color] + ([self.c2.color] if self.gradient.isChecked() else [])
+        return themes.Look("Custom", colors, self.accent.color, self.typeface.currentData(), self.light.isChecked(),
+                           self.direction.currentData())
 
     def _custom(self) -> None:
-        colors = [self.c1.color] + ([self.c2.color] if self.gradient.isChecked() else [])
-        look = themes.Look("Custom", colors, self.accent.color, self.typeface.currentData(), self.light.isChecked(),
-                           self.direction.currentData())
-        match = next((p for p in themes.PRESETS if p.same_looks(look)), None)
+        look = self._from_controls()
+        known = themes.PRESETS + (self.extras.mine() if self.extras.mine else [])
+        match = next((p for p in known if p.same_looks(look)), None)
         self.apply(match or look)
-        self._mark(look)
+        self.seasons.blockSignals(True)
+        self.seasons.setChecked(False)
+        self.seasons.blockSignals(False)
+        self._mark(match or look)
+        self._season_text()
+
+    # ------------------------------------------------------------------------- the seasons
+
+    def _seasonal_look(self) -> themes.Look | None:
+        if self.extras.today is None:
+            return None
+        return themes.seasonal(self.extras.today(), self.december.currentData() or "both")
+
+    def _season_text(self) -> None:
+        names = self._in_season()
+        if not names:
+            self.season_note.setText("No holiday is in season now — the chosen theme shows.")
+        elif self.seasons.isChecked():
+            look = self._seasonal_look()
+            self.season_note.setText(f"Today: {look.name}." if look is not None else "")
+        else:
+            self.season_note.setText(f"In season now: {' and '.join(names)}.")
+
+    def _seasonal_changed(self) -> None:
+        on = self.seasons.isChecked()
+        self.extras.set_seasonal(on, self.december.currentData())
+        chosen = self.extras.chosen() if self.extras.chosen else self.current
+        look = (self._seasonal_look() if on else None) or chosen
+        self._fill()                                       # "in season" follows what December wears
+        shown = self._mark(look)
+        if shown is not None:
+            self.scroll.ensureWidgetVisible(shown)
+        self._season_text()
+
+    def _revert(self) -> None:
+        self._choose(self.opened_with)
+        if self.opened_seasonal and self.extras.set_seasonal is not None:
+            self.seasons.setChecked(True)                  # → `_seasonal_changed`

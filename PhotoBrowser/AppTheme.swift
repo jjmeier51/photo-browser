@@ -4,7 +4,7 @@ import UIKit
 /// The app's look, as chosen in Settings ▸ Appearance: the background behind the browsing
 /// surfaces (a solid colour or a gradient), the accent colour (chips, buttons, selection),
 /// the typeface, and whether the chrome is dark or light. Ready-made themes — everyday,
-/// Halloween and Christmas sets — are just values of this; "Custom" is whatever the pickers
+/// Halloween, Thanksgiving, Christmas and Holiday sets — are just values of this; "Custom" is whatever the pickers
 /// say. Stored by `Library` (`photoBrowser.theme`, JSON) so it's one app-wide value.
 ///
 /// How it reaches the screen: `AppGradient` (the background every browsing screen sits on)
@@ -209,6 +209,22 @@ struct AppTheme: Codable, Equatable, Sendable {
             AppTheme(name: "Ghost Story", background: .gradient([RGB(hex: 0x1B1F2A), RGB(hex: 0x0B0D12)], .down),
                      accent: RGB(hex: 0xB8C7E0), typeface: .bradleyHand, light: false),
         ]),
+        ThemeGroup(name: "Thanksgiving", themes: [
+            AppTheme(name: "Harvest Table", background: .gradient([RGB(hex: 0x3B1F0B), RGB(hex: 0x5E3210), RGB(hex: 0x1F1005)], .down),
+                     accent: RGB(hex: 0xF2A541), typeface: .georgia, light: false),
+            AppTheme(name: "Autumn Leaves", background: .gradient([RGB(hex: 0x4A1508), RGB(hex: 0x7A300C), RGB(hex: 0x8A4E12)], .diagonal),
+                     accent: RGB(hex: 0xFFE8B0), typeface: .serif, light: false),
+            AppTheme(name: "Pumpkin Pie", background: .gradient([RGB(hex: 0x4A2508), RGB(hex: 0x7A4212)], .down),
+                     accent: RGB(hex: 0xFFD9A0), typeface: .noteworthy, light: false),
+            AppTheme(name: "Cranberry", background: .gradient([RGB(hex: 0x3A0613), RGB(hex: 0x6E0F26)], .diagonal),
+                     accent: RGB(hex: 0xFFC7A6), typeface: .serif, light: false),
+            AppTheme(name: "Sage and Squash", background: .gradient([RGB(hex: 0x27301F), RGB(hex: 0x141A10)], .down),
+                     accent: RGB(hex: 0xE9B44C), typeface: .avenir, light: false),
+            AppTheme(name: "Maple", background: .gradient([RGB(hex: 0x2A1206), RGB(hex: 0x140A04)], .down),
+                     accent: RGB(hex: 0xF59B4B), typeface: .rounded, light: false),
+            AppTheme(name: "Cornucopia", background: .gradient([RGB(hex: 0xFFF6E3), RGB(hex: 0xF3DDB3)], .down),
+                     accent: RGB(hex: 0xB5521B), typeface: .georgia, light: true),
+        ]),
         ThemeGroup(name: "Christmas", themes: [
             AppTheme(name: "Candy Cane", background: .gradient([RGB(hex: 0x7A0000), RGB(hex: 0xB3001B)], .diagonal),
                      accent: RGB(hex: 0xFFFFFF), typeface: .rounded, light: false),
@@ -222,6 +238,36 @@ struct AppTheme: Codable, Equatable, Sendable {
                      accent: RGB(hex: 0xD7263D), typeface: .rounded, light: true),
             AppTheme(name: "Silver Bells", background: .gradient([RGB(hex: 0x2C2F36), RGB(hex: 0x0F1115)], .down),
                      accent: RGB(hex: 0xE6E6EB), typeface: .snellRoundhand, light: false),
+            AppTheme(name: "Gingerbread", background: .gradient([RGB(hex: 0x3E2212), RGB(hex: 0x5C3317), RGB(hex: 0x2A160B)], .down),
+                     accent: RGB(hex: 0xFFF1DC), typeface: .chalkboard, light: false),
+            AppTheme(name: "Nutcracker", background: .gradient([RGB(hex: 0x101B45), RGB(hex: 0x5E0D1A)], .diagonal),
+                     accent: RGB(hex: 0xFFD24A), typeface: .copperplate, light: false),
+            AppTheme(name: "Mistletoe", background: .gradient([RGB(hex: 0x10361F), RGB(hex: 0x0A2415)], .down),
+                     accent: RGB(hex: 0xFF8C94), typeface: .noteworthy, light: false),
+            AppTheme(name: "Christmas Eve", background: .gradient([RGB(hex: 0x050B24), RGB(hex: 0x0E1B4D), RGB(hex: 0x1B0B33)], .down),
+                     accent: RGB(hex: 0xFFE08A), typeface: .serif, light: false),
+            AppTheme(name: "Santa's Workshop", background: .gradient([RGB(hex: 0x5A0A0A), RGB(hex: 0x2E0505)], .down),
+                     accent: RGB(hex: 0xF4D35E), typeface: .markerFelt, light: false),
+            AppTheme(name: "North Pole", background: .gradient([RGB(hex: 0xF4FBFF), RGB(hex: 0xCFE8F7)], .down),
+                     accent: RGB(hex: 0xC1121F), typeface: .rounded, light: true),
+        ]),
+        ThemeGroup(name: "Holiday", themes: [
+            AppTheme(name: "Holiday Lights", background: .gradient([RGB(hex: 0x0B0F1A), RGB(hex: 0x141B2D)], .down),
+                     accent: RGB(hex: 0xFFC857), typeface: .rounded, light: false),
+            AppTheme(name: "Festival of Lights", background: .gradient([RGB(hex: 0x0A2A66), RGB(hex: 0x061A40)], .down),
+                     accent: RGB(hex: 0xE8EEF9), typeface: .serif, light: false),
+            AppTheme(name: "Kwanzaa", background: .gradient([RGB(hex: 0x0E0E0E), RGB(hex: 0x3D0A0A), RGB(hex: 0x0B3317)], .diagonal),
+                     accent: RGB(hex: 0xF2C037), typeface: .futura, light: false),
+            AppTheme(name: "Winter Solstice", background: .gradient([RGB(hex: 0x0D1B2A), RGB(hex: 0x1B263B), RGB(hex: 0x33475F)], .down),
+                     accent: RGB(hex: 0xE0E1DD), typeface: .avenir, light: false),
+            AppTheme(name: "Sugar Plum", background: .gradient([RGB(hex: 0x2B0F3A), RGB(hex: 0x4E2460)], .diagonal),
+                     accent: RGB(hex: 0xFFC2E2), typeface: .snellRoundhand, light: false),
+            AppTheme(name: "Hot Cocoa", background: .gradient([RGB(hex: 0x3A2418), RGB(hex: 0x1E120C)], .down),
+                     accent: RGB(hex: 0xF7D9C4), typeface: .noteworthy, light: false),
+            AppTheme(name: "Midnight Toast", background: .gradient([RGB(hex: 0x0A0A0F), RGB(hex: 0x1C1530)], .down),
+                     accent: RGB(hex: 0xF5D76E), typeface: .copperplate, light: false),
+            AppTheme(name: "First Frost", background: .gradient([RGB(hex: 0xFFFFFF), RGB(hex: 0xE3EEF4)], .down),
+                     accent: RGB(hex: 0x2A6FAB), typeface: .avenir, light: true),
         ]),
     ]
 

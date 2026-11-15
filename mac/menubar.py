@@ -164,19 +164,35 @@ def install(win, sf) -> None:
     theme_group = QActionGroup(win)
     theme_acts: list[tuple[QAction, object]] = []
 
-    def theme_item(menu, label: str, look) -> None:
+    def theme_item(menu, label: str, look) -> QAction:
         a = QAction(label, win)
         a.setCheckable(True)
         a.triggered.connect(lambda _=False, look=look: sf.set_look(look))
         theme_group.addAction(a)
         menu.addAction(a)
         theme_acts.append((a, look))
+        return a
     theme_item(theme, "Match macOS", None)
+    theme.addSeparator()
+    set_menus = []                                     # a submenu per set: forty themes are too many for one list
     for group_name, looks in sf.themes.groups():
-        theme.addSeparator()
-        theme.addSection(group_name) if hasattr(theme, "addSection") else None
+        sub = theme.addMenu(group_name)
+        set_menus.append((sub, group_name))
         for look in looks:
-            theme_item(theme, look.name, look)
+            theme_item(sub, look.name, look)
+    mine_menu = theme.addMenu(sf.themes.MINE)
+    mine_acts: list[QAction] = []
+    theme.addSeparator()
+    seasons = QAction("Follow the Seasons", win)
+    seasons.setCheckable(True)
+    seasons.setStatusTip("Through the holidays — Halloween, Thanksgiving, Christmas and the New Year — the window "
+                         "wears that season's themes, a different one each day")
+    seasons.setToolTip(seasons.statusTip())
+    seasons.triggered.connect(lambda on: sf.set_seasonal(bool(on)))
+    theme.addAction(seasons)
+    surprise = QAction("Surprise Me", win)
+    surprise.triggered.connect(lambda _=False: sf.set_look(sf.surprise_look()))
+    theme.addAction(surprise)
     theme.addSeparator()
     custom = QAction("Choose or Customize…", win)
     custom.triggered.connect(lambda _=False: sf.open_themes(win))
@@ -184,8 +200,20 @@ def install(win, sf) -> None:
 
     def tick_theme() -> None:
         now = sf.current_look()
+        for a in mine_acts:                            # My Themes: whatever is saved now
+            theme_group.removeAction(a)
+            theme_acts[:] = [(x, look) for x, look in theme_acts if x is not a]
+        mine_acts.clear()
+        mine_menu.clear()
+        for look in sf.my_themes():
+            mine_acts.append(theme_item(mine_menu, look.name, look))
+        mine_menu.setEnabled(bool(mine_acts))
         for a, look in theme_acts:
             a.setChecked((look is None and now is None) or (look is not None and now is not None and look.same_looks(now)))
+        in_season = sf.themes.season(sf._today(), sf.december_wears())
+        for sub, name in set_menus:                    # the set in season says so
+            sub.setTitle(f"{name} — in season" if name in in_season else name)
+        seasons.setChecked(sf.seasonal_on())
     theme.aboutToShow.connect(tick_theme)
     covers = act(v, "Folder Covers", lambda: pane().set_folder_covers(not pane().folder_covers), None,
                  tip="Folders show a picture — the cover chosen for them here or on the iPhone, else their first photo")

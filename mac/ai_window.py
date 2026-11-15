@@ -10,7 +10,10 @@
 - **A job's window** shows where it's at ("2 of 4 ready…"), then the results: each one kept unless clicked
   (a click marks it to throw away), double-click to see it full size. **Save** puts the kept ones in the
   "AI" folder beside the photo (an edit: with its EXIF, place and date, and its tags) or in the folder's
-  "AI" folder (a creation). Closing with results unsaved asks first; **Run Again** opens the form as it was.
+  "AI" folder (a creation) **and closes the window** (what was saved is said on the main window's status line;
+  it stays only when something couldn't be saved). **Run Again** opens the form as it was and closes the results
+  too — kept results not yet saved are asked about once ("Do this every time" remembers the answer). Closing
+  with results unsaved asks first.
   A job cut short by quitting is finished the next time Safe Finder's AI is used (its images go straight
   to the folder).
 - **The Astria.ai Browser** is its own module now — `astria_browser.py`.
@@ -59,6 +62,7 @@ class AIHooks:
     add_tags: Callable[[list[str], list[str]], None] | None = None      # (files, tags): tag them
     create: Callable[[dict], None] | None = None                        # open Create with AI filled in
     current_folder: Callable[[], str] | None = None                     # the folder Safe Finder is showing now
+    note: Callable[[str], None] | None = None                           # a line on the main window's status line
 
 
 def _seg(parent: QWidget, options: list[str], current: str) -> tuple[QWidget, QButtonGroup]:
@@ -844,12 +848,43 @@ class _Result(QWidget):
         p.end()
 
 
+def _unsaved_before_run_again(parent: QWidget, count: int) -> str:
+    """Run Again closes the results it came from. When some there were kept but not saved: "save", "discard"
+    or "cancel" — asked once, and the answer can stand for every time after (they were paid for; nothing is
+    thrown away without the person having said so at least once)."""
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QCheckBox
+    settings = QSettings("PhotoBrowser", "SafeFinder")
+    choice = str(settings.value("ai/run_again_unsaved", "ask") or "ask")
+    if choice in ("save", "discard"):
+        return choice
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle("Run Again")
+    box.setText(f"Save the {count} result{'s' if count != 1 else ''} here first?")
+    box.setInformativeText("Run Again closes this window and opens the form as it was.")
+    save = box.addButton("Save and Run Again", QMessageBox.ButtonRole.AcceptRole)
+    discard = box.addButton("Don't Save", QMessageBox.ButtonRole.DestructiveRole)
+    box.addButton(QMessageBox.StandardButton.Cancel)
+    box.setDefaultButton(save)
+    always = QCheckBox("Do this every time")
+    box.setCheckBox(always)
+    box.exec()
+    clicked = box.clickedButton()
+    answer = "save" if clicked is save else "discard" if clicked is discard else "cancel"
+    if answer != "cancel" and always.isChecked():
+        settings.setValue("ai/run_again_unsaved", answer)
+    return answer
+
+
 class ResultsWindow(QWidget):
     def __init__(self, job: Job, hooks: AIHooks, theme, parent=None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.job, self.hooks, self.theme = job, hooks, theme
         self.saved: list[str] = []
+        self.failed = 0                 # results the last Save couldn't write (the window stays open for them)
+        self._settled = False           # closing after Save / Run Again: nothing left to ask
         self.tiles: list[_Result] = []
         self.setWindowTitle(("Edit with AI — " + os.path.basename(job.source)) if job.mode == "edit"
                             else "Create with AI")
@@ -891,6 +926,7 @@ class ResultsWindow(QWidget):
         self.summary = _small("", wrap=False)
         bh.addWidget(self.summary, 1)
         self.again = QPushButton("Run Again")
+        self.again.setToolTip("Opens the form as it was, and closes these results")
         self.again.clicked.connect(self.run_again)
         self.show_btn = QPushButton("Show in Safe Finder")
         self.show_btn.setVisible(False)
@@ -898,7 +934,8 @@ class ResultsWindow(QWidget):
         self.save_btn = QPushButton("Save")
         self.save_btn.setObjectName("Primary")
         self.save_btn.setEnabled(False)
-        self.save_btn.clicked.connect(self.save)
+        self.save_btn.setToolTip("Saves the kept results and closes this window")
+        self.save_btn.clicked.connect(self.save_and_close)
         for b in (self.again, self.show_btn, self.save_btn):
             bh.addWidget(b)
         v.addWidget(bar)
@@ -974,6 +1011,7 @@ class ResultsWindow(QWidget):
             self.hooks.carry_tags([(self.job.source, p) for p in out])
         A.drop_pending(self.job.id)
         self.saved = out
+        self.failed = failed
         self.save_btn.setEnabled(False)
         self.save_btn.setText("Saved")
         self.show_btn.setVisible(bool(out) and self.hooks.reveal is not None)
@@ -982,15 +1020,45 @@ class ResultsWindow(QWidget):
                              (f" {failed} couldn't be saved." if failed else ""))
         return out
 
+    def save_and_close(self) -> None:
+        """The Save button: the kept results are saved and the window goes — what was saved is said on the main
+        window's status line instead. It stays only when something couldn't be saved, with why."""
+        self.save()
+        if self.saved and not self.failed:
+            if self.hooks.note is not None:
+                self.hooks.note(self.summary.text())
+            self._settled = True
+            self.close()
+
+    def _unsaved(self) -> list:
+        return [t for t in self.tiles if t.keep] if not self.saved else []
+
     def run_again(self) -> None:
+        """The form as it was, in place of these results: the window closes. Kept results that weren't saved are
+        asked about first (`_unsaved_before_run_again`)."""
+        unsaved = self._unsaved()
+        if unsaved:
+            answer = _unsaved_before_run_again(self, len(unsaved))
+            if answer == "cancel":
+                return
+            if answer == "save":
+                self.save()
+                if self.failed:
+                    return                                # why is on the window; nothing closes over an error
+                if self.hooks.note is not None:
+                    self.hooks.note(self.summary.text())
+            else:
+                A.drop_pending(self.job.id)
         win = RequestWindow(self.job.mode, self.job.source or self.job.folder, self.hooks, self.theme,
                             self.parentWidget(), settings=self.job.settings)
         if self.hooks.keep_open:
             self.hooks.keep_open(win)
         win.show()
+        self._settled = True
+        self.close()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        unsaved = [t for t in self.tiles if t.keep] if not self.saved else []
+        unsaved = [] if self._settled else self._unsaved()
         if unsaved:
             box = QMessageBox(self)
             box.setWindowTitle("Unsaved results")
@@ -1068,6 +1136,8 @@ class BatchResultsWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.batch, self.hooks, self.theme = list(batch), hooks, theme
         self.saved: list[str] = []
+        self.failed = 0
+        self._settled = False           # closing after Save All / Run Again: nothing left to ask
         self.sections: dict[str, _PhotoSection] = {}
         first = batch[0]
         self.setWindowTitle(f"Edit with AI — {len(batch)} photos")
@@ -1114,7 +1184,7 @@ class BatchResultsWindow(QWidget):
         self.summary = _small("", wrap=False)
         bh.addWidget(self.summary, 1)
         self.again = QPushButton("Run Again")
-        self.again.setToolTip("The form again, for the same photos")
+        self.again.setToolTip("The form again, for the same photos — these results close")
         self.again.clicked.connect(self.run_again)
         self.show_btn = QPushButton("Show in Safe Finder")
         self.show_btn.setVisible(False)
@@ -1122,7 +1192,8 @@ class BatchResultsWindow(QWidget):
         self.save_btn = QPushButton("Save All")
         self.save_btn.setObjectName("Primary")
         self.save_btn.setEnabled(False)
-        self.save_btn.clicked.connect(self.save)
+        self.save_btn.setToolTip("Saves every kept result beside its own photo and closes this window")
+        self.save_btn.clicked.connect(self.save_and_close)
         for b in (self.again, self.show_btn, self.save_btn):
             bh.addWidget(b)
         v.addWidget(bar)
@@ -1279,6 +1350,7 @@ class BatchResultsWindow(QWidget):
             photos += bool(made)
             out += made
         self.saved = out
+        self.failed = failed
         self.save_btn.setEnabled(False)
         self.save_btn.setText("Saved")
         self.show_btn.setVisible(bool(out) and self.hooks.reveal is not None)
@@ -1289,16 +1361,51 @@ class BatchResultsWindow(QWidget):
                              + (f" {failed} couldn't be saved." if failed else ""))
         return out
 
+    def save_and_close(self) -> None:
+        """Save All: everything kept is saved and the window goes (said on the main window's status line). It stays
+        when something couldn't be saved, or when a photo that failed is still there to Try Again."""
+        self.save()
+        waiting = any(j.error is not None and not j.images for j in self.batch)
+        if self.saved and not self.failed and not waiting:
+            if self.hooks.note is not None:
+                self.hooks.note(self.summary.text())
+            self._settled = True
+            self.close()
+
     def run_again(self) -> None:
-        win = RequestWindow("edit", [j.source for j in self.batch], self.hooks, self.theme, self.parentWidget(),
-                            settings=self.batch[0].settings)
-        if self.hooks.keep_open:
-            self.hooks.keep_open(win)
+        """The form again for the same photos, in place of these results (see `ResultsWindow.run_again`). Photos
+        still with Astria are asked about by the close itself."""
+        unsaved = [t for _j, t in self.tiles() if t.keep] if not self.saved else []
+        running = sum(1 for j in self.batch if not j.done)
+        if unsaved and not running:
+            answer = _unsaved_before_run_again(self, len(unsaved))
+            if answer == "cancel":
+                return
+            if answer == "save":
+                self.save()
+                if self.failed:
+                    return
+                if self.hooks.note is not None:
+                    self.hooks.note(self.summary.text())
+            else:
+                for j in self.batch:
+                    A.drop_pending(j.id)
+            self._settled = True
+        elif not running:
+            self._settled = True
+        photos = [j.source for j in self.batch]
+        settings = self.batch[0].settings
+        hooks, theme, parent = self.hooks, self.theme, self.parentWidget()
+        if not self.close():                              # still running, and the person chose to stay
+            return
+        win = RequestWindow("edit", photos, hooks, theme, parent, settings=settings)
+        if hooks.keep_open:
+            hooks.keep_open(win)
         win.show()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        unsaved = [t for _j, t in self.tiles() if t.keep] if not self.saved else []
-        running = sum(1 for j in self.batch if not j.done)
+        unsaved = [t for _j, t in self.tiles() if t.keep] if not self.saved and not self._settled else []
+        running = 0 if self._settled else sum(1 for j in self.batch if not j.done)
         if unsaved or running:
             box = QMessageBox(self)
             box.setWindowTitle("Edit with AI")

@@ -1,6 +1,6 @@
-"""Safe Finder's looks — the iPhone app's themes (`AppTheme.swift`: Everyday, Halloween and Christmas sets, or a
-custom background, accent colour, typeface and light/dark chrome), plus "Match macOS", the Finder look that
-follows the Mac's light or dark appearance.
+"""Safe Finder's looks — the iPhone app's themes (`AppTheme.swift`: Everyday, Halloween, Thanksgiving, Christmas
+and Holiday sets, or a custom background, accent colour, typeface and light/dark chrome), plus "Match macOS", the
+Finder look that follows the Mac's light or dark appearance.
 
 A `Look` is what's chosen: the background behind the files (one colour, or a gradient of two or three), the
 accent (selection, buttons, the active chips), the typeface, and whether the chrome is light. Everything else on
@@ -10,6 +10,10 @@ palette; `theme_window.py` is the chooser.
 
 Kept in Safe Finder's settings as JSON (`theme`); empty = Match macOS. The preset names and colours are the
 iPhone app's — keep the two lists in step.
+
+Two things are the Mac's own: **My Themes** (custom looks saved under a name — `looks_from_json`, `with_saved`;
+setting `my_themes`) and **Follow the Seasons** (`seasonal`: through the holidays the window wears that season's
+themes, a different one each day, and goes back to the chosen theme afterwards; setting `theme_seasonal`).
 """
 from __future__ import annotations
 
@@ -128,12 +132,33 @@ PRESETS: list[Look] = [
     _l("Halloween", "Haunted House", ["#0E0E10"], "#C41E3A", "markerFelt"),
     _l("Halloween", "Candy Corn", ["#3D1F00", "#7A3E00", "#B37400"], "#FFF3B0", "noteworthy"),
     _l("Halloween", "Ghost Story", ["#1B1F2A", "#0B0D12"], "#B8C7E0", "bradleyHand"),
+    _l("Thanksgiving", "Harvest Table", ["#3B1F0B", "#5E3210", "#1F1005"], "#F2A541", "georgia"),
+    _l("Thanksgiving", "Autumn Leaves", ["#4A1508", "#7A300C", "#8A4E12"], "#FFE8B0", "serif", direction="diagonal"),
+    _l("Thanksgiving", "Pumpkin Pie", ["#4A2508", "#7A4212"], "#FFD9A0", "noteworthy"),
+    _l("Thanksgiving", "Cranberry", ["#3A0613", "#6E0F26"], "#FFC7A6", "serif", direction="diagonal"),
+    _l("Thanksgiving", "Sage and Squash", ["#27301F", "#141A10"], "#E9B44C", "avenir"),
+    _l("Thanksgiving", "Maple", ["#2A1206", "#140A04"], "#F59B4B", "rounded"),
+    _l("Thanksgiving", "Cornucopia", ["#FFF6E3", "#F3DDB3"], "#B5521B", "georgia", light=True),
     _l("Christmas", "Candy Cane", ["#7A0000", "#B3001B"], "#FFFFFF", "rounded", direction="diagonal"),
     _l("Christmas", "Evergreen", ["#0B3D20", "#06281A", "#021A10"], "#FFD700", "serif"),
     _l("Christmas", "Winter Night", ["#0A1931", "#185ADB"], "#BFE9FF", "rounded"),
     _l("Christmas", "Cozy Fireplace", ["#2B1105", "#4A1C0C", "#1A0A05"], "#FF9F1C", "georgia"),
     _l("Christmas", "Snow Day", ["#FFFFFF", "#DCEBFF"], "#D7263D", "rounded", light=True),
     _l("Christmas", "Silver Bells", ["#2C2F36", "#0F1115"], "#E6E6EB", "snellRoundhand"),
+    _l("Christmas", "Gingerbread", ["#3E2212", "#5C3317", "#2A160B"], "#FFF1DC", "chalkboard"),
+    _l("Christmas", "Nutcracker", ["#101B45", "#5E0D1A"], "#FFD24A", "copperplate", direction="diagonal"),
+    _l("Christmas", "Mistletoe", ["#10361F", "#0A2415"], "#FF8C94", "noteworthy"),
+    _l("Christmas", "Christmas Eve", ["#050B24", "#0E1B4D", "#1B0B33"], "#FFE08A", "serif"),
+    _l("Christmas", "Santa's Workshop", ["#5A0A0A", "#2E0505"], "#F4D35E", "markerFelt"),
+    _l("Christmas", "North Pole", ["#F4FBFF", "#CFE8F7"], "#C1121F", "rounded", light=True),
+    _l("Holiday", "Holiday Lights", ["#0B0F1A", "#141B2D"], "#FFC857", "rounded"),
+    _l("Holiday", "Festival of Lights", ["#0A2A66", "#061A40"], "#E8EEF9", "serif"),
+    _l("Holiday", "Kwanzaa", ["#0E0E0E", "#3D0A0A", "#0B3317"], "#F2C037", "futura", direction="diagonal"),
+    _l("Holiday", "Winter Solstice", ["#0D1B2A", "#1B263B", "#33475F"], "#E0E1DD", "avenir"),
+    _l("Holiday", "Sugar Plum", ["#2B0F3A", "#4E2460"], "#FFC2E2", "snellRoundhand", direction="diagonal"),
+    _l("Holiday", "Hot Cocoa", ["#3A2418", "#1E120C"], "#F7D9C4", "noteworthy"),
+    _l("Holiday", "Midnight Toast", ["#0A0A0F", "#1C1530"], "#F5D76E", "copperplate"),
+    _l("Holiday", "First Frost", ["#FFFFFF", "#E3EEF4"], "#2A6FAB", "avenir", light=True),
 ]
 
 
@@ -193,3 +218,72 @@ def derive(look: Look) -> dict[str, str]:
     out.update(accent=accent, accent_pill=mix(accent, black, 0.14), on_accent=on_accent,
                content_css=gradient_css(look.colors, look.direction))
     return out
+
+
+# ----------------------------------------------------------------------------- themes of one's own
+
+def looks_from_json(text) -> list[Look]:
+    """The saved themes ("My Themes"): a JSON list of looks. Anything unreadable is simply not there."""
+    try:
+        items = json.loads(str(text or "[]"))
+    except ValueError:
+        return []
+    out: list[Look] = []
+    for item in items if isinstance(items, list) else []:
+        look = Look.from_json(json.dumps(item))
+        if look is not None and all(look.name != o.name for o in out):
+            look.group = MINE
+            out.append(look)
+    return out
+
+
+def looks_to_json(looks: list[Look]) -> str:
+    return json.dumps([json.loads(look.to_json()) for look in looks])
+
+
+MINE = "My Themes"
+
+
+def with_saved(looks: list[Look], look: Look, name: str) -> list[Look]:
+    """`looks` with `look` kept under `name` — replacing the one of that name, else added at the end."""
+    name = " ".join(name.split())[:60] or "My Theme"
+    kept = Look(name, list(look.colors), look.accent, look.typeface, look.light, look.direction, MINE)
+    out = [kept if o.name == name else o for o in looks]
+    return out if any(o.name == name for o in looks) else out + [kept]
+
+
+# ----------------------------------------------------------------------------- following the seasons
+
+DECEMBER = {"christmas": "Christmas themes", "holiday": "Holiday themes", "both": "Christmas and Holiday themes"}
+
+
+def thanksgiving(year: int):
+    """US Thanksgiving: the fourth Thursday of November."""
+    import datetime
+    first = datetime.date(year, 11, 1)
+    return first + datetime.timedelta(days=(3 - first.weekday()) % 7 + 21)
+
+
+def season(day, december: str = "both") -> list[str]:
+    """The theme groups in season on `day` (a `datetime.date`) — empty outside the holidays.
+
+    October is Halloween; November up to Thanksgiving Day is Thanksgiving; the day after it up to Christmas Day
+    is Christmas, Holiday or both (`december`); the days from the 26th to New Year's Day are Holiday."""
+    if day.month == 10:
+        return ["Halloween"]
+    turkey = thanksgiving(day.year)
+    if day.month == 11 and day <= turkey:
+        return ["Thanksgiving"]
+    if (day.month == 11 and day > turkey) or (day.month == 12 and day.day <= 25):
+        return {"christmas": ["Christmas"], "holiday": ["Holiday"]}.get(december, ["Christmas", "Holiday"])
+    if (day.month == 12 and day.day >= 26) or (day.month == 1 and day.day == 1):
+        return ["Holiday"]
+    return []
+
+
+def seasonal(day, december: str = "both") -> Look | None:
+    """The theme to wear on `day` when following the seasons: a different one of the season's each day (the same
+    one all day), or None outside the holidays — the chosen theme shows then."""
+    names = season(day, december)
+    pool = [p for p in PRESETS if p.group in names]
+    return pool[day.toordinal() % len(pool)] if pool else None

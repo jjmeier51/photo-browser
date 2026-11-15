@@ -38,6 +38,7 @@ Run:  double-click "Safe Finder.command" next to this file, or
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -5184,7 +5185,7 @@ class Pane(QWidget):
         return ai_window.AIHooks(tags_of=lambda p: tag_store().tags(p, fresh=False), carry_tags=carry,
                                  reveal=self._reveal_from_viewer,
                                  view=lambda paths, start: self.view_media(start, among=paths), keep_open=keep,
-                                 add_tags=add_tags, current_folder=current_folder,
+                                 add_tags=add_tags, current_folder=current_folder, note=self._airdrop_noted,
                                  create=lambda settings: self.ai_create(current_folder() or str(Path.home() / "Pictures"),
                                                                         settings))
 
@@ -7656,7 +7657,9 @@ def apply_theme(app: QApplication, window: MainWindow | None = None) -> None:
         app.palette().color(QPalette.ColorRole.Window).lightness() < 128
     if os.environ.get("SAFE_FINDER_THEME") in ("dark", "light"):
         dark = os.environ["SAFE_FINDER_THEME"] == "dark"
-    look = themes.Look.from_json(QSettings("PhotoBrowser", "SafeFinder").value("theme", ""))
+    look = chosen_look()
+    if seasonal_on():                                  # through the holidays, that season's theme of the day
+        look = themes.seasonal(_today(), december_wears()) or look
     THEME = Theme(dark, look)
     app.setPalette(THEME.palette())
     app.setStyleSheet(THEME.stylesheet())
@@ -7678,23 +7681,92 @@ BASE_FONT: QFont | None = None
 
 
 def current_look() -> "themes.Look | None":
+    """The theme that's on — the season's, while Follow the Seasons has one, else the chosen one."""
     return THEME.look
+
+
+def chosen_look() -> "themes.Look | None":
+    """The theme the person chose (None: Match macOS) — what shows outside the holidays."""
+    return themes.Look.from_json(QSettings("PhotoBrowser", "SafeFinder").value("theme", ""))
+
+
+def _today():
+    return datetime.date.today()
+
+
+def seasonal_on() -> bool:
+    return str(QSettings("PhotoBrowser", "SafeFinder").value("theme_seasonal", "")) in ("1", "true")
+
+
+def december_wears() -> str:
+    v = str(QSettings("PhotoBrowser", "SafeFinder").value("theme_december", "both"))
+    return v if v in themes.DECEMBER else "both"
+
+
+def set_seasonal(on: bool, december: str | None = None) -> None:
+    """View ▸ Theme ▸ Follow the Seasons: through the holidays (October to New Year's Day) the window wears that
+    season's themes, a different one each day; the chosen theme comes back afterwards."""
+    s = QSettings("PhotoBrowser", "SafeFinder")
+    s.setValue("theme_seasonal", "1" if on else "")
+    if december in themes.DECEMBER:
+        s.setValue("theme_december", december)
+    _reapply_theme()
+
+
+def _season_tick() -> None:
+    """A new day may be a new theme (or the season's end): looked at now and then while the app is open."""
+    if not seasonal_on():
+        return
+    want = themes.seasonal(_today(), december_wears()) or chosen_look()
+    now = THEME.look
+    if (want is None) != (now is None) or (want is not None and now is not None and not want.same_looks(now)):
+        _reapply_theme()
+
+
+def my_themes() -> "list[themes.Look]":
+    return themes.looks_from_json(QSettings("PhotoBrowser", "SafeFinder").value("my_themes", ""))
+
+
+def save_my_theme(name: str, look: "themes.Look") -> None:
+    QSettings("PhotoBrowser", "SafeFinder").setValue(
+        "my_themes", themes.looks_to_json(themes.with_saved(my_themes(), look, name)))
+
+
+def remove_my_theme(name: str) -> None:
+    QSettings("PhotoBrowser", "SafeFinder").setValue(
+        "my_themes", themes.looks_to_json([m for m in my_themes() if m.name != name]))
+
+
+def surprise_look() -> "themes.Look":
+    """A ready-made theme other than the one that's on."""
+    import random
+    now = THEME.look
+    return random.choice([p for p in themes.PRESETS if now is None or not p.same_looks(now)])
+
+
+def _reapply_theme() -> None:
+    app = QApplication.instance()
+    win = next((w for w in app.topLevelWidgets() if isinstance(w, MainWindow)), None)
+    apply_theme(app, win)
 
 
 def open_themes(parent: QWidget | None = None) -> None:
     """View ▸ Theme…: the chooser (theme_window.py)."""
     import theme_window
-    dlg = theme_window.ThemeDialog(parent, current_look(), set_look)
+    dlg = theme_window.ThemeDialog(parent, current_look(), set_look, theme_window.Extras(
+        mine=my_themes, save=save_my_theme, remove=remove_my_theme, seasonal=seasonal_on, december=december_wears,
+        set_seasonal=set_seasonal, surprise=surprise_look, chosen=chosen_look, today=_today))
     dlg.exec()
     dlg.deleteLater()
 
 
 def set_look(look: "themes.Look | None") -> None:
-    """Chooses the theme (None: Match macOS) and shows it at once, everywhere."""
-    QSettings("PhotoBrowser", "SafeFinder").setValue("theme", look.to_json() if look is not None else "")
-    app = QApplication.instance()
-    win = next((w for w in app.topLevelWidgets() if isinstance(w, MainWindow)), None)
-    apply_theme(app, win)
+    """Chooses the theme (None: Match macOS) and shows it at once, everywhere. A theme chosen by hand is the
+    one that shows: Follow the Seasons goes off (it would otherwise keep wearing the season's)."""
+    settings = QSettings("PhotoBrowser", "SafeFinder")
+    settings.setValue("theme", look.to_json() if look is not None else "")
+    settings.setValue("theme_seasonal", "")
+    _reapply_theme()
 
 
 def main() -> None:
@@ -7722,6 +7794,9 @@ def main() -> None:
     win = MainWindow(args.src, args.dst)
     app.styleHints().colorSchemeChanged.connect(lambda _s: apply_theme(app, win))
     app.applicationStateChanged.connect(on_app_state)        # the Dock icon brings every window forward
+    season_timer = QTimer(app)                               # Follow the Seasons: a new day, a new theme
+    season_timer.timeout.connect(_season_tick)
+    season_timer.start(10 * 60 * 1000)
     win.show()
     sys.exit(app.exec())
 
