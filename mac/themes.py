@@ -75,11 +75,21 @@ def contrast(a: str, b: str) -> float:
 def readable(color: str, on: list[str], at_least: float, toward: str) -> str:
     """`color`, moved towards `toward` (white on dark chrome, black on light) just far enough to stand
     `at_least` to one against every background in `on`. Small text needs 4.5; hints and marks 3."""
+    best, best_at = toward, 0.0
     for step in range(0, 21):
         c = mix(color, toward, step / 20)
-        if min(contrast(c, bg) for bg in on) >= at_least:
+        got = min(contrast(c, bg) for bg in on)
+        if got >= at_least:
             return c
-    return toward
+        if got > best_at:
+            best, best_at = c, got
+    # The floor can't be met going that way (a white background with dark chrome asked for, a mid-grey one):
+    # whichever of black and white reads best — never text the same colour as what it's on.
+    for end in ("#000000", "#FFFFFF"):
+        got = min(contrast(end, bg) for bg in on)
+        if got > best_at:
+            best, best_at = end, got
+    return best
 
 
 def average(colors: list[str]) -> str:
@@ -126,8 +136,9 @@ class Look:
         if not valid_color(d.get("accent")):
             return None
         return Look(str(d.get("name") or "Custom")[:60], [c.upper() for c in colors], d["accent"].upper(),
-                    d.get("typeface") if d.get("typeface") in TYPEFACES else "system", bool(d.get("light")),
-                    d.get("direction") if d.get("direction") in DIRECTIONS else "down")
+                    d["typeface"] if isinstance(d.get("typeface"), str) and d["typeface"] in TYPEFACES else "system",
+                    bool(d.get("light")),
+                    d["direction"] if isinstance(d.get("direction"), str) and d["direction"] in DIRECTIONS else "down")
 
     def same_looks(self, other: "Look") -> bool:
         return (self.colors, self.accent, self.typeface, self.light, self.direction if len(self.colors) > 1 else "") == \
@@ -246,6 +257,7 @@ def derive(look: Look) -> dict[str, str]:
     out["secondary"] = readable(out["secondary"], grounds, 4.5, toward)
     out["tertiary"] = readable(out["tertiary"], grounds, 3.0, toward)
     out.update(accent=accent, accent_pill=pill, on_accent=on_accent,
+               accent_text=readable(accent, grounds, 4.5, toward),       # the accent, where it's used *as* text
                content_css=gradient_css(look.colors, look.direction))
     return out
 

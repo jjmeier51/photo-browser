@@ -26,6 +26,7 @@ them with ffmpeg says so (`engine_note`), with why the helper isn't there.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -165,6 +166,12 @@ def engine_note() -> str:
 
 # ----------------------------------------------------------------------------- Save Frame
 
+def frame_time(seconds: float) -> str:
+    """A moment in a video, said so that the frame *at* it is the one taken: to the microsecond and never
+    rounded up — "1.235" asked of a frame that starts at 1.234567 gets the frame after it."""
+    return f"{math.floor(max(0.0, seconds) * 1e6) / 1e6:.6f}"
+
+
 def frame_image(video: str, seconds: float):
     """The frame of `video` at `seconds` as a Pillow RGB picture (standard range), or None. A worker thread, or a
     moment's wait: it runs the helper (AVFoundation) or ffmpeg once."""
@@ -176,7 +183,7 @@ def frame_image(video: str, seconds: float):
         helper = video_tools.helper()
         if helper:
             try:
-                r = subprocess.run([*helper, "frame", video, f"{max(0.0, seconds):.3f}", str(out)],
+                r = subprocess.run([*helper, "frame", video, frame_time(seconds), str(out)],
                                    capture_output=True, timeout=120)
                 ok = r.returncode == 0 and out.is_file() and out.stat().st_size > 0
             except (OSError, subprocess.SubprocessError):
@@ -184,7 +191,7 @@ def frame_image(video: str, seconds: float):
         if not ok and (ff := video_tools.ffmpeg()):
             chain = ",".join([*_ffmpeg_filters(video, True), "format=rgb24"])
             try:
-                r = subprocess.run([ff, "-y", "-v", "error", "-ss", f"{max(0.0, seconds):.3f}", "-i", video,
+                r = subprocess.run([ff, "-y", "-v", "error", "-ss", frame_time(seconds), "-i", video,
                                     "-frames:v", "1", "-vf", chain, str(out)], capture_output=True, timeout=120)
                 ok = r.returncode == 0 and out.is_file() and out.stat().st_size > 0
             except (OSError, subprocess.SubprocessError):
@@ -211,7 +218,7 @@ def save_frame(video: str, seconds: float) -> str | None:
         ok = False
         if helper:
             try:
-                r = subprocess.run([*helper, "frame", video, f"{max(0.0, seconds):.3f}", str(out)],
+                r = subprocess.run([*helper, "frame", video, frame_time(seconds), str(out)],
                                    capture_output=True, timeout=180)
                 ok = r.returncode == 0 and out.is_file() and out.stat().st_size > 0
             except (OSError, subprocess.SubprocessError):
@@ -219,7 +226,7 @@ def save_frame(video: str, seconds: float) -> str | None:
         if not ok and (ff := video_tools.ffmpeg()):
             chain = ",".join([*_ffmpeg_filters(video, True), "format=rgb24"])
             try:
-                r = subprocess.run([ff, "-y", "-v", "error", "-ss", f"{max(0.0, seconds):.3f}", "-i", video,
+                r = subprocess.run([ff, "-y", "-v", "error", "-ss", frame_time(seconds), "-i", video,
                                     "-frames:v", "1", "-vf", chain, str(out)], capture_output=True, timeout=180)
                 ok = r.returncode == 0 and out.is_file() and out.stat().st_size > 0
             except (OSError, subprocess.SubprocessError):

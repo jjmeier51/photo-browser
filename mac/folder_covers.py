@@ -108,6 +108,7 @@ class FolderCovers:
         self.settings = settings
         self._lock = threading.RLock()
         self._files: dict[str, tuple[float, tuple | None, dict[str, Entry]]] = {}     # base → (looked, stamp, entries)
+        self._unreadable: set[str] = set()             # bases whose shared file was there but couldn't be read
         self._backups: dict[str, tuple[tuple | None, dict[str, str]]] = {}            # base → (stamp, rel → name)
         self._bases: dict[str, tuple[float, str | None]] = {}
         self._answers: dict[str, tuple[float, tuple[str, float] | None, bool]] = {}   # folder → (when, cover, removed)
@@ -154,12 +155,12 @@ class FolderCovers:
             return hit[2]
         entries: dict[str, Entry] = {}
         if stamp is not None:
-            try:
-                doc = json.loads(file.read_bytes().decode("utf-8"))
-                if isinstance(doc, dict) and doc.get("format") == FORMAT:
-                    entries = _parse(doc.get("covers"))
-            except (OSError, ValueError):
-                entries = {}
+            import net_fetch
+            doc, how = net_fetch.load_json(file)            # a torn file is read from its .bak, never taken for "no covers"
+            if how == "corrupt":
+                self._unreadable.add(base)                  # …and with no .bak either, it's set aside before any write
+            if doc.get("format") == FORMAT:
+                entries = _parse(doc.get("covers"))
         self._files[base] = (now, stamp, entries)
         self._answers.clear()
         return entries
@@ -191,6 +192,8 @@ class FolderCovers:
         doc = {"format": FORMAT, "version": 1, "updated": round(time.time(), 3), "by": app_identity.APP_NAME,
                "covers": {k: {"file": entries[k][0], "at": entries[k][1]} for k in sorted(entries)}}
         data = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        _set_aside(file, base in self._unreadable)
+        self._unreadable.discard(base)
         _put(file, data, spare_folders.on_exfat(str(file.parent)))
         self._files[base] = (time.monotonic(), self._stamp(file), dict(entries))
         self._answers.clear()
@@ -353,6 +356,20 @@ def _jpeg(picture) -> bytes:
     out = io.BytesIO()
     im.save(out, "JPEG", quality=90)
     return out.getvalue()
+
+
+def _set_aside(file: Path, unreadable: bool) -> None:
+    """Before the shared file is written over: what's there now is kept as `<name>.bak` when it's good, and as
+    `<name>.damaged` when it couldn't be read — a torn file used to be taken for "no covers at all", and the
+    next change then replaced every other folder's cover with nothing."""
+    try:
+        import net_fetch
+        if unreadable:
+            file.with_name(file.name + ".damaged").write_bytes(file.read_bytes())
+        else:
+            net_fetch.keep_backup(file)
+    except OSError:
+        pass
 
 
 def _put(file: Path, data: bytes, exfat: bool) -> None:

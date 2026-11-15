@@ -39,7 +39,18 @@ def install(win, sf) -> None:
         if tip:
             a.setStatusTip(tip)
             a.setToolTip(tip)
-        a.triggered.connect(lambda _=False: slot())
+        def run() -> None:
+            """The command, if it can be run right now. The check is asked again here because a command is only
+            greyed out while its menu is open (`rest`): from a keyboard shortcut this is the only check."""
+            if callable(check):
+                try:
+                    if not check():
+                        return
+                except Exception:  # noqa: BLE001 — a check that fails doesn't block the command
+                    pass
+            slot()
+
+        a.triggered.connect(lambda _=False: run())
         a.setData(check)
         menu.addAction(a)
         win.addAction(a)                                # its shortcut works wherever the window has focus
@@ -54,6 +65,14 @@ def install(win, sf) -> None:
                     a.setEnabled(bool(check()))
                 except Exception:  # noqa: BLE001 — a check that fails just leaves the command on
                     a.setEnabled(True)
+
+    def rest(menu) -> None:
+        """The menu has closed: every command enabled again. A disabled action's shortcut is dead, and a
+        command greyed out when the menu was last opened (nothing selected then) must work once something is
+        — ⌘⌫, F2, ⌘D, ⌘E… `run` above does the real check when it's pressed."""
+        for a in menu.actions():
+            if callable(a.data()):
+                a.setEnabled(True)
 
     def sel() -> list[str]:
         try:
@@ -105,6 +124,7 @@ def install(win, sf) -> None:
         m = bar.addMenu(menu_title)
         m.setToolTipsVisible(True)
         m.aboutToShow.connect(lambda m=m: refresh(m))
+        m.aboutToHide.connect(lambda m=m: rest(m))
         return m
 
     def submenu(parent, title: str):
@@ -112,6 +132,7 @@ def install(win, sf) -> None:
         m = parent.addMenu(title)
         m.setToolTipsVisible(True)
         m.aboutToShow.connect(lambda m=m: refresh(m))
+        m.aboutToHide.connect(lambda m=m: rest(m))
         return m
 
     # -- File
@@ -374,6 +395,19 @@ def install(win, sf) -> None:
         return s[0] if len(s) == 1 and not os.path.isdir(s[0]) and sf.kind_of(s[0]) != "other" else None
     act(t, "Use as Album Cover", lambda: pane().set_cover(os.path.dirname(cover_source()), cover_source()), None,
         cover_source, "The selected photo or video as the cover of the folder it's in — here and on the iPhone")
+    def one_folder():
+        s = sel()
+        return s[0] if len(s) == 1 and os.path.isdir(s[0]) else None
+
+    def has_cover() -> bool:
+        import folder_covers
+        return one_folder() is not None and folder_covers.default(win.settings).cover(one_folder()) is not None
+    act(t, "Choose Folder Cover…", lambda: pane().choose_cover(one_folder()), None, one_folder,
+        "A picture of your choosing as the selected folder's cover — here and on the iPhone")
+    act(t, "Remove Folder Cover", lambda: pane().remove_cover(one_folder()), None, has_cover,
+        "Back to the folder's first photo as its cover")
+    act(t, "Remove All Tags…", lambda: pane().clear_tags(sel()), None, lambda: bool(sel()),
+        "Every tag off the selected items (asked first)")
     act(t, "Find People…", lambda: pane().open_people(folder_target()), None, folder_target,
         "Finds the faces in the photos of the selected folder (or this one) and groups them into people — on this "
         "Mac; you give the names")
@@ -454,8 +488,10 @@ def install(win, sf) -> None:
         "video's like count read again")
     act(dl, "Download from Fanfix…", lambda: sf.open_fanfix(folder_target(), win), None, folder_target,
         "Your purchased content from Fanfix creators, into a folder for each creator")
-    act(dl, sf.passes_label(folder_target()) if folder_target() else "Download Passes…",
-        lambda: sf.open_passes(folder_target(), win), None, folder_target)
+    passes_act = act(dl, sf.passes_label(folder_target()) if folder_target() else "Download Passes…",
+                     lambda: sf.open_passes(folder_target(), win), None, folder_target)
+    dl.aboutToShow.connect(lambda: passes_act.setText(          # (named for the folder it would act on *now*)
+        sf.passes_label(folder_target()) if folder_target() else "Download Passes…"))
     dl.addSeparator()
     act(dl, "Browse taylorpictures.net…", lambda: pane().open_taylor(
         folder_target() or str(win.settings.value("taylor/root") or "")), None,
@@ -467,9 +503,9 @@ def install(win, sf) -> None:
     act(w, "Zoom", lambda: win.showNormal() if win.isMaximized() else win.showMaximized())
     w.addSeparator()
     act(w, "Bring All to Front", sf.raise_all_windows, None, None,
-        "Every Photo Browser for Mac window in front of other apps' windows — what a click on the Dock icon does")
+        f"Every {app_identity.APP_NAME} window in front of other apps' windows — what a click on the Dock icon does")
     w.addSeparator()
-    act(w, "Photo Browser for Mac", lambda: (win.showNormal() if win.isMinimized() else None, win.raise_(),
+    act(w, app_identity.APP_NAME, lambda: (win.showNormal() if win.isMinimized() else None, win.raise_(),
                                    win.activateWindow()))
     others = []
 

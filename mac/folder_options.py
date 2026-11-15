@@ -65,6 +65,8 @@ class FolderOptions:
     def __init__(self, settings=None) -> None:
         self.settings = settings
         self._files: dict[str, tuple[tuple[int, int] | None, dict[str, float]]] = {}     # base → (stamp of the file, entries)
+        self._unreadable: set[str] = set()             # bases whose shared file was there but couldn't be read
+        self._extra: dict[str, dict] = {}              # base → keys in the file this version doesn't know (kept on writing)
         self._bases: dict[str, tuple[float, str | None]] = {}
 
     # -- where
@@ -96,22 +98,33 @@ class FolderOptions:
             return hit[1]
         entries: dict[str, float] = {}
         if stamp is not None:
-            try:
-                doc = json.loads(file.read_bytes().decode("utf-8"))
-                raw = doc.get("videos_first") if isinstance(doc, dict) and doc.get("format") == FORMAT else None
-                if isinstance(raw, dict):
-                    entries = {str(k): float(v) for k, v in raw.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
-            except (OSError, ValueError):
-                entries = {}
+            import net_fetch
+            doc, how = net_fetch.load_json(file)            # a torn file is read from its .bak, never taken for "nothing set"
+            if how == "corrupt":
+                self._unreadable.add(base)
+            raw = doc.get("videos_first") if doc.get("format") == FORMAT else None
+            if isinstance(raw, dict):
+                entries = {str(k): float(v) for k, v in raw.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+            self._extra[base] = {k: v for k, v in doc.items() if k not in ("format", "version", "updated", "by", "videos_first")}
         self._files[base] = (stamp, entries)
         return entries
 
     def _write(self, base: str, entries: dict[str, float]) -> None:
         import spare_folders
         file = self._path(base)
-        doc = {"format": FORMAT, "version": 1, "updated": round(time.time(), 3), "by": app_identity.APP_NAME,
+        doc = {**self._extra.get(base, {}),                 # (what a later version of either app put there stays)
+               "format": FORMAT, "version": 1, "updated": round(time.time(), 3), "by": app_identity.APP_NAME,
                "videos_first": {k: entries[k] for k in sorted(entries)}}
         data = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        try:                                                # what's there now: kept as .bak (or .damaged) first
+            import net_fetch
+            if base in self._unreadable:
+                file.with_name(file.name + ".damaged").write_bytes(file.read_bytes())
+                self._unreadable.discard(base)
+            else:
+                net_fetch.keep_backup(file)
+        except OSError:
+            pass
         if spare_folders.on_exfat(str(file.parent)):
             with open(file, "wb") as f:                # exFAT: in place — no rename, no fsync (CLAUDE.md #12)
                 f.write(data)

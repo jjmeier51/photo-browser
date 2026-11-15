@@ -360,7 +360,7 @@ def mark_ai_made(paths: list[str]) -> None:
         return
     try:
         subprocess.run([exiftool, "-overwrite_original", "-q", f"-XMP-iptcExt:DigitalSourceType={AI_SOURCE}",
-                        "-XMP-xmp:CreatorTool=Photo Browser for Mac (FLUX.2 klein 4B, mflux)", *paths],
+                        f"-XMP-xmp:CreatorTool={app_identity.APP_NAME} (FLUX.2 klein 4B, mflux)", *paths],
                        capture_output=True, timeout=120)
     except (OSError, subprocess.SubprocessError):
         pass

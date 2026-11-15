@@ -133,6 +133,7 @@ class Theme:
     def __init__(self, dark: bool, look: "themes.Look | None" = None) -> None:
         self.look = look
         self.on_accent = "#FFFFFF"                     # text and marks drawn on the accent colour
+        self.accent_text = ""                          # the accent where it is itself text (kept readable)
         self.content_css = ""                          # the file views' background, when it's a gradient
         if look is not None:
             self.dark = not look.light
@@ -279,7 +280,7 @@ class Theme:
         QCheckBox::indicator:indeterminate {{ image: url("{ui_mark("dash", t.on_accent)}"); }}
         QRadioButton::indicator:checked {{ image: url("{ui_mark("dot", t.on_accent)}"); }}
         QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{ border-color: {t.tertiary}; }}
-        QCheckBox:focus, QRadioButton:focus {{ color: {t.accent}; }}
+        QCheckBox:focus, QRadioButton:focus {{ color: {t.accent_text or t.accent}; }}
         QCheckBox:disabled, QRadioButton:disabled, QLabel:disabled {{ color: {t.tertiary}; }}
         QMenu {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 8px; padding: 4px; }}
         QMenu::item {{ padding: 4px 18px; border-radius: 4px; }}
@@ -291,7 +292,7 @@ class Theme:
                                background: {t.button}; font-size: 12px; }}
         QToolButton#TagChip:hover {{ background: {t.hover}; }}
         QToolButton#TagChip[state="on"] {{ background: {t.accent}; border-color: {t.accent}; color: {t.on_accent}; }}
-        QToolButton#TagChip[state="part"] {{ border: 1px solid {t.accent}; color: {t.accent}; }}
+        QToolButton#TagChip[state="part"] {{ border: 1px solid {t.accent}; color: {t.accent_text or t.accent}; }}
         QLineEdit#TagField {{ background: {t.content}; border: 1px solid {t.button_border}; border-radius: 7px;
                               padding: 5px 8px; font-size: 13px; }}
         QLineEdit#TagField:focus {{ border-color: {t.accent}; }}
@@ -2646,6 +2647,9 @@ class Query:
         self.inside: list[str] = []                            # folded: in the name of a folder it's in
         self.dates: tuple[float | None, float | None] | None = None      # modified: [from, before)
         self.exts: set[str] = set()
+        self.not_exts: set[str] = set()                         # "-ext:mov", "-kind:video"
+        self.not_inside: list[str] = []                        # "-in:trash"
+        self.unclear: list[str] = []                           # terms that couldn't be read ("date:someday")
         self.size: tuple[int | None, int | None] | None = None   # (min, max) bytes, files only
         self.menu_kind = kind if kind in KIND_EXT else ""      # the Kind menu's choice, as such
         self.kind = self.menu_kind                              # …which "kind:" in the text overrides
@@ -2688,12 +2692,22 @@ class Query:
             elif key == "has" and low in ("location", "place", "gps"):
                 self.located = not neg
             elif key == "kind":
-                if low in KIND_EXT:
+                if low in KIND_EXT and neg:
+                    self.not_exts |= set(KIND_EXT[low])
+                elif low in KIND_EXT:
                     self.kind = low
+                else:
+                    self.unclear.append(f"{key}:{value}")
             elif key == "size":
                 self.size = size_bounds(low)
+                if self.size is None:
+                    self.unclear.append(f"{key}:{value}")
             elif key == "ext":
-                self.exts |= {"." + e.strip(". ") for e in low.split(",") if e.strip(". ")}
+                found = {"." + e.strip(". ") for e in low.split(",") if e.strip(". ")}
+                if neg:
+                    self.not_exts |= found
+                else:
+                    self.exts |= found
             elif key == "tag":
                 starts = low.endswith("*")
                 name = search_query.fold(shared_tags.normalized(low.rstrip("*")))
@@ -2707,9 +2721,11 @@ class Query:
                 if state:
                     self.states.append((state, not neg))
             elif key == "in":
-                self.inside.append(search_query.fold(value))
+                (self.not_inside if neg else self.inside).append(search_query.fold(value))
             elif key in ("date", "before", "after", "modified"):
                 span = search_query.date_range(low)
+                if span is None:
+                    self.unclear.append(f"{key}:{value}")                   # said, rather than silently widening the search
                 if span is not None:
                     lo, hi = self.dates or (None, None)
                     if key == "before":
@@ -2734,7 +2750,7 @@ class Query:
     def empty(self) -> bool:
         return not (self.words or self.without or self.tags or self.without_tags or self.states or self.inside
                     or self.dates or self.exts or self.kind or self.size or self.where or self.near or self.who
-                    or self.located is not None)
+                    or self.not_exts or self.not_inside or self.located is not None)
 
     def by_place(self) -> bool:
         """Whether where a photo was taken has to be known (its GPS read) to answer."""
@@ -2860,9 +2876,13 @@ class Query:
             return False
         if self.kind and ext not in KIND_EXT[self.kind]:
             return False
-        if self.inside:
+        if ext in self.not_exts:
+            return False
+        if self.inside or self.not_inside:
             where = search_query.forms(parents)
             if not all(search_query.has(w, where) for w in self.inside):
+                return False
+            if any(search_query.has(w, where) for w in self.not_inside):
                 return False
         named = search_query.forms(name) if (self.words or self.without) else ("", "", "")
         missing = [w for w in self.words if not search_query.has(w, named)]
@@ -2921,6 +2941,8 @@ class Query:
             bits.append(dict(KIND_LABELS)[self.kind])
         if self.size and "size:" not in self.text.lower():
             bits.append(size_label(self.size))
+        if self.unclear:
+            bits.append("couldn't read " + ", ".join(f"“{u}”" for u in self.unclear[:3]))
         return " · ".join(bits)
 
     def spotlight(self) -> str:
@@ -3008,6 +3030,7 @@ class FileScanner:
             return
         listing: list[tuple[str, bool, list[str], list[str]]] = []
         entries = 0
+        stamp = search_query.NAMES.stamp()                     # (names that change while this reads aren't kept)
         while stack:
             if self._stop.is_set():
                 return                                         # half a tree isn't kept
@@ -3041,7 +3064,7 @@ class FileScanner:
                 listing = []
             stack += [(os.path.join(folder, d), dev, False) for d in dirs]
             yield record
-        search_query.NAMES.put(root, listing, entries)
+        search_query.NAMES.put(root, listing, entries, stamp)
 
     def _walk(self) -> int:
         batch: list[tuple[str, int, float, bool]] = []
@@ -6252,8 +6275,8 @@ class Pane(QWidget):
 
         win = self.window()
         if isinstance(win, MainWindow):
-            win.undo.push(title if len(done) == 1 else f"{title} of {len(done):,} Items", undo)
-            self.note(line, "Undo", win.undo_last)
+            item = win.undo.push(title if len(done) == 1 else f"{title} of {len(done):,} Items", undo)
+            self.note(line, "Undo", lambda: win.undo_this(item))
         else:
             self.note(line)
 
@@ -7120,8 +7143,8 @@ class Pane(QWidget):
         """Notes something that can be taken back (Edit ▸ Undo, ⌘Z) and says it, with an Undo button."""
         win = self.window()
         if isinstance(win, MainWindow):
-            win.undo.push(title, undo)
-            self.note(line, "Undo", win.undo_last)
+            item = win.undo.push(title, undo)
+            self.note(line, "Undo", lambda: win.undo_this(item))     # this toast's Undo takes *this* back
         else:
             self.note(line)
 
@@ -8390,6 +8413,11 @@ class MainWindow(QMainWindow):
         if said:
             self.active_pane.note(said)
 
+    def undo_this(self, item) -> None:
+        """A toast's own Undo: that action, even if something else has been done since (in the other pane, say)."""
+        said = self.undo.undo_item(item)
+        self.active_pane.note(said or "That's already been undone.")
+
     def open_palette(self) -> None:
         """Edit ▸ Find a Command… (⇧⌘P): every menu command in one searchable list."""
         commands = [(label, a) for label, a in ui_extras.menu_commands(self.menuBar())
@@ -8747,9 +8775,30 @@ class MainWindow(QMainWindow):
         self.sidebar.rebuild()
 
     # -- lifecycle
+    def busy_windows(self) -> list[QWidget]:
+        """The app's other windows that are in the middle of something — a clone, an upscale, a download, a
+        save. Quitting with the main window would cut them off (or leave them with no main window)."""
+        out = []
+        for w in QApplication.topLevelWidgets():
+            if w is self or not w.isVisible():
+                continue
+            if any(bool(getattr(w, name, False)) is True for name in ("running", "saving", "working", "busy")):
+                out.append(w)
+        return out
+
     def closeEvent(self, event) -> None:  # noqa: N802
+        busy = self.busy_windows()
+        if busy:
+            names = "\n".join("•  " + (w.windowTitle() or type(w).__name__) for w in busy[:8])
+            r = QMessageBox.question(self, app_identity.APP_NAME,
+                                     f"Still at work:\n\n{names}\n\nQuit anyway? What's in progress is stopped; "
+                                     "what's finished stays.")
+            if r != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                busy[0].raise_()
+                return
         if self.current is not None:
-            r = QMessageBox.question(self, "Photo Browser for Mac",
+            r = QMessageBox.question(self, app_identity.APP_NAME,
                                      "A transfer is still running. Stop it and quit? The file in progress is "
                                      "cleaned up; finished files stay on the drive.")
             if r != QMessageBox.StandardButton.Yes:

@@ -45,6 +45,7 @@ import re
 import subprocess
 import sys
 import threading
+import shutil
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -129,11 +130,16 @@ class Store:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or SUPPORT / "astria.json"
         self.lock = threading.RLock()
-        try:
-            with open(self.path, encoding="utf-8") as f:
-                self.data: dict = json.load(f)
-        except (OSError, ValueError):
-            self.data = {}
+        import net_fetch
+        # History, the saved map and jobs still out (paid for) live here: a torn file is read from its .bak and
+        # set aside as .damaged — never taken for "nothing yet" and written over.
+        self.data: dict
+        self.data, how = net_fetch.load_json(self.path)
+        if how == "corrupt":
+            try:
+                self.path.with_name(self.path.name + ".damaged").write_bytes(self.path.read_bytes())
+            except OSError:
+                pass
 
     def get(self, key: str, default=None):
         with self.lock:
@@ -157,6 +163,12 @@ class Store:
             tmp = self.path.with_suffix(".saving")
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=1)
+            if time.monotonic() - getattr(self, "_backed_at", -1e9) > 300 and self.path.is_file():
+                self._backed_at = time.monotonic()      # the last good one, kept beside it (every few minutes at most)
+                try:
+                    shutil.copyfile(self.path, self.path.with_name(self.path.name + ".bak"))
+                except OSError:
+                    pass
             os.replace(tmp, self.path)
         except OSError:
             pass

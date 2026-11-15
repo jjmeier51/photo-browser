@@ -170,10 +170,24 @@ class UndoStack:
         self.items: list[Undoable] = []
         self.changed: Callable[[], None] = lambda: None
 
-    def push(self, title: str, undo: Callable[[], str | None]) -> None:
-        self.items.append(Undoable(title, undo))
+    def push(self, title: str, undo: Callable[[], str | None]) -> "Undoable":
+        item = Undoable(title, undo)
+        self.items.append(item)
         del self.items[:-self.LIMIT]
         self.changed()
+        return item
+
+    def undo_item(self, item: "Undoable") -> str | None:
+        """Takes *that* one back — what a toast's own Undo button means, whatever was done after it. None when
+        it's already been undone (or has dropped off the end)."""
+        if item not in self.items:
+            return None
+        self.items.remove(item)
+        self.changed()
+        try:
+            return item.undo() or f"Undid {item.title}."
+        except Exception as e:  # noqa: BLE001
+            return f"Couldn't undo {item.title}: {e}"
 
     def title(self) -> str:
         return self.items[-1].title if self.items else ""
@@ -195,7 +209,8 @@ class UndoStack:
 def menu_commands(menubar) -> list[tuple[str, QAction]]:
     """Every command in the menu bar as ("File ▸ Rename…", action), submenus followed. Menus are asked to bring
     themselves up to date first (their `aboutToShow`), so what's greyed out and what's ticked is as it would be
-    on opening them."""
+    on opening them — that answer is kept on each action (`can_run`) and the menus are then told they've
+    closed again (`aboutToHide`), because an action left disabled has a dead keyboard shortcut."""
     out: list[tuple[str, QAction]] = []
 
     def walk(menu, trail: list[str]) -> None:
@@ -207,12 +222,20 @@ def menu_commands(menubar) -> list[tuple[str, QAction]]:
             if a.menu() is not None:
                 walk(a.menu(), trail + [text])
             elif text:
+                a.setProperty("can_run", a.isEnabled())
                 out.append((" ▸ ".join(trail + [text]), a))
+        menu.aboutToHide.emit()
 
     for top in menubar.actions():
         if top.menu() is not None:
             walk(top.menu(), [top.text().replace("&", "")])
     return out
+
+
+def can_run(action: QAction) -> bool:
+    """Whether the command could be run when the list was made (see `menu_commands`)."""
+    known = action.property("can_run")
+    return bool(known) if known is not None else action.isEnabled()
 
 
 def _matches(words: list[str], text: str) -> int | None:
@@ -259,8 +282,8 @@ class CommandPalette(QDialog):
         self.list = QListWidget()
         self.list.setAccessibleName("Commands")
         self.list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.list.itemActivated.connect(lambda _i: self._run())
-        self.list.itemClicked.connect(lambda _i: self._run())
+        self.list.itemActivated.connect(self._run)
+        self.list.itemClicked.connect(self._run)
         v.addWidget(self.list, 1)
         hint = QLabel("↑ ↓ to choose · Return to run · Esc to close")
         hint.setObjectName("PaletteHint")
@@ -275,7 +298,7 @@ class CommandPalette(QDialog):
         for i, (label, action) in enumerate(self.commands):
             score = _matches(words, label)
             if score is not None:
-                ranked.append((0 if action.isEnabled() else 50, score, i, label, action))
+                ranked.append((0 if can_run(action) else 50, score, i, label, action))
         ranked.sort(key=lambda r: r[:3])
         self.list.clear()
         for _off, _score, _i, label, action in ranked[:200]:
@@ -283,7 +306,7 @@ class CommandPalette(QDialog):
             item = QListWidgetItem(label + (f"      {keys}" if keys else ""))
             item.setData(Qt.ItemDataRole.UserRole, action)
             item.setToolTip(action.toolTip() if action.toolTip() != action.text() else "")
-            if not action.isEnabled():
+            if not can_run(action):
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
                 item.setForeground(QColor(self.theme.tertiary))
             elif action.isCheckable() and action.isChecked():
@@ -302,10 +325,11 @@ class CommandPalette(QDialog):
                 self.list.setCurrentRow(row)
                 return
 
-    def _run(self) -> None:
-        item = self.list.currentItem()
+    def _run(self, item=None) -> None:
+        """Runs the clicked row (or, from the keyboard, the highlighted one) — never another row in its place."""
+        item = item if item is not None else self.list.currentItem()
         action = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-        if action is None or not action.isEnabled():
+        if action is None or not (item.flags() & Qt.ItemFlag.ItemIsEnabled):
             return
         self.accept()
         QTimer.singleShot(0, action.trigger)                # once this window has gone

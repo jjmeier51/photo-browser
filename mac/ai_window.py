@@ -856,7 +856,7 @@ def _unsaved_before_run_again(parent: QWidget, count: int) -> str:
     from PySide6.QtWidgets import QCheckBox
     settings = app_identity.settings()
     choice = str(settings.value("ai/run_again_unsaved", "ask") or "ask")
-    if choice in ("save", "discard"):
+    if choice == "save":                                   # (an earlier version could remember "discard": no longer honoured)
         return choice
     box = QMessageBox(parent)
     box.setIcon(QMessageBox.Icon.Question)
@@ -867,13 +867,13 @@ def _unsaved_before_run_again(parent: QWidget, count: int) -> str:
     discard = box.addButton("Don't Save", QMessageBox.ButtonRole.DestructiveRole)
     box.addButton(QMessageBox.StandardButton.Cancel)
     box.setDefaultButton(save)
-    always = QCheckBox("Do this every time")
+    always = QCheckBox("Always save first, without asking")
     box.setCheckBox(always)
     box.exec()
     clicked = box.clickedButton()
     answer = "save" if clicked is save else "discard" if clicked is discard else "cancel"
-    if answer != "cancel" and always.isChecked():
-        settings.setValue("ai/run_again_unsaved", answer)
+    if answer == "save" and always.isChecked():           # throwing results away is never made a habit: only
+        settings.setValue("ai/run_again_unsaved", "save")  # "save every time" is remembered
     return answer
 
 
@@ -995,25 +995,29 @@ class ResultsWindow(QWidget):
             QDesktopServices.openUrl(QUrl.fromLocalFile(paths[i]))
 
     def save(self) -> list[str]:
-        kept = [t.data for t in self.tiles if t.keep]
         out, failed = [], 0
-        for data in kept:
+        for t in self.tiles:
+            if not t.keep or getattr(t, "saved_to", ""):          # (one saved on an earlier try isn't saved twice)
+                continue
             try:
                 if self.job.mode == "edit":
-                    out.append(A.save_edit(data, self.job.source, self.job.model_label, self.job.settings.get("prompt", "")))
+                    t.saved_to = A.save_edit(t.data, self.job.source, self.job.model_label, self.job.settings.get("prompt", ""))
                 else:
-                    out.append(A.save_created(data, self.job.folder, self.job.model_label,
-                                              self.job.settings.get("prompt", "")))
+                    t.saved_to = A.save_created(t.data, self.job.folder, self.job.model_label,
+                                                self.job.settings.get("prompt", ""))
+                out.append(t.saved_to)
             except (OSError, ValueError) as e:
                 failed += 1
                 self.state.setText(f"Couldn't save one: {e}")
         if out and self.job.mode == "edit" and self.hooks.carry_tags is not None:
             self.hooks.carry_tags([(self.job.source, p) for p in out])
-        A.drop_pending(self.job.id)
-        self.saved = out
+        if not failed:
+            A.drop_pending(self.job.id)                      # only once every kept result is on the drive: they were paid for
+        out = [t.saved_to for t in self.tiles if getattr(t, "saved_to", "")]
+        self.saved = out if not failed else []               # (still "unsaved" while any couldn't be written)
         self.failed = failed
-        self.save_btn.setEnabled(False)
-        self.save_btn.setText("Saved")
+        self.save_btn.setEnabled(bool(failed))
+        self.save_btn.setText("Try Saving Again" if failed else "Saved")
         self.show_btn.setVisible(bool(out) and self.hooks.reveal is not None)
         folder = os.path.dirname(out[0]) if out else ""
         self.summary.setText(f"Saved {len(out)} into “{os.path.basename(folder)}”." +
@@ -1070,6 +1074,9 @@ class ResultsWindow(QWidget):
             box.exec()
             if box.clickedButton() is save:
                 self.save()
+                if self.failed:                            # the drive's gone, or full: the window stays, with why
+                    event.ignore()
+                    return
             elif box.clickedButton() is discard:
                 A.drop_pending(self.job.id)
             else:
@@ -1426,7 +1433,15 @@ class BatchResultsWindow(QWidget):
             clicked = box.clickedButton()
             if clicked is save:
                 if unsaved:
+                    self.unwritten = 0
                     self.save_finished_only()
+                    if self.unwritten:
+                        QMessageBox.warning(self, "Edit with AI", f"{self.unwritten} result"
+                                            f"{'s' if self.unwritten != 1 else ''} couldn't be saved — is the drive "
+                                            "connected? They're still here.")
+                        self.saved = []
+                        event.ignore()
+                        return
             elif discard is not None and clicked is discard:
                 for j in self.batch:
                     if j.done:
@@ -1447,16 +1462,19 @@ class BatchResultsWindow(QWidget):
         for job in self.batch:
             if not job.done:
                 continue
-            made = []
+            made, missed = [], 0
             for t in self.sections[job.id].tiles:
-                if t.keep:
+                if t.keep and not getattr(t, "saved_to", ""):
                     try:
-                        made.append(A.save_edit(t.data, job.source, job.model_label, job.settings.get("prompt", "")))
+                        t.saved_to = A.save_edit(t.data, job.source, job.model_label, job.settings.get("prompt", ""))
+                        made.append(t.saved_to)
                     except (OSError, ValueError):
-                        pass
+                        missed += 1
             if made and self.hooks.carry_tags is not None:
                 self.hooks.carry_tags([(job.source, p) for p in made])
-            A.drop_pending(job.id)
+            if not missed:
+                A.drop_pending(job.id)                       # a job whose results couldn't all be written is kept
+            self.unwritten = getattr(self, "unwritten", 0) + missed
             out += made
         self.saved = out
         return out

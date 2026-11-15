@@ -145,6 +145,7 @@ class NameIndex:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._roots: dict[str, tuple[float, list]] = {}
+        self._generation = 0
 
     def get(self, root: str) -> list | None:
         with self._lock:
@@ -157,8 +158,13 @@ class NameIndex:
     def fresh(self, roots: list[str]) -> bool:
         return bool(roots) and all(self.get(r) is not None for r in roots)
 
-    def put(self, root: str, listing: list, entries: int) -> None:
-        if entries > self.LIMIT:
+    def stamp(self) -> int:
+        """Taken before a walk starts and handed back to `put`: a listing gathered while files were changing
+        (a `forget` in between) is thrown away rather than kept as if it were current."""
+        return self._generation
+
+    def put(self, root: str, listing: list, entries: int, stamp: int | None = None) -> None:
+        if entries > self.LIMIT or (stamp is not None and stamp != self._generation):
             return
         with self._lock:
             if len(self._roots) >= 6:                      # a handful of places at most
@@ -168,6 +174,7 @@ class NameIndex:
 
     def forget(self) -> None:
         with self._lock:
+            self._generation += 1
             self._roots.clear()
 
 

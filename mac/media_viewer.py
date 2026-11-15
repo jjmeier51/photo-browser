@@ -1057,7 +1057,9 @@ class _VideoStage(QWidget):
             s.step(frames)
         elif self.backend == "qt":
             self.player.pause()
-            self.seek(self.player.position() + int(round(frames * 1000 / max(self.fps, 1))))
+            fps = max(self.fps, 1.0)                        # by frame number, aimed at the middle of the frame:
+            frame = int(round(self.player.position() / 1000.0 * fps)) + frames      # adding 33 ms each time drifts
+            self.seek(int(max(0.0, (frame + 0.5) / fps * 1000.0)))
 
     def set_rate(self, rate: float) -> None:
         s = self._surface()
@@ -1917,6 +1919,7 @@ class MediaViewer(QWidget):
         if not is_video(self.current):
             return
         self._exact_time = True
+        self.fade.wake(2.5)                             # the time is what's being read: the controls stay a moment
         self.video.step(frames)
         QTimer.singleShot(60, self._show_exact)
 
@@ -1924,7 +1927,8 @@ class MediaViewer(QWidget):
         if getattr(self, "_exact_time", False) and self.paths and is_video(self.current):
             s = max(0.0, self.video.position_s())
             fps = max(self.video.fps, 1.0)
-            self.time_now.setText(f"{media_info.clock(s)}.{int(round((s % 1) * 1000)) % 1000:03d}")
+            ms = int(s * 1000 + 1e-6)                       # (the clock rounds to the nearest second: 1.6 s isn't "0:02.600")
+            self.time_now.setText(f"{media_info.clock(ms // 1000)}.{ms % 1000:03d}")
             self.time_now.setToolTip(f"Frame {int(round(s * fps)) + 1:,} at {fps:g} frames a second")
 
     def _position(self, ms: int, duration: int) -> None:
