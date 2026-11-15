@@ -5958,6 +5958,79 @@ class Pane(QWidget):
         if paths and IS_MAC:
             subprocess.Popen(["qlmanage", "-p", *paths], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    # -- receive from iPhone (airdrop_window.py / airdrop_receive.py)
+    def receive_drive(self) -> str:
+        """The drive AirDrops are received onto: the one this pane is on, else the first connected one ("" when
+        there's none — the Mac's own disk isn't searched for a folder)."""
+        here = self.location if self.location and not self.is_virtual else ""
+        if here:
+            root = str(engine.volume_root(Path(here)))
+            if root != "/":
+                return root
+        try:
+            for v in sorted(Path("/Volumes").iterdir()):
+                if not v.name.startswith(".") and os.path.realpath(v) != "/" and v.is_dir():
+                    return str(v)
+        except OSError:
+            pass
+        return ""
+
+    def receive_hooks(self):
+        import airdrop_receive
+        import airdrop_window
+
+        def done(res, dest: str) -> None:
+            if res.of("moved") or res.of("already"):
+                search_query.NAMES.forget()
+                for pane in {self, getattr(self.window(), "src", self), getattr(self.window(), "dst", self)}:
+                    if pane.location and not pane.is_virtual and os.path.normpath(pane.location) == os.path.normpath(dest):
+                        pane.refresh()
+            first = next((m.dst for m in res.moves if m.status == "moved"), "")
+            self.note(airdrop_receive.summary(res, dest), "Show" if first else "",
+                      (lambda: self.reveal(first)) if first else None)
+
+        return airdrop_window.Hooks(self.receive_drive, lambda p: MainWindow.trash_item(Path(p)),
+                                    lambda path: spare_folders.make_dir(path) and None, done,
+                                    lambda: self.location if self.location and not self.is_virtual else "")
+
+    def receive_from_iphone(self) -> None:
+        """File ▸ Receive from iPhone… (⇧⌘I): the photos and videos AirDropped to this Mac (they land in
+        Downloads), moved into the drive's "From iPhone" folder — each copy checked before its original goes."""
+        import airdrop_window
+        dlg = airdrop_window.ReceiveWindow(QApplication.activeWindow() or self.window(), self.settings, self.receive_hooks())
+        dlg.finished.connect(lambda _r: getattr(self.window(), "airdrop_watcher", None) and self.window().airdrop_watcher.sync())
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.open()
+
+    def airdrops_arrived(self, paths: list[str]) -> None:
+        """Photos or videos were just AirDropped to this Mac: moved straight away when that's the setting,
+        else offered in a toast."""
+        import airdrop_receive
+        import airdrop_window
+        hooks = self.receive_hooks()
+        dest = airdrop_window.destination(self.settings, self.receive_drive(), hooks.here())
+        photos = sum(1 for p in paths if airdrop_receive.kind_of(p) == "photo")
+        videos = len(paths) - photos
+        what = " and ".join(b for b in (f"{photos:,} photo{'s' if photos != 1 else ''}" if photos else "",
+                                        f"{videos:,} video{'s' if videos != 1 else ''}" if videos else "") if b)
+
+        def move() -> None:
+            if not dest or not os.path.isdir(dest):
+                self.receive_from_iphone()
+                return
+            sig = airdrop_window._Signals()
+            self._receiving = sig                      # kept alive until it reports
+            sig.done.connect(lambda res: (hooks.done(res, dest), setattr(self, "_receiving", None)))
+            airdrop_window.run_receive(paths, dest, self.settings, hooks, sig, threading.Event())
+
+        if dest and str(self.settings.value(airdrop_window.AUTO_KEY, "false")).lower() == "true":
+            self._airdrop_noted(f"{what} arrived by AirDrop — moving {'it' if len(paths) == 1 else 'them'} to "
+                                f"“{os.path.basename(dest)}”…")
+            move()
+        else:
+            name = os.path.basename(dest) if dest else airdrop_receive.FOLDER_NAME
+            self.note(f"{what} arrived by AirDrop.", f"Move to “{name}”", move)
+
     def airdrop(self, paths: list[str]) -> None:
         """Pack the selection into .pbgallery archives (one per folder; loose files together) and open
         the Mac's AirDrop window — the Photo Browser app on the iPhone unpacks them into a drive folder
@@ -8204,6 +8277,12 @@ class MainWindow(QMainWindow):
         self._restore_layout()
         import menubar
         menubar.install(self, sys.modules[__name__])      # File, Edit, View, Go, Photos, Window, Help + shortcuts
+        try:                                              # AirDrops arriving in Downloads, offered for "From iPhone"
+            import airdrop_window
+            self.airdrop_watcher = airdrop_window.Watcher(self, self.settings)
+            self.airdrop_watcher.arrived.connect(lambda paths: self.active_pane.airdrops_arrived(paths))
+        except Exception:  # noqa: BLE001 — receiving by hand (File ▸ Receive from iPhone…) still works
+            self.airdrop_watcher = None
         self.update_actions()
 
     # -- panes

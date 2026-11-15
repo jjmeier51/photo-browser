@@ -143,6 +143,9 @@ def install(win, sf) -> None:
     act(f, "Move to the Other Side", lambda: win.transfer_selection(True), "Ctrl+Shift+M",
         lambda: not win.split or win.move_btn.isEnabled())
     act(f, "AirDrop to iPhone…", lambda: pane().airdrop(sel()), None, lambda: bool(sel()) and sf.IS_MAC)
+    act(f, "Receive from iPhone…", lambda: pane().receive_from_iphone(), "Ctrl+Shift+I", None,
+        "Photos and videos AirDropped to this Mac (they land in Downloads), moved into the drive's “From iPhone” "
+        "folder — each copy checked before its original goes")
     act(f, "Make Book PDF…", lambda: pane().make_book(texts()), None, lambda: bool(texts()),
         "The selected .txt / .md / .rtf typeset like a printed book (bookify) — a PDF beside it")
     f.addSeparator()
