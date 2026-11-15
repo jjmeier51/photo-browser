@@ -101,17 +101,17 @@ class Record:
     @classmethod
     def load(cls, folder: str | Path, name: str, form: str) -> "Record":
         rec = cls(Path(folder), name, form)
+        rec.state = "missing"
         doc = rec._read()
         rec.fields = {k: v for k, v in doc.items() if k != "downloaded"}
         rec.downloaded = {str(x) for x in doc.get("downloaded") or [] if isinstance(x, (str, int))}
         return rec
 
     def _read(self) -> dict:
-        try:
-            doc = json.loads(self.file.read_bytes().decode("utf-8"))
-            return doc if isinstance(doc, dict) and doc.get("format") == self.form else {}
-        except (OSError, ValueError):
-            return {}
+        """The record on the drive — from the copy kept before its last save when it can't be read (`state`)."""
+        import net_fetch
+        doc, self.state = net_fetch.load_json(self.file)
+        return doc if doc.get("format") == self.form else {}
 
     @property
     def exists(self) -> bool:
@@ -133,6 +133,8 @@ class Record:
         out["videos"] = int(doc.get("videos") or 0) + videos
         out["downloaded"] = sorted(ids)
         self.folder.mkdir(parents=True, exist_ok=True)
+        import net_fetch
+        net_fetch.keep_backup(self.file)               # the last good record, should this save be cut off
         sc.write_file(self.file, json.dumps(out, ensure_ascii=False, indent=1).encode("utf-8"))
         self.fields = {k: v for k, v in out.items() if k != "downloaded"}
         self.downloaded = ids
@@ -285,14 +287,16 @@ def write_meta(path: str, item: Item, tool) -> None:
                 args.append(f"-IPTC:Keywords={item.keyword}")
             if args:
                 args = ["-IPTC:CodedCharacterSet=UTF8", *args]
-        if args:
-            tool.run("-m", "-overwrite_original_in_place", "-charset", "iptc=UTF8", "-api", "largefilesupport=1",
-                     *args, path)
-        if caption_file:
-            try:
-                os.remove(caption_file)
-            except OSError:
-                pass
+        try:
+            if args:
+                tool.run("-m", "-overwrite_original_in_place", "-charset", "iptc=UTF8", "-api", "largefilesupport=1",
+                         *args, path)
+        finally:
+            if caption_file:
+                try:
+                    os.remove(caption_file)
+                except OSError:
+                    pass
     if when:
         try:
             os.utime(path, (when, when))
@@ -318,14 +322,8 @@ def place(src: str, folder: Path, name: str) -> str | None:
     if os.path.lexists(dest):
         return None
     st = os.stat(src)
-    if sc._on_exfat(str(folder)):
-        shutil.copyfile(src, dest)
-    else:
-        part = folder / f".{name}.part"
-        shutil.copyfile(src, part)
-        with open(part, "rb+") as f:
-            os.fsync(f.fileno())
-        os.replace(part, dest)
+    import net_fetch
+    net_fetch.put(src, dest, sc._on_exfat(str(folder)))   # whole or not there: a failed copy leaves no partial
     os.utime(dest, (st.st_atime, st.st_mtime))
     try:
         os.remove(src)

@@ -1043,14 +1043,17 @@ class TaylorWindow(QWidget):
 
         def work() -> None:
             tool = sc.ExifSession(tool_path) if tool_path else None
+            out = T.Outcome()
             try:
                 out = T.download_album(gallery, album, root, year, record, index, skip_have=skip,
                                        progress=lambda d, n, _name: bridge.dl_progress.emit(album.id, d, n), stop=stop,
                                        tool=tool)
+            except Exception as e:  # noqa: BLE001 — whatever went wrong, the window is told: it must never be left
+                out.note = f"The download stopped: {e or type(e).__name__}"     # waiting on an album forever
             finally:
                 if tool is not None:
                     tool.close()
-            bridge.dl_done.emit(album.id, out)
+                bridge.dl_done.emit(album.id, out)
         threading.Thread(target=work, daemon=True).start()
         self._refresh_here()
 
@@ -1078,7 +1081,8 @@ class TaylorWindow(QWidget):
         if out.elsewhere:
             bits.append(f"{out.elsewhere:,} skipped — already elsewhere in Taylor Swift")
         if out.failed:
-            bits.append(f"{out.failed:,} couldn't be downloaded")
+            why = getattr(out, "reasons", [])
+            bits.append(f"{out.failed:,} couldn't be downloaded" + (f" ({why[0]})" if why else ""))
         title = album.title if album else str(aid)
         msg = (f"“{title}”: " + ", ".join(bits) + "." if bits else f"“{title}”: {out.note or 'nothing to do.'}")
         if out.stopped:

@@ -45,6 +45,7 @@ import json
 import os
 import re
 import time
+import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -420,6 +421,8 @@ def plain_get(url: str, headers: dict[str, str], timeout: float = 30) -> tuple[i
                    f"couldn't reach the resolver ({reason})".encode())
     except OSError as e:
         return 0, f"network error ({e})".encode()
+    except http.client.HTTPException as e:              # a dropped connection (IncompleteRead): asked again by the caller
+        return 0, f"the connection dropped ({type(e).__name__})".encode()
 
 
 class Resolver:

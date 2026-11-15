@@ -55,6 +55,7 @@ import unicodedata
 import zlib
 from collections import OrderedDict, deque
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Callable, NamedTuple
 
 HERE = Path(__file__).resolve().parent
@@ -3160,6 +3161,41 @@ class TagScanner:
         self.signals.done.emit(not self._stop.is_set())
 
 
+class ListScanner(TagScanner):
+    """The files a collection names (a place's photos, a person's) — each checked to still be there, like a
+    tag's. `paths` is asked for on the UI thread, when the scan starts."""
+
+    def __init__(self, paths) -> None:
+        super().__init__("")
+        self._paths_fn = paths
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, args=(list(self._paths_fn()),), name="list-scan", daemon=True).start()
+
+
+@dataclass
+class Collection:
+    """A kind of made-up place whose files come from a list — "photo-browser://place/Paris, France",
+    "photo-browser://person/12" — so a pane shows it like a tag's files. Registered by the feature that owns it
+    (`COLLECTIONS[prefix] = Collection(...)`); every callable takes what follows the prefix."""
+    title: Callable[[str], str]
+    paths: Callable[[str], list]
+    icon: str = "tag"
+    tip: Callable[[str], str] = lambda _arg: ""
+    status: Callable[[str, int], str] = lambda _arg, n: f"{n:,} item{'s' if n != 1 else ''}"
+    empty: Callable[[str], tuple] = lambda _arg: ("Nothing Here", "")
+
+
+COLLECTIONS: dict[str, Collection] = {}
+
+
+def collection_of(location: str) -> "tuple[Collection, str] | None":
+    for prefix, c in COLLECTIONS.items():
+        if location.startswith(prefix):
+            return c, location[len(prefix):]
+    return None
+
+
 class LabelScanner(TagScanner):
     """The items with one label (Favorites or To AI) — like a tag's, from the same tables."""
 
@@ -4577,7 +4613,7 @@ class Pane(QWidget):
 
     # -- navigation
     def go(self, path: str, record: bool = True) -> None:
-        if path in (VIDEOS, EMPTY) or path.startswith(TAG) or path.startswith(LABEL):
+        if path in (VIDEOS, EMPTY) or path.startswith(TAG) or path.startswith(LABEL) or collection_of(path):
             self._show_results(path, record)
             return
         if path.startswith(SEARCH):
@@ -4738,6 +4774,11 @@ class Pane(QWidget):
                                   "Everything marked To AI on this Mac and the connected drives — the same as the "
                                   "iPhone app's (⇧⌘A adds or removes the selection)")
             self.scopebar.hide()
+        elif collection_of(loc):
+            c, arg = collection_of(loc)
+            self.title.setText(c.title(arg))
+            self.title.setToolTip(c.tip(arg))
+            self.scopebar.hide()
         elif loc.startswith(TAG):
             tag = loc[len(TAG):]
             self.title.setText(f"#{tag}")
@@ -4780,6 +4821,9 @@ class Pane(QWidget):
             scanner = TagScanner(self.location[len(TAG):])
         elif self.location.startswith(LABEL):
             scanner = LabelScanner(self.location[len(LABEL):])
+        elif collection_of(self.location):
+            c, arg = collection_of(self.location)
+            scanner = ListScanner(lambda c=c, arg=arg: c.paths(arg))
         else:
             run = self.searches[self.location]
             scanner = FileScanner(run.roots, run.query, folders=run.query.wants_folders(), spotlight=run.spotlight)
@@ -4977,6 +5021,9 @@ class Pane(QWidget):
                 label = self.location[len(LABEL):]
                 text, icon = shared_tags.LABEL_NAMES.get(label, label), ("heart.fill" if label == "favorite" else
                                                                           "sparkles")
+            elif collection_of(self.location):
+                c, arg = collection_of(self.location)
+                text, icon = c.title(arg), c.icon
             b.setText(text)
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             b.setIcon(glyph(icon, THEME.accent, 14))
@@ -5032,6 +5079,9 @@ class Pane(QWidget):
             elif self.location.startswith(LABEL) and not sel:
                 text = (f"{n} favorite{'s' if n != 1 else ''}" if self.location.endswith("favorite") else
                         f"{n} item{'s' if n != 1 else ''} in To AI")
+            elif collection_of(self.location) and not sel:
+                c, arg = collection_of(self.location)
+                text = c.status(arg, n)
             if shown != n:
                 text += f" ({shown} shown — {self.filter_summary()})" if self.any_filter() else f" ({shown} shown)"
             if self.scanner is not None:
@@ -5545,6 +5595,9 @@ class Pane(QWidget):
                     title, detail = "No Empty Folders", "Every folder has something in it."
                 elif self.location.startswith(TAG):
                     title, detail = "Nothing Has This Tag", "Select files and press ⌘T to tag them."
+                elif collection_of(self.location):
+                    c, arg = collection_of(self.location)
+                    title, detail = c.empty(arg)
                 elif self.location == LABEL + "favorite":
                     title, detail = "No Favorites Yet", "Select photos or videos and press ⇧⌘F — they show up here and in Favorites on the iPhone."
                 elif self.location.startswith(LABEL):
@@ -5854,7 +5907,7 @@ class Pane(QWidget):
             menu.addAction("Look for Empty Folders Again", lambda: self.go(EMPTY))
         elif self.is_search:
             menu.addAction("Search Again", lambda: self.go(self.location))
-        elif self.location.startswith(TAG) or self.location.startswith(LABEL):
+        elif self.location.startswith(TAG) or self.location.startswith(LABEL) or collection_of(self.location):
             menu.addAction("Look Again", lambda: self.go(self.location))
         else:
             menu.addAction("New Folder", self.new_folder).setShortcut(QKeySequence("Ctrl+Shift+N"))
@@ -7073,7 +7126,7 @@ class Sidebar(QWidget):
         tag_store().forget_volumes()                   # a drive came or went: its tags with it
         selected = [i.data(0, PATH_ROLE) for i in self.tree.selectedItems()]
         self.tree.clear()
-        fav = self._section("Places")                     # ("Favorites" is the hearted items, under Labels)
+        fav = self._section("Shortcuts")                  # (Favorites are the hearted items; Places are where photos were taken)
         self._collection(fav, "All Videos", VIDEOS, glyph("film", THEME.accent, 16),
                          "Every video in your home folder, newest first — shown on the From side")
         home = Path.home()

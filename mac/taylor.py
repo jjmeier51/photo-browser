@@ -34,6 +34,7 @@ Everything here runs on worker threads; nothing touches Qt.
 """
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import os
@@ -157,7 +158,10 @@ def page_count(html: str, pattern: str) -> int:
 
 def sanitize(name: str) -> str:
     cleaned = re.sub(r'[/\\:?%*|"<>]', "-", name).strip()
-    return cleaned[:120] if cleaned else "Untitled"
+    if not cleaned:
+        return "Untitled"
+    stem, ext = os.path.splitext(cleaned)              # a long name is cut in its stem: the extension stays
+    return (stem[:max(1, 120 - len(ext))] + ext) if len(ext) <= 8 else cleaned[:120]
 
 
 # ----------------------------------------------------------------------------- dates and places from titles
@@ -443,8 +447,8 @@ def _python_get(url: str, referer: str) -> tuple[bytes | None, str]:
         if _wanted(url, e.code, data):
             return data, ""
         return None, _why_python(e)
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        return None, _why_python(e)
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as e:
+        return None, _why_python(e)                    # (HTTPException: a dropped connection — IncompleteRead)
 
 
 def _mac_get(url: str, referer: str) -> tuple[bytes | None, str]:
@@ -541,6 +545,8 @@ class Record:
                                  "downloaded": time.time()}
         self.albums = merged
         import simpcity as sc
+        import net_fetch
+        net_fetch.keep_backup(self.path)
         sc.write_file(self.path, json.dumps({"version": 1, "albums": merged}, indent=1, sort_keys=True).encode())
 
     def is_complete(self, album: int) -> bool:
@@ -700,6 +706,7 @@ class Outcome:
     stopped: bool = False
     note: str = ""
     files: list[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)   # why each photo that failed did (name: reason)
 
 
 def download_album(gallery: Gallery, album: Album, root: str, year: int | None = None,
@@ -750,13 +757,15 @@ def download_album(gallery: Gallery, album: Album, root: str, year: int | None =
                 data = gallery.get(img.full, HOST)
                 if not data or len(data) < 256 or data.lstrip()[:1] == b"<":    # nothing, or a page not a photo
                     kind = "failed"
+                    out.reasons.append(f"{name}: " + ("no answer" if not data else "the site sent a page, not the photo"))
                 else:
                     with open(tmp, "wb") as f:
                         f.write(data)
                     sc.apply_date(tmp, when.timestamp() if when else 0, tool)
                     kind = "downloaded" if social.place(tmp, folder, name) else "already"
-        except OSError:
+        except Exception as e:  # noqa: BLE001 — one photo's trouble is that photo's, never the album's
             kind = "failed"
+            out.reasons.append(f"{name}: {e or type(e).__name__}")
         with lock:
             if kind == "downloaded":
                 out.downloaded += 1

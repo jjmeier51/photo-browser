@@ -315,15 +315,16 @@ class Record:
     @classmethod
     def load(cls, folder: str | Path) -> "Record":
         rec = cls(Path(folder))
+        rec.state = "missing"
         rec._merge(rec._read())
         return rec
 
     def _read(self) -> dict:
-        try:
-            doc = json.loads(self.file.read_bytes().decode("utf-8"))
-            return doc if isinstance(doc, dict) and doc.get("format") == FORMAT else {}
-        except (OSError, ValueError):
-            return {}
+        """The record on the drive. One that can't be read (a save cut off by a pulled cable) is taken from the
+        copy kept before the last save — `state` says so — rather than treated as "nothing downloaded yet"."""
+        import net_fetch
+        doc, self.state = net_fetch.load_json(self.file)
+        return doc if doc.get("format") == FORMAT else {}
 
     def _merge(self, doc: dict) -> None:
         for k, v in (doc.get("items") or {}).items():
@@ -651,6 +652,8 @@ class Record:
                "threads": dict(sorted(self.threads.items())), "items": dict(sorted(self.items.items())),
                "failed": dict(sorted(self.failed.items())), "links": dict(sorted(self.links.items())),
                "reactions": dict(sorted(self.reactions.items())), "galleries": dict(sorted(self.galleries.items()))}
+        import net_fetch
+        net_fetch.keep_backup(self.file)               # the last good record, should this save be cut off
         write_file(self.file, json.dumps(doc, ensure_ascii=False, indent=1).encode("utf-8"))
 
 
@@ -715,7 +718,9 @@ def member_stem(zip_stem: str, inner: str, taken: set[str]) -> str:
     """`<zip's stem>-<its path in the zip>`: folders joined with "_", made safe, kept unique in the zip."""
     base = os.path.splitext(inner)[0].replace("\\", "/").strip("/").replace("/", "_")
     base = re.sub(r'[^\w.\- ()]+', "_", base).strip(" ._") or "file"
-    stem = f"{zip_stem}-{base}"[:150]
+    stem = f"{zip_stem}-{base}"
+    while len(stem.encode("utf-8")) > 200:               # bytes, not characters: a name may hold 255 of them
+        stem = stem[:-1]
     out, n = stem, 2
     while out.lower() in taken:
         out = f"{stem} {n}"
@@ -1083,14 +1088,8 @@ def place(src: str | Path, folder: str | Path, name: str) -> Path:
         while (folder / f"{stem} {n}{ext}").exists():
             n += 1
         dest = folder / f"{stem} {n}{ext}"
-    if _on_exfat(str(folder)):
-        shutil.copyfile(src, dest)
-    else:
-        part = folder / f".{dest.name}.part"
-        shutil.copyfile(src, part)
-        with open(part, "rb+") as f:
-            os.fsync(f.fileno())
-        os.replace(part, dest)
+    import net_fetch
+    net_fetch.put(src, dest, _on_exfat(str(folder)))      # whole or not there: a failed copy leaves no partial
     st = os.stat(src)
     os.utime(dest, (st.st_atime, st.st_mtime))
     try:
@@ -1154,43 +1153,21 @@ def referer_origin(url: str) -> str:
 
 
 def fetch(url: str, headers: dict[str, str], path: str, connect_timeout: float = 20,
-          limit: float = 600, check=None) -> tuple[str | None, str]:
+          limit: float = 600, check=None, attempts: int = 3, busy: bool = True, stop=None,
+          progress=None) -> tuple[str | None, str]:
     """Downloads `url` to `path` with a plain request (on a worker thread). Returns (path, "") or
-    (None, why): an HTTP status, a page where a file belongs, no connection, too slow. `connect_timeout`
+    (None, why): an HTTP status, a page where a file belongs, no connection, cut off, too slow. `connect_timeout`
     bounds the wait for an answer and each read; `limit` the whole transfer. `check(size, type)` sees
     the answer before any of it is read and may raise `Skip` (a video already downloaded), which is
-    passed on."""
-    import urllib.error
-    import urllib.request
-    started = time.monotonic()
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=connect_timeout, context=ssl_context()) as resp:
-            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
-            if ctype.startswith("text/"):
-                return None, f"the server sent a page ({ctype}), not the file"
-            if check:
-                length = resp.headers.get("Content-Length")
-                check(int(length) if length and length.isdigit() else None, ctype)
-            with open(path, "wb") as f:
-                while chunk := resp.read(1 << 20):
-                    f.write(chunk)
-                    if time.monotonic() - started > limit:
-                        raise TimeoutError(f"still downloading after {int(limit)} s")
-        if os.path.getsize(path) < 64:
-            raise ValueError("an empty file")
-        return path, ""
-    except urllib.error.HTTPError as e:
-        why = f"HTTP {e.code}"
-    except urllib.error.URLError as e:
-        why = f"couldn't connect ({e.reason})"
-    except (OSError, ValueError, TimeoutError) as e:
-        why = str(e) or type(e).__name__
-    try:
-        os.remove(path)
-    except OSError:
-        pass
-    return None, why
+    passed on.
+
+    All of it is `net_fetch.fetch_to_file` now: the length is checked (a transfer cut short used to pass for a
+    finished file), a cut-off one resumes from where it got to, timeouts and resets — and, unless `busy` is
+    False, a busy server's 429 / 5xx — are tried again after a growing, random wait, a cross-host redirect
+    doesn't carry the cookies along, and `stop()` ends it at once."""
+    import net_fetch
+    return net_fetch.fetch_to_file(url, headers, path, connect_timeout=connect_timeout, limit=limit, check=check,
+                                   attempts=attempts, busy=busy, stop=stop, context=ssl_context(), progress=progress)
 
 
 # ----------------------------------------------------------------------------- pixhost: reading it

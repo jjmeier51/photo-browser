@@ -33,6 +33,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -705,16 +706,21 @@ class SocialWindow(QMainWindow):
         self.setWindowTitle(f"{self.k['name']} — {self.info.get('handle') or self.info.get('profile_name')}")
 
     # ------------------------------------------------------------------ downloads
-    def _tries(self) -> list[dict[str, str]]:
+    def _tries(self, url: str = "") -> list[dict[str, str]]:
+        """The headers to try for a file: logged out, then — only when the file is on the site's own host —
+        with the session. The session's cookies never go to another host (a CDN's files are signed addresses
+        and a browser wouldn't send them there either)."""
         anon = social.headers(self.k["referer"], ua=self.ua)
-        cookie = self.cookie_header()
+        host = (urlsplit(url).hostname or "").lower()
+        own = host == self.k["domain"] or host.endswith("." + self.k["domain"])
+        cookie = self.cookie_header() if own else ""
         return [anon, social.headers(self.k["referer"], cookie, self.ua)] if cookie else [anon]
 
     def _queue(self, item: social.Item) -> None:
         self.queued += 1
         self.key_left[item.key] = self.key_left.get(item.key, 0) + 1
         self.bar.setRange(0, self.queued)
-        fut = self.pool.submit(social.settle, item, self._tries(), self.opts, self.exif, self.engine, self.heavy)
+        fut = self.pool.submit(social.settle, item, self._tries(item.url), self.opts, self.exif, self.engine, self.heavy)
         self.futures.append(fut)
         fut.add_done_callback(lambda f: self.bridge.call.emit(self._settled, f))
 

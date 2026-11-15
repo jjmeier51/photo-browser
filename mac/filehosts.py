@@ -244,7 +244,7 @@ def _open(url: str, ua: str, method: str = "GET", body: bytes | None = None, hea
             data = e.read(1 << 20)
         except OSError:
             data = b""
-        return e.code, e.headers.get("Content-Type") or "" if e.headers else "", data
+        return e.code, (e.headers.get("Content-Type") or "") if e.headers else "", data
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise HostError(f"couldn't connect to {urlsplit(url).hostname} ({getattr(e, 'reason', e)})") from e
 

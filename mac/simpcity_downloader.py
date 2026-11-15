@@ -489,6 +489,12 @@ class SimpCityWindow(QMainWindow):
         The posts' reaction scores are noted on the way (`simpcity.reactions`)."""
         sc.make_folder(self.dest)
         self.record = sc.Record.load(self.dest)
+        if self.record.state == "restored":
+            self._log("The record in this folder was damaged (a save cut short?) — the copy kept before its last "
+                     "save was used; the damaged file is beside it as “.simpcity.json.damaged”.")
+        elif self.record.state == "corrupt":
+            self._log("The record in this folder can't be read and there's no earlier copy — files already here are "
+                     "still skipped by name, but posts deleted since may be offered again.")
         first = 1 if full else self.record.start_page(base, self.want_videos)
         from_start = first == 1 or self.record.full_read(base, self.want_videos)   # a read from page 1, or carrying one on
         had_hosts = int(self.record.threads.get(base, {}).get("hosts") or 0) >= sc.HOSTS_READ
@@ -1429,11 +1435,18 @@ class SimpCityWindow(QMainWindow):
         def fetch() -> tuple:
             # A busy server (turbo's CDN answers 503 under load) is asked again after a pause, before the
             # browser is tried.
+            import net_fetch
+            stop = lambda: bool(self.stopping)                       # noqa: E731
             for wait in (*sc.BUSY_WAITS, None):
-                got = sc.fetch(url, headers, target, limit=limit, check=check)
+                # (busy=False: a busy server's waits are the tuned ones here; cut-off transfers and resets are
+                # still resumed and retried inside)
+                got = sc.fetch(url, headers, target, limit=limit, check=check, busy=False, stop=stop)
                 if got[0] or wait is None or self.stopping or not sc.is_busy(got[1]):
                     return got
-                time.sleep(wait)
+                try:
+                    net_fetch.wait(wait, stop)                       # Stop ends the wait, not 40 s later
+                except net_fetch.Stopped:
+                    return None, "stopped"
             return got
         self.handle(("thread", fetch, f"{item.stem} (downloading {url[:90]})"), direct_done)
 
