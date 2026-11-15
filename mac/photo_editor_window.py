@@ -722,6 +722,8 @@ class EditorWindow(QDialog):
                  on_done: Callable[[str, bool, list[str]], None]) -> None:
         super().__init__(parent)
         self.path, self.settings, self.on_done = path, settings, on_done
+        self.earlier: dict | None = None            # this photo is an edited copy whose edit is known (edit_history)
+        self.result_path = ""                       # editing again: the edited copy that Save writes over
         self.src: batch_crop.Source | None = None
         self.size_px = (0, 0)                       # the original, upright
         self.edit = pe.Edit()
@@ -1700,6 +1702,9 @@ class EditorWindow(QDialog):
         m = self.edits_menu
         m.clear()
         have = not pe.is_empty(pe.transferable(self.edit))
+        if self.earlier is not None and not self.result_path:
+            m.addAction("Edit Again from the Original", self.edit_again)
+            m.addSeparator()
         m.addAction("Copy Edits", self.copy_edits).setEnabled(have)
         m.addAction("Paste Edits", self.paste_edits).setEnabled(copied_edit(self.settings) is not None)
         m.addSeparator()
@@ -1712,6 +1717,36 @@ class EditorWindow(QDialog):
             gone = m.addMenu("Remove a Look")
             for name in sorted(looks, key=str.casefold):
                 gone.addAction(name, lambda name=name: self.remove_look(name))
+
+    def edit_again(self) -> None:
+        """This photo is a copy saved from here (edit_history): the original is opened instead, with the edit that
+        made the copy on it — every slider, the crop, the strokes and the text as they were left. Saving writes
+        over the copy; the original isn't touched."""
+        earlier = self.earlier
+        if earlier is None or self.saving:
+            return
+        if self.edit.changed() and QMessageBox.question(
+                self, "Edit Again from the Original", "What you've changed here since opening this copy will be left "
+                "behind. Go on?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            edit = pe.from_dict(earlier["edit"])
+        except Exception as e:  # noqa: BLE001 — a record from a version that kept something else
+            QMessageBox.information(self, "Edit Again from the Original", f"The edit kept for this copy can't be read ({e}).")
+            return
+        self.result_path, self.path = self.path, earlier["source"]
+        self.earlier = None
+        self.edit = edit
+        self._undo.clear()
+        self._redo.clear()
+        self.src = None
+        self.setWindowTitle(f"Edit Photo — {os.path.basename(self.path)} → {os.path.basename(self.result_path)}")
+        self.new_btn.setText("Update the Edited Copy")
+        self.new_btn.setToolTip(f"Writes this over “{os.path.basename(self.result_path)}” — the original is left as it is (⌘S)")
+        self.note.setText("Opening the original…")
+        self._refresh()
+        self._load()
 
     def copy_edits(self) -> None:
         """The filter, adjustments, face sliders, blur and frame — not the crop, brush strokes or text — kept
@@ -2227,6 +2262,19 @@ class EditorWindow(QDialog):
         self.wait_text = "Drawing…"
         self._sync()
         self._tab_changed(self._tab())
+        if self.result_path:
+            self.request()
+            self.note.setText(f"The original, with the edit that made “{os.path.basename(self.result_path)}” — change "
+                              "anything, then Update the Edited Copy. The original stays as it is.")
+        else:
+            try:
+                import edit_history
+                self.earlier = edit_history.find(self.path)
+            except Exception:  # noqa: BLE001 — an extra: never in the way of opening a photo
+                self.earlier = None
+            if self.earlier is not None:
+                self.note.setText("This is a copy you edited here. Edits ▾ ▸ Edit Again from the Original opens it "
+                                  "with every slider where you left it.")
 
     # ------------------------------------------------------------------ saving
     def save(self, as_new: bool, upscale: tuple | None = None) -> None:
@@ -2241,7 +2289,8 @@ class EditorWindow(QDialog):
                 return
         self.saving = True
         self._cancel.clear()
-        self._pending = {"as_new": as_new, "upscale": upscale, "edit": self.edit.copy()}
+        self._pending = {"as_new": as_new, "upscale": upscale, "edit": self.edit.copy(),
+                         "over": self.result_path if as_new and os.path.isfile(self.result_path) else ""}
         self.bar.setValue(0)
         self.bar.show()
         self.note.setText("Saving — every pixel this time…")
@@ -2289,7 +2338,10 @@ class EditorWindow(QDialog):
                 edit, found = pending["edit"], list(self.renderer.found)
                 data = batch_crop.encode_like(src, im, gain=lambda g: pe.gain_through(g, edit, found))
                 sig.progress.emit(0.95)
-                if pending["as_new"]:
+                if pending["as_new"] and pending.get("over"):
+                    batch_crop.write_in_place(pending["over"], data)       # editing again: the edited copy, updated
+                    written = pending["over"]
+                elif pending["as_new"]:
                     written = batch_crop.write_beside(path, data, pe.NEW_LABEL)
                 else:
                     batch_crop.write_in_place(path, data)
@@ -2320,6 +2372,17 @@ class EditorWindow(QDialog):
                 "It was saved in standard range — its HDR brightness couldn't be kept here."
         as_new = bool(pending.get("as_new"))
         upscale = pending.get("upscale")
+        if as_new:
+            try:                                           # the edit is kept with the copy, to be opened again —
+                import edit_history                        # not an upscaled one: that isn't what the edit makes
+                if upscale:
+                    edit_history.forget(written)
+                else:
+                    edit_history.remember(self.path, written, pe.to_dict(edit))
+            except Exception:  # noqa: BLE001 — the photo is saved; this is an extra
+                pass
+            if pending.get("over"):
+                as_new = False                             # for the main window: that file changed, no new one came
         self.bar.hide()
         if not upscale:
             self._finish(written, as_new, tags)

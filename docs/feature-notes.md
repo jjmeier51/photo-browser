@@ -2794,14 +2794,63 @@ What changed, by area — details are in the commit messages and the code's own 
 - **Find Duplicates**: Best = pixels, size, then the ties; exact scope skips `identical is False`; name-only
   groups are never bulk-ticked; a copy isn't trashed when its keeper has gone.
 
-**Left undone, on purpose or for lack of time** (all from the reviews): the bulk-rename fixes (NFC/NFD
-`samefile`, journal cap, a crash-recovery journal, replan debounce) — a worker's unfinished edits to
-`rename_tools.py` were reverted rather than shipped untested; video upscale's ffmpeg fallback for WebM/MKV,
-container and creation-date handling; People following transfers, viewer / duplicate trashes and a renamed
-drive (still keyed by absolute path); `near:` for lakes / islands / regions and country by polygon; map
-labels by population and "photos in this map view"; heal previewed at full resolution; an edit kept
-re-editable beside its file; duplicates' dHash cache pruning and group indexing; orphaned child processes
-(mflux, ffmpeg) on quit; Undo for Move to Trash.
+### 6an-2. The items left undone, done (Nov 15, 2026)
+
+One at a time, each tested and pushed by itself.
+
+- **Undo for Move to Trash; child processes** — `MainWindow.trash_to` says where in the Trash an item went, so
+  the toast's Undo (and ⌘Z) puts it back with its tags and labels; `mac/children.py` tracks every long-running
+  program the app starts (ffmpeg, mflux, the Swift helpers — `OWN_GROUP`, `track` / `tracked`, `stop`,
+  `wait_or_stop`, `stop_all` at quit and at exit), so quitting never leaves one writing a hidden file.
+- **Video upscale** (`video_tools.upscale`) — what AVFoundation can't open (WebM, MKV, AVI) goes to ffmpeg
+  instead of failing (`by_helper` → `by_ffmpeg`); a `.mp4` name gets an MP4 inside (the helper's QuickTime file
+  repacked with `-c copy`); Opus / Vorbis / PCM sound becomes AAC rather than failing the encode
+  (`MP4_AUDIO`, `audio_codec`); an in-place upscale keeps creation *and* modification dates (`_put_dates` →
+  `clone_drive.put_dates`); why a run failed is kept (`said` → `problem`) and shown; the sheet always hears the
+  end (`try/finally` round the worker).
+- **Batch rename** (`rename_tools.apply_bulk`, `_units`) — the renames are made in an order in which each new
+  name is free when its turn comes (paths), so there is **one rename and one journal line per file**; only names
+  that go round in a circle (a swap) use a passing name, for one item of the circle, and a circle that can't be
+  completed is put back whole. Renumbering 6,000 photos is 6,000 journal lines, not 12,000 — the old way
+  overran `KEEP` (20,000) at 10,000 files and cut the batch in half. The journal never cuts into the batch being
+  noted and tolerates a bad `"at"`. Names are compared NFC + case-folded (`_key`) and by `samefile`, so macOS's
+  decomposed "é" isn't "already taken" by itself; a plan reads each folder once (`listing`).
+- **Find Duplicates** — "exact" also needs the first and last 64 KB to agree (same size + same dimensions isn't
+  rare among one camera's photos); a numbered series is not a "similar name" group unless the plain name is
+  among them or one says "(1)" / "copy" (`named_as_copies`; a date keeps its last part); before the Trash a
+  ticked copy is left alone if it or the copy that was to stay changed since the scan (`Group.stamps`,
+  `Group.changed`); ▸ **In the N Groups Listed** ticks only groups that have been put on screen (`Group.bulk`);
+  the keep rule uses pixel sizes only when known for every copy; a read error isn't cached as "not a picture"
+  (`_dhash` → transient); the cache holds a million entries and drops this run's last; `add()` looks up a
+  group by one member instead of comparing with every group.
+- **People** — faces follow a photo moved by a transfer (`_carry_tags` → `store.renamed`) and leave with copies
+  trashed from Find Duplicates; `Store.note_drive(id, root)` (called from the sidebar's `rebuild` via
+  `_people_drives`, with the id in the drive's shared tag file) re-roots a drive's faces when it comes back
+  under another name — not while the old place is still mounted (a clone beside its original).
+- **Places** — a clicked circle's own photos (`@bins:<bin>;<bin>…` as a PLACE collection argument, up to
+  `MOST_BINS` spots; a circle that is one whole place still uses its label); town names biggest first, none
+  drawn over another, across the date line too; `near:france` / `near:california` mean *in* (`geo_names.
+  wide_place`), `-near:` excludes (`Query.not_near`), and `near:` no longer takes the start of some other town's
+  name (`find(prefix=False)` — the map's search box still does).
+- **Heal is saved as shown** — the fill is decided once, on the copy shown at rest (`photo_edit.guide_of`,
+  `GUIDE` = the window's `PREVIEW`), and carried to the full photo along the same matches
+  (`inpaint.remove_region_as`: `_solve` on the guide, `_to_full` onto the photo — its own detail, the guide's
+  structure); the close-up preview the same way, the rough one by shrinking the fine one (`_Renderer._stroked`).
+  **Whoever renders strokes on the full photo passes `guide=pe.guide_of(image)`** (`render`, `retouched`) — the
+  editor's save does. A Heal also writes back only the pixels it changed (`_paste`), not an 8-bit rounding of
+  the whole region round it.
+- **Edits can be opened again** (`mac/edit_history.py`) — Save as New keeps the `Edit` JSON on the Mac
+  (`Application Support/…/Edits`, one small file per edited copy, found by the copy's path, at most 3,000); the
+  editor opened on such a copy offers **Edits ▾ ▸ Edit Again from the Original**: the original opens with every
+  slider, the crop, strokes and text as left, and the Save button becomes **Update the Edited Copy** (writes
+  over the copy with `write_in_place`; the original is never touched). A record applies only while the copy and
+  the original are both as they were (size + modified date) — otherwise "again" would quietly undo whatever
+  changed them. Not kept for Overwrite Original or Save and Upscale. A renamed or moved copy loses its record.
+
+**Still not done:** a crash-recovery note for a rename interrupted mid-swap (a passing name is visible and says
+what it is); country by polygon rather than nearest town; Undo of a Trash doesn't give People's faces back (the
+next scan finds them, without names confirmed since); "Candy Corn" can't reach 4.5:1 with one text colour.
+None of this ran on a Mac: tested on Linux with ffmpeg and offscreen Qt; the Swift helpers were not compiled.
 
 ## 6ab. Photo Browser for Mac Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
 

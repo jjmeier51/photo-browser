@@ -377,6 +377,20 @@ Python. (`SimpCityService`,
   histogram. Menu commands are disabled only while their menu is open (`menubar.rest`) and re-check when run; a
   long job's window sets `running` / `saving` / `working` / `busy` so Quit asks (`MainWindow.busy_windows`).
   Shared JSON on the drive is read with `net_fetch.load_json` and backed up before a write. §6an.
+- **Mac follow-ups (Nov 15, §6an-2)**: a **Heal is decided once, on the copy shown** — anything that renders
+  strokes on the full photo passes `guide=pe.guide_of(image)` to `photo_edit.render` / `retouched`
+  (`inpaint.remove_region_as` carries the fill; `_Renderer._stroked` does the same for the preview sizes).
+  **Edits can be opened again**: Save as New keeps the `Edit` on the Mac (`mac/edit_history.py`, by the copy's
+  path, valid only while copy and original are unchanged); Edits ▾ ▸ Edit Again from the Original, then
+  "Update the Edited Copy". **Batch rename**: `apply_bulk` makes one rename and one journal line per file
+  (`_units`: paths in a safe order; only a true swap uses a passing name, and a swap that fails is put back
+  whole); names are compared with `rename_tools._key` (NFC + case) and `samefile`. **Find Duplicates**: exact =
+  size + dimensions + first/last bytes; a numbered series isn't a name group (`named_as_copies`); `Group.changed`
+  is checked before the Trash; bulk ticking only of `Group.bulk` groups already listed. **People** follows
+  transfers and a re-rooted drive (`Store.note_drive`, `_people_drives`). **Places**: `@bins:…` collection
+  argument for a clicked circle; `near:` a country/state means in it; `-near:`. **Long-running programs** are
+  started with `children.OWN_GROUP` and `children.track`/`tracked` (never a bare `Popen` for ffmpeg, mflux or a
+  helper); `video_tools.upscale` falls back from the helper to ffmpeg and keeps both dates.
 - **Photo Browser for Mac collages** (select 2–9 photos ▸ Make Collage…; `mac/collage.py`, `mac/collage_window.py`): generated
   row/column layouts (≤40 per count), 32 shapes, sRGB out (JPEG/HEIC/PNG); takes the oldest photo's date and place
   and every photo's tags + "collage". **Stitch Videos** (select ≥2 videos; `mac/video_stitch.py`,

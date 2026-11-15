@@ -1109,6 +1109,18 @@ standard range.
 The **Adjust** tab begins with a histogram — the picture's tones from dark to light, with a red mark at an end
 when shadows or highlights are clipped.
 
+**Heal is saved as you saw it.** The fill a Heal stroke makes is decided once, on the picture shown in the
+window, and carried to the full-size photo in the photo's own detail — it used to be worked out again at full
+size, and could come out differently from what you'd approved.
+
+**Edit Again from the Original** (`edit_history.py`). When you Save as New, the edit itself — every slider, the
+crop, the brush strokes, the text — is kept on this Mac beside nothing (in Application Support; the drive and
+the photo get nothing extra). Open the "(edited)" copy in the editor later and **Edits ▾ ▸ Edit Again from the
+Original** opens the *original* with all of it back where you left it; change what you like and **Update the
+Edited Copy** writes over the copy. The original is never touched. It's offered only while the copy and the
+original are both unchanged since (crop the copy elsewhere, or overwrite the original, and it isn't — "again"
+would silently undo that), and not for a copy that was renamed, moved, or saved with Save and Upscale.
+
 ### Make Collage — two to nine photos on one picture (`collage_window.py`, `collage.py`)
 
 Select **two to nine photos** ▸ right-click ▸ **Make Collage of N Photos…** (or Photos ▸ Make Collage…).
