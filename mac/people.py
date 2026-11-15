@@ -4,12 +4,17 @@
 embeddings of the same person's other faces and far from everyone else's. This module keeps them (`Store`, one
 SQLite file on this Mac) and does everything else, with numpy only and no Qt:
 
-- **Grouping** (`Store.cluster`). New faces first join the person they're clearly closest to (the person's
-  *centre* — the mean of their faces); what's left is grouped among itself: faces that have at least two close
-  neighbours pull their neighbours into a group (so two look-alikes don't chain two crowds together), and a group
-  of `MIN_GROUP` or more becomes a new, unnamed person. Faces that are small, blurred or turned away can *join* a
-  person but never start one; faces close to nobody stay ungrouped. It's incremental — a later scan adds to the
-  people there are — and it never undoes anything the person did.
+- **Grouping** (`Store.cluster`). New faces first join the person they're clearly closest to; what's left is
+  grouped among itself: faces that have at least two close neighbours pull their neighbours into a group, **each
+  group is then tested for being two people** (`_split`: cut in two the best way it can be; if the halves are
+  much less like each other than like themselves, they're two — one borderline pair of look-alikes otherwise
+  chains two people into one), and a group of `MIN_GROUP` or more becomes a new, unnamed person. Faces that are
+  small, blurred or turned away can *join* a person but never start one; faces close to nobody stay ungrouped.
+  It's incremental — a later scan adds to the people there are — and it never undoes anything the person did.
+- **"How like this person is this face"** is the face's *average* similarity to the person's faces (the face ·
+  the mean of theirs) — not its similarity to their normalised centre, which flatters: against a person whose
+  faces average 0.5 with each other, a stranger at 0.36 scores 0.50 on the centre. Two groups are one person
+  when they're as like each other as they are like themselves (`merge_ratio`).
 - **What the person says stands.** Naming, merging, "this is not her", "yes, that's him" are kept as facts:
   a *confirmed* face is never moved by grouping, a *rejected* (face, person) pair is never proposed again, and a
   merge is for good. Renaming someone to a name another person has merges the two.
@@ -41,13 +46,15 @@ import app_identity
 
 DIM = 128
 TUNING = {
-    "assign": 0.46,        # a new face joins the person whose centre it's this close to…
-    "margin": 0.05,        # …and that much closer than to the runner-up
+    "assign": 0.42,        # a new face joins the person whose faces it's this like on average…
+    "margin": 0.05,        # …and that much more than the runner-up's
     "link": 0.50,          # two ungrouped faces are neighbours
     "core": 2,             # a face with this many neighbours pulls them into a group
-    "keep": 0.40,          # a group's member must be this close to the group's centre
-    "merge": 0.62,         # two unnamed groups this close are one
-    "suggest": 0.34,       # worth asking about
+    "keep": 0.34,          # a group's member must be this like the rest of the group, on average
+    "split_ratio": 0.75,   # a group's two halves this much less like each other than like themselves: two people
+    "merge_ratio": 0.85,   # two unnamed groups this nearly as like each other as like themselves: one person
+    "ask": 0.33,           # two people this alike: "Same Person?"
+    "suggest": 0.30,       # a face this like a person: worth asking about
     "weak": 0.45,          # a face's quality below this can join, not start, a person
 }
 MIN_GROUP = 3              # faces before an unnamed group is shown as a person
@@ -121,6 +128,7 @@ class Store:
                                                key_face INTEGER, favorite INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0,
                                                created REAL);
             CREATE TABLE IF NOT EXISTS rejects (face INTEGER, person INTEGER, PRIMARY KEY (face, person));
+            CREATE TABLE IF NOT EXISTS apart (a INTEGER, b INTEGER, PRIMARY KEY (a, b));
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
         """)
         self.db.execute("INSERT OR IGNORE INTO meta VALUES ('schema', ?)", (str(SCHEMA),))
@@ -290,6 +298,7 @@ class Store:
                 self.db.execute("UPDATE faces SET person = ?, confirmed = 1 WHERE person = ?", (into, other))
                 self.db.execute("UPDATE OR IGNORE rejects SET person = ? WHERE person = ?", (into, other))
                 self.db.execute("DELETE FROM rejects WHERE person = ?", (other,))
+                self.db.execute("DELETE FROM apart WHERE a = ? OR b = ?", (other, other))
                 self.db.execute("DELETE FROM people WHERE id = ?", (other,))
             self.db.execute("UPDATE faces SET confirmed = 1 WHERE person = ?", (into,))
             # a face can't be both theirs and "not theirs"
@@ -298,6 +307,27 @@ class Store:
             self.db.commit()
         self.changed()
         return into
+
+    def keep_apart(self, a: int, b: int) -> None:
+        """"Different people": the two are never offered as one again."""
+        with self.lock:
+            self.db.execute("INSERT OR IGNORE INTO apart VALUES (?, ?)", (min(a, b), max(a, b)))
+            self.db.commit()
+        self.changed()
+
+    def _apart(self) -> set[tuple[int, int]]:
+        with self.lock:
+            return {(r[0], r[1]) for r in self.db.execute("SELECT a, b FROM apart")}
+
+    def ungroup(self, person: int) -> None:
+        """Takes a group apart: its faces go back to being nobody's (to be grouped again, or not)."""
+        with self.lock:
+            self.db.execute("UPDATE faces SET person = NULL, confirmed = 0 WHERE person = ?", (person,))
+            self.db.execute("DELETE FROM people WHERE id = ?", (person,))
+            self.db.execute("DELETE FROM rejects WHERE person = ?", (person,))
+            self.db.execute("DELETE FROM apart WHERE a = ? OR b = ?", (person, person))
+            self.db.commit()
+        self.changed()
 
     def confirm(self, face_ids: Iterable[int], person: int) -> None:
         """"Yes, that's them": the faces are the person's, and stay."""
@@ -366,7 +396,7 @@ class Store:
     def forget_all(self) -> None:
         """Every face, every person, every name: gone. (The photos are untouched.)"""
         with self.lock:
-            for table in ("faces", "people", "rejects", "files"):
+            for table in ("faces", "people", "rejects", "apart", "files"):
                 self.db.execute(f"DELETE FROM {table}")
             self.db.commit()
             self.db.execute("VACUUM")
@@ -374,8 +404,10 @@ class Store:
         self.changed()
 
     # ------------------------------------------------------------------ grouping
-    def _centres(self) -> tuple[list[int], np.ndarray]:
-        """Each person's centre: the mean of their faces (confirmed ones counted twice), as a unit vector."""
+    def _means(self) -> tuple[list[int], np.ndarray]:
+        """Each person's mean face — the plain average of their faces' vectors (confirmed ones counted twice),
+        *not* made unit length: a face · a person's mean is the face's average similarity to their faces, and a
+        mean · itself is how alike their own faces are."""
         ids, m = self._matrix()
         with self.lock:
             rows = self.db.execute("SELECT id, person, confirmed FROM faces WHERE person IS NOT NULL").fetchall()
@@ -383,12 +415,43 @@ class Store:
             return [], np.zeros((0, DIM), dtype=np.float32)
         where = {int(f): i for i, f in enumerate(ids)}
         sums: dict[int, np.ndarray] = {}
+        weight: dict[int, float] = {}
         for fid, person, confirmed in rows:
             i = where.get(fid)
             if i is not None:
-                sums[person] = sums.get(person, 0) + m[i] * (2.0 if confirmed else 1.0)
+                w = 2.0 if confirmed else 1.0
+                sums[person] = sums.get(person, 0) + m[i] * w
+                weight[person] = weight.get(person, 0.0) + w
         people = sorted(sums)
-        return people, unit(np.stack([sums[p] for p in people])) if people else np.zeros((0, DIM), dtype=np.float32)
+        if not people:
+            return [], np.zeros((0, DIM), dtype=np.float32)
+        return people, np.stack([sums[p] / weight[p] for p in people]).astype(np.float32)
+
+    @staticmethod
+    def _split(sub: np.ndarray, members: list[int]) -> list[list[int]]:
+        """A group that is really two people, as two groups (else as it was). The group is cut in two around its
+        two least alike corners (a few rounds of 2-means); if the halves' faces are much less like each other
+        than like their own half, the cut is real — and each half is tried again."""
+        if len(members) < 2 * MIN_GROUP:
+            return [members]
+        vec = sub[members]
+        centre = unit(vec.mean(axis=0))
+        a = int(np.argmin(vec @ centre))                       # the odd one out…
+        b = int(np.argmin(vec @ vec[a]))                       # …and the face least like it
+        ca, cb = vec[a], vec[b]
+        side = None
+        for _ in range(6):
+            side = (vec @ ca) >= (vec @ cb)
+            if side.all() or not side.any():
+                return [members]
+            ca, cb = unit(vec[side].mean(axis=0)), unit(vec[~side].mean(axis=0))
+        ma, mb = vec[side].mean(axis=0), vec[~side].mean(axis=0)
+        cross, within = float(ma @ mb), min(float(ma @ ma), float(mb @ mb))
+        if cross >= TUNING["split_ratio"] * within or cross >= TUNING["link"]:
+            return [members]                                   # one person, seen two ways
+        left = [members[i] for i in np.nonzero(side)[0]]
+        right = [members[i] for i in np.nonzero(~side)[0]]
+        return Store._split(sub, left) + Store._split(sub, right)
 
     def cluster(self, progress: Callable[[str], None] = lambda _t: None,
                 stop: Callable[[], bool] = lambda: False) -> dict[str, int]:
@@ -410,11 +473,11 @@ class Store:
         progress("Grouping faces…")
 
         # 1. join the people there are
-        people, centres = self._centres()
+        people, means = self._means()
         assign: dict[int, int] = {}
         if people:
             idx = np.array([where[f] for f, _q in free])
-            sims = m[idx] @ centres.T                                 # (free faces) × (people)
+            sims = m[idx] @ means.T                                   # (free faces) × (people): average likeness
             order = np.argsort(-sims, axis=1)
             for row, (fid, _q) in enumerate(free):
                 no = rejected.get(fid, set())
@@ -470,12 +533,13 @@ class Store:
                 if core[i] or any(core[int(j)] for j in neighbours[i]):
                     groups.setdefault(find(i), []).append(i)
             made: list[tuple[int, list[int]]] = []
+            parts = [part for members in groups.values() for part in self._split(sub, members)]
             with self.lock:
-                for members in groups.values():
+                for members in parts:
                     if len(members) < MIN_GROUP:
                         continue
-                    centre = unit(sub[members].mean(axis=0))
-                    members = [i for i in members if float(sub[i] @ centre) >= t["keep"]]
+                    mean = sub[members].mean(axis=0)
+                    members = [i for i in members if float(sub[i] @ mean) >= t["keep"]]
                     if len(members) < MIN_GROUP:
                         continue
                     pid = self._new_person()
@@ -496,11 +560,11 @@ class Store:
                    rejected: dict[int, set[int]]) -> int:
         if not face_ids:
             return 0
-        people, centres = self._centres()
+        people, means = self._means()
         if not people:
             return 0
         idx = np.array([where[f] for f in face_ids])
-        sims = m[idx] @ centres.T
+        sims = m[idx] @ means.T
         got = []
         for row, fid in enumerate(face_ids):
             c = int(np.argmax(sims[row]))
@@ -513,21 +577,28 @@ class Store:
         return len(got)
 
     def _merge_unnamed(self) -> int:
-        """Two groups nobody has named whose centres are very close are one person. Named people are never
-        merged by the app — only offered (`merge_candidates`)."""
+        """Two groups nobody has named that are as like each other as they are like themselves are one person.
+        Named people are never merged by the app — only offered (`merge_candidates`)."""
         merged = 0
+        apart = self._apart()
         for _ in range(50):
-            people, centres = self._centres()
+            people, means = self._means()
             with self.lock:
                 named = {r[0] for r in self.db.execute("SELECT id FROM people WHERE name != ''")}
             free = [i for i, p in enumerate(people) if p not in named]
             if len(free) < 2:
                 break
-            sub = centres[free]
-            sims = sub @ sub.T
-            np.fill_diagonal(sims, -1.0)
-            a, b = np.unravel_index(int(np.argmax(sims)), sims.shape)
-            if float(sims[a, b]) < TUNING["merge"]:
+            sub = means[free]
+            cross = sub @ sub.T
+            own = np.diag(cross).copy()
+            ratio = cross / np.maximum(np.minimum(own[:, None], own[None, :]), 1e-6)
+            np.fill_diagonal(ratio, -1.0)
+            for x, y in apart:                              # the person said these two aren't one
+                if x in people and y in people and people.index(x) in free and people.index(y) in free:
+                    i, k = free.index(people.index(x)), free.index(people.index(y))
+                    ratio[i, k] = ratio[k, i] = -1.0
+            a, b = np.unravel_index(int(np.argmax(ratio)), ratio.shape)
+            if float(ratio[a, b]) < TUNING["merge_ratio"] or float(cross[a, b]) < TUNING["assign"]:
                 break
             pa, pb = people[free[a]], people[free[b]]
             with self.lock:
@@ -542,10 +613,10 @@ class Store:
         """Faces that are probably this person's — ungrouped ones, and faces in small unnamed groups — nearest
         first, each with how close (0…1). Never one the person said isn't theirs."""
         ids, m = self._matrix()
-        people, centres = self._centres()
+        people, means = self._means()
         if person not in people or not len(ids):
             return []
-        centre = centres[people.index(person)]
+        centre = means[people.index(person)]
         with self.lock:
             named = {r[0] for r in self.db.execute("SELECT id FROM people WHERE name != ''")}
             rows = self.db.execute(f"SELECT {self._FACE} FROM faces WHERE person IS NULL OR person != ?", (person,)).fetchall()
@@ -568,17 +639,19 @@ class Store:
 
     def merge_candidates(self, limit: int = 20) -> list[tuple[Person, Person, float]]:
         """Pairs of people who may be one — "Is this the same person?" — nearest first."""
-        people, centres = self._centres()
+        people, means = self._means()
         shown = {p.id: p for p in self.people()}
         idx = [i for i, p in enumerate(people) if p in shown]
         if len(idx) < 2:
             return []
-        sub = centres[idx]
+        sub = means[idx]
         sims = np.triu(sub @ sub.T, k=1)
-        pairs = np.argwhere(sims >= TUNING["suggest"] + 0.08)
+        pairs = np.argwhere(sims >= TUNING["ask"])
         out = sorted(((shown[people[idx[a]]], shown[people[idx[b]]], float(sims[a, b])) for a, b in pairs),
                      key=lambda x: -x[2])
-        out = [(a, b, s) for a, b, s in out if not (a.name and b.name)]        # two named people: the person knows
+        apart = self._apart()
+        out = [(a, b, s) for a, b, s in out if not (a.name and b.name)         # two named people: the person knows
+               and (min(a.id, b.id), max(a.id, b.id)) not in apart]
         return out[:limit]
 
     def close(self) -> None:

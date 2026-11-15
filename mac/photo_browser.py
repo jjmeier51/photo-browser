@@ -2763,6 +2763,8 @@ class Query:
             if wanted:
                 try:
                     import people
+                    if not (people.folder() / "people.sqlite3").is_file():
+                        return self._people_paths            # People was never used: nothing to look in
                     store = people.shared()
                     named = [(search_query.fold(p.name), p.id) for p in store.people(hidden=True) if p.name]
                     for w in wanted:
@@ -3402,6 +3404,46 @@ COLLECTIONS[PLACE] = Collection(
     status=lambda arg, n: f"{n:,} item{'s' if n != 1 else ''} taken in {place_filter_name(arg)}",
     empty=lambda arg: ("No Photos From Here", "Nothing with this location is on the drives connected now. "
                                               "Go ▸ Places… ▸ Read Locations reads the photos not read yet."))
+
+
+def _people_do(what) -> None:
+    """Something for the People store to follow (a rename, a trip to the Trash) — only when there is one: the
+    feature costs nothing until it's used."""
+    try:
+        import people
+        if (people.folder() / "people.sqlite3").is_file():
+            what(people.shared())
+    except Exception:  # noqa: BLE001 — People following along never fails the thing it follows
+        pass
+
+
+def _person(arg: str):
+    import people
+    try:
+        return people.shared().person(int(arg))
+    except (ValueError, Exception):  # noqa: BLE001 — no such person (forgotten since): nobody
+        return None
+
+
+def _person_name(arg: str) -> str:
+    p = _person(arg)
+    return p.label if p is not None else "Someone"
+
+
+def _person_paths(arg: str) -> list[str]:
+    import people
+    try:
+        return people.shared().photos_of(int(arg))
+    except ValueError:
+        return []
+
+
+COLLECTIONS[PERSON] = Collection(
+    title=_person_name, paths=_person_paths, icon="person",
+    tip=lambda arg: f"Every photo {_person_name(arg)} is in — right-click one for “This Is Not {_person_name(arg)}”",
+    status=lambda arg, n: f"{n:,} photo{'s' if n != 1 else ''} of {_person_name(arg)}",
+    empty=lambda arg: ("No Photos of Them Here", "Their photos aren't on the drives connected now — or the "
+                                                 "group was taken apart."))
 
 
 class LabelScanner(TagScanner):
@@ -5743,6 +5785,75 @@ class Pane(QWidget):
         self._ai_hooks().keep_open(w)
         w.show()
 
+    def open_people(self, find_in: str | None = None) -> None:
+        """Go ▸ People… (people_window.py): the faces in the photos, grouped into people — found on this Mac,
+        named by the person. `find_in`: start looking in that folder straight away."""
+        import people_window
+        win = self.window()
+        existing = next((w for w in _VIEWERS if isinstance(w, people_window.PeopleWindow)), None)
+        if existing is None:
+            def show(person_id: int) -> None:
+                win.raise_()
+                win.activateWindow()
+                win._navigate(f"{PERSON}{person_id}")
+
+            def tag(paths: list[str], name: str) -> None:
+                tag_store().add(paths, [name])
+                tags_changed()
+                search_query.NAMES.forget()
+
+            def folder() -> str:
+                p = win.active_pane
+                return p.location if not p.is_virtual and os.path.isdir(p.location) else ""
+            existing = people_window.PeopleWindow(people_window.PeopleHooks(
+                show=show, folder=folder, drives=lambda: [str(v) for v in external_volumes()], tag=tag,
+                note=None), THEME, win)
+            self._ai_hooks().keep_open(existing)
+        existing.show()
+        existing.raise_()
+        existing.activateWindow()
+        if find_in:
+            QTimer.singleShot(200, lambda: existing.find_people([find_in]))
+
+    def _people_menu(self, menu: QMenu, paths: list[str]) -> None:
+        """Right-click ▸ People: who's in the photo (go to their photos), and — in a person's own collection —
+        "This Is Not <name>" for the photos selected."""
+        try:
+            import people
+            if not (people.folder() / "people.sqlite3").is_file():
+                return
+            store = people.shared()
+            here = _person(self.location[len(PERSON):]) if self.location.startswith(PERSON) else None
+            inside = store.people_in(paths[0]) if len(paths) == 1 else []
+        except Exception:  # noqa: BLE001 — People is an extra: never in the way of the menu
+            return
+        if here is None and not inside:
+            return
+        sub = menu.addMenu(glyph("person", THEME.secondary, 16), "People")
+        for person in inside:
+            sub.addAction(f"Show {person.label}'s Photos" if person.name else "Show This Person's Photos",
+                          lambda pid=person.id: self.window()._navigate(f"{PERSON}{pid}"))
+        if here is not None:
+            if inside:
+                sub.addSeparator()
+            n = len(paths)
+
+            def not_them() -> None:
+                got = store.remove_photos(paths, here.id)
+                self.note(f"Took {got:,} face{'s' if got != 1 else ''} out of {here.label}'s photos — they won't be "
+                          "suggested for them again." if got else f"{here.label} isn't in what's selected.")
+                QTimer.singleShot(150, lambda: self.go(self.location, record=False))
+            sub.addAction(f"This Is Not {here.label}" if n == 1 else f"These {n} Are Not {here.label}", not_them)
+            if n == 1:
+                def key() -> None:
+                    face = next((f for f in store.faces_in(paths[0]) if f.person == here.id), None)
+                    if face is not None:
+                        store.set_key(here.id, face.id)
+                        self.note(f"That's {here.label}'s key photo now.")
+                sub.addAction("Make Key Photo", key)
+        sub.addSeparator()
+        sub.addAction("People…", self.open_people)
+
     def open_ai_models(self, select: str | None = None) -> None:
         """AI ▸ AI Models…: the models made so far, and pictures from them."""
         import ai_models_window
@@ -5939,6 +6050,7 @@ class Pane(QWidget):
         failed = [p for p in paths if not MainWindow.trash_item(Path(p))]
         moved = len(paths) - len(failed)
         try:
+            _people_do(lambda store: store.forget_files([p for p in paths if p not in failed]))
             if tag_store().forget([p for p in paths if p not in failed]):
                 tags_changed()
         except OSError:
@@ -5986,6 +6098,7 @@ class Pane(QWidget):
         old = [r.old for r in res.done]
         search_query.NAMES.forget()
         media_info.forget(old)
+        _people_do(lambda store: store.renamed([(r.old, r.new) for r in res.done]))
         if THUMBS is not None:
             THUMBS.forget(old)
         tags_changed()
@@ -6252,6 +6365,7 @@ class Pane(QWidget):
                 f"Edit Metadata of {len(editable)} Items…"
             menu.addAction(label, lambda: self.edit_metadata(editable)).setShortcut(QKeySequence("Ctrl+I"))
         self._cover_menu(menu, paths)
+        self._people_menu(menu, paths)
         menu.addSeparator()
 
         # -- change it
@@ -6363,6 +6477,8 @@ class Pane(QWidget):
         ai.addSeparator()
         ai.addAction("Make AI Model from Photos Inside…", lambda: self.make_ai_model([folder]))
         ai.addAction("AI Models…", lambda: self.open_ai_models())
+        menu.addAction("Find People in Photos Here…" if here else "Find People in Photos Inside…",
+                       lambda: self.open_people(folder))
         cc = menu.addMenu("CapCut")
         cc.addAction("Send Photos & Videos Here to CapCut", lambda: self.send_to_capcut([folder]))
         cc.addAction("Import from CapCut…", lambda: self.import_from_capcut(folder))

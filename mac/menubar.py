@@ -366,6 +366,9 @@ def install(win, sf) -> None:
         if len(s) > 1 and all(os.path.isdir(p) for p in s):
             return s
         return folder_target()
+    act(t, "Find People…", lambda: pane().open_people(folder_target()), None, folder_target,
+        "Finds the faces in the photos of the selected folder (or this one) and groups them into people — on this "
+        "Mac; you give the names")
     act(t, "Find Duplicates…", lambda: pane().find_duplicates(dup_target()), None, dup_target,
         "Likely copies in the selected folder or folders (or this one)")
     t.addSeparator()

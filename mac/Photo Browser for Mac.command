@@ -10,4 +10,6 @@ fi
 # Make Book PDF (bookify.py) needs ReportLab and pyphen: added later, so an existing .venv gets them here — quietly,
 # and never in the way (offline, Photo Browser for Mac still opens; the Make Book window offers to install them again).
 .venv/bin/python -c "import reportlab, pyphen" 2>/dev/null || .venv/bin/pip install --quiet "reportlab>=4.0" "pyphen>=0.14" 2>/dev/null || true
+# People (faces.py) needs onnxruntime: added later too, so an existing .venv gets it the same way.
+.venv/bin/python -c "import onnxruntime" 2>/dev/null || .venv/bin/pip install --quiet "onnxruntime>=1.17" 2>/dev/null || true
 exec .venv/bin/python photo_browser.py "$@"

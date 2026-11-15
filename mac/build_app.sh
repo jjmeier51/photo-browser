@@ -71,6 +71,7 @@ rm -rf "dist/Photo Browser for Mac" "dist/Photo Browser for Mac.app"
   --collect-all pywidevine \
   --collect-all yt_dlp \
   --collect-all reportlab \
+  --collect-all onnxruntime \
   --collect-data pyphen \
   --add-data "$PWD/relocate_folders.py:." \
   --add-data "$PWD/exfat_inspect.py:." \
