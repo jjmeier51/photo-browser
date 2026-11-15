@@ -197,9 +197,11 @@ class UpscaleRun(QDialog):
 
     def __init__(self, parent: QWidget | None, photos: list[str], engine: au.Engine,
                  on_done: Callable[[list[tuple[str, str]], list[tuple[str, str]], list[tuple[str, str]]], None],
-                 as_new: bool = False, texture: float = 0.0, lanes: int = 1, allow_large: bool = False) -> None:
+                 as_new: bool = False, texture: float = 0.0, lanes: int = 1, allow_large: bool = False,
+                 factor: int = au.FACTOR) -> None:
         super().__init__(parent)
         self.photos, self.engine, self.on_done, self.as_new = photos, engine, on_done, as_new
+        self.factor = factor
         self.allow_large = allow_large
         self.texture = texture
         self.running = True
@@ -230,7 +232,7 @@ class UpscaleRun(QDialog):
         self.title = QLabel(objectName="SheetTitle")
         self.title.setWordWrap(True)
         lay.addWidget(self.title)
-        bits = [f"2× with {engine.describe()}", "saved as new photos" if as_new else "in place"]
+        bits = [f"{factor}× with {engine.describe()}", "saved as new photos" if as_new else "in place"]
         if texture > 0:
             bits.append(f"{texture * 100:.0f}% texture kept")
         if self._lanes > 1:
@@ -277,7 +279,7 @@ class UpscaleRun(QDialog):
         while (i := self._next()) is not None:
             path = self.photos[i]
             try:
-                r = au.upscale(self.engine, path, as_new=self.as_new, texture=self.texture, stop=self._stop,
+                r = au.upscale(self.engine, path, self.factor, as_new=self.as_new, texture=self.texture, stop=self._stop,
                                progress=lambda stage, done, i=i: self._sig.step.emit(i, stage, done),
                                allow_large=self.allow_large)
                 self._sig.progress.emit(i, path, "done", f"{r.width}×{r.height}", r.path)

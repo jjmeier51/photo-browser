@@ -366,6 +366,11 @@ def install(win, sf) -> None:
         if len(s) > 1 and all(os.path.isdir(p) for p in s):
             return s
         return folder_target()
+    def cover_source():
+        s = sel()
+        return s[0] if len(s) == 1 and not os.path.isdir(s[0]) and sf.kind_of(s[0]) != "other" else None
+    act(t, "Use as Album Cover", lambda: pane().set_cover(os.path.dirname(cover_source()), cover_source()), None,
+        cover_source, "The selected photo or video as the cover of the folder it's in — here and on the iPhone")
     act(t, "Find People…", lambda: pane().open_people(folder_target()), None, folder_target,
         "Finds the faces in the photos of the selected folder (or this one) and groups them into people — on this "
         "Mac; you give the names")
@@ -373,6 +378,10 @@ def install(win, sf) -> None:
         "Likely copies in the selected folder or folders (or this one)")
     t.addSeparator()
 
+    act(t, "Edit Photo…", lambda: pane().edit_photo(photos()[0]) if len(photos()) == 1 else None, "Ctrl+E",
+        lambda: len(photos()) == 1,
+        "The photo editor: filters, adjustments, crop, retouch, face, text and frames — saved as new, over the "
+        "original, or saved and upscaled")
     adjust = submenu(t, "Adjust")
     act(adjust, "Crop…", lambda: pane().crop_photos(photos()), None, lambda: bool(photos()),
         "One crop, drawn once, on every selected photo")

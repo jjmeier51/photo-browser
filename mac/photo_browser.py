@@ -4783,6 +4783,28 @@ class Pane(QWidget):
             QMessageBox.warning(self, "Folder Cover", f"The cover couldn't be set.\n\n{e}")
             return
         covers_changed()
+        self.note(f"That's the cover of “{os.path.basename(folder) or folder}” now.")
+
+    def cover_from_viewer(self, path: str, seconds: float | None) -> str:
+        """The viewer's ⋯ ▸ Use as Album Cover: the photo — or the very frame a video is showing — as the cover
+        of the folder it's in. Returns what to say."""
+        import folder_covers
+        folder = os.path.dirname(path)
+        name = os.path.basename(folder) or folder
+        try:
+            picture = None
+            if seconds is not None:
+                import frame_export
+                picture = frame_export.frame_image(path, seconds)       # the frame on screen, not the thumbnail
+            if picture is None:
+                picture = self.cover_picture(path) if PIL_OK else None
+            if picture is None:
+                return "The cover couldn't be made from this one."
+            folder_covers.default(self.settings).set(folder, picture)
+        except Exception as e:  # noqa: BLE001
+            return f"The cover couldn't be set: {e}"
+        covers_changed()
+        return f"That's the cover of “{name}” now."
 
     def choose_cover(self, folder: str) -> None:
         exts = " ".join(f"*{e}" for e in sorted((IMAGE_EXT - RAW_EXT) | VIDEO_EXT))
@@ -4811,7 +4833,8 @@ class Pane(QWidget):
                 menu.addAction("Remove Cover", lambda: self.remove_cover(path))
         elif kind_of(path) != "other":
             folder = os.path.dirname(path)
-            menu.addAction(f"Use as Cover of “{os.path.basename(folder) or folder}”", lambda: self.set_cover(folder, path))
+            a = menu.addAction("Use as Album Cover", lambda: self.set_cover(folder, path))
+            a.setToolTip(f"The cover of “{os.path.basename(folder) or folder}” — here and on the iPhone")
 
     def use_view_everywhere(self) -> int:
         """Every folder shown before is shown this way from now on (icons, list or Photos) — and so is every
@@ -5527,6 +5550,7 @@ class Pane(QWidget):
             reveal=self._reveal_from_viewer, export_frames=lambda p: self.export_frames([p]),
             save_frame=frame_export.save_frame, labels_of=lambda p: tag_store().labels(p, fresh=False),
             set_label=lambda p, label, on: self.set_label([p], label, on), remove_objects=self.remove_objects,
+            set_cover=self.cover_from_viewer, edit_photo=self.edit_photo,
             extra={"frame_note": frame_export.engine_note})
         # Opens over Photo Browser for Mac's window, as tall as its display, and takes each item's shape within that.
         viewer = media_viewer.MediaViewer(items, items.index(path), hooks, poster, None, box=self.window().geometry())
@@ -6378,6 +6402,9 @@ class Pane(QWidget):
                      f"Edit {len(photos)} Photos" if photos and not videos else
                      f"Edit {len(videos)} Videos" if videos and not photos else f"Edit {n} Items" if n else "Edit")
             edit = menu.addMenu(title)
+            if len(photos) == 1:
+                edit.addAction("Photo Editor…", lambda: self.edit_photo(photos[0])).setShortcut(QKeySequence("Ctrl+E"))
+                edit.addSeparator()
             if photos:
                 edit.addAction("Crop…", lambda: self.crop_photos(photos))
             if turnable:
@@ -6755,6 +6782,46 @@ class Pane(QWidget):
         dlg = remove_window.RemoveWindow(QApplication.activeWindow() or self.window(), path, self.settings, done)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.open()
+
+    # -- the photo editor (photo_editor_window.py / photo_edit.py / photo_text.py)
+    def edit_photo(self, path: str) -> None:
+        """Right-click a photo ▸ Edit ▸ Photo Editor… (⌘E), or ⋯ in the viewer: filters, adjustments, crop,
+        retouch, face, text and frames; saved as a new photo, over the original, or saved and upscaled — with
+        the original's metadata, dates and tags, tagged "edited"."""
+        try:
+            import photo_editor_window
+        except ImportError as e:                 # numpy, not in an older mac/.venv yet
+            QMessageBox.information(self.window(), "Edit Photo", f"The photo editor needs numpy ({e}). Quit "
+                                    f"{app_identity.APP_NAME} and open “{app_identity.APP_NAME}.command” again — it "
+                                    "installs it.")
+            return
+        if not photo_editor_window.can_edit(path):
+            QMessageBox.information(self.window(), "Edit Photo", "This photo can't be edited here — JPEG, HEIC, PNG, "
+                                    "WebP, TIFF and BMP photos can (HEIC needs pillow-heif; run mac/run.sh once).")
+            return
+
+        def done(written: str, as_new: bool, tags: list[str]) -> None:
+            try:
+                if as_new:
+                    tag_store().carry([(path, written)])             # a new photo has its original's tags…
+                if tags:
+                    tag_store().add([written], tags)                 # …and "edited" (and "cropped", "upscaled")
+            except OSError as e:
+                QMessageBox.warning(self.window(), "Edit Photo", f"Couldn't save the tags: {e}")
+            tags_changed()
+            if THUMBS is not None and not as_new:
+                THUMBS.forget([written])
+            media_info.forget([written])
+            for w in list(_VIEWERS):                                   # a viewer showing it: read it afresh
+                if hasattr(w, "reload"):
+                    w.reload(written)
+            self.refresh()
+            self.note(f"Saved “{os.path.basename(written)}”" + (" beside the original." if as_new else "."),
+                      "Show" if as_new else "", (lambda: self.reveal(written)) if as_new else None)
+
+        dlg = photo_editor_window.EditorWindow(QApplication.activeWindow() or self.window(), path, self.settings, done)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.show()
 
     # -- AI upscale (ai_upscale.py / upscale_window.py — Real-ESRGAN on this Mac)
     def ai_upscale(self, paths: list[str]) -> None:
