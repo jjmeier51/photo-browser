@@ -8217,7 +8217,9 @@ class MainWindow(QMainWindow):
         box.setInformativeText("The Mac side of Photo Browser on the iPhone: the same drive, folders, tags, Favorites "
                                "and covers — with safe transfers and the tools that are easier at a desk.\n\n"
                                "Nothing is uploaded anywhere except by the tools that say so (the downloaders, "
-                               "Edit and Create with AI).")
+                               "Edit and Create with AI). Places and People work entirely on this Mac.\n\n"
+                               + geo_names.ATTRIBUTION + " Face models: OpenCV's YuNet (MIT) and SFace "
+                               "(Apache-2.0), downloaded when People is first used.")
         box.exec()
 
     def show_welcome(self, first: bool = False) -> None:

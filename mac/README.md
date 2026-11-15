@@ -434,6 +434,11 @@ to keep their contrast on every part of the background.
 
 ### Photos view and the viewer — the iPhone app's grid and viewer (`media_viewer.py`, `media_info.py`)
 
+**Nothing but the picture.** In the viewer the controls are see-through and get out of the way: dimmed while the
+mouse is elsewhere, full strength under it, and — once the mouse has rested a few seconds — gone, pointer and
+all, leaving the photo or video alone on black. Move the mouse and they're back. The picture never shifts when
+they fade, and ←/→ doesn't bring them back. **⋯ ▸ Keep Controls Visible** if you'd rather they stayed.
+
 The third view button in each pane (⌘3, beside icons and list) shows a folder the way Photo Browser on the
 iPhone does: square tiles two pixels apart filling the pane's width in whole columns, each picture cropped
 to fill its square; a video's length bottom left and a play badge bottom right; tag dots top right (the
@@ -641,6 +646,52 @@ import; pick it in the window if yours is elsewhere.
 
 Photo Browser for Mac never writes CapCut projects itself: recent CapCut versions encrypt them and reject ones made by
 other tools, so dragging the clips in is what works with every version.
+
+### Places — where your photos were taken (`places_window.py`, `geo_names.py`, `places.py`)
+
+Every photo and video with a location has a place name the moment it's read — the nearest town, from a table of
+170,000 places that ships with the app. Nothing is sent anywhere for it.
+
+- **Go ▸ Places…** (⇧⌘L, or **Library ▸ Places** in the sidebar): a list — Country ▸ State or region ▸ Town, with
+  counts — and a **map**. Scroll to zoom, drag to move; photos gather into numbered circles that split as you
+  zoom in. Select a place (or a circle) and press **Show Photos**: the main window shows everything taken there
+  — a town, a state, or a whole country — as a collection you can view, tag and sort like any folder.
+  The map is drawn by the app from country outlines it carries; there's no map service behind it.
+- **Read Locations…** in that window reads the photos whose location hasn't been read yet (the iPhone's index
+  on the drive already covers whatever the iPhone has seen).
+- **Search by place**: `place:paris`, `city:paris`, `state:ny`, `country:france`, `near:"lake tahoe"` (within
+  25 km; `near:tahoe~50km` for another distance), `is:located`, `-is:located`. A plain word finds photos taken
+  somewhere by that name too: `tokyo` finds files called that *and* photos taken there.
+- **Filter by place**: the funnel's **Location** is Country ▸ State ▸ City with counts; pick a town, a state or
+  a whole country.
+- **Refine Place Names with Apple** (in the Places window): off, names come only from the app's own table. On
+  — as the iPhone does — Apple's geocoder is also asked, a place at a time, for the names it knows better
+  (neighbourhoods, parks); only coordinates are sent. The iPhone's own names on the drive are always used first.
+
+Place names: GeoNames (geonames.org), CC BY 4.0, reduced to selected columns. Map: made with Natural Earth.
+`mac/make_geo_data.py` rebuilds both files (`mac/geo/`) from the sources.
+
+### People — the faces in your photos (`people_window.py`, `people.py`, `faces.py`)
+
+**Go ▸ People…** (⇧⌘E, or **Library ▸ People**): the app finds the faces in your photos and groups the ones that
+are the same person — like People in Photos. It all happens on this Mac; you give the names.
+
+- **Find People ▾** — in the folder the main window shows, or on the whole drive. It works in the background
+  (a count, and a Stop that loses nothing — next time it carries on). The first time, it explains itself and
+  downloads the two small models it needs (39 MB, from OpenCV, checked) — the only time it uses the network.
+- **The grid**: a circle per person, their name (or **Add Name**) and how many photos. **Double-click** to see
+  their photos in the main window. **Click the name** to name them; a name someone already has merges the two
+  (it asks).
+- **Getting it right**: select two or more and **Merge**; right-click ▸ **Review Suggestions…** for faces that
+  are probably theirs (click once for Yes, again for Not them); **Same Person?** goes through pairs who may be
+  one; in a person's photos, right-click ▸ People ▸ **This Is Not Anna** takes a photo out for good, **Make Key
+  Photo** chooses their circle. What you say stands — the app never undoes it, and never asks the same thing twice.
+- **Also**: Favorite (shown first), Hide, **Tag Their Photos “Anna”** (the name as a tag — so the iPhone app
+  shows it too), `person:anna` in the search field (or just `anna`).
+- **Privacy**: face data stays in the app's folder on this Mac — never on the drive, never uploaded — and the
+  app never puts a name to a face itself. **••• ▸ Forget All Face Data…** deletes every bit of it.
+
+It needs `onnxruntime` (the launcher installs it). Faces in videos aren't looked at yet.
 
 ### Find Duplicates (`duplicates_window.py`, `duplicates.py`)
 

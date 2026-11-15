@@ -2437,6 +2437,147 @@ keyboard focus, Finder's Return-renames convention (Return opens here, F2 rename
 count badge, native unified toolbar. **Not seen on a Mac**: all of it was run with Qt's offscreen platform on
 Linux — menu roles, sheets, the title-bar proxy icon and the Help window's fonts are the things to look at first.
 
+## 6al. Mac: the viewer's look, the downloaders reviewed, Places, People (Nov 15, 2026)
+
+Four things asked for together; three were researched first (a code review of every downloader plus what
+gallery-dl / yt-dlp / cyberdrop-dl do; offline place naming and maps; on-device face grouping), then built.
+
+### The viewer — nothing but the picture (`mac/media_viewer.py`, `_Chrome`)
+
+The bars above and below the picture stay where they are — a Qt widget laid *over* the Mac's native video view
+is never seen, which is why they aren't overlays — but they no longer look like bars: the stage's own black, no
+borders, and what's on them is see-through. `_Chrome` gives each bar an opacity: `REST` (0.62) while the mouse
+is elsewhere on the window, full under the mouse, and 0 once the mouse has rested `IDLE_SECONDS` (2.6 s) — with
+the pointer hidden too. Moving the mouse brings them back (140 ms; they leave over 650 ms). Rules that matter:
+the picture never moves when they fade (so no re-fit); arrow keys don't wake them (flipping through photos would
+flash the controls every time); a note written on the top bar holds it for as long as the note shows; they don't
+fade while a menu is open, a slider is held, or the mouse is on a bar; ⋯ ▸ Keep Controls Visible turns it off
+(`viewer/keep_controls`). **The mouse is polled, not listened for** (a 200 ms timer on `QCursor.pos()`): the
+native view doesn't pass hover on. The scrubber is a 3-px line whose knob shows under the mouse; resolution/HDR
+are plain text; the Info panel and menus are quieter; on a Mac the title bar asks for no background
+(`Qt.WindowType.NoTitleBarBackgroundHint`, Qt 6.9+; `PHOTO_BROWSER_VIEWER_TITLEBAR=plain` to keep the usual
+one). Not seen on a Mac: the title-bar hint and how the opacity effect sits with the native view.
+
+### The downloaders, reviewed (`mac/net_fetch.py`) — see also §7
+
+**A real bug, in every plain-request download**: `urllib`'s `read(n)` returns what arrived and says nothing when
+the server hangs up early, so a 5 KB piece of a 1 MB file was saved, recorded as downloaded (SimpCity even stored
+its size and SHA-256) and never fetched again. Reproduced against a local server; fixed in one place every
+downloader goes through — `simpcity.fetch` is now a thin wrapper over `net_fetch.fetch_to_file`:
+
+- bytes written are checked against `Content-Length`; `IncompleteRead` / resets are errors;
+- a cut-off transfer **resumes** (`Range` + `If-Range` with the strong ETag or Last-Modified; a 200 starts over);
+- timeouts, resets, truncation — and 429 / 5xx unless the caller has its own tuned waits (`busy=False`, as
+  SimpCity's `BUSY_WAITS` loop does) — are retried with exponential backoff and full jitter, obeying
+  `Retry-After`; `stop()` ends a transfer or a wait at once (Stop used to wait out a 40 s sleep);
+- an HTML or JSON error body saved under a media name is refused (`looks_like_page`);
+- a redirect to another host is followed **without** `Cookie` / `Authorization` (urllib forwards them).
+
+Also fixed: taylorpictures.net's window waiting forever on an album after a dropped connection (`IncompleteRead`
+escaped `one()` → `pool.map` → `work()`, which then never emitted `dl_done`); a failed copy onto the drive
+leaving a partial that later counted as downloaded (`net_fetch.put`: whole or removed, size checked, exFAT's
+no-rename rule kept); Instagram / Facebook cookies sent to whatever host a file was on (`_tries(url)`: the site's
+own hosts only); an unreadable record silently replaced by an empty one (`keep_backup` before every save,
+`load_json` restores from `.bak` and keeps the damaged file as `.damaged` — `Record.state` says which);
+TikTok's listing dying on a truncated answer; long names losing their extension (Taylor) or counted in
+characters rather than bytes (zip members); an `or`/`if` precedence slip in `filehosts._open`; a caption temp
+file leaked when ExifTool raised.
+
+**Looked at and left alone, on purpose**: the visible-browser model (checks and logins answered by the person),
+gofile only through its own site, DRM refused, every pacing value tuned on real runs (`facebook._Reader`,
+SimpCity's `PAGE_GAP` / `LIMIT_WAITS`, lane counts), `Dedup`, the merge-on-save records, TikTok listing the
+whole profile for likes, the page scripts identical in Swift and Python.
+
+**Recommended, not done** (each is real work with a real site to test against): a failure ledger with **Retry
+Failed** in every window (`net_fetch.RunLog` is the start), per-host limits with a shared pause on 429, a
+"session may have expired" pause after repeated 401/403, one `LaneRunner` for the three near-identical queue
+loops, a free-space check before big videos, a sweep of stale temp folders, re-resolving a TikTok / Instagram
+media address that has gone stale. Nothing that evades a site's limits was considered.
+
+### Places (`mac/geo_names.py`, `mac/places.py`, `mac/places_window.py`, `mac/geo/`)
+
+Before: a Location filter per folder, each ~1 km bin named by Apple's geocoder at one request every 1.2 s, 60 a
+pass — a well-travelled folder took several visits to name, and nothing could be searched or seen across the
+library.
+
+- **Offline names.** `geo/places.npz` (2.5 MB, built by `make_geo_data.py` from GeoNames `cities1000`, CC BY 4.0
+  — credited in About and the README): 171,939 places as unit vectors; a point's nearest is the largest dot
+  product, with the top eight then measured in float64 (float32 dots can't separate places 2 km apart — the
+  first cut put Passy's photos in the wrong arrondissement). 1 ms a point, no grid, no antimeridian case.
+  Neighbourhood rows roll up at build time (`parent`: the most populous place in the same region, ≥ 5× bigger,
+  ≥ 300k people, within 0.008·√population km) so the label is "Paris, France" with "Paris 16 Passy" kept as the
+  district — both searchable. Labels as the iPhone writes them. A point over 100 km from any place has no town.
+- **Three layers, in this order**: the iPhone's names (the drive's `places.json`), Apple's asked from this Mac
+  (now optional — *Refine Place Names with Apple*, `places/refine`), the table's. **Offline names are never
+  written into the index** (`_offline` is memory only): written, they'd pass for refined ones and `locate`
+  would never better them. `_refined` is what "has a geocoder's name" means now.
+- **The whole library from the indexes**: `Places.everything` / `summary` / `files_at` list every file whose GPS
+  was ever read — months of the iPhone's work — without opening a photo; `scan` reads the rest. Own-index keys
+  are drive-relative with no drive recorded, so a path is offered under each connected drive and the collection
+  scanner (which stats every path anyway) drops the ones that aren't there.
+- **Search** (`Query`): `place:` `city:` `state:` `country:` `near:"name"` (`~50km`) `is:located`; a plain word
+  also matches a known place's text (`_words_in_places`) — but only `place:` and kin read a photo's GPS
+  (`bin_now`), a plain search never does. `Query.needs_tags()` now means "needs the file's path": the scanner
+  only passed paths for tag searches, which is why the first `place:` search matched nothing.
+- **Filter**: Country ▸ State ▸ City; `@cc:FR` / `@region:US.NY` choose a whole country or state
+  (`place_filter_name`). Hierarchy is by ISO code from the offline place, whatever the label's source — GeoNames
+  and Apple spell countries differently.
+- **The window** (Go ▸ Places…, ⇧⌘L): list + a map drawn with QPainter in Web Mercator from Natural Earth
+  outlines (`geo/world.json.gz`, public domain; 110m below zoom 3.2, 50m above) — no tiles, no map service: OSM's
+  tile policy forbids bundling, and where the photos were taken shouldn't be told to a tile server by panning.
+  Photos gather per 54-px cell into counted circles; the world is drawn three times side by side so the date
+  line needs no special case; `fit` finds the smallest longitude span as the complement of the biggest gap.
+- `COLLECTIONS` / `Collection` / `ListScanner` in `photo_browser.py`: a made-up location whose files come from a
+  list — Places (`PLACE`) and People (`PERSON`) are both that, so the viewer, tags, Trash all work on them.
+
+Not done: photo thumbnails on the map, "nearby photos" from one photo, GPS from MKV/AVI. Not seen on a Mac.
+
+### People (`mac/faces.py`, `mac/people.py`, `mac/people_window.py`)
+
+The iPhone's Find People compares generic *image* feature prints of unaligned crops, first face of a cluster as
+its only representative, the name as the key — it groups look-alike *pictures* more than people. The Mac's is
+built the way face grouping is actually done:
+
+- **Detector** YuNet (MIT, 232 KB) and **embedder** SFace (Apache-2.0, 37 MB, 128-d, LFW 99.4%) — OpenCV's
+  models, run directly in onnxruntime with the pre/post-processing in numpy + Pillow (grid-cell decode with
+  `score = √(cls·obj)`, greedy NMS; Umeyama similarity to the ArcFace template; Pillow's half-pixel shift), checked
+  against `cv2` to 1e-4 px and cosine 0.9997. **Detector input is BGR, embedder RGB, both 0–255 unscaled.**
+  InsightFace's models are better and were rejected (non-commercial licence); Apple's Vision has no public
+  face-identity API (the iPhone's feature print isn't one).
+- **Two detection passes**: whole photo at 640, and — when its long side is over 960 — 640-px tiles of the photo
+  at 1280, faces cut by a tile's inner edge dropped, the lot merged by NMS. One scale isn't enough: at 640 a
+  97-px face in a 12 MP frame is missed; at 1280 a frame-filling close-up is.
+- **Models aren't shipped**: downloaded on first use from OpenCV's Hugging Face pages, SHA-256 checked, into
+  `…/People/models`. `onnxruntime` is a new requirement (launcher and build updated).
+- **Grouping** (`Store.cluster`, numpy only, incremental): join the person a face is most like *on average*
+  (face · the person's un-normalised mean ≥ 0.42, 0.05 clear of the runner-up); group the rest by neighbours of
+  core faces (≥ 2 neighbours at ≥ 0.50); **`_split` every group** — 2-means, and if the halves are less than 75%
+  as like each other as like themselves they're two people. That last step came from a test: one pair at exactly
+  0.50 chained two people whose faces averaged 0.36 alike. The normalised-centroid score that most code uses
+  flatters (a stranger at 0.36 scores 0.50 against a tight person), hence means, not centres. Weak faces
+  (quality < 0.45: small, soft, turned) join but never start a person; `MIN_GROUP` 3. 20,000 faces group in ~1.5 s.
+- **What the person says stands**: `confirmed` faces never move, `rejects` (face, person) are never proposed
+  again, `apart` (person, person) is never asked again, merges are final; a person has an id — the name is just
+  a column (renaming onto a taken name merges, after asking). A photo looked at again keeps a confirmed face's
+  person when a face is found in the same spot.
+- **Storage**: SQLite (WAL) in `~/Library/Application Support/Photo Browser for Mac/People/` — on the Mac, not
+  the drive: it's biometric data, and WAL on a removable drive is fragile. Embeddings as float16 (25 MB per
+  100k faces). Boxes are fractions of the EXIF-upright picture, top-left origin.
+- **The window**: see `people_window.py`'s notes. The store's `changed` fires on whichever thread changed it —
+  it goes through a signal (a `QTimer.start` from the scan thread logged "Timers cannot be started from another
+  thread"). `Query._people` and `_people_do` only touch the store when its file exists: People costs nothing,
+  and creates nothing, until it's used.
+- **Privacy**: nothing leaves the Mac; the only network use is the model download; the app never names anyone;
+  Forget All Face Data deletes everything; nothing about faces is written to the drive. Sharing with the iPhone
+  is by **Tag Their Photos** (the name as an ordinary tag, which already syncs) — the iPhone's `people` store
+  uses "path#index" ids the Mac can't produce.
+
+Tested here on one real face (a public-domain portrait: found at every size, 0.87–0.99 alike under lighting,
+tilt, mirroring, JPEG) and on synthetic embeddings for the grouping logic. **The thresholds are untried on a
+real library** — `people.TUNING` is the one place to turn them, and "Same Person?" / Review Suggestions are how
+a too-cautious setting shows up. Not done: faces in videos, Apple's Vision as a faster detector, the viewer
+drawing face boxes, undo for merges.
+
 ## 6ab. Photo Browser for Mac Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
 
 The iPhone's video upscale (`MediaEditing.upscaleVideo`, §6f) on the Mac: right-click videos ▸ **Upscale Video…**
@@ -2753,6 +2894,10 @@ Implemented from the improvement report's top items.
   iOS 17): `FileActions.hdrFrameHeadroom` / `hdrFrameExposureTrim` to tune.
 
 ## 7. Downloaders (from the broader project + this session)
+
+> **Nov 15, 2026 — every downloader's plain requests go through `mac/net_fetch.py`** (length-checked, resumable,
+> retried with backoff, cookies kept to their host). A download cut short used to pass for a finished file. See
+> §6al for the review: what was fixed, what was deliberately left, and what's still recommended.
 
 The app has several **download-only, opt-in** importers. All are best-effort, `nonisolated`,
 and treat reverse-engineered protocols as fragile (failures surface as notes, never crashes).

@@ -195,6 +195,24 @@ actions the app makes no network calls.
   and drives Select Extra Copies (identical / exact / all shown); look-alike strictness; other files by bytes;
   several folders as one; trashed copies' tags and labels pass to the kept copy (`DupHooks.inherit`). It ticks,
   the person trashes — §6q, §6ak.
+  **Places** (Go ▸ Places… ⇧⌘L; `mac/places_window.py`, `mac/geo_names.py`, `mac/places.py`, data in `mac/geo/`
+  built by `mac/make_geo_data.py` — GeoNames CC BY 4.0, credit it): every GPS bin named offline by the nearest
+  town; label order iPhone's (drive) → Apple's (optional, `places/refine`) → the table's, and **offline names are
+  never written into the index**; search `place:` `city:` `state:` `country:` `near:` `is:located` (only these
+  read GPS — `bin_now`; a plain word matches places already read); filter Country ▸ State ▸ City (`@cc:FR`,
+  `@region:US.NY`); a self-drawn map (Natural Earth, no tiles). **People** (Go ▸ People… ⇧⌘E;
+  `mac/people_window.py`, `mac/people.py`, `mac/faces.py`): YuNet + SFace through onnxruntime (models downloaded
+  on first use, SHA-checked; detector BGR, embedder RGB), SQLite store **on the Mac only** (biometric data — never
+  on the drive, never uploaded; the app never names anyone), grouping in `Store.cluster` with thresholds in
+  `people.TUNING` (untried on a real library); confirmed faces, rejects and `apart` are the person's word and
+  are never undone by grouping; a person has an id, the name is a column. Both are list-backed collections
+  (`COLLECTIONS`, `PLACE`, `PERSON`) — add another kind the same way. Touch the People store only when its file
+  exists (`_people_do`): the feature must cost nothing until used. §6al.
+  **The viewer's controls fade** (`media_viewer._Chrome`: bars stay *outside* the picture — a widget over the
+  native video view is never drawn — and the mouse is polled, not listened for). §6al.
+  **Downloads go through `mac/net_fetch.py`** (`simpcity.fetch` wraps it): length-checked, resumable, retried
+  with backoff, no cookies across hosts; records keep a `.bak`; a finished file reaches the drive via
+  `net_fetch.put`. Don't add a bare `urlopen(...).read()` loop for a file. §6al.
   **How the Mac window talks to the person** (`mac/ui_extras.py`, §6ak): results go through `Pane.note(text,
   "Undo", fn)` (a toast; `_airdrop_noted` for steps still under way, ending in "…") — not a `QMessageBox` unless
   it's an error; anything reversible pushes onto `MainWindow.undo` (`Pane._undoable` / `_renamed`); an empty view
