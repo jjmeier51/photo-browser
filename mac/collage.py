@@ -272,14 +272,17 @@ def sharpest_size(photos: list[tuple[int, int]], d: Design) -> int:
 class Source:
     """What the collage inherits: the oldest photo's date and place, and its file dates."""
     path: str = ""
-    taken: float = 0.0                      # unix; 0 when no photo says
+    taken: float = 0.0                      # unix: the capture date — 0 when no photo knows its own
     place: tuple[float, float] | None = None
     stat: os.stat_result | None = None
+    file_date: float = 0.0                  # the date the file itself gets (the capture date, else the earliest file date)
 
 
 def oldest(paths: list[str]) -> Source:
-    """The photo with the earliest capture date (failing that, the earliest file date) — and the place of
-    the earliest photo that has one."""
+    """The photo with the earliest **capture** date — a photo that knows when it was taken always counts before
+    one that only has a file date (a download's file date can be older than everything) — and the place of the
+    earliest photo that has one. When no photo has a capture date the collage is given none either; its file
+    takes the earliest file date."""
     import media_info
     rows = []
     for p in paths:
@@ -292,13 +295,14 @@ def oldest(paths: list[str]) -> Source:
         except OSError:
             continue
         taken = float(info.get("taken") or 0)
-        rows.append((taken or min(st.st_mtime, getattr(st, "st_birthtime", st.st_mtime)), bool(taken), p, st, info.get("place")))
+        file_date = min(st.st_mtime, getattr(st, "st_birthtime", st.st_mtime))
+        rows.append((not taken, taken or file_date, p, st, info.get("place"), taken))
     if not rows:
         return Source()
-    rows.sort(key=lambda r: r[0])
+    rows.sort(key=lambda r: (r[0], r[1]))
     first = rows[0]
     place = next((r[4] for r in rows if r[4]), None)
-    return Source(first[2], first[0], tuple(place) if place else None, first[3])
+    return Source(first[2], first[5], tuple(place) if place else None, first[3], first[1])
 
 
 def _exif(src: Source, w: int, h: int) -> bytes:
@@ -349,7 +353,7 @@ def encode(im: Image.Image, fmt: str, src: Source) -> bytes:
 
 def new_path(folder: str, src: Source, ext: str) -> str:
     """“Collage 2024-07-04.jpg” in `folder` (the oldest photo's day), never a name that's taken."""
-    day = time.strftime("%Y-%m-%d", time.localtime(src.taken or time.time()))
+    day = time.strftime("%Y-%m-%d", time.localtime(src.taken or src.file_date or time.time()))
     n = 1
     while True:
         path = os.path.join(folder, f"Collage {day}{'' if n == 1 else f' {n}'}{ext}")
@@ -374,15 +378,31 @@ def save(im: Image.Image, folder: str, fmt: str, src: Source) -> str:
             os.unlink(tmp)
         except OSError:
             pass
-    if src.taken:
+    when = src.taken or src.file_date
+    if when:
         try:
             import clone_drive
-            ns = int(src.taken * 1e9)
+            ns = int(when * 1e9)
             if not (clone_drive.IS_MAC and clone_drive.set_dates(dest, ns, ns, ns)):
-                os.utime(dest, (src.taken, src.taken))
+                os.utime(dest, (when, when))
         except Exception:  # noqa: BLE001 — the date in the metadata is the one that counts
             try:
-                os.utime(dest, (src.taken, src.taken))
+                os.utime(dest, (when, when))
             except OSError:
                 pass
     return dest
+
+
+def needed_side(design: "Design", long_side: int) -> int:
+    """The most pixels any photo needs on its long side for a collage this size (so nine 48 MP photos aren't
+    all opened whole for a 1,080 px collage). 0: open it whole."""
+    zoom = max([v.zoom for v in design.views] + [1.0])
+    need = int(long_side * 1.6 * zoom)                 # a cell can be the whole canvas; a photo can be cropped to half
+    return 0 if need >= 12000 else need
+
+
+def clamped(view: View, photo: tuple[int, int], cell: tuple[int, int]) -> View:
+    """The view with its centre where the photo can actually be — so a slide past the edge has no dead travel
+    on the way back."""
+    l, t, r, b = crop_box(photo, cell, view)
+    return View(view.zoom, (l + r) / 2 / photo[0], (t + b) / 2 / photo[1])

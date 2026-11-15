@@ -7,7 +7,8 @@ against its original, and puts the originals in the Mac's Trash (or leaves them,
 the drive's existing "From iPhone" (found by name, remembered; Change… picks another; when the drive has none
 the window offers to make it).
 
-**Watch for AirDrops** (ticked by default): while the app is open, `Watcher` notices new arrivals and says so
+**Watch for AirDrops** (on from the first time this window is opened — not before, so the app doesn't read
+Downloads, and macOS doesn't ask about it, until the feature is used): `Watcher` notices new arrivals and says so
 in a toast with a **Move to “From iPhone”** button — or, with **Move them without asking**, just moves them and
 says what it did.
 """
@@ -57,12 +58,23 @@ class _Signals(QObject):
     found = Signal(object)
 
 
+_ONE_AT_A_TIME = threading.Lock()         # two receives at once would both write the same "name.part"
+
+
 def run_receive(paths: list[str], dest: str, settings, hooks: Hooks, sig: _Signals, stop: threading.Event) -> None:
     after = "keep" if str(settings.value(AFTER_KEY, "trash")) == "keep" else "trash"
 
     def work() -> None:
-        res = ar.receive(paths, dest, after=after, trash=hooks.trash, progress=sig.progress.emit, stop=stop.is_set)
-        sig.done.emit(res)
+        res = ar.Result()
+        try:
+            with _ONE_AT_A_TIME:                      # (a batch that arrives during another waits its turn)
+                paths_now = [p for p in paths if os.path.exists(p)]     # the other receive may have taken some
+                res = ar.receive(paths_now, dest, after=after, trash=hooks.trash, progress=sig.progress.emit,
+                                 stop=stop.is_set)
+        except Exception as e:  # noqa: BLE001 — the window must always hear that it's over
+            res.moves.append(ar.Move("", status="failed", why=f"{type(e).__name__}: {e}"))
+        finally:
+            sig.done.emit(res)
     threading.Thread(target=work, daemon=True).start()
 
 
@@ -112,8 +124,10 @@ class ReceiveWindow(QDialog):
         self.trash_after.toggled.connect(lambda on: settings.setValue(AFTER_KEY, "trash" if on else "keep"))
         lay.addWidget(self.trash_after)
         lay.addWidget(self.keep_after)
+        if settings.value(WATCH_KEY) is None:          # first time here: watching starts now, not at every launch before
+            settings.setValue(WATCH_KEY, "true")
         self.watch = QCheckBox("Watch for AirDrops while the app is open, and offer to move them")
-        self.watch.setChecked(_on(settings, WATCH_KEY, True))
+        self.watch.setChecked(_on(settings, WATCH_KEY, False))
         self.watch.toggled.connect(lambda on: (settings.setValue(WATCH_KEY, "true" if on else "false"), self._buttons()))
         self.auto = QCheckBox("Move them without asking")
         self.auto.setChecked(_on(settings, AUTO_KEY, False))
@@ -188,7 +202,7 @@ class ReceiveWindow(QDialog):
         self.list.clear()
         for a in found:
             when = time.strftime("%-d %b, %H:%M", time.localtime(a.when))
-            bits = [a.kind.capitalize(), _size(a.size), when] + ([f"from {a.sender}"] if a.sender else []) \
+            bits = ["Edit instructions" if a.kind == "sidecar" else a.kind.capitalize(), _size(a.size), when] + ([f"from {a.sender}"] if a.sender else []) \
                 + ([] if a.airdrop else ["not an AirDrop"])
             item = QListWidgetItem(f"{a.name}\n" + "  ·  ".join(bits))
             item.setData(Qt.ItemDataRole.UserRole, a.path)
@@ -305,7 +319,7 @@ class Watcher(QObject):
 
     def sync(self) -> None:
         """Starts or stops watching, as the setting says."""
-        on = _on(self.settings, WATCH_KEY, True)
+        on = _on(self.settings, WATCH_KEY, False)
         folder = str(ar.downloads())
         watching = self._fs.directories()
         if on and os.path.isdir(folder):
@@ -318,7 +332,7 @@ class Watcher(QObject):
             self._tick.stop()
 
     def check(self) -> None:
-        if not _on(self.settings, WATCH_KEY, True):
+        if not _on(self.settings, WATCH_KEY, False):
             return
 
         def work() -> None:

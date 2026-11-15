@@ -97,6 +97,8 @@ class _Board(QWidget):
         return -1
 
     def mousePressEvent(self, e) -> None:  # noqa: N802
+        if self.win.saving:
+            return
         i = self.cell_at(e.position())
         if e.button() == Qt.MouseButton.RightButton and i >= 0:
             menu = QMenu(self)
@@ -133,12 +135,12 @@ class _Board(QWidget):
 
     def mouseDoubleClickEvent(self, e) -> None:  # noqa: N802
         i = self.cell_at(e.position())
-        if i >= 0:
+        if i >= 0 and not self.win.saving:
             self.win.reset_view(i)
 
     def wheelEvent(self, e) -> None:  # noqa: N802
         i = self.cell_at(e.position())
-        if i >= 0:
+        if i >= 0 and not self.win.saving:
             self.win.zoom(i, 1.0 + e.angleDelta().y() / 900.0)
 
     def paintEvent(self, _e) -> None:  # noqa: N802
@@ -207,8 +209,10 @@ class CollageWindow(QDialog):
         left.addWidget(self.board, 1)
         row = QHBoxLayout()
         row.setContentsMargins(12, 8, 12, 10)
-        row.addWidget(_plain("Shuffle", self.shuffle, "The photos in another order"))
-        row.addWidget(_plain("Add Photos…", self.add_photos, "Up to nine"))
+        self.shuffle_btn = _plain("Shuffle", self.shuffle, "The photos in another order")
+        self.add_btn = _plain("Add Photos…", self.add_photos, "Up to nine")
+        row.addWidget(self.shuffle_btn)
+        row.addWidget(self.add_btn)
         self.note = QLabel("Drag a photo onto another to swap them; drag inside its cell to slide it; scroll to zoom.",
                            objectName="SheetSub")
         row.addWidget(self.note, 1)
@@ -221,7 +225,7 @@ class CollageWindow(QDialog):
         left.addLayout(row)
         root.addLayout(left, 1)
 
-        side = QWidget()
+        side = self.side = QWidget()
         side.setFixedWidth(400)
         s = QVBoxLayout(side)
         s.setContentsMargins(12, 12, 12, 12)
@@ -391,9 +395,10 @@ class CollageWindow(QDialog):
         if im is None:
             return
         l, t, r, b = collage.crop_box(im.size, (max(1, int(cell.width())), max(1, int(cell.height()))), was)
-        v = self.design.views[i]
-        v.x = min(1.0, max(0.0, was.x - moved.x() / cell.width() * (r - l) / im.width))
-        v.y = min(1.0, max(0.0, was.y - moved.y() / cell.height() * (b - t) / im.height))
+        size = (max(1, int(cell.width())), max(1, int(cell.height())))
+        self.design.views[i] = collage.clamped(collage.View(was.zoom, was.x - moved.x() / cell.width() * (r - l) / im.width,
+                                                            was.y - moved.y() / cell.height() * (b - t) / im.height),
+                                               im.size, size)
         self.draw()
 
     def zoom(self, i: int, factor: float) -> None:
@@ -472,15 +477,21 @@ class CollageWindow(QDialog):
     def ready(self) -> bool:
         return bool(self.paths) and all(im is not None for im in self.photos)
 
+    def _snapshot(self) -> collage.Design:
+        d = self.design
+        return collage.Design(d.layout, d.ratio, d.margin, d.spacing, d.corner, d.colour, d.blur_back,
+                              [collage.View(v.zoom, v.x, v.y) for v in d.views])
+
     def draw(self) -> None:
         self.save_btn.setEnabled(self.ready() and not self.saving)
         self.edit_btn.setEnabled(self.ready() and not self.saving)
+        self.side.setEnabled(not self.saving)
+        self.shuffle_btn.setEnabled(not self.saving)
+        self.add_btn.setEnabled(not self.saving)
         if not self.ready():
             return
         self.gen += 1
-        d = self.design
-        snap = collage.Design(d.layout, d.ratio, d.margin, d.spacing, d.corner, d.colour, d.blur_back,
-                              [collage.View(v.zoom, v.x, v.y) for v in d.views])
+        snap = self._snapshot()
         with self._cv:
             self._job = (self.gen, list(self.photos), snap)
             self._cv.notify()
@@ -516,14 +527,15 @@ class CollageWindow(QDialog):
         self.bar.show()
         self.note.setText("Saving…")
         self.draw()
-        d, paths, long_side, sig = self.design, list(self.paths), self.long_side(), self._sig
-        folder = os.path.dirname(paths[0])
+        d, paths, long_side, sig = self._snapshot(), list(self.paths), self.long_side(), self._sig
+        folder = os.path.dirname(paths[0])                 # (a snapshot: the window can't change what's being saved)
+        need = collage.needed_side(d, long_side)
 
         def work() -> None:
             try:
                 photos = []
                 for k, p in enumerate(paths):
-                    photos.append(collage.open_photo(p, 0))
+                    photos.append(collage.open_photo(p, need))
                     sig.progress.emit(0.6 * (k + 1) / len(paths))
                 im = collage.render(photos, d, long_side)
                 sig.progress.emit(0.85)
