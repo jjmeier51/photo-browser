@@ -177,15 +177,21 @@ class VideoUpscaleDialog(QDialog):
         todo, as_new = list(self.todo), self.as_new
 
         def work() -> None:
-            for i, path in enumerate(todo):
-                if self.stopping:
-                    break
-                new = as_new or os.path.splitext(path)[1].lower() not in IN_PLACE_EXT
-                out = vt.new_name(path, label) if new else None
-                outcome = vt.upscale(path, target, rate, out, progress=lambda f, i=i: self.bridge.progress.emit(i, f),
-                                     stop=lambda: self.stopping)
-                self.bridge.one.emit(i, outcome, out or path)
-            self.bridge.finished.emit()
+            try:
+                for i, path in enumerate(todo):
+                    if self.stopping:
+                        break
+                    new = as_new or os.path.splitext(path)[1].lower() not in IN_PLACE_EXT
+                    out = vt.new_name(path, label) if new else None
+                    try:
+                        outcome = vt.upscale(path, target, rate, out, progress=lambda f, i=i: self.bridge.progress.emit(i, f),
+                                             stop=lambda: self.stopping)
+                    except Exception as e:  # noqa: BLE001 — one video that throws is one that failed, not the end
+                        vt.problem = f"{type(e).__name__}: {e}"
+                        outcome = "failed"
+                    self.bridge.one.emit(i, outcome, out or path)
+            finally:
+                self.bridge.finished.emit()            # always: a sheet that never hears this can never be closed
         threading.Thread(target=work, daemon=True, name="video-upscale").start()
         self._progress(0, 0.0)
 

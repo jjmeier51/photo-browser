@@ -28,6 +28,8 @@ _lock = threading.Lock()
 _converting = threading.Semaphore(1)           # one WebM conversion at a time: each one uses every core
 _helper: list[str] | None | bool = False       # False = not looked for yet
 problem = ""                                   # why there's no helper, once it's been looked for
+said = ""                                      # what the last ffmpeg / helper run that failed said (for the window)
+MP4_AUDIO = {"aac", "alac", "mp3", "ac3", "eac3"}       # what an MP4 carries well; anything else is made AAC
 note = ""                                      # set once when neither tool is here
 
 
@@ -233,10 +235,24 @@ def _keep_attributes(src: str, dst: str) -> None:
 def _stream(cmd: list[str], on_line, stop, timeout: float) -> tuple[int, str]:
     """Runs `cmd`, handing each line it prints to `on_line`; `stop()` true kills it. → (exit code, last line)."""
     import time as _time
+    import children
+    global said
+    said = ""
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    except OSError:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace",
+                                **children.OWN_GROUP)
+    except OSError as e:
+        said = str(e)
         return 1, ""
+    children.track(proc)                         # not left running (writing a hidden half-made video) when the app quits
+    errors: list[str] = []
+
+    def hear() -> None:                          # why it failed, when it does — it used to be thrown away
+        for err in proc.stderr:
+            if err.strip():
+                errors.append(err.strip())
+                del errors[:-6]
+    threading.Thread(target=hear, daemon=True).start()
     last = ""
     started = _time.monotonic()
     killer_done = threading.Event()
@@ -244,10 +260,7 @@ def _stream(cmd: list[str], on_line, stop, timeout: float) -> tuple[int, str]:
     def watch() -> None:
         while not killer_done.wait(0.3):
             if (stop is not None and stop()) or _time.monotonic() - started > timeout:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+                children.stop(proc, 1.0)
                 return
     threading.Thread(target=watch, daemon=True).start()
     try:
@@ -259,6 +272,9 @@ def _stream(cmd: list[str], on_line, stop, timeout: float) -> tuple[int, str]:
     finally:
         code = proc.wait()
         killer_done.set()
+        children.forget(proc)
+    if code != 0:
+        said = " — ".join(errors[-2:])[-400:]
     return code, last
 
 
@@ -273,19 +289,24 @@ def upscale(path: str, target: int = TARGET, fps: float | None = None, out: str 
 
     AVFoundation does it where the helper is built (H.264 at the highest quality; HEVC for HDR, which stays
     HDR); else ffmpeg (Lanczos, x264 CRF 17 — or 10-bit HEVC with the HDR curve kept for an HDR source)."""
+    global problem
     st = os.stat(path)
-    shown = size(path)
+    shown = size(path) or _ffprobe_size(path)          # (the helper can't read a WebM or an MKV; ffprobe can)
     if shown and min(shown) >= target:
         return "skipped"
     tool = available()
-    folder, name = os.path.split(path)
+    if not tool:
+        return "failed"
     final = out or path
-    tmp_ext = ".mov" if tool == "helper" else (os.path.splitext(final)[1].lower() if
-                                              os.path.splitext(final)[1].lower() in (".mp4", ".mov", ".m4v") else ".mp4")
-    tmp = os.path.join(os.path.dirname(final), f".{os.path.basename(final)}.upscaling{tmp_ext}")
+    ext = os.path.splitext(final)[1].lower()
+    ext = ext if ext in (".mp4", ".mov", ".m4v") else ".mp4"
+    stem = os.path.join(os.path.dirname(final), f".{os.path.basename(final)}.upscaling")
     say = progress or (lambda _f: None)
-    outcome = "failed"
-    if tool == "helper":
+    stopped = lambda: stop is not None and stop()      # noqa: E731
+
+    def by_helper() -> tuple[str, str]:
+        tmp = stem + ".mov"                            # AVFoundation writes QuickTime
+
         def line(text: str) -> None:
             if text.startswith("progress "):
                 try:
@@ -293,10 +314,24 @@ def upscale(path: str, target: int = TARGET, fps: float | None = None, out: str 
                 except (ValueError, IndexError):
                     pass
         _code, last = _stream([*helper(), "upscale", path, tmp, str(target), str(fps or 0), "progress"], line, stop, 6 * 3600)
-        outcome = last if last in ("upscaled", "skipped", "failed") else "failed"
-    elif tool == "ffmpeg":
-        if shown is None:
-            return "failed"
+        got = last if last in ("upscaled", "skipped", "failed") else "failed"
+        if got == "upscaled" and ext != ".mov" and ffmpeg() and not stopped():
+            packed = stem + ext                        # a .mp4 name gets an MP4 inside: repacked, nothing re-encoded
+            r = _run([ffmpeg(), "-y", "-v", "error", "-i", tmp, "-map", "0", "-c", "copy", "-map_metadata", "0",
+                      "-movflags", "+faststart+use_metadata_tags", packed], 3600)
+            if r is not None and r.returncode == 0 and os.path.isfile(packed) and os.path.getsize(packed) > 0:
+                _remove(tmp)
+                tmp = packed
+            else:
+                _remove(packed)
+        return got, tmp
+
+    def by_ffmpeg() -> tuple[str, str]:
+        tmp = stem + ext
+        if shown is None or not ffmpeg():
+            global said
+            said = said or ("ffmpeg isn't installed" if not ffmpeg() else "it can't be read as a video")
+            return "failed", tmp
         info = probe(path)
         total = info.get("duration") or 0
         hdr = info.get("transfer") in ("smpte2084", "arib-std-b67")
@@ -309,6 +344,9 @@ def upscale(path: str, target: int = TARGET, fps: float | None = None, out: str 
         else:
             codecs = (["-c:v", "libx264", "-crf", "17", "-preset", "medium", "-pix_fmt", "yuv420p"],
                       ["-c:v", "h264_videotoolbox", "-q:v", "75", "-pix_fmt", "yuv420p"])
+        sound = audio_codec(path)                      # Opus, Vorbis or PCM don't go into an MP4 as they are
+        keep = not sound or sound in MP4_AUDIO or (ext == ".mov" and sound.startswith("pcm"))
+        audio = ["-c:a", "copy"] if keep else ["-c:a", "aac", "-b:a", "192k"]
 
         def line(text: str) -> None:
             if total and text.startswith("out_time_ms="):
@@ -318,26 +356,86 @@ def upscale(path: str, target: int = TARGET, fps: float | None = None, out: str 
                     pass
         for codec in codecs:
             code, _last = _stream([ffmpeg(), "-y", "-v", "error", "-nostats", "-progress", "pipe:1", "-i", path,
-                                   "-map", "0:v:0", "-map", "0:a?", "-vf", vf, *codec, "-c:a", "copy",
+                                   "-map", "0:v:0", "-map", "0:a?", "-vf", vf, *codec, *audio,
                                    "-map_metadata", "0", "-movflags", "+faststart+use_metadata_tags", tmp], line, stop, 12 * 3600)
             if code == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
-                outcome = "upscaled"
+                return "upscaled", tmp
+            if stopped():
                 break
-            if stop is not None and stop():
-                break
-    else:
-        return "failed"
-    if stop is not None and stop():
+        return "failed", tmp
+
+    outcome, tmp = by_helper() if tool == "helper" else by_ffmpeg()
+    if outcome == "failed" and tool == "helper" and ffmpeg() and not stopped():
+        _remove(tmp)                                   # what AVFoundation can't open (WebM, MKV, AVI), ffmpeg can
+        outcome, tmp = by_ffmpeg()
+    if stopped():
         outcome = "stopped"
     if outcome != "upscaled" or not os.path.isfile(tmp):
-        if os.path.exists(tmp):
-            os.remove(tmp)
+        for leftover in (stem + ".mov", stem + ext, tmp):
+            _remove(leftover)
+        if outcome not in ("skipped", "stopped") and said:
+            problem = said                             # why, for the window
         return outcome if outcome in ("skipped", "stopped") else "failed"
     _keep_attributes(path, tmp)
     os.replace(tmp, final)
-    os.utime(final, (st.st_atime, st.st_mtime))
+    _put_dates(final, st)
     say(1.0)
     return "upscaled"
+
+
+def _remove(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _put_dates(path: str, st: os.stat_result) -> None:
+    """The original's created and modified dates onto what replaced it — together (clone_drive.put_dates): on a
+    Mac a modified date set by itself afterwards drags the created date with it."""
+    try:
+        import clone_drive
+        clone_drive.put_dates(path, st)
+    except Exception:  # noqa: BLE001 — not a Mac, or the call isn't there: the modified date at least
+        try:
+            os.utime(path, (st.st_atime, st.st_mtime))
+        except OSError:
+            pass
+
+
+def _ffprobe(path: str, *entries: str) -> dict:
+    ff = ffmpeg()
+    if not ff:
+        return {}
+    exe = os.path.join(os.path.dirname(ff), os.path.basename(ff).replace("ffmpeg", "ffprobe"))
+    r = _run([exe, "-v", "error", *entries, "-of", "json", path], 120)
+    try:
+        return json.loads(r.stdout)
+    except (AttributeError, ValueError):
+        return {}
+
+
+def _ffprobe_size(path: str) -> tuple[int, int] | None:
+    """The size the video is shown at, by ffprobe — for what the helper can't read."""
+    doc = _ffprobe(path, "-select_streams", "v:0", "-show_entries",
+                   "stream=width,height:stream_side_data=rotation:stream_tags=rotate")
+    try:
+        s0 = doc["streams"][0]
+        w, h = int(s0["width"]), int(s0["height"])
+        rot = abs(int(float((s0.get("tags") or {}).get("rotate") or
+                            next((d.get("rotation") for d in s0.get("side_data_list") or [] if "rotation" in d), 0))))
+        return (h, w) if rot % 180 == 90 else (w, h)
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None
+
+
+def audio_codec(path: str) -> str:
+    """The first sound track's codec ("aac", "opus", "pcm_s16le"…), "" when there's none or it can't be told."""
+    doc = _ffprobe(path, "-select_streams", "a:0", "-show_entries", "stream=codec_name")
+    try:
+        return str(doc["streams"][0].get("codec_name") or "")
+    except (KeyError, IndexError, TypeError):
+        return ""
 
 
 # ----------------------------------------------------------------------------- turning a video
