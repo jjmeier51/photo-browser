@@ -151,8 +151,8 @@ def single(path: str, new_name: str) -> Rename:
     if len(new_name.encode("utf-8")) > 255:
         raise ValueError("That name is too long.")
     target = os.path.join(folder, new_name)
-    same_file = os.path.basename(path).casefold() == new_name.casefold()      # only its capitals change
-    if os.path.lexists(target) and not same_file:
+    same_file = _key(os.path.basename(path)) == _key(new_name)      # only its capitals (or how an accent is written) change
+    if os.path.lexists(target) and not same_file and not _same_item(target, path):
         raise ValueError(f"“{new_name}” is already taken in this folder.")
     return Rename(os.path.abspath(path), target, os.path.isdir(path), target)
 
@@ -230,6 +230,19 @@ def ordered(items: list[Facts], order: str, descending: bool = False) -> list[Fa
     return out[::-1] if descending else out
 
 
+def _key(path: str) -> str:
+    """A path as the drive compares names: capitals and the two ways of writing an accented letter (macOS
+    hands back "é" as e + accent; a typed or pasted name has it as one letter) are the same name."""
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def _same_item(a: str, b: str) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 def clean_name(name: str, exfat: bool) -> str:
     """What a pattern made, as a name a folder can hold: no "/" or ":" (nor exFAT's others), no leading or
     trailing spaces or trailing dots."""
@@ -276,8 +289,9 @@ def bulk_plan(items: list[Facts], pattern: str, order: str = "capture", descendi
     problems = [f"“{{{u}}}” isn't something a name can be made from." for u in unknown]
     if not pattern.strip():
         problems.append("Type what the names should be.")
-    sources = {os.path.join(os.path.dirname(f.path), os.path.basename(f.path)).casefold() for f in items}
+    sources = {_key(f.path) for f in items}
     taken: dict[str, int] = {}
+    listing: dict[str, set[str]] = {}          # each folder read once per plan, not one look per item per keystroke
     rows: list[tuple[Facts, str, str]] = []
     renames: list[Rename] = []
     clashes = 0
@@ -285,6 +299,10 @@ def bulk_plan(items: list[Facts], pattern: str, order: str = "capture", descendi
         folder = os.path.dirname(f.path)
         if folder not in exfat_cache:
             exfat_cache[folder] = spare_folders.on_exfat(folder)
+            try:
+                listing[folder] = {_key(n) for n in os.listdir(folder)}
+            except OSError:
+                listing[folder] = set()
         stem = clean_name(render(pattern, f, start + i, digits, find, replace, match_case), exfat_cache[folder])
         wrong = ""
         if not stem:
@@ -292,25 +310,28 @@ def bulk_plan(items: list[Facts], pattern: str, order: str = "capture", descendi
         elif stem.startswith("."):
             wrong = "the name would be hidden"
         name = stem + f.ext
-        key = os.path.join(folder, name).casefold()
+        key = _key(os.path.join(folder, name))
         if not wrong:
             k = taken.get(key, 0) + 1
             taken[key] = k
             if k > 1:                                      # the same name twice in this batch: numbered apart
                 while True:
                     name = f"{stem} {k}{f.ext}"
-                    if os.path.join(folder, name).casefold() not in taken:
+                    if _key(os.path.join(folder, name)) not in taken:
                         break
                     k += 1
-                taken[os.path.join(folder, name).casefold()] = 1
+                taken[_key(os.path.join(folder, name))] = 1
             if len(name.encode("utf-8")) > 255:
                 wrong = "the name would be too long"
         target = os.path.join(folder, name)
-        if not wrong and target != f.path and target.casefold() not in sources and os.path.lexists(target):
+        nfc = unicodedata.normalize("NFC", target)
+        changes = nfc != unicodedata.normalize("NFC", f.path)      # (the same name written the other way is no change)
+        if (not wrong and changes and _key(target) not in sources and _key(name) in listing[folder]
+                and os.path.lexists(target) and not _same_item(target, f.path)):
             wrong = "that name is taken by something that isn't being renamed"
             clashes += 1
         rows.append((f, name, wrong))
-        if not wrong and target != f.path:
+        if not wrong and changes:
             renames.append(Rename(f.path, target, f.is_dir, target))
     bad = sum(1 for _f, _n, w in rows if w)
     if clashes:
@@ -322,62 +343,144 @@ def bulk_plan(items: list[Facts], pattern: str, order: str = "capture", descendi
                     sum(1 for f in items if not f.has_capture and not f.is_dir) if uses_date else 0)
 
 
+def _units(plan: list[Rename]) -> list[tuple[str, list[Rename]]]:
+    """The batch as runs that can each be made one rename at a time: ("path", [renames in an order in which
+    every new name is free when its turn comes]) or ("ring", [renames whose names go round in a circle — the
+    last one's new name is the first one's old one]). Each new name is at most one item's old name, so the
+    batch is nothing but such paths and rings. (A loop, not recursion: a path can be thousands long.)"""
+    waiting = {_key(r.old): r for r in plan}
+    units: list[tuple[str, list[Rename]]] = []
+    for first in plan:
+        if _key(first.old) not in waiting:
+            continue
+        run, seen, r, ring = [], set(), first, False
+        while True:
+            key = _key(r.old)
+            run.append(r)
+            seen.add(key)
+            want = _key(r.new)
+            holder = waiting.get(want)
+            if holder is None or want == key:              # its new name is free (or is its own, re-capitalised)
+                break
+            if want in seen:                               # …is held by one of this run: a ring
+                ring = True
+                if holder is not run[0]:                   # (two items after one name: only the ring itself is one)
+                    at = run.index(holder)
+                    units.append(("path", run[:at][::-1]))  # those leading into it wait their turn — and will be told no
+                    for x in run[:at]:
+                        waiting.pop(_key(x.old), None)
+                    run = run[at:]
+                break
+            r = holder
+        for x in run:
+            waiting.pop(_key(x.old), None)
+        units.append(("ring", run) if ring else ("path", run[::-1]))
+    return units
+
+
 def apply_bulk(plan: list[Rename], tags=None, progress=lambda done, total: None, stop=lambda: False) -> Result:
-    """Makes a batch of renames whose names may trade places ("2.jpg" becomes "1.jpg" while "1.jpg" becomes
-    "2.jpg"). When no new name is another item's old one, it's `apply`. Otherwise in two steps: every item to
-    a passing name ("renaming-<id>-<n>.ext"), then each to its new one — and an item whose new name turns out
-    to be held (something failed, or was stopped) goes back to the name it had, so nothing is ever left under a
-    passing name or lost. Tags, labels and the journal follow the same two steps (a passing name is a step
-    for them too — an exchange can't be told in one)."""
-    old_names = {r.old.casefold() for r in plan}
-    if not any(r.new.casefold() in old_names and r.new.casefold() != r.old.casefold() for r in plan):
+    """Makes a batch of renames whose names may be each other's ("2.jpg" becomes "1.jpg" while "3.jpg" becomes
+    "2.jpg"; or two that trade places). When no new name is another item's old one, it's `apply`. Otherwise the
+    renames are made in an order in which each new name is free when its turn comes — one rename, and one line
+    in the journal, per item. Only names that go round in a circle (a swap) need a passing name
+    ("renaming-<id>-<n>.ext") for one of them; if anything in such a circle can't be renamed, the whole circle is
+    put back as it was, so nothing is left under a passing name. An item whose new name is still held (something
+    before it failed, or the run was stopped) keeps the name it had. Stop is heeded between renames, never in
+    the middle of a circle."""
+    old_names = {_key(r.old) for r in plan}
+    if not any(_key(r.new) in old_names and _key(r.new) != _key(r.old) for r in plan):
         return apply(plan, tags, progress, stop)
     token = uuid.uuid4().hex[:8]
-    staged: list[tuple[Rename, str]] = []
+    steps: list[Rename] = []                   # every rename made, in the order made — what tags and the journal follow
+    done: list[Rename] = []
     failed: list[tuple[Rename, str]] = []
-    total = len(plan) * 2
-    for i, r in enumerate(plan):
-        if stop():
-            break
-        passing = os.path.join(os.path.dirname(r.old), f"renaming-{token}-{i}{os.path.splitext(r.old)[1] if not r.is_dir else ''}")
+    total, count = len(plan), 0
+    HELD = "its new name is in use — left as it was"
+
+    def tick() -> None:
+        nonlocal count
+        count += 1
+        if count % 50 == 0:
+            progress(count, total)
+
+    def one(r: Rename) -> str:
+        """"" when renamed, else why not."""
         try:
-            os.rename(r.old, passing)
-            staged.append((r, passing))
+            _rename(r.old, r.new)
+            return ""
+        except FileExistsError:
+            return HELD
         except OSError as e:
-            failed.append((r, e.strerror or str(e)))
-        if i % 50 == 0:
-            progress(i + 1, total)
-    # Which staged items can't have their new name: it's held by something that didn't move (a file outside the
-    # batch, an item that couldn't be staged, or stopped before its turn) — and then, in turn, whoever was to take
-    # the name such an item is going back to. Those go back to the names they had; the rest go on.
-    back: set[int] = {i for i, (r, _p) in enumerate(staged) if os.path.lexists(r.new)}
-    grew = True
-    while grew:
-        grew = False
-        reclaimed = {staged[i][0].old.casefold() for i in back}
-        for i, (r, _p) in enumerate(staged):
-            if i not in back and r.new.casefold() in reclaimed:
-                back.add(i)
-                grew = True
-    done: list[tuple[Rename, str]] = []
-    for i, (r, passing) in enumerate(staged):
+            return e.strerror or str(e)
+
+    stopped = False
+    for n, (kind, run) in enumerate(_units(plan)):
+        if kind == "path":
+            for r in run:
+                stopped = stopped or stop()
+                if stopped:
+                    break                      # the rest keep their names; nothing is half-done
+                why = one(r)
+                if why:
+                    failed.append((r, why))
+                else:
+                    steps.append(Rename(r.old, r.new, r.is_dir, r.new))
+                    done.append(r)
+                tick()
+            continue
+        stopped = stopped or stop()
+        if stopped:
+            continue
+        # A ring: the last item steps aside, the others move up one by one into the name just left, and the
+        # last takes the first one's old name. Anything going wrong → everything back, in reverse.
+        last = run[-1]
+        passing = os.path.join(os.path.dirname(last.old),
+                               f"renaming-{token}-{n}{os.path.splitext(last.old)[1] if not last.is_dir else ''}")
         try:
-            if i in back:
-                os.rename(passing, r.old)
-                failed.append((r, "its new name is in use — left as it was"))
-            else:
-                if os.path.lexists(r.new):
-                    raise FileExistsError(17, "its new name is still in use", r.new)
-                os.rename(passing, r.new)
-                done.append((r, passing))
+            os.rename(last.old, passing)
         except OSError as e:
-            failed.append((r, f"it's now “{os.path.basename(passing)}” ({e.strerror or e}) — rename it by hand"))
-        if i % 50 == 0:
-            progress(len(plan) + i + 1, total)
+            failed.extend((r, e.strerror or str(e)) if r is last else (r, HELD) for r in run)
+            continue
+        moved: list[Rename] = []
+        why = ""
+        for r in run[-2::-1]:                  # the one before the last first: its new name is the one just left
+            why = one(r)
+            if why:
+                break
+            moved.append(r)
+        if not why:
+            try:
+                if os.path.lexists(last.new):
+                    raise FileExistsError(17, "its new name is still in use", last.new)
+                os.rename(passing, last.new)
+            except OSError as e:
+                why = e.strerror or str(e)
+        if not why:
+            steps.append(Rename(last.old, passing, last.is_dir, passing))
+            steps.extend(Rename(r.old, r.new, r.is_dir, r.new) for r in moved)
+            steps.append(Rename(passing, last.new, last.is_dir, last.new))
+            done.extend(run)
+        else:
+            stuck = ""
+            for r in moved[::-1]:              # back the way they came: each old name is free again in this order
+                try:
+                    os.rename(r.new, r.old)
+                except OSError as e:
+                    stuck = stuck or f"“{os.path.basename(r.old)}” is now “{os.path.basename(r.new)}” ({e.strerror or e})"
+            try:
+                if os.path.lexists(last.old):
+                    raise FileExistsError(17, "its old name is in use", last.old)
+                os.rename(passing, last.old)
+            except OSError as e:
+                stuck = stuck or f"“{os.path.basename(last.old)}” is now “{os.path.basename(passing)}” ({e.strerror or e})"
+            for r in run:
+                failed.append((r, f"{stuck} — rename it by hand" if stuck else
+                               f"couldn't be renamed ({why}) — left as it was" if r not in moved and r is not last
+                               else "left as it was (another name in the same swap couldn't be changed)"))
+        for _ in run:
+            tick()
     progress(total, total)
-    if done:
-        steps = [Rename(r.old, passing, r.is_dir, passing) for r, passing in done] + \
-                [Rename(passing, r.new, r.is_dir, r.new) for r, passing in done]
+    if steps:
         if tags is not None:
             try:
                 tags.renamed([(x.old, x.new) for x in steps])
@@ -385,7 +488,7 @@ def apply_bulk(plan: list[Rename], tags=None, progress=lambda done, total: None,
                 pass
         _folder_choices([(x.old, x.new) for x in steps if x.is_dir])
         note_renames(steps)
-    return Result([r for r, _p in done], failed, [])
+    return Result(done, failed, [])
 
 
 # ----------------------------------------------------------------------------- a copy beside the original
@@ -457,6 +560,13 @@ def drive_base(path: str) -> str | None:
     return None
 
 
+def _when(entry: dict) -> float:
+    try:
+        return float(entry.get("at") or 0)
+    except (TypeError, ValueError):                # a journal someone edited: an entry with no usable date is old
+        return 0.0
+
+
 def note_renames(done: list[Rename]) -> int:
     """Adds the renames to their drive's journal (module notes). Items on a drive the app has never opened
     (no metadata folder) have nothing to note. Returns how many were noted."""
@@ -482,9 +592,11 @@ def note_renames(done: list[Rename]) -> int:
             doc = {}
         old = doc.get("renames") if isinstance(doc, dict) and doc.get("format") == FORMAT else []
         floor = now - KEEP_DAYS * 86400
-        kept = [e for e in (old if isinstance(old, list) else [])
-                if isinstance(e, dict) and float(e.get("at") or 0) >= floor]
-        out = {"format": FORMAT, "version": 1, "by": app_identity.APP_NAME, "updated": now, "renames": (kept + entries)[-KEEP:]}
+        kept = [e for e in (old if isinstance(old, list) else []) if isinstance(e, dict) and _when(e) >= floor]
+        # Old entries make room; this batch is never cut — half a batch would send tags to the wrong names.
+        room = max(0, KEEP - len(entries))
+        out = {"format": FORMAT, "version": 1, "by": app_identity.APP_NAME, "updated": now,
+               "renames": (kept[-room:] if room else []) + entries}
         data = json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         try:
             if spare_folders.on_exfat(str(file.parent)):

@@ -30,6 +30,11 @@ import rename_tools as rt
 SHOWN = 400                 # names listed (the count says how many there are)
 
 
+def _broke(where: str, e: Exception) -> rt.Result:
+    """What a run that stopped on an unexpected error reports: nothing more is renamed, and the window says so."""
+    return rt.Result([], [(rt.Rename(where, where, True, where), f"stopped by an error ({type(e).__name__}: {e})")], [])
+
+
 class _Bridge(QObject):
     planned = Signal(object, object, int)       # (plan, skipped, generation)
     progress = Signal(int, int)
@@ -143,8 +148,11 @@ class LeadingSpacesDialog(QDialog):
         plan, skipped = self.plan, self.skipped
 
         def work() -> None:
-            res = rt.apply(plan, self.tags, progress=lambda d, t: self.bridge.progress.emit(d, t),
-                           stop=lambda: self.stopping, skipped=skipped)
+            try:
+                res = rt.apply(plan, self.tags, progress=lambda d, t: self.bridge.progress.emit(d, t),
+                               stop=lambda: self.stopping, skipped=skipped)
+            except Exception as e:  # noqa: BLE001 — the sheet must hear the end, or it can never be closed
+                res = _broke(self.folder, e)
             self.bridge.finished.emit(res)
         threading.Thread(target=work, daemon=True, name="rename").start()
 
@@ -390,8 +398,11 @@ class BulkRenameDialog(QDialog):
         renames = list(self.plan.renames)
 
         def work() -> None:
-            res = rt.apply_bulk(renames, self.tags, progress=lambda d, t: self.bridge.progress.emit(d, t),
-                                stop=lambda: self.stopping)
+            try:
+                res = rt.apply_bulk(renames, self.tags, progress=lambda d, t: self.bridge.progress.emit(d, t),
+                                    stop=lambda: self.stopping)
+            except Exception as e:  # noqa: BLE001 — the sheet must hear the end, or it can never be closed
+                res = _broke(os.path.dirname(renames[0].old) if renames else "", e)
             self.bridge.finished.emit(res)
         threading.Thread(target=work, daemon=True, name="bulk-rename").start()
 
