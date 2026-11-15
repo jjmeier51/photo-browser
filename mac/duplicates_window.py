@@ -9,14 +9,22 @@ Trash together. Nothing goes without that button and its confirmation.
   millisecond, with the **Oldest** and **Newest** marked (as on the iPhone). A click ticks a copy for the
   Trash (red ring); a double-click opens the group in the viewer, at that copy, to look closely and flip
   between them. With subfolders included, each tile says which folder its copy is in.
-- **Per group**: View, Not Duplicates (never listed again), and a menu — Select All But One (keeps the copy
-  `duplicates.keeper` picks: most tags, a plain name, the oldest), Select All Copies, Deselect, Show in Safe
-  Finder.
-- **For the lot**: **Select Extra Copies** ticks every copy but one in each *identical* group — the safe bulk
-  pick, since those copies are the same file — and the bar shows how many are ticked and how much space
-  they'd free. **Move to Trash** asks first, and warns when a group would lose every copy.
-- **Include subfolders** and **Leave out “Frame” files** (video-frame screenshots: hundreds of alike images
-  that are never duplicates) are remembered; Rescan looks again (fast — the photos' fingerprints are kept).
+- **Per group**: View, Not Duplicates (never listed again), and a menu — Select All But One, Select All
+  Copies, Deselect, Show in Safe Finder. Right-click a copy: Keep Only This One, View, Show in Safe Finder.
+- **Which copy is kept** is a rule, chosen in the bar (`duplicates.KEEP_RULES`: the best copy, the largest file,
+  the highest resolution, the oldest, the newest) with an optional **preferred folder** — copies in it are kept
+  over copies elsewhere. The copy the rule would keep wears a green **Keep** mark in every group, so the rule
+  is seen before anything is ticked.
+- **For the lot**: **Select Extra Copies** ticks every copy but the kept one — in the *identical* groups (the
+  safe bulk pick: those copies are the same file), in all exact groups, or in every group shown — and the bar
+  shows how many are ticked and how much space they'd free. **Move to Trash** asks first, warns when a group
+  would lose every copy, and (unless unticked) gives each kept copy the tags, Favorite and To AI of the copies
+  that go, so nothing said about a photo is lost with its duplicate.
+- **What's looked at**: **Include subfolders**, **Leave out “Frame” files** (video-frame screenshots: hundreds
+  of alike images that are never duplicates), **Other files too** (documents, archives — by their bytes) and how
+  strict **Look-alikes** are; several folders can be looked at as one (select them, Find Duplicates). All
+  remembered; Rescan looks again (fast — the photos' fingerprints are kept). Groups sort by space, name, number
+  of copies or folder.
 
 Safe Finder hands the window what it needs (`DupHooks`): thumbnails, the trash, tags, the viewer and
 revealing a file — the window itself never deletes anything.
@@ -32,15 +40,17 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLabel, QLayout, QMenu, QMessageBox,
-                               QProgressBar, QPushButton, QScrollArea, QSizePolicy, QToolButton, QVBoxLayout,
-                               QWidget, QWidgetItem)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLayout,
+                               QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QToolButton,
+                               QVBoxLayout, QWidget, QWidgetItem)
 
 import duplicates as D
 
 PAGE = 60                                          # groups shown at a time ("Show More" for the next)
 TILE_W, PIC = 150, 150
 KIND_COLOR = {"exact": "#30D158", "similar": "#0A84FF", "name": "#FF9F0A"}
+SORTS = {"space": "Most space first", "copies": "Most copies first", "name": "By name", "folder": "By folder"}
+SCOPES = {"identical": "In Identical Groups", "exact": "In All Exact Groups", "shown": "In Every Group Shown"}
 
 
 @dataclass
@@ -52,6 +62,7 @@ class DupHooks:
     view: Callable[[list[str], str], None] | None = None     # (the group's files, the one to start at)
     reveal: Callable[[str], None] | None = None
     changed: Callable[[], None] | None = None                # files went: the panes look again
+    inherit: Callable[[str, list[str]], None] | None = None  # (kept copy, copies going): tags and labels move over
 
 
 def human(n: float) -> str:
@@ -125,6 +136,7 @@ class Tile(QWidget):
     toggled = Signal(str)
     opened = Signal(str)
     restored = Signal(str, bool)                    # a double-click: the tick back as it was before its clicks
+    only = Signal(str)                              # Keep Only This One
 
     def __init__(self, path: str, card: "Card") -> None:
         super().__init__(card)
@@ -134,6 +146,8 @@ class Tile(QWidget):
         self.before_press = False
         self.marker = ""                            # "oldest" | "newest"
         self.when: float | None = None
+        self.keep = False                           # the copy the keep rule would keep
+        self.pixels: tuple[int, int] = (0, 0)
         self.folder_note = ""
         try:
             self.size = os.path.getsize(path)
@@ -152,6 +166,16 @@ class Tile(QWidget):
         # a double-click only opens: the tick goes back to how it was before the first of its clicks
         self.restored.emit(self.path, self.before_press)
         self.opened.emit(self.path)
+
+    def contextMenuEvent(self, e) -> None:  # noqa: N802
+        menu = QMenu(self)
+        menu.addAction("Keep Only This One", lambda: self.only.emit(self.path))
+        menu.addAction("View", lambda: self.opened.emit(self.path))
+        reveal = self.card.win.hooks.reveal
+        if reveal is not None:
+            menu.addAction("Show in Safe Finder", lambda: reveal(self.path))
+        menu.exec(e.globalPos())
+        menu.deleteLater()
 
     def paintEvent(self, _e) -> None:  # noqa: N802
         theme = self.card.win.theme
@@ -199,6 +223,16 @@ class Tile(QWidget):
             p.drawRoundedRect(pill, pill.height() / 2, pill.height() / 2)
             p.setPen(QColor("white"))
             p.drawText(pill, Qt.AlignmentFlag.AlignCenter, text)
+        if self.keep and not self.selected:         # what the keep rule would keep, said before anything is ticked
+            p.setFont(small)
+            fm = QFontMetrics(small)
+            pill = QRectF(0, 0, fm.horizontalAdvance("Keep") + 12, fm.height() + 4)
+            pill.moveBottomRight(pic.bottomRight() - QPoint(6, 6))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#30D158"))
+            p.drawRoundedRect(pill, pill.height() / 2, pill.height() / 2)
+            p.setPen(QColor("white"))
+            p.drawText(pill, Qt.AlignmentFlag.AlignCenter, "Keep")
         # the tick
         d = 24
         ring = QRectF(TILE_W - d - 6, 6, d, d)
@@ -231,6 +265,8 @@ class Tile(QWidget):
         if self.marker and self.when:
             lt = time.localtime(self.when)
             detail = time.strftime("%b %d, %Y %H:%M:%S", lt) + f".{int((self.when % 1) * 1000):03d}"
+        elif self.pixels[0]:
+            detail = f"{self.pixels[0]:,} × {self.pixels[1]:,} · {human(self.size)}"
         else:
             detail = human(self.size)
         p.drawText(QRect(2, PIC + 6 + fm.height(), TILE_W - 4, sfm.height()), Qt.AlignmentFlag.AlignLeft,
@@ -298,6 +334,7 @@ class Card(QFrame):
             t.toggled.connect(self.win.toggle)
             t.restored.connect(lambda p, on: self.win.set_selected([p], on))
             t.opened.connect(lambda p: self.win.view(self.group.paths, p))
+            t.only.connect(lambda p: self.win.keep_only(self, p))
             self.flow.addWidget(t)
             self.tiles[path] = t
         v.addWidget(holder)
@@ -316,12 +353,17 @@ class Card(QFrame):
         bits.append(g.types)
         if g.kind == "exact" and g.identical is False:
             bits.append("same size, different bytes")
-        self.facts.setText(" · ".join(bits))
+        if g.alike:
+            bits.append(g.alike)
+        self.facts.setText(" · ".join(b for b in bits if b))
         dates = self.win.dates
         marks = D.ages(g.paths, dates)
+        keep = self.win.keeper(g.paths)
         for p, t in self.tiles.items():
             t.marker = marks.get(p, "")
             t.when = dates.get(p)
+            t.pixels = self.win.pixels.get(p, (0, 0))
+            t.keep = p == keep
             t.selected = p in self.win.selected
             t.update()
 
@@ -330,19 +372,33 @@ class _Bridge(QObject):
     progress = Signal(str, int, int)
     scanned = Signal(object)                        # the groups
     identical = Signal(object)                      # a group whose Identical check finished
-    dated = Signal(object)                          # {path: date}
+    dated = Signal(object)                          # ({path: date}, {path: (width, height)})
 
 
 class DuplicatesWindow(QWidget):
-    def __init__(self, folder: str, hooks: DupHooks, theme, parent=None) -> None:
+    def __init__(self, folder: str | list[str], hooks: DupHooks, theme, parent=None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.folder = folder
+        self.folders = [folder] if isinstance(folder, str) else list(folder)
+        # what tiles' "in <folder>" notes are told from: the folder, or what several have in common
+        self.folder = self.folders[0] if len(self.folders) == 1 else os.path.commonpath(self.folders)
         self.hooks = hooks
         self.theme = theme
         self.settings = QSettings("PhotoBrowser", "SafeFinder")
         self.recursive = str(self.settings.value("duplicates/subfolders", "false")) == "true"
         self.exclude_frames = str(self.settings.value("duplicates/exclude_frames", "false")) == "true"
+        self.all_files = str(self.settings.value("duplicates/all_files", "false")) == "true"
+        self.strictness = str(self.settings.value("duplicates/strictness", "normal"))
+        if self.strictness not in D.STRICTNESS:
+            self.strictness = "normal"
+        self.sort = str(self.settings.value("duplicates/sort", "space"))
+        if self.sort not in SORTS:
+            self.sort = "space"
+        self.keep_rule = str(self.settings.value("duplicates/keep", "best"))
+        if self.keep_rule not in D.KEEP_RULES:
+            self.keep_rule = "best"
+        self.prefer: str | None = None              # a folder whose copies are kept over copies elsewhere
+        self.pixels: dict[str, tuple[int, int]] = {}
         self.not_dupes = D.NotDuplicates()
         self.groups: list[D.Group] = []
         self.selected: set[str] = set()
@@ -364,7 +420,8 @@ class DuplicatesWindow(QWidget):
             self._repaint.setInterval(120)
             self._repaint.timeout.connect(self._repaint_tiles)
             hooks.thumbs_ready.connect(self._repaint.start)
-        self.setWindowTitle(f"Find Duplicates — {os.path.basename(folder) or folder}")
+        self.setWindowTitle(f"Find Duplicates — {os.path.basename(self.folder) or self.folder}" if len(self.folders) == 1
+                            else f"Find Duplicates — {len(self.folders)} folders")
         self.resize(980, 760)
         self._build()
         QTimer.singleShot(0, self.rescan)
@@ -379,7 +436,8 @@ class DuplicatesWindow(QWidget):
             QToolButton#DupMore::menu-indicator {{ image: none; width: 0; }}
             QToolButton#DupFilter {{ border: 1px solid {t.button_border}; border-radius: 12px; padding: 3px 11px;
                                      background: {t.button}; }}
-            QToolButton#DupFilter:checked {{ background: {t.accent}; color: white; border-color: {t.accent}; }}
+            QToolButton#DupFilter:checked {{ background: {t.accent}; color: {getattr(t, "on_accent", "white")};
+                                             border-color: {t.accent}; }}
             QScrollArea#DupScroll, QWidget#DupBody {{ background: {t.content}; border: none; }}
             #DupBar {{ background: {t.header}; border-top: 1px solid {t.border}; }}
             #DupTop {{ background: {t.header}; border-bottom: 1px solid {t.border}; }}
@@ -396,7 +454,9 @@ class DuplicatesWindow(QWidget):
         title = QLabel("Find Duplicates")
         title.setObjectName("SheetTitle")
         row.addWidget(title)
-        self.where = QLabel(self.folder)
+        self.where = QLabel(self.folder if len(self.folders) == 1 else
+                            ", ".join(os.path.basename(f) or f for f in self.folders))
+        self.where.setToolTip("\n".join(self.folders))
         self.where.setObjectName("SheetSub")
         row.addWidget(self.where, 1)
         self.rescan_btn = QPushButton("Rescan")
@@ -411,9 +471,35 @@ class DuplicatesWindow(QWidget):
         self.frames_box.setToolTip("Video-frame screenshots — hundreds of alike images that are never duplicates")
         self.frames_box.setChecked(self.exclude_frames)
         self.frames_box.toggled.connect(self._options)
+        self.all_box = QCheckBox("Other files too")
+        self.all_box.setToolTip("Documents, archives and everything else, not only photos and videos — matched by "
+                                "their bytes")
+        self.all_box.setChecked(self.all_files)
+        self.all_box.toggled.connect(self._options)
+        self.strict_box = QComboBox()
+        for key, label in D.STRICTNESS_LABEL.items():
+            self.strict_box.addItem(label, key)
+        self.strict_box.setCurrentIndex(max(0, self.strict_box.findData(self.strictness)))
+        self.strict_box.setToolTip("How alike two photos must look to be listed as visually similar.\n"
+                                   "Strict: all but identical. Loose: also catches heavier edits and crops — and "
+                                   "more photos that only resemble each other.")
+        self.strict_box.activated.connect(lambda _i: self._options())
+        self.sort_box = QComboBox()
+        for key, label in SORTS.items():
+            self.sort_box.addItem(label, key)
+        self.sort_box.setCurrentIndex(max(0, self.sort_box.findData(self.sort)))
+        self.sort_box.setToolTip("The order of the groups")
+        self.sort_box.activated.connect(lambda _i: self._set_sort())
         opts.addWidget(self.sub_box)
         opts.addWidget(self.frames_box)
+        opts.addWidget(self.all_box)
+        opts.addSpacing(6)
+        opts.addWidget(QLabel("Look-alikes:"))
+        opts.addWidget(self.strict_box)
         opts.addStretch(1)
+        opts.addWidget(self.sort_box)
+        tv.addLayout(opts)
+        prog = QHBoxLayout()
         self.filters = QButtonGroup(self)
         self.filter_btns: dict[str, QToolButton] = {}
         for key in ("all", *D.KINDS):
@@ -424,9 +510,8 @@ class DuplicatesWindow(QWidget):
             b.clicked.connect(lambda _=False, k=key: self._set_filter(k))
             self.filters.addButton(b)
             self.filter_btns[key] = b
-            opts.addWidget(b)
-        tv.addLayout(opts)
-        prog = QHBoxLayout()
+            prog.addWidget(b)
+        prog.addSpacing(8)
         self.bar = QProgressBar()
         self.bar.setVisible(False)
         self.status = QLabel("")
@@ -458,10 +543,26 @@ class DuplicatesWindow(QWidget):
         self.summary = QLabel("")
         self.summary.setObjectName("SheetSub")
         bh.addWidget(self.summary, 1)
-        self.extra_btn = QPushButton("Select Extra Copies")
-        self.extra_btn.setToolTip("Tick every copy but one in each group whose copies are identical, byte for byte "
-                                  "— keeping the copy with the most tags, a plain name, the oldest")
-        self.extra_btn.clicked.connect(self.select_extra)
+        bh.addWidget(QLabel("Keep:"))
+        self.keep_box = QComboBox()
+        self._fill_keep()
+        self.keep_box.activated.connect(lambda _i: self._keep_chosen())
+        bh.addWidget(self.keep_box)
+        self.extra_btn = QToolButton()
+        self.extra_btn.setObjectName("DupMore")
+        self.extra_btn.setText("Select Extra Copies ▾")
+        self.extra_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.extra_btn.setToolTip("Tick every copy but the one to keep (marked Keep), a group at a time")
+        self.extra_menu = QMenu(self.extra_btn)
+        self.extra_menu.setToolTipsVisible(True)
+        self.extra_acts = {}
+        for key, tip in (("identical", "The safe pick: these copies are the same file, byte for byte"),
+                         ("exact", "Same size and dimensions — almost always the same file"),
+                         ("shown", "Look-alikes and similar names too: check them before the Trash")):
+            a = self.extra_menu.addAction(SCOPES[key], lambda k=key: self.select_extra(k))
+            a.setToolTip(tip)
+            self.extra_acts[key] = a
+        self.extra_btn.setMenu(self.extra_menu)
         self.clear_btn = QPushButton("Deselect All")
         self.clear_btn.clicked.connect(lambda: self.set_selected(list(self.selected), False))
         self.trash_btn = QPushButton("Move to Trash")
@@ -477,9 +578,55 @@ class DuplicatesWindow(QWidget):
     def _options(self) -> None:
         self.recursive = self.sub_box.isChecked()
         self.exclude_frames = self.frames_box.isChecked()
+        self.all_files = self.all_box.isChecked()
+        self.strictness = self.strict_box.currentData() or "normal"
         self.settings.setValue("duplicates/subfolders", "true" if self.recursive else "false")
         self.settings.setValue("duplicates/exclude_frames", "true" if self.exclude_frames else "false")
+        self.settings.setValue("duplicates/all_files", "true" if self.all_files else "false")
+        self.settings.setValue("duplicates/strictness", self.strictness)
         self.rescan()
+
+    def _set_sort(self) -> None:
+        self.sort = self.sort_box.currentData() or "space"
+        self.settings.setValue("duplicates/sort", self.sort)
+        self.shown = PAGE
+        self._render()
+
+    # ------------------------------------------------------------------ which copy is kept
+    def _fill_keep(self) -> None:
+        self.keep_box.blockSignals(True)
+        self.keep_box.clear()
+        for i, (key, label) in enumerate(D.KEEP_RULES.items()):
+            self.keep_box.addItem(label, key)
+            self.keep_box.setItemData(i, D.KEEP_TIP[key], Qt.ItemDataRole.ToolTipRole)
+        self.keep_box.insertSeparator(self.keep_box.count())
+        if self.prefer:
+            self.keep_box.addItem(f"Preferring “{os.path.basename(self.prefer) or self.prefer}” — Change…", "prefer")
+            self.keep_box.addItem("No Preferred Folder", "noprefer")
+        else:
+            self.keep_box.addItem("Prefer Copies in a Folder…", "prefer")
+        self.keep_box.setCurrentIndex(max(0, self.keep_box.findData(self.keep_rule)))
+        self.keep_box.setToolTip(D.KEEP_TIP[self.keep_rule] + (f"\nCopies in “{self.prefer}” are kept over copies "
+                                                                "elsewhere." if self.prefer else ""))
+        self.keep_box.blockSignals(False)
+
+    def _keep_chosen(self) -> None:
+        key = self.keep_box.currentData()
+        if key == "prefer":
+            folder = QFileDialog.getExistingDirectory(self, "Keep the Copies in This Folder", self.prefer or self.folder)
+            if folder:
+                self.prefer = folder
+        elif key == "noprefer":
+            self.prefer = None
+        elif key in D.KEEP_RULES:
+            self.keep_rule = key
+            self.settings.setValue("duplicates/keep", key)
+        self._fill_keep()
+        for c in self.cards:
+            c.refresh()
+
+    def keeper(self, paths: list[str]) -> str:
+        return D.keeper(paths, self.hooks.tags_of, self.keep_rule, self.pixels, self.dates, self.prefer)
 
     def rescan(self) -> None:
         if self.scanning:
@@ -493,11 +640,13 @@ class DuplicatesWindow(QWidget):
         self.bar.setVisible(True)
         self.bar.setRange(0, 0)
         self.status.setText("Looking…")
-        folder, recursive, frames, stop, nd = self.folder, self.recursive, self.exclude_frames, self.stop, \
+        folder, recursive, frames, stop, nd = self.folders, self.recursive, self.exclude_frames, self.stop, \
             self.not_dupes
+        threshold, all_files = D.STRICTNESS[self.strictness], self.all_files
 
         def work() -> None:
-            groups = D.scan(folder, recursive, frames, nd, progress=self.bridge.progress.emit, stop=stop)
+            groups = D.scan(folder, recursive, frames, nd, progress=self.bridge.progress.emit, stop=stop,
+                            threshold=threshold, all_files=all_files)
             self.bridge.scanned.emit(None if stop.is_set() else groups)
         threading.Thread(target=work, daemon=True).start()
 
@@ -525,7 +674,9 @@ class DuplicatesWindow(QWidget):
         self.shown = PAGE
         self._render()
         n = len(groups)
-        self.status.setText(f"{n:,} group{'s' if n != 1 else ''} of likely duplicates." if n else
+        extra = sum(len(g.paths) - 1 for g in groups)
+        self.status.setText(f"{n:,} group{'s' if n != 1 else ''} · {extra:,} extra cop{'ies' if extra != 1 else 'y'} · "
+                            f"up to {human(sum(g.extra_bytes for g in groups))} to free." if n else
                             "No duplicates here — nothing shares a size and dimensions, looks alike, or has a "
                             "copy-style name." + (" (Turn on Include subfolders to look further.)"
                                                   if not self.recursive else ""))
@@ -543,15 +694,23 @@ class DuplicatesWindow(QWidget):
                 if g.kind == "exact" and g.identical is None:
                     if D.check_identical(g, stop) is not None:
                         bridge.identical.emit(g)
-            paths = [p for g in groups for p in g.paths]
+            paths = list(dict.fromkeys(p for g in groups for p in g.paths))
             out: dict[str, float] = {}
+            px: dict[str, tuple[int, int]] = {}
+
+            def facts(p: str):                      # noqa: ANN202
+                return (D.precise_date(p) if D.kind_of(p) != "other" else None), D.pixels_of(p)
             with ThreadPoolExecutor(max_workers=6) as pool:
-                for p, d in zip(paths, pool.map(D.precise_date, paths)):
+                for i, (p, (d, wh)) in enumerate(zip(paths, pool.map(facts, paths))):
                     if stop.is_set():
                         return
                     if d is not None:
                         out[p] = d
-            bridge.dated.emit(out)
+                    if wh[0]:
+                        px[p] = wh
+                    if i % 400 == 399:              # a big library: the first cards fill in as it goes
+                        bridge.dated.emit((dict(out), dict(px)))
+            bridge.dated.emit((out, px))
         threading.Thread(target=work, daemon=True).start()
 
     def _identical(self, group: D.Group) -> None:
@@ -560,14 +719,24 @@ class DuplicatesWindow(QWidget):
                 c.refresh()
         self._update_bar()
 
-    def _dated(self, dates: dict) -> None:
+    def _dated(self, found) -> None:
+        dates, pixels = found
         self.dates.update(dates)
+        self.pixels.update(pixels)
         for c in self.cards:
             c.refresh()
 
     # ------------------------------------------------------------------ showing
     def _visible_groups(self) -> list[D.Group]:
-        return self.groups if self.filter == "all" else [g for g in self.groups if g.kind == self.filter]
+        groups = self.groups if self.filter == "all" else [g for g in self.groups if g.kind == self.filter]
+        if self.sort == "copies":
+            return sorted(groups, key=lambda g: (-len(g.paths), g.rank, -g.extra_bytes))
+        if self.sort == "name":
+            return sorted(groups, key=lambda g: D._natural(os.path.basename(g.paths[0])))
+        if self.sort == "folder":
+            return sorted(groups, key=lambda g: (os.path.dirname(g.paths[0]).lower(),
+                                                 D._natural(os.path.basename(g.paths[0]))))
+        return groups                               # as scanned: strongest kind first, biggest payoff first
 
     def _set_filter(self, key: str) -> None:
         self.filter = key
@@ -628,7 +797,9 @@ class DuplicatesWindow(QWidget):
         self.trash_btn.setText(f"Move {n:,} to Trash" if n else "Move to Trash")
         self.trash_btn.setEnabled(n > 0 and self.hooks.trash is not None)
         self.clear_btn.setEnabled(n > 0)
-        self.extra_btn.setEnabled(any(g.identical for g in self.groups))
+        self.extra_acts["identical"].setEnabled(any(g.identical for g in self.groups))
+        self.extra_acts["exact"].setEnabled(any(g.kind == "exact" for g in self.groups))
+        self.extra_btn.setEnabled(bool(self.groups))
 
     def _repaint_tiles(self) -> None:
         for c in self.cards:
@@ -653,22 +824,37 @@ class DuplicatesWindow(QWidget):
         self._update_bar()
 
     def all_but_one(self, card: Card) -> None:
-        keep = D.keeper(card.group.paths, self.hooks.tags_of)
-        self.set_selected([p for p in card.group.paths if p != keep], True)
+        keep, extra = self.keeper(card.group.paths), []
+        extra = [p for p in card.group.paths if p != keep]
+        self.set_selected(extra, True)
         self.set_selected([keep], False)
 
-    def select_extra(self) -> None:
-        """Every copy but one in each identical group (the keeper per `duplicates.keeper`)."""
-        ticked = 0
-        for g in self.groups:
-            if g.identical:
-                keep = D.keeper(g.paths, self.hooks.tags_of)
-                extra = [p for p in g.paths if p != keep]
-                self.set_selected(extra, True)
-                self.set_selected([keep], False)
-                ticked += len(extra)
-        self.status.setText(f"Ticked {ticked:,} extra cop{'ies' if ticked != 1 else 'y'} in the identical groups "
-                            "— one copy of each kept. Check them, then Move to Trash.")
+    def keep_only(self, card: Card, path: str) -> None:
+        """A copy's right-click ▸ Keep Only This One: every other copy in its group is ticked."""
+        self.set_selected([p for p in card.group.paths if p != path], True)
+        self.set_selected([path], False)
+
+    def select_extra(self, scope: str = "identical") -> None:
+        """Every copy but the kept one (`keeper`) in each identical group — or each exact group, or each group
+        shown under the current filter."""
+        if scope == "identical":
+            groups = [g for g in self.groups if g.identical]
+        elif scope == "exact":
+            groups = [g for g in self.groups if g.kind == "exact"]
+        else:
+            groups = self._visible_groups()
+        ticked, kept = 0, set()
+        for g in groups:
+            keep = self.keeper(g.paths)
+            kept.add(keep)
+            extra = [p for p in g.paths if p != keep and p not in kept]
+            self.set_selected(extra, True)
+            ticked += len(extra)
+        self.set_selected(list(kept), False)                # a copy kept by one group isn't trashed by another
+        what = {"identical": "the identical groups", "exact": "the exact groups", "shown": "the groups shown"}[scope]
+        self.status.setText(f"Ticked {ticked:,} extra cop{'ies' if ticked != 1 else 'y'} in {what} — one copy of each "
+                            "kept (marked Keep). " + ("Check them, then Move to Trash." if scope != "shown" else
+                                                      "Look-alikes aren't always copies: check them before the Trash."))
 
     def view(self, paths: list[str], start: str) -> None:
         if self.hooks.view is not None:
@@ -696,12 +882,32 @@ class DuplicatesWindow(QWidget):
             info = (f"Every copy in {len(lost):,} group{'s' if len(lost) != 1 else ''} is ticked — "
                     f"{'those photos' if len(lost) != 1 else 'that photo'} would be gone from here entirely. " + info)
         box.setInformativeText(info)
+        # What's said about a copy that goes — its tags, Favorite, To AI — passes to the copy that stays.
+        heirs: list[tuple[str, list[str]]] = []
+        if self.hooks.inherit is not None:
+            for g in self.groups:
+                going = [p for p in g.paths if p in self.selected]
+                staying = [p for p in g.paths if p not in self.selected]
+                if going and staying:
+                    heirs.append((self.keeper(staying), going))
+        carry = QCheckBox("Give the kept copies the tags, Favorite and To AI of the copies that go")
+        carry.setChecked(str(self.settings.value("duplicates/inherit", "true")) == "true")
+        if heirs:
+            box.setCheckBox(carry)
         go = box.addButton("Move to Trash", QMessageBox.ButtonRole.DestructiveRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
         box.setDefaultButton(go)
         box.exec()
         if box.clickedButton() is not go:
             return
+        if heirs:
+            self.settings.setValue("duplicates/inherit", "true" if carry.isChecked() else "false")
+            if carry.isChecked():
+                for keep, going in heirs:
+                    try:
+                        self.hooks.inherit(keep, going)
+                    except OSError:
+                        pass
         moved = set(self.hooks.trash(paths))
         self.selected -= moved
         self.groups = [g2 for g in self.groups if (g2 := g.without(moved)) is not None]

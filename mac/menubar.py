@@ -288,8 +288,14 @@ def install(win, sf) -> None:
     act(t, "To AI", lambda: pane().toggle_label("ai"), "Ctrl+Shift+A", lambda: bool(sel()),
         "Mark the selection To AI (or take it off) — the iPhone app's To AI")
     t.addSeparator()
-    act(t, "Find Duplicates…", lambda: pane().find_duplicates(folder_target()), None, folder_target,
-        "Likely copies in the selected folder (or this one)")
+    def dup_target():
+        """Several folders selected: all of them, looked at as one; else the folder selected or shown."""
+        s = sel()
+        if len(s) > 1 and all(os.path.isdir(p) for p in s):
+            return s
+        return folder_target()
+    act(t, "Find Duplicates…", lambda: pane().find_duplicates(dup_target()), None, dup_target,
+        "Likely copies in the selected folder or folders (or this one)")
     act(t, "Export All Frames…", lambda: pane().export_frames(videos()), None, lambda: bool(videos()))
     act(t, "Upscale Video…", lambda: pane().upscale_videos(videos()), None, lambda: bool(videos()),
         "The selected videos upscaled to 1080p or 4K — replaced, or saved as new videos beside them")

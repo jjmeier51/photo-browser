@@ -5119,9 +5119,9 @@ class Pane(QWidget):
         win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
         win.show()
 
-    def find_duplicates(self, folder: str) -> None:
-        """Find Duplicates… (duplicates_window.py — the iPhone's): likely copies in `folder`, ticked and moved to
-        the Trash from there."""
+    def find_duplicates(self, folder: str | list[str]) -> None:
+        """Find Duplicates… (duplicates_window.py — the iPhone's): likely copies in `folder` — or in several
+        folders looked at as one — ticked and moved to the Trash from there."""
         import duplicates_window
 
         def thumb(p: str) -> QPixmap | None:
@@ -5147,10 +5147,16 @@ class Pane(QWidget):
                 viewer.removed.connect(lambda gone: [w.remove_paths(gone) for w in list(_VIEWERS)
                                                      if isinstance(w, duplicates_window.DuplicatesWindow)])
 
+        def inherit(keep: str, going: list[str]) -> None:
+            store = tag_store()
+            pairs = [(p, keep) for p in going]
+            if store.carry(pairs) + store.carry_labels(pairs):
+                tags_changed()
+
         hooks = duplicates_window.DupHooks(
             thumb=thumb, thumbs_ready=THUMBS.ready if THUMBS is not None else None, trash=trash,
             tags_of=lambda p: tag_store().tags(p, fresh=False), view=view, reveal=self._reveal_from_viewer,
-            changed=self.refresh_results)
+            changed=self.refresh_results, inherit=inherit)
         win = duplicates_window.DuplicatesWindow(folder, hooks, THEME, self.window())
         _VIEWERS.append(win)
         win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
@@ -5607,6 +5613,8 @@ class Pane(QWidget):
             self._cover_menu(menu, paths)
             if len(paths) == 1 and os.path.isdir(paths[0]):
                 self._folder_tools(menu, paths[0], "Find Duplicates…")
+            elif len(paths) > 1 and all(os.path.isdir(p) for p in paths):
+                menu.addAction(f"Find Duplicates in These {len(paths)} Folders…", lambda: self.find_duplicates(paths))
             menu.addSeparator()
             win = self.window()
             if isinstance(win, MainWindow) and self is win.src:

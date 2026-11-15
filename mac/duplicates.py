@@ -14,17 +14,27 @@ A set already found as a stronger kind isn't listed again as a weaker one — no
 group already listed (the iPhone lists "IMG_1 / IMG_1 (1)" as a name group beside the exact group holding
 both); a set whose every pair was marked **Not Duplicates** isn't listed at all (`NotDuplicates`, this Mac's).
 
-Beyond the iPhone: **Include subfolders** (the iPhone looks at one folder), and an **Identical** check — the
-files of an exact group are read through (SHA-256) in the background, so a group whose copies are byte for
-byte the same says so, and only those offer **Select Extra Copies** (`keeper`: the copy kept is the one with
-the most tags, then a plain name — not "(1)" or "copy" — then the oldest, then the shortest path). Nothing is
-ever deleted without the person pressing Move to Trash.
+Beyond the iPhone:
 
-Pairing near-identical hashes doesn't compare every pair: by the pigeonhole principle two hashes within 6 bits
-agree exactly on at least one of 7 bands of the 64 bits, so only hashes sharing a band are compared. dHashes
-are cached on disk by path, modified date and size, so a rescan only reads new or changed photos.
+- **Include subfolders** (the iPhone looks at one folder), and **several folders at once** (`scan` takes a
+  list — copies of one photo in two folders are found across them).
+- An **Identical** check — the files of an exact group are read through (SHA-256) in the background, so a group
+  whose copies are byte for byte the same says so.
+- **Files whose dimensions can't be read** (a RAW the Mac has no reader for, a damaged video) and — with
+  `all_files` — **documents, archives and anything else** are grouped as exact by size and a quick signature of
+  their first and last bytes, then proved (or not) by the Identical check like the rest.
+- **How strict "visually similar" is** (`STRICTNESS`: 4, 6 or 8 bits), and each similar group says how alike
+  its copies are (`Group.alike`).
+- **Which copy to keep** (`keeper`, `KEEP_RULES`): the best copy (most tags, a plain name — not "(1)" or "copy" —
+  the oldest), the largest file, the most pixels, the oldest, the newest; a preferred folder beats them all.
+  `extra_copies` is every copy but that one. Nothing is ever deleted without the person pressing Move to Trash.
 
-Everything here is plain Python + Pillow and runs on worker threads.
+Pairing near-identical hashes doesn't compare every pair: by the pigeonhole principle two hashes within t bits
+agree exactly on at least one of t + 1 bands of the 64 bits (`bands_for`), so only hashes sharing a band are
+compared (with numpy, a band's members at a time). dHashes are cached on disk by path, modified date and size, so
+a rescan only reads new or changed photos.
+
+Everything here is plain Python + Pillow (numpy when it's there) and runs on worker threads.
 """
 from __future__ import annotations
 
@@ -46,7 +56,9 @@ IMAGE_EXT = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".gif", ".tif", ".tiff",
 VIDEO_EXT = {".mov", ".mp4", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".mts", ".m2ts", ".wmv"}
 HASHABLE = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".gif", ".tif", ".tiff", ".bmp", ".webp", ".avif"}
 THRESHOLD = 6                                      # bits; the iPhone's
-BANDS = (10, 9, 9, 9, 9, 9, 9)                     # 7 bands over 64 bits (pigeonhole for THRESHOLD = 6)
+STRICTNESS = {"strict": 4, "normal": THRESHOLD, "loose": 8}
+STRICTNESS_LABEL = {"strict": "Strict", "normal": "Normal", "loose": "Loose"}
+QUICK = 64 * 1024                                  # bytes read from each end for a file's quick signature
 KINDS = ("exact", "similar", "name")
 KIND_LABEL = {"exact": "Exact match", "similar": "Visually similar", "name": "Similar name"}
 SUPPORT = Path.home() / "Library" / "Application Support" / "Safe Finder"
@@ -56,6 +68,32 @@ CACHE = Path.home() / "Library" / "Caches" / "PhotoBrowser" / "dhash.json"
 def kind_of(path: str) -> str:
     ext = os.path.splitext(path)[1].lower()
     return "image" if ext in IMAGE_EXT else "video" if ext in VIDEO_EXT else "other"
+
+
+def bands_for(threshold: int) -> tuple[int, ...]:
+    """t + 1 bands over the 64 bits: two hashes within t bits agree on one of them whole (7 bands for 6)."""
+    n = max(1, threshold) + 1
+    base, extra = divmod(64, n)
+    return tuple(base + 1 if i < extra else base for i in range(n))
+
+
+BANDS = bands_for(THRESHOLD)
+
+
+def quick_signature(path: str) -> str | None:
+    """A cheap stand-in for a file's contents: SHA-1 of its first and last 64 KB. Same size + same signature is
+    worth a full read; a different one settles it without."""
+    h = hashlib.sha1()
+    try:
+        with open(path, "rb") as f:
+            h.update(f.read(QUICK))
+            size = os.fstat(f.fileno()).st_size
+            if size > QUICK:
+                f.seek(max(QUICK, size - QUICK))
+                h.update(f.read(QUICK))
+    except OSError:
+        return None
+    return h.hexdigest()
 
 
 def is_frame_file(path: str) -> bool:
@@ -220,6 +258,17 @@ class Group:
     height: int = 0
     identical: bool | None = None                  # exact groups: byte for byte the same (None until checked)
     hashes: dict[str, str] = field(default_factory=dict)
+    spread: int | None = None                      # similar groups: the most bits any two copies differ by
+
+    @property
+    def alike(self) -> str:
+        """How alike a similar group's copies look: "98% alike"."""
+        return "" if self.spread is None else f"{round(100 * (1 - self.spread / 64))}% alike"
+
+    @property
+    def extra_bytes(self) -> int:
+        """What trashing every copy but one would free, near enough (the largest copy's size, each)."""
+        return self.size * (len(self.paths) - 1)
 
     @property
     def rank(self) -> int:
@@ -245,20 +294,30 @@ class Group:
         if len(left) < 2:
             return None
         return Group(self.kind, left, self.size, self.width, self.height, self.identical,
-                     {p: h for p, h in self.hashes.items() if p in left})
+                     {p: h for p, h in self.hashes.items() if p in left}, self.spread)
 
 
-def media_files(folder: str, recursive: bool, exclude_frames: bool, stop: threading.Event | None = None) -> list[str]:
-    """Photos and videos in `folder` (and below, when `recursive`), hidden files and folders left out."""
+JUNK = {"thumbs.db", "desktop.ini", "icon\r"}
+
+
+def media_files(folder: str, recursive: bool, exclude_frames: bool, stop: threading.Event | None = None,
+                all_files: bool = False) -> list[str]:
+    """Photos and videos in `folder` (and below, when `recursive`), hidden files and folders left out. With
+    `all_files`, every other file too — but not the records the apps keep beside the photos (JSON sidecars)."""
+    def wanted(n: str) -> bool:
+        if n.startswith("."):
+            return False
+        if kind_of(n) == "other":
+            return all_files and n.lower() not in JUNK and not n.lower().endswith(".json")
+        return not (exclude_frames and is_frame_file(n))
+
     out: list[str] = []
     if recursive:
         for root, dirs, files in os.walk(folder):
             if stop is not None and stop.is_set():
                 break
             dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not d.endswith((".app", ".photoslibrary")))
-            for n in sorted(files):
-                if not n.startswith(".") and kind_of(n) != "other" and not (exclude_frames and is_frame_file(n)):
-                    out.append(os.path.join(root, n))
+            out += [os.path.join(root, n) for n in sorted(files) if wanted(n)]
     else:
         try:
             names = sorted(os.listdir(folder))
@@ -266,8 +325,7 @@ def media_files(folder: str, recursive: bool, exclude_frames: bool, stop: thread
             return []
         for n in names:
             p = os.path.join(folder, n)
-            if not n.startswith(".") and kind_of(n) != "other" and not (exclude_frames and is_frame_file(n)) \
-                    and os.path.isfile(p):
+            if wanted(n) and os.path.isfile(p):
                 out.append(p)
     return out
 
@@ -291,18 +349,33 @@ def similar_clusters(hashes: dict[str, int], threshold: int = THRESHOLD) -> list
     buckets: dict[tuple[int, int], list[int]] = {}
     for i, p in enumerate(paths):
         h, shift = hashes[p], 0
-        for b, width in enumerate(BANDS):
+        for b, width in enumerate(bands_for(threshold)):
             buckets.setdefault((b, (h >> shift) & ((1 << width) - 1)), []).append(i)
             shift += width
-    checked: set[tuple[int, int]] = set()
+    try:
+        import numpy as np
+        values = np.array([hashes[p] for p in paths], dtype=np.uint64)
+        count = getattr(np, "bitwise_count", None)          # numpy 2
+        if count is None:
+            table = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
+
+            def count(x):                                   # noqa: ANN001, ANN202
+                return table[x.view(np.uint8).reshape(-1, 8)].sum(axis=1)
+    except ImportError:
+        np = None
     for members in buckets.values():
         if len(members) < 2 or len(members) > 5000:   # a band of solid colour: every flat photo shares it
             continue
+        if np is not None and len(members) > 8:
+            idx = np.array(members)
+            vals = values[idx]
+            for x in range(len(members) - 1):
+                near = np.nonzero(count(vals[x + 1:] ^ vals[x]) <= threshold)[0]
+                for k in near:
+                    parent[find(members[x])] = find(members[x + 1 + int(k)])
+            continue
         for x, i in enumerate(members):
             for j in members[x + 1:]:
-                if (i, j) in checked:
-                    continue
-                checked.add((i, j))
                 if distance(hashes[paths[i]], hashes[paths[j]]) <= threshold:
                     parent[find(i)] = find(j)
     clusters: dict[int, list[str]] = {}
@@ -311,16 +384,28 @@ def similar_clusters(hashes: dict[str, int], threshold: int = THRESHOLD) -> list
     return [c for c in clusters.values() if len(c) > 1]
 
 
-def scan(folder: str, recursive: bool = False, exclude_frames: bool = False,
+def spread_of(paths: list[str], hashes: dict[str, int]) -> int | None:
+    """The most bits any two of the copies differ by (None when the group is too big to be worth working out)."""
+    hs = [hashes[p] for p in paths if p in hashes]
+    if len(hs) < 2 or len(hs) > 60:
+        return None
+    return max(distance(a, b) for i, a in enumerate(hs) for b in hs[i + 1:])
+
+
+def scan(folder: str | list[str], recursive: bool = False, exclude_frames: bool = False,
          not_dupes: NotDuplicates | None = None, cache: HashCache | None = None,
          progress: Callable[[str, int, int], None] | None = None,
-         stop: threading.Event | None = None) -> list[Group]:
-    """The groups in `folder` — exact, then visually similar, then similar name; within a kind the biggest
-    payoff first. `progress(stage, done, total)` from this (worker) thread."""
+         stop: threading.Event | None = None, threshold: int = THRESHOLD,
+         all_files: bool = False) -> list[Group]:
+    """The groups in `folder` (or in several folders, looked at as one) — exact, then visually similar, then
+    similar name; within a kind the biggest payoff first. `progress(stage, done, total)` from this (worker)
+    thread."""
     stop = stop or threading.Event()
     say = progress or (lambda *_a: None)
     say("Listing", 0, 0)
-    files = media_files(folder, recursive, exclude_frames, stop)
+    folders = [folder] if isinstance(folder, str) else list(folder)
+    files = list(dict.fromkeys(p for f in folders for p in media_files(f, recursive, exclude_frames, stop, all_files)))
+    several = recursive or len(folders) > 1
     sizes: dict[str, int] = {}
     for p in files:
         try:
@@ -332,7 +417,7 @@ def scan(folder: str, recursive: bool = False, exclude_frames: bool = False,
     by_size: dict[int, list[str]] = {}
     for p in files:
         by_size.setdefault(sizes[p], []).append(p)
-    need_dims = [p for ps in by_size.values() if len(ps) > 1 for p in ps]
+    need_dims = [p for ps in by_size.values() if len(ps) > 1 for p in ps if kind_of(p) != "other"]
     dims: dict[str, tuple[int, int]] = {}
     with ThreadPoolExecutor(max_workers=8) as pool:
         for i, (p, d) in enumerate(zip(need_dims, pool.map(_dims, need_dims))):
@@ -350,12 +435,18 @@ def scan(folder: str, recursive: bool = False, exclude_frames: bool = False,
         if w * h > 0:
             key = f"{sizes[p]}|{max(w, h)}|{w * h}"
             exact.setdefault(f"{key}|{name.lower()}" if frame else key, []).append(p)
-        if not frame:
+        elif sizes[p] > 0 and len(by_size[sizes[p]]) > 1:
+            # no dimensions to go by (not a picture, or one that can't be read): the same size and the same
+            # first and last bytes — the Identical check then reads them through
+            sig = quick_signature(p)
+            if sig is not None:
+                exact.setdefault(f"{sizes[p]}|bytes|{sig}", []).append(p)
+        if not frame and kind_of(p) != "other":
             stem = normalized_base_name(name)
             if stem:
                 # with subfolders, a name is only a copy of one in the same folder ("IMG_0001" is in every
                 # one); a photo and a video of one name are a Live Photo's two halves, not copies
-                where = os.path.dirname(p) if recursive else ""
+                where = os.path.dirname(p) if several else ""
                 by_name.setdefault(f"{where}\n{kind_of(p)}\n{stem}", []).append(p)
     # visually similar: dHash every photo
     photos = [p for p in files if os.path.splitext(p)[1].lower() in HASHABLE]
@@ -386,12 +477,13 @@ def scan(folder: str, recursive: bool = False, exclude_frames: bool = False,
             return
         seen.add(key)
         rep = max(paths, key=lambda p: sizes.get(p, 0))
-        w, h = dims.get(rep) or _dims(rep)
-        groups.append(Group(kind, paths, sizes.get(rep, 0), w, h))
+        w, h = dims.get(rep) or ((0, 0) if kind_of(rep) == "other" else _dims(rep))
+        groups.append(Group(kind, paths, sizes.get(rep, 0), w, h,
+                            spread=spread_of(paths, hashes) if kind == "similar" else None))
 
     for ps in exact.values():
         add(ps, "exact")
-    for ps in similar_clusters(hashes):
+    for ps in similar_clusters(hashes, threshold):
         add(ps, "similar")
     for ps in by_name.values():
         add(ps, "name")
@@ -469,9 +561,21 @@ def ages(paths: list[str], dates: dict[str, float]) -> dict[str, str]:
     return {have[0][1]: "oldest", have[-1][1]: "newest"}
 
 
-def keeper(paths: list[str], tags_of: Callable[[str], list[str]] | None = None) -> str:
-    """The copy Select Extra Copies keeps: most tags, then a plain name (not "(1)"/"copy"), then the oldest
-    (created, else modified), then the shortest path."""
+KEEP_RULES = {"best": "The best copy", "largest": "The largest file", "resolution": "The highest resolution",
+              "oldest": "The oldest", "newest": "The newest"}
+KEEP_TIP = {"best": "Most tags, then a plain name (not “(1)” or “copy”), then the oldest",
+            "largest": "The biggest file — usually the least compressed",
+            "resolution": "The most pixels, then the biggest file",
+            "oldest": "The earliest taken (the file's own date when it doesn't say)",
+            "newest": "The latest taken (the file's own date when it doesn't say)"}
+
+
+def keeper(paths: list[str], tags_of: Callable[[str], list[str]] | None = None, rule: str = "best",
+           pixels: dict[str, tuple[int, int]] | None = None, dates: dict[str, float] | None = None,
+           prefer: str | None = None) -> str:
+    """The copy to keep. `rule` (KEEP_RULES) decides; ties — and "best" — fall to: most tags, then a plain name
+    (not "(1)"/"copy"), then the oldest (created, else modified), then the shortest path. A copy inside the
+    `prefer` folder beats one that isn't, whatever the rule."""
     def birth(p: str) -> float:
         try:
             st = os.stat(p)
@@ -483,4 +587,43 @@ def keeper(paths: list[str], tags_of: Callable[[str], list[str]] | None = None) 
         stem = os.path.splitext(os.path.basename(p))[0].lower().strip()
         return 0 if normalized_base_name(os.path.basename(p)) == stem else 1
 
-    return min(paths, key=lambda p: (-len(tags_of(p) if tags_of else []), plain(p), birth(p), len(p), p))
+    def size(p: str) -> int:
+        try:
+            return os.path.getsize(p)
+        except OSError:
+            return 0
+
+    def when(p: str) -> float:
+        d = (dates or {}).get(p)
+        return d if d is not None else birth(p)
+
+    def first(p: str) -> tuple:
+        if rule == "largest":
+            return (-size(p),)
+        if rule == "resolution":
+            w, h = (pixels or {}).get(p) or (0, 0)
+            return (-(w * h), -size(p))
+        if rule == "oldest":
+            return (when(p),)
+        if rule == "newest":
+            return (-when(p),)
+        return ()
+
+    def outside(p: str) -> int:
+        if not prefer:
+            return 0
+        return 0 if (p == prefer or p.startswith(prefer.rstrip("/") + "/")) else 1
+
+    return min(paths, key=lambda p: (outside(p), *first(p), -len(tags_of(p) if tags_of else []), plain(p),
+                                     birth(p), len(p), p))
+
+
+def extra_copies(paths: list[str], **how) -> tuple[str, list[str]]:
+    """(the copy to keep, the rest) — `how` as for `keeper`."""
+    keep = keeper(paths, **how)
+    return keep, [p for p in paths if p != keep]
+
+
+def pixels_of(path: str) -> tuple[int, int]:
+    """A photo's or video's dimensions as shown ((0, 0) for anything else or unreadable)."""
+    return (0, 0) if kind_of(path) == "other" else _dims(path)
