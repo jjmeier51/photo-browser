@@ -71,6 +71,27 @@ def to_u8(arr: np.ndarray) -> np.ndarray:
     return np.clip(arr * 255.0 + 0.5, 0, 255).astype(np.uint8)
 
 
+SIDES = {"rough": DRAFT, "fine": PREVIEW, "close": PREVIEW * 2}
+
+
+def screen_transform(im: Image.Image):
+    """What turns the photo's own colours into the screen's (sRGB) — None when they already are, or it has no
+    profile. Only for showing: the photo is worked on and saved in its own colours."""
+    icc = im.info.get("icc_profile")
+    if not icc or im.mode not in ("RGB", "RGBA"):
+        return None
+    try:
+        import io
+        from PIL import ImageCms
+        src = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+        if "srgb" in (ImageCms.getProfileDescription(src) or "").lower():
+            return None
+        return ImageCms.buildTransform(src, ImageCms.createProfile("sRGB"), "RGB", "RGB",
+                                       renderingIntent=ImageCms.Intent.RELATIVE_COLORIMETRIC)
+    except Exception:  # noqa: BLE001 — a profile LittleCMS can't use
+        return None
+
+
 class _Signals(QObject):
     loaded = Signal(object, str)
     preview = Signal(int, object, str, bool)        # generation, uint8 rgb, stage, rough?
@@ -96,18 +117,48 @@ class _Renderer:
         self.base: dict[str, np.ndarray] = {}
         self.snaps: dict[str, list[tuple[list, np.ndarray]]] = {"rough": [], "fine": []}
         self.kept: dict[str, dict] = {"rough": {}, "fine": {}}
+        self.im: Image.Image | None = None
+        self.to_screen = None
         self.found: list[pe.FaceBox] = []
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
     def set_photo(self, im: Image.Image) -> None:
-        for name, side in (("fine", PREVIEW), ("rough", DRAFT)):
-            s = min(1.0, side / max(im.size))
-            small = im if s >= 1 else im.resize((max(1, round(im.width * s)), max(1, round(im.height * s))),
-                                                Image.Resampling.LANCZOS, reducing_gap=2.0)
-            self.base[name] = pe.to_float(small)[0]
-            self.snaps[name] = [([], self.base[name])]
-            self.kept[name] = {}
+        self.im = im
+        self.to_screen = screen_transform(im)
+        for name in ("fine", "rough"):
+            self._make(name)
+
+    def _make(self, name: str) -> None:
+        """The copy of the photo that `name` works on: "rough" while a slider moves, "fine" at rest, and "close"
+        — twice as large — when the crop keeps less than half the photo, so what's left isn't shown from a
+        handful of pixels."""
+        im, side = self.im, SIDES[name]
+        s = min(1.0, side / max(im.size))
+        small = im if s >= 1 else im.resize((max(1, round(im.width * s)), max(1, round(im.height * s))),
+                                            Image.Resampling.LANCZOS, reducing_gap=2.0)
+        self.base[name] = pe.to_float(small)[0]
+        self.snaps[name] = [([], self.base[name])]
+        self.kept[name] = {}
+
+    def _fine(self, e: pe.Edit, stage: str) -> str:
+        x, y, w, h = e.geometry.crop
+        if stage in ("final", "noframe") and max(w, h) < 0.55 and max(self.im.size) > PREVIEW * 1.3:
+            if "close" not in self.base:
+                self._make("close")
+            return "close"
+        return "fine"
+
+    def _shown(self, arr: np.ndarray) -> np.ndarray:
+        """In the screen's colours: a Display P3 photo's numbers aren't sRGB's, and Qt shows numbers as they are."""
+        if self.to_screen is None:
+            return arr
+        try:
+            from PIL import ImageCms
+            return np.asarray(ImageCms.applyTransform(Image.fromarray(arr, "RGB"), self.to_screen))
+        except Exception:  # noqa: BLE001 — colours as they are, rather than no picture
+            self.to_screen = None
+            return arr
 
     def ask(self, gen: int, edit: pe.Edit, stage: str, rough_first: bool) -> None:
         with self.cv:
@@ -133,10 +184,10 @@ class _Renderer:
                 self.job = None
             try:
                 if rough_first:
-                    self.sig.preview.emit(gen, self.render("rough", edit, stage), stage, True)
+                    self.sig.preview.emit(gen, self._shown(self.render("rough", edit, stage)), stage, True)
                     if self._waiting():
                         continue
-                self.sig.preview.emit(gen, self.render("fine", edit, stage), stage, False)
+                self.sig.preview.emit(gen, self._shown(self.render(self._fine(edit, stage), edit, stage)), stage, False)
             except Exception as e:  # noqa: BLE001 — a preview that can't be made is said, never a crash
                 self.sig.failed.emit(f"{type(e).__name__}: {e}")
 
@@ -200,9 +251,9 @@ class _Renderer:
                 g = pe.apply_geometry(base, e.geometry)
                 s = THUMB / max(g.shape[:2])
                 small = pe.resize(g, max(1, round(g.shape[1] * s)), max(1, round(g.shape[0] * s)), Image.Resampling.BOX)
-                out = {"": to_u8(small)}
+                out = {"": self._shown(to_u8(small))}
                 for look in pe.LOOKS:
-                    out[look.name] = to_u8(pe.apply_look(small, look.name))
+                    out[look.name] = self._shown(to_u8(pe.apply_look(small, look.name)))
                 self.sig.thumbs.emit(gen, out)
             except Exception:  # noqa: BLE001 — thumbnails are a nicety
                 pass
@@ -234,7 +285,8 @@ class SliderRow(QWidget):
         lay.addWidget(self.name, 0, 0)
         lay.addWidget(self.number, 0, 1)
         lay.addWidget(self.slider, 1, 0, 1, 2)
-        self.slider.sliderPressed.connect(self.grabbed)
+        self._grabbed_at = 0.0
+        self.slider.sliderPressed.connect(self._grab)
         self.slider.valueChanged.connect(self._changed)
         self.slider.sliderReleased.connect(lambda: self.moved.emit(self.slider.value(), True))
         self.name.mouseDoubleClickEvent = lambda _e: self.reset()
@@ -245,11 +297,19 @@ class SliderRow(QWidget):
         self.number.setText(f"{v:+d}{self.suffix}" if self.slider.minimum() < 0 else f"{v}{self.suffix}")
         self.name.setStyleSheet("" if v == self.rest else "font-weight: 600;")
 
+    def _grab(self) -> None:
+        """About to change: said once per gesture (a click on the groove that turns into a drag is one)."""
+        import time
+        now = time.monotonic()
+        if now - self._grabbed_at > 0.4:
+            self.grabbed.emit()
+        self._grabbed_at = now
+
     def _changed(self, v: int) -> None:
         self._show()
         if not self.signalsBlocked():
             if not self.slider.isSliderDown():
-                self.grabbed.emit()
+                self._grab()
             self.moved.emit(v, not self.slider.isSliderDown())
 
     def reset(self) -> None:
@@ -505,7 +565,7 @@ class UpscaleChoice(QDialog):
         lay.addWidget(sub)
         self.as_new = QRadioButton("Save as a new photo — “name (edited)”, the original left as it is")
         self.replace = QRadioButton("Overwrite the original")
-        (self.as_new if str(settings.value("editor/upscale_how", "new")) != "replace" else self.replace).setChecked(True)
+        self.as_new.setChecked(True)                   # every time: overwriting is chosen, never remembered
         lay.addWidget(self.as_new)
         lay.addWidget(self.replace)
         lay.addWidget(_head("Model"))
@@ -571,7 +631,6 @@ class UpscaleChoice(QDialog):
 
     def _accept(self) -> None:
         self._ok = True
-        self.settings.setValue("editor/upscale_how", "new" if self.as_new.isChecked() else "replace")
         self.settings.setValue("editor/upscale_factor", self.factor())
         self.settings.setValue("upscale/model", self.model.currentData() or "")
         self.settings.setValue("upscale/texture", self.texture.value() / 100.0)
@@ -883,10 +942,14 @@ class EditorWindow(QDialog):
         base = self.renderer.base.get("rough")
         if base is None:
             return
+        try:
+            found = pe.auto_adjust(pe.apply_geometry(base, self.edit.geometry))
+        except (ValueError, ArithmeticError):         # nothing to go on (a blank picture): left as it is
+            return
         self.begin()
         for key in ("whites", "blacks", "brightness", "temperature", "tint", "vibrance"):
             self.edit.adjust.pop(key, None)
-        self.edit.adjust.update(pe.auto_adjust(pe.apply_geometry(base, self.edit.geometry)))
+        self.edit.adjust.update(found)
         self._sync()
         self.request()
 
@@ -959,6 +1022,8 @@ class EditorWindow(QDialog):
         self.begin()
         g.quarters = (g.quarters + step) % 4
         g.crop = self.canvas.crop = tuple(batch_crop.turned(g.crop, step))
+        f = self.edit.focus
+        f.x, f.y = (1.0 - f.y, f.x) if step > 0 else (f.y, 1.0 - f.x)
         if g.flip_h != g.flip_v:                     # a mirrored photo turns the other way round its mirror
             g.flip_h, g.flip_v = g.flip_v, g.flip_h
         self.request()
@@ -970,9 +1035,11 @@ class EditorWindow(QDialog):
         if across:
             g.flip_h = not g.flip_h
             g.crop = (1 - x - w, y, w, h)
+            self.edit.focus.x = 1.0 - self.edit.focus.x
         else:
             g.flip_v = not g.flip_v
             g.crop = (x, 1 - y - h, w, h)
+            self.edit.focus.y = 1.0 - self.edit.focus.y
         g.straighten = -g.straighten
         self.canvas.crop = g.crop
         self._sync()
@@ -1012,13 +1079,13 @@ class EditorWindow(QDialog):
         self.tool_note = QLabel("", objectName="SheetSub")
         self.tool_note.setWordWrap(True)
         lay.addWidget(self.tool_note)
-        self.brush_size = SliderRow("Brush Size", 1, 40, 0, "%")
+        self.brush_size = SliderRow("Brush Size", 1, 40, 6, "%")
         self.brush_size.set(float(self.settings.value("editor/brush", 6) or 6))
         self.brush_size.moved.connect(lambda v, _r: (self.settings.setValue("editor/brush", v), self.canvas.update()))
-        self.brush_amount = SliderRow("Strength", 5, 100, 0, "%")
+        self.brush_amount = SliderRow("Strength", 5, 100, 60, "%")
         self.brush_amount.set(float(self.settings.value("editor/brush_amount", 60) or 60))
         self.brush_amount.moved.connect(lambda v, _r: self.settings.setValue("editor/brush_amount", v))
-        self.brush_soft = SliderRow("Soft Edge", 0, 100, 0, "%")
+        self.brush_soft = SliderRow("Soft Edge", 0, 100, 60, "%")
         self.brush_soft.set(float(self.settings.value("editor/brush_soft", 60) or 60))
         self.brush_soft.moved.connect(lambda v, _r: self.settings.setValue("editor/brush_soft", v))
         for r in (self.brush_size, self.brush_amount, self.brush_soft):
@@ -1551,8 +1618,7 @@ class EditorWindow(QDialog):
         if not self._undo or self._undo[-1] != now:
             self._undo.append(now)
             del self._undo[:-80]
-        self._redo.clear()
-        QTimer.singleShot(0, self._refresh)
+        QTimer.singleShot(0, self._refresh)           # (redo is dropped by `redo` itself once the edit has moved on)
 
     def undo(self) -> None:
         if not self._undo or self.saving:
@@ -1566,14 +1632,22 @@ class EditorWindow(QDialog):
         self._redo.append(now)
         self._restore(self._undo.pop())
 
+    def _can_redo(self) -> bool:
+        """Redo makes sense only while the edit is still where the last undo left it."""
+        if self._redo and pe.to_dict(self.edit) != getattr(self, "_redo_from", None):
+            self._redo.clear()
+        return bool(self._redo)
+
     def redo(self) -> None:
-        if not self._redo or self.saving:
+        if self.saving or not self._can_redo():
+            self._refresh()
             return
         self._undo.append(pe.to_dict(self.edit))
         self._restore(self._redo.pop())
 
     def _restore(self, state: dict) -> None:
         self.edit = pe.from_dict(state)
+        self._redo_from = pe.to_dict(self.edit)          # where redo is still good from
         self.sel = min(self.sel, len(self.edit.texts) - 1)
         self._sync()
         self.request()
@@ -1617,13 +1691,16 @@ class EditorWindow(QDialog):
         ready = self.src is not None and not self.saving
         changed = self.edit.changed()
         self.undo_btn.setEnabled(ready and bool(self._undo))
-        self.redo_btn.setEnabled(ready and bool(self._redo))
+        self.redo_btn.setEnabled(ready and self._can_redo())
         self.reset_btn.setEnabled(ready and changed)
         self.compare_btn.setEnabled(ready and changed)
         for b in (self.new_btn, self.over_btn, self.up_btn):
             b.setEnabled(ready and changed)
         self.up_btn.setEnabled(ready)                          # upscaling alone is a fair thing to ask for
         self.stack.setEnabled(ready)
+        stoppable = self.saving and self._pending is not None and not self._pending.get("writing")
+        self.close_btn.setText("Stop" if stoppable else "Close")
+        self.close_btn.setEnabled(not self.saving or stoppable)
         n = len(self.edit.strokes)
         self.strokes_note.setText(f"{n} brush stroke{'s' if n != 1 else ''} on this photo." if n else "")
         for r in (self.focus_amount, self.focus_size, self.focus_angle):
@@ -1692,6 +1769,8 @@ class EditorWindow(QDialog):
         if stage != self.stage() or (rough and gen < self.gen):
             return                                       # overtaken: the newer one is on its way
         self.canvas.set_pixmap(QPixmap.fromImage(qimage_rgb(arr)))
+        if not rough and not self.saving and self.note.text() == "Healing…":
+            self.note.setText("")
         if TABS[self._tab()] == "Filters" and not rough:
             self._ask_thumbs()
 
@@ -1710,6 +1789,11 @@ class EditorWindow(QDialog):
             self.close()
         elif e.key() not in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             super().keyPressEvent(e)
+
+    def changeEvent(self, e) -> None:  # noqa: N802
+        if e.type() == e.Type.ActivationChange and not self.isActiveWindow() and self.comparing:
+            self.compare(False)                        # the key-up went to another window
+        super().changeEvent(e)
 
     def keyReleaseEvent(self, e) -> None:  # noqa: N802
         if e.key() == Qt.Key.Key_Space and not e.isAutoRepeat():
@@ -1961,6 +2045,16 @@ class EditorWindow(QDialog):
         def work() -> None:
             try:
                 src = batch_crop.open_upright(path)
+                if src.image.mode == "CMYK":                 # worked on as RGB: brought over by its own profile
+                    try:
+                        from PIL import ImageCms
+                        import io as _io
+                        rgbp = ImageCms.createProfile("sRGB")
+                        src.image = ImageCms.profileToProfile(src.image, ImageCms.ImageCmsProfile(_io.BytesIO(src.info["icc_profile"])),
+                                                              rgbp, outputMode="RGB")
+                    except Exception:  # noqa: BLE001 — no usable profile: Pillow's plain conversion
+                        src.image = src.image.convert("RGB")
+                    src.info.pop("icc_profile", None)
                 hdr = False
                 try:
                     import thumb_color
@@ -1997,7 +2091,7 @@ class EditorWindow(QDialog):
 
     # ------------------------------------------------------------------ saving
     def save(self, as_new: bool, upscale: tuple | None = None) -> None:
-        if self.src is None or self.saving:
+        if self.src is None or self.saving or not (self.edit.changed() or upscale):
             return
         if not as_new and not upscale:
             if QMessageBox.question(self, "Overwrite Original",
@@ -2034,17 +2128,24 @@ class EditorWindow(QDialog):
         pending, src, path, sig = self._pending, self.src, self.path, self._sig
         try:
             if pending["edit"].texts:                    # text is the Mac's fonts: drawn here, on the main thread
+                if alpha is not None and alpha.shape == rgb.shape[:2]:
+                    alpha = np.maximum(alpha, photo_text.coverage(pending["edit"].texts, rgb.shape[1], rgb.shape[0]))
                 rgb = photo_text.onto_array(rgb, pending["edit"].texts)
         except Exception as e:  # noqa: BLE001
             self._save_failed(f"the text couldn't be drawn ({e})")
             return
         self.bar.setValue(86)
+        pending["writing"] = True                        # past here it's finished, not stopped
+        self._refresh()
 
         def work() -> None:
             try:
                 im = pe.to_image(rgb, alpha if alpha is not None and alpha.shape == rgb.shape[:2] else None)
-                if src.image.mode in ("L", "LA") and float(np.abs(rgb - rgb.mean(axis=2, keepdims=True)).max()) < 0.01:
-                    im = im.convert("LA" if im.mode == "RGBA" else "L")       # a grey photo stays grey
+                if src.image.mode in ("L", "LA"):
+                    if float(np.abs(rgb - rgb.mean(axis=2, keepdims=True)).max()) < 0.01:
+                        im = im.convert("LA" if im.mode == "RGBA" else "L")   # a grey photo stays grey
+                    else:
+                        src.info.pop("icc_profile", None)                     # …and one given colour isn't "grey" any more
                 edit, found = pending["edit"], list(self.renderer.found)
                 data = batch_crop.encode_like(src, im, gain=lambda g: pe.gain_through(g, edit, found))
                 sig.progress.emit(0.95)
@@ -2142,6 +2243,9 @@ class EditorWindow(QDialog):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.saving:
+            if self._pending is not None and not self._pending.get("writing"):
+                self._cancel.set()                     # still working the picture out: stopped, nothing written
+                self.note.setText("Stopping…")
             event.ignore()
             return
         if self.src is not None and self.edit.changed():

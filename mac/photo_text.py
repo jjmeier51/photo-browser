@@ -1,4 +1,4 @@
-"""Text on a photo — the photo editor's layers (photo_editor_window.py) and the collage's captions.
+"""Text on a photo — the photo editor's layers (photo_editor_window.py).
 
 A layer is a plain dict (so it sits in an undo step and in settings as it is): the words, a font, a size as a
 fraction of the picture's short side, where its centre is (fractions of the picture), an angle, a colour — and
@@ -300,6 +300,16 @@ def onto_array(rgb: np.ndarray, layers: list[dict]) -> np.ndarray:
     paint_all(img, layers)
     out = np.frombuffer(img.constBits(), dtype=np.uint8).reshape(h, img.bytesPerLine())[:, :w * 4].reshape(h, w, 4)
     return out[..., :3].astype(np.float32) / 255.0
+
+
+def coverage(layers: list[dict], w: int, h: int) -> np.ndarray:
+    """How much of each pixel the layers cover (h, w float32, 0…1) — so text put on a see-through part of a
+    picture is itself seen. Call on the main thread."""
+    img = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(0)
+    paint_all(img, layers)
+    a = np.frombuffer(img.constBits(), dtype=np.uint8).reshape(h, img.bytesPerLine())[:, :w * 4].reshape(h, w, 4)
+    return a[..., 3].astype(np.float32) / 255.0
 
 
 def angle_to(layer: dict, w: float, h: float, x: float, y: float) -> float:

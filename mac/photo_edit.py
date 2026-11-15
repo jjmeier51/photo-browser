@@ -193,9 +193,9 @@ def auto_adjust(img: np.ndarray) -> dict:
     if lo > 0.03:
         out["blacks"] = -round(min(100.0, lo / 0.12 * 100.0))
     span = max(hi - lo, 0.05)
-    rel = (mid - lo) / span
+    rel = min(0.98, max(0.02, (mid - lo) / span))          # (a page that's mostly white has its middle at the top)
     if abs(rel - 0.46) > 0.04:
-        out["brightness"] = int(np.clip(math.log2(math.log(max(rel, 0.02)) / math.log(0.46)) * 100.0, -60, 60))
+        out["brightness"] = int(np.clip(math.log2(math.log(rel) / math.log(0.46)) * 100.0, -60, 60))
     flat = small.reshape(-1, 3)
     near_grey = flat[(flat.max(axis=1) - flat.min(axis=1)) < 0.12 * np.maximum(flat.max(axis=1), 0.2)]
     if len(near_grey) > len(flat) * 0.04:                    # a cast shows in what should be grey; a red dress doesn't count
@@ -372,9 +372,11 @@ def apply_adjust(img: np.ndarray, a: dict, seed: int = 7) -> np.ndarray:
     chroma = v("chroma")
     if chroma:
         n = max(1, int(round(abs(chroma) * 0.004 * long_side)))
+        n = min(n, max(1, w - 1))
         out = out.copy()
-        out[..., 0] = np.roll(out[..., 0], -n, axis=1)
-        out[..., 2] = np.roll(out[..., 2], n, axis=1)
+        red, blue = out[..., 0].copy(), out[..., 2].copy()
+        out[:, :w - n, 0], out[:, w - n:, 0] = red[:, n:], red[:, -1:]          # red to the left, its edge held
+        out[:, n:, 2], out[:, :n, 2] = blue[:, :w - n], blue[:, :1]             # blue to the right
     scan = v("scan")
     if scan:
         period = max(2.0, long_side / 360.0)
@@ -532,8 +534,11 @@ def turned_size(g: Geometry, w: int, h: int, cropped: bool = True) -> tuple[int,
     if abs(g.straighten) > 0.01:
         z = _zoom_for(g.straighten, w, h)
         w, h = max(1, int(w / z)), max(1, int(h / z))
-    if cropped and g.crop != FULL:
-        w, h = max(1, round(g.crop[2] * w)), max(1, round(g.crop[3] * h))
+    if cropped and g.crop != FULL:                         # (rounded as apply_geometry cuts it)
+        x, y, cw, ch = g.crop
+        x0, y0 = max(0, int(round(x * w))), max(0, int(round(y * h)))
+        x1, y1 = min(w, max(x0 + 1, int(round((x + cw) * w)))), min(h, max(y0 + 1, int(round((y + ch) * h))))
+        w, h = max(1, x1 - x0), max(1, y1 - y0)
     return w, h
 
 
@@ -703,10 +708,13 @@ def apply_stroke(img: np.ndarray, s: Stroke, progress: Callable[[float], None] |
         warp = _Warp(box)
         step = max(1.0, r / 5.0)
         last = pts[0]
-        for p in pts[1:]:
+        for k in range(1, len(pts)):
+            p = pts[k]
             d = p - last
             dist = float(np.hypot(*d))
-            if dist < step and p is not pts[-1]:
+            if dist < step and k != len(pts) - 1:        # too near to matter — unless it's where the drag ended
+                continue
+            if dist <= 0:
                 continue
             n = max(1, int(dist / step))
             for i in range(n):
@@ -841,7 +849,7 @@ def _face_points(f: FaceBox, w: int, h: int):
     m1 = np.array([f.points[3][0] * w, f.points[3][1] * h])
     m2 = np.array([f.points[4][0] * w, f.points[4][1] * h])
     iod = float(np.hypot(*(e2 - e1)))
-    if iod < 6:
+    if iod < 0.006 * max(w, h):                          # a fraction, so the preview and the saved photo agree
         return None
     eyes_mid, mouth_mid = (e1 + e2) / 2, (m1 + m2) / 2
     across = (e2 - e1) / iod                                       # along the eyes
@@ -1114,6 +1122,49 @@ def from_dict(d: dict) -> Edit:
                 texts=[dict(t) for t in d.get("texts") or []], seed=int(d.get("seed", 7)))
 
 
+def plane_through(plane: np.ndarray, e: Edit, found: list[FaceBox] | None, margin: float, fill_heals: bool) -> np.ndarray:
+    """A second picture that lies on the photo — its HDR gain map, its transparency — taken through the edit so
+    it still lies on it: reshaped where the photo was reshaped, turned, straightened and cropped with it, and
+    given `margin` (0…1) under a frame's margins. `plane` is (h, w), 0…1; a new array comes back."""
+    out = np.ascontiguousarray(plane, dtype=F32).copy()
+    h, w = out.shape[:2]
+    for s in e.strokes:
+        if s.tool == "reshape":
+            apply_stroke(out, s)
+        elif fill_heals and s.tool == "heal" and s.points:
+            pts = np.array([(u * w, v * h) for u, v in s.points], dtype=np.float64)
+            r = max(1.0, s.size * max(h, w))
+            box = _window(pts, r, w, h)
+            if box is not None:
+                import gainmap
+                hole = np.zeros((h, w), dtype=F32)
+                hole[box[1]:box[3], box[0]:box[2]] = stroke_mask(pts, r, box, 0.0) > 0.35
+                out = gainmap.filled(out * 255.0, hole) / 255.0
+    if any(e.face.values()) and found:
+        face_warp(out, found, e.face)
+    if not e.geometry.plain():
+        out = apply_geometry(out, e.geometry)
+    if e.frame.kind == "cinema":                         # bars drawn on the photo: they take the margin's value
+        fh, fw = out.shape[:2]
+        if fw / fh < 2.39:
+            bar = int(round((fh - fw / 2.39) / 2.0))
+            out = out.copy()
+            out[:bar] = out[fh - bar:] = margin
+    elif e.frame.kind:
+        level = int(round(margin * 255))
+        solid = np.repeat(out[..., None], 3, axis=2)
+        out = apply_frame(solid, Frame(e.frame.kind, e.frame.width, (level, level, level), e.frame.shape, False))[..., 0]
+    return np.clip(out, 0.0, 1.0)
+
+
+def gain_through(g: np.ndarray, e: Edit, found: list[FaceBox] | None = None) -> np.ndarray:
+    """A photo's HDR gain map (gainmap.py: an upright (h, w) array, 0…255) taken through the edit: reshaped
+    with the picture, filled in where something was healed away, turned, straightened and cropped with it,
+    and given no extra brightness under a frame's margins. Filters and adjustments don't touch it — it says
+    how much brighter, not what colour."""
+    return plane_through(np.asarray(g, dtype=F32) / 255.0, e, found, 0.0, True) * 255.0
+
+
 def retouched(img: np.ndarray, e: Edit, found: list[FaceBox], progress: Callable[[float], None] | None = None,
               cancelled: Callable[[], bool] | None = None, start: int = 0) -> np.ndarray:
     """Stage one: the strokes from `start` on (the window keeps the earlier ones done), then the face
@@ -1140,50 +1191,21 @@ def render(img: np.ndarray, e: Edit, found: list[FaceBox] | None = None, alpha: 
            progress: Callable[[float], None] | None = None, cancelled: Callable[[], bool] | None = None
            ) -> tuple[np.ndarray, np.ndarray | None]:
     """The whole edit (everything but the text) on `img` — the photo upright, float32. Returns (rgb, alpha):
-    the alpha, when the photo has one, turned and cropped with it (a frame makes the photo opaque)."""
+    the alpha, when the photo has one, reshaped, turned and cropped with it (a frame's own margins are solid)."""
     report = progress or (lambda _p: None)
     out = retouched(img, e, found or [], lambda p: report(0.55 * p), cancelled) if (e.strokes or any(e.face.values())) \
         else img
     report(0.55)
     if not e.geometry.plain():
         out = apply_geometry(out, e.geometry)
-        if alpha is not None:
-            alpha = apply_geometry(alpha, e.geometry)
     report(0.65)
     out = toned(out, e)
     report(0.92)
     if e.frame.kind:
         out = apply_frame(out, e.frame)
-        if out.shape[:2] != (alpha.shape if alpha is not None else out.shape[:2]) or e.frame.kind in ("rounded", "cinema"):
+    if alpha is not None:                                # the transparency follows the picture; a frame is solid
+        alpha = plane_through(alpha, e, found, 1.0, False)
+        if alpha.shape != out.shape[:2]:
             alpha = None
     report(1.0)
     return np.clip(out, 0.0, 1.0), alpha
-
-
-def gain_through(g: np.ndarray, e: Edit, found: list[FaceBox] | None = None) -> np.ndarray:
-    """A photo's HDR gain map (gainmap.py: an upright (h, w) array, 0…255) taken through the edit, so it still
-    lies on the picture: reshaped where the picture was reshaped, filled in where something was healed away,
-    turned, straightened and cropped with it, and given the frame's margins (no extra brightness there).
-    Filters and adjustments don't touch it — it says how much brighter, not what colour."""
-    out = np.ascontiguousarray(g, dtype=F32) / 255.0
-    h, w = out.shape[:2]
-    for s in e.strokes:
-        if s.tool == "reshape":
-            apply_stroke(out, s)
-        elif s.tool == "heal" and s.points:
-            pts = np.array([(u * w, v * h) for u, v in s.points], dtype=np.float64)
-            r = max(1.0, s.size * max(h, w))
-            box = _window(pts, r, w, h)
-            if box is not None:
-                import gainmap
-                hole = np.zeros((h, w), dtype=F32)
-                hole[box[1]:box[3], box[0]:box[2]] = stroke_mask(pts, r, box, 0.0) > 0.35
-                out = gainmap.filled(out * 255.0, hole) / 255.0
-    if any(e.face.values()) and found:
-        face_warp(out, found, e.face)
-    if not e.geometry.plain():
-        out = apply_geometry(out, e.geometry)
-    if e.frame.kind:
-        solid = np.repeat(out[..., None], 3, axis=2)
-        out = apply_frame(solid, Frame(e.frame.kind, e.frame.width, (0, 0, 0), e.frame.shape, False))[..., 0]
-    return np.clip(out * 255.0, 0.0, 255.0)
