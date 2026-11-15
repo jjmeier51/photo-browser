@@ -847,10 +847,10 @@ class DuplicatesWindow(QWidget):
         shown under the current filter."""
         if scope == "identical":
             groups = [g for g in self.groups if g.identical]
-        elif scope == "exact":
-            groups = [g for g in self.groups if g.kind == "exact"]
-        else:
-            groups = self._visible_groups()
+        elif scope == "exact":                              # (not one the byte-for-byte check has shown to differ)
+            groups = [g for g in self.groups if g.kind == "exact" and g.identical is not False]
+        else:                                               # look-alikes, yes; "similar name" alone, never in bulk —
+            groups = [g for g in self._visible_groups() if g.kind != "name"]      # "beach 1/2/3" aren't copies
         ticked, kept = 0, set()
         for g in groups:
             keep = self.keeper(g.paths)
@@ -862,7 +862,8 @@ class DuplicatesWindow(QWidget):
         what = {"identical": "the identical groups", "exact": "the exact groups", "shown": "the groups shown"}[scope]
         self.status.setText(f"Ticked {ticked:,} extra cop{'ies' if ticked != 1 else 'y'} in {what} — one copy of each "
                             "kept (marked Keep). " + ("Check them, then Move to Trash." if scope != "shown" else
-                                                      "Look-alikes aren't always copies: check them before the Trash."))
+                                                      "Look-alikes aren't always copies: check them before the Trash. "
+                                                      "Groups alike only in name are left for you to tick."))
 
     def view(self, paths: list[str], start: str) -> None:
         if self.hooks.view is not None:
@@ -908,6 +909,19 @@ class DuplicatesWindow(QWidget):
         box.exec()
         if box.clickedButton() is not go:
             return
+        # The scan may be old: a copy only goes while the copy meant to stay is still there. (Where every copy
+        # of a group was ticked on purpose, that was said above and stands.)
+        orphaned: set[str] = set()
+        for g in self.groups:
+            going = [p for p in g.paths if p in self.selected]
+            staying = [p for p in g.paths if p not in self.selected]
+            if going and staying and not any(os.path.exists(p) for p in staying):
+                orphaned.update(going)
+        if orphaned:
+            self.set_selected(sorted(orphaned), False)
+            paths = [p for p in paths if p not in orphaned]
+            heirs = [(keep, [p for p in going if p not in orphaned]) for keep, going in heirs if os.path.exists(keep)]
+            heirs = [(keep, going) for keep, going in heirs if going]
         if heirs:
             self.settings.setValue("duplicates/inherit", "true" if carry.isChecked() else "false")
             if carry.isChecked():
@@ -922,7 +936,9 @@ class DuplicatesWindow(QWidget):
         self._render()
         failed = len(paths) - len(moved)
         self.status.setText(f"Moved {len(moved):,} to the Trash." +
-                            (f" {failed:,} couldn't be moved." if failed else ""))
+                            (f" {failed:,} couldn't be moved." if failed else "") +
+                            (f" {len(orphaned):,} left alone: the copy that was to stay isn't there any more — "
+                             "look again (Rescan)." if orphaned else ""))
         if self.hooks.changed is not None:
             self.hooks.changed()
 

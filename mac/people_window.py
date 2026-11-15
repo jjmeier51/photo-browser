@@ -17,9 +17,17 @@ this Mac (`faces.py`, `people.py`), shown as people you can name.
   shows — a few at a time in the background, with a count and a Stop that loses nothing; then groups what it
   found. The first time, it says what's about to happen and downloads the two models it needs (39 MB, from
   OpenCV, checked).
-- **⋯ ▸ Forget All Face Data…** deletes every face, group and name (the photos aren't touched).
+- **⋯ ▸ Group Again** groups once more, on its own thread, as Find People does when it's done.
+- **⋯ ▸ Forget All Face Data…** deletes every face, group and name (the photos aren't touched) — after
+  stopping a search that's under way, so nothing it was in the middle of comes back.
 
 Everything stays on this Mac. The app never puts a name to a face itself.
+
+**One thing at a time**: looking at photos and grouping both run on a worker thread under one "busy" state
+(`scanning`, `_begin` / `_end`) — Find People and Group Again are off while either runs, Stop stops either.
+**The dialogs listen for face pictures through bound slots and stop listening when they close** (`_FaceDialog`):
+a lambda connected to the window's signal kept every closed dialog alive and repainting for as long as the
+window was open.
 """
 from __future__ import annotations
 
@@ -55,20 +63,23 @@ class _Bridge(QObject):
     face = Signal(int, object)              # a face's picture is ready (face id, QImage)
     progress = Signal(str)
     scanned = Signal(object, str)           # the scan's totals (or None), and why it ended early ("" when it didn't)
+    grouped = Signal(object, str)           # Group Again's totals (or None), and what went wrong ("" when nothing)
     ready = Signal(bool, str)               # the models are there (or why not)
     changed = Signal()                      # the store changed (told from whichever thread changed it)
 
 
 class FaceCache:
     """Each face's square picture, cut from its photo on a worker thread and kept (memory, and a small file in
-    the People folder so the window opens at once next time)."""
+    the People folder so the window opens at once next time). The files are the store's to delete — with the
+    face (`Store._drop_thumbs`), or all of them (`forget_all`) — so a picture is only kept for a face the
+    store still has."""
 
-    def __init__(self, bridge: _Bridge) -> None:
-        self.bridge = bridge
+    def __init__(self, bridge: _Bridge, store: people.Store) -> None:
+        self.bridge, self.store = bridge, store
         self.images: dict[int, QPixmap] = {}
         self.asked: set[int] = set()
         self.pool = ThreadPoolExecutor(max_workers=3)
-        self.folder = people.folder() / "thumbs"
+        self.folder = store.thumbs
         bridge.face.connect(self._ready)
 
     def get(self, face: people.Face | None) -> QPixmap | None:
@@ -89,6 +100,9 @@ class FaceCache:
                 self.folder.mkdir(parents=True, exist_ok=True)
                 pil.save(cached, "JPEG", quality=88)
                 img = QImage(str(cached))
+                if self.store.face(face.id) is None:       # forgotten while this was being cut: not kept after all
+                    cached.unlink(missing_ok=True)
+                    img = QImage()
             except Exception:  # noqa: BLE001 — the photo is gone, or the drive is away: no picture
                 img = QImage()
         try:
@@ -100,13 +114,12 @@ class FaceCache:
         self.images[face_id] = QPixmap.fromImage(img) if not img.isNull() else QPixmap()
 
     def forget(self) -> None:
+        """The pictures held in memory (the files went with `Store.forget_all`)."""
         self.images.clear()
         self.asked.clear()
-        try:
-            for f in self.folder.iterdir():
-                f.unlink()
-        except OSError:
-            pass
+
+    def close(self) -> None:
+        self.pool.shutdown(wait=False, cancel_futures=True)
 
 
 def draw_circle(p: QPainter, rect: QRectF, pm: QPixmap | None, theme, ring: QColor | None = None) -> None:
@@ -241,13 +254,44 @@ class FaceTile(QWidget):
         p.end()
 
 
-class ReviewDialog(QDialog):
+class _FaceDialog(QDialog):
+    """A dialog that shows faces: it repaints as their pictures arrive — and stops listening when it closes
+    (module notes). `open_and_wait()` is `exec()` and then the dialog is deleted, not left as a hidden child of
+    the window."""
+
+    def __init__(self, win: "PeopleWindow") -> None:
+        super().__init__(win)
+        self.win, self.theme, self.cache = win, win.theme, win.cache
+        self._listening = False
+
+    def _listen(self) -> None:
+        self.win.bridge.face.connect(self._face_ready)
+        self._listening = True
+
+    def _face_ready(self, _face_id: int, _img) -> None:
+        self.update()
+
+    def done(self, result: int) -> None:
+        if self._listening:
+            self._listening = False
+            try:
+                self.win.bridge.face.disconnect(self._face_ready)
+            except (RuntimeError, TypeError):          # (the window went first)
+                pass
+        super().done(result)
+
+    def open_and_wait(self) -> int:
+        result = self.exec()
+        self.deleteLater()
+        return result
+
+
+class ReviewDialog(_FaceDialog):
     """"Is this <name>?" — the suggestions for one person, answered a tile at a time."""
 
     def __init__(self, win: "PeopleWindow", person: people.Person, found: list[tuple[people.Face, float]]) -> None:
         super().__init__(win)
-        self.win, self.person = win, person
-        self.theme, self.cache = win.theme, win.cache
+        self.person = person
         self.setWindowTitle(f"Review — {person.label}")
         self.resize(720, 560)
         v = QVBoxLayout(self)
@@ -290,7 +334,7 @@ class ReviewDialog(QDialog):
         for b in (all_yes, none, cancel, done):
             bar.addWidget(b)
         v.addLayout(bar)
-        win.bridge.face.connect(lambda _id, _img: self.update())
+        self._listen()
         self._count()
 
     def _all(self, answer: str) -> None:
@@ -314,12 +358,11 @@ class ReviewDialog(QDialog):
         self.accept()
 
 
-class KeyPhotoDialog(QDialog):
+class KeyPhotoDialog(_FaceDialog):
     """Choose Key Photo…: the person's faces; a click makes one the face that stands for them."""
 
     def __init__(self, win: "PeopleWindow", person: people.Person) -> None:
         super().__init__(win)
-        self.win, self.theme, self.cache = win, win.theme, win.cache
         self.setWindowTitle(f"Key Photo — {person.label}")
         self.resize(680, 500)
         v = QVBoxLayout(self)
@@ -339,15 +382,14 @@ class KeyPhotoDialog(QDialog):
             flow.addWidget(t)
         scroll.setWidget(body)
         v.addWidget(scroll, 1)
-        win.bridge.face.connect(lambda _id, _img: self.update())
+        self._listen()
 
 
-class SameDialog(QDialog):
+class SameDialog(_FaceDialog):
     """"Same Person?" — pairs that may be one, a pair at a time."""
 
     def __init__(self, win: "PeopleWindow", pairs: list) -> None:
         super().__init__(win)
-        self.win, self.theme, self.cache = win, win.theme, win.cache
         self.pairs = pairs
         self.at = 0
         self.setWindowTitle("Same Person?")
@@ -376,7 +418,10 @@ class SameDialog(QDialog):
         bar.addWidget(different)
         bar.addWidget(same)
         v.addLayout(bar)
-        win.bridge.face.connect(lambda _id, _img: self._draw())
+        self._listen()
+        self._draw()
+
+    def _face_ready(self, _face_id: int, _img) -> None:
         self._draw()
 
     def _draw(self) -> None:
@@ -422,16 +467,18 @@ class PeopleWindow(QWidget):
         self.hooks, self.theme = hooks, theme
         self.store = store or people.shared()
         self.bridge = _Bridge()
-        self.cache = FaceCache(self.bridge)
+        self.cache = FaceCache(self.bridge, self.store)
         self.tiles: list[PersonTile] = []
         self.selected: list[int] = []
         self.show_hidden = False
         self.stop = threading.Event()
-        self.scanning = False
+        self.scanning = False                   # busy: looking at photos, or grouping (one worker thread at a time)
+        self._forgetting = False                # Forget All Face Data was asked for mid-search: done once it stops
         self.resize(940, 700)
         self.bridge.face.connect(lambda _id, _img: self._repaint.start())
         self.bridge.progress.connect(lambda line: self.status.setText(line))
         self.bridge.scanned.connect(self._scanned)
+        self.bridge.grouped.connect(self._grouped)
         self.bridge.ready.connect(self._models_ready)
         self._repaint = QTimer(self)
         self._repaint.setSingleShot(True)
@@ -487,7 +534,8 @@ class PeopleWindow(QWidget):
         mm = QMenu(more)
         self.hidden_act = mm.addAction("Show Hidden People", self._toggle_hidden)
         self.hidden_act.setCheckable(True)
-        mm.addAction("Group Again", self.regroup).setToolTip("Looks once more for faces that belong together")
+        self.group_act = mm.addAction("Group Again", self.regroup)
+        self.group_act.setToolTip("Looks once more for faces that belong together")
         mm.addSeparator()
         mm.addAction("Forget All Face Data…", self.forget_all)
         mm.setToolTipsVisible(True)
@@ -622,7 +670,8 @@ class PeopleWindow(QWidget):
             menu.addAction(f"Merge {len(self.selected)} People", self.merge_selected)
         menu.addSeparator()
         menu.addAction("Review Suggestions…", lambda: self.review(person))
-        menu.addAction("Choose Key Photo…", lambda: (KeyPhotoDialog(self, person).exec(), self.cache.asked.clear()))
+        menu.addAction("Choose Key Photo…", lambda: (KeyPhotoDialog(self, person).open_and_wait(),
+                                                      self.cache.asked.clear()))
         menu.addAction("Unfavorite" if person.favorite else "Favorite",
                        lambda: self.store.set_flag(person.id, "favorite", not person.favorite))
         menu.addAction("Unhide" if person.hidden else "Hide",
@@ -684,14 +733,14 @@ class PeopleWindow(QWidget):
         if not found:
             self._say(f"Nothing more to suggest for {person.label} just now.")
             return
-        ReviewDialog(self, person, found).exec()
+        ReviewDialog(self, person, found).open_and_wait()
 
     def review_same(self) -> None:
         pairs = self.store.merge_candidates()
         if not pairs:
             self._say("No two people here look like one.")
             return
-        SameDialog(self, pairs).exec()
+        SameDialog(self, pairs).open_and_wait()
         self.fill()
 
     def not_a_person(self, person: people.Person) -> None:
@@ -708,9 +757,36 @@ class PeopleWindow(QWidget):
             self._say(f"Tagged {len(photos):,} photo{'s' if len(photos) != 1 else ''} “{person.name}”.")
 
     def regroup(self) -> None:
-        out = self.store.cluster()
-        self._say(f"{out['joined']:,} faces joined people, {out['new_people']:,} new "
-                  f"{'person' if out['new_people'] == 1 else 'people'}.")
+        """Group Again — on a worker thread (tens of thousands of faces take many seconds: the window froze),
+        under the same busy state as Find People, so it can't run beside a search's own grouping."""
+        if self.scanning:
+            return
+        self._begin("Grouping faces…")
+        store, bridge, stop = self.store, self.bridge, self.stop
+
+        def work() -> None:
+            out, why = None, ""
+            try:
+                out = store.cluster(lambda line: bridge.progress.emit(line), stop.is_set)
+            except Exception as e:  # noqa: BLE001 — whatever went wrong, the window is told
+                why = f"Grouping stopped: {e or type(e).__name__}"
+            try:
+                bridge.grouped.emit(out, why)
+            except RuntimeError:
+                pass
+        threading.Thread(target=work, name="group-people", daemon=True).start()
+
+    def _grouped(self, out, why: str) -> None:
+        if self._end():
+            return
+        self.fill()
+        if why:
+            self.status.setText(why)
+        elif out is not None:
+            merged = f", {out['merged']:,} groups turned out to be one person" if out.get("merged") else ""
+            self._say(f"{out['joined']:,} faces joined people, {out['new_people']:,} new "
+                      f"{'person' if out['new_people'] == 1 else 'people'}{merged}"
+                      f"{' (stopped)' if self.stop.is_set() else ''}.")
 
     def forget_all(self) -> None:
         counts = self.store.counts()
@@ -723,11 +799,22 @@ class PeopleWindow(QWidget):
         go = box.addButton("Forget Everything", QMessageBox.ButtonRole.DestructiveRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
         box.exec()
-        if box.clickedButton() is go:
+        if box.clickedButton() is not go:
+            return
+        if self.scanning:
+            # The search is told to stop and the forgetting waits for it (`_end`): the photos it's in the middle
+            # of would otherwise be written back after everything was deleted.
+            self._forgetting = True
             self.stop.set()
-            self.store.forget_all()
-            self.cache.forget()
-            self._say("All face data was deleted.")
+            self.status.setText("Stopping first, then deleting…")
+        else:
+            self._forget_now()
+
+    def _forget_now(self) -> None:
+        self._forgetting = False
+        self.store.forget_all()
+        self.cache.forget()
+        self._say("All face data was deleted.")
 
     def _say(self, line: str) -> None:
         self.status.setText(line)
@@ -790,17 +877,31 @@ class PeopleWindow(QWidget):
                 pass
         threading.Thread(target=fetch, name="face-models", daemon=True).start()
 
-    def _begin(self) -> None:
+    def _begin(self, line: str = "Getting ready…") -> None:
         self.scanning = True
         self.stop = threading.Event()
         self.find_btn.setEnabled(False)
+        self.group_act.setEnabled(False)
         self.stop_btn.setVisible(True)
         self.busy.setVisible(True)
         self.busy.setRange(0, 0)
-        self.status.setText("Getting ready…")
+        self.status.setText(line)
+
+    def _end(self) -> bool:
+        """The worker thread is done (its last act was to say so). True when Forget All Face Data was waiting
+        for that — it's done now, and there's nothing left to report."""
+        self.scanning = False
+        self.find_btn.setEnabled(True)
+        self.group_act.setEnabled(True)
+        self.stop_btn.setVisible(False)
+        self.busy.setVisible(False)
+        if self._forgetting:
+            self._forget_now()
+            return True
+        return False
 
     def _models_ready(self, ok: bool, why: str) -> None:
-        if not ok:
+        if not ok or self.stop.is_set():
             self._scanned(None, why)
             return
         folders, store, bridge, stop = self._pending, self.store, self.bridge, self.stop
@@ -829,21 +930,33 @@ class PeopleWindow(QWidget):
         threading.Thread(target=work, name="find-people", daemon=True).start()
 
     def _scanned(self, out, why: str) -> None:
-        self.scanning = False
-        self.find_btn.setEnabled(True)
-        self.stop_btn.setVisible(False)
-        self.busy.setVisible(False)
+        if self._end():
+            return
         self.fill()
         if why:
             self.status.setText(why)
         elif out is not None:
             stopped = " (stopped — Find People again carries on)" if self.stop.is_set() else ""
-            self._say(f"Looked at {out['photos']:,} photo{'s' if out['photos'] != 1 else ''}: {out['faces']:,} faces, "
-                      f"{out.get('new_people', 0):,} new {'person' if out.get('new_people', 0) == 1 else 'people'}, "
-                      f"{out.get('joined', 0):,} faces joined people already here{stopped}."
-                      if out["photos"] else "Every photo here has been looked at already.")
+            line = (f"Looked at {out['photos']:,} photo{'s' if out['photos'] != 1 else ''}: {out['faces']:,} faces, "
+                    f"{out.get('new_people', 0):,} new {'person' if out.get('new_people', 0) == 1 else 'people'}, "
+                    f"{out.get('joined', 0):,} faces joined people already here{stopped}."
+                    if out["photos"] else "" if out.get("halted") or out.get("failed") or out.get("unread")
+                    else "Every photo here has been looked at already.")
+            # what couldn't be looked at — said, not passed off as photos with no faces
+            if out.get("halted"):
+                line = f"{out['halted']} {line}"
+            elif out.get("unread"):
+                line += (f" {out['unread']:,} couldn't be read from the drive — Find People again tries "
+                         f"{'it' if out['unread'] == 1 else 'them'}.")
+            if out.get("failed"):
+                line += (f" {out['failed']:,} {'isn’t a picture' if out['failed'] == 1 else 'aren’t pictures'} "
+                         "that can be read (damaged, or still being copied) — tried again another day.")
+            self._say(line.strip())
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.stop.set()
+        if self._forgetting:                     # asked for and confirmed: not dropped because the window closed
+            self._forget_now()                   # (what the stopping search still holds is refused by the store)
         self.store.changed = lambda: None
+        self.cache.close()
         super().closeEvent(event)

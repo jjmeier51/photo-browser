@@ -574,8 +574,9 @@ KEEP_TIP = {"best": "Most tags, then a plain name (not “(1)” or “copy”),
 def keeper(paths: list[str], tags_of: Callable[[str], list[str]] | None = None, rule: str = "best",
            pixels: dict[str, tuple[int, int]] | None = None, dates: dict[str, float] | None = None,
            prefer: str | None = None) -> str:
-    """The copy to keep. `rule` (KEEP_RULES) decides; ties — and "best" — fall to: most tags, then a plain name
-    (not "(1)"/"copy"), then the oldest (created, else modified), then the shortest path. A copy inside the
+    """The copy to keep. `rule` (KEEP_RULES) decides — "best" is the most pixels, then the largest file; ties
+    fall to: most tags, then a plain name (not "(1)"/"copy"), then the oldest (created, else modified), then
+    the shortest path. A copy inside the
     `prefer` folder beats one that isn't, whatever the rule."""
     def birth(p: str) -> float:
         try:
@@ -608,7 +609,8 @@ def keeper(paths: list[str], tags_of: Callable[[str], list[str]] | None = None, 
             return (when(p),)
         if rule == "newest":
             return (-when(p),)
-        return ()
+        w, h = (pixels or {}).get(p) or (0, 0)          # "best": never the smaller picture because its name is
+        return (-(w * h), -size(p))                      # plainer — most pixels, then most bytes, then the ties
 
     def outside(p: str) -> int:
         if not prefer:

@@ -710,6 +710,11 @@ def outcome(text: str) -> tuple[str, str]:
     errors = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("Error")]
     m = re.search(r"(\d+) image files? updated", text)
     if m and int(m[1]) > 0:
+        try:                                         # written with its date kept: the drive's checksum record
+            import clone_drive                       # mustn't take the edit for a file gone bad
+            clone_drive.forget_checksum(ch.path)
+        except Exception:  # noqa: BLE001
+            pass
         return "updated", ""
     if errors:
         why = re.sub(r"^Error:\s*", "", errors[0])

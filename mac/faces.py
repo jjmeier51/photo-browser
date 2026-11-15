@@ -21,7 +21,14 @@ Things learned the hard way (all measured):
 - The detector wants **BGR**, the recogniser **RGB**; both take 0…255 with no scaling.
 - The detector sees faces about 10–300 px tall *in the 640 × 640 picture it's given*. A whole 12-megapixel photo
   squeezed to 640 loses the faces at the back of a group; cut into tiles it loses the close-up that fills the
-  frame. So: once whole, and — for a big photo — again as overlapping tiles at twice the size, the two merged.
+  frame. So: once whole, and — for a big photo — again as overlapping tiles at nearly twice the size, the two
+  merged. **Four tiles, not nine**: the photo is made 2 × 640 − `OVERLAP` on its longer side, so two tiles a side
+  cover it and share a strip wide enough to hold, whole, any face too small for the whole-photo pass. (Nine
+  tiles at 1280 with half of each shared found the same faces for twice the detector runs.)
+- **A photo the drive wouldn't hand over is not a photo without faces.** An I/O error, a file that's gone, a
+  drive pulled out mid-scan: nothing is recorded (recording "no faces" deleted the person's confirmed faces in
+  that photo and never looked again), and a few in a row end the scan. A file that *was* read but isn't a
+  picture — damaged, half-copied — is noted apart (`Store.note_failed`) and tried again another day.
 - The recogniser's quantised file doesn't load in onnxruntime; the full one logs hundreds of harmless warnings
   unless told to be quiet.
 
@@ -56,6 +63,8 @@ MODELS = {
         "what": "SFace face recogniser (OpenCV, Apache-2.0 licence)"},
 }
 NET = 640                                       # the detector's picture is 640 × 640
+OVERLAP = 96                                    # px two tiles share: a face up to this wide is whole in one of them
+READ_ERRORS = 5                                 # photos in a row the drive won't hand over before a scan gives up
 SCORE_SHOW, SCORE_USE = 0.6, 0.72               # a detection at all; one sure enough to go by
 MIN_FACE = 36                                   # px on its shorter side, in the photo as decoded
 MAX_FACES = 40
@@ -213,15 +222,17 @@ def detect(img, threshold: float = SCORE_SHOW) -> np.ndarray:
     small = img.resize((max(1, round(W * s)), max(1, round(H * s))), Image.Resampling.BILINEAR) if s < 1 else img
     found = [_detect_tile(np.asarray(small, dtype=np.uint8), s, 0.0, 0.0, threshold)]
     if max(W, H) > NET * 1.5:                                      # big enough to hide small faces: again, in tiles
-        s2 = min(2 * NET / W, 2 * NET / H, 1.0)
+        side = 2 * NET - OVERLAP                                   # two tiles across, sharing OVERLAP
+        s2 = min(side / W, side / H, 1.0)
         w2, h2 = max(1, round(W * s2)), max(1, round(H * s2))
         mid = np.asarray(img.resize((w2, h2), Image.Resampling.BILINEAR) if s2 < 1 else img, dtype=np.uint8)
 
         def starts(size: int) -> list[int]:
+            """Where the tiles begin along one side: as few as cover it with OVERLAP shared, evenly spread."""
             if size <= NET:
                 return [0]
-            last = size - NET
-            return sorted({0, last // 2, last}) if last > 160 else [0, last]
+            n = -(-(size - OVERLAP) // (NET - OVERLAP))
+            return [round(k * (size - NET) / (n - 1)) for k in range(n)]
 
         for ty in starts(h2):
             for tx in starts(w2):
@@ -363,11 +374,31 @@ def photos_under(folders: list[str], stop: Callable[[], bool] = lambda: False) -
     return out
 
 
+def _drive_trouble(e: BaseException, path: str) -> str:
+    """Why a photo couldn't be looked at, when it wasn't the picture's fault: "unread" — the drive didn't hand
+    it over (an I/O error, a file or a whole drive that's gone) — or "denied" (not allowed to read it: nothing
+    to do with the drive). "" when the file was read and isn't a picture that can be made out. (Pillow's own
+    complaints — not an image, truncated — are `OSError`s too, but carry no error number; the system's do.)"""
+    if isinstance(e, PermissionError):
+        return "denied"
+    if isinstance(e, OSError) and e.errno is not None:
+        return "unread"
+    try:
+        os.stat(path)
+    except OSError:
+        return "unread"
+    return ""
+
+
 def scan(store: "people.Store", folders: list[str], progress: Callable[[int, int, int], None] = lambda d, t, f: None,
-         stop: Callable[[], bool] = lambda: False, workers: int | None = None) -> dict[str, int]:
+         stop: Callable[[], bool] = lambda: False, workers: int | None = None) -> dict:
     """Looks at every photo under `folders` that hasn't been looked at (as it is now, with these models) and
-    records its faces. `progress(done, total, faces found)`. Returns {"photos", "faces", "failed", "skipped"}.
-    Stopping loses nothing: each photo is recorded as it's done."""
+    records its faces. `progress(done, total, faces found)`. Returns {"photos" (looked at), "faces", "failed"
+    (read, but not pictures that can be made out — noted, tried again another day), "unread" (the drive
+    wouldn't hand them over — not recorded: the next scan tries again), "skipped"} and, when `READ_ERRORS`
+    photos in a row went unread and the scan gave up, "halted": a sentence saying so.
+    Stopping loses nothing: each photo is recorded as it's done. And a photo that can't be read loses nothing
+    either — what was known about its faces stays."""
     paths = photos_under(folders, stop)
     todo = []
     for p in paths:
@@ -377,34 +408,55 @@ def scan(store: "people.Store", folders: list[str], progress: Callable[[int, int
             continue
         if not store.scanned(p, st.st_mtime, st.st_size, MODEL):
             todo.append((p, st.st_mtime, st.st_size))
-    out = {"photos": 0, "faces": 0, "failed": 0, "skipped": len(paths) - len(todo)}
+    out = {"photos": 0, "faces": 0, "failed": 0, "unread": 0, "skipped": len(paths) - len(todo)}
     if not todo:
         return out
     _session("detector")
     _session("recogniser")                       # (raises Missing before any thread starts)
     workers = workers or max(2, min(6, (os.cpu_count() or 4) - 2))
+    epoch = store.epoch                          # (Forget All Face Data meanwhile: nothing more is recorded)
+    halt = threading.Event()
+    streak = {"n": 0, "gave_up": 0}              # photos in a row the drive wouldn't hand over (counted as they
+    count = threading.Lock()                     # fail, on the workers: with the drive gone they fail fast)
 
     def one(item):
         path, mtime, size = item
-        if stop():
+        if stop() or halt.is_set():
             return None
         try:
-            return item, analyse(path)
+            found, trouble = analyse(path), ""
         except Missing:
             raise
-        except Exception:  # noqa: BLE001 — a file that isn't a picture after all: noted as having no faces
-            return item, None
+        except Exception as e:  # noqa: BLE001 — whatever it was, it's this photo's: told apart here
+            found, trouble = None, _drive_trouble(e, path) or "failed"
+        with count:
+            if trouble == "unread":
+                streak["n"] += 1
+                if streak["n"] >= READ_ERRORS and not halt.is_set():
+                    streak["gave_up"] = streak["n"]
+                    halt.set()
+            elif trouble != "denied":
+                streak["n"] = 0
+        return item, found, trouble
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for i, result in enumerate(pool.map(one, todo)):
             if result is None:
                 continue
-            (path, mtime, size), found = result
-            if found is None:
+            (path, mtime, size), found, trouble = result
+            if trouble in ("unread", "denied"):
+                out["unread"] += 1
+            elif found is None:
                 out["failed"] += 1
-                found = []
-            store.add_file(path, mtime, size, found, MODEL)
-            out["photos"] += 1
-            out["faces"] += len(found)
+                store.note_failed(path, mtime, size, MODEL, epoch)
+            else:
+                store.add_file(path, mtime, size, found, MODEL, epoch)
+                out["photos"] += 1
+                out["faces"] += len(found)
+            if store.epoch != epoch:
+                halt.set()
             progress(i + 1, len(todo), out["faces"])
+    if streak["gave_up"]:
+        out["halted"] = (f"{streak['gave_up']} photos in a row couldn't be read — is the drive still connected? "
+                         "Stopped there; nothing was lost, and Find People again carries on.")
     return out

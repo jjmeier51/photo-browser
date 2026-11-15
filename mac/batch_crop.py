@@ -440,6 +440,11 @@ def write_in_place(path: str, data: bytes) -> None:
                 pass
             raise
     restore_dates(path, st)
+    try:                                           # its size-and-date may be as before: the drive's checksum record
+        import clone_drive                         # (Clone Drive's Check Files) mustn't take the edit for damage
+        clone_drive.forget_checksum(path)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def write_beside(path: str, data: bytes, label: str) -> str:

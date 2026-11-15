@@ -5,12 +5,18 @@ copied to the same place on the new one — each file read back from the new dri
 its real name — then the two drives are compared and the report shown (and saved in
 ~/Library/Logs/Photo Browser for Mac/). "Verify" compares two drives without copying. Stopping, a pulled cable or a
 restart lose nothing: Clone again carries on where it was.
+
+Everything that touches a drive runs on a worker thread — the scan (and the stat-per-file sum of what's still to
+write, which it hands over with the plan), the copy, the comparisons, the check, and the two `diskutil` renames
+of "Give the New Drive the Old Drive's Name…". Each worker reports back whatever happens: an error nobody foresaw
+comes back as `failed` with its text, so the window is never left "running" with nothing running.
 """
 from __future__ import annotations
 
 import os
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Callable
 
@@ -26,8 +32,10 @@ class _Bridge(QObject):
     progress = Signal(int, int, object, object, str, str)     # bytes can pass 2 GB: objects, not ints
     log = Signal(str)
     phase = Signal(str)
-    asked = Signal(object, object)                            # (plan, blocks) after the scan
+    asked = Signal(object, object, object)                    # (plan, blocks, bytes still to write) after the scan
     finished = Signal(object)                                 # the report text, or None when stopped before the copy
+    failed = Signal(str)                                      # a worker gave up: what went wrong
+    renamed = Signal(bool, str)                               # the drives' names swapped (or not): what to tell
 
 
 class CloneWindow(QDialog):
@@ -35,6 +43,7 @@ class CloneWindow(QDialog):
         super().__init__(parent)
         self.volumes, self.done_cb = volumes, done
         self.running = False
+        self.renaming = False
         self.job: cd.Clone | None = None
         self.stop_flag = False
         self.report_path = ""
@@ -45,6 +54,8 @@ class CloneWindow(QDialog):
         self.bridge.phase.connect(self._phase)
         self.bridge.asked.connect(self._scanned)
         self.bridge.finished.connect(self._finished)
+        self.bridge.failed.connect(self._failed)
+        self.bridge.renamed.connect(self._names_swapped)
         self.setWindowTitle("Clone Drive to a New SSD")
         self.resize(780, 620)
         self.old = QComboBox()
@@ -174,7 +185,7 @@ class CloneWindow(QDialog):
 
     # -- running
     def _begin(self, what: str) -> None:
-        if self.running:
+        if self.running or self.renaming:
             return
         src, dst = self.old.currentData(), self.new.currentData()
         if not src or not dst:
@@ -201,13 +212,30 @@ class CloneWindow(QDialog):
         self._phase(f"Reading “{os.path.basename(src.rstrip('/')) or src}”…")
         threading.Thread(target=self._scan, daemon=True, name="clone-scan").start()
 
+    def _guarded(self, work: Callable[[], None], doing: str) -> None:
+        """Runs a worker's body so that it always reports back: an exception becomes `failed` (with its last
+        line for the status and the whole of it for the log) instead of a thread that dies without a word."""
+        try:
+            work()
+        except Exception as e:  # noqa: BLE001 — whatever it is, the window has to hear of it
+            self.bridge.log.emit(traceback.format_exc().rstrip())
+            self.bridge.failed.emit(f"{doing} stopped on an error: {type(e).__name__}: {e}")
+
     def _scan(self) -> None:
+        self._guarded(self._scan_work, "Reading the old drive")
+
+    def _scan_work(self) -> None:
         plan = cd.scan(self.src, progress=lambda n: self.bridge.phase.emit(f"Reading the old drive — {n:,} items…"),
                        stop=lambda: self.stop_flag)
-        blocks = [] if self.what != "clone" else cd.preflight(self.src, self.dst, plan)
-        self.bridge.asked.emit(plan, blocks)
+        need, blocks = 0, []
+        if self.what == "clone" and not self.stop_flag:
+            # A stat for every file: worked out here once, and handed to the question the window then asks.
+            self.bridge.phase.emit("Looking at what's already on the new drive…")
+            need = cd.bytes_missing(self.src, self.dst, plan)
+            blocks = cd.preflight(self.src, self.dst, plan, need=need)
+        self.bridge.asked.emit(plan, blocks, need)
 
-    def _scanned(self, plan: cd.Scan, blocks: list[str]) -> None:
+    def _scanned(self, plan: cd.Scan, blocks: list[str], need: int = 0) -> None:
         if self.stop_flag:
             self._finished(None)
             return
@@ -221,7 +249,6 @@ class CloneWindow(QDialog):
             self._finished(None)
             return
         if self.what == "clone":
-            need = cd.bytes_missing(self.src, self.dst, plan)
             name_old = os.path.basename(self.src.rstrip("/")) or self.src
             name_new = os.path.basename(self.dst.rstrip("/")) or self.dst
             text = (f"Copy {plan.files:,} files ({cd.human(need)} still to write) from “{name_old}” to “{name_new}”?\n\n"
@@ -247,7 +274,7 @@ class CloneWindow(QDialog):
 
     def _begin_check(self, update: bool) -> None:
         """Check Files: the new drive read again against its recorded checksums (clone_drive.check_drive)."""
-        if self.running:
+        if self.running or self.renaming:
             return
         dst = self.new.currentData()
         if not dst or not os.path.isdir(dst):
@@ -268,24 +295,29 @@ class CloneWindow(QDialog):
         threading.Thread(target=self._check_work, args=(dst, update), daemon=True, name="clone-check").start()
 
     def _check_work(self, dst: str, update: bool) -> None:
-        awake = cd.keep_awake()
-        try:
-            c = cd.check_drive(dst, update=update, stop=lambda: self.stop_flag,
-                               progress=lambda i, total, name: self.bridge.progress.emit(
-                                   i, total, 0, 0, os.path.basename(name), "checking files"))
-        finally:
-            if awake is not None:
-                awake.terminate()
-        self.result, self.cmp, self.checked = None, None, (c, update)
-        self.bridge.finished.emit(cd.check_report(dst, c, update))
+        def work() -> None:
+            awake = cd.keep_awake()
+            try:
+                c = cd.check_drive(dst, update=update, stop=lambda: self.stop_flag,
+                                   progress=lambda i, total, name: self.bridge.progress.emit(
+                                       i, total, 0, 0, os.path.basename(name), "checking files"))
+            finally:
+                if awake is not None:
+                    awake.terminate()
+            self.result, self.cmp, self.checked = None, None, (c, update)
+            self.bridge.finished.emit(cd.check_report(dst, c, update))
+        self._guarded(work, "Checking the files")
 
     def _work(self) -> None:
-        awake = cd.keep_awake()                          # a clone runs for hours: the Mac mustn't doze off
-        try:
-            self._work_awake()
-        finally:
-            if awake is not None:
-                awake.terminate()
+        def work() -> None:
+            awake = cd.keep_awake()                      # a clone runs for hours: the Mac mustn't doze off
+            try:
+                self._work_awake()
+            finally:
+                if awake is not None:
+                    awake.terminate()
+        self._guarded(work, {"verify": "Comparing the drives", "details": "Matching dates and attributes",
+                             "recopy": "Copying again"}.get(self.what, "The clone"))
 
     def _work_awake(self) -> None:
         plan, src, dst = self.plan, self.src, self.dst
@@ -324,10 +356,10 @@ class CloneWindow(QDialog):
                 if time.monotonic() - last[0] > 0.2 or done == total:
                     last[0] = time.monotonic()
                     self.bridge.progress.emit(done, total, 0, 0, os.path.basename(name), "comparing")
-            sums = cd.load_sums(dst) if deep else None   # a byte-for-byte comparison records what it read
+            sums = cd.load_sums(dst) if deep else None   # a byte-for-byte comparison records what it read —
             cmp = cd.compare(src, dst, plan, deep=deep, progress=tick, stop=lambda: self.stop_flag, collect=sums)
-            if sums:
-                cd.save_sums(dst, sums)
+            if sums is not None and sums.appended:       # onto the drive as it goes; here only tidied
+                cd.compact_sums(dst)
         text = cd.report(src, dst, plan, result, cmp)
         self.result, self.cmp = result, cmp
         self.bridge.finished.emit(text)
@@ -367,6 +399,13 @@ class CloneWindow(QDialog):
         self.stop.setEnabled(False)
         self.status.setText("Stopping after the file in hand — nothing half-copied is left behind…")
 
+    def _failed(self, message: str) -> None:
+        """A worker gave up on something unforeseen (its traceback is in the log). The window is usable again;
+        what was copied before it is whole and checked, and Clone again carries on from there."""
+        self._finished(None)
+        self.log.appendPlainText(message)
+        self.status.setText(message + " — nothing half-copied is left behind; the details are in the log above.")
+
     def _finished(self, text) -> None:
         self.running = False
         self.bar.setVisible(False)
@@ -386,7 +425,8 @@ class CloneWindow(QDialog):
             if c.stopped:
                 line = "Stopped before the end."
             elif c.damaged or c.unreadable:
-                line = f"{len(c.damaged) + len(c.unreadable):,} file(s) are damaged or can't be read — listed above."
+                line = (f"{len(c.damaged) + len(c.unreadable):,} file(s) aren't what was recorded — damaged, or edited "
+                        "without their date changing — or can't be read. They're listed above.")
             elif update:
                 line = f"Recorded {c.recorded:,} file(s). Check Files reads them all against their checksums."
             elif not c.intact and (c.unrecorded or c.changed):
@@ -435,7 +475,33 @@ class CloneWindow(QDialog):
                 "changes but its name. With the old name, everything that points at the library by the drive's "
                 "name — on this Mac and on the iPhone — finds it on the new drive.") != QMessageBox.StandardButton.Yes:
             return
-        ok, message = cd.swap_names(self.src, self.dst)
+        # Two `diskutil rename`s, each of which may take a while (a drive that's asleep, or busy): off this thread,
+        # with the window saying so and nothing else startable until they're done.
+        self.renaming = True
+        busy = (self.go, self.verify, self.check, self.record, self.old, self.new, self.deep, self.again, self.match,
+                self.rename)
+        for w in busy:
+            w.setEnabled(False)
+        self.bar.setRange(0, 0)
+        self.bar.setVisible(True)
+        self.status.setText(f"Renaming the drives — “{name}” becomes “{aside}”, the new drive “{name}”…")
+        src, dst = self.src, self.dst
+
+        def work() -> None:
+            try:
+                ok, message = cd.swap_names(src, dst)
+            except Exception as e:  # noqa: BLE001 — always answer, or the window stays busy for good
+                ok, message = False, f"Couldn't rename the drives: {type(e).__name__}: {e}"
+            self.bridge.renamed.emit(ok, message)
+        threading.Thread(target=work, daemon=True, name="clone-rename").start()
+
+    def _names_swapped(self, ok: bool, message: str) -> None:
+        self.renaming = False
+        self.bar.setVisible(False)
+        self.bar.setRange(0, 1000)
+        for w in (self.go, self.verify, self.check, self.record, self.old, self.new, self.deep, self.again, self.match,
+                  self.rename):
+            w.setEnabled(True)
         self.log.appendPlainText(message)
         self.status.setText(message)
         if ok:
@@ -445,6 +511,9 @@ class CloneWindow(QDialog):
             QMessageBox.warning(self, "Clone Drive", message)
 
     def reject(self) -> None:
+        if self.renaming:
+            self.status.setText("Renaming the drives — a moment…")      # two short commands that can't be cut off
+            return
         if self.running:
             if QMessageBox.question(self, "Clone Drive", "A clone is running. Stop it and close? (Clone again later "
                                     "carries on where it was.)") != QMessageBox.StandardButton.Yes:
