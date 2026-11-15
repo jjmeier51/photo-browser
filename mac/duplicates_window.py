@@ -51,7 +51,7 @@ PAGE = 60                                          # groups shown at a time ("Sh
 TILE_W, PIC = 150, 150
 KIND_COLOR = {"exact": "#30D158", "similar": "#0A84FF", "name": "#FF9F0A"}
 SORTS = {"space": "Most space first", "copies": "Most copies first", "name": "By name", "folder": "By folder"}
-SCOPES = {"identical": "In Identical Groups", "exact": "In All Exact Groups", "shown": "In Every Group Shown"}
+SCOPES = {"identical": "In Identical Groups", "exact": "In All Exact Groups", "shown": "In the Groups Listed"}
 
 
 @dataclass
@@ -777,6 +777,11 @@ class DuplicatesWindow(QWidget):
             self.list.addWidget(empty, 0, Qt.AlignmentFlag.AlignHCenter)
         self.list.addStretch(1)
         self._update_counts()
+        listed = sum(1 for g in groups[:self.shown] if g.bulk)      # only what's been put in front of the person
+        act = getattr(self, "extra_acts", {}).get("shown")
+        if act is not None:
+            act.setText(f"In the {listed:,} Group{'s' if listed != 1 else ''} Listed" if listed else SCOPES["shown"])
+            act.setEnabled(listed > 0)
         self._update_bar()
 
     def _more(self) -> None:
@@ -823,10 +828,10 @@ class DuplicatesWindow(QWidget):
             self.selected.update(paths)
         else:
             self.selected.difference_update(paths)
-        for c in self.cards:
-            for p in paths:
-                t = c.tiles.get(p)
-                if t is not None:
+        want = set(paths)
+        for c in self.cards:                               # (by the cards' few tiles, not cards × paths)
+            for p, t in c.tiles.items():
+                if p in want and t.selected != on:
                     t.selected = on
                     t.update()
         self._update_bar()
@@ -850,16 +855,18 @@ class DuplicatesWindow(QWidget):
         elif scope == "exact":                              # (not one the byte-for-byte check has shown to differ)
             groups = [g for g in self.groups if g.kind == "exact" and g.identical is not False]
         else:                                               # look-alikes, yes; "similar name" alone, never in bulk —
-            groups = [g for g in self._visible_groups() if g.kind != "name"]      # "beach 1/2/3" aren't copies
-        ticked, kept = 0, set()
+            groups = [g for g in self._visible_groups()[:self.shown] if g.bulk]   # "beach 1/2/3" aren't copies; and
+        kept: set[str] = set()
+        going: list[str] = []
         for g in groups:
             keep = self.keeper(g.paths)
             kept.add(keep)
-            extra = [p for p in g.paths if p != keep and p not in kept]
-            self.set_selected(extra, True)
-            ticked += len(extra)
-        self.set_selected(list(kept), False)                # a copy kept by one group isn't trashed by another
-        what = {"identical": "the identical groups", "exact": "the exact groups", "shown": "the groups shown"}[scope]
+            going.extend(p for p in g.paths if p != keep)
+        going = [p for p in dict.fromkeys(going) if p not in kept]      # a copy kept by one group isn't trashed by another
+        ticked = len(going)
+        self.set_selected(going, True)                      # once for them all, not once a group
+        self.set_selected(list(kept), False)
+        what = {"identical": "the identical groups", "exact": "the exact groups", "shown": "the groups listed"}[scope]
         self.status.setText(f"Ticked {ticked:,} extra cop{'ies' if ticked != 1 else 'y'} in {what} — one copy of each "
                             "kept (marked Keep). " + ("Check them, then Move to Trash." if scope != "shown" else
                                                       "Look-alikes aren't always copies: check them before the Trash. "
@@ -917,6 +924,13 @@ class DuplicatesWindow(QWidget):
             staying = [p for p in g.paths if p not in self.selected]
             if going and staying and not any(os.path.exists(p) for p in staying):
                 orphaned.update(going)
+        # …and only while it's still the file that was compared: one edited or replaced since isn't the copy any more.
+        altered = {p for g in self.groups for p in g.paths if p in self.selected and p not in orphaned and g.changed(p)}
+        for g in self.groups:                              # (nor is it one, if the copy it was compared with has changed)
+            staying = [p for p in g.paths if p not in self.selected]
+            if staying and all(g.changed(p) for p in staying):
+                altered.update(p for p in g.paths if p in self.selected and p not in orphaned)
+        orphaned |= altered
         if orphaned:
             self.set_selected(sorted(orphaned), False)
             paths = [p for p in paths if p not in orphaned]
@@ -937,8 +951,8 @@ class DuplicatesWindow(QWidget):
         failed = len(paths) - len(moved)
         self.status.setText(f"Moved {len(moved):,} to the Trash." +
                             (f" {failed:,} couldn't be moved." if failed else "") +
-                            (f" {len(orphaned):,} left alone: the copy that was to stay isn't there any more — "
-                             "look again (Rescan)." if orphaned else ""))
+                            (f" {len(orphaned):,} left alone: {'they' if len(orphaned) != 1 else 'it'} or the copy that "
+                             "was to stay changed since this was looked at — look again (Rescan)." if orphaned else ""))
         if self.hooks.changed is not None:
             self.hooks.changed()
 

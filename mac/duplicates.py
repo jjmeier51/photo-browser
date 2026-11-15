@@ -102,19 +102,41 @@ def is_frame_file(path: str) -> bool:
 
 
 _COPY_SUFFIXES = [re.compile(p) for p in (r"\s*\(\d+\)$", r"\s+copy(\s+\d+)?$", r"[-_]\d{1,2}$", r"\s+\d{1,2}$")]
+_DATE_PART = _COPY_SUFFIXES[2]
+_ONLY_NUMBERS = re.compile(r"[\d\s._-]*$")
 
 
-def normalized_base_name(filename: str) -> str:
-    """The iPhone's `normalizedBaseName`: extension gone, lower case, copy suffixes stripped until none is left."""
+def _strip_marks(filename: str) -> tuple[str, str]:
+    """→ (the name without its copy marks, the strongest mark it had: "" none, "number" a short number at the
+    end, "copy" a "(2)" or "copy")."""
     base = os.path.splitext(filename)[0].lower().strip()
+    mark = ""
     changed = True
     while changed:
         changed = False
-        for rx in _COPY_SUFFIXES:
+        for i, rx in enumerate(_COPY_SUFFIXES):
             new = rx.sub("", base).strip()
-            if new != base:
-                base, changed = new, True
-    return base
+            if new == base:
+                continue
+            if rx is _DATE_PART and _ONLY_NUMBERS.fullmatch(new):      # "2024-05-12": a date, not "2024-05"'s copy
+                continue
+            base, changed = new, True
+            mark = "copy" if i < 2 else (mark or "number")
+    return base, mark
+
+
+def normalized_base_name(filename: str) -> str:
+    """The iPhone's `normalizedBaseName`: extension gone, lower case, copy suffixes stripped until none is left —
+    except that a date ("2024-05-12") keeps its last part."""
+    return _strip_marks(filename)[0]
+
+
+def named_as_copies(names: list[str]) -> bool:
+    """Whether files that share a stripped name are named like copies of one another: the plain name is among
+    them ("IMG_0001" beside "IMG_0001-1"), or one says so outright ("beach (1)", "beach copy"). Files that only
+    count — "beach 1", "beach 2", "beach 3"; "scan 12-30-45", "scan 12-30-46" — are a series, not copies."""
+    marks = [_strip_marks(n)[1] for n in names]
+    return "" in marks or "copy" in marks
 
 
 def _bits(x: int) -> int:
@@ -131,7 +153,13 @@ def dhash(path) -> int | None:
     """The iPhone's `PerceptualHash.dHash`: upright, tiny, grey, 9×8 — a bit per pixel brighter than its right
     neighbour, row by row. `path` is a file or a file-like object (a downloaded thumbnail's bytes). None when
     the picture can't be read."""
-    from PIL import Image, ImageOps
+    return _dhash(path)[0]
+
+
+def _dhash(path) -> tuple[int | None, bool]:
+    """→ (the hash or None, whether a None is only for now: the file couldn't be read at all — an I/O error, no
+    permission, gone — rather than read and found not to be a picture)."""
+    from PIL import Image, ImageOps, UnidentifiedImageError
     try:
         import batch_crop                          # registers HEIC with Pillow, when it can
     except ImportError:
@@ -146,15 +174,22 @@ def dhash(path) -> int | None:
             im = im.convert("L")
             im.thumbnail((32, 32), Image.Resampling.BILINEAR)
             px = list(im.resize((9, 8), Image.Resampling.BILINEAR).getdata())
+    except UnidentifiedImageError:
+        return None, False
+    except OSError as e:                           # Pillow's own complaints ("truncated") carry no errno
+        return None, e.errno is not None
     except Exception:  # noqa: BLE001 — a damaged or unknown file just isn't hashed
-        return None
+        return None, False
     h, bit = 0, 0
     for row in range(8):
         for col in range(8):
             if px[row * 9 + col] > px[row * 9 + col + 1]:
                 h |= 1 << bit
             bit += 1
-    return h
+    return h, False
+
+
+CACHE_MOST = 1_000_000                             # about 60 MB of JSON; a big library is a few hundred thousand
 
 
 class HashCache:
@@ -164,6 +199,7 @@ class HashCache:
         self.path = path or CACHE
         self.lock = threading.Lock()
         self.data: dict[str, int] = {}
+        self.used: set[str] = set()                # what this run asked for — the last to go when it's pruned
         self.dirty = False
         try:
             with open(self.path, encoding="utf-8") as f:
@@ -185,10 +221,13 @@ class HashCache:
         if k is None:
             return None
         with self.lock:
+            self.used.add(k)
             if k in self.data:
                 v = self.data[k]
                 return None if v < 0 else v
-        h = dhash(path)
+        h, passing = _dhash(path)
+        if passing:                                # couldn't be *read* (the drive hiccuped, no permission) isn't
+            return None                            # "isn't a picture": only the second is worth remembering
         with self.lock:
             self.data[k] = -1 if h is None else h
             self.dirty = True
@@ -198,8 +237,10 @@ class HashCache:
         with self.lock:
             if not self.dirty:
                 return
-            if len(self.data) > 300000:            # an old cache full of files long gone: start afresh
-                self.data = dict(list(self.data.items())[-100000:])
+            if len(self.data) > CACHE_MOST:        # too many: this run's stay, then the newest of the rest
+                rest = [(k, v) for k, v in self.data.items() if k not in self.used]
+                room = max(0, CACHE_MOST * 2 // 3 - len(self.used))
+                self.data = {**dict(rest[-room:] if room else []), **{k: self.data[k] for k in self.used if k in self.data}}
             data = dict(self.data)
             self.dirty = False
         try:
@@ -260,6 +301,24 @@ class Group:
     identical: bool | None = None                  # exact groups: byte for byte the same (None until checked)
     hashes: dict[str, str] = field(default_factory=dict)
     spread: int | None = None                      # similar groups: the most bits any two copies differ by
+    stamps: dict[str, tuple[int, int]] = field(default_factory=dict)   # each copy's (size, mtime) when it was looked at
+
+    def changed(self, path: str) -> bool:
+        """Whether the file isn't the one that was compared any more (edited, replaced or gone since the scan)."""
+        was = self.stamps.get(path)
+        if was is None:
+            return False
+        try:
+            st = os.stat(path)
+        except OSError:
+            return True
+        return (st.st_size, st.st_mtime_ns) != was
+
+    @property
+    def bulk(self) -> bool:
+        """Whether "Select Extra Copies" may tick this group without the person looking: never one alike only in
+        name, nor an exact one the byte-for-byte check has shown to differ."""
+        return self.kind != "name" and not (self.kind == "exact" and self.identical is False)
 
     @property
     def alike(self) -> str:
@@ -295,7 +354,8 @@ class Group:
         if len(left) < 2:
             return None
         return Group(self.kind, left, self.size, self.width, self.height, self.identical,
-                     {p: h for p, h in self.hashes.items() if p in left}, self.spread)
+                     {p: h for p, h in self.hashes.items() if p in left}, self.spread,
+                     {p: v for p, v in self.stamps.items() if p in left})
 
 
 JUNK = {"thumbs.db", "desktop.ini", "icon\r"}
@@ -332,8 +392,11 @@ def media_files(folder: str, recursive: bool, exclude_frames: bool, stop: thread
 
 
 def _dims(path: str) -> tuple[int, int]:
-    info = media_info.video_info(path) if kind_of(path) == "video" else media_info.image_info(path)
-    return int(info.get("width") or 0), int(info.get("height") or 0)
+    try:
+        info = media_info.video_info(path) if kind_of(path) == "video" else media_info.image_info(path)
+        return int(info.get("width") or 0), int(info.get("height") or 0)
+    except Exception:  # noqa: BLE001 — one file that can't be measured mustn't end the whole scan
+        return 0, 0
 
 
 def similar_clusters(hashes: dict[str, int], threshold: int = THRESHOLD) -> list[list[str]]:
@@ -408,11 +471,14 @@ def scan(folder: str | list[str], recursive: bool = False, exclude_frames: bool 
     files = list(dict.fromkeys(p for f in folders for p in media_files(f, recursive, exclude_frames, stop, all_files)))
     several = recursive or len(folders) > 1
     sizes: dict[str, int] = {}
+    stamps: dict[str, tuple[int, int]] = {}
     for p in files:
         try:
-            sizes[p] = os.path.getsize(p)
+            st = os.stat(p)
         except OSError:
-            pass
+            continue
+        sizes[p] = st.st_size
+        stamps[p] = (st.st_size, st.st_mtime_ns)
     files = [p for p in files if p in sizes]
     # size + dimensions — only files sharing a size can be exact, so only those are opened for dimensions
     by_size: dict[int, list[str]] = {}
@@ -449,6 +515,20 @@ def scan(folder: str | list[str], recursive: bool = False, exclude_frames: bool 
                 # one); a photo and a video of one name are a Live Photo's two halves, not copies
                 where = os.path.dirname(p) if several else ""
                 by_name.setdefault(f"{where}\n{kind_of(p)}\n{stem}", []).append(p)
+    # Same size and the same dimensions is the iPhone's rule — and in a big library two different photos from one
+    # camera do share both. So the first and last bytes must agree too (128 KB read, only of files in a group).
+    measured = [(k, ps) for k, ps in exact.items() if len(ps) > 1 and "|bytes|" not in k]
+    if measured:
+        flat = [p for _k, ps in measured for p in ps]
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            sigs = dict(zip(flat, pool.map(quick_signature, flat)))
+        for k, ps in measured:
+            del exact[k]
+            for p in ps:
+                if sigs.get(p) is not None:
+                    exact.setdefault(f"{k}|{sigs[p]}", []).append(p)
+        if stop.is_set():
+            return []
     # visually similar: dHash every photo
     photos = [p for p in files if os.path.splitext(p)[1].lower() in HASHABLE]
     cache = cache or HashCache()
@@ -465,7 +545,7 @@ def scan(folder: str | list[str], recursive: bool = False, exclude_frames: bool 
     cache.save()
     say("Grouping", 0, 0)
     groups: list[Group] = []
-    seen: set[frozenset[str]] = set()
+    shown_with: dict[str, list[frozenset[str]]] = {}        # a path → the groups it's already in (not every group)
 
     def add(paths: list[str], kind: str) -> None:
         if len(paths) < 2:
@@ -474,20 +554,23 @@ def scan(folder: str | list[str], recursive: bool = False, exclude_frames: bool 
         if not_dupes is not None and not_dupes.all_dismissed(paths):
             return
         key = frozenset(paths)
-        if any(key <= have for have in seen):     # already shown whole, as a stronger kind (or the same set)
+        if any(key <= have for have in shown_with.get(paths[0], ())):   # already shown whole, as a stronger kind
             return
-        seen.add(key)
+        for p in paths:
+            shown_with.setdefault(p, []).append(key)
         rep = max(paths, key=lambda p: sizes.get(p, 0))
         w, h = dims.get(rep) or ((0, 0) if kind_of(rep) == "other" else _dims(rep))
         groups.append(Group(kind, paths, sizes.get(rep, 0), w, h,
-                            spread=spread_of(paths, hashes) if kind == "similar" else None))
+                            spread=spread_of(paths, hashes) if kind == "similar" else None,
+                            stamps={p: stamps[p] for p in paths if p in stamps}))
 
     for ps in exact.values():
         add(ps, "exact")
     for ps in similar_clusters(hashes, threshold):
         add(ps, "similar")
     for ps in by_name.values():
-        add(ps, "name")
+        if named_as_copies([os.path.basename(p) for p in ps]):
+            add(ps, "name")
     groups.sort(key=lambda g: (g.rank, -g.size * (len(g.paths) - 1)))
     return groups
 
@@ -599,17 +682,19 @@ def keeper(paths: list[str], tags_of: Callable[[str], list[str]] | None = None, 
         d = (dates or {}).get(p)
         return d if d is not None else birth(p)
 
+    px = pixels if pixels and all(pixels.get(p) for p in paths) else {}     # known for every copy, or not used
+
     def first(p: str) -> tuple:
         if rule == "largest":
             return (-size(p),)
         if rule == "resolution":
-            w, h = (pixels or {}).get(p) or (0, 0)
+            w, h = px.get(p) or (0, 0)
             return (-(w * h), -size(p))
         if rule == "oldest":
             return (when(p),)
         if rule == "newest":
             return (-when(p),)
-        w, h = (pixels or {}).get(p) or (0, 0)          # "best": never the smaller picture because its name is
+        w, h = px.get(p) or (0, 0)                      # "best": never the smaller picture because its name is
         return (-(w * h), -size(p))                      # plainer — most pixels, then most bytes, then the ties
 
     def outside(p: str) -> int:
