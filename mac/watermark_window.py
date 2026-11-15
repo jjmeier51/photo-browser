@@ -1,4 +1,4 @@
-"""Safe Finder's Remove Watermark window: take one's own see-through watermark off many photos at once
+"""Photo Browser for Mac's Remove Watermark window: take one's own see-through watermark off many photos at once
 (watermark.py does the work).
 
 Right-click photos (or folders) ▸ "Remove Watermark…". The window shows one photo at a time. Once it has
@@ -11,7 +11,7 @@ already has a result teaches it again from that copy, for when the result isn't 
 photo as it is, with what will go in red; ‹ › (or the arrow keys) step through the photos, which are
 looked through ahead of time in the background so stepping is quick. Save as New writes each result beside
 its photo ("name (no watermark).ext"), Replace rewrites the photo; photos where no watermark was found are
-left alone. Safe Finder tags the results "retouched".
+left alone. Photo Browser for Mac tags the results "retouched".
 
 Threads: one worker does all the pixel work — the photo on screen first (a box drawn on it before
 anything), then the others in order — and talks to the window only through signals. The library of learned

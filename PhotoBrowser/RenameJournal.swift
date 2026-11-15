@@ -2,13 +2,13 @@ import Foundation
 
 /// Renames made on the Mac, carried over to everything this app keeps by path.
 ///
-/// Safe Finder can rename files and folders on the drive (Rename…, "Remove Leading Spaces from
+/// Photo Browser for Mac can rename files and folders on the drive (Rename…, "Remove Leading Spaces from
 /// Names…" — `mac/rename_tools.py`). The tags, Favorites and To AI follow by themselves (they live
-/// in the drive's shared tag file, which Safe Finder re-keys), but captions, covers, birthdays,
+/// in the drive's shared tag file, which Photo Browser for Mac re-keys), but captions, covers, birthdays,
 /// hidden items, the downloaders' folder records and the rest are keyed by path *on the phone* —
 /// a rename made elsewhere would orphan them, exactly as a rename in Finder does.
 ///
-/// So Safe Finder notes every rename it makes in the drive's
+/// So Photo Browser for Mac notes every rename it makes in the drive's
 /// `.Photo Browser Metadata/renames.json` — `{"renames": [{"id", "from", "to", "dir", "at"}]}`,
 /// paths drive-relative, `from` the item's path before the batch and `to` where it ended up. Each
 /// time the drive is opened or comes back (the tag sync's moments), the entries this phone hasn't

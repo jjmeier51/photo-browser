@@ -8,7 +8,7 @@ date and prompt, its pictures in a tight grid. A ✓ marks what's already been d
   visit is instant. The listing itself is kept too: the window opens on what it showed last time and brings it up
   to date in the background, a page at a time.
 - **Finding things.** The search field takes words and "phrases" from the prompt, the model or the date, `-word`
-  to leave out, and `date:2026-10`, `before:`, `after:` (the search language of Safe Finder's own search —
+  to leave out, and `date:2026-10`, `before:`, `after:` (the search language of Photo Browser for Mac's own search —
   `search_query.py`). Beside it: one model, only what's new / only what's downloaded, newest or oldest first.
 - **Picking.** Click selects; ⌘-click adds or removes one; ⇧-click takes the run between; the circle on a tile
   ticks it without touching the rest; a group's "Select All"; ⌘A for everything shown. Double-click or Space
@@ -16,11 +16,11 @@ date and prompt, its pictures in a tight grid. A ✓ marks what's already been d
 - **The viewer** (`ViewerWindow`): the picture as large as the window, ← → through everything shown, its model,
   date, size and whole prompt beside it; Download, Copy Prompt, Use Prompt (Create with AI, filled in), Copy Image.
 - **Downloading** — one, the selection, or everything new: four at a time, with progress, Stop, and Retry for
-  any that failed. **Where to** is a choice that's remembered (`Destination`): the folder Safe Finder is in, that
+  any that failed. **Where to** is a choice that's remembered (`Destination`): the folder Photo Browser for Mac is in, that
   folder's "AI" folder, any folder you choose, or one of the last few.
 - **What a download is** (`astria.save_download`): the file exactly as Astria made it — nothing re-compressed,
   all of its own metadata kept — with the prompt, model, date and "AI-made" label added to its metadata, and the
-  **AI** tag in Safe Finder (shared with the iPhone app).
+  **AI** tag in Photo Browser for Mac (shared with the iPhone app).
 
 Read-only on Astria's side: it lists and downloads. Nothing is uploaded and nothing there is changed.
 """
@@ -80,11 +80,11 @@ class Item:
 # ============================================================================ where downloads go
 
 class Destination:
-    """The remembered choice of where downloads go: "current" (the folder Safe Finder is showing), "ai" (that
+    """The remembered choice of where downloads go: "current" (the folder Photo Browser for Mac is showing), "ai" (that
     folder's AI folder) or "fixed" (a folder that was chosen) — and the last few folders chosen."""
 
     def __init__(self, current) -> None:
-        self._current = current                            # () → the folder Safe Finder is in
+        self._current = current                            # () → the folder Photo Browser for Mac is in
 
     def mode(self) -> str:
         d = A.store().get("browser_dest", {}) or {}
@@ -614,7 +614,7 @@ class BrowserWindow(QWidget):
         bh.setSpacing(8)
         self.summary = _small("", wrap=False)
         bh.addWidget(self.summary, 1)
-        self.show_btn = QPushButton("Show in Safe Finder")
+        self.show_btn = QPushButton("Show in Photo Browser")
         self.show_btn.setVisible(False)
         self.show_btn.clicked.connect(self._show_last)
         self.retry_btn = QPushButton("")
@@ -1010,7 +1010,7 @@ class BrowserWindow(QWidget):
                     lambda path=path: self._set_dest("fixed", path))
         menu.addSeparator()
         menu.addAction("Choose Folder…", self._choose_dest)
-        note = menu.addAction("The choice is remembered. “This Folder” follows the folder Safe Finder is showing.")
+        note = menu.addAction("The choice is remembered. “This Folder” follows the folder Photo Browser for Mac is showing.")
         note.setEnabled(False)
 
     def _set_dest(self, mode: str, path: str = "") -> None:
@@ -1150,7 +1150,7 @@ class BrowserWindow(QWidget):
         saved = self.saved_map.get(item.key)
         if saved and os.path.exists(saved) and self.hooks.reveal is not None:
             menu.addSeparator()
-            menu.addAction("Show in Safe Finder", lambda: self.hooks.reveal(saved))
+            menu.addAction("Show in Photo Browser", lambda: self.hooks.reveal(saved))
         menu.exec(where)
         menu.deleteLater()
 
@@ -1164,7 +1164,7 @@ class BrowserWindow(QWidget):
         self.viewer.activateWindow()
 
     def event(self, event) -> bool:  # noqa: N802
-        if event.type() == event.Type.WindowActivate:      # back from Safe Finder: "this folder" may be another now
+        if event.type() == event.Type.WindowActivate:      # back from Photo Browser for Mac: "this folder" may be another now
             self._update_bar()
             if self.viewer is not None:
                 self.viewer.refresh_buttons()
@@ -1259,7 +1259,7 @@ class ViewerWindow(QWidget):
         use.setVisible(browser.hooks.create is not None)
         copy_img = QPushButton("Copy Image")
         copy_img.clicked.connect(self._copy_image)
-        self.reveal_btn = QPushButton("Show in Safe Finder")
+        self.reveal_btn = QPushButton("Show in Photo Browser")
         self.reveal_btn.clicked.connect(self._reveal)
         for b in (self.dl_btn, self.dl_to, self.sel_btn, copy, use, copy_img, self.reveal_btn):
             v.addWidget(b)

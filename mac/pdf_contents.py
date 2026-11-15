@@ -1,4 +1,4 @@
-"""A PDF's table of contents, for Safe Finder's PDF viewer: where its chapters are, and what a click on a
+"""A PDF's table of contents, for Photo Browser for Mac's PDF viewer: where its chapters are, and what a click on a
 contents page means.
 
 Two sources, best first:

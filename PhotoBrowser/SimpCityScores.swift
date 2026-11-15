@@ -2,7 +2,7 @@ import Foundation
 
 /// Reaction scores of SimpCity downloads, for the folder view's "Most reactions" sort and the score on
 /// each tile. They live in the folder's shared record (`<person>/simpcity/.simpcity.json`, `reactions`),
-/// written by this app's downloader and by Safe Finder (its downloads, and its "Get Reaction Scores",
+/// written by this app's downloader and by Photo Browser for Mac (its downloads, and its "Get Reaction Scores",
 /// which reads the threads again for them) — see `SimpCity.Record.scores`: a file takes its post's score.
 ///
 /// A record can be megabytes, so it's parsed off the main actor and once per change: the parsed scores

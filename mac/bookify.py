@@ -8,7 +8,7 @@ bookify.py — typeset a plain-text or RTF file as a PDF that looks and reads li
     python3 bookify.py story.txt --size iphone          # pages the shape of an iPhone 17 Pro Max screen
     python3 bookify.py story.txt --picture "map.jpg@front" --picture "storm.jpg@chapter 4,wide,The storm"
 
-Safe Finder runs it too: right-click a .txt / .md / .rtf file ▸ Make Book PDF… (book_window.py), which calls
+Photo Browser for Mac runs it too: right-click a .txt / .md / .rtf file ▸ Make Book PDF… (book_window.py), which calls
 `make_book` — the same book, with progress and Stop, placed beside the original.
 
 What it does
@@ -18,7 +18,7 @@ What it does
     with a drop cap, small-caps lead-in and a fleuron
   * Running heads (book title on the left, chapter on the right) and folios
   * A contents page you can click: every entry — its title and its page number — jumps to the chapter,
-    and the chapters are the PDF's outline too (the sidebar in Preview, Books and Safe Finder's viewer)
+    and the chapters are the PDF's outline too (the sidebar in Preview, Books and Photo Browser for Mac's viewer)
   * Pictures (--picture, or `pictures=` to make_book): a page of its own, across the text or half
     width, with an optional caption — at the front, at the start or end of a chapter, on a page, or
     at the end of the book
@@ -71,7 +71,7 @@ try:
 except ImportError:
     if __name__ == "__main__":
         sys.exit("bookify needs ReportLab:  pip install reportlab pyphen pillow numpy")
-    raise                                           # imported (Safe Finder): the caller says what's missing
+    raise                                           # imported (Photo Browser for Mac): the caller says what's missing
 
 try:
     import pyphen  # noqa: F401  (ReportLab uses it for hyphenation)

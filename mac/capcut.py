@@ -1,4 +1,4 @@
-"""Safe Finder ↔ CapCut (the desktop video editor): clips out to CapCut, finished videos back onto the drive.
+"""Photo Browser for Mac ↔ CapCut (the desktop video editor): clips out to CapCut, finished videos back onto the drive.
 capcut_window.py is the tray and the import window; this is the part with no Qt, testable on its own.
 
 **Why not write CapCut projects.** CapCut keeps its projects as drafts (`~/Movies/CapCut/User Data/Projects/
@@ -9,7 +9,7 @@ the next CapCut update, or worse, damage the person's drafts. So the hand-off us
 - **Out** (`Session`, `order`, `stage`): the clips in timeline order — by date taken (default), by name, or as
   selected — handed to CapCut the way a person would, by dragging them from the tray into CapCut's media panel or
   timeline (the files themselves, where they are on the drive; CapCut refers to them there). "Copy to this Mac
-  first" copies them into `~/Movies/Safe Finder for CapCut/<session>/` (numbered, so name order = timeline order)
+  first" copies them into `~/Movies/Photo Browser for CapCut/<session>/` (numbered, so name order = timeline order)
   for a project that must work with the drive unplugged. Each send is a session in the record.
 - **Back** (`exports`, `bring_in`): CapCut's finished videos are wherever its Export panel saved them — it
   remembers the last folder, and there's no documented default — so the usual places are looked in
@@ -23,7 +23,7 @@ the next CapCut update, or worse, damage the person's drafts. So the hand-off us
 removed from the Mac (a rename when it's the same disk). The date goes in with ExifTool when it's there
 (`social.write_meta`, the downloaders' QuickTime tags, which the iPhone reads).
 
-**The record** (`~/Library/Application Support/Safe Finder/capcut.json`): the last sessions, which exports were
+**The record** (`~/Library/Application Support/Photo Browser for Mac/capcut.json`): the last sessions, which exports were
 brought in (by path, size and time — an export copied rather than moved isn't offered again), and the export
 folder.
 """
@@ -39,11 +39,12 @@ import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+import app_identity
 
 BUNDLE_ID = "com.lemon.lvoverseas"          # CapCut for Mac (the App Store and capcut.com builds alike)
 APP_NAME = "CapCut"
 TAG = "capcut"
-STAGING = "Safe Finder for CapCut"          # ~/Movies/<this>/<session>: clips copied to the Mac first
+STAGING = "Photo Browser for CapCut"          # ~/Movies/<this>/<session>: clips copied to the Mac first
 CLIP_EXT = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".mts", ".m2ts",
             ".jpg", ".jpeg", ".png", ".heic", ".heif", ".gif", ".webp", ".tif", ".tiff", ".bmp"}
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".mts", ".m2ts"}
@@ -57,7 +58,7 @@ ORDERS = (("taken", "Date taken"), ("name", "Name"), ("selected", "As selected")
 
 
 def support_dir() -> Path:
-    return Path.home() / "Library" / "Application Support" / "Safe Finder"
+    return app_identity.support()
 
 
 def record_file() -> Path:

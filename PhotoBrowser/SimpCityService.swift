@@ -6,7 +6,7 @@ import Observation
 /// every goonbox.cr image to its full-size file and every turbo.cr video to its file, and saves them into
 /// `<person>/simpcity`, tagged "simpcity" — photos and videos keep their own capture date, and get the
 /// forum post's date when they have none. What's been downloaded is the shared record
-/// (`SimpCityRecord.swift`), also read and written by Safe Finder on the Mac (`mac/simpcity.py`), so
+/// (`SimpCityRecord.swift`), also read and written by Photo Browser for Mac on the Mac (`mac/simpcity.py`), so
 /// neither ever fetches what the other already has.
 ///
 /// **Why a browser.** Both sites check that a real browser is asking (DDoS-Guard on simpcity.cr,
@@ -1275,7 +1275,7 @@ final class SimpCityPage: NSObject, WKNavigationDelegate, WKUIDelegate {
 """#
 
     /// goonbox's API, asked from a goonbox page (start it, then poll for the answer — the same pair of
-    /// scripts Safe Finder runs): `/api/images/<id>` → `image.original_url`, the full-size file.
+    /// scripts Photo Browser for Mac runs): `/api/images/<id>` → `image.original_url`, the full-size file.
     static func goonboxScripts(id: String) -> (start: String, read: String) {
         let safe = String(id.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == "-" })
         return (goonboxStartTemplate.replacingOccurrences(of: "__ID__", with: safe),

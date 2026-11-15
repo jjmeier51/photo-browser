@@ -1,4 +1,4 @@
-"""Remove an object from a photo — Safe Finder's Remove Objects (remove_window.py): the area drawn around it
+"""Remove an object from a photo — Photo Browser for Mac's Remove Objects (remove_window.py): the area drawn around it
 is filled with the photo itself, as TouchRetouch does. No Qt here, so it's testable on its own.
 
 **How.** Exemplar-based completion — the method behind Photoshop's Content-Aware Fill (Wexler, Shechtman &

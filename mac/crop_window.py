@@ -1,11 +1,11 @@
-"""Safe Finder's Crop window: draw one crop on a photo and put it on every selected photo.
+"""Photo Browser for Mac's Crop window: draw one crop on a photo and put it on every selected photo.
 
 Right-click photos ▸ "Crop…" (or "Crop N Photos…"). The window shows one of them with a crop box — drag
 inside it to move it, a corner to resize, a side (Freeform) to trim just that side — the iPhone's ratios
 (Freeform, Original, 1:1, 4:5, 3:2, 16:9), quarter turns, and "Last Crop" (the crop saved last, here).
 ‹ › (or the arrow keys) step through the selection to check the same crop on each photo. "Crop" writes
 them all in place (batch_crop.py — the rules and what's kept are there) on a worker thread, one at a time;
-Stop ends it after the photo in hand. Safe Finder then tags every cropped photo "cropped".
+Stop ends it after the photo in hand. Photo Browser for Mac then tags every cropped photo "cropped".
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QButtonGroup, QDialog, QHBoxLayout, QLabel, QMess
 import batch_crop as bc
 
 PREVIEW_PX = 1600
-LAST_KEY = "crop/last"          # the last crop, as CropSpec JSON, in Safe Finder's settings
+LAST_KEY = "crop/last"          # the last crop, as CropSpec JSON, in Photo Browser for Mac's settings
 GRAB = 12                       # how close (points) the pointer must be to grab a corner or a side
 
 

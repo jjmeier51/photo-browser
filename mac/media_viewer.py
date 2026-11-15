@@ -1,7 +1,7 @@
-"""Safe Finder's photo and video viewer — the iPhone app's viewer on the Mac: one item at a time on black,
+"""Photo Browser for Mac's photo and video viewer — the iPhone app's viewer on the Mac: one item at a time on black,
 the listing's order, a top and a bottom bar that a click hides or shows (the iPhone's tap), and an Info panel.
 
-**The window fits the picture, as tall as the display.** It opens over Safe Finder's window (`box`), on its
+**The window fits the picture, as tall as the display.** It opens over Photo Browser for Mac's window (`box`), on its
 display, the full height of that display (below the menu bar, above the Dock), and takes each item's shape at
 that height — a portrait video or photo has no black bars beside it; only an item too wide for the display at
 full height (a panorama) is as wide as the display instead. Moving to the next item re-fits it around the same
@@ -33,14 +33,14 @@ and for everything while the Swift library is being built or can't be (no Xcode 
   offers Open With… (QuickTime Player).
 - **Top right**: the resolution, quietly — 4K, 1080p, 720p, 8K… for a video (the iPhone app's long-side rule),
   megapixels for a photo — and HDR when it is (`media_info`: an HLG/PQ/Dolby Vision track; a gain map or HLG/PQ
-  photo). Beside it, ♡ (Favorite) and ✦ (To AI) — the iPhone app's labels, which Safe Finder shares with it.
+  photo). Beside it, ♡ (Favorite) and ✦ (To AI) — the iPhone app's labels, which Photo Browser for Mac shares with it.
 - **Moving around**: ←/→ (or a two-finger swipe when not zoomed), Esc or ↓ closes, I (or ↑) the Info panel,
   F full screen, S a slideshow (3 s a photo; a video plays out first), ⇧⌘F / ⇧⌘A Favorite / To AI, ⌘⌫ Move to
   Trash; the ⋯ menu has the rest.
 - **Info panel**: name, when it was taken or recorded (`media_info`), size and dimensions, length, camera,
   place (with a link to Maps), caption, folder, tags (and Edit Tags…).
 
-The viewer doesn't touch files itself: Safe Finder hands it what to do for the trash, tags, labels, revealing a
+The viewer doesn't touch files itself: Photo Browser for Mac hands it what to do for the trash, tags, labels, revealing a
 file and exporting frames (`hooks`), so it works the same from a folder, a search or a collection.
 """
 from __future__ import annotations
@@ -64,6 +64,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsPixmapItem, QGraph
 
 import media_info
 import viewer_surface
+import app_identity
 
 IS_MAC = sys.platform == "darwin"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff", ".bmp", ".avif",
@@ -92,7 +93,7 @@ def human(n: float) -> str:
 
 @dataclass
 class Hooks:
-    """What the viewer asks of Safe Finder (each may be None: the button is left out)."""
+    """What the viewer asks of Photo Browser for Mac (each may be None: the button is left out)."""
     trash: Callable[[list[str]], bool] | None = None          # → True when moved to the Trash
     tags_of: Callable[[str], list[str]] | None = None
     edit_tags: Callable[[str], None] | None = None
@@ -758,14 +759,14 @@ def saved_volume() -> float:
     """The viewer's volume, 0…1, as last set (full at first)."""
     from PySide6.QtCore import QSettings
     try:
-        return max(0.0, min(1.0, float(QSettings("PhotoBrowser", "SafeFinder").value("viewer/volume", 1.0))))
+        return max(0.0, min(1.0, float(app_identity.settings().value("viewer/volume", 1.0))))
     except (TypeError, ValueError):
         return 1.0
 
 
 def remember_volume(volume: float) -> None:
     from PySide6.QtCore import QSettings
-    QSettings("PhotoBrowser", "SafeFinder").setValue("viewer/volume", round(volume, 3))
+    app_identity.settings().setValue("viewer/volume", round(volume, 3))
 
 
 def loudness(volume: float) -> float:
@@ -1276,7 +1277,7 @@ TITLE_BAR = 28 if IS_MAC else 32          # the title bar's height until the win
 
 
 class MediaViewer(QWidget):
-    """One window: the items of a listing, one at a time (module notes). `box`: Safe Finder's window — the
+    """One window: the items of a listing, one at a time (module notes). `box`: Photo Browser for Mac's window — the
     viewer opens over it, on its display, as tall as that display."""
     closed = Signal()
     removed = Signal(list)                 # paths moved to the Trash from here
@@ -1302,7 +1303,7 @@ class MediaViewer(QWidget):
         self.anchor = box.center() if box is not None and box.isValid() else None
         screen = QApplication.screenAt(self.anchor) if self.anchor is not None else None
         if screen is not None and hasattr(self, "setScreen"):
-            self.setScreen(screen)                 # Safe Finder's display, not just the main one
+            self.setScreen(screen)                 # Photo Browser for Mac's display, not just the main one
         self._shown_once = False
         # Until then a resize is the system's (placing the window, leaving full screen), not a hand resize.
         self._settling = time.monotonic() + 1.5
@@ -1689,7 +1690,7 @@ class MediaViewer(QWidget):
     def _fit_to(self, path: str, first: bool = False) -> None:
         """The window takes the item's shape within `_room` — as tall as the display, unless the item is too
         wide for that (the picture fills it: no bars beside it) — keeping its centre, or, the first time, opening
-        over Safe Finder's window."""
+        over Photo Browser for Mac's window."""
         if not self.fit_window or self.isFullScreen() or self.isMaximized():
             return
         ms = self.media_size(path)

@@ -322,7 +322,7 @@ enum FacebookService {
 
     /// The profile's address on www.facebook.com however it was typed or pasted — "facebook.com/name",
     /// "https://m.facebook.com/name?mibextid=…", "fb.com/name", "profile.php?id=…", "name", "@name", a bare
-    /// id (Safe Finder's `facebook.start_url` does the same). Without a scheme, "facebook.com/name" used to be
+    /// id (Photo Browser for Mac's `facebook.start_url` does the same). Without a scheme, "facebook.com/name" used to be
     /// glued onto the host — www.facebook.com/facebook.com/name, a 404. Tracking parameters are dropped
     /// (profile.php keeps its `id`).
     nonisolated static func normalizedProfileURL(_ raw: String) -> String {

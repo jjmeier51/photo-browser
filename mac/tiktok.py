@@ -1,4 +1,4 @@
-"""TikTok profiles for Safe Finder — the iPhone app's `TikTokService` on the Mac (no Qt here;
+"""TikTok profiles for Photo Browser for Mac — the iPhone app's `TikTokService` on the Mac (no Qt here;
 tiktok_downloader.py is the window, social.py downloads).
 
 **How a profile is read** — exactly as the iPhone does: through the public **tikwm.com** resolver (no login,
@@ -33,7 +33,7 @@ folder's file names, together.
 
 **Likes are recalculated on every run.** The iPhone stops paging at a long run of posts it already has; here
 every run lists the whole profile, so each video's like count is read again and the record's `likes` is
-brought up to date (a post that's gone from TikTok keeps its last count). Safe Finder sorts by it
+brought up to date (a post that's gone from TikTok keeps its last count). Photo Browser for Mac sorts by it
 ("Reactions / Likes") and shows it in the viewer's Info; the iPhone takes the record's counts on its next run.
 
 Each file gets the post's date (in the file and as its dates), its caption and `@handle` (`social.write_meta`),

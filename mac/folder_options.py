@@ -6,7 +6,7 @@ Where a choice lives:
   `<drive>/.Photo Browser Metadata/folder-options.json` — `{"videos_first": {"<folder, drive-relative>": stamp}}`.
   The iPhone app reads and writes the same file (`FolderOptions.swift`), so a folder set here is shown that way
   there, and the other way round.
-- **In Safe Finder's settings**, for any other folder (on the Mac, or a drive the app has never opened), by its
+- **In Photo Browser for Mac's settings**, for any other folder (on the Mac, or a drive the app has never opened), by its
   full path.
 
 A stamp is when the choice was last made, as Unix time: **positive = on, negative = off**. Each app keeps what
@@ -24,6 +24,7 @@ import os
 import time
 import unicodedata
 from pathlib import Path
+import app_identity
 
 METADATA = ".Photo Browser Metadata"
 FILE_NAME = "folder-options.json"
@@ -108,7 +109,7 @@ class FolderOptions:
     def _write(self, base: str, entries: dict[str, float]) -> None:
         import spare_folders
         file = self._path(base)
-        doc = {"format": FORMAT, "version": 1, "updated": round(time.time(), 3), "by": "Safe Finder",
+        doc = {"format": FORMAT, "version": 1, "updated": round(time.time(), 3), "by": app_identity.APP_NAME,
                "videos_first": {k: entries[k] for k in sorted(entries)}}
         data = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if spare_folders.on_exfat(str(file.parent)):
@@ -199,7 +200,7 @@ _DEFAULT: FolderOptions | None = None
 
 
 def default(settings=None) -> FolderOptions:
-    """One for the whole app (Safe Finder hands in its settings the first time)."""
+    """One for the whole app (Photo Browser for Mac hands in its settings the first time)."""
     global _DEFAULT
     if _DEFAULT is None:
         _DEFAULT = FolderOptions(settings)

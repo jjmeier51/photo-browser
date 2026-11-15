@@ -1,5 +1,5 @@
 """Erase part of a photo — a watermark, a date stamp, a blemish — by filling it in from what's around it,
-for Safe Finder's Erase window (erase_window.py). No Qt here, so it's testable on its own.
+for Photo Browser for Mac's Erase window (erase_window.py). No Qt here, so it's testable on its own.
 
 What goes: the boxes drawn on the photo (as fractions of it, so one set of boxes fits every selected photo,
 as a crop does). In each box either all of it is replaced ("whole box"), or — the default — just the mark

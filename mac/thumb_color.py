@@ -1,4 +1,4 @@
-"""A thumbnail in the colours the photo is meant to have — for Safe Finder's tiles (safe_finder._ThumbJob).
+"""A thumbnail in the colours the photo is meant to have — for Photo Browser for Mac's tiles (photo_browser._ThumbJob).
 
 Pillow hands back a file's numbers as they're stored. Shown as they are, that's right only for a plain sRGB
 photo. Two kinds were wrong in the grid:

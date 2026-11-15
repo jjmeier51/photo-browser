@@ -1,14 +1,14 @@
 import SwiftUI
 
 /// Tags on folders. A folder carries tags of its own, like a file (`Library.tags`, keyed by its path —
-/// re-keyed on move/rename with everything else, shared with Safe Finder through the drive's tag file,
+/// re-keyed on move/rename with everything else, shared with Photo Browser for Mac through the drive's tag file,
 /// carried in the folder's own attribute). It shows up under those tags in the Tags filter, checked in
 /// its long-press Tags menu, and in its Get Info.
 ///
 /// When a tag goes on (or comes off) folders, the person is asked whether the files inside them — at any
 /// depth, from the drive index — change too: "Folder and Items Inside" / "Folder Only" / Cancel. Only the
-/// files the change would touch are counted, and when there are none, nothing is asked. Safe Finder asks
-/// the same question (`mac/safe_finder.py`, `ask_inside`).
+/// files the change would touch are counted, and when there are none, nothing is asked. Photo Browser for Mac asks
+/// the same question (`mac/photo_browser.py`, `ask_inside`).
 
 /// A tag about to go on (or come off) some items, folders among them, waiting on the question.
 struct FolderTagQuestion: Identifiable {

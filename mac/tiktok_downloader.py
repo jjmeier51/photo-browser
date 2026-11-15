@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe Finder ▸ Download ▸ "Download TikTok Profile…" / "Get New TikTok Videos" — the window (tiktok.py reads
+"""Photo Browser for Mac ▸ Download ▸ "Download TikTok Profile…" / "Get New TikTok Videos" — the window (tiktok.py reads
 the profile, social.py downloads).
 
     python3 mac/tiktok_downloader.py "/Volumes/SSD/Jane" [handle]
@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QMa
 import simpcity as sc  # noqa: E402
 import social  # noqa: E402
 import tiktok as tt  # noqa: E402
+import app_identity
 
 try:                                                    # the browser is only for the resolver's bot check
     from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
@@ -71,7 +72,7 @@ class _Bridge(QObject):
 class TikTokWindow(QMainWindow):
     """The downloader from one folder (the one right-clicked)."""
 
-    finished = Signal(str, list)       # (the profile's folder, files written) — Safe Finder refreshes + tags
+    finished = Signal(str, list)       # (the profile's folder, files written) — Photo Browser for Mac refreshes + tags
 
     def __init__(self, folder: str, start: str = "", tags=None, parent=None) -> None:
         super().__init__(parent)
@@ -80,7 +81,7 @@ class TikTokWindow(QMainWindow):
         self.running = self.stopping = False
         self.bridge = _Bridge()
         self.bridge.call.connect(lambda cb, value: cb(value))
-        self.settings = QSettings("PhotoBrowser", "SafeFinder")
+        self.settings = app_identity.settings()
         self.exiftool = sc.find_exiftool()
         self.cookies: dict[str, str] = {}
         self.setWindowTitle(f"TikTok — {self.person.name}")

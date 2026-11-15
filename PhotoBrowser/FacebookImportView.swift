@@ -133,7 +133,7 @@ struct FacebookImportView: View {
                 bg.end(); return
             }
 
-            // The folder's shared record: Safe Finder's downloads (and ones deleted since) aren't fetched again.
+            // The folder's shared record: Photo Browser for Mac's downloads (and ones deleted since) aren't fetched again.
             let shared = await Task.detached(priority: .userInitiated) { SocialRecord.snapshot(.facebook, in: dest) }.value
             let known = already.union(shared.ids)
             let r = await FacebookService.run(profileURL: link, into: dest, alreadyDownloaded: known,
@@ -149,7 +149,7 @@ struct FacebookImportView: View {
             if let picData = r.profilePic, let img = UIImage(data: picData) { library.setCover(img, for: dest) }
             else if library.coverURL(for: dest) == nil, let cover = await firstItemThumbnail(in: dest) { library.setCover(cover, for: dest) }
 
-            // Every file tagged "facebook", as Safe Finder tags its downloads.
+            // Every file tagged "facebook", as Photo Browser for Mac tags its downloads.
             library.addTag(SocialRecord.Kind.facebook.tag, to: r.postedBy.keys.map { URL(fileURLWithPath: $0) })
             if let profile = r.profile {
                 let done = known.union(r.newIDs), photos = r.photos, videos = r.videos

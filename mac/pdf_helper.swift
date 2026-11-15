@@ -1,4 +1,4 @@
-// The PDF composer for Safe Finder's "Optimize for iPhone" / "Optimize for Safe Finder" (mac/pdf_optimize.py).
+// The PDF composer for Photo Browser for Mac's "Optimize for iPhone" / "Optimize for Mac" (mac/pdf_optimize.py).
 // Python reads the pages and decides where every part goes (the plan); this draws it — each part of an original
 // page clipped and scaled onto its new page with Core Graphics, so the drawing stays the original's: vectors, its
 // fonts, its pictures at their own resolution, and text that can still be searched and selected. Built once with
@@ -58,7 +58,7 @@ func compose(source: URL, planURL: URL, out: URL) -> Int32 {
         let password = ProcessInfo.processInfo.environment["PDF_PASSWORD"] ?? ""
         if !doc.unlockWithPassword(password) { return fail("the PDF is protected by a password") }
     }
-    var info: [CFString: Any] = [kCGPDFContextCreator: plan.creator ?? "Safe Finder"]
+    var info: [CFString: Any] = [kCGPDFContextCreator: plan.creator ?? "Photo Browser for Mac"]
     if let title = plan.title, !title.isEmpty { info[kCGPDFContextTitle] = title }
     var first = CGRect(x: 0, y: 0, width: 612, height: 792)
     guard let ctx = CGContext(out as CFURL, mediaBox: &first, info as CFDictionary) else {

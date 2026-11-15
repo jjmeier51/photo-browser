@@ -1,4 +1,4 @@
-"""The transfer engine behind Safe Finder — copies or moves files and folders onto the exFAT SSD
+"""The transfer engine behind Photo Browser for Mac — copies or moves files and folders onto the exFAT SSD
 without the habits that damaged it when Finder did the copying. No GUI code here (it runs on a
 worker thread and reports through callbacks), so it can be tested on its own.
 
@@ -42,9 +42,10 @@ from pathlib import Path
 from typing import Callable
 
 import spare_folders
+import app_identity
 from safe_copy_to_ssd import CHUNK, IOS_FOLDER_LIMIT, hash_file, human, is_junk, plain_name, rename_note, safe_name
 
-STAGING_NAME = ".Safe Finder Staging"
+STAGING_NAME = app_identity.STAGING              # (an earlier version's: app_identity.OLD_STAGING)
 JOURNAL_NAME = "in-progress.txt"            # inside the staging folder: the file being written right now
 INCOMING_SUFFIX = ".incoming"              # a new folder is built as hidden ".<name>.incoming", then renamed
 
@@ -197,7 +198,7 @@ def build_plan(sources: list[Path], dest: Path) -> Plan:
 def relocate_tool() -> str:
     """Where relocate_folders.py is, for the Terminal commands shown to the user: next to this file when
     run from the repo; inside the app bundle (Contents/Resources, which the build script fills) when Safe
-    Finder runs as "Safe Finder.app"."""
+    Finder runs as "Photo Browser for Mac.app"."""
     here = os.path.dirname(os.path.abspath(__file__))
     candidates = [os.path.join(here, "relocate_folders.py")]
     if getattr(sys, "frozen", False):
@@ -443,7 +444,9 @@ class Transfer:
         destination). It only holds the journal of the file being written, so a file cut off by an
         unplug or a crash is removed on the next run instead of passing for a finished one."""
         for base in (self.volume, self.plan.dest):
-            staging = base / STAGING_NAME
+            # the folder an earlier version (under the app's old name) left is used as it is — its journal may
+            # name a file that was cut off
+            staging = Path(app_identity.drive_folder(base, STAGING_NAME, app_identity.OLD_STAGING))
             try:
                 if not staging.is_dir():
                     os.mkdir(staging)

@@ -1,4 +1,4 @@
-"""Safe Finder — reading Fanfix (app.fanfix.io) for its downloader (fanfix_downloader.py is the window; social.py
+"""Photo Browser for Mac — reading Fanfix (app.fanfix.io) for its downloader (fanfix_downloader.py is the window; social.py
 downloads). No Qt here, so it's testable on its own.
 
 For the creators the person subscribes to or bought posts from: what their own logged-in account can open on

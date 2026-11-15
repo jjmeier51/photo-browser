@@ -45,7 +45,7 @@ PHOTO_NAME = "test photo.jpg"
 TESTS = [
     ("iOS Test 1 - empty", "made with mkdir, nothing put in it"),
     ("iOS Test 2 - new file", "mkdir, then the photo written straight under its final name "
-                              "(how Safe Finder and the copy rebuild write files)"),
+                              "(how Photo Browser for Mac and the copy rebuild write files)"),
     ("iOS Test 3 - moved in", "the photo written at the top of the drive, then moved into a new folder "
                               "(a same-drive move, like Finder or your NewFolder test)"),
     ("iOS Test 4 - rebuilt", "built as a hidden folder, then renamed into place "

@@ -1,4 +1,4 @@
-"""Safe Finder's "Upscale Video…" window (video_tools.upscale does the work): the size to upscale to (1080p or
+"""Photo Browser for Mac's "Upscale Video…" window (video_tools.upscale does the work): the size to upscale to (1080p or
 4K), the frame rate (the video's own, 30 or 60 — as the iPhone app's upscale offers), and whether each result
 replaces its video or is saved as a new one beside it; then the run, one video at a time, with a bar that
 follows the encoder and a Stop that leaves the video in hand exactly as it was.

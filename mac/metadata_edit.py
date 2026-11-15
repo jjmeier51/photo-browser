@@ -1,4 +1,4 @@
-"""Safe Finder's bulk metadata editor — the work (metadata_window.py is the window).
+"""Photo Browser for Mac's bulk metadata editor — the work (metadata_window.py is the window).
 
 Many photos and videos at once — or every one in a folder and its subfolders: the capture date (set, stepping a
 few seconds a file so their order holds; shifted, for a camera clock or time zone that was off; read from the

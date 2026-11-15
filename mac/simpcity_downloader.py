@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe Finder ▸ "Download from SimpCity…" — the window (the rest is simpcity.py).
+"""Photo Browser for Mac ▸ "Download from SimpCity…" — the window (the rest is simpcity.py).
 
     python3 mac/simpcity_downloader.py "/Volumes/SSD/Helen Owen" [thread-url]
 
@@ -31,7 +31,7 @@ the zip is deleted and recorded (`files`) so it's never fetched again. Links lis
 (`LINK_RULES`) that held nothing are listed once more. Off, turbo and the hosts are left for a later run.
 
 Each page read also notes its posts' reaction scores into the record (`simpcity.reactions`). "Get Reaction
-Scores" (`scores_only`, Safe Finder's right-click on a SimpCity folder) reads every page of each thread the
+Scores" (`scores_only`, Photo Browser for Mac's right-click on a SimpCity folder) reads every page of each thread the
 record knows for those alone — nothing is downloaded — so files downloaded earlier get scores too, and
 scores read long ago are brought up to date; a read stopped short carries on from its page next time.
 
@@ -142,7 +142,7 @@ class _Runner:
 class SimpCityWindow(QMainWindow):
     """The downloader window for one person folder."""
 
-    finished = Signal(str, list)       # (simpcity folder, files written) — Safe Finder refreshes + tags
+    finished = Signal(str, list)       # (simpcity folder, files written) — Photo Browser for Mac refreshes + tags
 
     def __init__(self, person: str, thread: str | None = None, tags=None, parent=None, scores_only: bool = False) -> None:
         super().__init__(parent)
@@ -414,7 +414,7 @@ class SimpCityWindow(QMainWindow):
                        "The pages showed no reactions to read (SimpCity may have changed how it shows them).")
             else:
                 msg = (f"Read the reactions of {read:,} post{'s' if read != 1 else ''}; {have:,} of the {wanted:,} posts "
-                       f"the downloads came from now have a score. In Safe Finder, sort “{sc.FOLDER}” by Reaction Score.")
+                       f"the downloads came from now have a score. In Photo Browser for Mac, sort “{sc.FOLDER}” by Reaction Score.")
             if problems:
                 msg += " Stopped short — " + "; ".join(problems) + " (press Get Reaction Scores again to carry on)."
         self._say(msg)

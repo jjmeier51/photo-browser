@@ -1,4 +1,4 @@
-"""Safe Finder's Edit Metadata window — many photos and videos at once (metadata_edit.py does the work).
+"""Photo Browser for Mac's Edit Metadata window — many photos and videos at once (metadata_edit.py does the work).
 
 It opens at once and reads in the background: first the photos and videos among what was picked (every one
 inside a picked folder and its subfolders), then what each holds now (ExifTool, a hundred files a call). Each

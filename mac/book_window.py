@@ -1,4 +1,4 @@
-"""Make Book PDF — Safe Finder's window for `bookify.py`: a plain-text, Markdown or RTF file typeset as a PDF that
+"""Make Book PDF — Photo Browser for Mac's window for `bookify.py`: a plain-text, Markdown or RTF file typeset as a PDF that
 looks and reads like a printed book (EB Garamond, justified and hyphenated, a title page, contents, chapter
 openings with drop caps, running heads, cream paper). Right-click a .txt / .md / .rtf file ▸ Make Book PDF… (or
 several: a book of each), or File ▸ Make Book PDF….
@@ -9,7 +9,7 @@ screen, no blank pages), text size, paper, the accent colour, hyphenation langua
 right-hand pages, equal margins, your own fonts — and remembered for next time. **Save in**: beside the text (the
 default) or a folder you choose (remembered too, and always shown, so a book never lands somewhere unexpected; a
 folder that's gone — its drive unplugged — is said before anything is made). The book is "<name>.pdf" ("<name> (for
-iPhone).pdf" for the iPhone size; never over a file), carries the text's tags, and opens in Safe Finder's PDF viewer
+iPhone).pdf" for the iPhone size; never over a file), carries the text's tags, and opens in Photo Browser for Mac's PDF viewer
 from here.
 
 **Pictures.** Make Book first asks whether the book should have pictures. The book is made either way; with a
@@ -24,15 +24,15 @@ per text (`book/pictures/<id>` in the settings) and offered again the next time 
 **Pictures…** on the finished line reopens the window to change them. With several texts the window opens for
 each book in turn.
 
-bookify needs ReportLab (and pyphen for hyphenation; both in requirements.txt). When this copy of Safe Finder
+bookify needs ReportLab (and pyphen for hyphenation; both in requirements.txt). When this copy of Photo Browser for Mac
 hasn't got them, the window's main button becomes **Install ReportLab** (never a dead Make Book): run from the
 source it pip-installs them into its own Python; the built app — which has them inside when it was built from a
-.venv that had them (build_safe_finder_app.sh now makes sure) — installs them into its own folder,
-~/Library/Application Support/Safe Finder/python (`PRIVATE`, read at import), with any Python 3 on the Mac. They're
+.venv that had them (build_app.sh now makes sure) — installs them into its own folder,
+~/Library/Application Support/Photo Browser for Mac/python (`PRIVATE`, read at import), with any Python 3 on the Mac. They're
 pure Python (py3-none-any wheels), so pip fetches exactly those for the app's Python version, whatever Python runs
 pip. The first book downloads the EB Garamond fonts once (bookify caches them).
 
-It doesn't touch files itself: `BookHooks` place the PDF (Safe Finder's drive-safe `simpcity.place`), carry the
+It doesn't touch files itself: `BookHooks` place the PDF (Photo Browser for Mac's drive-safe `simpcity.place`), carry the
 tags, reveal and open it.
 """
 from __future__ import annotations
@@ -53,6 +53,7 @@ from PySide6.QtGui import QColor, QImageReader, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
                                QScrollArea, QSpinBox, QVBoxLayout, QWidget)
+import app_identity
 
 TEXT_EXTS = {".txt", ".text", ".md", ".markdown", ".rtf"}
 SIZES = [("6x9", "6 × 9 in — a trade paperback"), ("5.5x8.5", "5.5 × 8.5 in"), ("5x8", "5 × 8 in — a pocket novel"),
@@ -63,7 +64,7 @@ LANGS = [("en_US", "English (US)"), ("en_GB", "English (UK)"), ("de_DE", "German
          ("", "Don't hyphenate")]
 DEFAULT_ACCENT = "#7A2E22"
 # Where the built app keeps ReportLab and pyphen when it was built without them (module notes).
-PRIVATE = Path.home() / "Library" / "Application Support" / "Safe Finder" / "python"
+PRIVATE = app_identity.support() / "python"
 PURE = ["reportlab>=4.0", "pyphen>=0.14", "charset-normalizer"]      # ReportLab's own needs, less Pillow (inside)
 
 
@@ -119,7 +120,7 @@ def _system_python() -> str | None:
 
 
 def install_command() -> list[str] | None:
-    """The pip that installs ReportLab and pyphen: into this Safe Finder's own Python when it runs from the
+    """The pip that installs ReportLab and pyphen: into this Photo Browser for Mac's own Python when it runs from the
     source; for the built app, into `PRIVATE` by a Python on the Mac — pure-Python wheels for the app's own
     Python version. None when there's no way (the built app, and no Python with pip on the Mac)."""
     if not getattr(sys, "frozen", False):
@@ -368,7 +369,7 @@ class BookWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.sources = [s for s in sources if is_text(s)]
         self.hooks = hooks or BookHooks()
-        self.settings = QSettings("PhotoBrowser", "SafeFinder")
+        self.settings = app_identity.settings()
         self.stop = threading.Event()
         self.running = False
         self.books: list[str] = []
@@ -671,7 +672,7 @@ class BookWindow(QWidget):
         self.go.setVisible(False)
         self.install_btn.setVisible(True)
         self.install_btn.setDefault(True)
-        self._notice("Making books needs ReportLab (and pyphen, for hyphenation), and this Safe Finder hasn't got "
+        self._notice("Making books needs ReportLab (and pyphen, for hyphenation), and this Photo Browser for Mac hasn't got "
                      "them yet. Install ReportLab adds them — a minute, once — and then Make Book is here.")
 
     def _install(self) -> None:
@@ -679,7 +680,7 @@ class BookWindow(QWidget):
         if not cmd:
             self._notice("There's no Python with pip on this Mac to fetch ReportLab with. Either install Xcode's "
                          "Command Line Tools (in Terminal: xcode-select --install) and press Install ReportLab "
-                         "again, or build Safe Finder again with mac/build_safe_finder_app.sh — it puts ReportLab "
+                         "again, or build Photo Browser for Mac again with mac/build_app.sh — it puts ReportLab "
                          "inside the app.")
             return
         self.install_btn.setEnabled(False)
@@ -713,7 +714,7 @@ class BookWindow(QWidget):
             self.install_btn.setEnabled(True)
             how = (f"in Terminal: “{sys.executable} -m pip install reportlab pyphen”"
                    if not getattr(sys, "frozen", False) else
-                   "or build Safe Finder again with mac/build_safe_finder_app.sh, which puts ReportLab inside the app")
+                   "or build Photo Browser for Mac again with mac/build_app.sh, which puts ReportLab inside the app")
             self._notice(f"Couldn't install them ({why or 'unknown error'}). Try again (are you online?), {how}.")
 
     # ------------------------------------------------------------------ making the books
@@ -764,7 +765,7 @@ class BookWindow(QWidget):
             for n, src in enumerate(sources):
                 pre = f"{os.path.basename(src)}: " if len(sources) > 1 else ""
                 name = book_name(src, opts["size"])
-                tmpdir = Path(tempfile.mkdtemp(prefix="safe-finder-book-"))
+                tmpdir = Path(tempfile.mkdtemp(prefix="photo-browser-book-"))
                 try:
                     summary = bookify.make_book(src, tmpdir / name, progress=lambda t: _emit(bridge.progress, pre + t),
                                                 stop=stop, **opts)
@@ -900,7 +901,7 @@ class BookWindow(QWidget):
             except ImportError as e:
                 _emit(bridge.pictured, n, None, f"bookify can't run here ({e}).")
                 return
-            tmpdir = Path(tempfile.mkdtemp(prefix="safe-finder-book-"))
+            tmpdir = Path(tempfile.mkdtemp(prefix="photo-browser-book-"))
             tmp = tmpdir / os.path.basename(book)
             try:
                 summary = bookify.make_book(src, tmp, progress=lambda t: _emit(bridge.progress, t), stop=stop,

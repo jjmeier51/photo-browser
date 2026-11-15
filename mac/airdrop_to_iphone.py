@@ -15,7 +15,7 @@ Why an archive: AirDrop can't hand a folder to an iOS app, and a plain `.zip` is
 every other zip-capable app as well, so the phone would ask which one each time. Photos and videos are
 stored uncompressed (they're already compressed; AirDrop's speed is the limit anyway) and only the
 small sidecars are deflated. File dates are kept, and so are the files' Photo Browser tags: a hidden
-`.photobrowser-tags.json` in the archive lists them (Safe Finder's and the Finder tags each file
+`.photobrowser-tags.json` in the archive lists them (Photo Browser for Mac's and the Finder tags each file
 carries — see shared_tags.py), and the app puts them back on the unpacked files. Skipped: `.DS_Store`,
 AppleDouble `._*` files, `__MACOSX`, and `.part` downloads still in progress.
 
@@ -85,7 +85,7 @@ def _add(zf: zipfile.ZipFile, path: Path, arcname: str) -> int:
 
 
 def _add_tags(zf: zipfile.ZipFile, top: str, added: list[tuple[Path, str]]) -> None:
-    """The Photo Browser tags of what went in — Safe Finder's and the Finder tags each file carries —
+    """The Photo Browser tags of what went in — Photo Browser for Mac's and the Finder tags each file carries —
     as `<top>/.photobrowser-tags.json` ({"files": {path inside <top>: [tag, …]}}), which the app applies to
     the unpacked files and then removes. Tags never stop an AirDrop: any trouble just leaves them out."""
     try:
@@ -202,7 +202,7 @@ def _archive_mixed(items: list[Path], out_dir: Path, top: str, progress=None) ->
 
 
 def helper_source() -> Path | None:
-    """airdrop_helper.swift: next to this file, or inside Safe Finder.app's Resources when frozen."""
+    """airdrop_helper.swift: next to this file, or inside Photo Browser for Mac.app's Resources when frozen."""
     here = Path(__file__).resolve().parent
     candidates = [here / "airdrop_helper.swift"]
     if getattr(sys, "frozen", False):

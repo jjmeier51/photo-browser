@@ -123,8 +123,8 @@ struct TikTokImportView: View {
             // older backup, or rebuilt, mustn't make it fetch what's on the drive. The record is
             // brought up to date with what's on disk first.
             let onDisk = await Task.detached(priority: .userInitiated) { Library.postIDsOnDisk(in: dest, tiktok: true) }.value
-            // The folder's shared record (`.tiktok.json` — Safe Finder writes it too): its ids count as
-            // downloaded, and a folder Safe Finder made (no record on the phone yet) is taken over from it.
+            // The folder's shared record (`.tiktok.json` — Photo Browser for Mac writes it too): its ids count as
+            // downloaded, and a folder Photo Browser for Mac made (no record on the phone yet) is taken over from it.
             let shared = await Task.detached(priority: .userInitiated) { SocialRecord.snapshot(.tiktok, in: dest) }.value
             if library.tiktokInfo(for: dest) == nil, let info = shared.tiktokInfo {
                 library.setTikTokInfo(info, for: dest)
@@ -199,7 +199,7 @@ struct TikTokImportView: View {
                 progress: { p in Task { @MainActor in phase = p.phase } })
 
             // Refresh like counts on already-downloaded videos too (not just the new ones) — this run's
-            // over the ones the shared record has (Safe Finder reads every video's count on each run).
+            // over the ones the shared record has (Photo Browser for Mac reads every video's count on each run).
             library.applyTikTokLikes(shared.likes.merging(result.allStats) { _, fresh in fresh }, in: dest)
             // Record the resolved author id. The incremental cutoff (`newestDate`) is
             // deliberately NOT advanced here — at this point the videos are only

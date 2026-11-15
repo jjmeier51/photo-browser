@@ -606,7 +606,7 @@ HOST_PAGE_JS = r"""
 })()
 """
 
-# Injected into every page before its own scripts (Safe Finder: a profile script at document creation;
+# Injected into every page before its own scripts (Photo Browser for Mac: a profile script at document creation;
 # iPhone: a user script at document start). On gofile only, it keeps the answers of the site's own
 # `/contents/` API calls — the folder listing, signed by gofile's own script — in `window.__pbCaptured`
 # for `HOST_PAGE_JS`. It only watches; it never sends anything. Kept identical to the Swift copy.

@@ -27,7 +27,7 @@ struct TaylorBrowserView: View {
         .safeAreaInset(edge: .bottom) { DownloadQueueBar() }
         .onAppear { TaylorDownloads.shared.attach(library: library, onAlbumDone: onFinished) }
         .task {
-            // Albums Safe Finder downloaded into this folder count as downloaded here too.
+            // Albums Photo Browser for Mac downloaded into this folder count as downloaded here too.
             let folder = targetFolder
             let ids = await Task.detached(priority: .utility) { TaylorRecord.albumIDs(in: folder) }.value
             library.markTaylorAlbumsDownloaded(ids)
@@ -123,7 +123,7 @@ final class TaylorDownloads {
                 }
                 if r.downloaded > 0 {
                     library.markTaylorAlbumDownloaded(item.album.id)
-                    // The shared record in the Taylor folder, so Safe Finder on the Mac knows too.
+                    // The shared record in the Taylor folder, so Photo Browser for Mac on the Mac knows too.
                     if let name = r.folderName {
                         await TaylorRecord.note(album: item.album,
                                                 folder: item.folder.appendingPathComponent(name, isDirectory: true),

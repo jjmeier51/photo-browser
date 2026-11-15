@@ -1,4 +1,4 @@
-"""Safe Finder's menu bar — the Mac way to find everything: File, Edit, View, Go, Photos, Window, Help. Every
+"""Photo Browser for Mac's menu bar — the Mac way to find everything: File, Edit, View, Go, Photos, Window, Help. Every
 command acts on the pane you're in (the one with the blue FROM/TO chip) and what's selected there, as
 Finder's menus do, and greys out when it can't.
 
@@ -6,8 +6,8 @@ The keyboard shortcuts live here — one action per command — rather than on e
 bound twice (two live shortcuts for one key make Qt fire neither). Return (open) and Space (Quick Look)
 stay on the panes: they belong to the list you're typing in.
 
-`install(window, sf)` takes the main window and the safe_finder module (passed in rather than imported:
-run as a script, safe_finder is `__main__`, and importing it by name would load a second copy).
+`install(window, sf)` takes the main window and the photo_browser module (passed in rather than imported:
+run as a script, photo_browser is `__main__`, and importing it by name would load a second copy).
 """
 from __future__ import annotations
 
@@ -356,9 +356,9 @@ def install(win, sf) -> None:
     act(w, "Zoom", lambda: win.showNormal() if win.isMaximized() else win.showMaximized())
     w.addSeparator()
     act(w, "Bring All to Front", sf.raise_all_windows, None, None,
-        "Every Safe Finder window in front of other apps' windows — what a click on the Dock icon does")
+        "Every Photo Browser for Mac window in front of other apps' windows — what a click on the Dock icon does")
     w.addSeparator()
-    act(w, "Safe Finder", lambda: (win.showNormal() if win.isMinimized() else None, win.raise_(),
+    act(w, "Photo Browser for Mac", lambda: (win.showNormal() if win.isMinimized() else None, win.raise_(),
                                    win.activateWindow()))
     others = []
 
@@ -389,5 +389,5 @@ def install(win, sf) -> None:
     # -- Help
     h = each("Help")
     readme = Path(__file__).with_name("README.md")
-    act(h, "Safe Finder Help", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(readme))))
+    act(h, "Photo Browser for Mac Help", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(readme))))
     win.menu_actions = {a.text(): a for a in acts}

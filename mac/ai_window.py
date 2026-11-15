@@ -1,4 +1,4 @@
-"""Edit with AI and Create with AI in Safe Finder — the iPhone app's screens
+"""Edit with AI and Create with AI in Photo Browser for Mac — the iPhone app's screens
 (`AIEditView`, `AICreateView`, `AIResultsView`, `AstriaBrowserView`) on the Mac; astria.py does the talking.
 
 - **Edit with AI** (right-click a photo) / **Create with AI** (right-click a folder): the prompt (with an
@@ -14,7 +14,7 @@
   it stays only when something couldn't be saved). **Run Again** opens the form as it was and closes the results
   too — kept results not yet saved are asked about once ("Do this every time" remembers the answer). Closing
   with results unsaved asks first.
-  A job cut short by quitting is finished the next time Safe Finder's AI is used (its images go straight
+  A job cut short by quitting is finished the next time Photo Browser for Mac's AI is used (its images go straight
   to the folder).
 - **The Astria.ai Browser** is its own module now — `astria_browser.py`.
 
@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QFil
 
 import astria as A
 from duplicates_window import FlowLayout
+import app_identity
 
 CLIENT: Callable[[], A.Client] = lambda: A.Client()          # tests hand in a client on a fake Astria
 LANES = 4                     # generations sent to Astria at once (a batch of photos takes turns)
@@ -58,10 +59,10 @@ class AIHooks:
     carry_tags: Callable[[list[tuple[str, str]]], None] | None = None   # [(original, new)]
     reveal: Callable[[str], None] | None = None
     view: Callable[[list[str], str], None] | None = None
-    keep_open: Callable[[QWidget], None] | None = None                  # Safe Finder holds the window
+    keep_open: Callable[[QWidget], None] | None = None                  # Photo Browser for Mac holds the window
     add_tags: Callable[[list[str], list[str]], None] | None = None      # (files, tags): tag them
     create: Callable[[dict], None] | None = None                        # open Create with AI filled in
-    current_folder: Callable[[], str] | None = None                     # the folder Safe Finder is showing now
+    current_folder: Callable[[], str] | None = None                     # the folder Photo Browser for Mac is showing now
     note: Callable[[str], None] | None = None                           # a line on the main window's status line
 
 
@@ -309,7 +310,7 @@ class Jobs(QObject):
             saved = sum(len(s) for _j, s in done)
             if saved:
                 self.recovered.emit(f"Saved {saved} AI image{'s' if saved != 1 else ''} from a generation that "
-                                    "was still running when Safe Finder last closed.")
+                                    "was still running when Photo Browser for Mac last closed.")
         threading.Thread(target=work, daemon=True).start()
 
 
@@ -852,9 +853,8 @@ def _unsaved_before_run_again(parent: QWidget, count: int) -> str:
     """Run Again closes the results it came from. When some there were kept but not saved: "save", "discard"
     or "cancel" — asked once, and the answer can stand for every time after (they were paid for; nothing is
     thrown away without the person having said so at least once)."""
-    from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QCheckBox
-    settings = QSettings("PhotoBrowser", "SafeFinder")
+    settings = app_identity.settings()
     choice = str(settings.value("ai/run_again_unsaved", "ask") or "ask")
     if choice in ("save", "discard"):
         return choice
@@ -928,7 +928,7 @@ class ResultsWindow(QWidget):
         self.again = QPushButton("Run Again")
         self.again.setToolTip("Opens the form as it was, and closes these results")
         self.again.clicked.connect(self.run_again)
-        self.show_btn = QPushButton("Show in Safe Finder")
+        self.show_btn = QPushButton("Show in Photo Browser")
         self.show_btn.setVisible(False)
         self.show_btn.clicked.connect(lambda: self.hooks.reveal(self.saved[0]) if self.saved and self.hooks.reveal else None)
         self.save_btn = QPushButton("Save")
@@ -981,7 +981,7 @@ class ResultsWindow(QWidget):
 
     def _open(self, i: int) -> None:
         """Full size: through the viewer, from a temporary copy."""
-        tmp = Path(tempfile.gettempdir()) / "SafeFinderAI" / self.job.id
+        tmp = Path(tempfile.gettempdir()) / "PhotoBrowserAI" / self.job.id
         tmp.mkdir(parents=True, exist_ok=True)
         paths = []
         for k, t in enumerate(self.tiles):
@@ -1186,7 +1186,7 @@ class BatchResultsWindow(QWidget):
         self.again = QPushButton("Run Again")
         self.again.setToolTip("The form again, for the same photos — these results close")
         self.again.clicked.connect(self.run_again)
-        self.show_btn = QPushButton("Show in Safe Finder")
+        self.show_btn = QPushButton("Show in Photo Browser")
         self.show_btn.setVisible(False)
         self.show_btn.clicked.connect(lambda: self.hooks.reveal(self.saved[0]) if self.saved and self.hooks.reveal else None)
         self.save_btn = QPushButton("Save All")
@@ -1296,7 +1296,7 @@ class BatchResultsWindow(QWidget):
 
     def _open(self, tile: _Result) -> None:
         """Full size, through the viewer: every result of the batch, in order, from temporary copies."""
-        tmp = Path(tempfile.gettempdir()) / "SafeFinderAI" / self.batch[0].id
+        tmp = Path(tempfile.gettempdir()) / "PhotoBrowserAI" / self.batch[0].id
         tmp.mkdir(parents=True, exist_ok=True)
         paths, start = [], ""
         for job, t in self.tiles():
@@ -1413,7 +1413,7 @@ class BatchResultsWindow(QWidget):
                 box.setText(f"{running} of the {len(self.batch)} photos {'is' if running == 1 else 'are'} still with "
                             "Astria.")
                 box.setInformativeText("Close anyway? What's still coming is saved into its photo's “AI” folder "
-                                       "when it arrives (the next time Safe Finder's AI is used)."
+                                       "when it arrives (the next time Photo Browser for Mac's AI is used)."
                                        + (f" The {len(unsaved)} kept result{'s' if len(unsaved) != 1 else ''} here "
                                           "can be saved now." if unsaved else ""))
             else:

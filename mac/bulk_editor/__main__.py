@@ -1,4 +1,4 @@
-"""`python -m photobrowser_mac` — launch the app."""
+"""`python -m bulk_editor` — launch the app."""
 
 from .app import main
 

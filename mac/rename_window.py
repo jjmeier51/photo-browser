@@ -1,4 +1,4 @@
-"""Safe Finder's renaming windows (rename_tools.py does the work).
+"""Photo Browser for Mac's renaming windows (rename_tools.py does the work).
 
 **Rename Files…** (`BulkRenameDialog`): many items renamed by a pattern — a ready-made one or your own, from
 `{n}` (a number), `{name}`, `{date}` `{time}` (the capture date), `{folder}`, `{camera}`… — numbered in an order

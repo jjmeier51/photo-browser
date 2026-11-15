@@ -1,4 +1,4 @@
-"""Safe Finder — Passes.com helpers (no Qt).
+"""Photo Browser for Mac — Passes.com helpers (no Qt).
 
 Provides: token exchange, gallery and message pagination, per-post item building,
 and the shared-record type (.passes.json on the drive).  Same pattern as
@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 import social
+import app_identity
 
 # ── constants ────────────────────────────────────────────────────────────────
 
@@ -40,7 +41,7 @@ SUCCESS_RE = re.compile(r"passes\.com/(auth/success|home|feed|gallery)", re.I)
 
 API = "https://www.passes.com/api"
 
-KEYCHAIN_SERVICE = "Safe Finder Passes"
+KEYCHAIN_SERVICE = "Photo Browser for Mac Passes"
 KEYCHAIN_ACCOUNT = "refresh-token"
 SETTINGS_KEY     = "passes/refresh_token"   # QSettings fallback
 DEVICE_SETTING   = "passes/device"          # path to a .wvd
@@ -111,10 +112,17 @@ def get_refresh_token() -> str:
                 capture_output=True, text=True, timeout=10)
             if r.returncode == 0:
                 return r.stdout.strip().strip('"')
+            # saved before the app's rename: still read from where it is
+            r = subprocess.run(
+                ["security", "find-generic-password",
+                 "-s", app_identity.OLD_NAME + " Passes", "-a", KEYCHAIN_ACCOUNT, "-w"],
+                capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                return r.stdout.strip().strip('"')
         except (OSError, subprocess.SubprocessError):
             pass
     from PySide6.QtCore import QSettings
-    return str(QSettings("PhotoBrowser", "SafeFinder").value(SETTINGS_KEY, "")
+    return str(app_identity.settings().value(SETTINGS_KEY, "")
                or "").strip().strip('"')
 
 
@@ -136,7 +144,7 @@ def set_refresh_token(token: str) -> None:
         except (OSError, subprocess.SubprocessError):
             pass
     from PySide6.QtCore import QSettings
-    s = QSettings("PhotoBrowser", "SafeFinder")
+    s = app_identity.settings()
     if token:
         s.setValue(SETTINGS_KEY, token)
     else:
@@ -146,7 +154,7 @@ def set_refresh_token(token: str) -> None:
 def device_path() -> Path:
     """Where the Widevine .wvd lives. Swappable; nothing is committed to the repo."""
     from PySide6.QtCore import QSettings
-    p = str(QSettings("PhotoBrowser", "SafeFinder").value(DEVICE_SETTING, "") or "")
+    p = str(app_identity.settings().value(DEVICE_SETTING, "") or "")
     if p:
         return Path(p).expanduser()
     return Path.home() / "Library/Application Support/SafeFinder/device.wvd"

@@ -172,7 +172,7 @@ class MainWindow(QMainWindow):
         self.root_layout.insertWidget(0, banner)
 
     def _about(self):
-        QMessageBox.about(self, APP_NAME, f"{APP_NAME} for Mac {__version__}\n\nBrowse a drive and bulk-edit EXIF, dates, filenames and captions.\n"
+        QMessageBox.about(self, APP_NAME, f"{APP_NAME} {__version__}\n\nBrowse a drive and bulk-edit EXIF, dates, filenames and captions.\n"
                                          f"ExifTool: {self.exif.version() or 'not found'}")
 
     def _tile_size(self, px: int):

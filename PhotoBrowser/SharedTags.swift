@@ -1,10 +1,10 @@
 import Foundation
 
-/// Tags shared with Safe Finder on the Mac (`mac/shared_tags.py`): the drive's
+/// Tags shared with Photo Browser for Mac on the Mac (`mac/shared_tags.py`): the drive's
 /// `.Photo Browser Metadata/shared-tags.json`, keyed by each file's path inside the drive — the same
 /// key for a file on the Mac (`/Volumes/SSD/…`) and here (`…/SSD/…`).
 ///
-/// The drive is plugged into one device at a time. Safe Finder edits the drive's file directly; the
+/// The drive is plugged into one device at a time. Photo Browser for Mac edits the drive's file directly; the
 /// app keeps its own `tags` store and, whenever the drive is here — opened, reconnected, back in the
 /// foreground, a couple of seconds after a tag changes, on the way to the background — merges the two
 /// **three ways** against what they agreed on at the last sync (`Base`): a tag added or removed on one
@@ -12,7 +12,7 @@ import Foundation
 /// (through `DriveWriter`) and into the store.
 ///
 /// The base is kept per drive file, by the file's `id` — not by the root path, which changes every
-/// time the drive is replugged. A file the app has no base for (new, started afresh by Safe Finder
+/// time the drive is replugged. A file the app has no base for (new, started afresh by Photo Browser for Mac
 /// after damage, or a drive it has never synced) shares no history with the store, so nothing is taken
 /// as removed: the two are combined. A lost or damaged file can therefore never wipe tags. Hidden paths
 /// (`.Trash`, …) are never shared.
@@ -30,10 +30,10 @@ import Foundation
 /// for means it came back (put back from a Trash) and its tags are restored; otherwise the store is the
 /// record and the marker follows it (every removal clears it at the next sync). An earlier build (Oct 26,
 /// 2026) briefly wrote Finder tags too; they come off wherever they're exactly what it wrote
-/// (`isOursInFinder`). Safe Finder does the same for every folder it opens (`mac/shared_tags.py`).
+/// (`isOursInFinder`). Photo Browser for Mac does the same for every folder it opens (`mac/shared_tags.py`).
 ///
 /// **Favorites and To AI ride along** in the same file, in `labels` (path → ["favorite", "ai"]), merged three
-/// ways against the same base exactly as tags are — so a heart added or taken off in Safe Finder or here reaches
+/// ways against the same base exactly as tags are — so a heart added or taken off in Photo Browser for Mac or here reaches
 /// the other. They are the app's `favorites` / `aiLabels`, not tags: no tag list shows them, copies don't get
 /// them (`copyTags`), and they aren't carried inside files. A base from before labels were shared has none, so
 /// the first sync combines the two sides' labels and removes nothing.
@@ -43,7 +43,7 @@ nonisolated enum SharedTags {
     static let fileName = "shared-tags.json"
     static let format = "Photo Browser shared tags"
 
-    /// The file on the drive (Safe Finder writes the same shape).
+    /// The file on the drive (Photo Browser for Mac writes the same shape).
     nonisolated struct File: Codable, Sendable {
         var format: String?
         var version: Int?
@@ -372,14 +372,14 @@ extension Library {
         guard let root = rootURL, !waitingForDrive else { return }
         if tagSyncRunning { tagSyncAgain = true; return }
         tagSyncRunning = true
-        // Renames Safe Finder made while the drive was on the Mac: everything kept by path here
+        // Renames Photo Browser for Mac made while the drive was on the Mac: everything kept by path here
         // follows them first, so the merge below sees the tags under their new names.
         await applyMacRenames()
         guard rootURL?.path == root.path, !waitingForDrive else { tagSyncRunning = false; return }
-        // Each folder's own choices ("Videos at the Top"), shared with Safe Finder the same way.
+        // Each folder's own choices ("Videos at the Top"), shared with Photo Browser for Mac the same way.
         await syncFolderOptions()
         guard rootURL?.path == root.path, !waitingForDrive else { tagSyncRunning = false; return }
-        // Folder covers, likewise: Safe Finder's choices in, this phone's out (`FolderCovers.swift`).
+        // Folder covers, likewise: Photo Browser for Mac's choices in, this phone's out (`FolderCovers.swift`).
         await syncFolderCovers()
         guard rootURL?.path == root.path, !waitingForDrive else { tagSyncRunning = false; return }
         let rootPath = root.path
@@ -479,7 +479,8 @@ extension Library {
                     scheduleBulkSave(tags, "tags")
                     labelsVersion += 1
                 }
-                let from = by == "Safe Finder" ? "Safe Finder" : "the drive"
+                // "Safe Finder" is what the Mac app was called (and wrote here) until November 2026.
+                let from = (by == "Photo Browser for Mac" || by == "Safe Finder") ? "Photo Browser for Mac" : "the drive"
                 let what = changed > 0 && labelChanges > 0 ? "Tags and favorites"
                     : changed > 0 ? "Tags" : "Favorites and To AI"
                 let n = changed + labelChanges

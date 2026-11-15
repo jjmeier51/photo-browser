@@ -311,7 +311,7 @@ endpoint changed), grouped by prompt with model name (`modelName(forTune:tunes:)
   stamped with the prompt's `created_at` and provenance, marked AI-generated, and remembered in
   `Library.astriaSavedImages` (image URL → path) so the grid badges what's already on the drive.
 
-### 1.13 Safe Finder's twin — `mac/astria.py`, `mac/ai_window.py` (Nov 3, 2026)
+### 1.13 Photo Browser for Mac's twin — `mac/astria.py`, `mac/ai_window.py` (Nov 3, 2026)
 
 A field-for-field port of the request path above, so both apps send identical prompts: `createPrompt`'s
 retries and `findRecentPrompt` reconciliation (the transport raises `PreSend` vs `Ambiguous` — urllib's
@@ -321,7 +321,7 @@ Pillow, `resolveGeneration`'s single/stacked rules, `compatible` tunes, faceid r
 `base|path|mtime|size` (forgotten when a prompt that used them is refused), the model table, 5.0 Pro pinned
 to 2K, Flux without `prompt[resolution]`, the nearest supported `aspect_ratio`, and the trigger phrase
 prepended after the prefix — so a Flux LoRA prompt reads "ohwx woman <lora:11:1> …" on both.
-- **Where things live**: the key in the Keychain (`security add-generic-password -s "Safe Finder Astria"`;
+- **Where things live**: the key in the Keychain (`security add-generic-password -s "Photo Browser for Mac Astria"`;
   off a Mac a 0600 field in the store), everything else in `~/Library/Application Support/Safe
   Finder/astria.json` (tune overrides, `run_edit`/`run_create`, history + favorites — not shared with the
   iPhone's — reference tunes, saved browser images by URL, the last save folder, pending jobs).
@@ -333,12 +333,12 @@ prepended after the prefix — so a Flux LoRA prompt reads "ohwx woman <lora:11:
 - **Upload**: Pillow's HEIC decode is the SDR base (no gain map), so the iPhone's HDR soft-clip isn't needed;
   upright, ≤ 2048 (1024 for 1K), JPEG 92.
 - **Durability, simplified**: a pending record is written the moment Astria accepts the prompt and dropped
-  when the results are saved or discarded, or the error is final. `Jobs.resume` runs once per Safe Finder
+  when the results are saved or discarded, or the error is final. `Jobs.resume` runs once per Photo Browser for Mac
   run (first AI use): jobs < 2 h old, < 4 tries, 30-tick polls, saved straight to the folder, and only a
   save is reported. No notifications — a Mac process isn't suspended mid-job the way iOS's is.
 - Not ported: Surprise Me, Extend with AI (Flux outpaint), creating tunes, live activities.
 
-**Nov 11 — several photos, one prompt (Safe Finder).** "Select 5 photos, prompt 'Remove the bookshelf behind
+**Nov 11 — several photos, one prompt (Photo Browser for Mac).** "Select 5 photos, prompt 'Remove the bookshelf behind
 Johnny' for all 5, send them to Astria and get them back together." Astria has no batch call — an edit is one
 prompt with one `input_image` — so a batch is **a job per photo** with the same text, tune and settings:
 `RequestWindow` takes a list (`targets`; the form shows the photos and "5 photos × 2 = 10 images"), `generate`
@@ -354,18 +354,18 @@ remembered). More than `BATCH_ASK` (20) images asks first. Not on the iPhone yet
 photo at a time). Tested against a stand-in client: five photos, one prompt, ≤ 4 at once, one refused then
 tried again, a result left out, nine files saved beside their photos with tags carried.
 
-**Nov 9 — "moderated" in Astria, nothing back in Safe Finder.** An SFW edit showed "moderated" on Astria while
-Safe Finder waited and got nothing. The two apps' requests are field-for-field the same (fields, model ids,
+**Nov 9 — "moderated" in Astria, nothing back in Photo Browser for Mac.** An SFW edit showed "moderated" on Astria while
+Photo Browser for Mac waited and got nothing. The two apps' requests are field-for-field the same (fields, model ids,
 pinned 2K, upload sizes, prompt composition), so the moderation itself is Astria's or its partner model's
 (Seedream is ByteDance's, Nano Banana Google's, each with its own filter, and a run can trip it one time and
-not the next). Two things were Safe Finder's own, both fixed:
+not the next). Two things were Photo Browser for Mac's own, both fixed:
 - **It couldn't see the refusal.** Astria's API documents no failure field for a prompt (docs.astria.ai: no
   status, no moderation flag); both apps read only `error`, so a prompt stopped some other way was polled for
   ~25 minutes and then reported as "still working". `astria.prompt_failure` (and the iPhone's
   `AIExtend.promptFailure`, the same rule) also takes any value saying moderated / nsfw / flagged / censored /
   blocked, or a true flag so named — never the prompt's own words — and ends the job at once, terminal (not
   recovered later). A job that brings nothing back saves Astria's answer to
-  `~/Library/Logs/Safe Finder/astria-prompt-<id>-<time>.json`, so a new kind of refusal can be read.
+  `~/Library/Logs/Photo Browser for Mac/astria-prompt-<id>-<time>.json`, so a new kind of refusal can be read.
 - **Its photo wasn't the iPhone's.** Pillow sent the photo's numbers with no colour conversion and no profile
   (Display P3 / Adobe RGB read as sRGB: duller, shifted skin tones), and a transparent PNG's clear pixels as
   black. `upload_jpeg` now does what the iPhone's Core Image encode does: converts from the photo's embedded
@@ -1059,17 +1059,17 @@ apply it.
 
 ---
 
-## 6h. Tags shared with Safe Finder — `SharedTags.swift`, `mac/shared_tags.py` (Oct 26, 2026)
+## 6h. Tags shared with Photo Browser for Mac — `SharedTags.swift`, `mac/shared_tags.py` (Oct 26, 2026)
 
-The app's tags and Safe Finder's are one set. **Where:** `<drive>/.Photo Browser Metadata/shared-tags.json`
+The app's tags and Photo Browser for Mac's are one set. **Where:** `<drive>/.Photo Browser Metadata/shared-tags.json`
 (the metadata-backup folder at the app's root), `{"format", "version", "id", "updated", "by",
 "files": {drive-relative path: [tag]}}` — the same key for a file on the Mac (`/Volumes/SSD/…`) and
 here (`…/userfsd/<UUID>/SSD/…`). Tags are stored as `normalizedTag` makes them and compared ignoring
-case on both sides; hidden paths (`.Trash`…) are never in it; Safe Finder writes keys NFC (Swift's
+case on both sides; hidden paths (`.Trash`…) are never in it; Photo Browser for Mac writes keys NFC (Swift's
 String equality is canonical, so NFD keys here match).
 
 **Why a file on the drive, merged three ways.** The SSD is plugged into one device at a time, so
-there is never a second writer to race. Safe Finder edits the drive's file directly — while the
+there is never a second writer to race. Photo Browser for Mac edits the drive's file directly — while the
 drive is on the Mac it *is* the copy of record. The app keeps its own `Library.tags` (everything
 else reads it) and `syncDriveTags` merges: for each path, a side that left the last-agreed state
 alone takes the other side's tags; when both changed, removals from either side go and additions
@@ -1077,7 +1077,7 @@ from both stay (`SharedTags.merge`). The last-agreed state (`tagSyncBases`, bulk
 "tagSyncBase") is kept **by the file's `id`**, not by root path — the root path changes on every
 replug (new mount UUID), which would have turned every sync into a no-history union and stopped Mac
 removals from ever reaching the phone. No base for the file's id (new file, a drive never synced,
-Safe Finder restarted a damaged file with a new id) → plain union, never a removal: a lost file can't
+Photo Browser for Mac restarted a damaged file with a new id) → plain union, never a removal: a lost file can't
 wipe tags. Timestamps were considered and rejected: last-writer-wins per path loses one side of a
 both-changed file and depends on two clocks.
 
@@ -1088,13 +1088,13 @@ moves, renames, prunes and backup restores), and on the way to the background (`
 a background-task window, saving the base before it closes). Coalesced (`scheduleTagSync`); one at a
 time (`tagSyncRunning` / `tagSyncAgain`); an entry edited while a sync was reading is left for the next
 one. Reading/merging/writing is detached; the write goes through `DriveWriter.writeDataSync`. A sync
-that brings changes shows a toast ("Tags from Safe Finder: 12 files updated") and bumps
-`labelsVersion`. Drive Health ▸ Metadata safety has **Sync Tags with Safe Finder** and the last
+that brings changes shows a toast ("Tags from Photo Browser for Mac: 12 files updated") and bumps
+`labelsVersion`. Drive Health ▸ Metadata safety has **Sync Tags with Photo Browser for Mac** and the last
 result (`tagSyncStatus`).
 
-**Safe Finder** (`shared_tags.TagStore`): a drive file's table is found per folder by walking up to
+**Photo Browser for Mac** (`shared_tags.TagStore`): a drive file's table is found per folder by walking up to
 the nearest folder holding `.Photo Browser Metadata` (else the volume root), cached per folder; files
-on the Mac's own disk go into `~/Library/Application Support/Safe Finder/tags.json` (absolute keys)
+on the Mac's own disk go into `~/Library/Application Support/Photo Browser for Mac/tags.json` (absolute keys)
 and travel with Move/Copy (`Transfer` now reports `placed` (original → where its copy landed, incl.
 "name (1)" and a renamed `.incoming` folder) and `trashed_paths`; `MainWindow._carry_tags` copies tags
 over and drops the trashed originals'). The file is re-read when its mtime/size change (checked at most
@@ -1104,7 +1104,7 @@ header button / right-click ▸ Tags ▸ Add Tags… open `TagDialog` (type, com
 segment; chips toggle on all / ✕ off all / "3/12" partial); right-click ▸ Tags lists every tag with
 ticks; folders in a selection expand to their files on a thread (`expand_files`, hidden/bundles/
 sidecars skipped); the sidebar's Tags section (counts, colour dot from a CRC of the folded name) opens
-`safe-finder://tag/<name>` (a `TagScanner` collection), takes file drops, and renames / removes a tag
+`photo-browser://tag/<name>` (a `TagScanner` collection), takes file drops, and renames / removes a tag
 everywhere; `tag:x` / `#x` in a search field opens the same collection; tiles show a pill (dots + first
 tag), list rows chips, the status line a single selection's tags; Move to Trash drops the tags.
 
@@ -1125,7 +1125,7 @@ against each other): marker at another path → the file arrived from elsewhere:
 any here), and if nothing is at the old path any more it was a move, so drop the old entry; marker for this
 very path on a file the store has nothing for → it came back (Put Back from a Trash, which dropped its
 tags): restore them — only for an *arriving* file (`arrived:`), never while a sync writes out the store's own
-removals; otherwise the store is the record and the marker follows it. **Who writes:** Safe Finder on
+removals; otherwise the store is the record and the marker follows it. **Who writes:** Photo Browser for Mac on
 every edit (`TagStore._edit`, so a removal clears the marker at once) and when a folder is opened
 (`check_carried` reads on a thread, applies on the UI thread); the app at each sync for every key whose
 tags changed since the base — all of them once (`Base.markers`, nil in bases from the Finder-tag build, so
@@ -1145,15 +1145,15 @@ results kept from the review (`AIResultsView.keep`, `.edit(original:)`) or saved
 recovered images had no AI badge), and images saved from the **Astria.ai Browser** whose prompt was an
 edit started here (`astriaPromptSources`: prompt id → original path, noted when Astria accepts the prompt
 in `pendingRecorder`, remapped with moves; prompts from Astria's website, Create, or before Oct 26 have
-no source). Crop/rotate/resize, upscales and metadata writes replace the file in place, so its tags stay. Safe Finder's transfers already did (`carry`). **AirDrop:** `airdrop_to_iphone._add_tags` puts
+no source). Crop/rotate/resize, upscales and metadata writes replace the file in place, so its tags stay. Photo Browser for Mac's transfers already did (`carry`). **AirDrop:** `airdrop_to_iphone._add_tags` puts
 `<top>/.photobrowser-tags.json` (the tables' tags + Finder tags, keyed inside the top folder) in the
 `.pbgallery`; `ReceivedArchivesView` → `Library.applyArchiveTags` applies and removes it (`Archiver.peek`
 doesn't count it).
 
 **Backups.** The metadata backup (`backUpMetadata`, manual and automatic) syncs with the drive's tag
-file first, so Safe Finder's latest tags are in it (they were already in the snapshot's `tags`; the
-drive copy sits in the same `.Photo Browser Metadata` folder). Safe Finder keeps a copy of each tag
-table before its first change of a day in `~/Library/Application Support/Safe Finder/Tag Backups/<drive or
+file first, so Photo Browser for Mac's latest tags are in it (they were already in the snapshot's `tags`; the
+drive copy sits in the same `.Photo Browser Metadata` folder). Photo Browser for Mac keeps a copy of each tag
+table before its first change of a day in `~/Library/Application Support/Photo Browser for Mac/Tag Backups/<drive or
 This Mac>/` (last 14).
 
 ---
@@ -1164,7 +1164,7 @@ base (`Base.labels`, nil for bases saved before → the first sync combines and 
 either table differs, applied back to the sets in `syncDriveTags` (an item edited during the sync waits for the
 next). Every favorite/To AI setter calls `noteTagsEdited()` so the drive follows. Deliberately *not* reserved tags:
 those would surface in every tag list, count and filter on both sides. Not carried in the file's own marker xattr,
-so a Finder move leaves them behind (as it always did on the iPhone). Safe Finder: `TagFile.labels` (hidden keys
+so a Finder move leaves them behind (as it always did on the iPhone). Photo Browser for Mac: `TagFile.labels` (hidden keys
 skipped on read), `TagStore.labels / set_label / files_labelled / label_count / carry_labels`, `forget` drops them;
 transfers carry them only for items that were moved (`_carry_tags`: originals that went to the Trash, or inside
 one), never for copies — the app's rule. UI: right-click Favorite/To AI, Photos ▸ ⇧⌘F/⇧⌘A (toggle: off when all
@@ -1174,7 +1174,7 @@ have it), sidebar **Labels** (counts; drop to add), `LABEL` collections (`LabelS
 ## 6i. Batch crop — `BatchCrop.swift`, `mac/batch_crop.py`, `mac/crop_window.py` (Oct 29, 2026)
 
 Crop one photo, put the same crop on many, and tag every one of them "cropped" — on the iPhone and in
-Safe Finder.
+Photo Browser for Mac.
 
 - **iPhone.** Select photos ▸ More ▸ **Crop…** opens `BatchCropView`: the crop box (`CropOverlay`, the
   photo editor's — now shared, with side handles in Freeform so one side can be trimmed alone) over the
@@ -1194,18 +1194,18 @@ Safe Finder.
   (a box within 0.4% of every edge is no crop), and a photo's crop becomes `Library.lastCrop` (bulk
   store `lastCrop`). The photo editor only offers a crop with no turn, flip, straighten or keystone as
   the Last Crop — its own turn runs the other way round in Core Image's Y-up space, so it isn't carried.
-- **Safe Finder.** Right-click photos ▸ **Crop…** / **Crop N Photos…**: the same box, ratios, turns and
-  Last Crop (kept in Safe Finder's settings), ‹ › to step through the selection. Pillow (pillow-heif for
+- **Photo Browser for Mac.** Right-click photos ▸ **Crop…** / **Crop N Photos…**: the same box, ratios, turns and
+  Last Crop (kept in Photo Browser for Mac's settings), ‹ › to step through the selection. Pillow (pillow-heif for
   HEIC) rewrites each photo: upright first (EXIF orientation baked in, then 1), turn, crop, saved in its
   own format with its EXIF (pixel size updated), ICC profile and XMP (orientation and size fixed); a
   TIFF keeps its descriptive tags. The new bytes are made and decoded again in memory first, so a photo
   that can't be read or encoded is untouched. APFS: hidden temp beside it + its extended attributes
   (the carried tags, "where from") + rename; exFAT: written into the file in place (no rename on exFAT,
-  CLAUDE.md #12). The modified and created dates are put back, so Safe Finder drops those thumbnails
+  CLAUDE.md #12). The modified and created dates are put back, so Photo Browser for Mac drops those thumbnails
   itself (`Thumbnails.forget` — its cache key is path + modified date). Not carried by Pillow: HDR gain
   maps (HDR photos come out standard range on the Mac) and a JPEG's extra MPF pictures.
 
-## 6j. Folder tags — `FolderTags.swift`, `mac/safe_finder.py` (Oct 29, 2026)
+## 6j. Folder tags — `FolderTags.swift`, `mac/photo_browser.py` (Oct 29, 2026)
 
 A folder carries tags of its own. Its path is a key in `Library.tags` and in the drive's shared tag file
 like any file's, so nothing new had to be built for it to sync, re-key on move/rename (`itemsMoved`
@@ -1217,19 +1217,19 @@ re-keys a folder's own path as well as its subtree), survive the trash, or show 
   Items Inside" / "Folder Only" / Cancel. Only the files the change would touch are counted, and when there
   are none nothing is asked. iPhone: `Library.folderTagQuestion` + the `folderTagPrompt` alert, from the
   folder long-press Tags menu, the selection bar, "Add Tag…" and the folder's Get Info (`TagEditor`'s
-  `onChange`); files inside come from the drive index (`filesInside`), else a walk. Safe Finder:
+  `onChange`); files inside come from the drive index (`filesInside`), else a walk. Photo Browser for Mac:
   `ask_inside` from the right-click Tags menu, ⌘T (asked before the window opens — it then works on the
   folder, or the folder and its files), Remove All Tags and drops on a sidebar tag.
 - **Carried.** A folder carries the `com.photobrowser.tags` marker like a file (not on exFAT), so a folder
-  moved by Finder or Files keeps its tags: Safe Finder squares folders too when a folder is opened
+  moved by Finder or Files keeps its tags: Photo Browser for Mac squares folders too when a folder is opened
   (`check_carried`, `read_folder`), and the app's `adoptCarriedTags` now includes folders new to the
-  index. Safe Finder's transfers report placed folders (`Transfer.placed`), so a moved or copied folder
+  index. Photo Browser for Mac's transfers report placed folders (`Transfer.placed`), so a moved or copied folder
   — and its subfolders — keep their own tags.
-- **Shown.** Safe Finder: the tag pill on folder tiles, chips in the list view, the status line, the
+- **Shown.** Photo Browser for Mac: the tag pill on folder tiles, chips in the list view, the status line, the
   sidebar counts and tag collections. iPhone: checked in the Tags menu, in folder Get Info, counted in
   the Tags chip, and listed in the Tags filter. (iPhone tiles show no tags for files either.)
 
-## 6k. Safe Finder video thumbnails — `mac/thumb_helper.swift` (Oct 29, 2026)
+## 6k. Photo Browser for Mac video thumbnails — `mac/thumb_helper.swift` (Oct 29, 2026)
 
 Video thumbnails used to come only from `qlmanage`, a dozen files per run on one thread: Quick Look
 started afresh for every run and nothing appeared until the whole dozen was done, so a folder of videos
@@ -1244,15 +1244,15 @@ tone-mapped) and ImageIO previews (RAW), written as JPEGs straight into the thum
 - Fallbacks to Quick Look (now 4 files a run, so it streams too): while the helper builds, without
   Xcode's tools, for a file the helper can't read, after 30 s on one file, or when the helper keeps dying
   (10 restarts). Files in flight when it died are retried one at a time, so only the culprit goes without.
-- Tested with a stand-in speaking the same protocol (`SAFE_FINDER_THUMB_HELPER` names one); the Swift
+- Tested with a stand-in speaking the same protocol (`PHOTO_BROWSER_THUMB_HELPER` names one); the Swift
   itself is built on first use on the Mac.
 
-## 6l. Safe Finder AI Upscale 2× — `mac/ai_upscale.py`, `mac/upscale_window.py` (Oct 30, 2026)
+## 6l. Photo Browser for Mac AI Upscale 2× — `mac/ai_upscale.py`, `mac/upscale_window.py` (Oct 30, 2026)
 
 True AI upscaling on the Mac: Real-ESRGAN (realesrgan-ncnn-vulkan, Vulkan via MoltenVK on the GPU), local
 only. The engine isn't shipped — it's found in the free Upscayl app (searched inside the bundle for
 `upscayl-bin` and any folder of `.param`/`.bin` models, since Upscayl's layout isn't documented), in
-`~/Library/Application Support/Safe Finder/Real-ESRGAN`, on the PATH, or picked by hand (QSettings
+`~/Library/Application Support/Photo Browser for Mac/Real-ESRGAN`, on the PATH, or picked by hand (QSettings
 `upscale/engine`). Model: `PREFERRED` order (upscayl-standard-4x, realesrgan-x4plus, …), never anime /
 digital-art. The network's 4× result is Lanczos'd to exactly 2× (`-s` must match the model's own factor).
 Saved through `batch_crop.open_upright` / `encode_like` / `write_in_place` (split out of the crop's
@@ -1263,7 +1263,7 @@ Asked first (`upscale_window.ask_how`, QSettings `upscale/save`, Save as New the
 place) or **Save as New** — `batch_crop.write_beside` writes "name (upscaled).ext" / "(upscaled 2)" next to the
 original, never replacing anything (temp + fsync + `os.link`, which fails on a taken name; exFAT: created
 under its name, no attributes copied since they'd become `._` files), with the original's xattrs *except* the
-tag marker, its mode and its created/modified dates; Safe Finder then `carry`s the original's tags to it
+tag marker, its mode and its created/modified dates; Photo Browser for Mac then `carry`s the original's tags to it
 and adds "upscaled" (the marker is rewritten by the store for the new path).
 
 Options (Oct 30, `UpscaleOptions`; QSettings `upscale/model`, `upscale/texture`): the model (`photo_models`,
@@ -1304,7 +1304,7 @@ iPhone photo didn't open. `ai_upscale` raises the limit to 600 M (our own photos
 never downloads). A very wide panorama's 4× pass would also pass JPEG's 65,500 px: `_network` asks the
 engine for PNG then. Social downloads (`social.upscale_photo`) still leave large photos alone.
 
-## 6m. Safe Finder: each folder's own look, and the freeze in big moves — `mac/safe_finder.py` (Oct 30, 2026)
+## 6m. Photo Browser for Mac: each folder's own look, and the freeze in big moves — `mac/photo_browser.py` (Oct 30, 2026)
 
 **View memory (`FolderViews`).** Every place a pane shows keeps the look it was last shown in — mode
 (icons/list) and sort — recorded when a pane leaves it (and on every explicit change), restored when a
@@ -1332,7 +1332,7 @@ against a 22,500-key table: 4 s → 44 ms, on the UI thread at the end of a move
 Checked and ruled out offscreen: the thumbnail pool and the GIL switch interval made no measurable
 difference.
 
-## 6n. Safe Finder selection box — `BoxSelect` in `mac/safe_finder.py` (Oct 30, 2026)
+## 6n. Photo Browser for Mac selection box — `BoxSelect` in `mac/photo_browser.py` (Oct 30, 2026)
 
 Qt only starts a rubber band where `indexAt` finds nothing, and a grid tile's item rect is its whole cell,
 so with tiles reaching their neighbours the only place a box could start was the leftover strip at the
@@ -1347,7 +1347,7 @@ A press in a tile's blank space that never becomes a box is replayed to Qt as a 
 selects that tile; double-click, the context menu, drops (whole cell) and drags from a body are Qt's.
 Not overriding `indexAt` is deliberate: `QTreeView::setSelection` and drop targeting call it.
 
-## 6o. Safe Finder Erase Area — `mac/retouch.py`, `mac/erase_window.py` (Oct 30, 2026)
+## 6o. Photo Browser for Mac Erase Area — `mac/retouch.py`, `mac/erase_window.py` (Oct 30, 2026)
 
 For watermarks the person added by mistake (and stamps, blemishes): boxes as fractions (`EraseSpec`, like
 `CropSpec`), so one set fits a batch. It erases what's boxed — there's deliberately no detection of
@@ -1372,11 +1372,11 @@ coarse answer up, 30 Jacobi passes per level — on the area around the marks on
 (`_grain`: high-pass beside the hole, above/below/sides, clipped to 2.5× its robust spread so no edge comes
 along). Synthetic noise of the right strength still looked plastic; copied grain doesn't.
 
-Saving through `batch_crop` (`encode_like`, `write_in_place` / `write_beside` "… (retouched)"); Safe Finder
+Saving through `batch_crop` (`encode_like`, `write_in_place` / `write_beside` "… (retouched)"); Photo Browser for Mac
 carries tags to new photos and adds "retouched". numpy is new in `mac/requirements.txt` (the launchers now
 check for it; the menu says how to install it into an older `.venv`).
 
-## 6p. Safe Finder Photos view, viewer and Export All Frames — `mac/media_viewer.py`, `mac/media_info.py`, `mac/frame_export.py` (Nov 3, 2026)
+## 6p. Photo Browser for Mac Photos view, viewer and Export All Frames — `mac/media_viewer.py`, `mac/media_info.py`, `mac/frame_export.py` (Nov 3, 2026)
 
 **Photos view** (`PhotoDelegate`, mode "photos" in `Pane`): the same `GridView` and model as Icons with
 another delegate — no second view to keep in step. `cell_size` makes the columns fill the viewport
@@ -1412,9 +1412,9 @@ helper writes frames in place (`direct`, no rename — CLAUDE.md #12); elsewhere
 **The viewer, reworked (Nov 3, 2026).** The bars were translucent overlays: they hid the top and bottom of every
 photo, and on the Mac `QVideoWidget` is a native surface Qt draws *above* any widget laid over it — so a video's
 scrubber and play/pause, though built, were never seen. Now the bars are in the layout, above and below the
-stage. The window fits each item (`_fit_to`): within `box` — Safe Finder's window geometry, passed by
+stage. The window fits each item (`_fit_to`): within `box` — Photo Browser for Mac's window geometry, passed by
 `view_media`; the size a hand resize leaves (`resizeEvent`: a size that isn't our `_fit_target`) — minus the bars
-and the Info panel, keeping its centre (first time: Safe Finder's), kept on screen (`available_geometry`,
+and the Info panel, keeping its centre (first time: Photo Browser for Mac's), kept on screen (`available_geometry`,
 patchable for tests). The bars' minimum widths limit how narrow it can go (top ≈ 382 px, bottom ≈ 333): All
 Frames moved into ⋯ and the video controls are two rows (full-width scrubber, then buttons) so a 9:16 video in an
 820-px-tall window fits without side bars. Photos fill the stage (the old 100 % cap left small photos framed).
@@ -1468,7 +1468,7 @@ in each entry point — it traps rather than race if that's ever broken).
   the filter (macOS 14) the gain map isn't applied and an HLG/PQ photo that would need clipping isn't shown natively
   (Qt's stays) — a standard-range picture, never a clipped one. Untested on a Mac (no compiler here).
 - **Window size**: by default each item is fitted within the **whole display** the viewer opens on (the screen
-  under Safe Finder's window, `setScreen`), its full available height less the title bar — `_room`. A hand resize
+  under Photo Browser for Mac's window, `setScreen`), its full available height less the title bar — `_room`. A hand resize
   still sets `box`. The frame is placed from the computed outer size (the title bar isn't known until the window
   is up: 28 pt assumed, corrected by a refit 80 ms after the first show), and resizes the system makes while
   placing the window or leaving full screen (`_settling`) aren't taken for hand resizes.
@@ -1499,7 +1499,7 @@ only the ffmpeg *fallback* tone-maps the FFmpeg way. What was actually wrong, Ma
   iPhone video with, so it can't match QuickTime exactly; standard-range frames are standard range; HDR frames
   keep the iPhone screenshots' look (headroom 3, −0.15 EV — `FileActions.hdrFrameHeadroom`, §6g).
 
-## 6u. Safe Finder Type, Format and Location filters — `mac/places.py`, `Pane._filter_menu` (Nov 4, 2026)
+## 6u. Photo Browser for Mac Type, Format and Location filters — `mac/places.py`, `Pane._filter_menu` (Nov 4, 2026)
 
 The iPhone's `TypeFilter`, `FormatFilter` and Location filter, in the funnel menu beside the size filter (now
 four submenus titled with their values; **Show Everything** clears them). `PaneModel.filterAcceptsRow` applies
@@ -1514,7 +1514,7 @@ listing's.
 iPhone's** — `<path inside the volume>|<int mtime>|<size>` (its `stableCacheID` is volume-relative) — so the
 drive's `.Photo Browser Metadata/places.json`, which every iPhone metadata backup writes, is read as it is
 (read-only; nearest metadata folder up to the volume, reloaded when its mtime changes; an NFC/NFD retry for
-accented names). Safe Finder's own finds go to `~/Library/Application Support/Safe Finder/places.json` (same
+accented names). Photo Browser for Mac's own finds go to `~/Library/Application Support/Photo Browser for Mac/places.json` (same
 shape, atomic writes on the Mac's disk). Lookups (`label`) never read the disk — they run in `filterAcceptsRow`.
 **Opening the Location submenu** starts a `PlacePass` (worker thread, `Places.locate`): GPS for unknown files
 (8 at a time; photos' EXIF via `media_info.image_info`, videos' place now read by `media_info` from QuickTime
@@ -1529,7 +1529,7 @@ count changes, or if places are still unknown 30 s after the last pass. Over 8,0
 results, the iPhone's names used without asking, keys, persistence across navigation. CLGeocoder itself (and
 the Swift) couldn't be run in the Linux sandbox.
 
-## 6v. Safe Finder PDF viewer and Optimize for Safe Finder / for iPhone — `mac/pdf_viewer.py`, `mac/pdf_optimize.py`, `mac/pdf_helper.swift` (Nov 4, 2026)
+## 6v. Photo Browser for Mac PDF viewer and Optimize for Mac / for iPhone — `mac/pdf_viewer.py`, `mac/pdf_optimize.py`, `mac/pdf_helper.swift` (Nov 4, 2026)
 
 **Viewer**: QtPdf (`QPdfDocument` + `QPdfView`, PySide6 ≥ 6.6, no new dependency) in MultiPage / FitToWidth, the
 photo viewer's chrome (`media_viewer.VIEWER_STYLE`, `_bar_button`, full display height). Search is
@@ -1560,21 +1560,21 @@ a few per tick (one QPdfDocument per thread — the optimizer opens its own). Pa
    page size and odd/even side, grown per page — one text size throughout), a column to its own width, at most
    2.4×; atoms flow down, consecutive atoms of one block on one new page are **one piece** (so a phone page draws the
    original page a few times, not once per line); a page break only between atoms; an atom taller than the page is
-   shrunk alone onto a page (≤ 1.5 pages) or cut into page-high slices. Safe Finder (`plan_mac`): one piece per page,
+   shrunk alone onto a page (≤ 1.5 pages) or cut into page-high slices. Photo Browser for Mac (`plan_mac`): one piece per page,
    the common trim box + 14 pt; blank pages dropped.
 4. *Compose*: `pdf_helper compose` (CGPDFDocument → CGContext PDF: per piece clip, scale, translate,
    `getDrawingTransform(.cropBox, rect: shown size)` for /Rotate, `drawPDFPage` — vectors, text stays text; password
    via `PDF_PASSWORD`). Fallback `compose_with_qt`: whole-page renders cropped (cached per page and scale, ≤ 60 MP)
    into 3 px/pt pictures via `QPdfWriter`. **`QPdfDocumentRenderOptions.setScaledClipRect` doesn't put the part where
    it says** (checked: no offset matched) — never render parts with it.
-5. Written to a temp file, then `simpcity.place` beside the original as "<name> (for iPhone|Safe Finder).pdf".
+5. Written to a temp file, then `simpcity.place` beside the original as "<name> (for iPhone|Photo Browser for Mac).pdf".
 
 Tested in the sandbox (Qt path): a synthetic five-page PDF (single column, blank, two columns with a title, an
 abstract and a figure across them, a scan, a coloured slide) and a real-text two-column paper — pages inspected as
 pictures; the viewer driven offscreen (open, paging, zoom, search, thumbnails, both Optimizes, Back to Original,
 AirDrop hook); a pane's double-click → viewer → placed file + tags. The Swift composer couldn't be compiled here.
 
-## 6w. Safe Finder Make Book PDF — `mac/bookify.py`, `mac/book_window.py` (Nov 4, 2026)
+## 6w. Photo Browser for Mac Make Book PDF — `mac/bookify.py`, `mac/book_window.py` (Nov 4, 2026)
 
 `bookify.py` is the person's own script (ReportLab book typesetting), brought in as it was and kept a working CLI;
 the changes are only what a UI needs: `main()` split into **`make_book(src, out, **options, progress, stop)`**
@@ -1596,15 +1596,15 @@ what's saved). One worker thread per run, files one after another, each typeset 
 (`TagStore.carry`); Open → `Pane.view_pdf`. bookify is imported through a plain `import` in `_bookify()` (so
 PyInstaller takes it in — `importlib.import_module` would hide it); `--collect-all reportlab --collect-data pyphen`
 in the app build. **Dependencies**: `reportlab>=4.0`, `pyphen>=0.14` added to `requirements.txt`; `Safe
-Finder.command` installs them into an existing `.venv` quietly and non-fatally (Safe Finder must still open
-offline). **Bug found in use (Nov 4): "Make Book" greyed out** in the built app — `build_safe_finder_app.sh` only
+Finder.command` installs them into an existing `.venv` quietly and non-fatally (Photo Browser for Mac must still open
+offline). **Bug found in use (Nov 4): "Make Book" greyed out** in the built app — `build_app.sh` only
 installed requirements into a *new* `.venv` (or one missing PySide6/numpy), so an existing one never got ReportLab,
 `--collect-all reportlab` collected nothing, and the window disabled the button with a grey line saying "build it
 again" (which would have done the same). Now the build pip-installs `requirements.txt` every time and warns if
 ReportLab/pyphen still won't import; and the window never shows a dead button: without ReportLab its Primary button
 *is* **Install ReportLab** (bold notice above it). From source: pip into `sys.executable`. **Built app:** a Python on
 the Mac with pip (Homebrew, python.org, or Apple's once the Command Line Tools are there — `xcode-select -p` first,
-the stub would pop an installer) runs `pip install --target ~/Library/Application Support/Safe Finder/python
+the stub would pop an installer) runs `pip install --target ~/Library/Application Support/Photo Browser for Mac/python
 --no-deps --only-binary=:all: --implementation py --python-version <the app's>` of reportlab, pyphen and
 charset-normalizer — all `py3-none-any`, so the pip's own Python version doesn't matter; Pillow (ReportLab's other
 need) is already in the app. `book_window` appends that folder to `sys.path` at import. Tested with a clean
@@ -1657,7 +1657,7 @@ book made. A row per picture: where (chapter choices only when the book has name
 page, the size, a caption. `placement()` turns "on a page" into `after` + the element (so the choice survives
 re-builds); a kept "after" row shows the page that paragraph is on *now* and keeps its element unless the page or
 size is changed. `_add_pictures` builds to a temp file and `BookHooks.replace` puts it over the book made a moment
-ago (Safe Finder's: temp → fsync → rename with the carried attributes copied on; straight in on exFAT). Choices
+ago (Photo Browser for Mac's: temp → fsync → rename with the carried attributes copied on; straight in on exFAT). Choices
 are kept per text in `book/pictures/<sha1 of the path>` and in the window (`Pictures…` reopens). A picture that's
 gone is said and the book left as it was.
 
@@ -1691,7 +1691,7 @@ without links or outline (leaders with 4 front-matter pages; no leaders with 6; 
 title), the viewer (real mouse clicks on numbers and titles at fit-width and zoomed, Back, the list, the menu,
 chapter steps, the page box) and the window's whole pictures flow.
 
-## 6q. Safe Finder Find Duplicates — `mac/duplicates.py`, `mac/duplicates_window.py` (Nov 3, 2026)
+## 6q. Photo Browser for Mac Find Duplicates — `mac/duplicates.py`, `mac/duplicates_window.py` (Nov 3, 2026)
 
 A port of §2 (same three kinds, kept apart, same threshold 6, same normalized names, same Oldest/Newest from
 millisecond dates, same "Frame" toggle), with deliberate differences:
@@ -1712,15 +1712,15 @@ millisecond dates, same "Frame" toggle), with deliberate differences:
 - **No remembered result** (iOS's `DuplicateScanCache`); instead dHashes are cached on disk
   (`~/Library/Caches/PhotoBrowser/dhash.json`, by path|mtime_ns|size) and only files sharing a byte size are
   opened for dimensions, so a rescan is quick. Not Duplicates is this Mac's own
-  (`~/Library/Application Support/Safe Finder/not-duplicates.json`) — not shared with the iPhone's.
+  (`~/Library/Application Support/Photo Browser for Mac/not-duplicates.json`) — not shared with the iPhone's.
 
-The window never deletes: Safe Finder's `find_duplicates` hands it `DupHooks` (thumbnails from the shared
+The window never deletes: Photo Browser for Mac's `find_duplicates` hands it `DupHooks` (thumbnails from the shared
 engine, the Trash with tags forgotten, the viewer — whose own Move to Trash prunes the groups — and reveal).
 A double-click opens without leaving a tick (`Tile.restored` puts it back as it was before the clicks).
 
-## 6r. Safe Finder: one window, Split View on a toggle — `mac/safe_finder.py`, `mac/menubar.py` (Nov 3, 2026)
+## 6r. Photo Browser for Mac: one window, Split View on a toggle — `mac/photo_browser.py`, `mac/menubar.py` (Nov 3, 2026)
 
-Safe Finder opens as **one pane**, like Finder; the From/To pair is **Split View**, for transfers. The window
+Photo Browser for Mac opens as **one pane**, like Finder; the From/To pair is **Split View**, for transfers. The window
 still holds both panes (`src`, `dst`) in the `panes` splitter — `MainWindow.set_split(on)` only shows or hides
 the To pane, the Move/Copy bar (`action_bar`) and the FROM chip, so a transfer's code paths are unchanged.
 Toggles: the split button at the end of the From pane's header (`Pane.split_btn`, hidden on the To pane),
@@ -1738,7 +1738,7 @@ settled).
   Side (⇧⌘C / ⇧⌘M, `transfer_selection`) open it rather than sending files into a folder you can't see — a
   To pane closed after use still has one. Drags from Finder onto the one pane still transfer, as before.
 
-## 6t. Safe Finder Remove Objects — `mac/inpaint.py`, `mac/remove_window.py` (Nov 3, 2026)
+## 6t. Photo Browser for Mac Remove Objects — `mac/inpaint.py`, `mac/remove_window.py` (Nov 3, 2026)
 
 TouchRetouch-style removal: a lasso/brush mark, filled from the photo itself by **multi-scale exemplar
 completion** (Wexler, Shechtman & Irani 2007 + PatchMatch, Barnes et al. 2009 — Content-Aware Fill's method),
@@ -1768,12 +1768,12 @@ numpy only. Erase Area's membrane fill (`retouch._membrane`) is the coarsest lev
 - **Window**: the mark is an ARGB overlay ≤ 4096 px (scaled up for the removal); lasso fills on release, brush /
   eraser paint with Source / Clear composition; "Remove as I draw" (remembered) runs on release; work on a
   thread with a bar, Esc cancels between rounds. Saving is batch_crop's (`encode_like` + `write_in_place` /
-  `write_beside`, label "retouched"); Safe Finder carries tags to a new photo, adds "retouched", forgets the
+  `write_beside`, label "retouched"); Photo Browser for Mac carries tags to a new photo, adds "retouched", forgets the
   thumbnail and tells open viewers to `reload`.
 - Not done: a learned inpainting model (LaMa-style) would do better on unique structure; it would need a model
   download and an ML runtime, and couldn't be tested from here.
 
-## 6x. Safe Finder Remove Watermark — `mac/watermark.py`, `mac/watermark_window.py` (Nov 6, 2026)
+## 6x. Photo Browser for Mac Remove Watermark — `mac/watermark.py`, `mac/watermark_window.py` (Nov 6, 2026)
 
 Two ways in, one result: **by look** (any words, any number of copies — the batch path after one box) and **by template** (a box, or the same words again — exact when copies repeat). Both un-blend.
 
@@ -1878,10 +1878,10 @@ mark ≤ ~30 pixels per piece (specks next to strokes).
 **Window**: one worker thread does all pixel work, priority box > Look Again > save > the piece on screen >
 looking ahead (`_next_job`); a new want sets `_preempt`, which the engine's `cancelled` turns into `Stopped`
 and the job is simply picked up again later. The library is touched only by the worker. Saving re-opens each
-photo at full size and applies the copies found (`clean`, through `batch_crop`); Safe Finder carries tags to
+photo at full size and applies the copies found (`clean`, through `batch_crop`); Photo Browser for Mac carries tags to
 new photos and adds "retouched". Smoke-tested offscreen (box → learn → step → box → plain piece → Save as New).
 
-## 6y. Safe Finder ↔ CapCut — `mac/capcut.py`, `mac/capcut_window.py` (Nov 8, 2026)
+## 6y. Photo Browser for Mac ↔ CapCut — `mac/capcut.py`, `mac/capcut_window.py` (Nov 8, 2026)
 
 Clips out to the CapCut desktop app, finished videos back onto the drive. Entry points: right-click ▸ **Send to
 CapCut** (a selection with photos/videos or folders; ⇧⌘K in the menu bar — the context menu only shows the key), a
@@ -1901,9 +1901,9 @@ window on macOS hides when its app deactivates, which is exactly when the person
 worker (`capcut.order`: "taken" reads each file's own date — `media_info` mvhd / EXIF — falling back to the
 file's date; "name" natural; "selected"); `ClipList.mimeData` and `DragTile` give `text/uri-list` in list order
 (CapCut lays a multi-file drop on the timeline in that order). "Copy to this Mac first" (`capcut.stage`) copies into
-`~/Movies/Safe Finder for CapCut/<session>/` as "01 name.mp4"… (Import + Finder's name order keep the order); not
+`~/Movies/Photo Browser for CapCut/<session>/` as "01 name.mp4"… (Import + Finder's name order keep the order); not
 remembered between sends (it would silently copy gigabytes). Each send is a `Session` (id, name, start, clips in
-order, the clips' commonest folder, copies) in `~/Library/Application Support/Safe Finder/capcut.json` (last 60).
+order, the clips' commonest folder, copies) in `~/Library/Application Support/Photo Browser for Mac/capcut.json` (last 60).
 
 **Finding exports**: CapCut's Export panel reuses the last folder and no default is documented (sources disagree:
 Movies, Downloads…). `candidate_folders`: the remembered folder, `~/Movies/CapCut` + its subfolders except
@@ -1924,11 +1924,11 @@ clips give the tags and date.
 
 **Tested** offscreen (no CapCut here): ordering, drag data order, staging, an export appearing while "exporting…"
 then importable, moved into the clips' folder with "capcut" + the clips' tags, the import window copying into
-another folder and greying it after; inside Safe Finder the menu lines, ⇧⌘K, the status-line note.
-**Untested with the real CapCut** — the drag itself (CapCut takes Finder drags; Safe Finder's drags are the same
+another folder and greying it after; inside Photo Browser for Mac the menu lines, ⇧⌘K, the status-line note.
+**Untested with the real CapCut** — the drag itself (CapCut takes Finder drags; Photo Browser for Mac's drags are the same
 file URLs) and the export folder, which the window lets the person pick.
 
-## 6z. Safe Finder Convert WebP to JPEG — `mac/webp_convert.py`, `mac/webp_window.py` (Nov 8, 2026)
+## 6z. Photo Browser for Mac Convert WebP to JPEG — `mac/webp_convert.py`, `mac/webp_window.py` (Nov 8, 2026)
 
 Right-click a folder / its empty area / selected `.webp` files, or Photos ▸ Convert WebP to JPEG… (`Pane.convert_webp`).
 `webps_in` finds `.webp` (any case, not hidden; `os.walk` for subfolders, skipping hidden and the drive's own folders).
@@ -1939,16 +1939,16 @@ only named `.webp` returned byte for byte. `to_jpeg`: `target` = "name.jpg", els
 `simpcity.write_file` (temp → fsync → rename; straight in on exFAT), read back (`verify` + same size), file
 dates copied (`os.utime`). `convert`: four at a time (Pillow releases the GIL while coding), `trash(path)` per
 original only after its JPEG checked out — `trashed` / `untrashed` (the Trash refused: the original stays) —
-progress and Stop. Safe Finder's `done`: `carry` the tags to every JPEG; for trashed originals `carry_labels` then
+progress and Stop. Photo Browser for Mac's `done`: `carry` the tags to every JPEG; for trashed originals `carry_labels` then
 `forget` (a replacement is a move: Favorites / To AI follow); kept originals keep their labels (copy rule).
 Tested: a 3000×2000 photo with EXIF date/camera + sRGB ICC (all kept, 4:4:4, PSNR 39.6 dB against heavy synthetic
 noise — the worst case for JPEG), transparency onto white, animated left, a clash → "clash 2.jpg" with the old
-untouched, a misnamed JPEG byte-identical, a corrupt file reported, subfolders only when asked; inside Safe Finder
+untouched, a misnamed JPEG byte-identical, a corrupt file reported, subfolders only when asked; inside Photo Browser for Mac
 (offscreen) the menu lines, the count, the conversion, the originals to the Trash and the tags + Favorite on the JPEG.
 
-## 6aa. Safe Finder Rename, Remove Leading Spaces, Duplicate, Rotate — `mac/rename_tools.py`, `mac/rename_window.py`, `RenameJournal.swift` (Nov 10, 2026)
+## 6aa. Photo Browser for Mac Rename, Remove Leading Spaces, Duplicate, Rotate — `mac/rename_tools.py`, `mac/rename_window.py`, `RenameJournal.swift` (Nov 10, 2026)
 
-Safe Finder had no way to rename anything; the person asked for "a function to remove spaces at the very
+Photo Browser for Mac had no way to rename anything; the person asked for "a function to remove spaces at the very
 beginning of file names for an entire folder", and Duplicate / Rotate are the iPhone's that were missing.
 
 - **Remove Leading Spaces from Names…** (right-click a folder, the empty area, or File menu): `leading_space_plan`
@@ -1980,17 +1980,17 @@ beginning of file names for an entire folder", and Duplicate / Rotate are the iP
   metadata/dates/attributes kept. MP4/MOV/M4V only (a WebM has no such note); needs ffmpeg.
 
 Tested offscreen: the plan (taken names, hidden, all-space, nested folders), tags/labels/journal after the
-renames, a failed rename reported with the rest going on; the window and the menus in Safe Finder; rotate
+renames, a failed rename reported with the rest going on; the window and the menus in Photo Browser for Mac; rotate
 (photo pixels, video display size and rotation back to 0 after right + 180° + right, size unchanged = not
 re-encoded) and duplicate. The Swift side is read, not built (no compiler here).
 
-## 6ad. Safe Finder: the Dock icon brings every window forward; the volume slider takes a click (Nov 10, 2026)
+## 6ad. Photo Browser for Mac: the Dock icon brings every window forward; the volume slider takes a click (Nov 10, 2026)
 
-- **Dock icon.** "It just brings the main Safe Finder to the forefront." macOS brings all of an app's windows
+- **Dock icon.** "It just brings the main Photo Browser for Mac to the forefront." macOS brings all of an app's windows
   forward when a Dock click *activates* it — but a click on one window brings only that window, and a Dock
   click on an app that's already in front does nothing more, so a viewer or Edit with AI stayed behind another
   app's windows. Qt reports every Dock click as `applicationStateChanged(ApplicationActive)` — forced through
-  even when already active (its `applicationShouldHandleReopen`). `safe_finder.on_app_state` answers it with
+  even when already active (its `applicationShouldHandleReopen`). `photo_browser.on_app_state` answers it with
   `raise_all_windows()`: every visible, un-minimized top-level window (`app_windows` — not pop-ups or tooltips)
   raised, the main window first and the window in use last so it stays on top with the keyboard. The same
   signal fires when a click *on a window* activates the app; then only that window should come forward, so
@@ -2005,7 +2005,7 @@ re-encoded) and duplicate. The Swift side is read, not built (no compiler here).
 Checked offscreen (clicks and a drag on the slider; which windows are raised and in what order; the pointer
 rule). The Dock behaviour itself is macOS's and wasn't run here.
 
-## 6ae. Safe Finder Rename Files… (many, by a pattern) — `mac/rename_tools.py`, `mac/rename_window.py` (Nov 11, 2026)
+## 6ae. Photo Browser for Mac Rename Files… (many, by a pattern) — `mac/rename_tools.py`, `mac/rename_window.py` (Nov 11, 2026)
 
 "Bulk rename files, and rename them based on certain attributes — by Capture Date: Photo-11:01:23.jpg to be '1'
 and 11:01:26.jpg to be '2'." Select ≥ 2 items ▸ Rename N Items… (F2), a folder ▸ Rename Files Inside… (its files,
@@ -2036,12 +2036,12 @@ not its folders), File ▸ Rename Files….
 
 Tested: the plan (the example: three photos named by clock time → 1, 2, 3 by capture date; padding, dates,
 folder/camera, find/replace, duplicates, a taken name), straight renames with tags + journal, a full exchange,
-a block mid-batch (everything back, no passing names left), a stop mid-exchange; and the window in Safe Finder.
+a block mid-batch (everything back, no passing names left), a stop mid-exchange; and the window in Photo Browser for Mac.
 
 ## 6af. Videos at the Top — a per-folder choice in both apps — `FolderOptions.swift`, `mac/folder_options.py` (Nov 11, 2026)
 
 "For each folder, an option for 'Videos at the top': videos are the first files shown underneath the folders,
-then photos. Folders and folder highlights still first. Both Safe Finder and the iOS app, remembered for that
+then photos. Folders and folder highlights still first. Both Photo Browser for Mac and the iOS app, remembered for that
 folder."
 
 - **One store both apps read**: `<drive>/.Photo Browser Metadata/folder-options.json` —
@@ -2059,8 +2059,8 @@ folder."
   the choice; the flag is in `filterKey` and `filterSignature` (the memo and the paging). The highlight bubbles
   are drawn above the grid and aren't in this list. The Sort chip's menu has the tick ("Videos at the Top") and
   the chip reads "Sort: … · Videos first".
-- **Safe Finder**: `folder_options.FolderOptions` — the drive file for a folder under a `.Photo Browser Metadata`
-  (re-read when its mtime/size changes; a save re-reads first), else Safe Finder's settings by full path (a Mac
+- **Photo Browser for Mac**: `folder_options.FolderOptions` — the drive file for a folder under a `.Photo Browser Metadata`
+  (re-read when its mtime/size changes; a save re-reads first), else Photo Browser for Mac's settings by full path (a Mac
   folder, or a drive the app never opened — no metadata folder is created for it). `PaneModel.videos_first` adds
   a group to the sort key (0 folder, 1 video by extension, 2 other), which `lessThan` already keeps in place
   whichever way the order runs. `Pane._apply_videos_first` on arriving at a folder; the Sort menu and View menu
@@ -2071,10 +2071,10 @@ Tested (Mac): the file and settings stores, the merge, a later "off"/"on" from a
 panes — a remembered folder opens videos-first, both sort directions, off again, another folder untouched, the
 menu-bar tick, a new file landing in the right group. The Swift is read, not built.
 
-## 6ag. Safe Finder thumbnails of HDR and wide-colour photos — `mac/thumb_color.py`, `mac/thumb_helper.swift` (Nov 11, 2026)
+## 6ag. Photo Browser for Mac thumbnails of HDR and wide-colour photos — `mac/thumb_color.py`, `mac/thumb_helper.swift` (Nov 11, 2026)
 
 **What was wrong.** The viewer showed HDR photos properly (macOS draws them, §6p) but their tiles in the grid
-didn't. A tile is a small JPEG Safe Finder makes itself and Qt draws — and Qt shows a picture's numbers as
+didn't. A tile is a small JPEG Photo Browser for Mac makes itself and Qt draws — and Qt shows a picture's numbers as
 they are, with no colour management. `_ThumbJob._load` took Pillow's pixels straight (`im.convert("RGBA")`):
 
 - a photo stored with an **HDR curve** (PQ or HLG — the 10-bit HEICs from the iPhone's Save Frame / Export All
@@ -2114,7 +2114,7 @@ picture is PQ (not taken for the main one), a `cICP` PNG, an HLG-named ICC on a 
 profile; a grey ramp comes back within 2/255 of sRGB below the knee, white → 244, 5× white → 255; the whole
 `Thumbnails` pipeline offscreen. **Not checked:** real iPhone files, and the Swift (not compiled here).
 
-## 6ah. Safe Finder: a true grid, folder covers, themes, search (Nov 14, 2026)
+## 6ah. Photo Browser for Mac: a true grid, folder covers, themes, search (Nov 14, 2026)
 
 **The grid.** "The thumbnails never get close together." Two causes, both real:
 - The **Photo Grid** (⌘3, `PhotoDelegate`) left a blank column at the right. `QListView` in icon mode lays out
@@ -2149,9 +2149,9 @@ Cover; a photo or video ▸ Use as Cover of “<its folder>”. View ▸ Folder 
   removal from the Mac only removes a cover *chosen* here — an automatic one is what "no cover" looks like
   in the app, and removing it would only have `ensureRandomCover` pick again, forever. Entries for folders
   that no longer exist are dropped.
-- Until the iPhone app has written the shared file, Safe Finder shows the app's covers from its last
+- Until the iPhone app has written the shared file, Photo Browser for Mac shows the app's covers from its last
   backup (`metadata.json` → `folderCovers`). Folders not on such a drive: `~/Library/Application
-  Support/Safe Finder/Folder Covers` + settings.
+  Support/Photo Browser for Mac/Folder Covers` + settings.
 - Renames: `rename_tools._folder_choices` → `FolderCovers.renamed` (which also brings the backup-only
   covers of the moved folders into the shared file, so they follow).
 
@@ -2184,7 +2184,7 @@ on Return. Now:
 - Scope bar ▸ **Add Filter** (Favorites, To AI, tags with counts, Modified, Size, Recent Searches); the
   field completes from the last 15 searches.
 
-## 6ai. Safe Finder AI models, and pictures made on the Mac — `mac/ai_models.py`, `mac/local_ai.py`, `mac/ai_models_window.py` (Nov 14, 2026)
+## 6ai. Photo Browser for Mac AI models, and pictures made on the Mac — `mac/ai_models.py`, `mac/local_ai.py`, `mac/ai_models_window.py` (Nov 14, 2026)
 
 **The ask.** "Local AI image generation: train a model on 5–500 photos of a person, object etc., then generate
 brand-new images from it" — and to use Seedream 5.0 Pro and Nano Banana Pro with it too. The Mac is a late-2020
@@ -2211,7 +2211,7 @@ M1 mini with **16 GB**.
   (and "Nano Banana Pro", tune 3618064 — added to both apps' model lists here; there is no "Nano Banana 2 Pro").
 
 **So, what a "model" is here** — `ai_models.py`: a person / pet / object / style kept as its **best varied
-photos** (`~/Library/Application Support/Safe Finder/AI/Models/<name>/`: `model.json` + `photos/001.jpg…`,
+photos** (`~/Library/Application Support/Photo Browser for Mac/AI/Models/<name>/`: `model.json` + `photos/001.jpg…`,
 copies at ≤ 1536 px). `curate` reads the 5–500 offered once: unreadable and tiny (< 384 px) out; blurred out
 (variance of the Laplacian under a quarter of the set's median — judged against the set, so a soft shoot isn't
 all "blurred"); of near-copies (dHash within 6 bits) the best stays; then farthest-first on a small colour
@@ -2254,7 +2254,7 @@ person sends them to Astria themselves, outputs are labelled AI-made; nothing he
 sexual imagery of real people (an offence to create without consent in England and Wales since Feb 2026;
 publishing is a US federal offence; the model licences forbid it too).
 
-## 6aj. Safe Finder's Astria.ai Browser, rebuilt — `mac/astria_browser.py`, `astria.save_download` (Nov 15, 2026)
+## 6aj. Photo Browser for Mac's Astria.ai Browser, rebuilt — `mac/astria_browser.py`, `astria.save_download` (Nov 15, 2026)
 
 The first browser (in `ai_window.py`) built a widget per prompt and a widget per image, 25 prompts at a time
 behind "Show More", searched only prompt + model, saved by **re-encoding** every picture to JPEG (so whatever
@@ -2278,7 +2278,7 @@ metadata the file came with was dropped, PNGs became JPEGs), and didn't tag what
   the viewer doesn't fetch again.
 - **`Destination`** (store key `browser_dest`: mode `current` | `ai` | `fixed` + path; `browser_recent`):
   "current" is resolved when a download starts, from `AIHooks.current_folder` — the pane's live location — so
-  it follows the folder Safe Finder is in; a fixed folder that's gone (drive unplugged) falls back to current.
+  it follows the folder Photo Browser for Mac is in; a fixed folder that's gone (drive unplugged) falls back to current.
 - **Downloads**: 4 workers; `_PLACE_LOCK` around naming (two pictures of one prompt were racing for the same
   name); failures kept for Retry; a batch over 50 asks first; at the end of a batch the `saved` map is stored
   and `AIHooks.add_tags(paths, ["AI"])` tags them (the shared tag store, so the iPhone sees it).
@@ -2292,10 +2292,10 @@ metadata the file came with was dropped, PNGs became JPEGs), and didn't tag what
   inserts `eXIf` / XMP `iTXt` before `IDAT` — the compressed picture is never decoded. Other formats without
   ExifTool are left exactly as they came (reported as "kept"). Checked against real ExifTool 12.76: pixels
   identical, a file's own Make / Software / date / GPS / ICC all still there, ours added.
-- `save_created` (Create/Edit results) still re-encodes to JPEG as before — those are new files Safe Finder
+- `save_created` (Create/Edit results) still re-encodes to JPEG as before — those are new files Photo Browser for Mac
   makes from results, with the source photo's EXIF; only browser downloads are "as Astria made them".
 
-## 6ab. Safe Finder Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
+## 6ab. Photo Browser for Mac Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
 
 The iPhone's video upscale (`MediaEditing.upscaleVideo`, §6f) on the Mac: right-click videos ▸ **Upscale Video…**
 (Photos menu too). The window: **1080p or 4K** (short side 1080 / 2160 — never down; videos already that size
@@ -2330,7 +2330,7 @@ File ▸ **Clone Drive to a New SSD…**, or `python3 mac/clone_drive.py OLD NEW
   `shared-tags.json` + `renames.json`), the download records, `.Trash` (the app's Recently Deleted).
   Left out (and counted): `.DS_Store`, `._*` companions, `.Spotlight-V100`, `.fseventsd`, `.Trashes`,
   `.TemporaryItems`, `$RECYCLE.BIN`, `System Volume Information`, and the exFAT workarounds `.Spare Folders` /
-  `.Safe Finder Staging`.
+  `.Photo Browser Staging`.
 - **Each file**: read once with its BLAKE2 taken as it's read → written as `.<name>.cloning` → fsync → **read
   back from the drive** (`F_NOCACHE`) and compared → attributes, permissions, dates put on → renamed. So a file
   under its real name is whole and checked. One retry, then it's a listed problem.
@@ -2348,12 +2348,12 @@ File ▸ **Clone Drive to a New SSD…**, or `python3 mac/clone_drive.py OLD NEW
 - **`compare`** afterwards: every item present, same kind and size, mtime, creation date, attributes; `--deep`
   reads every byte of both. `recopy` (the window's "Copy N Different Files Again", `--repair`) replaces a copy
   whose contents differ — only where it's ours (the original's size and date) — and puts the folder's date back.
-- **Report** to the window and `~/Library/Logs/Safe Finder/clone-<time>.txt`, ending with the iPhone steps.
+- **Report** to the window and `~/Library/Logs/Photo Browser for Mac/clone-<time>.txt`, ending with the iPhone steps.
 - **The phone's side.** What the app keeps on the phone is path-keyed. (1) Before cloning: Drive Health ▸ Back
   Up Metadata Now — `metadata.json` there is drive-relative and covers every re-keyed store (checked against
   `applyRemap`'s list; not the Recently Deleted records, so empty that first). (2) **"Give the New Drive the Old
   Drive's Name…"** (`swap_names`: `diskutil rename` old → "<name> (old)", new → "<name>"): `chooseFolder` →
-  `rekeyRootIfRemounted` re-keys everything when the path after the mount id is unchanged, and Safe Finder's own
+  `rekeyRootIfRemounted` re-keys everything when the path after the mount id is unchanged, and Photo Browser for Mac's own
   `/Volumes/<name>/…` records keep working. (3) Whatever the path is, Drive Health ▸ Restore from the Drive's
   Backup merges the copied backup under the new root (adds only), and tags/Favorites/To AI come from
   `shared-tags.json` (its `id` is copied, so the phone's sync base still matches).
@@ -2393,7 +2393,7 @@ order loses the creation date, both new routes keep it. `setattrlist` itself is 
 **Nov 14, 2026 — what else a clone needed.** Looked for what a careful macOS copy does that this didn't:
 - **APFS doesn't checksum file contents** (only its own records), so a file that goes bad on the SSD reads
   back wrong without any error. The clone already computes a BLAKE2 of every file it writes; it now keeps
-  them on the new drive — `.Safe Finder Checksums/checksums.tsv` (digest, size, mtime ns, path; in
+  them on the new drive — `.Photo Browser Checksums/checksums.tsv` (digest, size, mtime ns, path; in
   `SKIP_AT_ROOT`, so it's never cloned or compared). `check_drive` (window: **Check Files**; CLI `--check`)
   reads the drive again: same size and date but different contents = DAMAGED; a different size or date =
   edited (counted apart); no entry = new. **Record New Files** / `--record` hashes the last two so later
@@ -2410,7 +2410,7 @@ order loses the creation date, both new routes keep it. `setattrlist` itself is 
   parallel copying (the read-back check is the bottleneck by design).
 
 
-## 6s. Safe Finder Edit Metadata — `mac/metadata_edit.py`, `mac/metadata_window.py` (Nov 3, 2026)
+## 6s. Photo Browser for Mac Edit Metadata — `mac/metadata_edit.py`, `mac/metadata_window.py` (Nov 3, 2026)
 
 Bulk metadata for any number of photos and videos (or everything under picked folders — `media_in`: hidden
 items, `._` files and app/library bundles skipped; GIF/WebM/AVI/MKV… counted as can't-hold). Entry points:
@@ -2695,7 +2695,7 @@ even though the session is fine. Now:
   with the session — now including the DASH video+audio pair (`dashPair`), so an exclusive video keeps
   its best rendition rather than dropping to the progressive stream.
 
-### 7.4e Instagram / Facebook in Safe Finder — `mac/social_downloader.py`, `mac/instagram.py`, `mac/facebook.py`, `mac/social.py`, `mac/video_tools.py`, `mac/video_helper.swift`, `SocialRecord.swift` (Nov 2, 2026)
+### 7.4e Instagram / Facebook in Photo Browser for Mac — `mac/social_downloader.py`, `mac/instagram.py`, `mac/facebook.py`, `mac/social.py`, `mac/video_tools.py`, `mac/video_helper.swift`, `SocialRecord.swift` (Nov 2, 2026)
 
 **Ports, not new designs.** `instagram.py` is `InstagramService` (feed / usertags — only the tagged carousel
 items — / clips / stories from every reel source incl. the subscriber reel in the tray / highlights; the
@@ -2840,7 +2840,7 @@ longer *needs* the number: when the page plainly is the account's (`page_names`:
 is read from the pages — posts/tagged/reels (`_watch`, which learns the number from the account's own posts),
 stories from /stories/<handle>/, highlights from the profile page's list; owner checks go by username first
 (`_owned`, `_theirs`). Whenever the page's data didn't name the account, what it loaded is saved to
-`~/Library/Logs/Safe Finder/instagram-<handle>-<time>.json` (`dump_visit`) and the log says where — the next fix comes
+`~/Library/Logs/Photo Browser for Mac/instagram-<handle>-<time>.json` (`dump_visit`) and the log says where — the next fix comes
 from Instagram's real answers.
 **Then: the iPhone's own route, ported.** The person: "it downloaded some posts and then got rate limited; it couldn't
 find highlights — the iOS app does it nearly perfectly." The iPhone's `InstagramService.apiData` makes every call
@@ -2848,7 +2848,7 @@ find highlights — the iOS app does it nearly perfectly." The iPhone's `Instagr
 same-origin, X-IG-App-ID 936619743392459, X-ASBD-ID, X-IG-WWW-Claim 0, X-CSRFToken — and only on a refusal
 (400/401/403/login page, `isRefusal`) asks again from its `InstagramWebFetcher` page, which then takes over; it paces
 with `Pacer(baseMS: 170, jitter: 0.5)` + rare pauses + a 2.5 s-per-429 penalty, retries after 2 s × attempt, and gets
-highlights from `highlights_tray` + `reels_media`. Safe Finder had copied only the fallback (every call a fetch from a
+highlights from `highlights_tray` + `reels_media`. Photo Browser for Mac had copied only the fallback (every call a fetch from a
 bare robots.txt page — Referer robots.txt) with slow, heavy pacing, and the page-reading workaround made the page fire
 its own GraphQL on top (more rate limit). Now: `SocialWindow._api` → `_direct` (urllib on a worker thread, the browser's
 cookies incl. HttpOnly, the browser's UA = the login's) → on `ig.is_refusal` the in-page fetch (now with
@@ -2862,7 +2862,7 @@ crawl (two feed pages, carousel `_1…_3`, DASH-over-progressive with audio, tag
 reels without the feed's duplicate, stories incl. a subscriber reel without the duplicate, two highlights into
 their own folders), second run downloads nothing.
 
-**Then: a false switch to the page.** The next log: profile info throttled (429), then "Instagram refused Safe Finder's
+**Then: a false switch to the page.** The next log: profile info throttled (429), then "Instagram refused Photo Browser for Mac's
 own requests — asking from the logged-in page from now on", and every feed after that came back "asked for a login".
 The switch came from `users/search/` — a phone-app endpoint the site never calls, which answers 400 to anything — and
 `_api` flipped to the page whenever the page's answer wasn't a refusal (its 404 counted). Now, as on the iPhone: the
@@ -2873,7 +2873,7 @@ reported ("will come next time") rather than read by scrolling the profile page,
 against a stand-in of that log (lookups 429, a search 400 to direct asks, the page's feed asks told to log in): no
 switch, every feed direct, all 10 files; with the number already in the record, the lookup stops after its throttled call and goes straight to the feeds.
 
-### 7.4f Fanfix in Safe Finder — `mac/fanfix.py`, `mac/fanfix_downloader.py` (Nov 7, 2026; reworked the same day)
+### 7.4f Fanfix in Photo Browser for Mac — `mac/fanfix.py`, `mac/fanfix_downloader.py` (Nov 7, 2026; reworked the same day)
 
 The person's own purchased content from Fanfix creators (subscriptions, bought posts and messages), for a
 personal archive. Mac only (no iPhone twin yet); `.fanfix.json` uses `social.Record`'s shape so one could
@@ -2971,7 +2971,7 @@ asset objects in it):
   often WebP behind .jpg) — taken, named by the asset id, dated from the message, captioned with its text (HTML
   stripped, `clean_text`), creator = `partnerUsername`. A **bought pay-per-view** (`unlockedAt` set) delivers *every*
   asset — photos too — with an empty `sourceUrl` and only FairPlay/Widevine manifests: **DRM-protected, counted
-  (`Haul.drm`) and never downloaded** (fanripper decrypts these; Safe Finder doesn't and won't). **Not bought**
+  (`Haul.drm`) and never downloaded** (fanripper decrypts these; Photo Browser for Mac doesn't and won't). **Not bought**
   (`unlockPriceInCents` > 0, `unlockedAt` null): `showAsset: false` + `…_blurred.jpg` → locked. Left out too:
   `removedByModeration`, the account's own uploads (`senderUserId == viewerUserId`), audio.
 - **Why it saved avatars "over and over"**: the old walk took each Messages-list chat (`{id, name, imageUrl,
@@ -2999,7 +2999,7 @@ asset objects in it):
   (and a folder made for one) trashed after the question, the person's own file left alone.
 
 ### 7.4d SimpCity threads — `SimpCityService.swift` / `SimpCityRecord.swift` / `SimpCityHosts.swift` / `SimpCityImportView.swift`, `mac/simpcity.py` / `mac/filehosts.py` / `mac/simpcity_downloader.py` (Oct 28, 2026)
-"Download from SimpCity…" on a person's folder (iPhone: the download menu; Safe Finder: right-click a
+"Download from SimpCity…" on a person's folder (iPhone: the download menu; Photo Browser for Mac: right-click a
 folder, or the empty area of one): paste a `simpcity.cr/threads/…` address; every page is read, each
 goonbox.cr image is saved full-size and — with **Download videos** on — each turbo.cr video and every
 video the posts link on pixeldrain, gofile, cyberdrop, bunkr, filester and fileditch, into
@@ -3045,7 +3045,7 @@ posted on several hosts is fetched once.
   Referer or login — so `simpcity.fetch` / `SimpCityDownloader.fetch` (20 s to answer, 10 min a file)
   goes first, with the goonbox page as Referer; only a refusal falls back to the browser (Chromium
   `page.download` from the window's page, matched by address as well as name, 20 s to start; WebKit
-  `WKDownload` on the iPhone). The first Safe Finder runs had it the other way round: Chromium's
+  `WKDownload` on the iPhone). The first Photo Browser for Mac runs had it the other way round: Chromium's
   download never reported back from a view-less lane page, so every file waited out a 30 s watchdog
   ("pretty slow"), and the fallback then asked the browser profile for its User-Agent **from a worker
   thread** — Qt WebEngine objects belong to the GUI thread, and the call hung (Erin Gilfoy: 809 files,
@@ -3056,7 +3056,7 @@ posted on several hosts is fetched once.
   answer a request without one with 403 `{"success": false, "message": "not allowed"}` — even a signed
   `/panda/…?s=` address — and serve the original (unsigned `original_url`) to one with
   `Referer: https://goonbox.cr/`. The plain request sends it (`simpcity.REFERER`); Chromium's own
-  downloads send none, so Safe Finder's profile has a request interceptor (`_Referer`) that adds it for
+  downloads send none, so Photo Browser for Mac's profile has a request interceptor (`_Referer`) that adds it for
   those hosts. A browser download that comes back **interrupted** can stay "resumable" and never count
   as finished — with only a "never started" watchdog that hung the run (Erin Gilfoy, second try) — so an
   interruption or cancel now ends it, and a started download has a limit too (2 min a photo, 15 a video).
@@ -3106,7 +3106,7 @@ posted on several hosts is fetched once.
   app's own upscales — on the temp copy, before the date rule (`prepare_image` / `prepareImage`).
   Record entries carry `made: 2` once under these rules; earlier ones still in the folder are brought up
   to them once, beside the new downloads (`fix_file` / `fixFile`: a copy prepared and committed back,
-  the tag attribute kept; a WebP's new `.jpg` takes its tags — Safe Finder `carry`+`forget`, iPhone
+  the tag attribute kept; a WebP's new `.jpg` takes its tags — Photo Browser for Mac `carry`+`forget`, iPhone
   `itemMoved` — and the `.webp` goes).
 - **Videos: WebM → MP4 (Mac only, Nov 2, 2026).** `simpcity.prepare_video` → `video_tools.webm_to_mp4`:
   ffmpeg, `-map 0:v:0 -map 0:a:0?`, `scale=trunc(iw/2)*2:trunc(ih/2)*2` (H.264 needs even sizes), libx264
@@ -3120,7 +3120,7 @@ posted on several hosts is fetched once.
   the entry keeping its `size`/`sha256`/`via`/`name` (the old `add` dropped them). One that won't convert
   is kept and marked `mp4: "failed"` so it isn't retried every run. No ffmpeg: nothing changes, one log line.
   The iPhone can't do this — AVFoundation has no WebM reader (the app plays WebM through WebKit) — so its
-  WebM downloads wait for Safe Finder's next run on that folder.
+  WebM downloads wait for Photo Browser for Mac's next run on that folder.
 - **Videos on file hosts** (Oct 28, `filehosts.py` / `SimpCityHosts.swift`, kept in step — same keys,
   ids and preference order; the page scripts byte-identical). A post's host link is a `Link` (a file or
   a folder: `pixeldrain /u/ /l/`, `gofile /d/`, `cyberdrop /a/ /f/ /e/`, `bunkr(.cr/.ws/.ru/…) /a/ /f/ /v/
@@ -3139,10 +3139,10 @@ posted on several hosts is fetched once.
   video a page plays (muted autoplay), has loaded, or links, and — on a folder — the pages of the files
   in it; a file page showing nothing gets its **Download button pressed** once (`CLICK_DOWNLOAD_JS`,
   never "app"/"premium"/sign-up buttons) and the file it then plays, links, or hands the browser is
-  taken by address (Safe Finder: `downloadRequested` from that lane page, cancelled; iPhone: the lane's
+  taken by address (Photo Browser for Mac: `downloadRequested` from that lane page, cancelled; iPhone: the lane's
   navigation delegate). A host whose API answers with a check page, or fails, goes the same way (a
   folder's page is listed; a file's page is read at its turn). The browser download of a host file
-  carries its page as Referer (Safe Finder: the interceptor's `by_url`; iPhone: the request) and gofile's
+  carries its page as Referer (Photo Browser for Mac: the interceptor's `by_url`; iPhone: the request) and gofile's
   cookie. A dead link (404 / "not found") is done; a folder that couldn't be listed is tried again next
   run; a failed video's link stays not done and is listed again (a video it no longer holds is done).
 - **gofile: the site's own listing, never our own request** (Oct 28, after the first real run: every
@@ -3151,7 +3151,7 @@ posted on several hosts is fetched once.
   signed with a retired secret gets the **IP banned on the spot** (the page itself refuses to sign after 6
   hours open). A re-implemented token (the fixed salt `LinkDownloadService` also had — now removed there
   too; its gofile links return a note) is exactly that. So: `CAPTURE_JS` / `captureScript` is injected
-  before the page's own scripts (Safe Finder: a profile `QWebEngineScript` at DocumentCreation, main
+  before the page's own scripts (Photo Browser for Mac: a profile `QWebEngineScript` at DocumentCreation, main
   world; iPhone: a `WKUserScript` at document start) and, on gofile only, keeps the answers of the site's
   own `/contents/` calls (`fetch` and XHR; it only reads them — the site still gets its answer, tested in
   Chromium); `HOST_PAGE_JS` turns them into files with name, exact size and id (and reports each call's
@@ -3166,9 +3166,9 @@ posted on several hosts is fetched once.
   `locked`: it is ranked last when grouping copies and never claims its size, so any other host's copy
   (or turbo, or a browser-read host) is downloaded instead and the pixeldrain one recorded `same_as`. One
   no other host has is never fetched directly; after the lanes finish, each opens **in the visible
-  window** (Safe Finder) / on the SimpCity screen (iPhone, only while it's open — otherwise the run's note
+  window** (Photo Browser for Mac) / on the SimpCity screen (iPhone, only while it's open — otherwise the run's note
   says to open it), the person presses Download and answers pixeldrain's captcha, and the download that
-  starts there is taken as it is (its `cap_response` address works once) — Safe Finder: the view page's
+  starts there is taken as it is (its `cap_response` address works once) — Photo Browser for Mac: the view page's
   `downloadRequested`; iPhone: the page's navigation delegate turns it into a `WKDownload` that
   `SimpCityFileDownload.adopt` saves. Nobody pressing Download within 4 minutes ends the step; that video
   and the rest are kept for the next run (reported as waiting, not failed).
@@ -3188,7 +3188,7 @@ posted on several hosts is fetched once.
   its SHA-256 against every video kept (pixeldrain's own hash counts too); a match is deleted and recorded
   `same_as`. Videos recorded before sizes were kept seed the check with their file's size (right whenever
   their own date was kept). A host link that answers with a photo/archive is `skipped` ("not a video").
-- **Download videos** (Safe Finder checkbox, `QSettings`; iPhone toggle, `photoBrowser.simpCityVideos`;
+- **Download videos** (Photo Browser for Mac checkbox, `QSettings`; iPhone toggle, `photoBrowser.simpCityVideos`;
   on by default). Off: turbo items are noted in `failed` with `skipped`, host links in `links` with
   `skipped` — so a later run with it on gets them without reading the thread again. A thread read before
   host links were collected (`threads[…].hosts` unset) is read from page 1 once when videos are on; a
@@ -3197,7 +3197,7 @@ posted on several hosts is fetched once.
   `<host>:<file|folder>:<id>` → url, post, posted, `files` (its videos' keys), `done`, `why`/`gone`/
   `skipped`; done on either side wins), item fields `size`, `sha256`, `via` (the link key), `name`,
   `same_as`, `skipped`. An older app that drops `links` only costs a re-listing.
-- **Tags**: iPhone `library.addTag("simpcity", to:)` every 20 files and at the end; Safe Finder the
+- **Tags**: iPhone `library.addTag("simpcity", to:)` every 20 files and at the end; Photo Browser for Mac the
   shared tag store (`tag_store().add`) the same way.
 
 **Download failures fixed (Nov 3, 2026).** Every browser fallback for a file-host or turbo video failed
@@ -3261,7 +3261,7 @@ Finder's right-click on a person folder or its `simpcity` folder, shown only whe
 `simpcity_scores_folder`) opens the window with `scores_only`: `_score_crawl` reads every page of every
 thread in the record through the same paced loop as a download (`_pages`, which `_crawl` now uses too),
 saves every 20 pages, and keeps a stopped thread's page in QSettings (`scores/<folder>|<thread id>`) to
-carry on there. **Sorting:** Safe Finder's "Reaction Score" sort key (highest first from the menu; unscored
+carry on there. **Sorting:** Photo Browser for Mac's "Reaction Score" sort key (highest first from the menu; unscored
 files last) reads `simpcity.folder_scores` (parsed once per record change, re-stat at most every 2 s) and
 draws the score on tiles and list rows while it's the sort; a finished run emits `tag_events().scores` and
 panes sorted by it re-sort. The iPhone's "Most reactions" (`SortKey.reactionsDesc`, offered in a folder
@@ -3282,7 +3282,7 @@ app-wide activity pill, the folder behind reloads after each (`onFinished`), and
 never dismissed for you. Album lists are searchable (title or id). Everything heavy runs through
 `Task.detached` (constraint 13).
 
-**Safe Finder twin + shared record (Nov 3, 2026)** — `mac/taylor.py`, `mac/taylor_window.py`,
+**Photo Browser for Mac twin + shared record (Nov 3, 2026)** — `mac/taylor.py`, `mac/taylor_window.py`,
 `TaylorRecord.swift`. The Mac ports the parsers pattern for pattern (including `decode`'s short entity list
 and `stripTags` without collapsing whitespace — so both apps name an album's folder identically and the Mac
 finds folders the iPhone made before the record existed). Same paging (pager → rest six at a time; no pager
@@ -3321,7 +3321,7 @@ the sections and reads only new albums. Photos are stored as thumbnail paths (th
 derived) to keep `site.json` small. "Albums With Photos to Get" is a virtual section (trail id -2) built
 from the summary. "Tag Them…" adds "taylorpictures.net" through the shared tag store, only on request.
 
-**Safe Finder's networking (Nov 3, 2026).** The first Mac build said "Couldn't reach taylorpictures.net" for every
+**Photo Browser for Mac's networking (Nov 3, 2026).** The first Mac build said "Couldn't reach taylorpictures.net" for every
 failure, and differed from the iPhone in three ways: no `Accept` header, any non-2xx answer thrown away (the
 iPhone reads a page whatever its status — `fetchHTML` ignores it), and Python's TLS, which — unlike Apple's —
 doesn't fetch a missing intermediate certificate. `taylor._http_get` now sends the iPhone's headers (gzip
@@ -3363,7 +3363,7 @@ same inbox; the downloader posts `BackgroundDownloader.landed` and the app files
 copying a video onto the drive used to block the UI. The listing and per-video HD resolve are
 still paced at ~1 request/s: that is tikwm's limit, not ours.
 
-### 7.4b-2 TikTok in Safe Finder, and the shared record — `mac/tiktok.py`, `mac/tiktok_downloader.py`, `SocialRecord.swift` (Nov 10, 2026)
+### 7.4b-2 TikTok in Photo Browser for Mac, and the shared record — `mac/tiktok.py`, `mac/tiktok_downloader.py`, `SocialRecord.swift` (Nov 10, 2026)
 
 Right-click a folder ▸ Download ▸ **Download TikTok Profile…** / **Get New TikTok Videos**. A port of
 `TikTokService`: the same tikwm calls (`user/posts` 35 a page, ~1 a second; `hd=1`; the single-video endpoint
@@ -3381,9 +3381,9 @@ be a video/photo and not a block page (`tiktok.fetcher`), tagged "tiktok".
 - **The shared record, `.tiktok.json`** (`photobrowser-tiktok`; `SocialRecord.Kind.tiktok`): `handle`,
   `author_id`, `nickname`, `downloaded` (only ever added to), `profile_video_count`, **`likes`** (post id →
   count) and `likes_updated`. The iPhone now reads it at the start of a run (ids count as downloaded; a folder
-  Safe Finder made is adopted — `Snapshot.tiktokInfo`; its likes go through `applyTikTokLikes`), writes ids +
+  Photo Browser for Mac made is adopted — `Snapshot.tiktokInfo`; its likes go through `applyTikTokLikes`), writes ids +
   likes after listing and as each download is filed (`applyFiledTikTok`), and tags its TikTok files "tiktok".
-- **Likes on every run.** The iPhone stops paging after 15 posts it already has; Safe Finder lists the whole
+- **Likes on every run.** The iPhone stops paging after 15 posts it already has; Photo Browser for Mac lists the whole
   profile every time (asked for: "every time it runs it should recalculate the number of likes"), so `likes`
   is rewritten for every post still on TikTok (a deleted post keeps its last count). Shown in the viewer's Info
   and sorted by "Reactions / Likes" (`reaction_score` falls back to `tiktok.likes_of`).
@@ -3434,7 +3434,7 @@ image behind a thumbnail; captures the blog post **date** and keeps it with the 
 ### 7.6 Receive from the Mac — AirDrop archives (`ArchiveIntake`, `ReceivedArchivesView`, `mac/airdrop_to_iphone.py`) (Oct 22, 2026)
 
 **Why.** Galleries downloaded on the Mac (`mac/pornpics_*.py`) used to reach the drive only by
-plugging the SSD into the Mac (Safe Finder). AirDrop lets the SSD stay on the phone — but AirDrop
+plugging the SSD into the Mac (Photo Browser for Mac). AirDrop lets the SSD stay on the phone — but AirDrop
 can't hand a folder to an iOS app, a Mac folder arrives on iOS as a zip, and a plain zip is claimed
 by Files and every zip-capable app, so the phone would ask "which app?" each time.
 
@@ -3448,7 +3448,7 @@ by Files and every zip-capable app, so the phone would ask "which app?" each tim
   "AirDrop to iPhone" button, the star downloader's `--airdrop` (the galleries that got new photos
   this run + `pornstar.json`, as one archive of the star folder; `--airdrop-all` for all) and Safe
   Finder's "AirDrop to iPhone…" context item all call `archive_items`/`archive_folder` + `send` on
-  a thread. `build_safe_finder_app.sh` bundles the tool and the helper source.
+  a thread. `build_app.sh` bundles the tool and the helper source.
 - `Config/Info.plist` declares the exported type `jayymei.PhotoBrowser.gallery-archive`
   (`.pbgallery`, conforms to `public.data`/`public.archive` — deliberately *not* `public.zip-archive`,
   so no other zip app claims it) as Owner, and `public.zip-archive` as Alternate (a folder
@@ -3550,7 +3550,7 @@ AirDrop off/unavailable → exit 2 → Finder fallback. The custom UTI must stay
 | Storage / Drive Health | `StorageView.swift`, `DriveHealthView.swift`, `DriveRepair.swift` (rebuild, header probe), `MetadataSnapshot.swift` (backup/restore, orphan audit) |
 | Directory reading / large folders | `Library.swift` (`coordinatedContents`, `listing`) |
 | Folder filters | `Models.swift` (`FormatFilter`), `FolderView.swift` |
-| Folder tags (+ "also the items inside?") | `FolderTags.swift`, `FolderView.tagMenu`, `FolderInfoView`, `mac/safe_finder.py` (`ask_inside`, `tag_items`) |
+| Folder tags (+ "also the items inside?") | `FolderTags.swift`, `FolderView.tagMenu`, `FolderInfoView`, `mac/photo_browser.py` (`ask_inside`, `tag_items`) |
 | Batch crop (one crop on many, "cropped" tag, Last Crop) | `BatchCrop.swift` (`CropSpec`, `BatchCropView`), `PhotoEditorView.swift` (`CropOverlay`), `mac/batch_crop.py`, `mac/crop_window.py` |
 | Folder Birthdays mapping (bulk) | `BirthdayMappingView.swift`, `Library.setBirthdays` |
 | Move/copy duplicate detection | `DuplicateDetection.swift`, `FileActions.moveItems/copyItems`, `PhotoBrowserTests/` |
@@ -3708,7 +3708,7 @@ or `layoutMargins` use (UIKit's default view margins are zero on 27.1+).
 > restored from the phone's backup). Everything in this section and §3.5/§3.6 is exFAT-specific and
 > now dormant: `DriveWriter.configureForVolume` picks `.barrier` on APFS, `SpareFolders.pool/remaining`
 > return nil unless `syncMode == .full`, Drive Health hides the New-folders section and the 2.2 TB
-> advice, FolderView's "can't read this folder" text points at First Aid instead, and Safe Finder
+> advice, FolderView's "can't read this folder" text points at First Aid instead, and Photo Browser for Mac
 > (`spare_folders.on_exfat`, cached per volume) neither takes spares nor adjusts names on an APFS
 > destination (`plain_name` only caps 255 UTF-8 bytes). Keep the code — the exFAT drive still exists
 > as the old copy.
@@ -3755,7 +3755,7 @@ directory fd) were themselves breaking folders. Every folder iOS refused to open
 as a directory right after it was created or while it grew: the AI / Screenshots / Duplicate PNGs
 helper folders (flushed at creation and after every commit), the Kardashian member folders (a parent
 flush after each of 46k photos), Force Refresh (`thoroughContents` flushed the folder it re-read),
-and Safe Finder v1 on the Mac (flushed each new folder and after every file). The copy rebuild,
+and Photo Browser for Mac v1 on the Mac (flushed each new folder and after every file). The copy rebuild,
 which never flushes a folder, produced folders iOS reads. The drive root, flushed on every
 backgrounding, stayed fine because, unlike other folders, it has no record inside a parent folder.
 Taken together, this points to Apple's exFAT driver writing a stale copy of a flushed folder's own
@@ -3767,14 +3767,14 @@ folder flushes too. To confirm on a broken folder: `sudo python3 mac/exfat_inspe
 before rebuilding it (look for `own-entry:` findings: dir-length, valid-length, alloc-flags,
 chain).
 
-**Same day, contradicting test:** the user moved (same-drive rename, via the fixed Safe Finder) the
+**Same day, contradicting test:** the user moved (same-drive rename, via the fixed Photo Browser for Mac) the
 files of a broken folder into a brand-new, never-flushed folder, and the new folder became
 unreadable too. So the folder flush is at most part of it — the damage can travel with the moved
 items' own records (or renaming into a folder triggers it). Response, pending inspector output:
 the Mac tools now write exactly like the copy rebuild, the one proven method — `safe_transfer.py`
 creates every file fresh under its final name (no staging rename, no same-drive rename: a "move" on
 the SSD is a fresh copy + Trash), with no fsync at all, `sync()` between items, and a journal in
-`.Safe Finder Staging/in-progress.txt` so a file cut off by a crash is deleted on the next run;
+`.Photo Browser Staging/in-progress.txt` so a file cut off by a crash is deleted on the next run;
 `rebuild_exfat_folders.py --move` became `--low-space` (fresh `copy2` copies into hidden
 `.<name>.fresh`, each original deleted only after its copy hashes equal and the batch was synced +
 `F_FULLFSYNC`'d via a small journal file). The iOS app is unchanged beyond the directory-flush rule
@@ -3801,8 +3801,8 @@ exactly 2.20 TB earlier, and only folders with such a twin would break) and a **
 that new and past the line readable?). Results: no twins (0 of 9), and 102 folders created since
 Oct 5 sit past the line and open fine — so neither explains it. What the 9 do share: every one was
 written by a tool that flushed folders at the time (the iOS app from Oct 5 — Kendall, Kylie, Kari
-Diviney/Duplicate PNGs; `safe_copy_to_ssd.py` / Safe Finder Oct 8–10 — the Porn folders; Japanese
-is the "NewFolder" of the move test, made by a Safe Finder window that may still have been running
+Diviney/Duplicate PNGs; `safe_copy_to_ssd.py` / Photo Browser for Mac Oct 8–10 — the Porn folders; Japanese
+is the "NewFolder" of the move test, made by a Photo Browser for Mac window that may still have been running
 the old code). The checker now adds the places a flush could leave a mark that it hadn't read: the
 FAT entries of each folder's clusters (contiguous folders shouldn't need any), clusters shared with
 a file (cross-links), and the writer fingerprint of each folder's own record (attributes, 10 ms
@@ -3811,7 +3811,7 @@ Result (Oct 10): no cross-links, and the folders' FAT entries look like everyone
 difference is the record's dates: 8 of the 9 were modified after they were created, versus 9% of
 the 508 folders made in the same days (87% of those carry an older modified date — copies that
 keep the source's date, like the copy rebuild). That is the signature of a folder a tool kept
-writing into over time (the app's downloads/rebuilds, Safe Finder's copies), consistent with the
+writing into over time (the app's downloads/rebuilds, Photo Browser for Mac's copies), consistent with the
 flush explanation but not proof of it. Kendall and Kylie are also the drive's only folders over
 one cluster (~10,000 items), so their straddling entry sets can't be compared with anything.
 

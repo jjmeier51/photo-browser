@@ -1,23 +1,29 @@
 # Photo Browser for Mac
 
-A desktop companion to the iOS **Photo Browser** app, built in Python (PySide6). Connect the
-SSD that holds your library, browse it with the same dark, square-tile look, and bulk-edit what
-the phone can't comfortably do at scale:
+The Mac side of the iOS **Photo Browser** app, in Python (PySide6): a Finder-like window onto the SSD that holds
+the library — the same folders, tags, Favorites, To AI, folder covers and "Videos at the Top" as the iPhone, kept
+in step through small files on the drive itself — with the tools that are easier at a desk: safe transfers onto
+the drive, bulk rename and metadata, crop / upscale / retouch, Find Duplicates, the downloaders, Edit and Create
+with AI, the Astria.ai Browser, AI models, a photo and video viewer, a PDF viewer, Clone Drive to a New SSD.
 
-- **EXIF & captions** — caption/description, title, keywords, creator, copyright, rating, camera
-  make/model/lens, software, GPS. Captions are written with the MWG composite tags so EXIF
-  `ImageDescription`, IPTC `Caption-Abstract` and XMP `dc:description` stay in sync (the iOS app,
-  Photos and Lightroom all read the same value).
-- **Dates** — set an exact capture date (stepping N seconds per file so order survives), shift a
-  whole selection by ±days/hours/minutes (camera clock / time-zone fixes), or read the date out of
-  the filename with a `strptime` pattern. Optionally the file's created/modified dates follow.
-- **Filenames** — pattern rename with tokens (`{name} {n} {n:3} {date} {date:%Y%m%d} {folder} {ext}`),
-  find & replace (plain or regex), prefix/suffix. Conflicts are flagged and never applied.
+**It was called Safe Finder until November 2026.** Nothing was left behind by the rename: the first launch under
+the new name moves the old settings, tags of files on the Mac's own disk, AI models, watermarks, folder covers,
+saved downloader logins, logs and thumbnails across, and re-saves the Astria key in the Keychain under the new
+name (`app_identity.py`). On the drive, the two hidden folders an earlier version made (`.Safe Finder Staging`,
+`.Safe Finder Checksums`) are still read — the checksums folder is renamed `.Photo Browser Checksums` the first
+time it's used.
 
-Every bulk editor previews each change in a table before anything is written. Single files are
-edited inline in the right-hand inspector (filename, capture date, every field) with one Save.
+```sh
+open "mac/Photo Browser for Mac.command"     # double-click it in Finder: sets up mac/.venv once, then opens
+sh mac/build_app.sh                          # or build "Photo Browser for Mac.app" into /Applications
+```
 
-Works on JPEG, HEIC, PNG, TIFF, RAW (DNG/CR2/CR3/NEF/ARW…) and MOV/MP4 video.
+Everything about the app is under [**The app**](#the-app-photo_browserpy) below. This folder also holds a few
+separate tools (gallery downloaders, drive repair) and **the bulk editor** — the first, much smaller Mac
+companion, which had this name before (`bulk_editor/`, at the end).
+
+The app's icon is `photo_browser_icon.png`, drawn by `make_icon.py` (the iPhone icon's colours as a grid of photo
+tiles round a folder); `build_app.sh` turns it into the app's `.icns`.
 
 ## PornPics gallery downloader (`pornpics_downloader.py`)
 
@@ -150,7 +156,7 @@ Command Line Tools — `xcode-select --install`); without it the archives are re
 right-click ▸ Share ▸ AirDrop. `--reveal` does that on purpose; `--no-send` only builds the archives.
 
 The same button lives in the PornPics browser ("AirDrop to iPhone"), the star downloader
-(`--airdrop` / `--airdrop-all`) and Safe Finder (right-click ▸ "AirDrop to iPhone…", for any folders
+(`--airdrop` / `--airdrop-all`) and Photo Browser for Mac (right-click ▸ "AirDrop to iPhone…", for any folders
 or files).
 
 **Anything else AirDropped works too.** A folder sent straight from Finder arrives on the phone as a
@@ -160,7 +166,7 @@ file as it is; an identical file already there is skipped, nothing is overwritte
 iOS keeps for itself: loose photos and videos AirDropped to an iPhone go straight into the Photos
 app before any app is asked — send them inside a folder, or use the app's "Add from iOS Album".
 
-## Safe Finder — a Finder window that moves files onto the SSD safely (`safe_finder.py`)
+## The app (`photo_browser.py`)
 
 Looks and works like Finder: a sidebar (Favorites, Locations with an eject button for the SSD, and
 your Tags) and **one window** of files, with icon view (photo and video thumbnails, with a size slider up
@@ -171,7 +177,7 @@ to 320 px and a spacing slider that packs the tiles edge to edge for more per ro
 View** or **⌘\\** opens a second pane beside the first — **From** (your Mac) on the left and **To** (the
 SSD) on the right, with the Move/Copy bar below — and the same again closes it. Right-click ▸ **Move or
 Copy in Split View…** opens it with your selection kept. The To pane opens on the folder it was last on
-(else the SSD), and Safe Finder remembers which way you left it. Select files or folders on the left and
+(else the SSD), and Photo Browser for Mac remembers which way you left it. Select files or folders on the left and
 press **Move to “Extreme SSD”** (or Copy), or drag them onto the right pane — onto a folder there to put
 them inside it. Drags from the real Finder work too, onto either pane.
 
@@ -194,7 +200,7 @@ whether there's room. Then:
   real name only once every file is in and checked. If a transfer is cut off, the hidden folder is
   picked up again next time.
 - **A file cut off mid-copy is cleaned up.** The file being written is noted in a hidden
-  `.Safe Finder Staging` folder at the top of the drive; if the Mac or the drive goes away, the next
+  `.Photo Browser Staging` folder at the top of the drive; if the Mac or the drive goes away, the next
   transfer deletes the half-written file before starting.
 - **Every copy is verified.** It's read back from the drive (not the Mac's memory) and compared
   with the original.
@@ -260,16 +266,16 @@ From pane, newest first, wherever it is — Movies, Downloads, Desktop, Document
 they can be picked and moved to the SSD from one place. It looks afresh each time you open it
 (click it again to look again). Searches and All Videos skip `~/Library`, app and library bundles
 (Photos, iMovie, Final Cut), hidden items and other drives; moved files drop off the list.
-(`SAFE_FINDER_SEARCH_ROOTS=/path:/other` makes "This Mac" look elsewhere.)
+(`PHOTO_BROWSER_SEARCH_ROOTS=/path:/other` makes "This Mac" look elsewhere.)
 
 ```sh
-open "mac/Safe Finder.command"                     # or double-click it in Finder; the first run installs PySide6
-mac/.venv/bin/python mac/safe_finder.py --from ~/Downloads --to "/Volumes/Extreme SSD"   # --to opens in Split View
+open "mac/Photo Browser for Mac.command"                     # or double-click it in Finder; the first run installs PySide6
+mac/.venv/bin/python mac/photo_browser.py --from ~/Downloads --to "/Volumes/Extreme SSD"   # --to opens in Split View
 ```
 
 ### The menu bar
 
-Everything Safe Finder does is in its menus, acting on the pane you're in and what's selected there (greyed
+Everything Photo Browser for Mac does is in its menus, acting on the pane you're in and what's selected there (greyed
 out when it can't): **File** (New Folder ⇧⌘N, Open ⌘↓, Open With Default App, Quick Look, Show in Finder,
 Copy/Move to the other side ⇧⌘C / ⇧⌘M — in one window they open Split View, AirDrop to iPhone, Move to Trash ⌘⌫), **Edit** (Select All, Find ⌘F,
 Tags… ⌘T), **View** (as Icons/List/Photos ⌘1–3, Split View ⌘\\, Sort By, bigger/smaller thumbnails ⌘= / ⌘−), **Go** (Back ⌘[,
@@ -324,13 +330,13 @@ M4V can be edited; GIF, WebM, AVI and MKV can't hold these tags and are left out
 
 Each photo and video is rendered once, at one size (512 px), and that one thumbnail is drawn at
 whatever icon size the slider is on — so resizing is instant, nothing re-renders. Thumbnails are kept
-on disk in `~/Library/Caches/PhotoBrowser/SafeFinderThumbs/` (keyed by path and date, so an edited
+on disk in `~/Library/Caches/PhotoBrowser/MacThumbs/` (keyed by path and date, so an edited
 file gets a fresh one) and come straight back on the next launch. Opening a folder renders what's on
 screen first and then the rest of the listing in the background, so scrolling finds them ready.
 Videos — and RAW and other formats Qt and Pillow can't read — come from a small helper,
 `thumb_helper.swift`, that uses the Mac's own AVFoundation and ImageIO: it stays running, makes a few
 at once, and each thumbnail appears the moment it's ready, the ones on screen first (the newest first
-as you scroll). Safe Finder builds it once with Xcode's `swiftc` (the same way as the AirDrop helper),
+as you scroll). Photo Browser for Mac builds it once with Xcode's `swiftc` (the same way as the AirDrop helper),
 into `~/Library/Caches/PhotoBrowser/`. Until it's built, without Xcode's tools, or for a file it can't
 read, Quick Look does those thumbnails, four at a time. The system may clear the Caches folder under
 disk pressure; the thumbnails just render again.
@@ -384,7 +390,7 @@ drags the files, as everywhere else). Each folder remembers it, like icons and l
 Preview: one item at a time on black, in the folder's order (or just the ones you picked, if you picked
 several).
 
-- **The window fits the picture, as tall as the display.** It opens over Safe Finder's window, on the same
+- **The window fits the picture, as tall as the display.** It opens over Photo Browser for Mac's window, on the same
   display, the **full height of that display** (from the menu bar down to the Dock), and takes each item's
   shape at that height — a portrait video or photo gets a tall, narrow window with no black bars beside it, a
   wide one a wide window (only something too wide for the display at full height, like a panorama, is as wide
@@ -402,7 +408,7 @@ several).
   on one that can't), with the same colours and brightness as QuickTime — not Qt's brighter, harsher version. An
   HDR photo (an iPhone photo with an HDR gain map, or an HLG/PQ one) appears for a moment in standard range, then
   in HDR — made for the brightness your display can show right now, and made again as that changes (screen
-  brightness, another display), the way Preview does, so its highlights are never cut off. This is a small Swift library (`viewer_surface.swift`) that Safe Finder builds in the background the
+  brightness, another display), the way Preview does, so its highlights are never cut off. This is a small Swift library (`viewer_surface.swift`) that Photo Browser for Mac builds in the background the
   first time it starts, with Xcode's Command Line Tools like the other helpers; until it's built, without the
   tools, and for videos macOS can't play (MKV, WebM, AVI…), Qt's player is used as before. If it won't build,
   the compiler's message is in `~/Library/Caches/PhotoBrowser/viewer_surface.log`.
@@ -426,9 +432,9 @@ several).
 Video lengths, dates, sizes and the camera are read from the files themselves (`media_info.py`: the MP4/MOV
 boxes and the photo's EXIF — no ExifTool), off the main thread and once per file.
 
-### The PDF viewer, and Optimize for Safe Finder / for iPhone (`pdf_viewer.py`, `pdf_optimize.py`)
+### The PDF viewer, and Optimize for Mac / for iPhone (`pdf_viewer.py`, `pdf_optimize.py`)
 
-**Double-click a PDF** (or press Return) and it opens in Safe Finder's own PDF viewer instead of Preview — the
+**Double-click a PDF** (or press Return) and it opens in Photo Browser for Mac's own PDF viewer instead of Preview — the
 photo viewer's dark look, as tall as the display, the pages scrolling one after another fitted to the width.
 ←/→ (Page Up/Down) a page at a time, or type a page number at the bottom; − / + and the zoom menu (Fit Width, Fit
 Page, 50–400 %), ⌘-scroll or pinch to zoom; **⌘F** searches — every match is marked, Return goes to the next and
@@ -448,7 +454,7 @@ viewer when it's made (**Back to Original** returns), carries the original's tag
   blank pages are left out. Nothing is retyped: it's the original's own drawing, cut and placed, so fonts,
   pictures and layout stay as they were. **AirDrop to iPhone…** sends it straight to the phone (Photo Browser
   takes it), or it travels on the drive beside the original.
-- **Optimize for Safe Finder** → "<name> (for Safe Finder).pdf": the pages stay whole and in order, trimmed to
+- **Optimize for Mac** → "<name> (for Mac).pdf": the pages stay whole and in order, trimmed to
   their content — the same box on every page (left and right pages separately, as a book's margins alternate),
   grown for any page with something outside it — and blank pages left out, so in this viewer the page, not its
   margins, fills the window and the text comes out larger.
@@ -496,11 +502,11 @@ and bold — see the top of `bookify.py`), and the window shows what it found be
   pages, equal margins. Your choices are remembered.
 
 **Make Book** sets it in the background (Stop stops it); the PDF goes beside the text (or in the folder you chose) as
-"<name>.pdf" — never over a file that's there — with the text's tags, and **Open** shows it in Safe Finder's PDF viewer (where Optimize
+"<name>.pdf" — never over a file that's there — with the text's tags, and **Open** shows it in Photo Browser for Mac's PDF viewer (where Optimize
 for iPhone works on it too). The first book downloads EB Garamond once. It needs ReportLab and pyphen (in
-`requirements.txt`): `Safe Finder.command` adds them to an existing setup and `build_safe_finder_app.sh` builds them
+`requirements.txt`): `Photo Browser for Mac.command` adds them to an existing setup and `build_app.sh` builds them
 into the app; if they're still missing, the window's main button is **Install ReportLab** instead of Make Book — it
-fetches them (into Safe Finder's own Python, or for the built app into ~/Library/Application Support/Safe
+fetches them (into Photo Browser for Mac's own Python, or for the built app into ~/Library/Application Support/Safe
 Finder/python, with any Python on the Mac), then Make Book appears. `bookify.py` still works on its own: `python3 bookify.py story.txt --size iphone`.
 
 **Pictures in the book.** When you press Make Book it first asks **"Would you like to add pictures to this
@@ -524,7 +530,7 @@ add, move or remove pictures. From Terminal:
 
 **A contents page you can click.** In a book made here, every line of the contents page — the chapter's name and
 its page number — is a link to that chapter, and the chapters are the PDF's outline (the sidebar in Preview and
-Books, and the Contents list in Safe Finder's viewer).
+Books, and the Contents list in Photo Browser for Mac's viewer).
 
 ### Export All Frames and Save Frame (`frame_export.py`)
 
@@ -562,7 +568,7 @@ small tray that floats over CapCut with the clips **in timeline order** — by d
 or as you selected them. Drag the big **Drag all into CapCut** tile onto CapCut's media panel or straight onto
 its timeline and every clip goes in, in that order (or drag single rows). The clips stay where they are on the
 drive — CapCut uses them from there; tick **Copy to this Mac first** for a project that has to work with the
-drive unplugged (they're copied, numbered, into `~/Movies/Safe Finder for CapCut/`). **Copy** puts them on the
+drive unplugged (they're copied, numbered, into `~/Movies/Photo Browser for CapCut/`). **Copy** puts them on the
 clipboard and **Show in Finder** reveals them.
 
 **Back.** Keep the tray open while you edit. When you **Export** in CapCut, the video appears in the tray's
@@ -573,11 +579,11 @@ so it sorts with them by year on the iPhone. **Take it off the Mac** unticked co
 
 **Import from CapCut…** (right-click a folder ▸ CapCut ▸, or Photos ▸) does the same for any of CapCut's exports,
 newest first, the ones already brought in greyed: tick them and bring them into that folder or each back to where
-its clips came from. CapCut saves exports wherever its Export panel last pointed, so Safe Finder looks in the
+its clips came from. CapCut saves exports wherever its Export panel last pointed, so Photo Browser for Mac looks in the
 usual places (~/Movies/CapCut, ~/Movies, Desktop, Downloads, Documents) and remembers the folder after the first
 import; pick it in the window if yours is elsewhere.
 
-Safe Finder never writes CapCut projects itself: recent CapCut versions encrypt them and reject ones made by
+Photo Browser for Mac never writes CapCut projects itself: recent CapCut versions encrypt them and reject ones made by
 other tools, so dragging the clips in is what works with every version.
 
 ### Find Duplicates (`duplicates_window.py`, `duplicates.py`)
@@ -585,7 +591,7 @@ other tools, so dragging the clips in is what works with every version.
 Right-click a folder ▸ **Find Duplicates…** (or a folder's empty space ▸ **Find Duplicates in This Folder…**) —
 the iPhone app's Find Duplicates. It lists groups of likely copies, strongest first:
 
-- **Exact match** (green) — the same size in bytes and the same pixel dimensions. Safe Finder then reads the
+- **Exact match** (green) — the same size in bytes and the same pixel dimensions. Photo Browser for Mac then reads the
   copies through in the background and marks the group **✓ Identical** when they're the same file byte for
   byte (or says "same size, different bytes" when they aren't).
 - **Visually similar** (blue) — the same picture re-saved, resized or lightly edited (a perceptual
@@ -597,7 +603,7 @@ Each copy is a tile with its size — or, when the copies' dates differ, the dat
 with the **Oldest** and **Newest** marked. **Click the copies you don't want** (a red ring), then **Move to
 Trash** at the bottom; it asks first and says if a group would lose every copy. Double-click a tile (or
 **View**) to see the group full size in the viewer and flip between the copies. **Not Duplicates** hides a
-group for good; the ••• menu has Select All But One, Select All Copies, Deselect and Show in Safe Finder.
+group for good; the ••• menu has Select All But One, Select All Copies, Deselect and Show in Photo Browser.
 
 **Select Extra Copies** ticks every copy but one in each *identical* group — keeping the copy with the most
 tags, then a plain name (not "(1)" or "copy"), then the oldest — so clearing out true duplicates is two
@@ -605,10 +611,10 @@ clicks; check the ticks, then Move to Trash. **Include subfolders** looks throug
 folder (each tile then says which folder it's in), and **Leave out “Frame” files** skips video-frame
 screenshots; both are remembered. The photos' fingerprints are kept, so Rescan is quick.
 
-### All of Safe Finder's windows, at once
+### All of Photo Browser for Mac's windows, at once
 
-Click **Safe Finder's icon in the Dock** and every Safe Finder window comes forward — the main window, an open
-viewer, Edit with AI, a downloader — not just the main one, even when Safe Finder is already the app in
+Click **Photo Browser for Mac's icon in the Dock** and every Photo Browser for Mac window comes forward — the main window, an open
+viewer, Edit with AI, a downloader — not just the main one, even when Photo Browser for Mac is already the app in
 front. (Clicking one window still brings only that window forward, as in any Mac app.) **Window ▸ Bring All
 to Front** does the same, and the Window menu lists every open window, minimized ones too.
 
@@ -643,7 +649,7 @@ iPhone too, and one you set on the iPhone is shown that way here.
     knows the photos it has seen, so they're never looked up again. For the rest it reads the GPS from the
     files (photos' EXIF, videos' QuickTime location) and names new places through Apple's geocoder, as the
     iPhone does — only the coordinates are sent, one place every 1.2 s, at most 60 a time (open it again to
-    name more). What it learns is kept in `~/Library/Application Support/Safe Finder/places.json`. A folder
+    name more). What it learns is kept in `~/Library/Application Support/Photo Browser for Mac/places.json`. A folder
     with over 8,000 files asks you to open a subfolder, like the iPhone.
   - **Size**: Empty (0 KB), under 1 MB, or 1 MB / 10 MB / 100 MB / 1 GB and up — folders by their
     calculated size (one not calculated yet still shows, except under "Empty"). In a search, `size:>100mb`,
@@ -659,13 +665,13 @@ iPhone too, and one you set on the iPhone is shown that way here.
 
 ### Tags — the same tags as Photo Browser on the iPhone
 
-Safe Finder's tags *are* the app's tags: tag a file here and it has that tag in Photo Browser on the
+Photo Browser for Mac's tags *are* the app's tags: tag a file here and it has that tag in Photo Browser on the
 iPhone (the Tags filter, the info panel, "No Tags"); tag it there and it shows up here. Removing a
 tag, renaming one, or moving a file carries across the same way.
 
 - **Folders have tags too.** A folder gets the tag itself — it shows the pill on its tile, it's listed
   under the tag in the sidebar, and on the iPhone it shows up in the Tags filter. Whenever you tag a
-  folder (⌘T, the right-click menu, dropping it on a sidebar tag) Safe Finder asks whether the files
+  folder (⌘T, the right-click menu, dropping it on a sidebar tag) Photo Browser for Mac asks whether the files
   inside it — in its subfolders too — get the tag as well: **Folder and Files Inside**, **Folder Only**,
   or Cancel. Taking a tag off a folder, or Remove All Tags, asks the same about the files inside that
   have it. Nothing is asked when no file inside would change. A folder carries its tags like a file
@@ -688,29 +694,29 @@ tag, renaming one, or moving a file carries across the same way.
   name, and the status line lists a selected item's tags.
 - **Tags stick to the file — however it's moved or copied.** Each tagged file carries its tags itself,
   in a small private field (with a note of where it was) that Finder doesn't show — Finder's own tags
-  are a separate thing and are left alone. Move or copy it with Safe Finder, Finder, the Files app or
-  `cp`, or AirDrop it to the iPhone with "AirDrop to iPhone…", and the tags go with it: Safe Finder picks
+  are a separate thing and are left alone. Move or copy it with Photo Browser for Mac, Finder, the Files app or
+  `cp`, or AirDrop it to the iPhone with "AirDrop to iPhone…", and the tags go with it: Photo Browser for Mac picks
   them up when you open the folder it landed in, the app when it next opens the drive. A move leaves
   nothing behind at the old place; a copy keeps the original's tags too; a file put back from the Trash
   gets its tags back. (Cloud folders such as iCloud Drive may drop the private field, and on an exFAT
-  drive files can't carry it without `._` clutter — there tags only travel through Safe Finder.) Tags on
-  files still on the Mac are also listed in `~/Library/Application Support/Safe Finder/tags.json`. A file
+  drive files can't carry it without `._` clutter — there tags only travel through Photo Browser for Mac.) Tags on
+  files still on the Mac are also listed in `~/Library/Application Support/Photo Browser for Mac/tags.json`. A file
   moved to the Trash loses its tags until it's put back. On the iPhone, copies, photos saved as new from
   the photo editor, and AI edits (Edit / Extend with AI, and their images saved later from the Astria.ai
   Browser) all get the original photo's tags.
 - **Backed up.** The tags are part of the app's metadata backups (Drive Health ▸ Back Up Metadata Now,
   and the automatic ones), which now sync with the drive first so tags added here are in them. Safe
   Finder also keeps a copy of each drive's tag file (and the Mac's) from before the first change of each
-  day in `~/Library/Application Support/Safe Finder/Tag Backups/` — the last 14.
+  day in `~/Library/Application Support/Photo Browser for Mac/Tag Backups/` — the last 14.
 
 **How they stay in step.** The tags of the files on a drive are saved *on the drive*, in the hidden
 `.Photo Browser Metadata/shared-tags.json` (the folder the app keeps its metadata backups in), by each
-file's path inside the drive. The drive is with one device at a time: Safe Finder edits that file
+file's path inside the drive. The drive is with one device at a time: Photo Browser for Mac edits that file
 directly, and the app merges it with its own tags whenever it opens the drive, gets it back, or
 returns to the foreground — and writes its own changes back a couple of seconds after each one (and
 on the way to the background). The merge is three-way: a tag added or removed on one side wins over
 one left alone, and additions from both sides are all kept. If the file is ever lost or damaged
-nothing is wiped — the app fills it back in. Drive Health ▸ Sync Tags with Safe Finder syncs on
+nothing is wiped — the app fills it back in. Drive Health ▸ Sync Tags with Photo Browser for Mac syncs on
 demand and shows when it last did. (Tags are only shared for files on the drive the app has open.)
 Each file also carries its own tags (see "Tags stick to the file" above), which is how they survive a
 move or copy that neither app saw.
@@ -727,8 +733,8 @@ They are the iPhone app's Favorites and To AI, both ways: they're kept in the dr
 (`.Photo Browser Metadata/shared-tags.json`, beside the tags, under `labels`), and the app merges that with its
 own whenever it opens the drive, comes back to the foreground, or a label or tag changes — a heart added or taken
 off on either side reaches the other, as tags do. Like the app's, they stay with the original when an item is
-copied, follow it when Safe Finder moves it to the SSD, and go when it's moved to the Trash. Items on the Mac's
-own disk keep theirs in Safe Finder's own file. A file moved by Finder (not Safe Finder) leaves its labels behind.
+copied, follow it when Photo Browser for Mac moves it to the SSD, and go when it's moved to the Trash. Items on the Mac's
+own disk keep theirs in Photo Browser for Mac's own file. A file moved by Finder (not Photo Browser for Mac) leaves its labels behind.
 
 ### Crop photos — one crop on many (`crop_window.py`, `batch_crop.py`)
 
@@ -750,7 +756,7 @@ listed at the end.
 
 Select photos, right-click ▸ **AI Upscale 2×…** (or **AI Upscale N Photos 2×…**). Each photo is upscaled
 by **Real-ESRGAN** — a real super-resolution neural network, not a resize — running on your Mac's graphics
-chip; nothing is uploaded. Safe Finder asks first, with three choices (each remembered for next time):
+chip; nothing is uploaded. Photo Browser for Mac asks first, with three choices (each remembered for next time):
 
 - **Model** — the photo models beside the engine, each with a note on what it's like. They differ a lot:
   Upscayl Standard is clean and smooth; Remacri and High Fidelity keep more natural texture; UltraSharp is
@@ -777,12 +783,12 @@ handing it over about as slow as the network itself) and is decoded straight at 
 more memory use bigger tiles than the engine picks on its own (fewer, larger GPU jobs — if that ever fails
 or comes out black, the photo is done again at the engine's size and the rest follow); and with 16 GB or
 more, two photos are upscaled at once, so the GPU works on one while the other is read or saved.
-`SAFE_FINDER_UPSCALE_TILE=200` (or `0` for the engine's own pick) overrides the tile size.
+`PHOTO_BROWSER_UPSCALE_TILE=200` (or `0` for the engine's own pick) overrides the tile size.
 
 Real-ESRGAN isn't part of macOS. The easy way to get it is the free **Upscayl** app
-([upscayl.org](https://upscayl.org), or `brew install --cask upscayl`): install it and Safe Finder finds
+([upscayl.org](https://upscayl.org), or `brew install --cask upscayl`): install it and Photo Browser for Mac finds
 its engine and models on its own. A `realesrgan-ncnn-vulkan` release works too — unzip it into
-`~/Library/Application Support/Safe Finder/Real-ESRGAN` — or point Safe Finder at either with **Choose
+`~/Library/Application Support/Photo Browser for Mac/Real-ESRGAN` — or point Photo Browser for Mac at either with **Choose
 Engine…** the first time (remembered). The best general-photo model found is used (Upscayl's standard
 model, else `realesrgan-x4plus`; anime and digital-art models are passed over). The models are 4×: the
 network upscales 4× and the result is brought to exactly 2× with Lanczos. GIFs and RAW files can't be
@@ -802,7 +808,7 @@ its format can hold (JPEG 65,500 px, WebP 16,383 px), isn't attempted, and the w
 ### Convert WebP to JPEG (`webp_window.py`, `webp_convert.py`)
 
 Right-click a folder (or its empty area) ▸ **Convert WebP Photos Inside / Here to JPEG…**, or select some `.webp`
-files ▸ **Convert to JPEG…** (also Photos ▸ Convert WebP to JPEG…). Safe Finder counts them, offers **Include
+files ▸ **Convert to JPEG…** (also Photos ▸ Convert WebP to JPEG…). Photo Browser for Mac counts them, offers **Include
 subfolders** and **Move the WebP originals to the Trash when their JPEG is saved** (both remembered), and makes
 each one a JPEG beside it:
 
@@ -836,7 +842,7 @@ The result shows as soon as a box is drawn. **Save as New** writes "name (retouc
 photo with the same metadata, dates and tags; **Replace** rewrites them in place. The results are tagged
 "retouched"; **Last Area** brings back the boxes used last. Photos where Just the Mark finds nothing in the
 boxes are left alone (and counted). It erases what you box; it doesn't look for watermarks on its own.
-(Needs numpy — `Safe Finder.command` installs it; rebuild the app with `build_safe_finder_app.sh`.)
+(Needs numpy — `Photo Browser for Mac.command` installs it; rebuild the app with `build_app.sh`.)
 
 ### Remove Watermark — your own watermark, off many pieces at once (`watermark_window.py`, `watermark.py`)
 
@@ -865,7 +871,7 @@ It needs a watermark of one colour (a white or black see-through mark; a drop sh
 four letters or more. A copy sitting on art as light as the ink (white on near-white) can't be read and is
 left. For a single opaque logo, use Remove Objects; for something boxed in the same spot on every photo,
 Erase Area. Each piece takes ten to thirty seconds. Check a few results with **Original** before replacing
-anything. The learned watermarks are kept in `~/Library/Application Support/Safe Finder/Watermarks`. (Needs
+anything. The learned watermarks are kept in `~/Library/Application Support/Photo Browser for Mac/Watermarks`. (Needs
 numpy, like Erase Area.)
 
 ### Remove Objects — draw round it and it's gone (`remove_window.py`, `inpaint.py`)
@@ -901,7 +907,7 @@ the lasso a little outside the object, with its shadow if it has one.
 Right-click a person's folder ▸ **Download Instagram Profile…** or **Download Facebook Profile…** (on a
 profile's own folder it says **Get New Instagram Posts** / **Get New Facebook Posts**). Type the handle (or
 paste the profile link) and press Download. The window holds a real browser: log in to Instagram or
-Facebook there once — it stays logged in — and if the site asks "is this you?", answer it there. Safe Finder
+Facebook there once — it stays logged in — and if the site asks "is this you?", answer it there. Photo Browser for Mac
 then reads the profile *from inside that logged-in browser*, exactly as the site's own pages do, so it sees
 what you see (private profiles you follow included), and never fills in a login or answers a check itself.
 
@@ -931,12 +937,12 @@ when ExifTool is installed), and lands in a folder for the profile inside the on
 (`<shortcode>.jpg`, `<shortcode>_2.mp4`, `FB_<id>.jpg`).
 
 **Nothing is downloaded twice, by either app.** The profile's folder keeps a hidden record
-(`.instagram.json` / `.facebook.json`) of every post downloaded into it — by Safe Finder *or* the iPhone,
+(`.instagram.json` / `.facebook.json`) of every post downloaded into it — by Photo Browser for Mac *or* the iPhone,
 which reads and writes the same file — and both apps also take the post ids in the folder's file names as
 done. A post you delete from the folder stays deleted. "Get New" reads newest first and stops once it
 reaches what's already there.
 
-Videos are put together and upscaled with AVFoundation — a small helper Safe Finder builds the first time
+Videos are put together and upscaled with AVFoundation — a small helper Photo Browser for Mac builds the first time
 (it needs Xcode's Command Line Tools: `xcode-select --install`), the iPhone app's own code — or with ffmpeg
 when that's installed instead (`brew install ffmpeg`). Neither: videos come in their one-file version, not
 upscaled (the log says so). The browser needs Qt WebEngine (part of PySide6, set up by `run.sh`).
@@ -952,7 +958,7 @@ in a login or answers a check itself.
 Then open what you want saved — a creator's page (type the handle and press **Open Creator**: app.fanfix.io/@name),
 **Home Feed** (everyone you subscribe to), **Purchases** (your Gallery of everything you've bought) or a chat in
 **Messages** — and press **Download from This Page**. The page loads afresh and scrolls itself to the end, in
-front of you, while Safe Finder reads what the page loads and shows (the same posts you see), and downloads
+front of you, while Photo Browser for Mac reads what the page loads and shows (the same posts you see), and downloads
 every photo and video you can open there **through that same browser** — your login and Cloudflare's OK go with
 it, the way browser-extension downloaders do it:
 
@@ -970,10 +976,10 @@ creator's folder.
 
 **What Fanfix won't let anyone save.** Fanfix delivers what you've *bought* — pay-per-view messages and sets,
 photos as well as videos — only as DRM-protected streams (FairPlay/Widevine); there's no plain file for them.
-Safe Finder doesn't break DRM, so it counts those ("N bought photos/videos … protected by DRM") and leaves them on
+Photo Browser for Mac doesn't break DRM, so it counts those ("N bought photos/videos … protected by DRM") and leaves them on
 Fanfix. Free messages and posts come down as their full-size originals.
 
-**Profile pictures from the earlier version.** It mistook creators' avatars for posts. After a run, Safe Finder
+**Profile pictures from the earlier version.** It mistook creators' avatars for posts. After a run, Photo Browser for Mac
 lists any such files it recorded as downloads and offers to move them (and any folder made only for them) to the
 Trash; nothing else is touched.
 
@@ -981,7 +987,7 @@ The creator's folder keeps a hidden record (`.fanfix.json`) of everything downlo
 Posts** takes only what's new, and a file you delete stays deleted. Your Fanfix login never leaves that browser
 (and Fanfix's own servers). If something you can see on a page isn't downloaded, press **Save Troubleshooting
 File** — it writes the last run (what the page loaded and showed, what was found, what failed and why) to
-`~/Library/Logs/Safe Finder`, on this Mac only — and send it over. Streams need yt-dlp (`run.sh` installs it) or
+`~/Library/Logs/Photo Browser for Mac`, on this Mac only — and send it over. Streams need yt-dlp (`run.sh` installs it) or
 ffmpeg.
 
 ### Download a TikTok profile (`tiktok_downloader.py`, `tiktok.py`)
@@ -1036,7 +1042,7 @@ login; only the public handle goes out.
 
 **Nothing is lost by a rename.** Tags, Favorites and To AI move to the new name at once. Everything the
 iPhone app keeps itself — captions, covers, birthdays, hidden items, a download folder's link to its
-profile — follows too: Safe Finder notes each rename on the drive, and the app applies them the next time
+profile — follows too: Photo Browser for Mac notes each rename on the drive, and the app applies them the next time
 it opens the drive.
 
 ### Upscale Video — 1080p or 4K (`video_upscale_window.py`, `video_tools.py`)
@@ -1065,7 +1071,7 @@ proves it.
    - **Stop**, a pulled cable or a sleeping Mac lose nothing: press Clone again and it carries on.
      Nothing of yours on the new drive is ever overwritten.
 4. When it finishes the two drives are compared and a report is shown (and saved in
-   `~/Library/Logs/Safe Finder/`). **"0 problems"** means everything is there. Tick *read every byte of both
+   `~/Library/Logs/Photo Browser for Mac/`). **"0 problems"** means everything is there. Tick *read every byte of both
    drives again* for the surest check (it takes about as long as the copy); if it ever finds a file that
    differs, **Copy … Different Files Again** fixes it.
    The report also names anything that's only on the new drive (things added there since).
@@ -1081,7 +1087,7 @@ proves it.
 
 **Check Files — is everything on the drive still what was written?** An SSD's file system (APFS) doesn't
 notice when the contents of a file go bad; the file just reads back wrong. So the clone keeps a checksum of
-every file it writes, on the new drive itself (a hidden `.Safe Finder Checksums` folder). Any time later,
+every file it writes, on the new drive itself (a hidden `.Photo Browser Checksums` folder). Any time later,
 choose the drive as the *new drive* and press **Check Files**: every file is read again and compared. A
 file that has the same size and date as when it was written but different contents is listed as
 **DAMAGED** — put that one back from another copy. Files you've edited since (a different size or date)
@@ -1123,7 +1129,7 @@ and none of 1,657"**, and every album everywhere shows its Here count. From ther
 The site's album and photo lists are kept in `~/Library/Caches/PhotoBrowser/taylor/` (`site.json`, and the
 comparison per folder), so later opens show the totals at once.
 
-**What you already have.** Safe Finder looks through the Taylor Swift folder when the window opens — every
+**What you already have.** Photo Browser for Mac looks through the Taylor Swift folder when the window opens — every
 photo's name at once, then its picture (a quick fingerprint, kept between launches) — and marks:
 - in the album list, **✓ All here**, "87 of 120", "Folder here", or nothing yet. **Check Albums Here** reads
   every album of the section and fills the column in (by name, so it's quick);
@@ -1144,7 +1150,7 @@ Both apps keep `Taylor Swift/.taylorpictures.json` — the albums downloaded int
 downloaded on the iPhone shows as downloaded here, and the other way round. Pages are only read; nothing
 is sent to the site.
 
-**Connecting.** Safe Finder makes the iPhone app's request (its browser agent, Accept and language headers),
+**Connecting.** Photo Browser for Mac makes the iPhone app's request (its browser agent, Accept and language headers),
 and reads a page whatever status the site sends it with, as the iPhone does. If Python's own networking can't
 get through — a certificate chain macOS would complete but Python won't, a dropped connection — the same
 request goes through the Mac's own networking (URLSession, what the iPhone uses; the video helper, built once
@@ -1175,20 +1181,20 @@ model and the models' tune ids).
   see it full size (←/→ then goes through the whole batch). A photo Astria couldn't do says why and has
   **Try Again** — the others aren't sent again. "How many" is per photo (5 photos × 2 = 10 images; over 20
   images it asks first). Closing while some are still with Astria is fine: they're saved to their folders when
-  they arrive, the next time Safe Finder's AI is used.
+  they arrive, the next time Photo Browser for Mac's AI is used.
 - **Create with AI** — right-click a folder (or its empty space): the same, from a prompt alone.
 - **Generate** opens the job's window: it shows what Astria's doing ("2 of 4 ready…"), then the results.
   Click one to leave it out, double-click to see it full size in the viewer, then **Save** — an edit's
   results go into an "AI" folder beside the photo as "<name> AI.jpg" with the photo's date, place and tags,
   a creation's into the folder's "AI" folder; the model and prompt are written into each file. Closing with
   results unsaved asks first. **Run Again** opens the form as it was. If you quit while Astria is still
-  working, the images are saved to the folder the next time you use Safe Finder's AI (within two hours).
+  working, the images are saved to the folder the next time you use Photo Browser for Mac's AI (within two hours).
 - **Astria.ai Browser…** — see the next section.
 
 ### The Astria.ai Browser (`astria_browser.py`)
 
 Right-click a folder ▸ AI ▸ **Astria.ai Browser…** (or Photos ▸ Astria.ai Browser…): everything your Astria
-account has made — from Safe Finder, the iPhone app, or Astria's own site — newest first.
+account has made — from Photo Browser for Mac, the iPhone app, or Astria's own site — newest first.
 
 - **Looking.** Each prompt has a heading (its model, date, how many pictures, how many you've downloaded) with
   the prompt under it and its pictures in a tight grid. **All Pictures** (top right) drops the headings for one
@@ -1203,11 +1209,11 @@ account has made — from Safe Finder, the iPhone app, or Astria's own site — 
   tile's corner ticks it without touching the rest; a heading's **Select All**; ⌘A for everything shown.
 - **Viewing.** Double-click (or Space): the picture as large as the window, ← → through everything shown,
   with its model, date, size and whole prompt beside it — Download, Copy Prompt, **Use Prompt in Create with
-  AI…** (the prompt and model filled in), Copy Image, Show in Safe Finder.
+  AI…** (the prompt and model filled in), Copy Image, Show in Photo Browser.
 - **Downloading.** **Download N Selected**, or with nothing selected **Download All N New** (everything shown
   that you don't have yet; more than 50 asks first). Four come down at a time with a progress bar and Stop;
   any that fail are counted and **Retry** fetches just those. Right-click a picture for the same on it alone.
-- **Where to.** The **Download to:** button — *This Folder* (whatever folder Safe Finder is showing, so it
+- **Where to.** The **Download to:** button — *This Folder* (whatever folder Photo Browser for Mac is showing, so it
   follows you), *Its AI Folder*, one of the last few folders you chose, or **Choose Folder…**. The choice is
   remembered.
 - **What you get.** The file exactly as Astria made it — nothing re-compressed, in its own format, with all of
@@ -1215,14 +1221,14 @@ account has made — from Safe Finder, the iPhone app, or Astria's own site — 
   description/caption, and in the app's "AI-generated · Prompt: …" comment), the model, the date it was made,
   and the standard "made by AI" label. The file's date is when it was made. With ExifTool installed every
   format is handled; without it JPEG and PNG still are (the rest are kept as they came, and it says so).
-  Every download gets the **AI** tag — in Safe Finder's Tags and, through the drive, on the iPhone.
+  Every download gets the **AI** tag — in Photo Browser for Mac's Tags and, through the drive, on the iPhone.
 
 It only reads from Astria: nothing is uploaded and nothing on your account is changed.
 
 ### AI models — a person, pet, object or style from your photos (`ai_models_window.py`, `ai_models.py`, `local_ai.py`)
 
 Select 5 or more photos and right-click ▸ **Make AI Model from N Photos…** (or right-click a folder ▸ AI ▸
-**Make AI Model from Photos Inside…**; up to 500 are looked at). Safe Finder keeps the sharpest, most varied
+**Make AI Model from Photos Inside…**; up to 500 are looked at). Photo Browser for Mac keeps the sharpest, most varied
 ones — about 30 for a person, pet or object, up to 100 for a style — and leaves out blurred shots, tiny ones
 and near-copies; it tells you how many of each. Give it a name and say what it is ("woman", "golden
 retriever", "ceramic mug"). For a person, tick that it's you or someone who has agreed. Your photos aren't
@@ -1330,15 +1336,15 @@ on from the page it reached.
 ### Install it as a Mac app
 
 ```sh
-sh mac/build_safe_finder_app.sh                    # → /Applications/Safe Finder.app (or ~/Applications)
+sh mac/build_app.sh                    # → /Applications/Photo Browser for Mac.app (or ~/Applications)
 ```
 
-Builds `Safe Finder.app` with [PyInstaller](https://pyinstaller.org) (installed into `mac/.venv`),
+Builds `Photo Browser for Mac.app` with [PyInstaller](https://pyinstaller.org) (installed into `mac/.venv`),
 with its own icon, and copies it to `/Applications`, so it opens from Launchpad, Spotlight or the
 Dock like any app. The first time it opens, macOS asks whether it may use Desktop, Documents,
 Downloads and external drives — say yes (System Settings ▸ Privacy & Security ▸ Files and Folders
 later). The app is a snapshot of the code: run the script again after every `git pull`. It keeps
-the same settings, staging folder and journal as `Safe Finder.command`, and carries the drive
+the same settings, staging folder and journal as `Photo Browser for Mac.command`, and carries the drive
 tools (`relocate_folders.py`, `exfat_inspect.py`, `spare_folders.py`) inside, so the "make spare
 folders" command it shows works even without this folder. `--no-install` just builds into
 `mac/dist/`.
@@ -1418,10 +1424,10 @@ macOS tolerates. Export the list with Drive Health's Share button, then:
    it. Run it again after adding folders: nearly all the free space is past the line.
 
    **Spare folders keep new folders below the line.** `--spares 100` keeps 100 ready-made empty
-   folders in a hidden `.Spare Folders` folder with their lists below the line. Safe Finder and the
+   folders in a hidden `.Spare Folders` folder with their lists below the line. Photo Browser for Mac and the
    iPhone app make every new folder by renaming one of those into place, so new folders open on the
    iPhone straight away. Top them up now and then (Drive Health ▸ New folders shows how many are left;
-   Safe Finder warns before a transfer that needs more than there are):
+   Photo Browser for Mac warns before a transfer that needs more than there are):
 
    ```sh
    sudo python3 mac/relocate_folders.py "/Volumes/<SSD name>" --apply --spares 100
@@ -1474,27 +1480,49 @@ python3 mac/rebuild_exfat_folders.py /Volumes/SSD --since 7 --apply         # ev
 
 Eject the SSD in Finder before unplugging it.
 
-## Requirements
+## The bulk editor (`bulk_editor/`) — the earlier, smaller app
+
+The first Mac companion to the iOS app (it was the one called "Photo Browser for Mac" until November 2026;
+the app above does all of this now — Edit Metadata…, Rename N Items… — and this one is kept as it was). Connect the
+SSD that holds your library, browse it with the same dark, square-tile look, and bulk-edit what
+the phone can't comfortably do at scale:
+
+- **EXIF & captions** — caption/description, title, keywords, creator, copyright, rating, camera
+  make/model/lens, software, GPS. Captions are written with the MWG composite tags so EXIF
+  `ImageDescription`, IPTC `Caption-Abstract` and XMP `dc:description` stay in sync (the iOS app,
+  Photos and Lightroom all read the same value).
+- **Dates** — set an exact capture date (stepping N seconds per file so order survives), shift a
+  whole selection by ±days/hours/minutes (camera clock / time-zone fixes), or read the date out of
+  the filename with a `strptime` pattern. Optionally the file's created/modified dates follow.
+- **Filenames** — pattern rename with tokens (`{name} {n} {n:3} {date} {date:%Y%m%d} {folder} {ext}`),
+  find & replace (plain or regex), prefix/suffix. Conflicts are flagged and never applied.
+
+Every bulk editor previews each change in a table before anything is written. Single files are
+edited inline in the right-hand inspector (filename, capture date, every field) with one Save.
+
+Works on JPEG, HEIC, PNG, TIFF, RAW (DNG/CR2/CR3/NEF/ARW…) and MOV/MP4 video.
+
+### Requirements
 
 - macOS 12+ (it also runs on Linux for development)
 - Python 3.10+
 - **ExifTool** — `brew install exiftool`. Browsing works without it; reading/writing metadata needs it.
 
-## Run
+### Run
 
 ```sh
 cd mac
-./run.sh            # creates .venv, installs PySide6 / Pillow / pillow-heif, launches
+./run.sh --bulk-editor   # creates .venv, installs PySide6 / Pillow / pillow-heif, launches
 ```
 
 or manually:
 
 ```sh
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m photobrowser_mac
+.venv/bin/python -m bulk_editor
 ```
 
-## Using it
+### Using it
 
 1. Pick the drive in the top-left menu (everything under `/Volumes`), or **Folder…** for any folder.
    The last drive reopens on launch.
@@ -1512,10 +1540,10 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 Thumbnails are cached in `~/Library/Caches/PhotoBrowserMac/thumbs` (keyed by path + mtime + size,
 like the iOS app, so an edited file regenerates). Video thumbnails use macOS QuickLook.
 
-## Layout
+### Layout
 
 ```
-photobrowser_mac/
+bulk_editor/
   app.py            window, menus, every write path (runs on a worker thread)
   theme.py          the stylesheet (iOS palette: navy→black gradient, translucent panels)
   library.py        volumes, folder scanning, Entry

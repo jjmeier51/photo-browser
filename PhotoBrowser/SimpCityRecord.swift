@@ -559,7 +559,7 @@ nonisolated enum SimpCity {
             threads.max { num($0.value["checked"]) < num($1.value["checked"]) }?.key
         }
 
-        /// Writes the record, merged with whatever is on the drive now (Safe Finder may have added to it).
+        /// Writes the record, merged with whatever is on the drive now (Photo Browser for Mac may have added to it).
         mutating func save() throws {
             merge(read())
             let doc: [String: Any] = ["format": SimpCity.format, "version": 1,

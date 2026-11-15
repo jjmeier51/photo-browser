@@ -1,6 +1,6 @@
 import Foundation
 
-/// Folder covers shared with Safe Finder — a cover chosen on the Mac is the folder's cover here,
+/// Folder covers shared with Photo Browser for Mac — a cover chosen on the Mac is the folder's cover here,
 /// and the other way round.
 ///
 /// Here a cover is an image in the app's own `folderCovers` directory, named in
@@ -12,7 +12,7 @@ import Foundation
 ///     {"format": "photobrowser-folder-covers", "version": 1,
 ///      "covers": {"<folder, drive-relative>": {"file": "<name in covers/>", "at": stamp}}}
 ///
-/// Safe Finder reads and writes the same file (`mac/folder_covers.py`).
+/// Photo Browser for Mac reads and writes the same file (`mac/folder_covers.py`).
 ///
 /// `at` is when the cover was chosen (Unix time); **the later choice wins**. Two special values:
 /// `"file": ""` means the cover was *removed* then (so the other side doesn't put its older one
@@ -143,14 +143,14 @@ nonisolated enum FolderCovers {
 
 extension Library {
     /// Notes that `folder`'s cover was just chosen (rather than picked automatically), so it wins
-    /// over an older choice made in Safe Finder — and goes to the drive shortly.
+    /// over an older choice made in Photo Browser for Mac — and goes to the drive shortly.
     func noteCoverChosen(for folder: URL) {
         coverStamps[folder.path] = Date().timeIntervalSince1970
         FilePrefs.shared.set(coverStamps, forKey: FolderCovers.stampsKey)
         scheduleTagSync(after: 1)          // `syncDriveTags` runs `syncFolderCovers`
     }
 
-    /// One merge with the drive's `folder-covers.json`: covers chosen in Safe Finder come in,
+    /// One merge with the drive's `folder-covers.json`: covers chosen in Photo Browser for Mac come in,
     /// covers set here go out.
     func syncFolderCovers() async {
         guard let root = rootURL, !waitingForDrive, !pureTransferMode else { return }
@@ -185,7 +185,7 @@ extension Library {
             let key = stored[rel] ?? (rel.isEmpty ? rootPath : rootPath + "/" + rel)
             let had = covers[key]
             if choice.file.isEmpty {
-                // Removed in Safe Finder. Only a cover *chosen* here goes; an automatic one is what
+                // Removed in Photo Browser for Mac. Only a cover *chosen* here goes; an automatic one is what
                 // "no cover" looks like in this app, and stays.
                 guard let had, (stamps[key] ?? 0) > 0 else { continue }
                 covers[key] = nil

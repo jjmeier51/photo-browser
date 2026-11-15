@@ -1,4 +1,4 @@
-"""Safe Finder ▸ "Download Passes…" / "Import Passes ZIP…"
+"""Photo Browser for Mac ▸ "Download Passes…" / "Import Passes ZIP…"
 
     python3 mac/passes_downloader.py <folder> [creator-username]
 
@@ -10,7 +10,7 @@ ZIP from Passes Settings into the same layout.
 Auth: the user signs in to passes.com in the window's embedded browser (a
 persistent QWebEngineProfile).  After the /auth/success navigation the page's
 `refresh-token` localStorage key is read and stored in the Mac's Keychain
-(service "Safe Finder Passes", account "refresh-token").  It is re-used on
+(service "Photo Browser for Mac Passes", account "refresh-token").  It is re-used on
 every subsequent run and exchanged for a short-lived access token each time.
 
 Clean variants are the DASH manifests, so any item carrying one goes through
@@ -50,6 +50,7 @@ import passes                                                                   
 import passes_decrypt                                                             # noqa: E402
 import simpcity as sc                                                             # noqa: E402
 import social                                                                     # noqa: E402
+import app_identity
 
 LANES      = 4       # parallel download threads
 SAVE_EVERY = 20      # flush record + tags after this many settled files
@@ -73,7 +74,7 @@ class _Bridge(QObject):
 class PassesWindow(QMainWindow):
     """Download / import window for Passes purchased content."""
 
-    finished = Signal(str, list)   # (folder, files-written) — Safe Finder refreshes + tags
+    finished = Signal(str, list)   # (folder, files-written) — Photo Browser for Mac refreshes + tags
 
     def __init__(self, folder: str, start: str = "", tags=None, parent=None) -> None:
         super().__init__(parent)
@@ -83,7 +84,7 @@ class PassesWindow(QMainWindow):
         self.stopping = False
         self.bridge   = _Bridge()
         self.bridge.call.connect(lambda cb, v: cb(v))
-        self.settings  = QSettings("PhotoBrowser", "SafeFinder")
+        self.settings  = app_identity.settings()
         self.exiftool  = sc.find_exiftool()
         self._refresh_token: str = passes.get_refresh_token()
         self._access_token:  str = ""
@@ -646,7 +647,7 @@ def _import_zip(zip_path: str, dest: Path,
     return written, skipped
 
 
-# ── label helper (used by safe_finder.py) ────────────────────────────────────
+# ── label helper (used by photo_browser.py) ────────────────────────────────────
 
 def passes_label(folder: str) -> str:
     return ("Get New Passes Posts"

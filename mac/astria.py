@@ -1,4 +1,4 @@
-"""Astria (astria.ai) for Safe Finder — the iPhone app's cloud AI client (`AIExtend.swift`) on the Mac:
+"""Astria (astria.ai) for Photo Browser for Mac — the iPhone app's cloud AI client (`AIExtend.swift`) on the Mac:
 **Edit with AI** (a photo + a prompt → new versions of it), **Create with AI** (a prompt → new images) and
 the **Astria.ai Browser** (every past generation on the account). Opt-in and key-gated: with no API key
 nothing here touches the network. Nothing is uploaded but what the person sends: the photo being edited and
@@ -26,12 +26,12 @@ The requests are the iPhone's, field for field (feature-notes §1), so the two a
   EXIF and GPS, its capture date, upright, and the model and prompt in the EXIF (Software, UserComment);
   a creation into the folder's "AI" folder (the browser: straight into the chosen folder), named from the
   prompt. Written the drive's way (exFAT: in place, no rename) and never over a file.
-- **A job cut short** (Safe Finder quit mid-generation) is noted the moment Astria accepts it, and finished
-  the next time Safe Finder's AI is used (within 2 hours, at most 4 tries): its images go to its folder.
+- **A job cut short** (Photo Browser for Mac quit mid-generation) is noted the moment Astria accepts it, and finished
+  the next time Photo Browser for Mac's AI is used (within 2 hours, at most 4 tries): its images go to its folder.
 
-The API key lives in the Mac's Keychain (`security`, service "Safe Finder Astria"); everything else —
+The API key lives in the Mac's Keychain (`security`, service "Photo Browser for Mac Astria"); everything else —
 model overrides, last settings, prompt history with hearts, reference tunes, saved images, unfinished
-jobs — in `~/Library/Application Support/Safe Finder/astria.json`.
+jobs — in `~/Library/Application Support/Photo Browser for Mac/astria.json`.
 
 All of it runs on worker threads; nothing touches Qt.
 """
@@ -52,13 +52,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+import app_identity
 
 BASE = "https://api.astria.ai"
-UA = "PhotoBrowser/1.0 (macOS; Safe Finder Astria client)"
-SUPPORT = Path.home() / "Library" / "Application Support" / "Safe Finder"
+UA = "PhotoBrowser/1.0 (macOS; Photo Browser for Mac Astria client)"
+SUPPORT = app_identity.support()
 THUMB_CACHE = Path.home() / "Library" / "Caches" / "PhotoBrowser" / "astria"
-KEYCHAIN_SERVICE = "Safe Finder Astria"
-LOGS = Path.home() / "Library" / "Logs" / "Safe Finder"
+KEYCHAIN_SERVICE, OLD_KEYCHAIN_SERVICE = app_identity.keychain_services("Astria")
+LOGS = app_identity.logs()
 DEFAULT_FLUX_TUNE = 1504944
 MAX_TUNES = 10
 REFERENCE_TITLE = "Photo Browser reference · "
@@ -112,11 +113,11 @@ class AIError(Exception):
     def describe(self) -> str:
         return {"not_configured": "Astria isn't set up yet — add your API key.",
                 "bad_image": "The photo couldn't be read.",
-                "network": "Couldn't reach Astria. If a generation was started it may still finish — Safe Finder "
+                "network": "Couldn't reach Astria. If a generation was started it may still finish — Photo Browser for Mac "
                            "will pick it up next time, and it's in the Astria.ai Browser.",
                 "bad_result": "Astria answered with something unexpected.",
                 "timed_out": "Astria is still working on it. The images will be saved to the folder when they're "
-                             "ready (next time Safe Finder's AI is used), and they're in the Astria.ai Browser.",
+                             "ready (next time Photo Browser for Mac's AI is used), and they're in the Astria.ai Browser.",
                 }.get(self.kind, self.message or "Astria refused the request.")
 
 
@@ -171,18 +172,29 @@ def store() -> Store:
     return _STORE
 
 
+def _keychain(*args: str) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(["security", *args], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def get_key() -> str:
     env = os.environ.get("ASTRIA_API_KEY", "").strip()
     if env:
         return env
     if sys.platform == "darwin":
-        try:
-            r = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", "api-key", "-w"],
-                               capture_output=True, text=True, timeout=10)
-            if r.returncode == 0:
-                return r.stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            pass
+        r = _keychain("find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", "api-key", "-w")
+        if r is not None and r.returncode == 0:
+            return r.stdout.strip()
+        # Saved before the app's rename: read from where it is, and kept under the new name from now on.
+        r = _keychain("find-generic-password", "-s", OLD_KEYCHAIN_SERVICE, "-a", "api-key", "-w")
+        if r is not None and r.returncode == 0 and r.stdout.strip():
+            key = r.stdout.strip()
+            moved = _keychain("add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", "api-key", "-w", key)
+            if moved is not None and moved.returncode == 0:
+                _keychain("delete-generic-password", "-s", OLD_KEYCHAIN_SERVICE, "-a", "api-key")
+            return key
     return str(store().get("api_key_fallback", "") or "")
 
 
@@ -190,17 +202,13 @@ def set_key(key: str) -> str:
     """Stores the key (the Keychain on a Mac). Returns where it went."""
     key = key.strip()
     if sys.platform == "darwin":
-        try:
-            if not key:
-                subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", "api-key"],
-                               capture_output=True, timeout=10)
-                return "keychain"
-            r = subprocess.run(["security", "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", "api-key",
-                                "-w", key], capture_output=True, timeout=10)
-            if r.returncode == 0:
-                return "keychain"
-        except (OSError, subprocess.SubprocessError):
-            pass
+        _keychain("delete-generic-password", "-s", OLD_KEYCHAIN_SERVICE, "-a", "api-key")   # never two of them
+        if not key:
+            _keychain("delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", "api-key")
+            return "keychain"
+        r = _keychain("add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", "api-key", "-w", key)
+        if r is not None and r.returncode == 0:
+            return "keychain"
     store().set("api_key_fallback", key)                # not a Mac (or no Keychain): a private file
     try:
         os.chmod(store().path, 0o600)
@@ -1067,7 +1075,7 @@ def save_created(result: bytes, folder: str, model: str = "", prompt: str = "", 
 # ----------------------------------------------------------------------------- downloads from the browser
 #
 # A picture taken down from the Astria.ai Browser is kept **exactly as Astria made it** — the same bytes, in its
-# own format, with whatever EXIF, XMP and colour profile it came with — and what Safe Finder knows about it is
+# own format, with whatever EXIF, XMP and colour profile it came with — and what Photo Browser for Mac knows about it is
 # *added* to its metadata in place: the prompt (as the caption every app shows, and in the app's own "AI-generated
 # · Prompt: …" comment), the model, the date it was made and the IPTC label that says a picture is AI-made.
 # Nothing already in the file is replaced: each field is written only where the file has none.

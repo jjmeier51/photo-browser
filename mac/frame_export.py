@@ -1,4 +1,4 @@
-"""Save Frame and Export All Frames for Safe Finder — the iPhone app's camera button (its press-and-hold
+"""Save Frame and Export All Frames for Photo Browser for Mac — the iPhone app's camera button (its press-and-hold
 standard-range PNG) and its Export All Frames (`ExportFramesSheet`, `FileActions.exportAllFrames`,
 `BulkFrameExportView`), with the same names and the same choices.
 
@@ -40,6 +40,7 @@ from typing import Callable
 import media_info
 import simpcity as sc
 import video_tools
+import app_identity
 
 FPS_CHOICES = (("Every frame", 1), ("Half", 2), ("Quarter", 4))
 
@@ -169,7 +170,7 @@ def save_frame(video: str, seconds: float) -> str | None:
     notes). Returns the file, or None. Runs on a worker thread."""
     folder = usable_folder(Path(video).parent, "Screenshots")
     name = f"Screenshot {datetime.now():%Y-%m-%d at %H.%M.%S}.png"
-    tmp = Path(tempfile.mkdtemp(prefix="safe-finder-frame-"))
+    tmp = Path(tempfile.mkdtemp(prefix="photo-browser-frame-"))
     out = tmp / name
     try:
         helper = video_tools.helper()
@@ -361,7 +362,7 @@ def FramesWindow(videos: list[str], parent=None, on_done: Callable[[list[str]], 
             super().__init__(parent, Qt.WindowType.Window)
             self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             self.videos = list(videos)
-            self.settings = QSettings("PhotoBrowser", "SafeFinder")
+            self.settings = app_identity.settings()
             self.stop = threading.Event()
             self.running = False
             self.folders: list[str] = []

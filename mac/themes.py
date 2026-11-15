@@ -1,14 +1,14 @@
-"""Safe Finder's looks — the iPhone app's themes (`AppTheme.swift`: Everyday, Halloween, Thanksgiving, Christmas
+"""Photo Browser for Mac's looks — the iPhone app's themes (`AppTheme.swift`: Everyday, Halloween, Thanksgiving, Christmas
 and Holiday sets, or a custom background, accent colour, typeface and light/dark chrome), plus "Match macOS", the
 Finder look that follows the Mac's light or dark appearance.
 
 A `Look` is what's chosen: the background behind the files (one colour, or a gradient of two or three), the
 accent (selection, buttons, the active chips), the typeface, and whether the chrome is light. Everything else on
 screen — sidebar, headers, borders, buttons — is worked out from those (`derive`), so any background reads as one
-window rather than a wallpaper behind grey panels. `safe_finder.Theme` turns the result into its stylesheet and
+window rather than a wallpaper behind grey panels. `photo_browser.Theme` turns the result into its stylesheet and
 palette; `theme_window.py` is the chooser.
 
-Kept in Safe Finder's settings as JSON (`theme`); empty = Match macOS. The preset names and colours are the
+Kept in Photo Browser for Mac's settings as JSON (`theme`); empty = Match macOS. The preset names and colours are the
 iPhone app's — keep the two lists in step.
 
 Two things are the Mac's own: **My Themes** (custom looks saved under a name — `looks_from_json`, `with_saved`;

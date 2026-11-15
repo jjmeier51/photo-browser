@@ -2569,7 +2569,7 @@ struct FolderView: View {
                         }
                     }
                     // This folder's own: its videos ahead of its photos (remembered for the folder, and
-                    // shared with Safe Finder — `FolderOptions`).
+                    // shared with Photo Browser for Mac — `FolderOptions`).
                     Divider()
                     Button { library.setVideosAtTop(!library.videosAtTop(in: url), in: url) } label: {
                         check("Videos at the Top", library.videosAtTop(in: url))

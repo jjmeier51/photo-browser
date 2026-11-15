@@ -1,4 +1,4 @@
-"""AI upscaling for Safe Finder: 2× with Real-ESRGAN, the open-source super-resolution network, run on the
+"""AI upscaling for Photo Browser for Mac: 2× with Real-ESRGAN, the open-source super-resolution network, run on the
 Mac's own GPU (Vulkan, through MoltenVK). Nothing is uploaded — the photo goes to a temporary file on the
 Mac, the engine writes its result beside it, and the photo is rewritten in place.
 
@@ -6,9 +6,9 @@ Real-ESRGAN isn't part of macOS, so the engine comes from one of:
   - the free Upscayl app (upscayl.org, or `brew install --cask upscayl`), which bundles it (`upscayl-bin`,
     a build of realesrgan-ncnn-vulkan) with photo models — looked for inside the app wherever it keeps
     them, in /Applications or ~/Applications;
-  - a realesrgan-ncnn-vulkan release unzipped into ~/Library/Application Support/Safe Finder/Real-ESRGAN
+  - a realesrgan-ncnn-vulkan release unzipped into ~/Library/Application Support/Photo Browser for Mac/Real-ESRGAN
     (its `models` folder beside it), or on the PATH;
-  - either of those picked by hand (Choose Engine… — an app or the engine itself), remembered by Safe Finder.
+  - either of those picked by hand (Choose Engine… — an app or the engine itself), remembered by Photo Browser for Mac.
 The models are 4× networks: the photo is upscaled 4× by the network and brought to exactly 2× with Lanczos
 — the usual way to get 2× out of them, and sharper than running the network on a halved photo. The best
 general-photo model found is used (`PREFERRED`); anime and digital-art models are passed over.
@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 import batch_crop
+import app_identity
 
 # Our own photos and the engine's own results, not files off the internet: room for the 4× pass of a large
 # tile and a 400 MP result (Pillow refuses at twice this).
@@ -95,7 +96,7 @@ APP_DIRS = [Path("/Applications"), Path.home() / "Applications"]
 NEW_LABEL = "upscaled"                       # a new photo is "name (upscaled).ext"
 READ_DONE, ENGINE_DONE = 0.04, 0.92          # of one photo: reading it, then the network's pass, then saving
 _PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
-SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "Safe Finder" / "Real-ESRGAN"
+SUPPORT_DIR = app_identity.support() / "Real-ESRGAN"
 
 
 class UpscaleError(Exception):
@@ -199,8 +200,8 @@ def engine_from(path: str, label: str | None = None) -> Engine | None:
 
 def find_engine(chosen: str | None = None) -> Engine | None:
     """The engine to use: the one picked by hand (`chosen`), else Upscayl's, else a Real-ESRGAN release in
-    Safe Finder's folder or on the PATH. SAFE_FINDER_UPSCALER names one outright (tests)."""
-    override = os.environ.get("SAFE_FINDER_UPSCALER")
+    Photo Browser for Mac's folder or on the PATH. PHOTO_BROWSER_UPSCALER names one outright (tests)."""
+    override = os.environ.get("PHOTO_BROWSER_UPSCALER")
     if override:
         return engine_from(override)
     if chosen:
@@ -249,8 +250,8 @@ def _memory_gb() -> float:
 def tile_size() -> int:
     """The tile the network works in. The engine picks at most 200 px however much memory there is; on a
     Mac's shared memory bigger tiles mean fewer, larger GPU jobs and less overlap computed twice. 0 = the
-    engine's own pick. SAFE_FINDER_UPSCALE_TILE overrides it."""
-    env = os.environ.get("SAFE_FINDER_UPSCALE_TILE")
+    engine's own pick. PHOTO_BROWSER_UPSCALE_TILE overrides it."""
+    env = os.environ.get("PHOTO_BROWSER_UPSCALE_TILE")
     if env is not None:
         return int(env)
     gb = _memory_gb()
@@ -306,7 +307,7 @@ def too_large(w: int, h: int, fmt: str, factor: int = FACTOR) -> str:
     if max(tw, th) > side:
         return f"it would be {tw:,}×{th:,} — wider than {fmt or 'its format'} can hold ({side:,} px)"
     if tw * th > MAX_RESULT_PIXELS:
-        return f"it would be {tw * th / 1e6:,.0f} MP — over the {MAX_RESULT_PIXELS // 1_000_000} MP Safe Finder makes"
+        return f"it would be {tw * th / 1e6:,.0f} MP — over the {MAX_RESULT_PIXELS // 1_000_000} MP Photo Browser for Mac makes"
     return ""
 
 
@@ -468,7 +469,7 @@ def upscale(engine: Engine, path: str, factor: int = FACTOR, *, as_new: bool = F
     alpha = mode in ("RGBA", "LA", "PA") or (mode == "P" and "transparency" in src.image.info)
     flat = src.image.convert("RGBA" if alpha else "RGB")
     fmt = "png" if alpha else "jpg"
-    with tempfile.TemporaryDirectory(prefix="safe-finder-upscale-") as td:
+    with tempfile.TemporaryDirectory(prefix="photo-browser-upscale-") as td:
         report("engine", READ_DONE)
         if large:
             big = _tiled(engine, flat, td, fmt, factor, texture, report, stop)

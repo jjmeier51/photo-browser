@@ -1,4 +1,4 @@
-"""Photo Browser tags, shared between the Mac (Safe Finder) and the Photo Browser app on the iPhone.
+"""Photo Browser tags, shared between the Mac (Photo Browser for Mac) and the Photo Browser app on the iPhone.
 
 Where they live
   On a drive: `<drive>/.Photo Browser Metadata/shared-tags.json` — the hidden folder the iPhone app
@@ -6,13 +6,13 @@ Where they live
   ("Trips/2024/IMG_0001.jpg"), so a file has the same key on the Mac (/Volumes/SSD/…) and on the
   iPhone (…/SSD/…). The drive is the folder the app browses; if the app's folder is one inside the
   drive, the nearest folder holding `.Photo Browser Metadata` is used instead.
-  On the Mac's own disk: ~/Library/Application Support/Safe Finder/tags.json, keyed by full path.
-  Those files aren't on the iPhone; their tags travel with them when Safe Finder moves or copies
+  On the Mac's own disk: ~/Library/Application Support/Photo Browser for Mac/tags.json, keyed by full path.
+  Those files aren't on the iPhone; their tags travel with them when Photo Browser for Mac moves or copies
   them onto a drive (`TagStore.carry`).
 
 How the two stay in step
   The drive is plugged into one device at a time, so each side simply works on the file while it has
-  the drive. Safe Finder edits the drive's file directly — while the drive is on the Mac it is the copy
+  the drive. Photo Browser for Mac edits the drive's file directly — while the drive is on the Mac it is the copy
   of record. The iPhone app keeps its own copy and, whenever the drive is connected, merges the two
   three ways against what they agreed on last time: a tag added or removed on either side wins over one
   left alone, and additions from both sides are kept (`Library.syncDriveTags`). The file's `id` tells
@@ -21,13 +21,13 @@ How the two stay in step
 
 Format (JSON, UTF-8):
   {"format": "Photo Browser shared tags", "version": 1, "id": "<uuid>", "updated": <epoch seconds>,
-   "by": "Safe Finder" | "Photo Browser", "files": {"<path in the drive>": ["tag", …], …},
+   "by": "Photo Browser for Mac" | "Photo Browser", "files": {"<path in the drive>": ["tag", …], …},
    "labels": {"<path in the drive>": ["favorite", "ai"], …}}
 
 Favorites and To AI ride in the same file, in `labels` (keys like `files`'): the iPhone app's Favorites and
 "To AI" labels, merged by the app three ways exactly as tags are (`SharedTags.sync`), so a heart added or taken
 off on either side reaches the other. They aren't tags — no tag list shows them — and, like the app's, they stay
-with the original when a file is copied, follow it when Safe Finder moves it (`carry_labels`), and go when it's
+with the original when a file is copied, follow it when Photo Browser for Mac moves it (`carry_labels`), and go when it's
 trashed (`forget`). They aren't carried inside files: a file moved by Finder leaves its labels behind, as it
 always has on the iPhone.
 A tag is stored as the app stores it (Library.normalizedTag: trimmed, no leading "#", inner spaces
@@ -37,7 +37,7 @@ never in it.
 Writing: on APFS through a temp file and a rename (atomic); on the exFAT SSD in place — the Mac tools
 never rename or fsync on exFAT (CLAUDE.md #12). A torn file reads as damaged, is started afresh (a new
 `id`) on the next change, and the app's merge fills it back in. Before the first change of a day the
-previous file is kept in ~/Library/Application Support/Safe Finder/Tag Backups/ (the last 14).
+previous file is kept in ~/Library/Application Support/Photo Browser for Mac/Tag Backups/ (the last 14).
 
 Tags that travel with the file
   (Folders carry tags of their own the same way — their path is a key like a file's, and they carry
@@ -45,7 +45,7 @@ Tags that travel with the file
   The tables are keyed by path, so on their own a file moved or copied by anything else — Finder, the
   Files app, `cp` — would leave its tags behind. So each file also *carries* its tags, in a private
   extended attribute, `com.photobrowser.tags` (JSON {"path": key, "tags": [...]}: where the file was, and
-  what it carried, when Safe Finder or the app last wrote it). Never on exFAT, where macOS would scatter
+  what it carried, when Photo Browser for Mac or the app last wrote it). Never on exFAT, where macOS would scatter
   `._` files. Finder, the Files app, cp/mv and ditto keep it through a copy or move; Finder doesn't show
   it, and Finder's own tags are left entirely alone — they are not Photo Browser tags. (Cloud folders such
   as iCloud Drive may drop a private attribute; the tags then stay behind, as they would without it.)
@@ -61,7 +61,7 @@ Tags that travel with the file
   wherever they are exactly what was written (the marker's tags, none coloured — `ours_in_finder`);
   Finder tags anyone else put on are never touched.
 
-No Qt here: Safe Finder drives it from the UI thread; it's also usable from scripts.
+No Qt here: Photo Browser for Mac drives it from the UI thread; it's also usable from scripts.
 """
 
 from __future__ import annotations
@@ -82,6 +82,7 @@ from typing import Callable, Iterable
 
 import safe_transfer as engine
 import spare_folders
+import app_identity
 
 FORMAT = "Photo Browser shared tags"
 VERSION = 1
@@ -147,7 +148,7 @@ def _within(key: str, roots: set[str]) -> bool:
 
 
 def taggable(path: str) -> bool:
-    """A file or folder Safe Finder tags: not hidden, not a gallery sidecar."""
+    """A file or folder Photo Browser for Mac tags: not hidden, not a gallery sidecar."""
     name = os.path.basename(path)
     return bool(name) and not name.startswith(".") and name not in SIDECARS
 
@@ -356,8 +357,8 @@ class TagFile:
 
     # -- writing
     def back_up(self) -> None:
-        """Before the first change of a day, keep the current file in Safe Finder's Tag Backups (the last
-        BACKUPS_KEPT per table) — a copy off the drive of what the app and Safe Finder agreed on."""
+        """Before the first change of a day, keep the current file in Photo Browser for Mac's Tag Backups (the last
+        BACKUPS_KEPT per table) — a copy off the drive of what the app and Photo Browser for Mac agreed on."""
         if not self.file.is_file():
             return
         name = "This Mac" if self.base is None else (self.base.name or "drive")
@@ -380,7 +381,7 @@ class TagFile:
         if not self.id:
             self.id = str(uuid.uuid4()).upper()
         doc = {"format": FORMAT, "version": VERSION, "id": self.id, "updated": round(time.time(), 3),
-               "by": "Safe Finder", "files": {k: self.files[k] for k in sorted(self.files) if self.files[k]}}
+               "by": app_identity.APP_NAME, "files": {k: self.files[k] for k in sorted(self.files) if self.files[k]}}
         if any(self.labels.values()):
             doc["labels"] = {k: self.labels[k] for k in sorted(self.labels) if self.labels[k]}
         data = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -407,9 +408,9 @@ class TagFile:
 
 
 def default_store() -> "TagStore":
-    """A store for scripts without Safe Finder's window (the AirDrop packer): drives are what's mounted
-    under /Volumes (or SAFE_FINDER_VOLUMES)."""
-    volumes_dir = Path(os.environ.get("SAFE_FINDER_VOLUMES", "/Volumes"))
+    """A store for scripts without Photo Browser for Mac's window (the AirDrop packer): drives are what's mounted
+    under /Volumes (or PHOTO_BROWSER_VOLUMES)."""
+    volumes_dir = Path(os.environ.get("PHOTO_BROWSER_VOLUMES", "/Volumes"))
 
     def volumes() -> list[Path]:
         try:
@@ -438,15 +439,15 @@ def tags_for_archive(paths: Iterable[str], store: "TagStore | None" = None) -> d
 
 
 def mac_store_file() -> Path:
-    return Path.home() / "Library" / "Application Support" / "Safe Finder" / "tags.json"
+    return app_identity.support() / "tags.json"
 
 
 def backups_dir() -> Path:
-    return Path.home() / "Library" / "Application Support" / "Safe Finder" / "Tag Backups"
+    return app_identity.support() / "Tag Backups"
 
 
 class TagStore:
-    """Every tag Safe Finder knows: the Mac's own table and each connected drive's. Paths in, paths out —
+    """Every tag Photo Browser for Mac knows: the Mac's own table and each connected drive's. Paths in, paths out —
     which table a file belongs to is worked out here (and remembered per folder)."""
 
     def __init__(self, is_drive: Callable[[str], bool], volumes: Callable[[], list[Path]],

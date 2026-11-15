@@ -1,7 +1,7 @@
 import Foundation
 
 /// The shared record of taylorpictures.net albums downloaded into a Taylor Swift folder —
-/// `<folder>/.taylorpictures.json`, written by this app's `TaylorDownloads` and by Safe Finder's
+/// `<folder>/.taylorpictures.json`, written by this app's `TaylorDownloads` and by Photo Browser for Mac's
 /// taylorpictures.net window (`mac/taylor.py` `Record`), so each marks as downloaded what the other has
 /// downloaded. The phone's own list (`Library.downloadedTaylorAlbums`) takes in the record's albums whenever
 /// the browser opens on that folder.

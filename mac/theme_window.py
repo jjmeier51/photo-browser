@@ -1,10 +1,10 @@
-"""View ▸ Theme… — Safe Finder's look, chosen the way the iPhone app's Settings ▸ Appearance chooses its own:
+"""View ▸ Theme… — Photo Browser for Mac's look, chosen the way the iPhone app's Settings ▸ Appearance chooses its own:
 "Match macOS" (the Finder look, light or dark with the Mac), the ready-made themes (Everyday, Halloween,
 Thanksgiving, Christmas, Holiday — the iPhone's, `themes.PRESETS`), or a custom background (one colour or a
 gradient), accent colour, typeface and light/dark chrome.
 
-A click shows the theme at once in every Safe Finder window; Revert puts back what was on when the window
-opened. `apply(look)` is Safe Finder's `set_look` (None = Match macOS).
+A click shows the theme at once in every Photo Browser for Mac window; Revert puts back what was on when the window
+opened. `apply(look)` is Photo Browser for Mac's `set_look` (None = Match macOS).
 
 The Mac's own extras (`Extras`, all optional so the window still stands alone): **My Themes** — "Save as My
 Theme…" keeps the custom look under a name (right-click one to rename or remove it); **Follow the Seasons** —
@@ -131,7 +131,7 @@ class ColorButton(QPushButton):
 
 @dataclass
 class Extras:
-    """What Safe Finder lends the chooser beyond applying a look (see the module doc)."""
+    """What Photo Browser for Mac lends the chooser beyond applying a look (see the module doc)."""
     mine: Callable[[], list] | None = None                       # the saved themes
     save: Callable[[str, themes.Look], None] | None = None
     remove: Callable[[str], None] | None = None

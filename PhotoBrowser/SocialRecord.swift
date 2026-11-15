@@ -1,18 +1,18 @@
 import Foundation
 
 /// The **shared record** of an Instagram, Facebook or TikTok profile folder — `.instagram.json` /
-/// `.facebook.json` / `.tiktok.json` in the folder itself — so this app and Safe Finder (`mac/social.py`,
+/// `.facebook.json` / `.tiktok.json` in the folder itself — so this app and Photo Browser for Mac (`mac/social.py`,
 /// `mac/instagram.py`, `mac/facebook.py`, `mac/tiktok.py`) never download a post the other already has.
-/// A TikTok record also carries each video's like count (`likes`: post id → count), which Safe Finder
+/// A TikTok record also carries each video's like count (`likes`: post id → count), which Photo Browser for Mac
 /// reads again on every run — this app takes them on its next run (`applyTikTokLikes`). It lists every post id downloaded into
 /// the folder (by either app), the profile's handle or name, its numeric id and link, when it was last
 /// brought up to date, and running photo/video counts.
 ///
 /// Why a file on the drive and not just the names in the folder: both apps already skip what's named in
 /// the folder (`postIDsOnDisk`, `FB_<id>`), but a post deleted from the folder would come back on the next
-/// run — this app's own record (`IGFolderInfo`/`FBFolderInfo`) lives on the phone, where Safe Finder can't
+/// run — this app's own record (`IGFolderInfo`/`FBFolderInfo`) lives on the phone, where Photo Browser for Mac can't
 /// read it. A run here adds the file's ids to "already downloaded" and writes its own into it. A folder
-/// Safe Finder made has no record on the phone, so a download into it takes the profile's id and last
+/// Photo Browser for Mac made has no record on the phone, so a download into it takes the profile's id and last
 /// update from the file (`Snapshot.instagramInfo` / `facebookInfo`).
 ///
 /// Every save re-reads the file and merges: ids are added, never dropped; the counts get this run's
@@ -35,7 +35,7 @@ nonisolated enum SocialRecord {
             case .tiktok: return "photobrowser-tiktok"
             }
         }
-        /// The tag every downloaded file gets, as Safe Finder tags them.
+        /// The tag every downloaded file gets, as Photo Browser for Mac tags them.
         var tag: String {
             switch self {
             case .instagram: return "instagram"
@@ -126,14 +126,14 @@ nonisolated enum SocialRecord {
 }
 
 extension SocialRecord.Snapshot {
-    /// The phone's record for a profile folder only the file knows (one Safe Finder made).
+    /// The phone's record for a profile folder only the file knows (one Photo Browser for Mac made).
     var instagramInfo: IGFolderInfo? {
         guard exists, !handle.isEmpty else { return nil }
         return IGFolderInfo(handle: handle, userID: userID, lastUpdated: lastUpdated, downloaded: Array(ids),
                             photos: photos, videos: videos)
     }
 
-    /// A TikTok folder only the file knows (one Safe Finder made). The incremental cutoff is left for the
+    /// A TikTok folder only the file knows (one Photo Browser for Mac made). The incremental cutoff is left for the
     /// first run here to set.
     var tiktokInfo: TTFolderInfo? {
         guard exists, !handle.isEmpty else { return nil }

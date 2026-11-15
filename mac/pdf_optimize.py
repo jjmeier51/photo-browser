@@ -1,5 +1,5 @@
-"""Make a PDF easier to read — on the iPhone (`IPHONE`) or in Safe Finder's own viewer on the Mac (`MAC`) — as a
-new PDF beside the original ("<name> (for iPhone).pdf", "<name> (for Safe Finder).pdf"); the original is never
+"""Make a PDF easier to read — on the iPhone (`IPHONE`) or in Photo Browser for Mac's own viewer on the Mac (`MAC`) — as a
+new PDF beside the original ("<name> (for iPhone).pdf", "<name> (for Mac).pdf"); the original is never
 touched. Nothing is retyped or reflowed: every page's own drawing is reused, cut and placed, so pictures, fonts and
 layout stay as they were (and, through the Swift composer, the text stays text — sharp and searchable).
 
@@ -10,9 +10,9 @@ down the left, then the right — so its text comes out nearly twice as large; a
 page, cut only in the white space between lines. A picture taller than the screen is shrunk to fit it rather than
 cut, unless it's very tall (a long scan with no gaps), which is cut into screen-high slices.
 
-**For Safe Finder**: the pages stay whole and in order, but trimmed to their content (the same box on every page,
+**For Photo Browser for Mac**: the pages stay whole and in order, but trimmed to their content (the same box on every page,
 left and right pages separately, as a book's margins alternate) and blank pages left out — so the page, not its
-margins, fills Safe Finder's viewer, and the text comes out larger in it.
+margins, fills Photo Browser for Mac's viewer, and the text comes out larger in it.
 
 How: each page is rendered small (QtPdf, `RENDER` pixels a point) and read for ink — the content's box, a column
 gutter (a white band in the middle that runs down a tall stretch of the page with text on both sides), and the
@@ -43,9 +43,9 @@ TOP = 18.0                          # and at the top and bottom (the Dynamic Isl
 MAX_SCALE = 2.4                     # a narrow column or a lone short line isn't blown up past this
 BLOCK_GAP = 10.0                    # between a page's regions on the new page (points)
 PAGE_GAP = 18.0                     # between one original page and the next
-MAC_PAD = 14.0                      # white kept round the content for Safe Finder
+MAC_PAD = 14.0                      # white kept round the content for Photo Browser for Mac
 RENDER = 2.0                        # pixels a point when reading a page
-NAMES = {IPHONE: "for iPhone", MAC: "for Safe Finder"}
+NAMES = {IPHONE: "for iPhone", MAC: "for Mac"}
 
 
 class Stopped(Exception):
@@ -404,13 +404,13 @@ def _helper_source() -> Path | None:
 
 
 def helper() -> list[str] | None:
-    """The composer's command, built the first time (or when its source is newer). SAFE_FINDER_PDF_HELPER names
+    """The composer's command, built the first time (or when its source is newer). PHOTO_BROWSER_PDF_HELPER names
     a stand-in (tests); "" turns it off."""
     global _helper, helper_problem
     with _helper_lock:
         if _helper is not False:
             return _helper
-        env = os.environ.get("SAFE_FINDER_PDF_HELPER")
+        env = os.environ.get("PHOTO_BROWSER_PDF_HELPER")
         if env is not None:
             _helper = env.split("\x1f") if env else None
             return _helper
@@ -450,7 +450,7 @@ def helper() -> list[str] | None:
 
 
 def plan_json(plan: list[OutPage], title: str) -> dict:
-    return {"title": title, "creator": "Safe Finder",
+    return {"title": title, "creator": "Photo Browser for Mac",
             "pages": [{"size": [round(o.width, 3), round(o.height, 3)],
                        "pieces": [{"page": pc.page, "src": [round(v, 3) for v in pc.src],
                                    "dst": [round(v, 3) for v in pc.dst]} for pc in o.pieces]} for o in plan]}
@@ -501,7 +501,7 @@ def compose_with_qt(doc, plan: list[OutPage], title: str, out: str, dpp: float,
     from PySide6.QtGui import QColor, QImage, QPageLayout, QPageSize, QPainter, QPdfWriter
     writer = QPdfWriter(out)
     writer.setTitle(title)
-    writer.setCreator("Safe Finder")
+    writer.setCreator("Photo Browser for Mac")
     writer.setResolution(int(round(72 * dpp)))
     painter = None
     cached: list = [None, None]                          # (page, scale) → its picture
@@ -570,7 +570,7 @@ def optimize(path: str, target: str, password: str = "", progress: Callable[[str
     plan = plan_iphone(pages) if target == IPHONE else plan_mac(pages)
     if not plan:
         raise ValueError("every page is blank")
-    tmpdir = Path(tempfile.mkdtemp(prefix="safe-finder-pdf-"))
+    tmpdir = Path(tempfile.mkdtemp(prefix="photo-browser-pdf-"))
     name = out_name(path, target)
     tmp = tmpdir / name
     try:

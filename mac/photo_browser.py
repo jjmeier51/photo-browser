@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe Finder — a Finder-style window for moving photos and videos onto the exFAT SSD safely.
+"""Photo Browser for Mac — a Finder-style window for moving photos and videos onto the exFAT SSD safely.
 
 Two Finder panes side by side — "From" (your Mac) and "To" (the SSD) — with a Finder sidebar
 (Favorites, Locations with eject buttons), icon view with photo/video thumbnails or list view,
@@ -7,7 +7,7 @@ back/forward, a path bar, a Sort menu (name, kind, date modified / created / add
 field, and sliders for the thumbnail size and the space between tiles. Search looks through the
 current folder or the whole Mac (Spotlight when it can, walking the folders otherwise) for names,
 extensions or kinds and shows the results in the same icon or list view, where they can be opened,
-revealed in their folder ("Show in Safe Finder") or moved to the SSD. "All Videos" in the sidebar
+revealed in their folder ("Show in Photo Browser") or moved to the SSD. "All Videos" in the sidebar
 is the same thing for every video in your home folder. Select files or folders on the left and press
 Move / Copy, or drag them anywhere onto the right pane (or onto a folder in it). Drops from the
 real Finder work too.
@@ -30,9 +30,9 @@ and each is tagged "cropped" (crop_window.py / batch_crop.py, the iPhone app's C
 AI Upscale 2×: right-click ▸ AI Upscale 2×… — Real-ESRGAN on this Mac (Upscayl's engine), in place, tagged
 "upscaled" (ai_upscale.py / upscale_window.py).
 
-Run:  double-click "Safe Finder.command" next to this file, or
-      mac/.venv/bin/python mac/safe_finder.py [--from FOLDER] [--to FOLDER]
-      — or build it into /Applications with "sh mac/build_safe_finder_app.sh" (see mac/README.md).
+Run:  double-click "Photo Browser for Mac.command" next to this file, or
+      mac/.venv/bin/python mac/photo_browser.py [--from FOLDER] [--to FOLDER]
+      — or build it into /Applications with "sh mac/build_app.sh" (see mac/README.md).
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ except ModuleNotFoundError:
     venv_python = HERE / ".venv" / "bin" / "python"
     if venv_python.exists() and Path(sys.executable).resolve() != venv_python.resolve():
         os.execv(str(venv_python), [str(venv_python), *sys.argv])
-    sys.exit("Safe Finder needs PySide6. Double-click “Safe Finder.command” (it sets everything up), or run:\n"
+    sys.exit("Photo Browser for Mac needs PySide6. Double-click “Photo Browser for Mac.command” (it sets everything up), or run:\n"
              "  python3 -m venv mac/.venv && mac/.venv/bin/pip install -r mac/requirements.txt")
 
 import airdrop_to_iphone as airdrop
@@ -98,6 +98,7 @@ import shared_tags
 import spare_folders
 import webp_convert
 from safe_copy_to_ssd import human, safe_name
+import app_identity
 
 try:
     from PIL import Image, ImageOps
@@ -111,7 +112,7 @@ except Exception:  # noqa: BLE001 - optional
     PIL_OK = False
 
 IS_MAC = sys.platform == "darwin"
-VOLUMES = Path(os.environ.get("SAFE_FINDER_VOLUMES", "/Volumes"))
+VOLUMES = Path(os.environ.get("PHOTO_BROWSER_VOLUMES", "/Volumes"))
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".gif", ".tif", ".tiff", ".bmp", ".webp", ".avif",
              ".dng", ".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".rw2"}
 VIDEO_EXT = {".mov", ".mp4", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".mts", ".m2ts", ".wmv"}
@@ -717,7 +718,7 @@ _TIKTOK_WINDOWS: list = []
 
 
 def app_windows() -> list[QWidget]:
-    """Every window of Safe Finder that's on screen (not minimized): the main one, viewers, the AI and
+    """Every window of Photo Browser for Mac that's on screen (not minimized): the main one, viewers, the AI and
     downloader windows, dialogs — not menus, tooltips or other pop-ups."""
     out = []
     for w in QApplication.topLevelWidgets():
@@ -737,7 +738,7 @@ _RAISED_AT = 0.0
 
 
 def raise_all_windows() -> int:
-    """Brings every Safe Finder window in front of other apps' windows, the one in use last so it stays on top
+    """Brings every Photo Browser for Mac window in front of other apps' windows, the one in use last so it stays on top
     and keeps the keyboard. Returns how many came forward."""
     global _RAISED_AT
     _RAISED_AT = time.monotonic()
@@ -764,7 +765,7 @@ def raise_all_windows() -> int:
 
 
 def _pointer_on_a_window() -> bool:
-    """Whether the pointer is over one of our windows, away from the screen's edge — i.e. Safe Finder was just
+    """Whether the pointer is over one of our windows, away from the screen's edge — i.e. Photo Browser for Mac was just
     brought forward by a click *on a window* (then only that window should come forward, as on any Mac app),
     not by its Dock icon or ⌘-Tab."""
     pos = QCursor.pos()
@@ -776,7 +777,7 @@ def _pointer_on_a_window() -> bool:
 
 
 def on_app_state(state) -> None:
-    """Safe Finder was activated. macOS sends this every time the Dock icon is clicked — also when Safe Finder
+    """Photo Browser for Mac was activated. macOS sends this every time the Dock icon is clicked — also when Photo Browser for Mac
     is already the app in front, which is when its other windows (a viewer, Edit with AI, a downloader) can
     still be sitting behind another app's: a click on one window brings only that one forward. So a click on
     the Dock icon (or ⌘-Tab) brings them all; a click on a window is left alone."""
@@ -1027,13 +1028,13 @@ _QL_BATCH = 4           # files per qlmanage run: few, so results come in as the
 
 def thumb_cache_dir() -> Path:
     """Where thumbnails persist between launches: ~/Library/Caches on a Mac (the system may clear it
-    under pressure — nothing is lost but a re-render). SAFE_FINDER_THUMB_CACHE overrides it (tests)."""
-    env = os.environ.get("SAFE_FINDER_THUMB_CACHE")
+    under pressure — nothing is lost but a re-render). PHOTO_BROWSER_THUMB_CACHE overrides it (tests)."""
+    env = os.environ.get("PHOTO_BROWSER_THUMB_CACHE")
     if env:
         return Path(env)
     if IS_MAC:
-        return Path.home() / "Library" / "Caches" / "PhotoBrowser" / "SafeFinderThumbs"
-    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "PhotoBrowser" / "SafeFinderThumbs"
+        return app_identity.thumb_cache()
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "PhotoBrowser" / "MacThumbs"
 
 
 # Photos whose tiles were made before their colours were handled (thumb_color.py — HDR and Display P3 came out
@@ -1132,7 +1133,7 @@ class _QuickLookRunner:
 
 
 def thumb_helper_source() -> Path | None:
-    """thumb_helper.swift: next to this file, or inside Safe Finder.app's Resources when frozen."""
+    """thumb_helper.swift: next to this file, or inside Photo Browser for Mac.app's Resources when frozen."""
     candidates = [HERE / "thumb_helper.swift"]
     if getattr(sys, "frozen", False):
         contents = Path(sys.executable).resolve().parent.parent
@@ -1145,8 +1146,8 @@ def build_thumb_helper() -> list[str] | None:
     """The command that runs the thumbnail helper, building it (once, into ~/Library/Caches/PhotoBrowser)
     when it's missing or older than its source (a build that fails keeps the older one). None without
     Xcode's tools — Quick Look does it all then.
-    SAFE_FINDER_THUMB_HELPER names a stand-in command (tests)."""
-    env = os.environ.get("SAFE_FINDER_THUMB_HELPER")
+    PHOTO_BROWSER_THUMB_HELPER names a stand-in command (tests)."""
+    env = os.environ.get("PHOTO_BROWSER_THUMB_HELPER")
     if env:
         return env.split("\x1f") if "\x1f" in env else [env]
     src = thumb_helper_source()
@@ -1451,7 +1452,7 @@ class Thumbnails(QObject):
         self._signals.skipped.connect(self._pending.discard, Qt.ConnectionType.QueuedConnection)
         self._ql = _QuickLookRunner(self._signals) if IS_MAC and shutil.which("qlmanage") else None
         self._frames = _FrameRunner(self._signals, self._ql, self) \
-            if IS_MAC or os.environ.get("SAFE_FINDER_THUMB_HELPER") else None
+            if IS_MAC or os.environ.get("PHOTO_BROWSER_THUMB_HELPER") else None
         self._tick = QTimer(self)
         self._tick.setSingleShot(True)
         self._tick.setInterval(60)
@@ -2313,11 +2314,11 @@ class ListView(BoxSelect, DropMixin, QTreeView):
 # ============================================================================ search & collections
 
 
-VIDEOS = "safe-finder://videos"                 # the "All Videos" collection
-SEARCH = "safe-finder://search/"                # + a number: one search's results (see Pane.searches)
-EMPTY = "safe-finder://empty"                   # the "Empty Folders" collection (see empty_roots)
-TAG = "safe-finder://tag/"                      # + a tag: every file carrying it (see TagScanner)
-LABEL = "safe-finder://label/"                  # + "favorite" / "ai": the iPhone app's Favorites and To AI
+VIDEOS = app_identity.URL + "videos"               # the "All Videos" collection
+SEARCH = app_identity.URL + "search/"               # + a number: one search's results (see Pane.searches)
+EMPTY = app_identity.URL + "empty"                 # the "Empty Folders" collection (see empty_roots)
+TAG = app_identity.URL + "tag/"                    # + a tag: every file carrying it (see TagScanner)
+LABEL = app_identity.URL + "label/"                # + "favorite" / "ai": the iPhone app's Favorites and To AI
 _R_PATH, _R_MTIME, _R_SIZE, _R_ISDIR = 258, 259, 260, 261    # roles on a results row (256/257: the sidebar's)
 KIND_EXT = {
     "image": IMAGE_EXT, "video": VIDEO_EXT, "raw": RAW_EXT, "pdf": {".pdf"},
@@ -2461,17 +2462,17 @@ def size_label(bounds: tuple[int | None, int | None] | None) -> str:
 
 def mac_roots() -> list[Path]:
     """What "This Mac" means to a search and to All Videos: the home folder, where files live (the
-    system, apps and ~/Library hold nothing you'd move to the SSD). SAFE_FINDER_SEARCH_ROOTS=a:b
+    system, apps and ~/Library hold nothing you'd move to the SSD). PHOTO_BROWSER_SEARCH_ROOTS=a:b
     overrides it (tests)."""
-    env = os.environ.get("SAFE_FINDER_SEARCH_ROOTS")
+    env = os.environ.get("PHOTO_BROWSER_SEARCH_ROOTS")
     return [Path(p) for p in env.split(":") if p] if env else [Path.home()]
 
 
 def empty_roots() -> list[Path]:
     """Where the sidebar looks for empty folders: Documents, Pictures, Movies and Downloads — the
-    places downloads and exports pile up and leave husks behind. SAFE_FINDER_EMPTY_ROOTS=a:b
+    places downloads and exports pile up and leave husks behind. PHOTO_BROWSER_EMPTY_ROOTS=a:b
     overrides it (tests)."""
-    env = os.environ.get("SAFE_FINDER_EMPTY_ROOTS")
+    env = os.environ.get("PHOTO_BROWSER_EMPTY_ROOTS")
     if env:
         return [Path(p) for p in env.split(":") if p]
     home = Path.home()
@@ -2850,7 +2851,7 @@ class FileScanner:
                    for p in parts) or (parts and parts[0] in _SKIP_TOP)
 
     def _spotlight(self) -> int:
-        exe = os.environ.get("SAFE_FINDER_MDFIND") or shutil.which("mdfind")
+        exe = os.environ.get("PHOTO_BROWSER_MDFIND") or shutil.which("mdfind")
         if not exe:
             return 0
         batch: list[tuple[str, int, float, bool]] = []
@@ -3056,7 +3057,7 @@ class EmptyFolderScanner:
 
 class TagScanner:
     """The files carrying one tag — on this Mac and the connected drives — each checked to still be
-    there (a file moved or deleted outside Safe Finder keeps its entry until it's tagged again). The same
+    there (a file moved or deleted outside Photo Browser for Mac keeps its entry until it's tagged again). The same
     signals as FileScanner, so a pane shows them like a search."""
 
     def __init__(self, tag: str) -> None:
@@ -3462,6 +3463,7 @@ class FolderViews:
         except ValueError:
             raw = {}
         for loc, v in (raw.items() if isinstance(raw, dict) else ()):
+            loc = app_identity.current_url(loc)         # kept from before the app's rename
             if isinstance(v, list) and len(v) == 3 and v[0] in ("grid", "list", "photos") and v[1] in dict(SORT_KEYS) \
                     and v[2] in ("asc", "desc"):
                 self.views[loc] = (v[0], v[1], v[2])
@@ -4165,7 +4167,7 @@ class Pane(QWidget):
     @property
     def is_virtual(self) -> bool:
         """A collection (All Videos, search results, a tag's files) rather than a folder."""
-        return self.location.startswith("safe-finder://")
+        return self.location.startswith(app_identity.URL)
 
     @property
     def is_search(self) -> bool:
@@ -4417,7 +4419,7 @@ class Pane(QWidget):
 
     def set_videos_first(self, on: bool) -> None:
         """Sort menu ▸ Videos at the Top: for this folder, remembered (on the drive, where the iPhone app reads
-        it too; in Safe Finder's settings for a folder that isn't on such a drive)."""
+        it too; in Photo Browser for Mac's settings for a folder that isn't on such a drive)."""
         import folder_options
         if self.is_virtual or not os.path.isdir(self.location):
             return
@@ -4509,7 +4511,7 @@ class Pane(QWidget):
             self.go(parent)
 
     def reveal(self, path: str) -> None:
-        """Show `path` in its folder, selected — "Show in Safe Finder" from a search or All Videos."""
+        """Show `path` in its folder, selected — "Show in Photo Browser" from a search or All Videos."""
         self._pending_reveal = path
         self.go(os.path.dirname(path.rstrip(os.sep)) or "/")
 
@@ -4645,7 +4647,7 @@ class Pane(QWidget):
         vol = engine.volume_root(base)
         if self.scope_volume.isChecked():
             if str(vol) == "/":
-                return mac_roots(), "SAFE_FINDER_SEARCH_ROOTS" not in os.environ
+                return mac_roots(), "PHOTO_BROWSER_SEARCH_ROOTS" not in os.environ
             return [vol], False
         return [base], False
 
@@ -4997,7 +4999,7 @@ class Pane(QWidget):
             save_frame=frame_export.save_frame, labels_of=lambda p: tag_store().labels(p, fresh=False),
             set_label=lambda p, label, on: self.set_label([p], label, on), remove_objects=self.remove_objects,
             extra={"frame_note": frame_export.engine_note})
-        # Opens over Safe Finder's window, as tall as its display, and takes each item's shape within that.
+        # Opens over Photo Browser for Mac's window, as tall as its display, and takes each item's shape within that.
         viewer = media_viewer.MediaViewer(items, items.index(path), hooks, poster, None, box=self.window().geometry())
         viewer.removed.connect(lambda _paths: self.refresh_results())
         _VIEWERS.append(viewer)
@@ -5053,7 +5055,7 @@ class Pane(QWidget):
         return pdf_viewer.available()
 
     def view_pdf(self, path: str) -> None:
-        """The PDF viewer (pdf_viewer.py), with its Optimize for Safe Finder / for iPhone: the new PDF is put
+        """The PDF viewer (pdf_viewer.py), with its Optimize for Mac / for iPhone: the new PDF is put
         beside the original the drive-safe way, with the original's tags."""
         import pdf_viewer
         import simpcity
@@ -5596,7 +5598,7 @@ class Pane(QWidget):
             if IS_MAC:
                 menu.addAction("Quick Look", self.quick_look)
                 menu.addAction("Show in Finder", lambda: subprocess.Popen(["open", "-R", paths[0]]))
-            menu.addAction("Show in Safe Finder", lambda: self.reveal(paths[0]))
+            menu.addAction("Show in Photo Browser", lambda: self.reveal(paths[0]))
             if IS_MAC:
                 menu.addAction("AirDrop to iPhone…", lambda: self.airdrop(paths))
             if len(paths) == 1:
@@ -5774,8 +5776,8 @@ class Pane(QWidget):
         try:
             import retouch
         except ImportError:                      # numpy, added for this, not in an older mac/.venv yet
-            QMessageBox.information(self.window(), "Erase Area", "Erase Area needs numpy. Quit Safe Finder and open "
-                                    "“Safe Finder.command” again — it installs it — or run: "
+            QMessageBox.information(self.window(), "Erase Area", "Erase Area needs numpy. Quit Photo Browser for Mac and open "
+                                    "“Photo Browser for Mac.command” again — it installs it — or run: "
                                     "mac/.venv/bin/pip install numpy")
             return
         photos = [p for p in paths if retouch.can_erase(p)]
@@ -5904,7 +5906,7 @@ class Pane(QWidget):
             import watermark
         except ImportError:                      # numpy, not in an older mac/.venv yet
             QMessageBox.information(self.window(), "Remove Watermark", "Remove Watermark needs numpy. Quit Safe "
-                                    "Finder and open “Safe Finder.command” again — it installs it — or run: "
+                                    "Finder and open “Photo Browser for Mac.command” again — it installs it — or run: "
                                     "mac/.venv/bin/pip install numpy")
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -5960,8 +5962,8 @@ class Pane(QWidget):
             import remove_window
             import retouch
         except ImportError:                      # numpy, not in an older mac/.venv yet
-            QMessageBox.information(self.window(), "Remove Objects", "Remove Objects needs numpy. Quit Safe Finder "
-                                    "and open “Safe Finder.command” again — it installs it — or run: "
+            QMessageBox.information(self.window(), "Remove Objects", "Remove Objects needs numpy. Quit Photo Browser for Mac "
+                                    "and open “Photo Browser for Mac.command” again — it installs it — or run: "
                                     "mac/.venv/bin/pip install numpy")
             return
         if not retouch.can_erase(path):
@@ -6436,7 +6438,7 @@ class TagDialog(QDialog):
         if drives:
             return (f"Saved on “{'”, “'.join(drives)}” — Photo Browser on the iPhone picks them up the next time "
                     "it opens the drive, and tags added there show up here.")
-        return (f"These {self.noun}s are on this Mac: their tags go along when Safe Finder moves or copies them onto "
+        return (f"These {self.noun}s are on this Mac: their tags go along when Photo Browser for Mac moves or copies them onto "
                 "the drive, and from there to the iPhone.")
 
     def _fill(self) -> None:
@@ -6921,7 +6923,7 @@ class ConfirmSheet(QDialog):
     def __init__(self, parent: QWidget, sources: list[str], dest: str, move: bool, verify: bool) -> None:
         super().__init__(parent, Qt.WindowType.Sheet if IS_MAC else Qt.WindowType.Dialog)
         self.setWindowModality(Qt.WindowModality.WindowModal)
-        self.setWindowTitle("Safe Finder")
+        self.setWindowTitle("Photo Browser for Mac")
         self.sources, self.dest = [Path(s) for s in sources], Path(dest)
         self.plan: engine.Plan | None = None
         self.setMinimumWidth(520)
@@ -7162,8 +7164,8 @@ class TransferPanel(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self, start_from: str | None, start_to: str | None) -> None:
         super().__init__()
-        self.setWindowTitle("Safe Finder")
-        self.settings = QSettings("PhotoBrowser", "SafeFinder")
+        self.setWindowTitle("Photo Browser for Mac")
+        self.settings = app_identity.settings()
         self.resize(1320, 820)
         self.setMinimumSize(980, 600)
         self.queue: list[tuple[engine.Plan, bool, bool, str]] = []
@@ -7256,7 +7258,8 @@ class MainWindow(QMainWindow):
         tag_events().scores.connect(lambda: [pane.on_scores_changed() for pane in (self.src, self.dst)])
 
         home = str(Path.home())
-        start_src = start_from or self.settings.value("From/location") or str(Path.home() / "Downloads")
+        start_src = start_from or app_identity.current_url(self.settings.value("From/location")) \
+            or str(Path.home() / "Downloads")
         self.src.go(start_src if os.path.isdir(start_src) else home)
         self._start_to = start_to
         self.set_active(self.src)
@@ -7281,7 +7284,8 @@ class MainWindow(QMainWindow):
             self._dst_ready = True
             home = str(Path.home())
             ext = external_volumes()
-            start = self._start_to or self.settings.value("To/location") or (str(ext[0]) if ext else home)
+            start = self._start_to or app_identity.current_url(self.settings.value("To/location")) \
+                or (str(ext[0]) if ext else home)
             self.dst.go(start if os.path.isdir(start) else (str(ext[0]) if ext else home))
         self.split = on
         if remember:
@@ -7637,7 +7641,7 @@ class MainWindow(QMainWindow):
     # -- lifecycle
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.current is not None:
-            r = QMessageBox.question(self, "Safe Finder",
+            r = QMessageBox.question(self, "Photo Browser for Mac",
                                      "A transfer is still running. Stop it and quit? The file in progress is "
                                      "cleaned up; finished files stay on the drive.")
             if r != QMessageBox.StandardButton.Yes:
@@ -7663,8 +7667,8 @@ def apply_theme(app: QApplication, window: MainWindow | None = None) -> None:
     scheme = app.styleHints().colorScheme()
     dark = scheme == Qt.ColorScheme.Dark if scheme != Qt.ColorScheme.Unknown else \
         app.palette().color(QPalette.ColorRole.Window).lightness() < 128
-    if os.environ.get("SAFE_FINDER_THEME") in ("dark", "light"):
-        dark = os.environ["SAFE_FINDER_THEME"] == "dark"
+    if os.environ.get("PHOTO_BROWSER_THEME") in ("dark", "light"):
+        dark = os.environ["PHOTO_BROWSER_THEME"] == "dark"
     look = chosen_look()
     if seasonal_on():                                  # through the holidays, that season's theme of the day
         look = themes.seasonal(_today(), december_wears()) or look
@@ -7695,7 +7699,7 @@ def current_look() -> "themes.Look | None":
 
 def chosen_look() -> "themes.Look | None":
     """The theme the person chose (None: Match macOS) — what shows outside the holidays."""
-    return themes.Look.from_json(QSettings("PhotoBrowser", "SafeFinder").value("theme", ""))
+    return themes.Look.from_json(app_identity.settings().value("theme", ""))
 
 
 def _today():
@@ -7703,18 +7707,18 @@ def _today():
 
 
 def seasonal_on() -> bool:
-    return str(QSettings("PhotoBrowser", "SafeFinder").value("theme_seasonal", "")) in ("1", "true")
+    return str(app_identity.settings().value("theme_seasonal", "")) in ("1", "true")
 
 
 def december_wears() -> str:
-    v = str(QSettings("PhotoBrowser", "SafeFinder").value("theme_december", "both"))
+    v = str(app_identity.settings().value("theme_december", "both"))
     return v if v in themes.DECEMBER else "both"
 
 
 def set_seasonal(on: bool, december: str | None = None) -> None:
     """View ▸ Theme ▸ Follow the Seasons: through the holidays (October to New Year's Day) the window wears that
     season's themes, a different one each day; the chosen theme comes back afterwards."""
-    s = QSettings("PhotoBrowser", "SafeFinder")
+    s = app_identity.settings()
     s.setValue("theme_seasonal", "1" if on else "")
     if december in themes.DECEMBER:
         s.setValue("theme_december", december)
@@ -7732,16 +7736,16 @@ def _season_tick() -> None:
 
 
 def my_themes() -> "list[themes.Look]":
-    return themes.looks_from_json(QSettings("PhotoBrowser", "SafeFinder").value("my_themes", ""))
+    return themes.looks_from_json(app_identity.settings().value("my_themes", ""))
 
 
 def save_my_theme(name: str, look: "themes.Look") -> None:
-    QSettings("PhotoBrowser", "SafeFinder").setValue(
+    app_identity.settings().setValue(
         "my_themes", themes.looks_to_json(themes.with_saved(my_themes(), look, name)))
 
 
 def remove_my_theme(name: str) -> None:
-    QSettings("PhotoBrowser", "SafeFinder").setValue(
+    app_identity.settings().setValue(
         "my_themes", themes.looks_to_json([m for m in my_themes() if m.name != name]))
 
 
@@ -7771,23 +7775,26 @@ def open_themes(parent: QWidget | None = None) -> None:
 def set_look(look: "themes.Look | None") -> None:
     """Chooses the theme (None: Match macOS) and shows it at once, everywhere. A theme chosen by hand is the
     one that shows: Follow the Seasons goes off (it would otherwise keep wearing the season's)."""
-    settings = QSettings("PhotoBrowser", "SafeFinder")
+    settings = app_identity.settings()
     settings.setValue("theme", look.to_json() if look is not None else "")
     settings.setValue("theme_seasonal", "")
     _reapply_theme()
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Safe Finder — move files onto the SSD safely.")
+    ap = argparse.ArgumentParser(description=f"{app_identity.APP_NAME} — browse the SSD, and move files onto it safely.")
     ap.add_argument("--from", dest="src", help="folder to show on the left")
     ap.add_argument("--to", dest="dst", help="folder to show on the right (the SSD)")
     args, _ = ap.parse_known_args()        # launched as an app, Finder may add its own arguments
+    # What the app kept under its old name (settings folder, saved logins, logs, thumbnails) comes along —
+    # before Qt makes fresh folders under the new one.
+    app_identity.carry_over()
 
     # The SimpCity window's browser (Qt WebEngine) needs this set before the app exists.
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv[:1])
-    app.setApplicationName("Safe Finder")
-    app.setApplicationDisplayName("Safe Finder")
+    app.setApplicationName(app_identity.APP_NAME)
+    app.setApplicationDisplayName(app_identity.APP_NAME)
     app.setStyle("Fusion")
     if not IS_MAC:
         f = app.font()

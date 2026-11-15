@@ -10,7 +10,7 @@ Trash together. Nothing goes without that button and its confirmation.
   Trash (red ring); a double-click opens the group in the viewer, at that copy, to look closely and flip
   between them. With subfolders included, each tile says which folder its copy is in.
 - **Per group**: View, Not Duplicates (never listed again), and a menu — Select All But One, Select All
-  Copies, Deselect, Show in Safe Finder. Right-click a copy: Keep Only This One, View, Show in Safe Finder.
+  Copies, Deselect, Show in Photo Browser. Right-click a copy: Keep Only This One, View, Show in Photo Browser.
 - **Which copy is kept** is a rule, chosen in the bar (`duplicates.KEEP_RULES`: the best copy, the largest file,
   the highest resolution, the oldest, the newest) with an optional **preferred folder** — copies in it are kept
   over copies elsewhere. The copy the rule would keep wears a green **Keep** mark in every group, so the rule
@@ -26,7 +26,7 @@ Trash together. Nothing goes without that button and its confirmation.
   remembered; Rescan looks again (fast — the photos' fingerprints are kept). Groups sort by space, name, number
   of copies or folder.
 
-Safe Finder hands the window what it needs (`DupHooks`): thumbnails, the trash, tags, the viewer and
+Photo Browser for Mac hands the window what it needs (`DupHooks`): thumbnails, the trash, tags, the viewer and
 revealing a file — the window itself never deletes anything.
 """
 from __future__ import annotations
@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, 
                                QVBoxLayout, QWidget, QWidgetItem)
 
 import duplicates as D
+import app_identity
 
 PAGE = 60                                          # groups shown at a time ("Show More" for the next)
 TILE_W, PIC = 150, 150
@@ -173,7 +174,7 @@ class Tile(QWidget):
         menu.addAction("View", lambda: self.opened.emit(self.path))
         reveal = self.card.win.hooks.reveal
         if reveal is not None:
-            menu.addAction("Show in Safe Finder", lambda: reveal(self.path))
+            menu.addAction("Show in Photo Browser", lambda: reveal(self.path))
         menu.exec(e.globalPos())
         menu.deleteLater()
 
@@ -316,7 +317,7 @@ class Card(QFrame):
         menu.addAction("Deselect", lambda: self.win.set_selected(self.group.paths, False))
         if self.win.hooks.reveal is not None:
             menu.addSeparator()
-            menu.addAction("Show in Safe Finder", lambda: self.win.hooks.reveal(self.group.paths[0]))
+            menu.addAction("Show in Photo Browser", lambda: self.win.hooks.reveal(self.group.paths[0]))
         more.setMenu(menu)
         head.addWidget(more)
         v.addLayout(head)
@@ -384,7 +385,7 @@ class DuplicatesWindow(QWidget):
         self.folder = self.folders[0] if len(self.folders) == 1 else os.path.commonpath(self.folders)
         self.hooks = hooks
         self.theme = theme
-        self.settings = QSettings("PhotoBrowser", "SafeFinder")
+        self.settings = app_identity.settings()
         self.recursive = str(self.settings.value("duplicates/subfolders", "false")) == "true"
         self.exclude_frames = str(self.settings.value("duplicates/exclude_frames", "false")) == "true"
         self.all_files = str(self.settings.value("duplicates/all_files", "false")) == "true"

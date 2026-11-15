@@ -1,4 +1,4 @@
-"""The taylorpictures.net window in Safe Finder (taylor.py does the reading, matching and downloading) — the
+"""The taylorpictures.net window in Photo Browser for Mac (taylor.py does the reading, matching and downloading) — the
 iPhone app's gallery browser on the Mac, plus what you already have in your Taylor Swift folder.
 
 - **First, the whole site against the whole folder** (the first time it opens on a folder, or Check Again):
@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QFram
                                QStackedWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 import taylor as T
+import app_identity
 
 THUMB = 132
 ROLE_KIND, ROLE_ID = Qt.ItemDataRole.UserRole, Qt.ItemDataRole.UserRole + 1
@@ -140,7 +141,7 @@ class TaylorWindow(QWidget):
         self.hooks = hooks
         self.theme = theme
         self.gallery = gallery or T.Gallery()
-        self.settings = QSettings("PhotoBrowser", "SafeFinder")
+        self.settings = app_identity.settings()
         self.record = T.Record(root)
         self.index = T.LocalIndex(root)
         self.checks = Checks()

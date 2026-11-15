@@ -712,7 +712,7 @@ enum AIExtend {
     /// it has been seen to fill, and a prompt its moderation stopped shows "moderated" in Astria's own pages
     /// with no documented place in the JSON — so any value saying so (outside the prompt's own words), or a
     /// true flag whose name does, ends the wait at once instead of polling ~25 minutes for nothing.
-    /// Safe Finder's `astria.prompt_failure` is the same rule — keep the two in step.
+    /// Photo Browser for Mac's `astria.prompt_failure` is the same rule — keep the two in step.
     nonisolated static func promptFailure(_ json: [String: Any]) -> String? {
         for key in ["error", "error_message", "failure_reason"] {
             if let e = json[key] as? String, !e.trimmingCharacters(in: .whitespaces).isEmpty { return e }

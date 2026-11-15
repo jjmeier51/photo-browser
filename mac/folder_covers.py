@@ -11,8 +11,8 @@ Where a cover lives:
 
   The iPhone app reads and writes the same file (`FolderCovers.swift`), so a cover chosen here is the folder's
   cover there, and the other way round.
-- **On this Mac**, for any other folder: the picture in `~/Library/Application Support/Safe Finder/Folder Covers`
-  and the choice in Safe Finder's settings, by full path.
+- **On this Mac**, for any other folder: the picture in `~/Library/Application Support/Photo Browser for Mac/Folder Covers`
+  and the choice in Photo Browser for Mac's settings, by full path.
 
 `at` is when the cover was chosen (Unix time). **The later choice wins** when the two apps disagree (`merged`).
 Two special cases: `"file": ""` means the cover was *removed* at that time (so the other app doesn't put its
@@ -37,6 +37,7 @@ import time
 import unicodedata
 import uuid
 from pathlib import Path
+import app_identity
 
 METADATA = ".Photo Browser Metadata"
 FILE_NAME = "folder-covers.json"
@@ -78,7 +79,7 @@ def _rel(base: str, folder: str) -> str:
 
 
 def local_dir() -> Path:
-    return Path.home() / "Library" / "Application Support" / "Safe Finder" / "Folder Covers"
+    return app_identity.support() / "Folder Covers"
 
 
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
@@ -187,7 +188,7 @@ class FolderCovers:
     def _write(self, base: str, entries: dict[str, Entry]) -> None:
         import spare_folders
         file = self._file(base)
-        doc = {"format": FORMAT, "version": 1, "updated": round(time.time(), 3), "by": "Safe Finder",
+        doc = {"format": FORMAT, "version": 1, "updated": round(time.time(), 3), "by": app_identity.APP_NAME,
                "covers": {k: {"file": entries[k][0], "at": entries[k][1]} for k in sorted(entries)}}
         data = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         _put(file, data, spare_folders.on_exfat(str(file.parent)))

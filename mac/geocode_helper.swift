@@ -1,4 +1,4 @@
-// The geocoder for Safe Finder's Location filter (mac/places.py) — names places exactly as the Photo Browser app
+// The geocoder for Photo Browser for Mac's Location filter (mac/places.py) — names places exactly as the Photo Browser app
 // does on the iPhone (`MetadataLoader.geocodeBins` / `shortLabel` / `searchText`): CLGeocoder, one request every
 // 1.2 s so a run never trips its limit, 4 s each at most; "Hauppauge, NY" in the US, "City, UK", otherwise
 // "City, Country". Only coordinates go to Apple's geocoder (as from the iPhone), and only when the Location

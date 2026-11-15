@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Take the characters exFAT and iOS can't handle out of every file and folder name under a folder.
 
-The characters are \\ / : * ? " < > | and control characters — the same ones Safe Finder replaces with
+The characters are \\ / : * ? " < > | and control characters — the same ones Photo Browser for Mac replaces with
 "-" when it copies to the SSD ("28 names adjusted so iOS can read them"). Cleaning a folder on the Mac
 first means the names arrive on the SSD exactly as you see them. By default the characters are
 removed ("JAV: Episode 3" → "JAV Episode 3", "What's next?.jpg" → "What's next.jpg"); where removing
 one would glue two words or numbers together it becomes a space ("1:2" → "1 2"). --dash replaces each
-with "-" instead, exactly like Safe Finder. Also, like Safe Finder: accents are stored in the standard
+with "-" instead, exactly like Photo Browser for Mac. Also, like Photo Browser for Mac: accents are stored in the standard
 form, trailing dots and spaces go, and names over 255 characters are shortened (keeping the
 extension). A "/" shown in a Finder name counts too — macOS stores it as ":".
 
@@ -103,7 +103,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("folder", nargs="?", help="the folder to clean (everything inside it, at any depth)")
     ap.add_argument("--apply", action="store_true", help="really rename (default: dry run)")
-    ap.add_argument("--dash", action="store_true", help='replace each character with "-" (like Safe Finder)')
+    ap.add_argument("--dash", action="store_true", help='replace each character with "-" (like Photo Browser for Mac)')
     ap.add_argument("--on-drive", action="store_true", help="allow it on the exFAT SSD (paths change — see above)")
     ap.add_argument("--include-top", action="store_true", help="also clean the name of the folder itself")
     ap.add_argument("--undo", metavar="LOG", help="put back every name a previous --apply changed")

@@ -1,4 +1,4 @@
-"""Facebook profiles for Safe Finder — what to download and where it goes; no Qt (social_downloader.py is
+"""Facebook profiles for Photo Browser for Mac — what to download and where it goes; no Qt (social_downloader.py is
 the window, social.py the downloading). A port of the iPhone app's `FacebookService`, so both apps download
 the same things under the same names and neither fetches what the other has.
 

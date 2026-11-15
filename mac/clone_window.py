@@ -1,9 +1,9 @@
-"""Safe Finder ▸ File ▸ "Clone Drive to a New SSD…" — the window (clone_drive.py does the work).
+"""Photo Browser for Mac ▸ File ▸ "Clone Drive to a New SSD…" — the window (clone_drive.py does the work).
 
 Pick the old drive and the new one, press Clone: the old drive is read (never changed), everything on it is
 copied to the same place on the new one — each file read back from the new drive and checked before it gets
 its real name — then the two drives are compared and the report shown (and saved in
-~/Library/Logs/Safe Finder/). "Verify" compares two drives without copying. Stopping, a pulled cable or a
+~/Library/Logs/Photo Browser for Mac/). "Verify" compares two drives without copying. Stopping, a pulled cable or a
 restart lose nothing: Clone again carries on where it was.
 """
 from __future__ import annotations

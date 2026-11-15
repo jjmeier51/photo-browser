@@ -1,8 +1,8 @@
-"""Safe Finder ▸ Convert WebP to JPEG… — the window (webp_convert.py does the converting).
+"""Photo Browser for Mac ▸ Convert WebP to JPEG… — the window (webp_convert.py does the converting).
 
 Counts the WebP photos first (on a worker thread — a folder's subfolders can be many), offers "Include subfolders"
 and "Move the WebP originals to the Trash when their JPEG is saved" (both remembered), then converts with a
-progress bar and Stop. Safe Finder's `done(result, moved)` moves the tags and Favorites / To AI over to the JPEGs.
+progress bar and Stop. Photo Browser for Mac's `done(result, moved)` moves the tags and Favorites / To AI over to the JPEGs.
 """
 from __future__ import annotations
 

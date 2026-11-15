@@ -1,4 +1,4 @@
-"""What Safe Finder shows about a photo or video, read straight from the file — quickly, with no ExifTool —
+"""What Photo Browser for Mac shows about a photo or video, read straight from the file — quickly, with no ExifTool —
 for the Photos grid's video lengths and the viewer's Info panel.
 
 **Videos** (`video_info`): an MP4/MOV/M4V's `moov` box says it all — `mvhd` its length and when it was

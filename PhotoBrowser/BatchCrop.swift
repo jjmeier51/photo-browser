@@ -11,7 +11,7 @@ import ImageIO
 ///
 /// The last crop saved here, in the Edit screen or in the photo editor is remembered
 /// (`Library.lastCrop`), so "Last Crop" can put a crop made earlier on one photo onto others.
-/// Mac twin: Safe Finder's Crop window (`mac/batch_crop.py`) — same fractions, same tag.
+/// Mac twin: Photo Browser for Mac's Crop window (`mac/batch_crop.py`) — same fractions, same tag.
 
 /// A crop that can be put on other photos: the turn, then a normalized **top-left** rect within the
 /// turned photo — the same convention as `MediaEditing.applyPhotoInPlace` and `EditRecipe.cropRect`.

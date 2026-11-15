@@ -1,4 +1,4 @@
-"""What Safe Finder's Instagram and Facebook downloaders share — no Qt here (social_downloader.py is the
+"""What Photo Browser for Mac's Instagram and Facebook downloaders share — no Qt here (social_downloader.py is the
 window; instagram.py and facebook.py read the two sites).
 
 **The shared record.** Each profile folder holds a hidden record — `.instagram.json` / `.facebook.json` —
@@ -341,7 +341,7 @@ def settle(item: Item, tries: list[dict[str, str]], opts: Options, tool=None, en
     `download` (Fanfix's streamed videos). Runs on a worker thread."""
     if os.path.lexists(item.folder / item.filename):
         return Settled(item, str(item.folder / item.filename), present=True)
-    tmp = tempfile.mkdtemp(prefix="safe-finder-social-")
+    tmp = tempfile.mkdtemp(prefix="photo-browser-social-")
     try:
         path, why = (fetcher or download)(item, tmp, tries)
         if not path:

@@ -1,6 +1,6 @@
-"""What Safe Finder's search understands, and the pieces that make it quick — no Qt here.
+"""What Photo Browser for Mac's search understands, and the pieces that make it quick — no Qt here.
 
-**The search field's language** (`tokens` splits it; `safe_finder.Query` gives each piece its meaning):
+**The search field's language** (`tokens` splits it; `photo_browser.Query` gives each piece its meaning):
 
     gazebo sunset          every word must be in the name — or among the file's tags
     "route 66"             the words together, as written

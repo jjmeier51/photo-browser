@@ -1,7 +1,7 @@
-"""Safe Finder's PDF viewer — a PDF opens here (double-click, Return) instead of in Preview, in the photo viewer's
+"""Photo Browser for Mac's PDF viewer — a PDF opens here (double-click, Return) instead of in Preview, in the photo viewer's
 dark look: the pages scrolling one after another, fitted to the width, with search, zoom and page thumbnails.
 
-**The window** opens over Safe Finder's window, on its display, as tall as the display (like the photo viewer),
+**The window** opens over Photo Browser for Mac's window, on its display, as tall as the display (like the photo viewer),
 and as wide as the first page's shape at that height allows.
 
 - **Reading**: scroll, ←/→ (or Page Up / Page Down) a page at a time, the page box at the bottom to jump (⌘G puts
@@ -16,7 +16,7 @@ and as wide as the first page's shape at that height allows.
   **Contents** button opens the chapters as a list beside the pages — the PDF's outline, else the entries read from
   its contents pages — with the chapter being read marked; the chapter's name in the bottom bar is a menu of them
   all, [ and ] step a chapter back and on, and **Back** (⌘[) returns to where a jump was made from.
-- **Optimize for Safe Finder** — a new PDF beside the original, trimmed to its content (the same box on every
+- **Optimize for Mac** — a new PDF beside the original, trimmed to its content (the same box on every
   page) with blank pages left out, so the page — not its margins — fills this viewer. **Optimize for iPhone** — a
   new PDF made for the iPhone 17 Pro Max: pages the shape of its screen, margins trimmed, two-column pages read a
   column at a time (larger), content flowing from page to page and cut only between lines (`pdf_optimize`). The
@@ -24,7 +24,7 @@ and as wide as the first page's shape at that height allows.
   (AirDrop to iPhone — Photo Browser there takes it), or travels on the drive beside the original.
 - **⋯**: Open With Default App (Preview), Show in Folder, AirDrop to iPhone.
 
-It doesn't touch files itself: Safe Finder's `PdfHooks` put the new PDF on the drive (safely: `simpcity.place`),
+It doesn't touch files itself: Photo Browser for Mac's `PdfHooks` put the new PDF on the drive (safely: `simpcity.place`),
 give it the original's tags, show a file in its pane and AirDrop.
 """
 from __future__ import annotations
@@ -61,7 +61,7 @@ def is_pdf(path: str) -> bool:
 
 @dataclass
 class PdfHooks:
-    """What the viewer asks of Safe Finder (each may be None)."""
+    """What the viewer asks of Photo Browser for Mac (each may be None)."""
     place: Callable[[str, str, str], str] | None = None          # (temp file, folder, name) → where it went
     carry_tags: Callable[[list[tuple[str, str]]], None] | None = None   # [(original, new)]
     reveal: Callable[[str], None] | None = None
@@ -298,7 +298,7 @@ class PdfViewer(QWidget):
         row.addWidget(self.chapter_btn)
         row.addStretch(1)
         # The two Optimize buttons, in the middle of the bottom bar (the top one holds the name and the search).
-        self.mac_btn = QPushButton("Optimize for Safe Finder", objectName="Optimize")
+        self.mac_btn = QPushButton("Optimize for Mac", objectName="Optimize")
         self.mac_btn.setToolTip("A new PDF beside this one, trimmed to its content with blank pages left out — so "
                                 "the page, not its margins, fills this viewer")
         self.mac_btn.clicked.connect(lambda: self.optimize(pdf_optimize.MAC))
@@ -747,7 +747,7 @@ class PdfViewer(QWidget):
         for b in (self.mac_btn, self.phone_btn):
             b.setEnabled(False)
         self.result_row.setVisible(False)
-        what = "for the iPhone" if target == pdf_optimize.IPHONE else "for Safe Finder"
+        what = "for the iPhone" if target == pdf_optimize.IPHONE else "for the Mac"
         self.say_busy(f"Optimizing {what}…")
         src, password, stop = self.path, self.password, self._stop
         place, progress, finished = self.hooks.place, self._progress, self._finished
@@ -846,7 +846,7 @@ class PdfViewer(QWidget):
 
     def _fit_window(self) -> None:
         """As tall as the display (under the menu bar, above the Dock), as wide as the first page allows at that
-        height — over Safe Finder's window."""
+        height — over Photo Browser for Mac's window."""
         avail = mv.available_geometry(self)
         if avail is None:
             self.resize(900, 1000)

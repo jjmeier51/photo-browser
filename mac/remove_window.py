@@ -1,4 +1,4 @@
-"""Safe Finder's Remove Objects window — TouchRetouch on the Mac: draw a lasso around something (or paint over
+"""Photo Browser for Mac's Remove Objects window — TouchRetouch on the Mac: draw a lasso around something (or paint over
 it) and it's gone, filled in from the photo itself (inpaint.py — the same kind of fill as Photoshop's
 Content-Aware Fill). Right-click a photo ▸ Remove Objects…, Photos ▸ Remove Objects…, or ⋯ in the viewer.
 
@@ -9,7 +9,7 @@ Content-Aware Fill). Right-click a photo ▸ Remove Objects…, Photos ▸ Remov
   Space — shows the original; ⌘-scroll or pinch zooms (or − / Fit / +), scrolling pans.
 - **Save as New** puts the result beside the photo as "name (retouched).ext"; **Replace Original** writes it
   in place. Either way the format, metadata, dates and tags are kept (batch_crop's saving), and the result is
-  tagged "retouched" (Safe Finder's `on_done`). Closing with changes asks first.
+  tagged "retouched" (Photo Browser for Mac's `on_done`). Closing with changes asks first.
 
 The work happens on a worker thread, a bar showing how far it's got; Esc stops it. The mark is kept as a
 picture at up to 4096 px (a 48 MP photo's mask at full size would cost 50 MB a stroke) and scaled up for the

@@ -14,7 +14,7 @@ which is how a model (`ai_models.py`) is drawn on a Mac that can't train one.
 
 **How it's installed** (`install`, on first use, with the person's go-ahead): mflux can't live inside Safe
 Finder.app (a frozen app has no Python to run it with, and its MLX/torch pins are tight), so it gets its own
-environment — `~/Library/Application Support/Safe Finder/AI/env`, made by **uv** (which also fetches the Python
+environment — `~/Library/Application Support/Photo Browser for Mac/AI/env`, made by **uv** (which also fetches the Python
 it needs) with mflux pinned to `MFLUX_VERSION`. Then `prepare` runs `mflux-save` once: the model comes down from
 Hugging Face (about 16 GB) and a quantised copy (about 4 GB at 4-bit) is kept in `…/AI/engines`; generating
 loads that copy, with `HF_HUB_OFFLINE=1` — after the first download nothing here touches the network.
@@ -28,7 +28,7 @@ its options change between releases.
 Pictures are marked as AI-made in their metadata (IPTC Digital Source Type "trainedAlgorithmicMedia") when
 ExifTool is there — on top of the prompt and settings mflux writes itself.
 
-SAFE_FINDER_AI_ENGINE names a folder of stand-in commands (tests).
+PHOTO_BROWSER_AI_ENGINE names a folder of stand-in commands (tests).
 """
 from __future__ import annotations
 
@@ -41,6 +41,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+import app_identity
 
 MFLUX_VERSION = "0.24.0"
 PYTHON_VERSION = "3.12"
@@ -54,7 +55,7 @@ IS_MAC = sys.platform == "darwin"
 
 
 def ai_dir() -> Path:
-    return Path.home() / "Library" / "Application Support" / "Safe Finder" / "AI"
+    return app_identity.support() / "AI"
 
 
 def env_dir() -> Path:
@@ -69,7 +70,7 @@ def engines_dir() -> Path:
 
 def memory_gb() -> float:
     """The Mac's unified memory, in GB (0 when it can't be read)."""
-    over = os.environ.get("SAFE_FINDER_AI_MEMORY_GB")
+    over = os.environ.get("PHOTO_BROWSER_AI_MEMORY_GB")
     if over:
         try:
             return float(over)
@@ -85,7 +86,7 @@ def memory_gb() -> float:
 
 
 def apple_silicon() -> bool:
-    if os.environ.get("SAFE_FINDER_AI_ENGINE"):
+    if os.environ.get("PHOTO_BROWSER_AI_ENGINE"):
         return True
     if not IS_MAC:
         return False
@@ -125,7 +126,7 @@ def plan(memory: float | None = None) -> Plan:
 # ----------------------------------------------------------------------------- the engine's programs
 
 def _stand_in() -> Path | None:
-    d = os.environ.get("SAFE_FINDER_AI_ENGINE")
+    d = os.environ.get("PHOTO_BROWSER_AI_ENGINE")
     return Path(d) if d else None
 
 
@@ -359,7 +360,7 @@ def mark_ai_made(paths: list[str]) -> None:
         return
     try:
         subprocess.run([exiftool, "-overwrite_original", "-q", f"-XMP-iptcExt:DigitalSourceType={AI_SOURCE}",
-                        "-XMP-xmp:CreatorTool=Safe Finder (FLUX.2 klein 4B, mflux)", *paths],
+                        "-XMP-xmp:CreatorTool=Photo Browser for Mac (FLUX.2 klein 4B, mflux)", *paths],
                        capture_output=True, timeout=120)
     except (OSError, subprocess.SubprocessError):
         pass

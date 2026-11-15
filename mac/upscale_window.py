@@ -1,4 +1,4 @@
-"""Safe Finder's AI Upscale windows: the options first (the model, how much of the original's texture to
+"""Photo Browser for Mac's AI Upscale windows: the options first (the model, how much of the original's texture to
 keep, and whether to replace the photos or save the upscales as new photos beside them), the progress of a
 run (ai_upscale.py does the work on worker threads — two photos at once where the Mac has the memory), and
 the note shown when there's no Real-ESRGAN engine on this Mac yet (Get Upscayl / Choose Engine…).
@@ -395,8 +395,8 @@ def ask_for_engine(parent: QWidget | None) -> tuple[au.Engine, str] | None:
         box.setInformativeText(
             "It runs on your Mac's graphics chip — nothing is uploaded. The easiest way to get it is the free "
             "Upscayl app (upscayl.org, or “brew install --cask upscayl”): install it, then choose AI Upscale "
-            "again — Safe Finder finds it on its own. A realesrgan-ncnn-vulkan release works too: unzip it into "
-            "~/Library/Application Support/Safe Finder/Real-ESRGAN, or pick it with Choose Engine….")
+            "again — Photo Browser for Mac finds it on its own. A realesrgan-ncnn-vulkan release works too: unzip it into "
+            "~/Library/Application Support/Photo Browser for Mac/Real-ESRGAN, or pick it with Choose Engine….")
         get = box.addButton("Get Upscayl", QMessageBox.ButtonRole.AcceptRole)
         choose = box.addButton("Choose Engine…", QMessageBox.ButtonRole.ActionRole)
         box.addButton(QMessageBox.StandardButton.Cancel)

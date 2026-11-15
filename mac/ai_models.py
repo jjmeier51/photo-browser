@@ -16,7 +16,7 @@ another*. So: unreadable, tiny and blurred photos are dropped; of near-identical
 kept; then the set is filled by always taking the photo least like those already taken (farthest-first), best
 first. The order is kept: the first photos are the ones to use when an engine takes only a few.
 
-A model is a folder in `~/Library/Application Support/Safe Finder/AI/Models/<name>/`: `model.json` and
+A model is a folder in `~/Library/Application Support/Photo Browser for Mac/AI/Models/<name>/`: `model.json` and
 `photos/001.jpg…` (copies — upright, sRGB, at most PHOTO_PX on the long side; the originals aren't touched or
 needed again). Nothing here leaves the Mac; the engines that upload say so themselves.
 """
@@ -32,6 +32,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+import app_identity
 
 KINDS = {"person": "Person", "pet": "Pet", "object": "Object", "style": "Style"}
 # The plain word for what the subject is — what prompts and a trained model's "class" call it.
@@ -42,10 +43,12 @@ MIN_SIDE = 384                       # smaller than this on its short side: too 
 # How many photos a model keeps, by kind (single subjects gain nothing past a few dozen; a style wants more).
 TARGET = {"person": 30, "pet": 30, "object": 30, "style": 100}
 NEAR_DUPLICATE_BITS = 6              # of 64: perceptual hashes this close are the same shot
+FORMAT = "photo-browser-ai-model"
+OLD_FORMAT = "safe" + "-finder-ai-model"      # what models made before the app's rename say; read all the same
 
 
 def root() -> Path:
-    return Path.home() / "Library" / "Application Support" / "Safe Finder" / "AI" / "Models"
+    return app_identity.support() / "AI" / "Models"
 
 
 def slug(name: str) -> str:
@@ -205,7 +208,7 @@ class Model:
         return f"the {self.word} in the reference photos"
 
     def save(self) -> None:
-        doc = {"format": "safe-finder-ai-model", "version": 1, "name": self.name, "kind": self.kind, "word": self.word,
+        doc = {"format": FORMAT, "version": 1, "name": self.name, "kind": self.kind, "word": self.word,
                "created": self.created, "photos": self.photos, "sources": self.sources, "consent": self.consent,
                "astria_tune": self.astria_tune, "astria_token": self.astria_token, "seen": self.seen}
         tmp = self.folder / ".model.json.saving"
@@ -218,7 +221,7 @@ def load(folder: Path) -> Model | None:
         d = json.loads((folder / "model.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(d, dict) or d.get("format") != "safe-finder-ai-model":
+    if not isinstance(d, dict) or d.get("format") not in (FORMAT, OLD_FORMAT):
         return None
     tune = d.get("astria_tune")
     return Model(folder, str(d.get("name") or folder.name), d.get("kind") if d.get("kind") in KINDS else "person",

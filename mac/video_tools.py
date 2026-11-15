@@ -1,4 +1,4 @@
-"""Video work for Safe Finder: putting a DASH video's two halves together (`mux`), upscaling a video to 1080p
+"""Video work for Photo Browser for Mac: putting a DASH video's two halves together (`mux`), upscaling a video to 1080p
 or 4K (`upscale` — in place or as a new file, its metadata and dates kept; `upscale_1080` for the downloaders)
 — and turning a WebM into an MP4
 (`webm_to_mp4`, the SimpCity downloader), which only ffmpeg can do: AVFoundation doesn't open WebM.
@@ -8,8 +8,8 @@ with `swiftc` into ~/Library/Caches/PhotoBrowser/ (like the thumbnail helper). W
 ffmpeg does it when it's installed (`brew install ffmpeg`). With neither, a DASH video falls back to its
 one-file version and no video is upscaled — the log says so once. A helper that won't build leaves the
 compiler's output in `video_helper.log` beside it (`problem` says why it isn't there), so falling back to
-ffmpeg — which tone-maps HDR its own way — is never silent. `SAFE_FINDER_VIDEO_HELPER` names a stand-in
-helper and `SAFE_FINDER_FFMPEG` an ffmpeg (tests).
+ffmpeg — which tone-maps HDR its own way — is never silent. `PHOTO_BROWSER_VIDEO_HELPER` names a stand-in
+helper and `PHOTO_BROWSER_FFMPEG` an ffmpeg (tests).
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def helper() -> list[str] | None:
     with _lock:
         if _helper is not False:
             return _helper
-        env = os.environ.get("SAFE_FINDER_VIDEO_HELPER")
+        env = os.environ.get("PHOTO_BROWSER_VIDEO_HELPER")
         if env:
             _helper = env.split("\x1f")
             return _helper
@@ -85,7 +85,7 @@ def helper() -> list[str] | None:
 
 
 def ffmpeg() -> str | None:
-    env = os.environ.get("SAFE_FINDER_FFMPEG")
+    env = os.environ.get("PHOTO_BROWSER_FFMPEG")
     if env is not None:
         return env or None
     for cand in (shutil.which("ffmpeg"), "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):

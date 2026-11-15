@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe Finder ▸ "Download from Fanfix…" — the window (fanfix.py reads what Fanfix's page loads and shows,
+"""Photo Browser for Mac ▸ "Download from Fanfix…" — the window (fanfix.py reads what Fanfix's page loads and shows,
 social.py places the files).
 
     python3 mac/fanfix_downloader.py "/Volumes/SSD/Jane" [creator]
@@ -22,7 +22,7 @@ not the file. A plain request is only the fallback. Four at a time, on worker th
 page goes, so links that expire are used while they're fresh.
 
 The page scrolls in front of the person — what it reads is what they see. "Save Troubleshooting File" writes the
-last run (what the page loaded, what it showed, what was found, what failed and why) to ~/Library/Logs/Safe Finder.
+last run (what the page loaded, what it showed, what was found, what failed and why) to ~/Library/Logs/Photo Browser for Mac.
 """
 from __future__ import annotations
 
@@ -48,6 +48,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 import fanfix  # noqa: E402
 import simpcity as sc  # noqa: E402
 import social  # noqa: E402
+import app_identity
 
 LANES = 4                     # files downloaded at once (paced like a person browsing)
 SAVE_EVERY = 25               # the records are saved (and the files tagged) after this many files
@@ -151,7 +152,7 @@ class _Bridge(QObject):
 class FanfixWindow(QMainWindow):
     """The downloader, from one folder (the one right-clicked)."""
 
-    finished = Signal(str, list)       # (the folder, files written) — Safe Finder refreshes + tags
+    finished = Signal(str, list)       # (the folder, files written) — Photo Browser for Mac refreshes + tags
 
     def __init__(self, folder: str, start: str = "", tags=None, parent=None) -> None:
         super().__init__(parent)
@@ -161,7 +162,7 @@ class FanfixWindow(QMainWindow):
         self.cookies: dict[str, dict[str, str]] = {}
         self.bridge = _Bridge()
         self.bridge.call.connect(lambda cb, value: cb(value))
-        self.settings = QSettings("PhotoBrowser", "SafeFinder")
+        self.settings = app_identity.settings()
         self.exiftool = sc.find_exiftool()
         self.captured: list[dict] = []
         self.report: dict = {}
@@ -224,7 +225,7 @@ class FanfixWindow(QMainWindow):
         login.clicked.connect(lambda: self.view.load(QUrl(fanfix.LOGIN)))
         self.trouble_btn = QPushButton("Save Troubleshooting File")
         self.trouble_btn.setToolTip("Writes the last run — what the page loaded and showed, what was found, what "
-                                    "failed and why — to a file in ~/Library/Logs/Safe Finder")
+                                    "failed and why — to a file in ~/Library/Logs/Photo Browser for Mac")
         self.trouble_btn.clicked.connect(self.save_troubleshooting)
         self.trouble_btn.setEnabled(False)
 
@@ -737,7 +738,7 @@ class FanfixWindow(QMainWindow):
         protected = len(h.drm) + self.drm
         if protected:
             line += (f" {protected} bought photo{'s' if protected != 1 else ''}/video{'s' if protected != 1 else ''} "
-                     "Fanfix only delivers protected by DRM (FairPlay/Widevine) — Safe Finder doesn't break DRM, so "
+                     "Fanfix only delivers protected by DRM (FairPlay/Widevine) — Photo Browser for Mac doesn't break DRM, so "
                      f"{'those stay' if protected != 1 else 'that stays'} viewable on Fanfix only.")
         if h.locked:
             line += f" {h.locked} locked item{'s' if h.locked != 1 else ''} (not bought) left out."
@@ -831,7 +832,7 @@ class FanfixWindow(QMainWindow):
     def save_troubleshooting(self) -> None:
         """The last run — what the page loaded and showed, what was found, what failed — to ~/Library/Logs/Safe
         Finder. It holds addresses from the person's own account: it stays on this Mac."""
-        folder = Path.home() / "Library" / "Logs" / "Safe Finder"
+        folder = app_identity.logs()
         try:
             folder.mkdir(parents=True, exist_ok=True)
             path = folder / f"fanfix-{time.strftime('%Y%m%d-%H%M%S')}.json"

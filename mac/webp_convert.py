@@ -1,4 +1,4 @@
-"""Safe Finder ▸ Convert WebP to JPEG — every .webp photo in a folder (or the selected ones) made a full-resolution,
+"""Photo Browser for Mac ▸ Convert WebP to JPEG — every .webp photo in a folder (or the selected ones) made a full-resolution,
 high-quality JPEG beside it. No Qt here (webp_window.py is the window), so it's testable on its own.
 
 **The JPEG** (`to_jpeg`): the same pixels at the same size — never scaled — saved at quality 95 with full colour
@@ -10,7 +10,7 @@ never overwritten: the new one is "name 2.jpg". Each JPEG is read back to check 
 
 **Onto the drive** by the drive's rules (`simpcity.write_file`: temp → fsync → rename; straight in on exFAT,
 CLAUDE.md #12). **The originals** go to the Trash only when asked (`convert(trash=…)`) and only once their JPEG
-checked out; Safe Finder then moves their tags and Favorites / To AI to the JPEG (`webp_window`), as for a move.
+checked out; Photo Browser for Mac then moves their tags and Favorites / To AI to the JPEG (`webp_window`), as for a move.
 Kept originals give their JPEG their tags, as a copy does.
 
 Pillow does the work (its WebP support reads lossy, lossless and alpha WebP); photos are converted four at a time
@@ -28,8 +28,9 @@ from pathlib import Path
 QUALITY = 95                  # "high quality": visually lossless; 100 only makes files much bigger
 SUBSAMPLING = 0               # 4:4:4 — full colour resolution
 LANES = 4
-SKIP_DIRS = {".Photo Browser Metadata", ".Spare Folders", ".Safe Finder Staging", ".Trashes", ".fseventsd",
-             ".Spotlight-V100", ".TemporaryItems", ".DocumentRevisions-V100"}
+SKIP_DIRS = {".Photo Browser Metadata", ".Spare Folders", ".Photo Browser Staging", ".Photo Browser Checksums",
+             ".Safe Finder Staging", ".Safe Finder Checksums",        # an earlier version's names for those two
+             ".Trashes", ".fseventsd", ".Spotlight-V100", ".TemporaryItems", ".DocumentRevisions-V100"}
 
 
 def is_webp(path: str) -> bool:

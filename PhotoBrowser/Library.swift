@@ -619,7 +619,7 @@ final class Library {
                 info.newestDate = newest
             }
             tiktokFolders[folder] = info
-            // The folder's shared record (`.tiktok.json`, Safe Finder's too): these ids and their likes.
+            // The folder's shared record (`.tiktok.json`, Photo Browser for Mac's too): these ids and their likes.
             let folderURL = URL(fileURLWithPath: folder, isDirectory: true)
             let doneIDs = Set(fresh), handle = info.handle, added = fresh.count
             let likes = Dictionary(filed.filter { $0.folder == folder && $0.likes > 0 }.map { ($0.id, $0.likes) },
@@ -630,7 +630,7 @@ final class Library {
             }
         }
         if !idsByFolder.isEmpty { persistTikTokFolders() }
-        // Tagged "tiktok", as Safe Finder tags its TikTok downloads.
+        // Tagged "tiktok", as Photo Browser for Mac tags its TikTok downloads.
         _ = addTag(SocialRecord.Kind.tiktok.tag, to: filed.map { URL(fileURLWithPath: $0.dest) })
         contentDidChange()
     }
@@ -648,7 +648,7 @@ final class Library {
     /// User tags per file ("portrait", "beach", …), keyed by path — edited in the info panel below the
     /// caption, filtered on in FolderView across a folder and its subfolders. Bulk-stored like captions.
     var tags: [String: [String]] = Library.loadBulk("tags") ?? [:]
-    /// Shared with Safe Finder through the drive (see `SharedTags`): what the store and each drive's
+    /// Shared with Photo Browser for Mac through the drive (see `SharedTags`): what the store and each drive's
     /// shared tag file agreed on at the last sync, by the file's id.
     @ObservationIgnored var tagSyncBases: [String: SharedTags.Base] = Library.loadBulk("tagSyncBase") ?? [:]
     @ObservationIgnored var tagSyncTask: Task<Void, Never>?
@@ -660,7 +660,7 @@ final class Library {
     /// Folder path → cover-image filename (stored under Application Support/folderCovers).
     var folderCovers: [String: String] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.folderCovers") as? [String: String]) ?? [:]
     /// Folder path → when its cover was chosen (Unix time). A folder with a cover but no stamp has an
-    /// automatic one (`ensureRandomCover`). Shared with Safe Finder through the drive's
+    /// automatic one (`ensureRandomCover`). Shared with Photo Browser for Mac through the drive's
     /// `folder-covers.json`, where the later choice wins — see `FolderCovers.swift`.
     var coverStamps: [String: Double] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.coverStamps") as? [String: Double]) ?? [:]
     /// Item file path → custom-thumbnail filename (stored under Application Support/itemThumbs).
@@ -2544,7 +2544,7 @@ final class Library {
                 try? DriveWriter.createDirectory(at: dest)
                 let shared = await Task.detached(priority: .utility) { SocialRecord.snapshot(.instagram, in: dest) }.value
                 let prior = instagramInfo(for: dest) ?? shared.instagramInfo
-                // The record's ids, the shared record's (Safe Finder's too), and what's in the folder (a
+                // The record's ids, the shared record's (Photo Browser for Mac's too), and what's in the folder (a
                 // record from an older backup mustn't make it fetch what's already there).
                 let onDisk = await Task.detached(priority: .utility) { Self.postIDsOnDisk(in: dest, tiktok: false) }.value
                 let already = Set(prior?.downloaded ?? []).union(onDisk).union(shared.ids)
@@ -2890,7 +2890,7 @@ final class Library {
     }
 
     /// Folder path → when "Videos at the Top" was last switched there (positive: on, negative: off).
-    /// Shared with Safe Finder through the drive's `folder-options.json` — see `FolderOptions.swift`.
+    /// Shared with Photo Browser for Mac through the drive's `folder-options.json` — see `FolderOptions.swift`.
     var videosFirst: [String: Double] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.videosFirst") as? [String: Double]) ?? [:]
 
     /// Individual files hidden from browsing — same idea as `hiddenFolders`, but per file (nothing on
@@ -4464,7 +4464,7 @@ final class Library {
         processPendingTikTok()            // file anything that finished while we were closed
         purgeExpiredTrash()               // drop trashed items past their 30-day window
         scheduleIndexBuild()
-        scheduleTagSync(after: 1)         // pick up tags added in Safe Finder while the drive was on the Mac
+        scheduleTagSync(after: 1)         // pick up tags added in Photo Browser for Mac while the drive was on the Mac
     }
 
     func restoreLastFolder() {
@@ -4500,7 +4500,7 @@ final class Library {
         processPendingTikTok()            // file anything that finished while we were closed
         purgeExpiredTrash()               // drop trashed items past their 30-day window
         scheduleIndexBuild()
-        scheduleTagSync(after: 1)         // pick up tags added in Safe Finder while the drive was on the Mac
+        scheduleTagSync(after: 1)         // pick up tags added in Photo Browser for Mac while the drive was on the Mac
     }
 
     /// Re-checks drive availability. Cheap when everything is fine, so it's safe to

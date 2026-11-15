@@ -1,12 +1,12 @@
 import Foundation
 
-/// Per-folder choices shared with Safe Finder — so far one: **Videos at the Top** (a folder's
+/// Per-folder choices shared with Photo Browser for Mac — so far one: **Videos at the Top** (a folder's
 /// videos listed before its photos; folders and highlights still first).
 ///
 /// The choice is kept by folder path in `Library.videosFirst` (a `FilePrefs` dictionary:
 /// path → stamp), and — for the drive that's open — in
 /// `<drive>/.Photo Browser Metadata/folder-options.json`
-/// (`{"videos_first": {"<folder, drive-relative>": stamp}}`), which Safe Finder reads and writes
+/// (`{"videos_first": {"<folder, drive-relative>": stamp}}`), which Photo Browser for Mac reads and writes
 /// too (`mac/folder_options.py`). So a folder set to "Videos at the Top" on the Mac is shown that
 /// way here, and the other way round.
 ///
@@ -73,7 +73,7 @@ extension Library {
         scheduleTagSync(after: 1)          // `syncDriveTags` runs `syncFolderOptions`
     }
 
-    /// One merge with the drive's `folder-options.json`: what Safe Finder set comes in, what was
+    /// One merge with the drive's `folder-options.json`: what Photo Browser for Mac set comes in, what was
     /// set here goes out. The file is only written when there's something it doesn't have.
     func syncFolderOptions() async {
         guard let root = rootURL, !waitingForDrive else { return }

@@ -1,4 +1,4 @@
-"""Safe Finder ▸ Send to CapCut / Import from CapCut — the windows (capcut.py has the logic).
+"""Photo Browser for Mac ▸ Send to CapCut / Import from CapCut — the windows (capcut.py has the logic).
 
 **The tray** (`CapCutTray`): opened by "Send to CapCut" beside CapCut (which it opens). It floats over CapCut —
 a small always-on-top panel that stays up while CapCut is the app in front — with the clips in timeline order
@@ -14,7 +14,7 @@ drive with the clips' tags and "capcut", dated like the earliest clip if wanted.
 folder (or all the usual places), newest first, the ones already brought in greyed; tick, choose where they go
 (that folder, or each back to where its clips came from), Import.
 
-Safe Finder hands in what it owns through `CapCutHooks` (thumbnails, the tag store, settings, a callback when
+Photo Browser for Mac hands in what it owns through `CapCutHooks` (thumbnails, the tag store, settings, a callback when
 files arrive); the copying runs on a worker thread and reports back through a signal.
 """
 from __future__ import annotations
@@ -293,7 +293,7 @@ class CapCutTray(QWidget):
         self.tile = DragTile(lambda: self.copies or self.ordered, hooks.thumb)
         self.clips = ClipList()
         self.copy_first = QCheckBox("Copy to this Mac first")
-        self.copy_first.setToolTip("Copies the clips into ~/Movies/Safe Finder for CapCut (numbered in this order) — "
+        self.copy_first.setToolTip("Copies the clips into ~/Movies/Photo Browser for CapCut (numbered in this order) — "
                                    "for a CapCut project that has to work with the drive unplugged")
         self.copy_first.toggled.connect(self._copy_first)
         self.bar = QProgressBar()
@@ -767,7 +767,7 @@ class CapCutImportDialog(QDialog):
             jobs.append((e, dest, session))
         if not jobs:
             self.status.setText("Tick the videos to bring in" + (" — and choose a folder for the ones with no clips "
-                                                                 "sent from Safe Finder." if skipped else "."))
+                                                                 "sent from Photo Browser for Mac." if skipped else "."))
             return
         self.go.setEnabled(False)
         self.status.setText(f"Bringing {len(jobs)} video{'s' if len(jobs) != 1 else ''} onto the drive…")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SimpCity thread downloader — the parts with no window (Safe Finder's window is simpcity_downloader.py).
+"""SimpCity thread downloader — the parts with no window (Photo Browser for Mac's window is simpcity_downloader.py).
 
 From a person's folder, a simpcity.cr thread is read page by page; every goonbox.cr image is resolved
 to its full-size file and every turbo.cr video to its file, and they are saved into a "simpcity"
@@ -7,7 +7,7 @@ folder inside the person's folder, tagged "simpcity". A photo or video that carr
 date keeps it; one that doesn't gets the date of the forum post it came from.
 
 **One record, both apps.** What was downloaded is kept on the drive, in the folder itself —
-`<person>/simpcity/.simpcity.json` — so the iPhone app (`SimpCityService.swift`) and Safe Finder read
+`<person>/simpcity/.simpcity.json` — so the iPhone app (`SimpCityService.swift`) and Photo Browser for Mac read
 and write the same list: a thread downloaded on the Mac is never fetched again on the iPhone, and the
 other way round. Keys are `goonbox:<id>` / `turbo:<id>`; files are named `<id>.<ext>`, so a file
 already in the folder counts as done even if the record was lost. Something deleted from the folder
@@ -24,7 +24,7 @@ page read, so "Get New" starts where the thread had got to.
 score" beside a member's name, which is that member's lifetime total). They're kept in the record by post
 (`reactions`: post id → score and when it was read; the newer reading wins a merge), so both apps can sort
 a folder's downloads by them (`folder_scores`, `Record.scores`): a file takes its post's score — the
-highest, when the same file came from several posts. Safe Finder's "Get Reaction Scores" reads every page
+highest, when the same file came from several posts. Photo Browser for Mac's "Get Reaction Scores" reads every page
 of the folder's threads again for them alone (scores change after a download).
 
 **Videos on file hosts.** A post's pixeldrain, gofile, cyberdrop, bunkr, filester or fileditch link is
@@ -59,6 +59,7 @@ from typing import NamedTuple
 from urllib.parse import urlsplit
 
 import filehosts as fh
+import app_identity
 
 FOLDER = "simpcity"
 RECORD = ".simpcity.json"
@@ -646,7 +647,7 @@ class Record:
         """Writes the record, merged with whatever is on the drive now (the other app may have added
         to it). Raises OSError when the drive can't be written."""
         self._merge(self._read())
-        doc = {"format": FORMAT, "version": VERSION, "updated": int(time.time()), "by": "Safe Finder",
+        doc = {"format": FORMAT, "version": VERSION, "updated": int(time.time()), "by": app_identity.APP_NAME,
                "threads": dict(sorted(self.threads.items())), "items": dict(sorted(self.items.items())),
                "failed": dict(sorted(self.failed.items())), "links": dict(sorted(self.links.items())),
                "reactions": dict(sorted(self.reactions.items())), "galleries": dict(sorted(self.galleries.items()))}

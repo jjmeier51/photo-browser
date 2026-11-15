@@ -1,15 +1,15 @@
-// The thumbnail helper for Safe Finder (mac/safe_finder.py): video frames and RAW/odd-image previews.
+// The thumbnail helper for Photo Browser for Mac (mac/photo_browser.py): video frames and RAW/odd-image previews.
 //
 // Qt and Pillow can't read video, and `qlmanage` — the only built-in command that can — starts Quick
 // Look afresh for every run and returns nothing until its whole batch is done, so a folder of videos
 // filled in slowly. This program stays running and makes each thumbnail with AVFoundation (a frame a
 // moment into the video) or ImageIO (RAW and anything else ImageIO reads, from its embedded preview),
-// several at once. Safe Finder builds it once with `swiftc` (Xcode or its Command Line Tools) into
+// several at once. Photo Browser for Mac builds it once with `swiftc` (Xcode or its Command Line Tools) into
 // ~/Library/Caches/PhotoBrowser/ and falls back to Quick Look without it, or for anything it can't do.
 //
 // Protocol, one JSON object per line. In (stdin):  {"id": "…", "path": "…", "out": "…", "px": 512,
 // "video": true}. Out (stdout): {"id": "…", "ok": true} once `out` holds the JPEG (written beside it,
-// then renamed), or {"id": "…", "ok": false}. Requests run concurrently; Safe Finder bounds how many are
+// then renamed), or {"id": "…", "ok": false}. Requests run concurrently; Photo Browser for Mac bounds how many are
 // in flight. Ends when stdin closes, after the ones in hand.
 import AVFoundation
 import CoreImage
@@ -69,7 +69,7 @@ func isHDRSpace(_ cs: CGColorSpace?) -> Bool {
     return name.contains("2100") || name.contains("HLG") || name.contains("PQ")
 }
 
-/// `image` as an 8-bit sRGB picture. Safe Finder draws its tiles with Qt, which shows a JPEG's numbers as
+/// `image` as an 8-bit sRGB picture. Photo Browser for Mac draws its tiles with Qt, which shows a JPEG's numbers as
 /// they are and takes no notice of the colour profile inside it — so a thumbnail left in the photo's own
 /// space came out washed (Display P3, BT.2020) or flat and grey (an HDR photo or frame in HLG / PQ). HDR is
 /// brought to standard range first (macOS 15+: highlights eased from HLG's 4.93× SDR white down to SDR

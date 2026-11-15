@@ -1,4 +1,4 @@
-"""AI ▸ Models… and Make AI Model… — Safe Finder's windows for `ai_models.py` (a person, pet, object or style kept
+"""AI ▸ Models… and Make AI Model… — Photo Browser for Mac's windows for `ai_models.py` (a person, pet, object or style kept
 as its best photos) and the engines that draw from one:
 
 - **On this Mac** (`local_ai.py` — FLUX.2 klein 4B through mflux): private, free, nothing uploaded. Set up on
@@ -35,7 +35,7 @@ class ModelHooks:
     folder: Callable[[], str]                              # where pictures made now should go (its "AI" folder)
     create_with_ai: Callable[[str, dict], None]            # (folder, settings): open Create with AI prefilled
     view: Callable[[list[str], str], None] | None = None   # open pictures in the viewer
-    reveal: Callable[[str], None] | None = None            # show a file or folder in Safe Finder
+    reveal: Callable[[str], None] | None = None            # show a file or folder in Photo Browser for Mac
     trash: Callable[[str], bool] | None = None             # a folder to the Trash
 
 
@@ -262,7 +262,7 @@ class ModelsWindow(QWidget):
         self.list.setFixedWidth(230)
         self.list.currentRowChanged.connect(lambda _r: self._show())
         left.addWidget(self.list, 1)
-        hint = QLabel("To make one: select 5 or more photos in Safe Finder and right-click ▸ Make AI Model… — or right-click "
+        hint = QLabel("To make one: select 5 or more photos in Photo Browser for Mac and right-click ▸ Make AI Model… — or right-click "
                       "a folder ▸ AI ▸ Make AI Model from Photos Inside…")
         hint.setWordWrap(True)
         hint.setObjectName("SheetSub")
@@ -471,7 +471,7 @@ class ModelsWindow(QWidget):
                     "•  the engine (mflux, about 1 GB)\n"
                     f"•  the model, FLUX.2 klein 4B (about {local_ai.DOWNLOAD_GB} GB to download from Hugging Face; "
                     f"about {4 if p.quantize == 4 else 8} GB is kept in the form this Mac uses)\n\n"
-                    f"It goes in “Application Support/Safe Finder/AI”. {local_ai.free_gb():.0f} GB is free. The download "
+                    f"It goes in “Application Support/Photo Browser for Mac/AI”. {local_ai.free_gb():.0f} GB is free. The download "
                     "can take a while, and the last step is heavy on a 16 GB Mac — close other apps. After this, "
                     "nothing here uses the network.\n\nSet it up now?") != QMessageBox.StandardButton.Yes:
                 return

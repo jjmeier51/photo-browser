@@ -1,4 +1,4 @@
-"""Instagram profiles for Safe Finder — what to download and where it goes; no Qt (social_downloader.py is
+"""Instagram profiles for Photo Browser for Mac — what to download and where it goes; no Qt (social_downloader.py is
 the window, social.py the downloading). A port of the iPhone app's `InstagramService`, so both apps
 download the same things under the same names and neither fetches what the other has.
 
@@ -72,6 +72,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import social
+import app_identity
 
 TAG = "instagram"
 RECORD = ".instagram.json"
@@ -279,10 +280,10 @@ def profile_from_page(seen: dict, handle: str) -> Profile | None:
 
 
 def dump_visit(seen: dict, handle: str) -> str:
-    """What a visited page loaded, saved to ~/Library/Logs/Safe Finder/instagram-<handle>-<time>.json — for when its
+    """What a visited page loaded, saved to ~/Library/Logs/Photo Browser for Mac/instagram-<handle>-<time>.json — for when its
     data didn't name the account, so the next fix is made from Instagram's real answers. Stays on this Mac."""
     import time as _time
-    folder = Path.home() / "Library" / "Logs" / "Safe Finder"
+    folder = app_identity.logs()
     try:
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"instagram-{handle}-{_time.strftime('%Y%m%d-%H%M%S')}.json"

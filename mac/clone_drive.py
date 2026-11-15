@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Move the whole library to a new SSD without losing anything — Safe Finder's "Clone Drive to a New SSD…"
+"""Move the whole library to a new SSD without losing anything — Photo Browser for Mac's "Clone Drive to a New SSD…"
 (no Qt here; clone_window.py is the window).
 
     python3 mac/clone_drive.py "/Volumes/Old SSD" "/Volumes/New SSD"             # dry run: what would be copied
@@ -28,7 +28,7 @@ The old drive is only ever read. Nothing on it is changed, moved or deleted.
 **What isn't**: macOS's own bookkeeping, which means nothing on another drive (`.Spotlight-V100`,
 `.fseventsd`, `.Trashes`, `.TemporaryItems`, `.DocumentRevisions-V100`, `.DS_Store`, the `._name` companions
 themselves), Windows' (`$RECYCLE.BIN`, `System Volume Information`), and the exFAT workarounds an APFS drive
-doesn't need (`.Spare Folders`, `.Safe Finder Staging`). The run counts them.
+doesn't need (`.Spare Folders`, `.Photo Browser Staging`). The run counts them.
 
 **How each file is copied**: read once (its checksum taken as it's read), written under a temporary name,
 flushed to the drive, **read back from the drive itself** (not the Mac's memory) and its checksum compared;
@@ -41,7 +41,7 @@ after "Back Up Metadata Now", a download record): that one is brought up to date
 
 **Then the two drives are compared** (`compare`): every item present, the same kind and size, its dates and
 attributes equal. `--deep` also reads every byte of both again. The report (also saved in
-`~/Library/Logs/Safe Finder/`) lists anything that differs; "0 problems" means the new drive has everything.
+`~/Library/Logs/Photo Browser for Mac/`) lists anything that differs; "0 problems" means the new drive has everything.
 
 **The iPhone app afterwards** (the report says this too). What the app keeps *on the phone* is keyed by each
 item's path, so it has to follow the library to the new drive:
@@ -78,10 +78,11 @@ sys.path.insert(0, str(HERE))
 
 import shared_tags  # noqa: E402 — its xattr calls (libc on macOS)
 from safe_copy_to_ssd import CHUNK, hash_file, human  # noqa: E402
+import app_identity
 
 SKIP_AT_ROOT = {".Spotlight-V100", ".fseventsd", ".Trashes", ".TemporaryItems", ".DocumentRevisions-V100",
                 ".apdisk", ".com.apple.timemachine.donotpresent", "$RECYCLE.BIN", "System Volume Information",
-                ".Spare Folders", ".Safe Finder Staging", ".Safe Finder Checksums", ".PKInstallSandboxManager",
+                ".Spare Folders", *app_identity.HIDDEN_ON_DRIVE, ".PKInstallSandboxManager",
                 ".PKInstallSandboxManager-SystemSoftware", ".HFS+ Private Directory Data\r", ".journal",
                 ".journal_info_block", "lost+found"}
 SKIP_ANYWHERE = {".DS_Store", ".localized"}
@@ -90,7 +91,7 @@ TEMP_SUFFIX = ".cloning"
 UNCOPYABLE_XATTRS = ("com.apple.provenance", "com.apple.macl", "com.apple.rootless", "com.apple.lastuseddate#PS",
                      "com.apple.quarantine")
 TIME_SLACK_NS = 2_000                # dates are compared to within 2 µs (APFS keeps nanoseconds; Python floats don't)
-LOGS = Path.home() / "Library" / "Logs" / "Safe Finder"
+LOGS = app_identity.logs()
 IS_MAC = sys.platform == "darwin"
 
 
@@ -684,17 +685,29 @@ def clear_leftovers(dst: str) -> int:
 #
 # APFS checksums its own records but not what's in the files: a photo that goes bad on the drive reads back
 # without complaint, wrong. So the clone keeps the checksum it already worked out for every file it wrote —
-# on the new drive, in `.Safe Finder Checksums/checksums.tsv` (digest, size, modified, path) — and `check_drive`
+# on the new drive, in `.Photo Browser Checksums/checksums.tsv` (digest, size, modified, path) — and `check_drive`
 # can later read the drive again and say which files no longer are what was written. A file whose size or
 # date has changed was edited, not damaged: it's counted apart, and re-recorded with `update`.
 
-SUMS_DIR, SUMS_FILE = ".Safe Finder Checksums", "checksums.tsv"
-SUMS_HEAD = "# Safe Finder checksums v1 — blake2b-160\tsize\tmodified (ns)\tpath"
+SUMS_DIR, SUMS_FILE = app_identity.CHECKSUMS, "checksums.tsv"
+SUMS_HEAD = "# Photo Browser checksums v1 — blake2b-160\tsize\tmodified (ns)\tpath"
 Sums = dict                      # rel → (digest, size, mtime_ns)
 
 
+def sums_folder(drive: str) -> str:
+    """The checksums folder on `drive` — the one an earlier version made (under the app's old name) is brought
+    to the new name when the drive lets it be, and read where it is when not."""
+    old, new = os.path.join(drive, app_identity.OLD_CHECKSUMS), os.path.join(drive, SUMS_DIR)
+    if os.path.isdir(old) and not os.path.exists(new):
+        try:
+            os.rename(old, new)
+        except OSError:
+            return old
+    return new
+
+
 def sums_path(drive: str) -> str:
-    return os.path.join(drive, SUMS_DIR, SUMS_FILE)
+    return os.path.join(sums_folder(drive), SUMS_FILE)
 
 
 def load_sums(drive: str) -> Sums:
@@ -716,7 +729,7 @@ def load_sums(drive: str) -> Sums:
 
 
 def save_sums(drive: str, sums: Sums) -> bool:
-    folder = os.path.join(drive, SUMS_DIR)
+    folder = sums_folder(drive)
     try:
         os.makedirs(folder, exist_ok=True)
         tmp = os.path.join(folder, f".{SUMS_FILE}{TEMP_SUFFIX}")
@@ -1049,7 +1062,7 @@ def old_drive_name(name: str, kind: str) -> str:
 
 def swap_names(old: str, new: str) -> tuple[bool, str]:
     """Renames the old drive to "<name> (old)" and gives the new drive the old one's name, so every path that
-    names the drive — Safe Finder's own records on this Mac, and the iPhone app's keys when the drive's name is
+    names the drive — Photo Browser for Mac's own records on this Mac, and the iPhone app's keys when the drive's name is
     part of them — still points at the library. macOS only (`diskutil rename`). → (worked, what to tell)."""
     if not IS_MAC:
         return False, "Renaming drives is only done on a Mac."

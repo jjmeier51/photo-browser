@@ -1,4 +1,4 @@
-"""Safe Finder's Erase window: take a watermark (a date stamp, a blemish) off photos — drawn once, put on every
+"""Photo Browser for Mac's Erase window: take a watermark (a date stamp, a blemish) off photos — drawn once, put on every
 selected photo.
 
 Right-click photos ▸ "Erase Area…". The window shows one of them: drag over what should go to put a box
@@ -10,7 +10,7 @@ still counts; "Whole Box" replaces everything inside them. The result shows as s
 check the same boxes on each photo (they're fractions of each photo, as a crop is). "Last Area" brings back
 the boxes used last. Save as New writes each result beside its photo, Replace rewrites the photo
 (retouch.py does the work, on a worker thread, one photo at a time; Stop ends it after the photo in hand);
-Safe Finder tags the results "retouched".
+Photo Browser for Mac tags the results "retouched".
 """
 from __future__ import annotations
 

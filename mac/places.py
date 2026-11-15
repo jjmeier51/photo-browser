@@ -1,4 +1,4 @@
-"""Where photos and videos were taken, for Safe Finder's Location filter — the iPhone app's place index
+"""Where photos and videos were taken, for Photo Browser for Mac's Location filter — the iPhone app's place index
 (`MetadataLoader.PlaceIndex`, the Location filter in `FolderView`), shared.
 
 Two layers, as on the iPhone. Each photo's or video's GPS reduces to a ~1 km **bin** ("40.82|-73.20": two
@@ -11,13 +11,13 @@ Files are keyed exactly as the iPhone keys them — "<path inside the drive>|<mo
 so its index works here as it is:
 
 - **The drive's** `.Photo Browser Metadata/places.json` — the iPhone's index, which every metadata backup to the
-  drive carries: months of geocoding, read (never written) by Safe Finder. The nearest folder above holding
+  drive carries: months of geocoding, read (never written) by Photo Browser for Mac. The nearest folder above holding
   `.Photo Browser Metadata` is used, as for shared tags.
-- **Safe Finder's own**, `~/Library/Application Support/Safe Finder/places.json` (the same shape): what Safe
+- **Photo Browser for Mac's own**, `~/Library/Application Support/Photo Browser for Mac/places.json` (the same shape): what Safe
   Finder read and named itself — GPS from the files (`media_info`: EXIF for photos, QuickTime's ISO 6709 for
   videos) and names from Apple's geocoder through `geocode_helper.swift` (CLGeocoder, the iPhone's labels, one
   request every 1.2 s, at most `NAME_LIMIT` a pass — a well-travelled folder names the rest next time). The
-  helper is built once with `swiftc` like Safe Finder's others; a failed build leaves `geocode_helper.log`.
+  helper is built once with `swiftc` like Photo Browser for Mac's others; a failed build leaves `geocode_helper.log`.
 
 Lookups (`label`) never touch the disk — they're made while painting and filtering; `locate` (a worker thread)
 does the reading and naming, and loads a drive's index the first time it's needed.
@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Callable
 
 import media_info
+import app_identity
 
 META_FOLDER = ".Photo Browser Metadata"
 FILE_NAME = "places.json"
@@ -47,9 +48,7 @@ MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS | {".avi", ".mkv", ".webm", ".mts", ".m2ts"
 
 
 def own_file() -> Path:
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Safe Finder" / FILE_NAME
-    return Path.home() / ".safe-finder" / FILE_NAME
+    return app_identity.support() / FILE_NAME
 
 
 def bin_of(lat: float, lng: float) -> str:
@@ -272,12 +271,12 @@ def _helper_source() -> Path | None:
 
 def helper() -> list[str] | None:
     """The geocoder's command, building it the first time (or when its source is newer). None without swiftc.
-    SAFE_FINDER_GEOCODE_HELPER names a stand-in (tests)."""
+    PHOTO_BROWSER_GEOCODE_HELPER names a stand-in (tests)."""
     global _helper, _helper_problem
     with _helper_lock:
         if _helper is not False:
             return _helper
-        env = os.environ.get("SAFE_FINDER_GEOCODE_HELPER")
+        env = os.environ.get("PHOTO_BROWSER_GEOCODE_HELPER")
         if env:
             _helper = env.split("\x1f")
             return _helper

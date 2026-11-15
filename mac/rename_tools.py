@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Renaming on the drive without losing what's attached to the names — Safe Finder's Rename, Rename Files…
+"""Renaming on the drive without losing what's attached to the names — Photo Browser for Mac's Rename, Rename Files…
 (many at once, by a pattern) and "Remove Leading Spaces from Names…" (no Qt here).
 
     python3 mac/rename_tools.py "/Volumes/SSD/Some Folder"            # dry run: what would be renamed
@@ -44,6 +44,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import spare_folders  # noqa: E402
+import app_identity
 
 METADATA = ".Photo Browser Metadata"
 JOURNAL = "renames.json"
@@ -483,7 +484,7 @@ def note_renames(done: list[Rename]) -> int:
         floor = now - KEEP_DAYS * 86400
         kept = [e for e in (old if isinstance(old, list) else [])
                 if isinstance(e, dict) and float(e.get("at") or 0) >= floor]
-        out = {"format": FORMAT, "version": 1, "by": "Safe Finder", "updated": now, "renames": (kept + entries)[-KEEP:]}
+        out = {"format": FORMAT, "version": 1, "by": app_identity.APP_NAME, "updated": now, "renames": (kept + entries)[-KEEP:]}
         data = json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         try:
             if spare_folders.on_exfat(str(file.parent)):

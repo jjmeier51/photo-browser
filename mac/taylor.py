@@ -1,4 +1,4 @@
-"""taylorpictures.net for Safe Finder — the iPhone app's gallery browser (`TaylorGallery.swift`,
+"""taylorpictures.net for Photo Browser for Mac — the iPhone app's gallery browser (`TaylorGallery.swift`,
 `TaylorBrowserView.swift`) on the Mac, plus a record of what's already in your Taylor Swift folder.
 
 **The site** is a standard Coppermine gallery, read the way the iPhone reads it (the same patterns): a

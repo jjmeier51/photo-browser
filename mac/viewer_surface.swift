@@ -1,4 +1,4 @@
-// The viewer's picture for Safe Finder (mac/viewer_surface.py, mac/media_viewer.py), drawn by macOS itself.
+// The viewer's picture for Photo Browser for Mac (mac/viewer_surface.py, mac/media_viewer.py), drawn by macOS itself.
 //
 // Qt draws video with its own decoder (FFmpeg since Qt 6.5) and its own HDR → standard-range curve, so an HDR
 // video came out brighter and harsher than in QuickTime Player, and Qt shows an HDR photo's standard-range
@@ -15,7 +15,7 @@
 //     current headroom (CIToneMapHeadroom: highlights eased in, never clipped), and made again whenever that
 //     headroom changes (brightness, another display) — checked while it's shown.
 //
-// Built with `swiftc -emit-library` into ~/Library/Caches/PhotoBrowser/ and loaded into Safe Finder with
+// Built with `swiftc -emit-library` into ~/Library/Caches/PhotoBrowser/ and loaded into Photo Browser for Mac with
 // ctypes. It's a plain C interface (`pbv_*`): Python makes the surface inside a Qt widget's own NSView (its
 // `winId()`), says which file to show and where the picture goes (`pbv_set_rect` — Qt keeps fit, zoom and
 // pan), and asks how playback is going on a timer. Every click passes through to Qt (`hitTest` → nil), so

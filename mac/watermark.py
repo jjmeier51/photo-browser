@@ -1,4 +1,4 @@
-"""Take one's own see-through watermark off photos in bulk, for Safe Finder's Remove Watermark window
+"""Take one's own see-through watermark off photos in bulk, for Photo Browser for Mac's Remove Watermark window
 (watermark_window.py). No Qt here, so it's testable on its own.
 
 Made for art signed with a see-through mark, at different places, sizes and turns on every piece, often
@@ -71,10 +71,11 @@ from PIL import Image, ImageFilter
 
 import batch_crop
 import retouch
+import app_identity
 
 TAG = retouch.ERASED_TAG                    # "retouched", as Erase Area and Remove Objects
 NEW_LABEL = "no watermark"
-LIBRARY = Path.home() / "Library" / "Application Support" / "Safe Finder" / "Watermarks"
+LIBRARY = app_identity.support() / "Watermarks"
 LIBRARY_MAX = 40                            # marks kept; the least recently used go first
 LUMA = np.array([0.299, 0.587, 0.114], np.float32)
 WORK_SIDE = 3000                            # bigger photos are searched at this size

@@ -1,4 +1,4 @@
-"""Batch crop for Safe Finder — the Mac twin of the iPhone app's Crop screen (PhotoBrowser/BatchCrop.swift).
+"""Batch crop for Photo Browser for Mac — the Mac twin of the iPhone app's Crop screen (PhotoBrowser/BatchCrop.swift).
 
 One crop, drawn on a photo, goes on every selected photo: the same quarter turn, then the same rectangle
 as fractions of the photo, so it lands on the same spot of photos of another size. A fixed-ratio crop

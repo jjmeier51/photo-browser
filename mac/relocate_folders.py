@@ -29,7 +29,7 @@ It then re-reads every moved folder, has fsck_exfat check the drive again, and r
   sudo python3 mac/relocate_folders.py "/Volumes/Extreme SSD" --apply --spares 100
 
 --spares N also keeps N ready-made empty folders in "<drive>/.Spare Folders" with their lists below the
-line: Safe Finder and the iPhone app make every new folder by moving one of those into place (moving
+line: Photo Browser for Mac and the iPhone app make every new folder by moving one of those into place (moving
 a folder never moves its list), so new folders start out readable on the iPhone. See spare_folders.py.
 """
 
@@ -363,7 +363,7 @@ def main() -> None:
         # Unmount before reading: macOS may still write its cached changes while unmounting.
         code, out = run(["diskutil", "unmount", mount])
         if code != 0:
-            sys.exit(f"Couldn't unmount the SSD — close anything using it (Finder windows, Safe Finder, "
+            sys.exit(f"Couldn't unmount the SSD — close anything using it (Finder windows, Photo Browser for Mac, "
                      f"Photo Browser for Mac) and try again.\n{out}")
         print(f"Unmounted {mount} (it is remounted at the end).")
         try:

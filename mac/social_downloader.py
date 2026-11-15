@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe Finder ▸ "Download Instagram Profile…" / "Download Facebook Profile…" — the window (instagram.py and
+"""Photo Browser for Mac ▸ "Download Instagram Profile…" / "Download Facebook Profile…" — the window (instagram.py and
 facebook.py read the sites, social.py downloads).
 
     python3 mac/social_downloader.py instagram "/Volumes/SSD/Jane" [handle]
@@ -47,6 +47,7 @@ import facebook as fb  # noqa: E402
 import instagram as ig  # noqa: E402
 import simpcity as sc  # noqa: E402
 import social  # noqa: E402
+import app_identity
 
 LANES = 6                     # files downloaded at once (from the sites' photo/video servers, not their pages)
 SAVE_EVERY = 25               # the record is saved (and the files tagged) after this many files
@@ -117,7 +118,7 @@ class _Runner:
 class SocialWindow(QMainWindow):
     """The downloader for one kind ("instagram" / "facebook") from one folder (the one right-clicked)."""
 
-    finished = Signal(str, list)       # (the profile's folder, files written) — Safe Finder refreshes + tags
+    finished = Signal(str, list)       # (the profile's folder, files written) — Photo Browser for Mac refreshes + tags
 
     def __init__(self, kind: str, folder: str, start: str = "", tags=None, parent=None) -> None:
         super().__init__(parent)
@@ -131,7 +132,7 @@ class SocialWindow(QMainWindow):
         self.calls = itertools.count(1)
         self.bridge = _Bridge()
         self.bridge.call.connect(lambda cb, value: cb(value))
-        self.settings = QSettings("PhotoBrowser", "SafeFinder")
+        self.settings = app_identity.settings()
         self.exiftool = sc.find_exiftool()
         self.setWindowTitle(f"{self.k['name']} — {self.person.name}")
         self.resize(1100, 860)
@@ -517,7 +518,7 @@ class SocialWindow(QMainWindow):
             def page_done(again) -> None:
                 if good(again) and not getattr(self, "via_browser", False):
                     self.via_browser = True
-                    self._log("   Instagram refused Safe Finder's own requests — asking from the logged-in page "
+                    self._log("   Instagram refused Photo Browser for Mac's own requests — asking from the logged-in page "
                               "from now on")
                 cb(again if good(again) or not answer[0] else answer)
             in_page(page_done)

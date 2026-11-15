@@ -1,4 +1,4 @@
-"""Find Duplicates for Safe Finder — the iPhone app's (`DuplicatesView.swift`, `PerceptualHash.swift`), with the
+"""Find Duplicates for Photo Browser for Mac — the iPhone app's (`DuplicatesView.swift`, `PerceptualHash.swift`), with the
 same three kinds of group, kept apart (never chained into one another, which once made nonsense groups):
 
 - **Exact** — the same size in bytes *and* the same pixel dimensions. Video-frame screenshots ("Frame 2.png")
@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 import media_info
+import app_identity
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".gif", ".tif", ".tiff", ".bmp", ".webp", ".avif",
              ".dng", ".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".rw2"}
@@ -61,7 +62,7 @@ STRICTNESS_LABEL = {"strict": "Strict", "normal": "Normal", "loose": "Loose"}
 QUICK = 64 * 1024                                  # bytes read from each end for a file's quick signature
 KINDS = ("exact", "similar", "name")
 KIND_LABEL = {"exact": "Exact match", "similar": "Visually similar", "name": "Similar name"}
-SUPPORT = Path.home() / "Library" / "Application Support" / "Safe Finder"
+SUPPORT = app_identity.support()
 CACHE = Path.home() / "Library" / "Caches" / "PhotoBrowser" / "dhash.json"
 
 
@@ -215,7 +216,7 @@ class HashCache:
 
 class NotDuplicates:
     """Pairs the person said aren't duplicates ("a\\nb", sorted), on this Mac. Moving or renaming a file in
-    Safe Finder doesn't follow it here — as on the iPhone, a moved pair can come up again."""
+    Photo Browser for Mac doesn't follow it here — as on the iPhone, a moved pair can come up again."""
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or SUPPORT / "not-duplicates.json"

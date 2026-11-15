@@ -1,8 +1,8 @@
-// The video helper for Safe Finder (mac/video_tools.py, mac/frame_export.py): AVFoundation for what Python
+// The video helper for Photo Browser for Mac (mac/video_tools.py, mac/frame_export.py): AVFoundation for what Python
 // can't do — putting a DASH video's two halves together, upscaling a video to 1080p, and the iPhone's frame
 // screenshot and Export All Frames.
 // The code is the iPhone app's (InstagramService.mux, MediaEditing.upscaleVideo), so a video comes out of
-// Safe Finder the way it comes out of the iPhone. Safe Finder builds it once with `swiftc` (Xcode or its
+// Photo Browser for Mac the way it comes out of the iPhone. Photo Browser for Mac builds it once with `swiftc` (Xcode or its
 // Command Line Tools) into ~/Library/Caches/PhotoBrowser/; without it, ffmpeg does the same when it's
 // installed.
 //
@@ -17,7 +17,7 @@
 //                                                                          "failed <why>" (exit 1)
 //
 // `fetch` is one web page or picture through the Mac's own networking — URLSession, what the iPhone app
-// uses — for Safe Finder's taylorpictures.net browser when Python's can't get through (macOS completes a
+// uses — for Photo Browser for Mac's taylorpictures.net browser when Python's can't get through (macOS completes a
 // server's certificate chain and speaks TLS as Safari does). The request is the iPhone app's
 // (TaylorGallery.fetchHTML): its agent, Accept and Accept-Language, and the referer.
 //

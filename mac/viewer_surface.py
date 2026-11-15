@@ -1,15 +1,15 @@
 """The viewer's picture drawn by macOS itself (`viewer_surface.swift`), for `media_viewer`.
 
 Qt Multimedia decodes video with FFmpeg (Qt 6.5+) and maps HDR to standard range with its own shaders, so an HDR
-video looked brighter and harsher in Safe Finder than in QuickTime Player; and Qt reads only an HDR photo's
+video looked brighter and harsher in Photo Browser for Mac than in QuickTime Player; and Qt reads only an HDR photo's
 standard-range picture. The surface shows a video with AVFoundation — QuickTime's own player, real HDR on a
 display that has the headroom — and an HDR photo through Core Image onto a layer that asks for HDR (EDR).
 
 It's a small Swift library built once with `swiftc -emit-library` (Xcode or its Command Line Tools) into
 ~/Library/Caches/PhotoBrowser/, then loaded with ctypes. The build runs in the background (`prepare()`, at
-Safe Finder's launch); until it's done, without the tools, or if it fails, `library()` is None and the viewer
+Photo Browser for Mac's launch); until it's done, without the tools, or if it fails, `library()` is None and the viewer
 draws with Qt as before. A failed build leaves its compiler output in `viewer_surface.log` beside it and isn't
-tried again until the source changes. SAFE_FINDER_NATIVE_VIEWER=0 turns it off.
+tried again until the source changes. PHOTO_BROWSER_NATIVE_VIEWER=0 turns it off.
 
 Every call is made on Qt's thread — the main thread, which AppKit and AVFoundation need.
 """
@@ -34,8 +34,8 @@ _load_failed = False
 
 
 def wanted() -> bool:
-    """On a Mac, unless SAFE_FINDER_NATIVE_VIEWER=0."""
-    return IS_MAC and os.environ.get("SAFE_FINDER_NATIVE_VIEWER", "1") != "0"
+    """On a Mac, unless PHOTO_BROWSER_NATIVE_VIEWER=0."""
+    return IS_MAC and os.environ.get("PHOTO_BROWSER_NATIVE_VIEWER", "1") != "0"
 
 
 def _source() -> Path | None:

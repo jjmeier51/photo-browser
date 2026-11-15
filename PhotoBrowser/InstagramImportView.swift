@@ -122,8 +122,8 @@ struct InstagramImportView: View {
                 dest = library.resolveIGDestination(person: target, handle: h)
                 try? DriveWriter.createDirectory(at: dest)
             }
-            // The folder's shared record (Safe Finder's downloads too — `SocialRecord`); for a folder
-            // only Safe Finder has downloaded into, it's where the profile's id and last update come from.
+            // The folder's shared record (Photo Browser for Mac's downloads too — `SocialRecord`); for a folder
+            // only Photo Browser for Mac has downloaded into, it's where the profile's id and last update come from.
             let shared = await Task.detached(priority: .userInitiated) { SocialRecord.snapshot(.instagram, in: dest) }.value
             let prior = isUpd ? ex : (library.instagramInfo(for: dest) ?? shared.instagramInfo)
             // Already here: the record's ids AND the posts in the folder — a record restored from an

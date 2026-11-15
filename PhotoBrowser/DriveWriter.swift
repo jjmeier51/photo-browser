@@ -207,7 +207,7 @@ actor DriveWriter {
     /// growing — the AI / Screenshots / Duplicate PNGs helper folders (`createDirectory` flushed each new
     /// level and every commit flushed the parent), the Kardashian member folders (a parent flush after
     /// each of 46k photos), Force Refresh (flushed the folder it re-read), and Mac tools that did the
-    /// same (Safe Finder). The one Mac writer whose folders iOS always read — the copy rebuild — never
+    /// same (Photo Browser for Mac). The one Mac writer whose folders iOS always read — the copy rebuild — never
     /// flushes a folder. The drive root, flushed on every backgrounding, stayed fine: it has no record
     /// in a parent. This matches Apple's exFAT driver writing a stale copy of a folder's own record
     /// (size / cluster chain) into its parent when that folder is flushed (fsck: "Directory /X/AI has
