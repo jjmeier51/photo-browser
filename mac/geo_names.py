@@ -139,8 +139,8 @@ def nearest_many(lats, lngs) -> list[Place | None]:
     lats, lngs = np.asarray(lats, dtype=np.float64), np.asarray(lngs, dtype=np.float64)
     out: list[Place | None] = [None] * len(lats)
     ok = [i for i in range(len(lats)) if valid(float(lats[i]), float(lngs[i]))]
-    for a in range(0, len(ok), 256):
-        idx = ok[a:a + 256]
+    for a in range(0, len(ok), 32):                    # (32 at a time: 256 made a gigabyte of the table at once)
+        idx = ok[a:a + 32]
         la, lo = np.radians(lats[idx]), np.radians(lngs[idx])
         q = np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)], axis=1).astype(np.float32)
         sims = q @ t.xyz.T

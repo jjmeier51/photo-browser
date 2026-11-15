@@ -38,6 +38,7 @@ are made from, without reading a single photo again. `scan` reads the ones not r
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -251,9 +252,10 @@ class Places:
 
     # -- reading and naming (a worker thread)
     def locate(self, files: list[tuple[str, int, int]], progress: Callable[[str], None] | None = None,
-               stop: threading.Event | None = None) -> None:
+               stop: threading.Event | None = None, naming: bool = True) -> None:
         """Reads the GPS of each of `files` (path, mtime, size) not yet known, then names the places that have
-        no name yet (`NAME_LIMIT` at most). `progress` gets a short line now and then."""
+        no name yet (`NAME_LIMIT` at most; not with `naming` off — a whole-drive read asks for names once, at
+        its end, not after every batch). `progress` gets a short line now and then."""
         say = progress or (lambda _t: None)
         self.problem = ""
         for folder in {os.path.dirname(os.path.abspath(p)) for p, _m, _s in files}:
@@ -289,7 +291,7 @@ class Places:
                 except Exception:  # noqa: BLE001
                     pass
         unnamed = sorted({b for p, m, s in files if (b := self.bin(p, m, s))
-                          and self._refined(b, os.path.dirname(os.path.abspath(p))) is None}) if self.refine else []
+                          and self._refined(b, os.path.dirname(os.path.abspath(p))) is None}) if self.refine and naming else []
         if unnamed and not (stop is not None and stop.is_set()):
             say("Naming places…")
             names = self.geocode(unnamed[:NAME_LIMIT], lambda d, t: say(f"Naming places… {d} of {t}"), stop)
@@ -366,15 +368,17 @@ class Places:
                 continue
             label = self.bin_label(b) or UNNAMED
             cc, country, region_key, region = self.where(b)
-            p = places.setdefault(label, {"label": label, "bins": [], "count": 0, "lat": 0.0, "lng": 0.0, "cc": cc,
-                                          "country": country, "region_key": region_key, "region": region})
+            p = places.setdefault((label, cc, region_key),
+                                  {"label": label, "bins": [], "count": 0, "lat": 0.0, "lng": 0.0, "cc": cc,
+                                   "country": country, "region_key": region_key, "region": region, "_x": 0.0, "_y": 0.0})
             p["bins"].append(b)
             p["count"] += n
             p["lat"] += centre[0] * n
-            p["lng"] += centre[1] * n
+            p["_x"] += math.cos(math.radians(centre[1])) * n      # longitudes as directions: 179.9° and −179.9°
+            p["_y"] += math.sin(math.radians(centre[1])) * n      # average to 180°, not to 0°
         for p in places.values():
             p["lat"] /= p["count"]
-            p["lng"] /= p["count"]
+            p["lng"] = math.degrees(math.atan2(p.pop("_y"), p.pop("_x")))
         return sorted(places.values(), key=lambda p: (-p["count"], p["label"].casefold()))
 
     def files_at(self, roots: list[str], bins: set[str]) -> list[str]:
@@ -406,7 +410,9 @@ class Places:
             if stop is not None and stop.is_set():
                 break
             self.locate(todo[a:a + 2000], lambda t, a=a: progress(f"{t}  ({a:,} of {len(todo):,} done)") if progress
-                        else None, stop)
+                        else None, stop, naming=False)     # (names asked for once, below — not a minute per batch)
+        if todo and not (stop is not None and stop.is_set()):
+            self.locate(todo, progress, stop)              # everything's read now: this pass only names places
         return len(todo)
 
     def save(self) -> None:

@@ -53,8 +53,8 @@ def _cached(path: str, kind: str, read) -> dict:
             return _cache[key]
     try:
         info = read(path)
-    except (OSError, ValueError, struct.error):
-        info = {}
+    except Exception:  # noqa: BLE001 — a file that can't be read says nothing; it never stops the folder being
+        info = {}      # read (Pillow refuses a picture over ~179 MP with an error that isn't an OSError)
     with _lock:
         if len(_cache) > 20000:
             _cache.clear()
