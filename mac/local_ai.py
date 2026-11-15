@@ -224,9 +224,20 @@ def _run(cmd: list[str], on_line: Callable[[str], None], stop: Callable[[], bool
          cwd: str | None = None) -> int:
     """Runs a command, handing over what it prints a line at a time (a progress bar's carriage returns count
     as line ends). Stop terminates it and raises Stopped."""
+    import children
+    import threading
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=_env(offline), cwd=cwd,
-                            stdin=subprocess.DEVNULL)
+                            stdin=subprocess.DEVNULL, **children.OWN_GROUP)
+    children.track(proc)                        # stopped with the app, not left holding the Mac's memory
     assert proc.stdout is not None
+
+    def watch() -> None:                        # Stop while it prints nothing (a model loading, a download): the
+        while proc.poll() is None:              # read below only comes back when it says something — or ends
+            if stop():
+                children.stop(proc)
+                return
+            time.sleep(0.25)
+    threading.Thread(target=watch, daemon=True).start()
     buf = b""
     try:
         while True:
@@ -244,7 +255,10 @@ def _run(cmd: list[str], on_line: Callable[[str], None], stop: Callable[[], bool
                 raise Stopped()
         if buf.strip():
             on_line(buf.decode("utf-8", "replace").strip())
-        return proc.wait()
+        code = proc.wait()
+        if stop():
+            raise Stopped()
+        return code
     except Stopped:
         proc.terminate()
         try:
@@ -254,7 +268,8 @@ def _run(cmd: list[str], on_line: Callable[[str], None], stop: Callable[[], bool
         raise
     finally:
         if proc.poll() is None:
-            proc.kill()
+            children.stop(proc, 1.0)
+        children.forget(proc)
 
 
 def install(on_line: Callable[[str], None], stop: Callable[[], bool] = lambda: False) -> None:

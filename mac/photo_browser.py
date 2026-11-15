@@ -5664,6 +5664,82 @@ class Pane(QWidget):
         self.window().activateWindow()
         self.reveal(path)
 
+    @staticmethod
+    def _said_about(paths: list[str]) -> dict[str, tuple[list[str], list[str]]]:
+        """The tags and labels of these items — and of everything inside the folders among them — as they are
+        now: {path: (tags, labels)}. Taken before a move to the Trash, which forgets them, so Undo can give
+        them back."""
+        store = tag_store()
+        out: dict[str, tuple[list[str], list[str]]] = {}
+        for p in paths:
+            inside = [p]
+            if os.path.isdir(p):
+                try:
+                    table = store.table_for(p)
+                    inside += [table.path(k) for k in table.keys_under(p)]
+                except Exception:  # noqa: BLE001 — a drive with no tag file: nothing to remember
+                    pass
+            for q in inside:
+                try:
+                    tags, labels = store.tags(q, fresh=False), store.labels(q, fresh=False)
+                except Exception:  # noqa: BLE001
+                    continue
+                if tags or labels:
+                    out[q] = (list(tags), list(labels))
+        return out
+
+    def _trashed(self, moved: list[tuple[str, str]], said: dict[str, tuple[list[str], list[str]]]) -> None:
+        """Items just went to the Trash: says so, with Undo (Edit ▸ Undo, ⌘Z) putting them back where they
+        were — with the tags, Favorites and To AI they had."""
+        n = len(moved)
+        line = f"Moved {n:,} item{'s' if n != 1 else ''} to the Trash."
+        known = [(orig, there) for orig, there in moved if there]
+        if not known:
+            self._airdrop_noted(line)
+            return
+
+        def undo() -> str:
+            back, taken, gone = [], 0, 0
+            for orig, there in known:
+                if os.path.lexists(orig):
+                    taken += 1                             # something else has that name now: left in the Trash
+                    continue
+                if not os.path.lexists(there):
+                    gone += 1                              # emptied, or put back by hand already
+                    continue
+                try:
+                    os.rename(there, orig)
+                except OSError:
+                    try:
+                        shutil.move(there, orig)
+                    except OSError:
+                        gone += 1
+                        continue
+                back.append(orig)
+            store = tag_store()
+            try:
+                for q, (tags, labels) in said.items():
+                    if any(q == b or q.startswith(b.rstrip(os.sep) + os.sep) for b in back):
+                        if tags:
+                            store.add([q], tags)
+                        for label in labels:
+                            store.set_label([q], label, True)
+            except OSError:
+                pass
+            tags_changed()
+            search_query.NAMES.forget()
+            sizer().clear()
+            self.refresh_results()
+            m = len(back)
+            said_back = f"Put {m:,} item{'s' if m != 1 else ''} back." if m else "Nothing could be put back."
+            if taken:
+                said_back += f" {taken:,} stayed in the Trash: something else has that name now."
+            if gone:
+                said_back += f" {gone:,} {'is' if gone == 1 else 'are'}n't in the Trash any more."
+            return said_back
+
+        self._undoable("Move to Trash" if n == 1 else f"Move to Trash of {n:,} Items", undo, line)
+
     def _viewer_trash(self, paths: list[str]) -> bool:
         """The viewer's Move to Trash: asked first (over the viewer), as from the listing."""
         box = QMessageBox(QApplication.activeWindow() or self.window())
@@ -5678,14 +5754,19 @@ class Pane(QWidget):
         box.exec()
         if box.clickedButton() is not go:
             return False
-        moved = [p for p in paths if MainWindow.trash_item(Path(p))]
+        said = self._said_about(paths)
+        went = [(p, MainWindow.trash_to(Path(p))) for p in paths]
+        moved = [p for p, there in went if there is not None]
         try:
+            _people_do(lambda store: store.forget_files(moved))
             if moved and tag_store().forget(moved):
                 tags_changed()
         except OSError:
             pass
         sizer().clear()
         self.refresh_results()
+        if moved:
+            self._trashed([(p, there or "") for p, there in went if there is not None], said)
         return bool(moved)
 
     def export_frames(self, videos: list[str]) -> None:
@@ -6167,7 +6248,9 @@ class Pane(QWidget):
         if not self._confirm("Move to Trash", f"Move {what} to the Trash?{size}",
                              detail + "\n\nThey can be put back from the Trash."):
             return
-        failed = [p for p in paths if not MainWindow.trash_item(Path(p))]
+        said = self._said_about(paths)
+        went = [(p, MainWindow.trash_to(Path(p))) for p in paths]
+        failed = [p for p, there in went if there is None]
         moved = len(paths) - len(failed)
         try:
             _people_do(lambda store: store.forget_files([p for p in paths if p not in failed]))
@@ -6186,7 +6269,8 @@ class Pane(QWidget):
             QMessageBox.warning(self.window(), "Move to Trash",
                                 f"{len(failed)} of {len(paths)} couldn't be moved to the Trash:\n"
                                 + "\n".join("• " + os.path.basename(f) for f in failed[:8]))
-        self._airdrop_noted(f"Moved {moved} item{'s' if moved != 1 else ''} to the Trash.")
+        if moved:
+            self._trashed([(p, there or "") for p, there in went if there is not None], said)
 
     def new_folder(self) -> None:
         if not self.location or self.is_virtual:
@@ -8656,6 +8740,17 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QFile
         return bool(QFile.moveToTrash(str(p))) or engine.trash_with_finder(p)
 
+    @staticmethod
+    def trash_to(p: Path) -> str | None:
+        """The same, saying where in the Trash it went — so it can be put back (Undo). "" when it went by way
+        of Finder (in the Trash, but where isn't known); None when it couldn't be moved."""
+        from PySide6.QtCore import QFile
+        f = QFile(str(p))
+        if f.moveToTrash():
+            there = f.fileName()
+            return there if there and os.path.normpath(there) != os.path.normpath(str(p)) else ""
+        return "" if engine.trash_with_finder(p) else None
+
     def _log(self, line: str) -> None:
         self._log_lines.append(line)
         if not self._panel_soon.isActive():
@@ -8868,6 +8963,11 @@ class MainWindow(QMainWindow):
                 time.sleep(0.05)
         if self.caffeinate is not None:
             self.caffeinate.terminate()
+        try:                                              # ffmpeg, mflux, a helper still at work: stopped with the app
+            import children
+            children.stop_all()
+        except Exception:  # noqa: BLE001
+            pass
         self.settings.setValue("geometry", self.saveGeometry())
         self._save_layout()
         event.accept()
