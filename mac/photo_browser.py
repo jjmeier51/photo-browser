@@ -6428,6 +6428,8 @@ class Pane(QWidget):
                 edit.addAction("Export All Frames…", lambda: self.export_frames(videos))
                 edit.addAction("Upscale Video…" if len(videos) == 1 else f"Upscale {len(videos)} Videos…",
                                lambda: self.upscale_videos(videos))
+        if 2 <= len(photos) <= 9:
+            menu.addAction(f"Make Collage of {len(photos)} Photos…", lambda: self.make_collage(photos))
         if photos:
             menu.addAction("Edit with AI…" if len(photos) == 1 else f"Edit {len(photos)} Photos with AI…",
                            lambda: self.ai_edit(photos))
@@ -6820,6 +6822,38 @@ class Pane(QWidget):
                       "Show" if as_new else "", (lambda: self.reveal(written)) if as_new else None)
 
         dlg = photo_editor_window.EditorWindow(QApplication.activeWindow() or self.window(), path, self.settings, done)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.show()
+
+    # -- collage (collage_window.py / collage.py)
+    def make_collage(self, paths: list[str]) -> None:
+        """Select 2–9 photos ▸ Make Collage…: layouts, shapes and sizes; saved beside the first photo with the
+        oldest photo's date and place and every photo's tags, tagged "collage"."""
+        try:
+            import collage
+            import collage_window
+        except ImportError as e:
+            QMessageBox.information(self.window(), "Make Collage", f"The collage maker needs numpy and Pillow ({e}).")
+            return
+        photos = [p for p in paths if not os.path.isdir(p) and collage.can_use(p)]
+        if not collage.MIN_PHOTOS <= len(photos) <= collage.MAX_PHOTOS:
+            QMessageBox.information(self.window(), "Make Collage", "Select two to nine photos to make a collage of them."
+                                    + (f" ({len(photos)} are selected.)" if len(photos) > collage.MAX_PHOTOS else ""))
+            return
+
+        def done(written: str, sources: list[str], edit: bool) -> None:
+            try:
+                tag_store().carry([(src, written) for src in sources])      # every photo's tags…
+                tag_store().add([written], [collage.COLLAGE_TAG])           # …and "collage"
+            except OSError as e:
+                QMessageBox.warning(self.window(), "Make Collage", f"Couldn't save the tags: {e}")
+            tags_changed()
+            self.refresh()
+            self.note(f"Saved “{os.path.basename(written)}”.", "Show", lambda: self.reveal(written))
+            if edit:
+                QTimer.singleShot(0, lambda: self.edit_photo(written))
+
+        dlg = collage_window.CollageWindow(QApplication.activeWindow() or self.window(), photos, self.settings, done)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.show()
 

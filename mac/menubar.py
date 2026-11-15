@@ -382,6 +382,8 @@ def install(win, sf) -> None:
         lambda: len(photos()) == 1,
         "The photo editor: filters, adjustments, crop, retouch, face, text and frames — saved as new, over the "
         "original, or saved and upscaled")
+    act(t, "Make Collage…", lambda: pane().make_collage(photos()), None, lambda: 2 <= len(photos()) <= 9,
+        "The two to nine selected photos on one picture — dozens of layouts, shapes and sizes")
     adjust = submenu(t, "Adjust")
     act(adjust, "Crop…", lambda: pane().crop_photos(photos()), None, lambda: bool(photos()),
         "One crop, drawn once, on every selected photo")
