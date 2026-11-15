@@ -275,15 +275,52 @@ mac/.venv/bin/python mac/photo_browser.py --from ~/Downloads --to "/Volumes/Extr
 
 ### The menu bar
 
-Everything Photo Browser for Mac does is in its menus, acting on the pane you're in and what's selected there (greyed
-out when it can't): **File** (New Folder ⇧⌘N, Open ⌘↓, Open With Default App, Quick Look, Show in Finder,
-Copy/Move to the other side ⇧⌘C / ⇧⌘M — in one window they open Split View, AirDrop to iPhone, Move to Trash ⌘⌫), **Edit** (Select All, Find ⌘F,
-Tags… ⌘T), **View** (as Icons/List/Photos ⌘1–3, Split View ⌘\\, Sort By, bigger/smaller thumbnails ⌘= / ⌘−), **Go** (Back ⌘[,
-Forward ⌘], Enclosing Folder ⌘↑, Home ⇧⌘H, Desktop ⇧⌘D, Downloads ⌥⌘L, Pictures, All Videos, Empty Folders, Favorites, To AI,
-Drives), **Photos** (Edit Metadata ⌘I, Favorite ⇧⌘F, To AI ⇧⌘A, Find Duplicates, Export All Frames, Send to CapCut ⇧⌘K, Import from CapCut, Convert WebP to JPEG, Crop, AI Upscale, Erase Area, Remove Watermark, Remove Objects, Edit/Create with AI, the
-Astria.ai Browser, the SimpCity / Instagram / Facebook downloaders, taylorpictures.net) and **Window** (every
-viewer and tool window that's open). The right-click menu keeps the everyday commands at the top and puts a
-folder's downloaders under **Download ▸**, its AI under **AI ▸** and the CapCut round trip under **CapCut ▸**.
+Everything Photo Browser for Mac does is in its menus, acting on the pane you're in and what's selected there
+(greyed out when it can't):
+
+- **File** — New Folder ⇧⌘N, Open ⌘O (or ⌘↓), Open With Default App, Quick Look (Space in the list), Show in
+  Finder, Rename… F2, Rename Files…, Duplicate ⌘D, Copy / Move to the Other Side ⇧⌘C / ⇧⌘M (in one window they
+  open Split View and say what to do next), AirDrop to iPhone, Make Book PDF, Clone Drive to a New SSD, Move to
+  Trash ⌘⌫, Close Window ⌘W, Quit ⌘Q.
+- **Edit** — **Undo ⌘Z** (the last rename — one or many — tag, or Favorite / To AI change; the menu says which),
+  Copy Name, Copy Path ⌥⌘C, Select All, Find ⌘F, **Find a Command… ⇧⌘P**, Tags… ⌘T.
+- **View** — as Icons / List / Photo Grid ⌘1–3, Tight Icons, Theme ▸, Folder Covers, Split View ⌘\\, Videos at
+  the Top, Sort By ▸ (with Ascending / Descending and Calculate Folder Sizes — the same choices as the header's
+  Sort button), **Show Hidden Files ⇧⌘.**, **Refresh ⌘R**, bigger / smaller thumbnails ⌘= / ⌘−.
+- **Go** — Back ⌘[, Forward ⌘] (a mouse's side buttons too), Enclosing Folder ⌘↑, **Go to Folder… ⇧⌘G**, Home,
+  Desktop, Downloads, Pictures, All Videos, Empty Folders, Favorites, To AI, Drives ▸.
+- **Photos** — Edit Metadata ⌘I, Favorite ⇧⌘F, To AI ⇧⌘A (they read Unfavorite / Remove To AI when the selection
+  already is), Find Duplicates…, then the tools in groups: **Adjust ▸** (Crop, Rotate, Convert WebP to JPEG),
+  **Retouch ▸** (AI Upscale 2×, Erase Area, Remove Watermark, Remove Objects), **Video ▸** (Export All Frames,
+  Upscale Video), **CapCut ▸**, **AI ▸** (Edit / Create with AI, Astria.ai Browser, Make AI Model, AI Models),
+  **Download ▸** (SimpCity, Instagram, Facebook, TikTok, Fanfix, taylorpictures.net).
+- **Window** — Minimize, Zoom, Bring All to Front, and every viewer and tool window that's open.
+- **Help** — the guide and the keyboard shortcuts in a window with a search field, Find a Command…, Welcome…,
+  About.
+
+**Find a Command… (⇧⌘P)** lists every one of those commands — over 140 — as you type a few letters of its name
+("dupl", "theme", "frames"); Return runs it. It shows each command's menu and key, so it also teaches where
+things are.
+
+**The right-click menu** is in the order things are reached for: open it · file it (Move / Copy, Rename,
+Duplicate, Tags ▸, Favorite, To AI, Edit Metadata, cover) · change it (**Edit Photo ▸** holds Crop, Rotate, AI
+Upscale, Erase Area, Remove Watermark, Remove Objects; Edit with AI…) · send it (AirDrop, CapCut) · where it is
+(Show in Finder, Copy Name, Copy Path — and Show in Enclosing Folder from results, a tag or Favorites) · Move to
+Trash, last and on its own. A folder adds its tools: Find Duplicates, Rename Files Inside, **Download ▸**,
+**AI ▸**, **CapCut ▸**, **Photos Inside ▸**.
+
+### Knowing what happened, and taking it back
+
+- **A toast** over the files says what was just done — "Renamed 14 items.", "Tagged 3 items “beach”." — for a few
+  seconds, with an **Undo** button when it can be taken back. (Steps still under way stay on the status line.)
+- **Undo (⌘Z)** takes back renames (through the same engine, so tags, labels and the note for the iPhone follow
+  back), tags added or removed, and Favorite / To AI. A move to the Trash is put back from the Trash.
+- **An empty view says why**: "This Folder Is Empty — drop files here, or press ⇧⌘N", "No Results", "Nothing
+  Matches the Filter — 212 items hidden by photos · HEIF", "No Favorites Yet — select photos and press ⇧⌘F".
+- Things that aren't errors don't stop you with an alert any more ("already here", "nothing to rename").
+- **Files have tooltips** — the whole name (tiles cut long ones short), kind, size, date, tags — and the window is
+  named for the folder it shows.
+- **The first launch** shows a short welcome (Help ▸ Welcome… shows it again).
 
 ### Edit Metadata — many photos and videos at once
 
@@ -371,10 +408,29 @@ set in the app show here. When both have chosen one, the later choice wins. (The
 for every folder that has no cover; those show here too, and any cover you choose replaces one.)
 
 **Themes** (`themes.py`, `theme_window.py`). View ▸ **Theme**: *Match macOS* (the Finder look, light or
-dark with your Mac), the iPhone app's themes — Everyday (Photo Browser, Graphite, Midnight, Ocean, Rose,
-Forest, Sunset, Paper), Halloween and Christmas — or **Choose or Customize…** for your own background (one
-colour or a gradient), accent colour, typeface and light or dark. A click shows it at once in every Photo Browser for
-Mac window.
+dark with your Mac), or one of forty ready-made themes in five sets — the same on the iPhone:
+
+- **Everyday** — Photo Browser, Graphite, Midnight, Ocean, Rose, Forest, Sunset, Paper.
+- **Halloween** — Pumpkin Patch, Witching Hour, Haunted House, Candy Corn, Ghost Story.
+- **Thanksgiving** — Harvest Table, Autumn Leaves, Pumpkin Pie, Cranberry, Sage and Squash, Maple, Cornucopia.
+- **Christmas** — Candy Cane, Evergreen, Winter Night, Cozy Fireplace, Snow Day, Silver Bells, Gingerbread,
+  Nutcracker, Mistletoe, Christmas Eve, Santa's Workshop, North Pole.
+- **Holiday** — Holiday Lights, Festival of Lights, Kwanzaa, Winter Solstice, Sugar Plum, Hot Cocoa, Midnight
+  Toast, First Frost.
+
+**Choose or Customize…** opens the chooser: every theme as a swatch, and your own background (one colour or a
+gradient), accent colour, typeface and light or dark. A click shows it at once in every window. On the Mac:
+
+- **My Themes** — **Save as My Theme…** keeps the look that's on under a name; it joins the chooser and the
+  Theme menu (right-click one to rename or remove it).
+- **Follow the Seasons** — through the holidays the window wears that season's themes, **a different one each
+  day**: Halloween all October, Thanksgiving from November 1 to Thanksgiving Day, then Christmas, Holiday or
+  both (your choice, "In December") to Christmas Day, and Holiday to New Year's Day. The rest of the year it
+  shows the theme you chose. Choosing a theme by hand turns it off.
+- **Surprise Me** — a ready-made theme picked for you.
+
+Whatever the colours, small text stays readable: the grey text and the text on the accent colour are worked out
+to keep their contrast on every part of the background.
 
 ### Photos view and the viewer — the iPhone app's grid and viewer (`media_viewer.py`, `media_info.py`)
 
@@ -588,28 +644,43 @@ other tools, so dragging the clips in is what works with every version.
 
 ### Find Duplicates (`duplicates_window.py`, `duplicates.py`)
 
-Right-click a folder ▸ **Find Duplicates…** (or a folder's empty space ▸ **Find Duplicates in This Folder…**) —
-the iPhone app's Find Duplicates. It lists groups of likely copies, strongest first:
+Right-click a folder ▸ **Find Duplicates…** (or a folder's empty space ▸ **Find Duplicates in This Folder…**; or
+select several folders ▸ **Find Duplicates in These N Folders…**, which looks at them as one — copies of a photo
+in two different folders are found). It's the iPhone app's Find Duplicates, with more. Groups of likely copies
+come strongest first:
 
-- **Exact match** (green) — the same size in bytes and the same pixel dimensions. Photo Browser for Mac then reads the
-  copies through in the background and marks the group **✓ Identical** when they're the same file byte for
-  byte (or says "same size, different bytes" when they aren't).
-- **Visually similar** (blue) — the same picture re-saved, resized or lightly edited (a perceptual
-  fingerprint; photos only). Kept tight, so a shoot of similar poses doesn't become one huge group.
+- **Exact match** (green) — the same size in bytes and the same pixel dimensions. The copies are then read
+  through in the background and the group is marked **✓ Identical** when they're the same file byte for byte (or
+  says "same size, different bytes" when they aren't). Files whose dimensions can't be read — a RAW the Mac has
+  no reader for, a damaged video — are matched by size and their first and last bytes instead.
+- **Visually similar** (blue) — the same picture re-saved, resized or lightly edited (a perceptual fingerprint;
+  photos only), with **how alike** the copies are ("98% alike"). **Look-alikes: Strict / Normal / Loose** sets
+  how alike they must be — Normal is the iPhone's; Loose also catches heavier edits, and more photos that only
+  resemble each other.
 - **Similar name** (orange) — copy-style names: `IMG_0001.jpg`, `IMG_0001 (1).jpg`, `IMG_0001 2.jpg`,
   `… copy.jpg` (a Live Photo's `.HEIC` and `.MOV` aren't copies of each other).
 
-Each copy is a tile with its size — or, when the copies' dates differ, the date and time to the millisecond,
-with the **Oldest** and **Newest** marked. **Click the copies you don't want** (a red ring), then **Move to
-Trash** at the bottom; it asks first and says if a group would lose every copy. Double-click a tile (or
-**View**) to see the group full size in the viewer and flip between the copies. **Not Duplicates** hides a
-group for good; the ••• menu has Select All But One, Select All Copies, Deselect and Show in Photo Browser.
+Each copy is a tile with its **dimensions and size** — or, when the copies' dates differ, the date and time to
+the millisecond, with the **Oldest** and **Newest** marked. **Click the copies you don't want** (a red ring),
+then **Move to Trash**; it asks first and says if a group would lose every copy. Double-click a tile (or
+**View**) to see the group full size in the viewer. Right-click a copy ▸ **Keep Only This One**. **Not
+Duplicates** hides a group for good.
 
-**Select Extra Copies** ticks every copy but one in each *identical* group — keeping the copy with the most
-tags, then a plain name (not "(1)" or "copy"), then the oldest — so clearing out true duplicates is two
-clicks; check the ticks, then Move to Trash. **Include subfolders** looks through everything inside the
-folder (each tile then says which folder it's in), and **Leave out “Frame” files** skips video-frame
-screenshots; both are remembered. The photos' fingerprints are kept, so Rescan is quick.
+**Which copy is kept is a rule** — the **Keep** box at the bottom: *the best copy* (most tags, then a plain name
+— not "(1)" or "copy" — then the oldest), *the largest file*, *the highest resolution*, *the oldest*, *the
+newest*; and **Prefer Copies in a Folder…** keeps the copy in a folder you choose over copies anywhere else
+(scan *Sorted* and *Downloads* together, prefer *Sorted*). The copy the rule would keep wears a green **Keep**
+mark in every group, before anything is ticked. **Select Extra Copies ▾** then ticks every other copy — *In
+Identical Groups* (the safe pick: they're the same file), *In All Exact Groups*, or *In Every Group Shown*
+(look-alikes too: check those).
+
+When copies go to the Trash, **the kept copy takes their tags, Favorite and To AI** (a tick in the
+confirmation, on by default) — so a tag put on the duplicate isn't lost with it.
+
+**Include subfolders**, **Leave out “Frame” files** (video-frame screenshots), **Other files too** (documents,
+archives and anything else, matched by their bytes) and the strictness are remembered; groups can be sorted by
+space, number of copies, name or folder; the scan ends with "132 groups · 418 extra copies · up to 3.2 GB to
+free." The photos' fingerprints are kept, so Rescan is quick.
 
 ### All of Photo Browser for Mac's windows, at once
 

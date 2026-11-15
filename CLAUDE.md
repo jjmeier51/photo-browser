@@ -183,13 +183,23 @@ actions the app makes no network calls.
   **Folder covers** (`mac/folder_covers.py` ↔ `FolderCovers.swift`): chosen cover, else first photo inside; shared
   through the drive's `.Photo Browser Metadata/folder-covers.json` + `covers/` (later `at` wins; `""` = removed,
   `at` 0 = automatic); the iPhone stamps chosen covers (`coverStamps`, `noteCoverChosen`) and merges in
-  `syncFolderCovers` (from `syncDriveTags`). **Themes** (`mac/themes.py` mirrors `AppTheme.groups` — keep in step;
-  `Theme(dark, look)`, `THEME.on_accent` for anything drawn on the accent). **Search** (`mac/search_query.py`):
+  `syncFolderCovers` (from `syncDriveTags`). **Themes** (`mac/themes.py` mirrors `AppTheme.groups` — keep in step:
+  Everyday, Halloween, Thanksgiving, Christmas, Holiday; `Theme(dark, look)`, `THEME.on_accent` for anything drawn
+  on the accent; `derive` keeps text / grey text / on-accent text above contrast floors — don't bypass it. Mac only:
+  My Themes (`my_themes`), Follow the Seasons (`themes.seasonal`, `chosen_look` vs `current_look`), Surprise Me). **Search** (`mac/search_query.py`):
   phrases, `-not`, `tag:`/`#`, `is:`, `in:`, `date:`/`before:`/`after:`, accent- and separator-blind, words match
   tags too; names kept ~2 min (`NAMES`) so results follow the typing — forget them when files change. §6ah.
   Photo Browser for Mac's **Find Duplicates** (right-click a folder; `mac/duplicates.py`, `mac/duplicates_window.py`): the
-  iPhone's exact / visually similar / similar-name groups, plus an Identical (SHA-256) check and Select Extra
-  Copies for identical groups only — it ticks, the person trashes — §6q.
+  iPhone's exact / visually similar / similar-name groups, plus an Identical (SHA-256) check; a **keep rule**
+  (`duplicates.keeper`: best / largest / resolution / oldest / newest, + a preferred folder) marks the copy to keep
+  and drives Select Extra Copies (identical / exact / all shown); look-alike strictness; other files by bytes;
+  several folders as one; trashed copies' tags and labels pass to the kept copy (`DupHooks.inherit`). It ticks,
+  the person trashes — §6q, §6ak.
+  **How the Mac window talks to the person** (`mac/ui_extras.py`, §6ak): results go through `Pane.note(text,
+  "Undo", fn)` (a toast; `_airdrop_noted` for steps still under way, ending in "…") — not a `QMessageBox` unless
+  it's an error; anything reversible pushes onto `MainWindow.undo` (`Pane._undoable` / `_renamed`); an empty view
+  explains itself (`Pane._update_empty`); every command is a menu-bar action (so it's in Find a Command… ⇧⌘P and
+  Help ▸ Keyboard Shortcuts) built with `act(...)` — submenus with `submenu(...)` — and `QAction.MenuRole.NoRole`.
   Photo Browser for Mac's **taylorpictures.net** window (right-click the Taylor Swift folder; `mac/taylor.py`,
   `mac/taylor_window.py`): first a pass of the whole site against the whole folder (resumable; "N of your
   photos are on the site", albums you have all/some/none of), then the iPhone's browser with "already here"
@@ -197,6 +207,8 @@ actions the app makes no network calls.
   (`TaylorRecord.swift`) — §7.4c.
   Photo Browser for Mac's **Edit with AI / Create with AI / Astria.ai Browser** (`mac/astria.py`, `mac/ai_window.py`): the
   iPhone's Astria request path field for field (keep the two in step), key in the Mac's Keychain — §1.13.
+  **Save / Save All and Run Again close the results window** (said in a toast; kept-but-unsaved results are asked
+  about once on Run Again, `ai/run_again_unsaved`).
   **Several photos, one prompt** (select photos ▸ Edit N Photos with AI…): a job per photo with the same prompt and
   settings, four at a time (`ai_window.LANES`), one `BatchResultsWindow` with every photo's results, Save All once
   they're all back (each into the "AI" folder beside its own photo), Try Again per failed photo. Photo Browser for Mac only.
@@ -258,7 +270,7 @@ actions the app makes no network calls.
   skipped; all file management (move/copy with duplicate detection, rename, delete,
   metadata, captions, labels) stays. (`Library.pureTransferMode`, see
   `docs/feature-notes.md` §5c.)
-- **Appearance** — Settings ▸ Appearance: ready-made themes (everyday, Halloween, Christmas
+- **Appearance** — Settings ▸ Appearance: ready-made themes (everyday, Halloween, Thanksgiving, Christmas, Holiday
   sets) or a custom background (solid / gradient), accent colour, typeface and light/dark chrome;
   `AppTheme` (persisted by `Library.theme`), drawn by `AppGradient`, applied at the app root
   (`.tint`, `.preferredColorScheme`, `.fontDesign`, default font) and in the chip bar.

@@ -2295,6 +2295,148 @@ metadata the file came with was dropped, PNGs became JPEGs), and didn't tag what
 - `save_created` (Create/Edit results) still re-encodes to JPEG as before — those are new files Photo Browser for Mac
   makes from results, with the source photo's EXIF; only browser downloads are "as Astria made them".
 
+## 6ak. The Mac app becomes Photo Browser for Mac; themes, Find Duplicates and a usability pass (Nov 15, 2026)
+
+### The rename — `mac/app_identity.py`
+
+The Mac app was **Safe Finder** until now. It's **Photo Browser for Mac**: in the app (title, menus, messages),
+its launcher (`Photo Browser for Mac.command`), its build (`build_app.sh` → `Photo Browser for Mac.app`, bundle id
+`com.photobrowser.mac`, category Photography), its main module (`photo_browser.py`, was `safe_finder.py`), the
+iPhone app's wording ("Sync Tags with Photo Browser for Mac"), and every doc. The earlier, smaller PySide6 app
+that used to have this name is now **the bulk editor** (`mac/bulk_editor/`, "Photo Browser Bulk Editor",
+`./run.sh --bulk-editor`); `run.sh` opens the app.
+
+**Why a module for a name.** The name wasn't only text. It was the folder in `~/Library/Application Support`
+(tags of files on the Mac's own disk, AI models, watermarks, folder covers, Real-ESRGAN, **the downloaders'
+saved logins** — Qt keeps a named WebEngine profile under the application's name), the settings file, the
+Keychain service of the Astria key, the logs folder, the thumbnail cache, two hidden folders on the drive, and
+`"by"` in the shared files. Changing the string alone would have started the app from nothing. So
+`app_identity.py` holds the name and **carries everything over**:
+
+- `support()` / `logs()` / `web_cache()` / `thumb_cache()` return the new folders; the first call in any process
+  *renames* the old folder to the new name (`_adopt`), and if both exist (an old build run again later) moves in
+  only what the new one lacks. Nothing is deleted or overwritten. `photo_browser.main` calls `carry_over()` before
+  `QApplication` exists — Qt would otherwise create the new profile folder first.
+- `settings()` replaces every `QSettings("PhotoBrowser", "SafeFinder")`; the first call copies the old values in.
+  (The new key is `PhotoBrowserForMac` — `PhotoBrowserMac` was already the bulk editor's.) Remembered places
+  spelled `safe-finder://…` are read as `photo-browser://…` (`current_url`).
+- The Astria key: read from the new Keychain service, else from the old one and re-saved under the new
+  (`astria.get_key`). Passes' token: the old service is still read.
+- On the drive: `.Photo Browser Staging` / `.Photo Browser Checksums` are the new names; the old
+  `.Safe Finder …` folders are still recognised everywhere they were skipped, an old staging folder is used as it
+  is (its journal may name a cut-off file), and the checksums folder is renamed the first time it's used
+  (`clone_drive.sums_folder`). Shared files say `"by": "Photo Browser for Mac"`; `SharedTags.swift` accepts both.
+- AI models made before the rename (`"format": "safe-finder-ai-model"`) still load, and are re-saved in the new
+  format. `SAFE_FINDER_*` environment switches still work as `PHOTO_BROWSER_*`.
+- `build_app.sh` removes an old `Safe Finder.app` once the new app is installed (it would keep running stale code
+  against the same data). macOS asks again for Desktop / Documents / Downloads / removable volumes — to it, a new
+  bundle id is a new app.
+
+Left as they were, on purpose: `safefinder-capcut` (a record's format id) and the `Application Support/SafeFinder`
+folder the Passes tool uses. **Rule from here: never write the app's name, a `QSettings(...)` or a Library path
+by hand — use `app_identity`.**
+
+Sandbox-tested with a fake home holding every old item (`scratchpad/rename_t/migrate_test.py`); **not run on a
+Mac**: the Keychain move, and that Qt's WebEngine profile path is `Application Support/<app name>/QtWebEngine`
+(if a login is missing after the rename, that folder is where to look).
+
+**The icon** — `mac/photo_browser_icon.png`, drawn by `mac/make_icon.py` (Pillow, 4× supersampled): the iPhone
+icon's wheel of colours as what the app shows — a 3 × 3 grid of photo tiles — with the folder as the middle tile,
+on a macOS-shaped plate (a superellipse filling Apple's 824-px grid, with its soft shadow). Checked down to 16 px.
+
+### Edit / Create with AI: the results window closes
+
+Save (and Save All) saved and left the window up; Run Again opened the form and left it up too. Now **Save
+closes the window** and the main window says what was saved; it stays only when something couldn't be written
+(or, for several photos, when a failed one is still there to Try Again). **Run Again closes it too**; kept
+results that weren't saved are asked about once — *Save and Run Again* / *Don't Save* / Cancel, with "Do this
+every time" (`ai/run_again_unsaved`). They cost credits, so they're never thrown away without the person having
+said so at least once.
+
+### Themes — `mac/themes.py`, `mac/theme_window.py`, `AppTheme.swift`
+
+Forty presets in five sets, the same in both apps: a new **Thanksgiving** set (7), six more **Christmas** themes
+(12 now), and a **Holiday** set (8: Holiday Lights, Festival of Lights, Kwanzaa, Winter Solstice, Sugar Plum, Hot
+Cocoa, Midnight Toast, First Frost). `AppTheme.groups` was generated from `themes.PRESETS` — keep them in step.
+On the Mac also:
+
+- **My Themes** (`my_themes` setting; `themes.with_saved`): the custom look saved under a name.
+- **Follow the Seasons** (`themes.season` / `seasonal`): October → Halloween; November 1 to Thanksgiving Day (the
+  fourth Thursday) → Thanksgiving; then to December 25 → Christmas, Holiday or both (`theme_december`); to
+  January 1 → Holiday. The day's theme is `pool[date.toordinal() % len(pool)]` — the same all day, another
+  tomorrow. `chosen_look()` is the person's theme, `current_look()` what's on; choosing by hand turns the
+  seasons off (otherwise the choice would appear to do nothing). A timer looks every ten minutes for a new day.
+- **Surprise Me**; the Theme menu has a submenu per set ("— in season" beside the one that is); the chooser
+  scrolls and is a sheet over its window (`open()`, not `exec()`).
+- **Contrast floors** in `derive`: text ≥ 7:1, grey text ≥ 4.5:1 and hints ≥ 3:1 against *every* stop of the
+  background and the header and sidebar (moved toward white or black just far enough — `readable`); the text on
+  the accent is whichever of black and white reads better on both accent shades. Six presets had grey text under
+  4.5:1 on their header before. (Candy Corn's lightest stop still gives white text only 4:1 — it's the iPhone's
+  colours.)
+
+### Find Duplicates — `mac/duplicates.py`, `mac/duplicates_window.py`
+
+What the first version couldn't do: say *which* copy to keep except in identical groups, look across two
+folders, find copies of anything but pictures with readable dimensions, or keep what was said about a copy.
+
+- **Keep rules** (`keeper(paths, rule, pixels, dates, prefer)`): best / largest / resolution / oldest / newest,
+  ties falling to the old order (most tags, plain name, oldest, shortest path); a **preferred folder** beats the
+  rule. The window shows the copy the rule would keep with a **Keep** mark before anything is ticked — a rule
+  nobody can see is a rule nobody trusts. Select Extra Copies takes a scope: identical / exact / every group
+  shown; a copy kept by one group is never ticked by another.
+- **Inheritance**: before the Trash, each kept copy takes the going copies' tags and labels
+  (`DupHooks.inherit` → `TagStore.carry` + `carry_labels`, both additive) — asked with a tick in the confirmation.
+- **Strictness** (4 / 6 / 8 bits): `bands_for(t)` generalises the pigeonhole banding (t + 1 bands); candidates
+  within a band are compared with numpy (`bitwise_count`, or a byte table before numpy 2) — 4,000 hashes at 8
+  bits in 0.13 s. Still single-linkage, so Loose can chain; each similar group says how alike it is (`spread`).
+- **By bytes**: same size + `quick_signature` (SHA-1 of the first and last 64 KB) groups files with no readable
+  dimensions and — with *Other files too* — non-media; the Identical check then proves it. JSON sidecars and
+  `Thumbs.db`-style junk are never listed.
+- **Several folders as one** (`scan` takes a list; "similar name" stays per folder).
+- Per-copy dimensions (read in the background with the dates), sorting, and the totals line.
+
+Not done: look-alike *videos* (it would need a frame from each; durations alone make false groups of same-length
+clips).
+
+### The usability pass — `mac/ui_extras.py`, `mac/menubar.py`, `photo_browser.py`
+
+Two looks at the app before changing anything: Apple's Human Interface Guidelines and what's known to make
+file and photo browsers pleasant (feedback over alerts, undo over confirmation, real empty states, a searchable
+command list, standard keys, native menu roles), and a screen-by-screen audit of this app run offscreen (about
+fifty screenshots, both appearances, the contrast of every theme, every menu dumped). What came of it:
+
+- **Toast** (`ui_extras.Toast`, `Pane.note`) for results, with Undo / nothing; `_airdrop_noted` keeps progress
+  lines (ending "…") on the status line and sends everything else to the toast as well.
+- **Undo** (`ui_extras.UndoStack` on the window; `Pane._renamed`, `_undoable`): renames go back through
+  `rename_tools.apply_bulk` with the pairs reversed — so tags, labels and `renames.json` follow; tags and labels
+  record exactly the items they changed.
+- **Empty states** (`ui_extras.EmptyNote`, `Pane._update_empty`): shown only once the folder's listing has
+  arrived (`directoryLoaded`), so a folder that's still loading doesn't flash "empty"; the note lets the mouse
+  through, so drops and right-clicks still reach the view.
+- **Find a Command…** (`ui_extras.CommandPalette` over `menu_commands(menuBar())`), **Help window**
+  (`HelpWindow`: the README's "The app" section through `QTextDocument.setMarkdown` with `MarkdownNoHTML` — the
+  guide writes `<name>` as words, which HTML swallowed 90% of — and the shortcuts from the same action list),
+  **Welcome** (once; `welcomed`), **About**.
+- **Menus**: the right-click menu rebuilt in groups (`Pane._item_menu`), duplicates gone from the empty-space
+  menu, Trash on its own; the Photos menu in submenus; Favorite / To AI retitle themselves; both Sort menus offer
+  the same things; `NoRole` on every action so macOS doesn't move one to the app menu because of a word in it
+  (About and Quit have their roles).
+- **Keys**: ⌘O, ⌘W, ⌘Q, ⇧⌘G, ⌘R, ⇧⌘., ⌘?, ⌥⌘C, ⇧⌘P, mouse back/forward. One binding per key still holds (checked:
+  no duplicates among 143 commands).
+- **Stylesheet**: `QMenu::item:disabled`, a Disabled palette group, checkbox / radio indicators (the tick is a
+  small generated PNG — `ui_mark` — since a stylesheet can colour the box but not draw the mark), `:default` and
+  `:focus` on buttons, 28-px header tools, taller path-bar crumbs.
+- **Layout**: pane title never under 70 px, search field 90–190 px, New Folder / Tags then the view buttons
+  step aside as a pane narrows (`Pane.resizeEvent`), the window's minimum width grows in Split View; list columns
+  "Kind" and sizes via `human()`; column widths and the sidebar's width are saved; window title = the folder
+  (`setWindowFilePath`).
+- **Accessibility**: header tools, sliders and the search field have accessible names (there were none).
+
+Left for another day (noted by the audit, not done): a Settings window, undo for the Trash (Put Back), sidebar
+keyboard focus, Finder's Return-renames convention (Return opens here, F2 renames — kept), drag images with a
+count badge, native unified toolbar. **Not seen on a Mac**: all of it was run with Qt's offscreen platform on
+Linux — menu roles, sheets, the title-bar proxy icon and the Help window's fonts are the things to look at first.
+
 ## 6ab. Photo Browser for Mac Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
 
 The iPhone's video upscale (`MediaEditing.upscaleVideo`, §6f) on the Mac: right-click videos ▸ **Upscale Video…**
