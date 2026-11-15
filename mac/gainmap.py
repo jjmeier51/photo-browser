@@ -11,7 +11,8 @@ built the first time like the other helpers). The Python side:
 - `sniff(path)` — does this photo have a gain map? Read from the file's own boxes (HEIC) or markers (JPEG);
   no helper needed, so it's free to ask.
 - `read(path)` → `GainMap`: the map as numbers, **turned upright** like `batch_crop.open_upright` turns the
-  photo, so the same crop and turns can be done to both.
+  photo, so the same crop and turns can be done to both. Read in Python (pillow-heif reads an HEIC's; a JPEG's
+  is the file's second picture) — the helper only when that fails.
 - carried through an edit by whoever does the edit: `turned` / `cropped` here for Crop and Rotate,
   `photo_edit.gain_through` for the photo editor (its reshaping, turning, straightening, cropping and frames),
   `filled` where something was removed from the photo (so its glow doesn't stay behind on an HDR screen).
@@ -161,10 +162,50 @@ def upright(a: np.ndarray, orientation: int) -> np.ndarray:
     return a
 
 
-def read(path: str) -> GainMap | None:
-    """The photo's gain map, upright — None when it has none or it can't be read here."""
-    if not sniff(path):
+def _read_heif(path: str) -> GainMap | None:
+    """An HEIC's Apple gain map through pillow-heif — which hands it over upright, like the picture."""
+    try:
+        import pillow_heif
+        hf = pillow_heif.open_heif(path)
+        ids = (hf.info.get("aux") or {}).get(APPLE_URN.decode())
+        if not ids:
+            return None
+        aux = hf.get_aux_image(ids[0])
+        if aux.mode != "L":
+            return None
+        w, h = aux.size
+        data = np.frombuffer(bytes(aux.data), dtype=np.uint8)
+        stride = int(getattr(aux, "stride", w) or w)
+        if data.size < stride * h or w < 2 or h < 2:
+            return None
+        main = hf.size
+        if (w > h) != (main[0] > main[1]) and w != h:        # not the picture's way round: not one to trust
+            return None
+        return GainMap(np.ascontiguousarray(data[:stride * h].reshape(h, stride)[:, :w]), "apple", {"by": "pillow-heif"})
+    except Exception:  # noqa: BLE001 — an older pillow-heif, a map it can't decode: the helper is asked instead
         return None
+
+
+def _read_jpeg(path: str) -> GainMap | None:
+    """A JPEG's gain map: the second picture in the file (MPF), stored the same way round as the first."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            if getattr(im, "n_frames", 1) < 2:
+                return None
+            orientation = im.getexif().get(0x0112, 1)
+            main = im.size
+            im.seek(1)
+            g = im.convert("L")
+            if g.width < 2 or g.height < 2 or g.width > main[0] or abs(g.width / g.height - main[0] / main[1]) > 0.02:
+                return None                                   # a second picture that isn't a map of the first
+            stored = np.asarray(g, dtype=np.uint8)
+        return GainMap(np.ascontiguousarray(upright(stored, int(orientation or 1))), "apple", {"by": "pillow"})
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _read_helper(path: str) -> GainMap | None:
     cmd = helper()
     if not cmd:
         return None
@@ -185,6 +226,16 @@ def read(path: str) -> GainMap | None:
         except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError):
             return None
     return GainMap(np.ascontiguousarray(upright(stored, int(info.get("orientation") or 1))), str(info.get("type") or "apple"), info)
+
+
+def read(path: str) -> GainMap | None:
+    """The photo's gain map, upright — None when it has none or it can't be read here. Read in Python where
+    that's possible (pillow-heif for HEIC, the file's second picture for JPEG); the helper otherwise."""
+    if not sniff(path):
+        return None
+    ext = os.path.splitext(path)[1].lower()
+    got = _read_heif(path) if ext in HEIF_EXT else _read_jpeg(path) if ext in JPEG_EXT else None
+    return got if got is not None else _read_helper(path)
 
 
 # ----------------------------------------------------------------------------- carried through an edit

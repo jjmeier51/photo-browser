@@ -17,25 +17,31 @@
 import CoreGraphics
 import Foundation
 import ImageIO
-import UniformTypeIdentifiers
+
+let pixelFormatL008: UInt32 = 0x4C30_3038          // 'L008' — kCVPixelFormatType_OneComponent8
 
 func fail(_ why: String, _ code: Int32 = 1) -> Never {
-    FileHandle.standardError.write((why + "\n").data(using: .utf8)!)
+    FileHandle.standardError.write(Data((why + "\n").utf8))
     exit(code)
 }
 
-/// The gain map's auxiliary data in the photo: Apple's, else (macOS 15+) an ISO 21496-1 one.
-func gainInfo(_ source: CGImageSource) -> (kind: String, type: CFString, info: [CFString: Any])? {
+/// The gain map's auxiliary data in the photo: Apple's (what every iPhone photo since iOS 14.1 has, and iOS 18+
+/// photos still carry beside the newer kind), else — macOS 15+ — an ISO 21496-1 one.
+func gainInfo(_ source: CGImageSource) -> (kind: String, type: CFString, info: [String: Any])? {
     if let info = CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, kCGImageAuxiliaryDataTypeHDRGainMap)
-        as? [CFString: Any] {
+        as? [String: Any] {
         return ("apple", kCGImageAuxiliaryDataTypeHDRGainMap, info)
     }
     if #available(macOS 15.0, *),
        let info = CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, kCGImageAuxiliaryDataTypeISOGainMap)
-        as? [CFString: Any] {
+        as? [String: Any] {
         return ("iso", kCGImageAuxiliaryDataTypeISOGainMap, info)
     }
     return nil
+}
+
+func number(_ value: Any?) -> Int? {
+    (value as? NSNumber)?.intValue
 }
 
 func fourCC(_ value: Any?) -> String {
@@ -44,79 +50,110 @@ func fourCC(_ value: Any?) -> String {
     return String(bytes: bytes, encoding: .ascii) ?? ""
 }
 
+func properties(_ source: CGImageSource) -> [String: Any] {
+    (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any]) ?? [:]
+}
+
 func read(_ photo: String, _ out: String) -> Never {
     guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: photo) as CFURL, nil) else { fail("can't open the photo") }
     guard let (kind, _, info) = gainInfo(source) else { exit(3) }
-    guard let data = info[kCGImageAuxiliaryDataInfoData] as? Data,
-          let desc = info[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any],
-          let width = (desc["Width"] as? NSNumber)?.intValue,
-          let height = (desc["Height"] as? NSNumber)?.intValue,
-          let row = (desc["BytesPerRow"] as? NSNumber)?.intValue
-    else { fail("the gain map has no data") }
-    let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
-    let orientation = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+    guard let data = info[kCGImageAuxiliaryDataInfoData as String] as? Data,
+          let desc = info[kCGImageAuxiliaryDataInfoDataDescription as String] as? [String: Any],
+          let width = number(desc["Width"]), let height = number(desc["Height"]), let row = number(desc["BytesPerRow"])
+    else { fail("the gain map has no data that can be read") }
+    let props = properties(source)
     do { try data.write(to: URL(fileURLWithPath: out)) } catch { fail("can't write the gain map: \(error.localizedDescription)") }
+    var format = fourCC(desc["PixelFormat"])
+    if format.isEmpty, data.count >= row * height, row >= width, row < width * 2 { format = "L008" }   // not said: 8-bit grey by its size
     let answer: [String: Any] = ["type": kind, "width": width, "height": height, "bytesPerRow": row,
-                                 "pixelFormat": fourCC(desc["PixelFormat"]), "orientation": orientation,
-                                 "imageWidth": (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0,
-                                 "imageHeight": (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0]
+                                 "pixelFormat": format,
+                                 "orientation": number(props[kCGImagePropertyOrientation as String]) ?? 1,
+                                 "imageWidth": number(props[kCGImagePropertyPixelWidth as String]) ?? 0,
+                                 "imageHeight": number(props[kCGImagePropertyPixelHeight as String]) ?? 0]
     guard let json = try? JSONSerialization.data(withJSONObject: answer), let line = String(data: json, encoding: .utf8)
     else { fail("can't describe the gain map") }
     print(line)
     exit(0)
 }
 
+/// The least a gain map's own metadata must say, for a photo whose original wouldn't hand its metadata over.
+func plainGainMetadata() -> CGImageMetadata? {
+    let xmp = """
+    <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\
+    <rdf:Description rdf:about="" xmlns:HDRGainMap="http://ns.apple.com/HDRGainMap/1.0/" \
+    HDRGainMap:HDRGainMapVersion="65536"/></rdf:RDF></x:xmpmeta>
+    """
+    return CGImageMetadataCreateFromXMPData(Data(xmp.utf8) as CFData)
+}
+
 func write(original: String, pixels: String, gain: String, gainWidth: Int, gainHeight: Int, out: String, quality: Double) -> Never {
     guard let origSource = CGImageSourceCreateWithURL(URL(fileURLWithPath: original) as CFURL, nil) else { fail("can't open the original") }
-    guard let (_, auxType, origInfo) = gainInfo(origSource) else { fail("the original has no gain map", 3) }
+    guard let (kind, auxType, origInfo) = gainInfo(origSource) else { fail("the original has no gain map", 3) }
     guard let pixelSource = CGImageSourceCreateWithURL(URL(fileURLWithPath: pixels) as CFURL, nil),
           let image = CGImageSourceCreateImageAtIndex(pixelSource, 0, nil) else { fail("can't read the edited pixels") }
-    guard let gainData = try? Data(contentsOf: URL(fileURLWithPath: gain)), gainData.count >= gainWidth * gainHeight,
-          gainWidth > 1, gainHeight > 1 else { fail("can't read the new gain map") }
+    guard gainWidth > 1, gainHeight > 1, let raw = try? Data(contentsOf: URL(fileURLWithPath: gain)),
+          raw.count >= gainWidth * gainHeight else { fail("can't read the new gain map") }
 
-    // The original's metadata, as the new picture now is: upright, and this size.
-    var props = CGImageSourceCopyPropertiesAtIndex(origSource, 0, nil) as? [CFString: Any] ?? [:]
-    props[kCGImagePropertyOrientation] = 1
-    props[kCGImagePropertyPixelWidth] = image.width
-    props[kCGImagePropertyPixelHeight] = image.height
-    if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
-        tiff[kCGImagePropertyTIFFOrientation] = 1
-        props[kCGImagePropertyTIFFDictionary] = tiff
+    // The original's metadata — camera, date, GPS, and Apple's maker note, which holds the HDR headroom
+    // ("33" and "48"; without them the photo looks flat) — as the new picture now is: upright, and its own size.
+    var props = properties(origSource)
+    let hadHeadroom = (props[kCGImagePropertyMakerAppleDictionary as String] as? [String: Any])?["48"] != nil
+    props[kCGImagePropertyOrientation as String] = 1
+    if var tiff = props[kCGImagePropertyTIFFDictionary as String] as? [String: Any] {
+        tiff[kCGImagePropertyTIFFOrientation as String] = 1
+        props[kCGImagePropertyTIFFDictionary as String] = tiff
     }
-    if var exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
-        exif[kCGImagePropertyExifPixelXDimension] = image.width
-        exif[kCGImagePropertyExifPixelYDimension] = image.height
-        props[kCGImagePropertyExifDictionary] = exif
+    if var exif = props[kCGImagePropertyExifDictionary as String] as? [String: Any] {
+        exif[kCGImagePropertyExifPixelXDimension as String] = image.width
+        exif[kCGImagePropertyExifPixelYDimension as String] = image.height
+        props[kCGImagePropertyExifDictionary as String] = exif
     }
-    props[kCGImageDestinationLossyCompressionQuality] = quality
+    props.removeValue(forKey: kCGImagePropertyPixelWidth as String)        // the picture says its own size
+    props.removeValue(forKey: kCGImagePropertyPixelHeight as String)
+    props[kCGImageDestinationLossyCompressionQuality as String] = quality
 
-    // The gain map: the original's description and metadata, with the new bytes and their size.
-    var desc = origInfo[kCGImageAuxiliaryDataInfoDataDescription] as? [String: Any] ?? [:]
+    // The gain map: the original's own dictionary (its metadata object as it came — it can't be rebuilt by
+    // hand), with the new bytes and their size. Rows are padded to a multiple of four, as ImageIO expects;
+    // an incomplete description is dropped without a word, hence every key here and the check at the end.
+    let rowBytes = (gainWidth + 3) & ~3
+    var padded = Data(capacity: rowBytes * gainHeight)
+    let pad = Data(count: rowBytes - gainWidth)
+    for y in 0..<gainHeight {
+        padded.append(raw.subdata(in: (y * gainWidth)..<((y + 1) * gainWidth)))
+        padded.append(pad)
+    }
+    var desc = (origInfo[kCGImageAuxiliaryDataInfoDataDescription as String] as? [String: Any]) ?? [:]
     desc["Width"] = gainWidth
     desc["Height"] = gainHeight
-    desc["BytesPerRow"] = gainWidth
-    desc.removeValue(forKey: "Orientation")
-    var aux: [CFString: Any] = [kCGImageAuxiliaryDataInfoData: gainData.prefix(gainWidth * gainHeight) as CFData,
-                                kCGImageAuxiliaryDataInfoDataDescription: desc]
-    if let meta = origInfo[kCGImageAuxiliaryDataInfoMetadata] {
-        aux[kCGImageAuxiliaryDataInfoMetadata] = meta
+    desc["BytesPerRow"] = rowBytes
+    desc["PixelFormat"] = pixelFormatL008
+    desc.removeValue(forKey: "Orientation")                                // the bytes are upright now
+    var aux = origInfo
+    aux[kCGImageAuxiliaryDataInfoData as String] = padded
+    aux[kCGImageAuxiliaryDataInfoDataDescription as String] = desc
+    if aux[kCGImageAuxiliaryDataInfoMetadata as String] == nil, kind == "apple", let plain = plainGainMetadata() {
+        aux[kCGImageAuxiliaryDataInfoMetadata as String] = plain
     }
 
-    let jpeg = out.lowercased().hasSuffix(".jpg") || out.lowercased().hasSuffix(".jpeg")
-    let type = (jpeg ? UTType.jpeg : UTType.heic).identifier as CFString
+    let lower = out.lowercased()
+    let type = (lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") ? "public.jpeg" : "public.heic") as CFString
     let url = URL(fileURLWithPath: out)
     try? FileManager.default.removeItem(at: url)
     guard let dest = CGImageDestinationCreateWithURL(url as CFURL, type, 1, nil) else { fail("can't start the new photo") }
-    CGImageDestinationAddImage(dest, image, props as CFDictionary)
-    CGImageDestinationAddAuxiliaryDataInfo(dest, auxType, aux as CFDictionary)
+    CGImageDestinationAddImage(dest, image, props as CFDictionary)          // the picture first…
+    CGImageDestinationAddAuxiliaryDataInfo(dest, auxType, aux as CFDictionary)   // …then what belongs to it
     guard CGImageDestinationFinalize(dest) else {
         try? FileManager.default.removeItem(at: url)
         fail("the new photo couldn't be written")
     }
-    // What was written must have its gain map, or it isn't what was asked for.
+    // What was written must have its gain map (and its headroom, if the original had one), or it isn't HDR.
     guard let check = CGImageSourceCreateWithURL(url as CFURL, nil), gainInfo(check) != nil else {
         try? FileManager.default.removeItem(at: url)
         fail("the gain map didn't go into the new photo")
+    }
+    if hadHeadroom, (properties(check)[kCGImagePropertyMakerAppleDictionary as String] as? [String: Any])?["48"] == nil {
+        try? FileManager.default.removeItem(at: url)
+        fail("the HDR headroom didn't go into the new photo")
     }
     exit(0)
 }
