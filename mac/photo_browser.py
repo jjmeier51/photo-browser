@@ -6425,6 +6425,8 @@ class Pane(QWidget):
                                lambda: self.convert_webp(webps))
             if videos:
                 edit.addSeparator()
+                if len(videos) >= 2:
+                    edit.addAction(f"Stitch {len(videos)} Videos…", lambda: self.stitch_videos(videos))
                 edit.addAction("Export All Frames…", lambda: self.export_frames(videos))
                 edit.addAction("Upscale Video…" if len(videos) == 1 else f"Upscale {len(videos)} Videos…",
                                lambda: self.upscale_videos(videos))
@@ -6974,6 +6976,33 @@ class Pane(QWidget):
                                     ("\n\n" + video_tools.problem if video_tools.problem else ""))
 
         dlg = video_upscale_window.VideoUpscaleDialog(self.window(), videos, self.settings, done)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.open()
+
+    # -- stitch videos (stitch_window.py / video_stitch.py)
+    def stitch_videos(self, paths: list[str]) -> None:
+        """Select two or more videos ▸ Stitch Videos…: joined in the order chosen into one video beside the
+        first — with the oldest clip's date, the place, and every clip's tags, tagged "stitched"."""
+        import stitch_window
+        import video_stitch
+        videos = [p for p in paths if kind_of(p) == "video" and not os.path.isdir(p)]
+        if len(videos) < 2:
+            QMessageBox.information(self.window(), "Stitch Videos", "Select two or more videos to stitch them together.")
+            return
+
+        def done(written: str, sources: list[str], notes: list[str]) -> None:
+            try:
+                tag_store().carry([(src, written) for src in sources])          # every clip's tags…
+                tag_store().add([written], [video_stitch.STITCHED_TAG])         # …and "stitched"
+            except OSError as e:
+                QMessageBox.warning(self.window(), "Stitch Videos", f"Couldn't save the tags: {e}")
+            tags_changed()
+            media_info.forget([written])
+            self.refresh()
+            line = f"Stitched {len(sources):,} videos into “{os.path.basename(written)}”"
+            self.note(line + (" — but " + "; ".join(notes) if notes else "") + ".", "Show", lambda: self.reveal(written))
+
+        dlg = stitch_window.StitchWindow(QApplication.activeWindow() or self.window(), videos, self.settings, done)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.open()
 

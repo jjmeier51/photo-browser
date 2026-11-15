@@ -407,6 +407,9 @@ def install(win, sf) -> None:
         lambda: len(photos()) == 1, "Draw round anything in the photo and it's gone — filled in from the photo itself")
 
     video = submenu(t, "Video")
+    act(video, "Stitch Videos…", lambda: pane().stitch_videos(videos()), None, lambda: len(videos()) >= 2,
+        "The selected videos joined into one, in the order you choose — it takes the oldest clip's date, the place "
+        "and every clip's tags")
     act(video, "Export All Frames…", lambda: pane().export_frames(videos()), None, lambda: bool(videos()),
         "Every frame of the selected videos as pictures, in a folder beside them")
     act(video, "Upscale Video…", lambda: pane().upscale_videos(videos()), None, lambda: bool(videos()),
