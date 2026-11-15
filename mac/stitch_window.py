@@ -14,8 +14,9 @@ import time
 from typing import Callable
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog,
+                               QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QProgressBar,
+                               QPushButton, QVBoxLayout, QWidget)
 
 import video_stitch as vs
 
@@ -26,7 +27,7 @@ def _clock(seconds: float) -> str:
 
 
 class _Signals(QObject):
-    probed = Signal(object, object)             # [Clip], [why…]
+    probed = Signal(object, object, str)        # [Clip], [why…], what will do the joining ("ffmpeg" / "helper" / "")
     progress = Signal(float)
     done = Signal(str, object, str)             # path, notes, why
 
@@ -37,6 +38,7 @@ class StitchWindow(QDialog):
         super().__init__(parent)
         self.paths, self.settings, self.on_done = list(paths), settings, on_done
         self.clips: dict[str, vs.Clip] = {}
+        self.tool = ""                              # what joins them — found out off the UI thread (it may be built)
         self.running = False
         self._stop = threading.Event()
         self._sig = _Signals()
@@ -64,7 +66,8 @@ class StitchWindow(QDialog):
         self.up_btn = self._button("↑", lambda: self.move(-1), "Earlier")
         self.down_btn = self._button("↓", lambda: self.move(1), "Later")
         self.remove_btn = self._button("Remove", self.remove, "Leave this clip out")
-        for b in (self.up_btn, self.down_btn, self.remove_btn):
+        self.add_btn = self._button("Add Clips…", self.add_clips, "More videos, from anywhere")
+        for b in (self.up_btn, self.down_btn, self.remove_btn, self.add_btn):
             row.addWidget(b)
         lay.addLayout(row)
         self.list = QListWidget()
@@ -72,8 +75,26 @@ class StitchWindow(QDialog):
         self.list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.list.setAlternatingRowColors(True)
         self.list.model().rowsMoved.connect(lambda *_: self._changed())
-        self.list.currentRowChanged.connect(lambda _r: self._buttons())
+        self.list.currentRowChanged.connect(lambda _r: (self._show_trim(), self._buttons()))
         lay.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        self.trim_label = QLabel("Trim the selected clip — from")
+        self.trim_from = QDoubleSpinBox()
+        self.trim_to = QDoubleSpinBox()
+        for box in (self.trim_from, self.trim_to):
+            box.setDecimals(2)
+            box.setSingleStep(0.1)
+            box.setSuffix(" s")
+            box.setKeyboardTracking(False)
+            box.valueChanged.connect(lambda _v: self._trimmed())
+        self.trim_reset = self._button("Whole Clip", self._untrim, "Use all of this clip")
+        row.addWidget(self.trim_label)
+        row.addWidget(self.trim_from)
+        row.addWidget(QLabel("to"))
+        row.addWidget(self.trim_to)
+        row.addWidget(self.trim_reset)
+        row.addStretch(1)
+        lay.addLayout(row)
         self.reencode = QCheckBox("Always re-encode (for clips that won't join cleanly as they are)")
         self.reencode.setChecked(str(settings.value("stitch/reencode", "false")) == "true")
         self.reencode.toggled.connect(lambda on: (settings.setValue("stitch/reencode", "true" if on else "false"), self._changed()))
@@ -126,8 +147,8 @@ class StitchWindow(QDialog):
         return b
 
     # ------------------------------------------------------------------ the clips
-    def _probe(self) -> None:
-        paths, sig = list(self.paths), self._sig
+    def _probe(self, paths: list[str] | None = None) -> None:
+        paths, sig = list(self.paths if paths is None else paths), self._sig
 
         def work() -> None:
             clips, bad = [], []
@@ -136,26 +157,82 @@ class StitchWindow(QDialog):
                     clips.append(vs.probe(p))
                 except vs.StitchError as e:
                     bad.append(str(e))
-            sig.probed.emit(clips, bad)
+                except Exception as e:  # noqa: BLE001 — one odd file never stops the rest
+                    bad.append(f"“{os.path.basename(p)}” ({type(e).__name__}: {e})")
+            try:
+                tool = vs.can_stitch()                  # (builds the built-in joiner the first time, when there's no ffmpeg)
+            except Exception:  # noqa: BLE001
+                tool = ""
+            sig.probed.emit(clips, bad, tool)
         threading.Thread(target=work, daemon=True).start()
 
-    def _probed(self, clips: list, bad: list) -> None:
-        self.clips = {c.path: c for c in clips}
+    def _probed(self, clips: list, bad: list, tool: str) -> None:
+        self.tool = tool
         for c in clips:
-            self._add_row(c)
+            if c.path not in self.clips:
+                self.clips[c.path] = c
+                self._add_row(c)
         if bad:
             QMessageBox.information(self, "Stitch Videos", "Left out:\n\n" + "\n".join(bad[:12]))
         self._changed()
 
-    def _add_row(self, c: vs.Clip) -> None:
+    def add_clips(self) -> None:
+        start = os.path.dirname(self.order()[0].path) if self.list.count() else ""
+        picked, _ = QFileDialog.getOpenFileNames(self, "Add Clips", start, "Videos (*.mp4 *.mov *.m4v *.mkv *.webm *.avi)")
+        fresh = [p for p in picked if p not in self.clips]
+        if fresh:
+            self._probe(fresh)
+
+    def _row_text(self, c: vs.Clip) -> str:
         when = time.strftime("%-d %b %Y, %H:%M", time.localtime(c.created)) if c.created else ""
-        bits = [_clock(c.duration), f"{c.width} × {c.height}", f"{c.fps:g} fps" if c.fps else "",
+        length = _clock(c.length) + (f" of {_clock(c.duration)} (trimmed)" if c.trimmed else "")
+        bits = [length, f"{c.width} × {c.height}", f"{c.fps:g} fps" if c.fps else "",
                 c.vcodec.upper() + (" HDR" if c.hdr else ""), "no sound" if not c.acodec and c.vcodec else "",
                 when + ("" if c.dated else " (file date)")]
-        item = QListWidgetItem(f"{os.path.basename(c.path)}\n" + "  ·  ".join(b for b in bits if b))
+        return f"{os.path.basename(c.path)}\n" + "  ·  ".join(b for b in bits if b)
+
+    def _add_row(self, c: vs.Clip) -> None:
+        item = QListWidgetItem(self._row_text(c))
         item.setData(Qt.ItemDataRole.UserRole, c.path)
         item.setToolTip(c.path)
         self.list.addItem(item)
+
+    # ------------------------------------------------------------------ trimming
+    def _current(self) -> vs.Clip | None:
+        item = self.list.currentItem()
+        return self.clips.get(item.data(Qt.ItemDataRole.UserRole)) if item is not None else None
+
+    def _show_trim(self) -> None:
+        c = self._current()
+        for box in (self.trim_from, self.trim_to):
+            box.blockSignals(True)
+            box.setRange(0.0, max(0.0, c.duration) if c else 0.0)
+        self.trim_from.setValue(c.start if c else 0.0)
+        self.trim_to.setValue((c.end if c and 0 < c.end < c.duration else c.duration) if c else 0.0)
+        for box in (self.trim_from, self.trim_to):
+            box.blockSignals(False)
+
+    def _trimmed(self) -> None:
+        c = self._current()
+        if c is None:
+            return
+        a, b = self.trim_from.value(), self.trim_to.value()
+        if b - a < 0.1:                                 # at least a tenth of a second of it
+            b = min(c.duration, a + 0.1)
+            a = max(0.0, b - 0.1)
+        c.start = a if a > 0.001 else 0.0
+        c.end = b if b < c.duration - 0.001 else 0.0
+        self.list.currentItem().setText(self._row_text(c))
+        self._show_trim()
+        self._changed()
+
+    def _untrim(self) -> None:
+        c = self._current()
+        if c is not None:
+            c.start = c.end = 0.0
+            self.list.currentItem().setText(self._row_text(c))
+            self._show_trim()
+            self._changed()
 
     def order(self) -> list[vs.Clip]:
         return [self.clips[self.list.item(i).data(Qt.ItemDataRole.UserRole)] for i in range(self.list.count())]
@@ -196,9 +273,8 @@ class StitchWindow(QDialog):
             self._buttons()
             return
         p = self.plan()
-        tool = vs.can_stitch()
-        total = sum(c.duration for c in clips)
-        self.how.setText((p.duration_note if tool else vs.NEEDS) + f"  Length: {_clock(total)}.")
+        total = sum(c.length for c in clips)
+        self.how.setText((p.duration_note if self.tool else vs.NEEDS) + f"  Length: {_clock(total)}.")
         inh = vs.inherit(clips)
         bits = []
         if inh.when and inh.oldest is not None:
@@ -218,11 +294,14 @@ class StitchWindow(QDialog):
         self.up_btn.setEnabled(idle and r > 0)
         self.down_btn.setEnabled(idle and 0 <= r < n - 1)
         self.remove_btn.setEnabled(idle and r >= 0 and n > 2)
+        self.add_btn.setEnabled(idle)
+        for w in (self.trim_label, self.trim_from, self.trim_to, self.trim_reset):
+            w.setEnabled(idle and r >= 0 and self.tool != "helper")
         for b in self.order_buttons:
             b.setEnabled(idle and n > 1)
         self.list.setEnabled(idle)
         self.reencode.setEnabled(idle)
-        self.go.setEnabled(idle and n >= 2 and bool(vs.can_stitch()))
+        self.go.setEnabled(idle and n >= 2 and bool(self.tool))
         self.close_btn.setText("Close" if idle else "Stop")
 
     # ------------------------------------------------------------------ the run
@@ -231,6 +310,7 @@ class StitchWindow(QDialog):
         if len(clips) < 2 or self.running:
             return
         p = self.plan()
+        fallback = vs.plan(clips, True, str(self.size.currentData()), float(self.fps.currentData() or 0))
         self.running = True
         self._stop.clear()
         self.bar.setValue(0)
@@ -241,7 +321,7 @@ class StitchWindow(QDialog):
 
         def work() -> None:
             try:
-                out, notes = vs.stitch(clips, p, sig.progress.emit, stop)
+                out, notes = vs.stitch(clips, p, sig.progress.emit, stop, fallback=fallback)
                 sig.done.emit(out, notes, "")
             except vs.Stopped:
                 sig.done.emit("", [], "stopped")

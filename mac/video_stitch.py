@@ -71,15 +71,48 @@ class Clip:
     dated: bool = False                       # the capture date came from the video's own metadata
     place: tuple[float, float] | None = None
     size: int = 0
+    profile: str = ""
+    level: int = 0
+    primaries: str = ""
+    start: float = 0.0                        # trimmed: where it starts (seconds into the clip)
+    end: float = 0.0                          # …and ends; 0 = to its end
 
     @property
     def hdr(self) -> bool:
         return self.transfer in HDR_CURVES
 
+    @property
+    def trimmed(self) -> bool:
+        return self.start > 0.001 or (0 < self.end < self.duration - 0.001)
+
+    @property
+    def length(self) -> float:
+        """How long it plays, trimmed."""
+        return max(0.0, (self.end if 0 < self.end < self.duration else self.duration) - max(0.0, self.start))
+
     def kind(self) -> tuple:
-        """What must match for clips to be joined as they are."""
-        return (self.vcodec, self.width, self.height, self.rotation, self.pix_fmt, round(self.fps, 2), self.timebase,
-                self.acodec, self.arate, self.channels)
+        """What must match for clips to be joined as they are: not only the codec and the size, but its
+        profile and level (two encoders' H.264 don't always play on as one stream) and its colours. The frame
+        rate is compared loosely — an iPhone's is never exactly 30."""
+        return (self.vcodec, self.profile, self.level, self.width, self.height, self.rotation, self.pix_fmt,
+                rate_class(self.fps), self.timebase, self.transfer, self.primaries, self.acodec, self.arate, self.channels)
+
+
+RATES = (23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 59.94, 60.0, 120.0, 240.0)
+
+
+def rate_class(fps: float) -> float:
+    """Coarser still, for "are these the same kind": 29.97 and 30 are (the frames keep their own times)."""
+    near = min((24.0, 25.0, 30.0, 48.0, 50.0, 60.0, 120.0, 240.0), key=lambda r: abs(r - fps)) if fps > 0 else 0.0
+    return near if near and abs(near - fps) / near < 0.02 else round(fps, 1)
+
+
+def snapped(fps: float) -> float:
+    """A measured frame rate as the usual one it's within 2% of (29.98 → 30… the nearest wins)."""
+    if fps <= 0:
+        return 0.0
+    near = min(RATES, key=lambda r: abs(r - fps))
+    return near if abs(near - fps) / near < 0.02 else round(fps, 1)
 
 
 def ffprobe() -> str | None:
@@ -143,18 +176,59 @@ def probe(path: str) -> Clip:
         c.fps = _rate(v.get("avg_frame_rate")) or _rate(v.get("r_frame_rate"))
         c.vcodec, c.pix_fmt = v.get("codec_name") or "", v.get("pix_fmt") or ""
         c.transfer, c.timebase = v.get("color_transfer") or "", v.get("time_base") or ""
+        c.profile, c.primaries = str(v.get("profile") or ""), v.get("color_primaries") or ""
+        try:
+            c.level = int(v.get("level") or 0)
+        except (TypeError, ValueError):
+            c.level = 0
         try:
             c.duration = float((doc.get("format") or {}).get("duration") or v.get("duration") or 0)
         except ValueError:
             c.duration = 0.0
         if a is not None:
             c.acodec, c.arate, c.channels = a.get("codec_name") or "?", int(a.get("sample_rate") or 0), int(a.get("channels") or 0)
-    else:                                         # no ffprobe: what the file's own boxes say
+    else:                                         # no ffprobe: what the file's own boxes say…
         c.duration = float(info.get("duration") or 0)
         c.width, c.height = int(info.get("width") or 0), int(info.get("height") or 0)
         c.fps = float(info.get("fps") or 0)
         c.rotation = int(info.get("rotation") or 0)
+        _probe_with_ffmpeg(c)                     # …and what ffmpeg prints about it (its sound, above all)
+    if c.width < 2 or c.height < 2:
+        raise StitchError(f"“{os.path.basename(path)}” can't be read as a video")
     return c
+
+
+def _probe_with_ffmpeg(c: Clip) -> None:
+    """Fills in a clip from `ffmpeg -i`'s own description — for an ffmpeg that came without ffprobe. Without
+    this every clip looked silent, and the stitched video came out mute."""
+    import re
+    ff = video_tools.ffmpeg()
+    if not ff:
+        return
+    try:
+        said = subprocess.run([ff, "-hide_banner", "-i", c.path], capture_output=True, text=True, timeout=60).stderr
+    except (OSError, subprocess.SubprocessError):
+        return
+    m = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", said)
+    if m and not c.duration:
+        c.duration = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    v = re.search(r"Stream #\S+ Video: (\w+)[^\n]*?, (\w+)[^\n]*?, (\d{2,5})x(\d{2,5})[^\n]*", said)
+    if v:
+        c.vcodec, c.pix_fmt = v.group(1), v.group(2)
+        w, h = int(v.group(3)), int(v.group(4))
+        turn = re.search(r"rotation of (-?\d+(?:\.\d+)?) degrees", said)
+        c.rotation = int(round(float(turn.group(1)))) % 360 if turn else c.rotation
+        c.width, c.height = (h, w) if c.rotation in (90, 270) else (w, h)
+        rate = re.search(r"(\d+(?:\.\d+)?) fps", v.group(0))
+        if rate and not c.fps:
+            c.fps = float(rate.group(1))
+        for curve in HDR_CURVES:
+            if curve in v.group(0):
+                c.transfer = curve
+    a = re.search(r"Stream #\S+ Audio: (\w+)[^\n]*?, (\d+) Hz, ([^,\n]+)", said)
+    if a:
+        c.acodec, c.arate = a.group(1), int(a.group(2))
+        c.channels = {"mono": 1, "stereo": 2}.get(a.group(3).strip(), 6 if "5.1" in a.group(3) else 2)
 
 
 ORDERS = [("selected", "As Selected"), ("date", "Oldest First"), ("newest", "Newest First"), ("name", "By Name")]
@@ -186,7 +260,7 @@ class Plan:
 
     @property
     def duration_note(self) -> str:
-        return "Joined as they are — no quality lost." if self.copy else self.why
+        return self.why or ("Joined as they are — no quality lost." if self.copy else "")
 
 
 SIZES = [("first", "The First Clip's"), ("largest", "The Largest Clip's"), ("1080", "1080p"), ("2160", "4K")]
@@ -198,8 +272,11 @@ def plan(clips: list[Clip], reencode: bool = False, size: str = "first", fps: fl
         return Plan(False)
     sound = any(c.acodec for c in clips)
     kinds = {c.kind() for c in clips}
-    if not reencode and len(kinds) == 1 and clips[0].vcodec in ("h264", "hevc") and ffprobe():
-        return Plan(True, clips[0].width, clips[0].height, clips[0].fps, clips[0].hdr, clips[0].transfer, sound)
+    if not reencode and len(kinds) == 1 and clips[0].vcodec in ("h264", "hevc") and video_tools.ffmpeg():
+        note = "Joined as they are — no quality lost."
+        if any(c.trimmed for c in clips):
+            note += " Trimmed clips are cut at the nearest key frames (tick Always re-encode for exact cuts)."
+        return Plan(True, clips[0].width, clips[0].height, clips[0].fps, clips[0].hdr, clips[0].transfer, sound, note)
     first = clips[0]
     if size == "largest":
         pick = max(clips, key=lambda c: c.width * c.height)
@@ -211,15 +288,15 @@ def plan(clips: list[Clip], reencode: bool = False, size: str = "first", fps: fl
     else:
         w, h = first.width, first.height
     w, h = max(2, w - w % 2), max(2, h - h % 2)
-    rate = fps or max((c.fps for c in clips), default=30.0) or 30.0
+    rate = fps or snapped(max((c.fps for c in clips), default=30.0)) or 30.0
     rate = min(rate, 120.0)
     hdr = all(c.hdr for c in clips) and len({c.transfer for c in clips}) == 1
     different = []
     if len({(c.width, c.height) for c in clips}) > 1:
         different.append("sizes")
-    if len({round(c.fps, 2) for c in clips}) > 1:
+    if len({rate_class(c.fps) for c in clips}) > 1:
         different.append("frame rates")
-    if len({c.vcodec for c in clips}) > 1 or len({c.pix_fmt for c in clips}) > 1:
+    if len({(c.vcodec, c.pix_fmt, c.profile, c.level, c.transfer) for c in clips}) > 1:
         different.append("formats")
     if len({(c.acodec, c.arate, c.channels) for c in clips}) > 1:
         different.append("sound")
@@ -227,7 +304,7 @@ def plan(clips: list[Clip], reencode: bool = False, size: str = "first", fps: fl
            "Re-encoded — the clips differ in " + ", ".join(different) if different else "Re-encoded onto one timeline")
     why += f": {w} × {h} at {rate:g} fps, {'10-bit HEVC (HDR kept)' if hdr else 'H.264'}."
     if any(c.hdr for c in clips) and not hdr:
-        why += " HDR and standard clips are mixed: the result is standard range."
+        why += " HDR and standard clips are mixed: the HDR ones are brought to standard range."
     return Plan(False, w, h, rate, hdr, clips[0].transfer if hdr else "", sound, why)
 
 
@@ -321,14 +398,42 @@ def _codec_args(ff: str, p: Plan) -> list[str]:
     return ["-c:v", "h264_videotoolbox", "-q:v", "75", "-pix_fmt", "yuv420p"]
 
 
+_filters_text: str | None = None
+
+
+def _has_filter(ff: str, name: str) -> bool:
+    global _filters_text
+    if _filters_text is None:
+        try:
+            _filters_text = subprocess.run([ff, "-hide_banner", "-filters"], capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            _filters_text = ""
+    return f" {name} " in _filters_text
+
+
+TO_STANDARD = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
+               "zscale=t=bt709:m=bt709:r=tv,")       # an HDR clip's picture, as a standard-range one
+
+
+def _container(out: str) -> str:
+    return "mov" if out.lower().endswith(".mov") else "mp4"
+
+
 def _ffmpeg_join(ff: str, clips: list[Clip], p: Plan, inh: Inherit, out: str,
                  progress: Callable[[float], None] | None, stop: threading.Event | None) -> str:
-    total = sum(c.duration for c in clips)
+    total = sum(c.length for c in clips)
     meta = _metadata_args(inh)
-    tail = ["-progress", "pipe:1", "-nostats", "-f", "mp4", out]
+    tail = ["-progress", "pipe:1", "-nostats", "-f", _container(out), out]
     if p.copy:
+        lines = []
+        for c in clips:
+            lines.append(_quote(c.path))
+            if c.start > 0.001:
+                lines.append(f"inpoint {c.start:.3f}")
+            if 0 < c.end < c.duration - 0.001:
+                lines.append(f"outpoint {c.end:.3f}")
         with tempfile.NamedTemporaryFile("w", suffix=".txt", prefix="stitch-", delete=False, encoding="utf-8") as f:
-            f.write("\n".join(_quote(c.path) for c in clips) + "\n")
+            f.write("\n".join(lines) + "\n")
             listing = f.name
         try:
             cmd = [ff, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", listing, "-map", "0:v:0"]
@@ -341,12 +446,17 @@ def _ffmpeg_join(ff: str, clips: list[Clip], p: Plan, inh: Inherit, out: str,
             except OSError:
                 pass
     cmd = [ff, "-y", "-v", "error"]
-    for c in clips:
+    for c in clips:                                    # a trim is asked of the input itself: exact, when re-encoding
+        if c.start > 0.001:
+            cmd += ["-ss", f"{c.start:.3f}"]
+        if 0 < c.end < c.duration - 0.001:
+            cmd += ["-to", f"{c.end:.3f}"]
         cmd += ["-i", c.path]
     parts, labels = [], ""
     fmt = "yuv420p10le" if p.hdr else "yuv420p"
+    tone = TO_STANDARD if not p.hdr and _has_filter(ff, "zscale") and _has_filter(ff, "tonemap") else ""
     for i, c in enumerate(clips):
-        parts.append(f"[{i}:v:0]scale={p.width}:{p.height}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        parts.append(f"[{i}:v:0]{tone if c.hdr else ''}scale={p.width}:{p.height}:force_original_aspect_ratio=decrease:flags=lanczos,"
                      f"pad={p.width}:{p.height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps={p.fps:g},format={fmt},"
                      f"setpts=PTS-STARTPTS[v{i}]")
         labels += f"[v{i}]"
@@ -355,11 +465,12 @@ def _ffmpeg_join(ff: str, clips: list[Clip], p: Plan, inh: Inherit, out: str,
                 parts.append(f"[{i}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
                              f"asetpts=PTS-STARTPTS[a{i}]")
             else:
-                parts.append(f"anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration={max(c.duration, 0.04):.3f}[a{i}]")
+                parts.append(f"anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration={max(c.length, 0.04):.3f}[a{i}]")
             labels += f"[a{i}]"
     parts.append(f"{labels}concat=n={len(clips)}:v=1:a={1 if p.sound else 0}[v]" + ("[a]" if p.sound else ""))
     cmd += ["-filter_complex", ";".join(parts), "-map", "[v]"] + (["-map", "[a]"] if p.sound else [])
-    cmd += _codec_args(ff, p) + (["-c:a", "aac", "-b:a", "192k"] if p.sound else []) + meta + tail
+    colours = [] if p.hdr else ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"]
+    cmd += _codec_args(ff, p) + colours + (["-c:a", "aac", "-b:a", "192k"] if p.sound else []) + meta + tail
     return _run(cmd, total, progress, stop)
 
 
@@ -458,9 +569,10 @@ def finish(out: str, inh: Inherit, exfat: bool) -> list[str]:
 
 
 def stitch(clips: list[Clip], p: Plan, progress: Callable[[float], None] | None = None,
-           stop: threading.Event | None = None, dest: str | None = None) -> tuple[str, list[str]]:
+           stop: threading.Event | None = None, dest: str | None = None, fallback: Plan | None = None) -> tuple[str, list[str]]:
     """Joins the clips in the order given. Returns (the new video's path, notes). Raises StitchError (Stopped
-    when stopped); nothing is left behind then."""
+    when stopped); nothing is left behind then. `fallback`: the re-encoding plan to use when joining the
+    clips as they are fails or comes out the wrong length (default: one at the first clip's size)."""
     global problem
     if len(clips) < 2:
         raise StitchError("two or more videos are needed")
@@ -468,31 +580,41 @@ def stitch(clips: list[Clip], p: Plan, progress: Callable[[float], None] | None 
     final = dest or out_path(clips[0].path)
     folder = os.path.dirname(final)
     exfat = spare_folders.on_exfat(folder)
-    work = final if exfat else os.path.join(folder, f".{os.path.basename(final)}.stitch-{uuid.uuid4().hex[:8]}.mp4")
+    ext = os.path.splitext(final)[1] or ".mp4"
+    work = final if exfat else os.path.join(folder, f".{os.path.basename(final)}.stitch-{uuid.uuid4().hex[:8]}{ext}")
     inh = inherit(clips)
     ff = video_tools.ffmpeg()
+    want = sum(c.length for c in clips)
+
+    def wrong_length() -> str:
+        if not os.path.isfile(work) or os.path.getsize(work) < 1024:
+            return "nothing was written"
+        got = probe(work).duration if ffprobe() else want
+        slack = max(1.5, 0.03 * want) + (2.0 * len(clips) if p.copy and any(c.trimmed for c in clips) else 0.0)
+        return f"the result is {got:.1f} s long where the clips add up to {want:.1f} s" if want > 1 and abs(got - want) > slack else ""
+
     try:
         if ff:
-            why = _ffmpeg_join(ff, clips, p, inh, work, lambda f: progress(0.94 * f) if progress else None, stop)
+            report = (lambda f: progress(0.94 * f)) if progress else None
+            why = _ffmpeg_join(ff, clips, p, inh, work, report, stop) or wrong_length()
             if why and p.copy:                             # alike on paper, not in fact: once more, re-encoded
                 _remove(work)
-                p2 = plan(clips, reencode=True)
-                why = _ffmpeg_join(ff, clips, p2, inh, work, lambda f: progress(0.94 * f) if progress else None, stop)
+                again = fallback if fallback is not None and not fallback.copy else plan(clips, reencode=True)
+                why = _ffmpeg_join(ff, clips, again, inh, work, report, stop) or wrong_length()
         elif helper():
+            if any(c.trimmed for c in clips):
+                raise StitchError("trimming needs ffmpeg (brew install ffmpeg)")
             args = [*helper(), work, str(int(inh.when or 0)), _iso6709(inh.place) if inh.place else "-"] + [c.path for c in clips]
             try:
                 r = subprocess.run(args, capture_output=True, text=True, timeout=6 * 3600)
                 why = "" if r.returncode == 0 else (r.stderr.strip() or "the joiner failed")
             except (OSError, subprocess.SubprocessError) as e:
                 why = str(e)
+            why = why or wrong_length()
         else:
             raise StitchError(NEEDS)
-        if why or not os.path.isfile(work) or os.path.getsize(work) < 1024:
-            raise StitchError(why or "nothing was written")
-        want = sum(c.duration for c in clips)
-        got = probe(work).duration if ffprobe() else want
-        if want > 1 and abs(got - want) > max(1.5, 0.03 * want):
-            raise StitchError(f"the result is {got:.1f} s long where the clips add up to {want:.1f} s")
+        if why:
+            raise StitchError(why)
         notes = finish(work, inh, exfat)
         if work != final:
             if os.path.lexists(final):
@@ -511,6 +633,7 @@ def stitch(clips: list[Clip], p: Plan, progress: Callable[[float], None] | None 
         return final, notes
     except BaseException as e:
         _remove(work)
+        _remove(work + "_exiftool_tmp")                    # what ExifTool leaves when it's cut short
         problem = str(e)
         raise
 
