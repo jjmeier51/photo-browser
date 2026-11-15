@@ -690,9 +690,70 @@ class _Warp:
         img[y0:y1, x0:x1] = _bilinear(img[y0:y1, x0:x1].copy(), self.mx, self.my)
 
 
+GUIDE = 1280                     # the long side a Heal is decided at: the picture on screen (the window's PREVIEW)
+
+
+def guide_of(im: "Image.Image") -> np.ndarray | None:
+    """The copy of a photo that its Heal strokes are decided on — the very copy the editor shows (made the same
+    way, so the same numbers) — or None when the photo is no bigger than that and is its own guide."""
+    from PIL import Image
+    s = GUIDE / max(im.size)
+    if s >= 1:
+        return None
+    small = im.resize((max(1, round(im.width * s)), max(1, round(im.height * s))), Image.Resampling.LANCZOS,
+                      reducing_gap=2.0)
+    return to_float(small)[0]
+
+
+def _heal_mask(shape: tuple, s: Stroke) -> np.ndarray | None:
+    h, w = shape[:2]
+    pts = np.array([(u * w, v * h) for u, v in s.points], dtype=np.float64)
+    r = max(1.0, s.size * float(max(h, w)))
+    box = _window(pts, r, w, h)
+    if box is None:
+        return None
+    return _whole(stroke_mask(pts, r, box, s.soft) > 0.35, box, w, h)
+
+
+def _paste(img: np.ndarray, patch: tuple | None) -> None:
+    """A Heal's changed region put into the picture — only the pixels it changed: the region around the fill
+    came back as 8-bit numbers, and writing those over the picture would round everything near a Heal."""
+    if patch is None:
+        return
+    py, px, data = patch
+    region = img[py:py + data.shape[0], px:px + data.shape[1]]
+    changed = (data != np.clip(region * 255.0 + 0.5, 0, 255).astype(np.uint8)).any(axis=-1)
+    region[changed] = data[changed].astype(F32) / 255.0
+
+
+def heal_area(shape: tuple, s: Stroke) -> np.ndarray | None:
+    """Where a Heal stroke changes a picture of `shape` — a little past what was painted (the fill's soft edge)."""
+    m = _heal_mask(shape, s)
+    if m is None:
+        return None
+    import inpaint
+    return inpaint._grow(m, max(3, int(round(min(shape[:2]) * 0.006))))
+
+
 def apply_stroke(img: np.ndarray, s: Stroke, progress: Callable[[float], None] | None = None,
-                 cancelled: Callable[[], bool] | None = None) -> None:
-    """One brush stroke, done to `img` in place."""
+                 cancelled: Callable[[], bool] | None = None, guide: np.ndarray | None = None) -> None:
+    """One brush stroke, done to `img` in place.
+
+    `guide`: the photo's small copy (`guide_of`) as it is before this stroke, when `img` is the bigger picture —
+    the stroke is done to it too, and a Heal is decided there and carried to `img` (inpaint.remove_region_as),
+    so the saved photo has the fill that was on screen."""
+    if guide is not None and guide.shape != img.shape:
+        if s.tool == "heal" and s.points:
+            import inpaint
+            big, small = _heal_mask(img.shape, s), _heal_mask(guide.shape, s)
+            if big is None or small is None:
+                return
+            u8 = lambda a: np.clip(a * 255.0 + 0.5, 0, 255).astype(np.uint8)      # noqa: E731
+            patch, shown = inpaint.remove_region_as(u8(img), big, u8(guide), small, progress, cancelled)
+            _paste(img, patch)
+            _paste(guide, shown)
+            return
+        apply_stroke(guide, s, None, cancelled)            # every other brush: done to each at its own size
     h, w = img.shape[:2]
     long_side = float(max(h, w))
     if not s.points:
@@ -741,11 +802,8 @@ def apply_stroke(img: np.ndarray, s: Stroke, progress: Callable[[float], None] |
     m = stroke_mask(pts, r, box, s.soft)
     if s.tool == "heal":
         import inpaint
-        patch = inpaint.remove_region(np.clip(img * 255.0 + 0.5, 0, 255).astype(np.uint8), _whole(m > 0.35, box, w, h),
-                                      progress, cancelled)
-        if patch is not None:
-            py, px, data = patch
-            img[py:py + data.shape[0], px:px + data.shape[1]] = data.astype(F32) / 255.0
+        _paste(img, inpaint.remove_region(np.clip(img * 255.0 + 0.5, 0, 255).astype(np.uint8),
+                                          _whole(m > 0.35, box, w, h), progress, cancelled))
         return
     m3 = (m * amount)[..., None]
     if s.tool == "smooth":
@@ -1166,15 +1224,19 @@ def gain_through(g: np.ndarray, e: Edit, found: list[FaceBox] | None = None) -> 
 
 
 def retouched(img: np.ndarray, e: Edit, found: list[FaceBox], progress: Callable[[float], None] | None = None,
-              cancelled: Callable[[], bool] | None = None, start: int = 0) -> np.ndarray:
+              cancelled: Callable[[], bool] | None = None, start: int = 0, guide: np.ndarray | None = None) -> np.ndarray:
     """Stage one: the strokes from `start` on (the window keeps the earlier ones done), then the face
-    sliders. Returns a new array."""
+    sliders. Returns a new array. `guide` (`guide_of` the photo, untouched): see `apply_stroke` — needed only
+    when a Heal is among the strokes; it is not changed."""
     out = img.copy()
     n = len(e.strokes) - start
+    if guide is not None and (start or not any(s.tool == "heal" for s in e.strokes)):
+        guide = None
+    guide = guide.copy() if guide is not None else None
     for i, s in enumerate(e.strokes[start:]):
         if cancelled and cancelled():
             break
-        apply_stroke(out, s, (lambda p, i=i: progress((i + p) / max(n, 1))) if progress else None, cancelled)
+        apply_stroke(out, s, (lambda p, i=i: progress((i + p) / max(n, 1))) if progress else None, cancelled, guide)
     if any(e.face.values()):
         apply_face(out, found, e.face)
     return out
@@ -1188,13 +1250,14 @@ def toned(img: np.ndarray, e: Edit) -> np.ndarray:
 
 
 def render(img: np.ndarray, e: Edit, found: list[FaceBox] | None = None, alpha: np.ndarray | None = None,
-           progress: Callable[[float], None] | None = None, cancelled: Callable[[], bool] | None = None
-           ) -> tuple[np.ndarray, np.ndarray | None]:
+           progress: Callable[[float], None] | None = None, cancelled: Callable[[], bool] | None = None,
+           guide: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray | None]:
     """The whole edit (everything but the text) on `img` — the photo upright, float32. Returns (rgb, alpha):
-    the alpha, when the photo has one, reshaped, turned and cropped with it (a frame's own margins are solid)."""
+    the alpha, when the photo has one, reshaped, turned and cropped with it (a frame's own margins are solid).
+    `guide`: `guide_of` the photo, so a Heal comes out as it was shown (`apply_stroke`)."""
     report = progress or (lambda _p: None)
-    out = retouched(img, e, found or [], lambda p: report(0.55 * p), cancelled) if (e.strokes or any(e.face.values())) \
-        else img
+    out = retouched(img, e, found or [], lambda p: report(0.55 * p), cancelled, guide=guide) \
+        if (e.strokes or any(e.face.values())) else img
     report(0.55)
     if not e.geometry.plain():
         out = apply_geometry(out, e.geometry)

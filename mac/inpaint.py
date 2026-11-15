@@ -347,13 +347,10 @@ def _to_full(orig: np.ndarray, hole: np.ndarray, worked: np.ndarray, level: "_Le
     return out
 
 
-def remove_region(rgb: np.ndarray, mask: np.ndarray, progress: Callable[[float], None] | None = None,
-                  cancelled: Callable[[], bool] | None = None, grow: int | None = None,
-                  seed: int = _RNG_SEED) -> tuple[int, int, np.ndarray] | None:
-    """What `mask` covers in `rgb` (h, w, 3, uint8) removed — as (y0, x0, the changed region, uint8): only the
-    area around the hole is worked on (and returned), so a 48 MP photo costs what its surroundings cost and an
-    undo step is that region alone. None when the mask is empty. `grow`: pixels the mask is grown by first
-    (default: a little, for the object's soft edge and halo)."""
+def _solve(rgb: np.ndarray, mask: np.ndarray, progress, cancelled, grow: int | None, seed: int) -> dict | None:
+    """The hole in `rgb` filled, with what it took to fill it: the region worked on (`y0`, `x0`, `roi`, `hole`),
+    the result there (`filled`), and the completion itself — `worked` (at the size it was worked at) and its
+    finest `level` (the matches), which is what carries the same fill to another size."""
     mask = np.asarray(mask, bool)
     if not mask.any():
         return None
@@ -381,17 +378,74 @@ def remove_region(rgb: np.ndarray, mask: np.ndarray, progress: Callable[[float],
         else:
             filled = _to_full(roi, hole, worked, level, sh / roi.shape[0])
     else:
-        filled, _level = _complete(roi, hole, progress, cancelled, rng)
+        filled, level = _complete(roi, hole, progress, cancelled, rng)
+        worked = filled
     if cancelled is not None and cancelled():
         return None
+    return {"y0": int(y0), "x0": int(x0), "roi": roi, "hole": hole, "filled": filled, "worked": worked, "level": level}
+
+
+def _blended(roi: np.ndarray, hole: np.ndarray, filled: np.ndarray, grey: bool) -> np.ndarray:
     # Blend the last two pixels inside the hole's edge (grown past the object: they're background anyway).
     inner = hole & ~_grow(~hole, 2)
     alpha = np.where(hole, np.where(inner, 1.0, 0.6), 0.0).astype(np.float32)[..., None]
     out = roi * (1 - alpha) + filled * alpha
+    patch = np.clip(np.rint(out), 0, 255).astype(np.uint8)
+    return patch[..., 0] if grey else patch
+
+
+def remove_region(rgb: np.ndarray, mask: np.ndarray, progress: Callable[[float], None] | None = None,
+                  cancelled: Callable[[], bool] | None = None, grow: int | None = None,
+                  seed: int = _RNG_SEED) -> tuple[int, int, np.ndarray] | None:
+    """What `mask` covers in `rgb` (h, w, 3, uint8) removed — as (y0, x0, the changed region, uint8): only the
+    area around the hole is worked on (and returned), so a 48 MP photo costs what its surroundings cost and an
+    undo step is that region alone. None when the mask is empty. `grow`: pixels the mask is grown by first
+    (default: a little, for the object's soft edge and halo)."""
+    got = _solve(rgb, mask, progress, cancelled, grow, seed)
+    if got is None:
+        return None
     if progress is not None:
         progress(1.0)
-    patch = np.clip(np.rint(out), 0, 255).astype(np.uint8)
-    return y0, x0, (patch[..., 0] if np.asarray(rgb).ndim == 2 else patch)
+    return got["y0"], got["x0"], _blended(got["roi"], got["hole"], got["filled"], np.asarray(rgb).ndim == 2)
+
+
+def remove_region_as(rgb: np.ndarray, mask: np.ndarray, guide: np.ndarray, guide_mask: np.ndarray,
+                     progress: Callable[[float], None] | None = None, cancelled: Callable[[], bool] | None = None,
+                     grow: int | None = None, seed: int = _RNG_SEED
+                     ) -> tuple[tuple[int, int, np.ndarray] | None, tuple[int, int, np.ndarray] | None]:
+    """The same removal in a picture at two sizes: decided on `guide` (the smaller — what's on screen), then
+    carried to `rgb` (the photo itself) along the same matches — each pixel copied from where the guide's fill
+    took it from, in the photo's own detail. So what was seen is what's saved, rather than the photo being
+    filled afresh (another size is another search, and another fill). Returns (the photo's changed region, the
+    guide's) — each as `remove_region` gives it; the guide's is exactly what `remove_region(guide, guide_mask)`
+    would."""
+    got = _solve(guide, guide_mask, progress, cancelled, grow, seed)
+    if got is None:
+        return None, None
+    grey = np.asarray(rgb).ndim == 2
+    small = (got["y0"], got["x0"], _blended(got["roi"], got["hole"], got["filled"], np.asarray(guide).ndim == 2))
+    mask = np.asarray(mask, bool)
+    (h, w), (gh, gw) = mask.shape, np.asarray(guide_mask).shape
+    fy, fx = h / gh, w / gw
+    y0, x0 = int(round(got["y0"] * fy)), int(round(got["x0"] * fx))
+    y1 = min(h, int(round((got["y0"] + got["roi"].shape[0]) * fy)))
+    x1 = min(w, int(round((got["x0"] + got["roi"].shape[1]) * fx)))
+    if y1 - y0 < 2 or x1 - x0 < 2 or not mask[y0:y1, x0:x1].any():
+        return None, small
+    roi = np.asarray(rgb[y0:y1, x0:x1], dtype=np.float32)
+    if roi.ndim == 2:
+        roi = roi[..., None]
+    g = grow if grow is not None else max(2, int(round(min(h, w) * 0.0025)))
+    hole = _grow(mask[y0:y1, x0:x1], g)
+    worked, level = got["worked"], got["level"]
+    if level is None or level.sy is None:
+        filled = roi.copy()
+        filled[hole] = _resize(worked, *hole.shape)[hole]
+    else:
+        filled = _to_full(roi, hole, worked, level, worked.shape[0] / roi.shape[0])
+    if progress is not None:
+        progress(1.0)
+    return (y0, x0, _blended(roi, hole, filled, grey)), small
 
 
 def remove(rgb: np.ndarray, mask: np.ndarray, progress: Callable[[float], None] | None = None,

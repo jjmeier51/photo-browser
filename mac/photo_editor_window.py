@@ -201,16 +201,38 @@ class _Renderer:
             except Exception as e:  # noqa: BLE001 — a preview that can't be made is said, never a crash
                 self.sig.failed.emit(f"{type(e).__name__}: {e}")
 
-    def _retouched(self, size: str, e: pe.Edit) -> np.ndarray:
+    def _stroked(self, size: str, strokes: list) -> np.ndarray:
+        """The `size` copy with `strokes` done (kept, so the next stroke starts from the last).
+
+        A Heal is decided once, on the "fine" copy — the picture at rest, and the copy the save is guided by
+        (pe.guide_of) — and the other sizes take that fill rather than searching for their own: the bigger one
+        along the same matches, the rough one by shrinking it. So the fill doesn't change as a slider is let go,
+        when the crop gets close, or when the photo is saved."""
         snaps = self.snaps[size]
-        best = max((s for s in snaps if s[0] == e.strokes[:len(s[0])]), key=lambda s: len(s[0]))
+        best = max((s for s in snaps if s[0] == strokes[:len(s[0])]), key=lambda s: len(s[0]))
         arr, done = best[1], len(best[0])
-        for i in range(done, len(e.strokes)):
+        fine = self.base.get("fine")
+        for i in range(done, len(strokes)):
             arr = arr.copy()
-            pe.apply_stroke(arr, e.strokes[i])
-            snaps.append((list(e.strokes[:i + 1]), arr))
+            st = strokes[i]
+            heal = st.tool == "heal" and size != "fine" and fine is not None and fine.shape != arr.shape
+            if heal and arr.shape[0] > fine.shape[0]:
+                pe.apply_stroke(arr, st, guide=self._stroked("fine", strokes[:i]).copy())
+            elif heal:
+                after = self._stroked("fine", strokes[:i + 1])
+                mask = pe.heal_area(arr.shape, st)
+                if mask is not None:
+                    small = pe.resize(after, arr.shape[1], arr.shape[0], Image.Resampling.BOX)
+                    arr[mask] = small[mask]
+            else:
+                pe.apply_stroke(arr, st)
+            snaps.append((list(strokes[:i + 1]), arr))
         if len(snaps) > SNAPSHOTS:
             del snaps[1:len(snaps) - SNAPSHOTS + 1]
+        return arr
+
+    def _retouched(self, size: str, e: pe.Edit) -> np.ndarray:
+        arr = self._stroked(size, e.strokes)
         face = tuple(sorted((k, v) for k, v in e.face.items() if v))
         if not face:
             return arr
@@ -2229,7 +2251,8 @@ class EditorWindow(QDialog):
         def work() -> None:
             try:
                 img, alpha = pe.to_float(src.image)
-                rgb, alpha = pe.render(img, edit, found, alpha, lambda f: sig.progress.emit(0.8 * f), cancel.is_set)
+                rgb, alpha = pe.render(img, edit, found, alpha, lambda f: sig.progress.emit(0.8 * f), cancel.is_set,
+                                       guide=pe.guide_of(src.image))
                 sig.rendered.emit((rgb, alpha), "")
             except MemoryError:
                 sig.rendered.emit(None, "there isn't enough memory for a photo this large")
