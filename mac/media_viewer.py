@@ -116,6 +116,8 @@ class Hooks:
     labels_of: Callable[[str], list[str]] | None = None       # "favorite", "ai" — the iPhone app's labels
     remove_objects: Callable[[str], None] | None = None       # the photo → Remove Objects (remove_window.py)
     set_label: Callable[[str, str, bool], None] | None = None  # (path, label, on)
+    set_cover: Callable[[str, float | None], str] | None = None   # (path, a video's seconds) → what to say
+    edit_photo: Callable[[str], None] | None = None           # the photo → the photo editor
     extra: dict = field(default_factory=dict)
 
 
@@ -455,6 +457,22 @@ def icon(name: str, color: str = "#F2F2F7", size: int = 18) -> QIcon:
         else:
             p.drawLine(QPointF(s * 0.62, s * 0.38), QPointF(s * 0.86, s * 0.62))
             p.drawLine(QPointF(s * 0.86, s * 0.38), QPointF(s * 0.62, s * 0.62))
+    elif name in ("frame.back", "frame.fwd"):                # one frame: a bar and an arrowhead against it
+        fwd = name == "frame.fwd"
+        bar_x = s * (0.70 if fwd else 0.30)
+        p.drawLine(QPointF(bar_x, s * 0.26), QPointF(bar_x, s * 0.74))
+        tri = QPainterPath()
+        if fwd:
+            tri.moveTo(s * 0.26, s * 0.26)
+            tri.lineTo(s * 0.58, s * 0.5)
+            tri.lineTo(s * 0.26, s * 0.74)
+        else:
+            tri.moveTo(s * 0.74, s * 0.26)
+            tri.lineTo(s * 0.42, s * 0.5)
+            tri.lineTo(s * 0.74, s * 0.74)
+        tri.closeSubpath()
+        p.setBrush(c)
+        p.drawPath(tri)
     elif name in ("prev", "next"):
         x0, x1 = (s * 0.62, s * 0.36) if name == "prev" else (s * 0.38, s * 0.64)
         p.drawPolyline([QPointF(x0, s * 0.2), QPointF(x1, s * 0.5), QPointF(x0, s * 0.8)])
@@ -1560,6 +1578,12 @@ class MediaViewer(QWidget):
         self.loop_act.setCheckable(True)
         self.loop_act.setChecked(True)
         self.loop_act.setToolTip("Play it over and over (as the iPhone does)")
+        self.cover_act = menu.addAction("Use as Album Cover", self.use_as_cover)
+        self.cover_act.setToolTip("This photo — or the frame the video is on — as the cover of the folder it's in "
+                                  "(on the iPhone too)")
+        self.cover_act.setVisible(self.hooks.set_cover is not None)
+        self.edit_act = menu.addAction("Edit Photo…", lambda: self.hooks.edit_photo(self.current))
+        self.edit_act.setVisible(self.hooks.edit_photo is not None)
         self.tags_act = menu.addAction("Tags…", self.edit_tags)
         self.reveal_act = menu.addAction("Show in Folder", self.reveal)
         menu.addAction("Open With Default App", self.open_external)
@@ -1604,6 +1628,16 @@ class MediaViewer(QWidget):
         row.addWidget(self.prev_btn)
         row.addWidget(self.next_btn)
         row.addStretch(1)
+        # One frame back / on, as the iPhone's corner double-taps: the video pauses, and holding a button keeps
+        # stepping. The time then reads to the millisecond, with the frame's number.
+        self.frame_back_btn = _bar_button("", "Back One Frame (,  or ⇧←) — hold to keep going", lambda: self.step_frame(-1),
+                                          "frame.back")
+        self.frame_fwd_btn = _bar_button("", "Forward One Frame (.  or ⇧→) — hold to keep going", lambda: self.step_frame(1),
+                                         "frame.fwd")
+        for b in (self.frame_back_btn, self.frame_fwd_btn):
+            b.setAutoRepeat(True)
+            b.setAutoRepeatDelay(350)
+            b.setAutoRepeatInterval(90)
         self.play_btn = _bar_button("", "Play (Space)", lambda: self.video.toggle(), "play")
         self.mute_btn = _bar_button("", "Mute (M)", self._toggle_mute, "speaker")
         self.mute_btn.setCheckable(True)
@@ -1624,7 +1658,8 @@ class MediaViewer(QWidget):
             menu.addAction(label, lambda r=rate, t=label.split()[0]: (self.video.set_rate(r), self.speed_btn.setText(t)))
         self.speed_btn.setMenu(menu)
         self.speed_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.play_controls = [self.play_btn, self.mute_btn, self.volume, self.speed_btn]
+        self.play_controls = [self.frame_back_btn, self.play_btn, self.frame_fwd_btn, self.mute_btn, self.volume,
+                              self.speed_btn]
         for b in self.play_controls:
             row.addWidget(b)
         row.addStretch(1)
@@ -1666,7 +1701,8 @@ class MediaViewer(QWidget):
                            ("Down", self.close), ("Up", self.toggle_info), ("I", self.toggle_info),
                            ("F", self.toggle_full), ("S", self.toggle_slideshow), ("Space", self._space),
                            ("J", lambda: self.video.skip(-15)), ("L", lambda: self.video.skip(15)),
-                           (",", lambda: self.video.step(-1)), (".", lambda: self.video.step(1)),
+                           (",", lambda: self.step_frame(-1)), (".", lambda: self.step_frame(1)),
+                           ("Shift+Left", lambda: self.step_frame(-1)), ("Shift+Right", lambda: self.step_frame(1)),
                            ("M", lambda: self.mute_btn.click()), ("Ctrl+Backspace", self.trash),
                            ("Ctrl+T", self.edit_tags), ("+", lambda: self.zoom(1.25)),
                            ("=", lambda: self.zoom(1.25)), ("-", lambda: self.zoom(0.8)),
@@ -1709,6 +1745,8 @@ class MediaViewer(QWidget):
         self.frames_act.setVisible(video and self.hooks.export_frames is not None)
         self.frame_btn.setEnabled(video)
         self.loop_act.setVisible(video)
+        self.edit_act.setVisible(not video and self.hooks.edit_photo is not None)
+        self._exact_time = False
         self.remove_act.setVisible(not video and self.hooks.remove_objects is not None)
         self._show_labels()
         self._show_badges(path)
@@ -1874,10 +1912,31 @@ class MediaViewer(QWidget):
             b.setEnabled(available)
 
     # ------------------------------------------------------------------ video controls
+    def step_frame(self, frames: int) -> None:
+        """One frame back or on (the video pauses). From then until it plays again the time is exact."""
+        if not is_video(self.current):
+            return
+        self._exact_time = True
+        self.video.step(frames)
+        QTimer.singleShot(60, self._show_exact)
+
+    def _show_exact(self) -> None:
+        if getattr(self, "_exact_time", False) and self.paths and is_video(self.current):
+            s = max(0.0, self.video.position_s())
+            fps = max(self.video.fps, 1.0)
+            self.time_now.setText(f"{media_info.clock(s)}.{int(round((s % 1) * 1000)) % 1000:03d}")
+            self.time_now.setToolTip(f"Frame {int(round(s * fps)) + 1:,} at {fps:g} frames a second")
+
     def _position(self, ms: int, duration: int) -> None:
         if not self.scrub.isSliderDown():
             self.scrub.setRange(0, max(0, duration))
             self.scrub.setValue(ms)
+        if getattr(self, "_exact_time", False) and not self.video.is_playing():
+            self._show_exact()
+            self.time_all.setText(media_info.clock(duration / 1000) if duration else "")
+            return
+        self._exact_time = False
+        self.time_now.setToolTip("")
         self.time_now.setText(media_info.clock(ms / 1000))
         self.time_all.setText(media_info.clock(duration / 1000) if duration else "")
 
@@ -1985,6 +2044,13 @@ class MediaViewer(QWidget):
                  ("Added to To AI." if on else "Removed from To AI."))
 
     # ------------------------------------------------------------------ chrome, info, slideshow
+    def use_as_cover(self) -> None:
+        if self.hooks.set_cover is None or not self.paths:
+            return
+        path = self.current
+        seconds = self.video.position_s() if is_video(path) else None
+        self.say(self.hooks.set_cover(path, seconds))
+
     def toggle_chrome(self) -> None:
         self.chrome = not self.chrome
         self.top.setVisible(self.chrome)

@@ -165,6 +165,40 @@ def engine_note() -> str:
 
 # ----------------------------------------------------------------------------- Save Frame
 
+def frame_image(video: str, seconds: float):
+    """The frame of `video` at `seconds` as a Pillow RGB picture (standard range), or None. A worker thread, or a
+    moment's wait: it runs the helper (AVFoundation) or ffmpeg once."""
+    from PIL import Image
+    tmp = Path(tempfile.mkdtemp(prefix="photo-browser-frame-"))
+    out = tmp / "frame.png"
+    try:
+        ok = False
+        helper = video_tools.helper()
+        if helper:
+            try:
+                r = subprocess.run([*helper, "frame", video, f"{max(0.0, seconds):.3f}", str(out)],
+                                   capture_output=True, timeout=120)
+                ok = r.returncode == 0 and out.is_file() and out.stat().st_size > 0
+            except (OSError, subprocess.SubprocessError):
+                ok = False
+        if not ok and (ff := video_tools.ffmpeg()):
+            chain = ",".join([*_ffmpeg_filters(video, True), "format=rgb24"])
+            try:
+                r = subprocess.run([ff, "-y", "-v", "error", "-ss", f"{max(0.0, seconds):.3f}", "-i", video,
+                                    "-frames:v", "1", "-vf", chain, str(out)], capture_output=True, timeout=120)
+                ok = r.returncode == 0 and out.is_file() and out.stat().st_size > 0
+            except (OSError, subprocess.SubprocessError):
+                ok = False
+        if not ok:
+            return None
+        with Image.open(out) as im:
+            return im.convert("RGB")
+    except OSError:
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def save_frame(video: str, seconds: float) -> str | None:
     """The frame of `video` at `seconds` as a standard-range PNG in the "Screenshots" folder beside it (module
     notes). Returns the file, or None. Runs on a worker thread."""
