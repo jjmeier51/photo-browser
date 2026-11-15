@@ -256,8 +256,8 @@ bar picks where: the folder you're in (and everything inside it), or the whole d
 on the Mac side, which asks Spotlight and so answers at once, walking your home folder itself only
 when Spotlight has nothing (an external drive is always walked, streaming results as it goes).
 Results come up in the same icon or list view, with thumbnails, newest first: open them, Quick
-Look, select and Move or Copy to the SSD exactly as in a folder, or right-click ▸ **Show in Safe
-Finder** to jump to the file in its folder, selected. Esc (or clearing the field) returns to the
+Look, select and Move or Copy to the SSD exactly as in a folder, or right-click ▸ **Show in Photo Browser for
+Mac** to jump to the file in its folder, selected. Esc (or clearing the field) returns to the
 folder; back/forward bring a search up again. Searching in the To pane is for finding things on
 the SSD — Move/Copy wait until a folder is open there again.
 
@@ -373,8 +373,8 @@ for every folder that has no cover; those show here too, and any cover you choos
 **Themes** (`themes.py`, `theme_window.py`). View ▸ **Theme**: *Match macOS* (the Finder look, light or
 dark with your Mac), the iPhone app's themes — Everyday (Photo Browser, Graphite, Midnight, Ocean, Rose,
 Forest, Sunset, Paper), Halloween and Christmas — or **Choose or Customize…** for your own background (one
-colour or a gradient), accent colour, typeface and light or dark. A click shows it at once in every Safe
-Finder window.
+colour or a gradient), accent colour, typeface and light or dark. A click shows it at once in every Photo Browser for
+Mac window.
 
 ### Photos view and the viewer — the iPhone app's grid and viewer (`media_viewer.py`, `media_info.py`)
 
@@ -506,8 +506,8 @@ and bold — see the top of `bookify.py`), and the window shows what it found be
 for iPhone works on it too). The first book downloads EB Garamond once. It needs ReportLab and pyphen (in
 `requirements.txt`): `Photo Browser for Mac.command` adds them to an existing setup and `build_app.sh` builds them
 into the app; if they're still missing, the window's main button is **Install ReportLab** instead of Make Book — it
-fetches them (into Photo Browser for Mac's own Python, or for the built app into ~/Library/Application Support/Safe
-Finder/python, with any Python on the Mac), then Make Book appears. `bookify.py` still works on its own: `python3 bookify.py story.txt --size iphone`.
+fetches them (into Photo Browser for Mac's own Python, or for the built app into ~/Library/Application Support/Photo Browser for
+Mac/python, with any Python on the Mac), then Make Book appears. `bookify.py` still works on its own: `python3 bookify.py story.txt --size iphone`.
 
 **Pictures in the book.** When you press Make Book it first asks **"Would you like to add pictures to this
 book?"** — Add Pictures, No Pictures, or Cancel. Either way the book is made. With Add Pictures, the **Pictures**
@@ -705,8 +705,8 @@ tag, renaming one, or moving a file carries across the same way.
   the photo editor, and AI edits (Edit / Extend with AI, and their images saved later from the Astria.ai
   Browser) all get the original photo's tags.
 - **Backed up.** The tags are part of the app's metadata backups (Drive Health ▸ Back Up Metadata Now,
-  and the automatic ones), which now sync with the drive first so tags added here are in them. Safe
-  Finder also keeps a copy of each drive's tag file (and the Mac's) from before the first change of each
+  and the automatic ones), which now sync with the drive first so tags added here are in them. Photo Browser for
+  Mac also keeps a copy of each drive's tag file (and the Mac's) from before the first change of each
   day in `~/Library/Application Support/Photo Browser for Mac/Tag Backups/` — the last 14.
 
 **How they stay in step.** The tags of the files on a drive are saved *on the drive*, in the hidden
@@ -1370,8 +1370,8 @@ python3 mac/safe_copy_to_ssd.py --cli ~/Downloads/Folder --to "/Volumes/Extreme 
 ```
 
 > **APFS note (Oct 2026):** the library now lives on an APFS SSD. The two sections below, the
-> relocation tool, spare folders and the name adjustments are for the old **exFAT** drive only — Safe
-> Finder notices the filesystem and leaves all of that alone on APFS (names are copied exactly as they
+> relocation tool, spare folders and the name adjustments are for the old **exFAT** drive only — Photo Browser for
+> Mac notices the filesystem and leaves all of that alone on APFS (names are copied exactly as they
 > are). A `.Spare Folders` folder copied onto the APFS drive does nothing and can be deleted.
 
 ## Repair the SSD when iOS can't see or open folders (`repair_drive.sh`) — try this first

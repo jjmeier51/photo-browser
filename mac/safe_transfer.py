@@ -197,8 +197,8 @@ def build_plan(sources: list[Path], dest: Path) -> Plan:
 
 def relocate_tool() -> str:
     """Where relocate_folders.py is, for the Terminal commands shown to the user: next to this file when
-    run from the repo; inside the app bundle (Contents/Resources, which the build script fills) when Safe
-    Finder runs as "Photo Browser for Mac.app"."""
+    run from the repo; inside the app bundle (Contents/Resources, which the build script fills) when Photo Browser for
+    Mac runs as "Photo Browser for Mac.app"."""
     here = os.path.dirname(os.path.abspath(__file__))
     candidates = [os.path.join(here, "relocate_folders.py")]
     if getattr(sys, "frozen", False):

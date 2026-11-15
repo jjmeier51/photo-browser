@@ -43,8 +43,8 @@ clearest line becomes a box for the template method below, which is more exact w
   strength reads low isn't the mark and is left alone, so a shape in the art is never "removed" into a
   dark ghost.
 
-**Across photos** (`Library`): every mark learned from a box is kept in `~/Library/Application Support/Safe
-Finder/Watermarks`, with its look (`style_of`). A new photo is tried against the last few kept marks (the
+**Across photos** (`Library`): every mark learned from a box is kept in `~/Library/Application Support/Photo Browser for
+Mac/Watermarks`, with its look (`style_of`). A new photo is tried against the last few kept marks (the
 same words again: taken out as they are), then by the look of all of them; only a photo with a mark of a look
 never seen needs a box.
 

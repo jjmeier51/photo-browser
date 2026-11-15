@@ -2,6 +2,10 @@
 command acts on the pane you're in (the one with the blue FROM/TO chip) and what's selected there, as
 Finder's menus do, and greys out when it can't.
 
+The Photos menu keeps what's used every day at the top (Edit Metadata, Favorite, To AI, Find Duplicates) and
+groups the rest the way the right-click menu does — Adjust ▸, Retouch ▸, Video ▸, CapCut ▸, AI ▸, Download ▸ —
+so no menu is a screenful. Every command, wherever it lives, is also in **Edit ▸ Find a Command…** (⇧⌘P).
+
 The keyboard shortcuts live here — one action per command — rather than on each pane, so a key is never
 bound twice (two live shortcuts for one key make Qt fire neither). Return (open) and Space (Quick Look)
 stay on the panes: they belong to the list you're typing in.
@@ -14,8 +18,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+
+import app_identity
 
 
 def install(win, sf) -> None:
@@ -23,9 +28,13 @@ def install(win, sf) -> None:
     pane = lambda: win.active_pane                      # noqa: E731 — read at the moment of use
     acts: list[QAction] = []
 
-    def act(menu, text: str, slot, keys: str | None = None, check=None, tip: str = "") -> QAction:
+    def act(menu, text: str, slot, keys: str | list[str] | None = None, check=None, tip: str = "",
+            role=QAction.MenuRole.NoRole) -> QAction:
         a = QAction(text, win)
-        if keys:
+        a.setMenuRole(role)        # NoRole: macOS doesn't move a command to the app menu because of its wording
+        if isinstance(keys, list):
+            a.setShortcuts([QKeySequence(k) for k in keys])
+        elif keys:
             a.setShortcut(QKeySequence(keys))
         if tip:
             a.setStatusTip(tip)
@@ -94,16 +103,25 @@ def install(win, sf) -> None:
 
     def each(menu_title: str):
         m = bar.addMenu(menu_title)
+        m.setToolTipsVisible(True)
+        m.aboutToShow.connect(lambda m=m: refresh(m))
+        return m
+
+    def submenu(parent, title: str):
+        """A submenu whose commands grey out like the top-level ones."""
+        m = parent.addMenu(title)
+        m.setToolTipsVisible(True)
         m.aboutToShow.connect(lambda m=m: refresh(m))
         return m
 
     # -- File
     f = each("File")
     act(f, "New Folder", lambda: pane().new_folder(), "Ctrl+Shift+N", real_folder)
-    act(f, "Open", lambda: pane().open_selected(), "Ctrl+Down", lambda: bool(sel()))
+    act(f, "Open", lambda: pane().open_selected(), ["Ctrl+O", "Ctrl+Down"], lambda: bool(sel()))
     act(f, "Open With Default App", lambda: pane().open_external(), None,
         lambda: any(sf.kind_of(p) != "other" for p in sel()))
-    act(f, "Quick Look  (Space)", lambda: pane().quick_look(), None, lambda: bool(sel()) and sf.IS_MAC)
+    act(f, "Quick Look", lambda: pane().quick_look(), None, lambda: bool(sel()) and sf.IS_MAC,
+        "A quick look at the selection without opening it — press Space in the file list")
     act(f, "Show in Finder", lambda: sf.subprocess.Popen(["open", "-R", sel()[0]]) if sel() else None, None,
         lambda: bool(sel()) and sf.IS_MAC)
     act(f, "Rename…", lambda: pane().rename_item(sel()[0]) if len(sel()) == 1 else
@@ -133,11 +151,25 @@ def install(win, sf) -> None:
         "kept — and the two drives compared afterwards. The old drive is only read.")
     f.addSeparator()
     act(f, "Move to Trash", lambda: pane().delete_selection(), "Ctrl+Backspace", lambda: bool(sel()))
+    f.addSeparator()
+    act(f, "Close Window", lambda: (sf.QApplication.activeWindow() or win).close(), "Ctrl+W")
+    act(f, f"Quit {app_identity.APP_NAME}", win.close, "Ctrl+Q", role=QAction.MenuRole.QuitRole)
 
     # -- Edit
     e = each("Edit")
+    undo = act(e, "Undo", win.undo_last, "Ctrl+Z", lambda: bool(win.undo.items),
+               "Takes back the last rename, tag or Favorite / To AI change")
+    e.aboutToShow.connect(lambda: undo.setText(f"Undo {win.undo.title()}" if win.undo.items else "Undo"))
+    e.addSeparator()
+    act(e, "Copy Name", lambda: pane().copy_names(sel()), "Ctrl+Shift+Alt+C", lambda: bool(sel()),
+        "The selected items' names, on the clipboard")
+    act(e, "Copy Path", lambda: pane().copy_names(sel(), full=True), "Ctrl+Alt+C", lambda: bool(sel()),
+        "Where the selected items are, on the clipboard — one a line")
     act(e, "Select All", lambda: pane().view().selectAll(), "Ctrl+A")
+    e.addSeparator()
     act(e, "Find", lambda: (pane().search.setFocus(), pane().search.selectAll()), "Ctrl+F")
+    act(e, "Find a Command…", win.open_palette, "Ctrl+Shift+P", None,
+        "Every command in these menus in one list — type a few letters of what you want")
     e.addSeparator()
     act(e, "Tags…", lambda: pane().edit_tags(), "Ctrl+T", lambda: bool(sel()))
 
@@ -241,12 +273,34 @@ def install(win, sf) -> None:
         sort.addAction(a)
         sort_acts[key] = a
     sort.addSeparator()
-    flip = QAction("Reverse Order", win)
-    flip.triggered.connect(lambda: (lambda k, o: pane().set_sort(k, sf.Qt.SortOrder.AscendingOrder
-                                                                  if o == sf.Qt.SortOrder.DescendingOrder
-                                                                  else sf.Qt.SortOrder.DescendingOrder))(*pane().current_sort()))
-    sort.addAction(flip)
-    sort.aboutToShow.connect(lambda: sort_acts.get(pane().current_sort()[0], sort_acts["name"]).setChecked(True))
+    order_group = QActionGroup(win)                    # the same two as the header's Sort button
+    order_acts = {}
+    for label, order in (("Ascending", sf.Qt.SortOrder.AscendingOrder), ("Descending", sf.Qt.SortOrder.DescendingOrder)):
+        a = QAction(label, win)
+        a.setCheckable(True)
+        a.triggered.connect(lambda _=False, order=order: pane().set_sort(pane().current_sort()[0], order))
+        order_group.addAction(a)
+        sort.addAction(a)
+        order_acts[order] = a
+    sort.addSeparator()
+    sizes = QAction("Calculate Folder Sizes", win)
+    sizes.setCheckable(True)
+    sizes.setToolTip("Add up what each folder holds (in the background) — shown in the Size column, used by the "
+                     "size sort and the size filter")
+    sizes.triggered.connect(lambda on: pane().set_show_sizes(bool(on)))
+    sort.addAction(sizes)
+
+    def tick_sort() -> None:
+        key, order = pane().current_sort()
+        sort_acts.get(key, sort_acts["name"]).setChecked(True)
+        order_acts[order].setChecked(True)
+        sizes.setChecked(bool(pane().model.show_sizes))
+    sort.aboutToShow.connect(tick_sort)
+    hidden = act(v, "Show Hidden Files", lambda: win.set_show_hidden(not win.show_hidden), "Ctrl+Shift+.", None,
+                 "Files and folders whose names start with a dot — the apps' own records on the drive among them")
+    hidden.setCheckable(True)
+    v.aboutToShow.connect(lambda: hidden.setChecked(bool(win.show_hidden)))
+    act(v, "Refresh", lambda: pane().refresh(), "Ctrl+R", None, "Reads this folder — or runs this search — again")
     v.addSeparator()
     act(v, "Bigger Thumbnails", lambda: pane().slider.setValue(min(320, pane().slider.value() + 24)), "Ctrl+=")
     act(v, "Smaller Thumbnails", lambda: pane().slider.setValue(max(48, pane().slider.value() - 24)), "Ctrl+-")
@@ -256,6 +310,8 @@ def install(win, sf) -> None:
     act(g, "Back", lambda: pane().go_back(), "Ctrl+[")
     act(g, "Forward", lambda: pane().go_forward(), "Ctrl+]")
     act(g, "Enclosing Folder", lambda: pane().go_up(), "Ctrl+Up", real_folder)
+    act(g, "Go to Folder…", lambda: pane().go_to_folder(), "Ctrl+Shift+G", None,
+        "Type or paste a path — ~/Pictures, /Volumes/…")
     g.addSeparator()
     home = Path.home()
     act(g, "Home", lambda: pane().go(str(home)), "Ctrl+Shift+H")
@@ -283,11 +339,23 @@ def install(win, sf) -> None:
     act(t, "Edit Metadata…", lambda: pane().edit_metadata(editable()) if editable() else None, "Ctrl+I",
         lambda: bool(editable()),
         "Capture date, location, caption, keywords, camera and any other tag — of everything selected")
-    act(t, "Favorite", lambda: pane().toggle_label("favorite"), "Ctrl+Shift+F", lambda: bool(sel()),
-        "Favorite the selection (or unfavorite it, when it all is) — the iPhone app's Favorites")
-    act(t, "To AI", lambda: pane().toggle_label("ai"), "Ctrl+Shift+A", lambda: bool(sel()),
-        "Mark the selection To AI (or take it off) — the iPhone app's To AI")
+    fav = act(t, "Favorite", lambda: pane().toggle_label("favorite"), "Ctrl+Shift+F", lambda: bool(sel()),
+              "Favorite the selection (or unfavorite it, when it all is) — the iPhone app's Favorites")
+    to_ai = act(t, "To AI", lambda: pane().toggle_label("ai"), "Ctrl+Shift+A", lambda: bool(sel()),
+                "Mark the selection To AI (or take it off) — the iPhone app's To AI")
+
+    def label_titles() -> None:
+        """Favorite / Unfavorite and To AI / Remove To AI, as the right-click menu says them."""
+        s, store = sel(), sf.tag_store()
+        try:
+            every = lambda label: bool(s) and all(label in store.labels(p, fresh=False) for p in s)   # noqa: E731
+            fav.setText("Unfavorite" if every("favorite") else "Favorite")
+            to_ai.setText("Remove To AI" if every("ai") else "To AI")
+        except Exception:  # noqa: BLE001 — the titles are a nicety
+            pass
+    t.aboutToShow.connect(label_titles)
     t.addSeparator()
+
     def dup_target():
         """Several folders selected: all of them, looked at as one; else the folder selected or shown."""
         s = sel()
@@ -296,57 +364,76 @@ def install(win, sf) -> None:
         return folder_target()
     act(t, "Find Duplicates…", lambda: pane().find_duplicates(dup_target()), None, dup_target,
         "Likely copies in the selected folder or folders (or this one)")
-    act(t, "Export All Frames…", lambda: pane().export_frames(videos()), None, lambda: bool(videos()))
-    act(t, "Upscale Video…", lambda: pane().upscale_videos(videos()), None, lambda: bool(videos()),
-        "The selected videos upscaled to 1080p or 4K — replaced, or saved as new videos beside them")
     t.addSeparator()
-    act(t, "Send to CapCut", lambda: pane().send_to_capcut(sendable()), "Ctrl+Shift+K", lambda: bool(sendable()),
-        "Opens CapCut with the selected clips (or this folder's) beside it, in order, to drag in — and brings "
-        "CapCut's exports back")
-    act(t, "Import from CapCut…", lambda: pane().import_from_capcut(folder_target()), None, None,
-        "CapCut's finished videos, onto the drive — into this folder, or back where their clips came from")
-    t.addSeparator()
-    act(t, "Convert WebP to JPEG…", lambda: pane().convert_webp(webp_targets()), None, lambda: bool(webp_targets()),
-        "Every WebP selected (or in the selected folder, or this one) as a full-resolution, quality-95 JPEG")
-    act(t, "Crop…", lambda: pane().crop_photos(photos()), None, lambda: bool(photos()))
+
+    adjust = submenu(t, "Adjust")
+    act(adjust, "Crop…", lambda: pane().crop_photos(photos()), None, lambda: bool(photos()),
+        "One crop, drawn once, on every selected photo")
     for label, quarters in (("Rotate Left", 3), ("Rotate Right", 1), ("Rotate 180°", 2)):
-        act(t, label, lambda quarters=quarters: pane().rotate_items(sel(), quarters), None,
+        act(adjust, label, lambda quarters=quarters: pane().rotate_items(sel(), quarters), None,
             lambda: bool(photos() or videos()), "The selected photos and videos turned in place")
-    act(t, "AI Upscale 2×…", lambda: pane().ai_upscale(photos()), None, lambda: bool(photos()))
-    act(t, "Erase Area…", lambda: pane().erase_area(photos()), None, lambda: bool(photos()))
-    act(t, "Remove Watermark…", lambda: pane().remove_watermark(watermarkable()), None, lambda: bool(watermarkable()),
+    adjust.addSeparator()
+    act(adjust, "Convert WebP to JPEG…", lambda: pane().convert_webp(webp_targets()), None, lambda: bool(webp_targets()),
+        "Every WebP selected (or in the selected folder, or this one) as a full-resolution, quality-95 JPEG")
+
+    retouch = submenu(t, "Retouch")
+    act(retouch, "AI Upscale 2×…", lambda: pane().ai_upscale(photos()), None, lambda: bool(photos()),
+        "The selected photos at twice the size, with Real-ESRGAN on this Mac")
+    act(retouch, "Erase Area…", lambda: pane().erase_area(photos()), None, lambda: bool(photos()),
+        "Boxes drawn over a stamp or mark on one photo, erased from every selected one")
+    act(retouch, "Remove Watermark…", lambda: pane().remove_watermark(watermarkable()), None,
+        lambda: bool(watermarkable()),
         "Your own see-through watermark, learned once and taken out of every selected photo (or every photo inside "
         "the selected folders)")
-    act(t, "Remove Objects…", lambda: pane().remove_objects(photos()[0]) if len(photos()) == 1 else None, None,
+    act(retouch, "Remove Objects…", lambda: pane().remove_objects(photos()[0]) if len(photos()) == 1 else None, None,
         lambda: len(photos()) == 1, "Draw round anything in the photo and it's gone — filled in from the photo itself")
-    t.addSeparator()
-    act(t, "Edit with AI…", lambda: pane().ai_edit(photos()), None, lambda: bool(photos()),
+
+    video = submenu(t, "Video")
+    act(video, "Export All Frames…", lambda: pane().export_frames(videos()), None, lambda: bool(videos()),
+        "Every frame of the selected videos as pictures, in a folder beside them")
+    act(video, "Upscale Video…", lambda: pane().upscale_videos(videos()), None, lambda: bool(videos()),
+        "The selected videos upscaled to 1080p or 4K — replaced, or saved as new videos beside them")
+
+    cc = submenu(t, "CapCut")
+    act(cc, "Send to CapCut", lambda: pane().send_to_capcut(sendable()), "Ctrl+Shift+K", lambda: bool(sendable()),
+        "Opens CapCut with the selected clips (or this folder's) beside it, in order, to drag in — and brings "
+        "CapCut's exports back")
+    act(cc, "Import from CapCut…", lambda: pane().import_from_capcut(folder_target()), None, None,
+        "CapCut's finished videos, onto the drive — into this folder, or back where their clips came from")
+
+    ai = submenu(t, "AI")
+    act(ai, "Edit with AI…", lambda: pane().ai_edit(photos()), None, lambda: bool(photos()),
         "The selected photo — or every selected photo, with the same prompt, the results back together")
-    act(t, "Create with AI…", lambda: pane().ai_create(folder_target()), None, folder_target)
-    act(t, "Astria.ai Browser…", lambda: pane().astria_browser(folder_target() or str(home / "Pictures")))
-    act(t, "Make AI Model…", lambda: pane().make_ai_model(
+    act(ai, "Create with AI…", lambda: pane().ai_create(folder_target()), None, folder_target,
+        "A new picture from a prompt, saved into this folder's “AI” folder")
+    act(ai, "Astria.ai Browser…", lambda: pane().astria_browser(folder_target() or str(home / "Pictures")), None, None,
+        "Everything made on Astria: browse, search, download")
+    ai.addSeparator()
+    act(ai, "Make AI Model…", lambda: pane().make_ai_model(
         photos() if len(photos()) >= 5 else ([folder_target()] if folder_target() else photos())),
         None, lambda: len(photos()) >= 5 or bool(folder_target()),
         "A person, pet, object or style from 5–500 photos: the best varied ones are kept, and pictures of it can be "
         "made on this Mac or with Seedream and Nano Banana")
-    act(t, "AI Models…", lambda: pane().open_ai_models(), None, None, "The models made so far, and pictures from them")
-    t.addSeparator()
-    act(t, "Download from SimpCity…", lambda: sf.open_simpcity(folder_target(), win), None, folder_target)
-    act(t, "Get Reaction Scores", lambda: sf.open_simpcity(sf.simpcity_scores_folder(folder_target()), win,
-                                                           scores_only=True), None,
+    act(ai, "AI Models…", lambda: pane().open_ai_models(), None, None, "The models made so far, and pictures from them")
+
+    dl = submenu(t, "Download")
+    act(dl, "Download from SimpCity…", lambda: sf.open_simpcity(folder_target(), win), None, folder_target)
+    act(dl, "Get Reaction Scores", lambda: sf.open_simpcity(sf.simpcity_scores_folder(folder_target()), win,
+                                                            scores_only=True), None,
         lambda: folder_target() is not None and sf.simpcity_scores_folder(folder_target()) is not None)
-    act(t, "Download Instagram Profile…", lambda: sf.open_social("instagram", folder_target(), win), None,
+    act(dl, "Download Instagram Profile…", lambda: sf.open_social("instagram", folder_target(), win), None,
         folder_target)
-    act(t, "Download Facebook Profile…", lambda: sf.open_social("facebook", folder_target(), win), None,
+    act(dl, "Download Facebook Profile…", lambda: sf.open_social("facebook", folder_target(), win), None,
         folder_target)
-    act(t, "Download TikTok Profile…", lambda: sf.open_tiktok(folder_target(), win), None, folder_target,
+    act(dl, "Download TikTok Profile…", lambda: sf.open_tiktok(folder_target(), win), None, folder_target,
         "A TikTok profile's videos, watermark-free, into its @handle folder (the iPhone app's) — with every "
         "video's like count read again")
-    act(t, "Download from Fanfix…", lambda: sf.open_fanfix(folder_target(), win), None, folder_target,
+    act(dl, "Download from Fanfix…", lambda: sf.open_fanfix(folder_target(), win), None, folder_target,
         "Your purchased content from Fanfix creators, into a folder for each creator")
-    act(t, sf.passes_label(folder_target()) if folder_target() else "Download Passes…",
+    act(dl, sf.passes_label(folder_target()) if folder_target() else "Download Passes…",
         lambda: sf.open_passes(folder_target(), win), None, folder_target)
-    act(t, "Browse taylorpictures.net…", lambda: pane().open_taylor(
+    dl.addSeparator()
+    act(dl, "Browse taylorpictures.net…", lambda: pane().open_taylor(
         folder_target() or str(win.settings.value("taylor/root") or "")), None,
         lambda: folder_target() is not None or bool(win.settings.value("taylor/root")))
 
@@ -388,6 +475,11 @@ def install(win, sf) -> None:
 
     # -- Help
     h = each("Help")
-    readme = Path(__file__).with_name("README.md")
-    act(h, "Photo Browser for Mac Help", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(readme))))
+    act(h, f"{app_identity.APP_NAME} Help", lambda: win.open_help(0), "Ctrl+?", None,
+        "The guide to everything the app does, with a search field")
+    act(h, "Keyboard Shortcuts", lambda: win.open_help(1), None, None, "Every command that has a key")
+    act(h, "Find a Command…", win.open_palette, None, None, "⇧⌘P — type a few letters of what you want")
+    h.addSeparator()
+    act(h, "Welcome…", lambda: win.show_welcome(), None, None, "The few lines shown on the first launch")
+    act(h, f"About {app_identity.APP_NAME}", win.about, None, None, "", QAction.MenuRole.AboutRole)
     win.menu_actions = {a.text(): a for a in acts}

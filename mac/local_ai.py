@@ -12,8 +12,8 @@ which is how a model (`ai_models.py`) is drawn on a Mac that can't train one.
 - 24 GB: the same with the 8-bit model and up to 3 references;
 - 32 GB and up: 8-bit, up to 4 references, 1024 px. (Training would fit from here; it isn't built yet.)
 
-**How it's installed** (`install`, on first use, with the person's go-ahead): mflux can't live inside Safe
-Finder.app (a frozen app has no Python to run it with, and its MLX/torch pins are tight), so it gets its own
+**How it's installed** (`install`, on first use, with the person's go-ahead): mflux can't live inside Photo Browser for
+Mac.app (a frozen app has no Python to run it with, and its MLX/torch pins are tight), so it gets its own
 environment — `~/Library/Application Support/Photo Browser for Mac/AI/env`, made by **uv** (which also fetches the Python
 it needs) with mflux pinned to `MFLUX_VERSION`. Then `prepare` runs `mflux-save` once: the model comes down from
 Hugging Face (about 16 GB) and a quantised copy (about 4 GB at 4-bit) is kept in `…/AI/engines`; generating

@@ -60,6 +60,28 @@ def luminance(c: str) -> float:
     return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
 
 
+def contrast(a: str, b: str) -> float:
+    """The WCAG contrast ratio of two colours (1 = the same, 21 = black on white)."""
+    def lum(c: str) -> float:
+        out = 0.0
+        for v, w in zip(rgb(c), (0.2126, 0.7152, 0.0722)):
+            v /= 255
+            out += w * (v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4)
+        return out
+    la, lb = sorted((lum(a), lum(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def readable(color: str, on: list[str], at_least: float, toward: str) -> str:
+    """`color`, moved towards `toward` (white on dark chrome, black on light) just far enough to stand
+    `at_least` to one against every background in `on`. Small text needs 4.5; hints and marks 3."""
+    for step in range(0, 21):
+        c = mix(color, toward, step / 20)
+        if min(contrast(c, bg) for bg in on) >= at_least:
+            return c
+    return toward
+
+
 def average(colors: list[str]) -> str:
     cs = [rgb(c) for c in colors]
     return css(tuple(sum(c[i] for c in cs) / len(cs) for i in range(3)))
@@ -190,7 +212,9 @@ def derive(look: Look) -> dict[str, str]:
     top, avg = look.colors[0], average(look.colors)
     white, black = "#FFFFFF", "#000000"
     accent = look.accent
-    on_accent = black if luminance(accent) > 0.6 else white
+    pill = mix(accent, black, 0.14)
+    # text on the accent (buttons, the selected row): whichever of black and white reads better on both shades
+    on_accent = max((white, black), key=lambda c: min(contrast(c, accent), contrast(c, pill)))
     if look.light:
         out = {
             "window": avg, "content": avg, "header": mix(top, black, 0.035), "sidebar": mix(avg, black, 0.07),
@@ -215,7 +239,13 @@ def derive(look: Look) -> dict[str, str]:
             "button": mix(avg, white, 0.13), "button_border": "rgba(255,255,255,0.12)",
             "green": "#32D74B", "orange": "#FF9F0A", "red": "#FF453A",
         }
-    out.update(accent=accent, accent_pill=mix(accent, black, 0.14), on_accent=on_accent,
+    # Small grey text has to be readable on every stop of the background and on the header and sidebar.
+    grounds = list(look.colors) + [out["header"], out["sidebar"], out["panel"]]
+    toward = black if look.light else white
+    out["text"] = readable(out["text"], grounds, 7.0, toward)
+    out["secondary"] = readable(out["secondary"], grounds, 4.5, toward)
+    out["tertiary"] = readable(out["tertiary"], grounds, 3.0, toward)
+    out.update(accent=accent, accent_pill=pill, on_accent=on_accent,
                content_css=gradient_css(look.colors, look.direction))
     return out
 

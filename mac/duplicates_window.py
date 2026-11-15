@@ -455,10 +455,17 @@ class DuplicatesWindow(QWidget):
         title = QLabel("Find Duplicates")
         title.setObjectName("SheetTitle")
         row.addWidget(title)
-        self.where = QLabel(self.folder if len(self.folders) == 1 else
-                            ", ".join(os.path.basename(f) or f for f in self.folders))
+        where = self.folder if len(self.folders) == 1 else ", ".join(os.path.basename(f) or f for f in self.folders)
+        home = os.path.expanduser("~")
+        if where.startswith(home + "/"):
+            where = "~" + where[len(home):]
+        self.where = QLabel()
         self.where.setToolTip("\n".join(self.folders))
         self.where.setObjectName("SheetSub")
+        self.where.setMinimumWidth(80)
+        self.where.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._where_text = where
+        self.where.setText(where)
         row.addWidget(self.where, 1)
         self.rescan_btn = QPushButton("Rescan")
         self.rescan_btn.clicked.connect(self.rescan)
@@ -927,6 +934,11 @@ class DuplicatesWindow(QWidget):
         self.selected -= gone_set
         self.groups = [g2 for g in self.groups if (g2 := g.without(gone_set)) is not None]
         self._render()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)                         # a long path is cut in its middle, not off the end
+        fm = self.where.fontMetrics()
+        self.where.setText(fm.elidedText(self._where_text, Qt.TextElideMode.ElideMiddle, max(60, self.where.width())))
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.stop.set()

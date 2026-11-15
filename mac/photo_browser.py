@@ -88,6 +88,7 @@ import airdrop_to_iphone as airdrop
 import batch_crop
 import search_query
 import themes
+import ui_extras
 import thumb_color
 import capcut
 import media_info
@@ -151,7 +152,7 @@ class Theme:
             self.window, self.content, self.header = "#FFFFFF", "#FFFFFF", "#F6F6F6"
             self.sidebar, self.panel = "#EEEEF1", "#FAFAFA"
             self.border, self.hairline = "#DADADC", "rgba(0,0,0,0.07)"
-            self.text, self.secondary, self.tertiary = "#1D1D1F", "#6E6E73", "#A1A1A6"
+            self.text, self.secondary, self.tertiary = "#1D1D1F", "#6E6E73", "#8E8E93"
             self.accent, self.accent_pill = "#007AFF", "#0064E1"
             self.select_bg, self.select_inactive = "rgba(0,0,0,0.075)", "#D4D4D8"
             self.zebra, self.hover = "#F4F5F5", "rgba(0,0,0,0.045)"
@@ -167,6 +168,8 @@ class Theme:
                         (QPalette.ColorRole.HighlightedText, self.on_accent), (QPalette.ColorRole.ToolTipBase, self.panel),
                         (QPalette.ColorRole.ToolTipText, self.text), (QPalette.ColorRole.PlaceholderText, self.tertiary)):
             p.setColor(role, qc(c))
+        for role in (QPalette.ColorRole.Text, QPalette.ColorRole.WindowText, QPalette.ColorRole.ButtonText):
+            p.setColor(QPalette.ColorGroup.Disabled, role, qc(self.tertiary))     # what can't be used looks it
         return p
 
     def font_families(self) -> list[str]:
@@ -192,9 +195,13 @@ class Theme:
         #StatusBar QLabel, #PathBar QLabel {{ color: {t.secondary}; font-size: 11px; }}
         #FsChip {{ font-size: 10px; font-weight: 600; color: {t.secondary}; border: 1px solid {t.button_border};
                    border-radius: 7px; padding: 1px 6px; }}
-        QToolButton#Crumb {{ border: none; padding: 1px 3px; border-radius: 4px; color: {t.secondary}; font-size: 11px; }}
+        QToolButton#Crumb {{ border: none; padding: 3px 5px; border-radius: 4px; color: {t.secondary}; font-size: 11px; }}
         QToolButton#Crumb:hover {{ background: {t.hover}; color: {t.text}; }}
-        QToolButton#Nav, QToolButton#Seg {{ border: none; border-radius: 6px; padding: 3px; }}
+        QToolButton#Nav, QToolButton#Seg {{ border: none; border-radius: 6px; padding: 5px; }}
+        QToolButton#Nav:focus, QToolButton#Seg:focus, QToolButton#Crumb:focus, QToolButton#Scope:focus {{
+            border: 1px solid {t.accent}; }}
+        QToolButton#Nav:focus, QToolButton#Seg:focus {{ padding: 4px; }}
+        QToolButton#Crumb:focus {{ padding: 2px 4px; }}
         QToolButton#Nav:hover, QToolButton#Seg:hover {{ background: {t.hover}; }}
         QToolButton#Seg:checked {{ background: {t.select_bg}; }}
         QToolButton#Nav:disabled {{ background: transparent; }}
@@ -231,7 +238,13 @@ class Theme:
         QPushButton {{ background: {t.button}; border: 1px solid {t.button_border}; border-radius: 6px;
                        padding: 5px 14px; min-height: 18px; }}
         QPushButton:hover {{ background: {t.hover}; }}
-        QPushButton:disabled {{ color: {t.tertiary}; }}
+        QPushButton:focus {{ border: 2px solid {t.accent}; padding: 4px 13px; }}
+        QPushButton:default {{ background: {t.accent}; color: {t.on_accent}; border: 1px solid {t.accent};
+                               font-weight: 600; }}
+        QPushButton:default:hover {{ background: {t.accent_pill}; }}
+        QPushButton:default:focus {{ border: 2px solid {t.text}; }}
+        QPushButton:disabled, QPushButton:default:disabled {{ color: {t.tertiary}; background: {t.button};
+                                                              border: 1px solid {t.button_border}; font-weight: 400; }}
         QPushButton#Primary {{ background: {t.accent}; color: {t.on_accent}; border: 1px solid {t.accent}; font-weight: 600; }}
         QPushButton#Primary:hover {{ background: {t.accent_pill}; }}
         QPushButton#Primary:disabled {{ background: {t.select_inactive}; border-color: {t.select_inactive};
@@ -252,10 +265,25 @@ class Theme:
         #SheetTitle {{ font-size: 15px; font-weight: 700; }}
         #SheetSub {{ color: {t.secondary}; }}
         #SheetRow {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 8px; }}
-        QCheckBox {{ spacing: 6px; }}
+        QCheckBox, QRadioButton {{ spacing: 6px; }}
+        QCheckBox::indicator, QRadioButton::indicator {{ width: 14px; height: 14px; background: {t.content};
+                                                         border: 1px solid {t.secondary}; }}
+        QCheckBox::indicator {{ border-radius: 4px; }}
+        QRadioButton::indicator {{ border-radius: 8px; }}
+        QCheckBox::indicator:hover, QRadioButton::indicator:hover {{ border-color: {t.accent}; }}
+        QCheckBox::indicator:checked, QCheckBox::indicator:indeterminate, QRadioButton::indicator:checked {{
+            background: {t.accent}; border-color: {t.accent}; }}
+        QCheckBox::indicator:checked {{ image: url("{ui_mark("check", t.on_accent)}"); }}
+        QCheckBox::indicator:indeterminate {{ image: url("{ui_mark("dash", t.on_accent)}"); }}
+        QRadioButton::indicator:checked {{ image: url("{ui_mark("dot", t.on_accent)}"); }}
+        QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{ border-color: {t.tertiary}; }}
+        QCheckBox:focus, QRadioButton:focus {{ color: {t.accent}; }}
+        QCheckBox:disabled, QRadioButton:disabled, QLabel:disabled {{ color: {t.tertiary}; }}
         QMenu {{ background: {t.panel}; border: 1px solid {t.border}; border-radius: 8px; padding: 4px; }}
         QMenu::item {{ padding: 4px 18px; border-radius: 4px; }}
         QMenu::item:selected {{ background: {t.accent}; color: {t.on_accent}; }}
+        QMenu::item:disabled {{ color: {t.tertiary}; background: transparent; }}
+        QMenuBar::item:disabled {{ color: {t.tertiary}; }}
         QMenu::separator {{ height: 1px; background: {t.border}; margin: 4px 6px; }}
         QToolButton#TagChip {{ border: 1px solid {t.button_border}; border-radius: 11px; padding: 3px 10px 3px 7px;
                                background: {t.button}; font-size: 12px; }}
@@ -271,6 +299,43 @@ class Theme:
 
 
 THEME = Theme(False)
+
+
+_UI_MARKS: dict[tuple[str, str], str] = {}
+
+
+def ui_mark(kind: str, color: str) -> str:
+    """A tick, dash or dot in `color` as a small picture on disk — what a stylesheet needs to draw inside a
+    ticked checkbox or radio button (it can colour the box, not draw the mark). Made once per colour."""
+    key = (kind, color)
+    if key in _UI_MARKS:
+        return _UI_MARKS[key]
+    folder = Path(tempfile.gettempdir()) / "PhotoBrowserUI"
+    path = folder / f"{kind}-{color.lstrip('#')}.png"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        size, dpr = 14, 3
+        pm = QPixmap(size * dpr, size * dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.scale(dpr, dpr)
+        pen = QPen(QColor(color), 1.9, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        if kind == "check":
+            p.drawPolyline([QPointF(3.4, 7.4), QPointF(6.0, 10.0), QPointF(10.8, 4.4)])
+        elif kind == "dash":
+            p.drawLine(QPointF(3.8, 7.0), QPointF(10.2, 7.0))
+        else:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(color))
+            p.drawEllipse(QPointF(7.0, 7.0), 2.6, 2.6)
+        p.end()
+        pm.save(str(path))
+    except OSError:
+        pass
+    _UI_MARKS[key] = path.as_posix()
+    return _UI_MARKS[key]
 
 
 def qc(css: str) -> QColor:
@@ -3331,7 +3396,41 @@ class PaneModel(QSortFilterProxyModel):
             elif index.column() == 0 and role == Qt.ItemDataRole.ToolTipRole:
                 size = folder_size(self.filePath(index))
                 return self.filePath(index) + ("" if size is None else f"\n{human(size)}")
+        if self._is_fs and index.isValid():
+            if index.column() == 1 and role == Qt.ItemDataRole.DisplayRole and not self.isDir(index):
+                # the size as the status line and every tool say it ("2.1 MB"), not the file model's "2.05 MiB"
+                return human(self.sourceModel().size(self.mapToSource(index)))
+            if index.column() == 0 and role == Qt.ItemDataRole.ToolTipRole:
+                return self._tip(self.filePath(index), self.isDir(index),
+                                 None if self.isDir(index) else self.sourceModel().size(self.mapToSource(index)))
         return super().data(index, role)
+
+    def headerData(self, section: int, orientation, role: int = Qt.ItemDataRole.DisplayRole):  # noqa: N802
+        if self._is_fs and orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole \
+                and section == 2:
+            return "Kind"                                  # the file model's "Type": everywhere else it's Kind
+        return super().headerData(section, orientation, role)
+
+    @staticmethod
+    def _tip(path: str, is_dir: bool, size: int | None) -> str:
+        """What hovering over an item says: its whole name (tiles cut long ones short), then what it is, how
+        big, when it was changed, and its tags."""
+        lines = [os.path.basename(path.rstrip("/")) or path]
+        facts = [kind_name(path, is_dir)]
+        if size is not None:
+            facts.append(human(size))
+        try:
+            facts.append(time.strftime("%b %-d, %Y at %-I:%M %p", time.localtime(os.path.getmtime(path))))
+        except (OSError, ValueError):
+            pass
+        lines.append(" · ".join(facts))
+        try:
+            tags = tag_store().tags(path, fresh=False)
+            if tags:
+                lines.append(", ".join("#" + t for t in tags[:8]) + (f" +{len(tags) - 8}" if len(tags) > 8 else ""))
+        except Exception:  # noqa: BLE001 — a tooltip never fails the view
+            pass
+        return "\n".join(lines)
 
     def size_known(self, path: str) -> None:
         """A folder's size came in: its row shows it; the order and the filter follow when they
@@ -3605,9 +3704,11 @@ class Pane(QWidget):
         h.addSpacing(4)
         self.title = QLabel(objectName="PaneTitle")
         self.title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.title.setMinimumWidth(70)                     # the folder's name never squeezed away to nothing
         h.addWidget(self.title, 1)
         self.search = QLineEdit(objectName="Search")
         self.search.setPlaceholderText("Search")
+        self.search.setAccessibleName("Search")
         self.search.setToolTip(
             "Words in the name or tags — press Return (⌘F from anywhere). Then the results follow as you type.\n"
             "“route 66” together · -blurry not this · tag:beach or #beach · is:favorite · is:ai · is:untagged\n"
@@ -3624,7 +3725,9 @@ class Pane(QWidget):
         self._live.setInterval(280)
         self._live.timeout.connect(self._live_search)
         self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(190)
+        self.search.setMinimumWidth(90)                    # gives way in a narrow pane (Split View) before the
+        self.search.setMaximumWidth(190)                   # tools beside it are covered
+        self.search.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.search.returnPressed.connect(self.run_search)
         self.search.textChanged.connect(self._search_text_changed)
         self.search.installEventFilter(self)
@@ -3732,6 +3835,11 @@ class Pane(QWidget):
         self.stack.addWidget(self.grid)
         self.stack.addWidget(self.list)
         root.addWidget(self.stack, 1)
+        self.empty_note = ui_extras.EmptyNote(self.stack)   # "This Folder Is Empty", "No Results"…
+        self.toast = ui_extras.Toast(self.stack)            # what just happened, with Undo / Show
+        self.toast.restyle(THEME)
+        self._loaded_dir = ""                               # the folder whose listing has arrived
+        self.fs.directoryLoaded.connect(self._dir_loaded)
         for v in (self.grid, self.list):
             v.doubleClicked.connect(self.open_index)
             v.customContextMenuRequested.connect(lambda pos, v=v: self.context_menu(v, pos))
@@ -3759,13 +3867,16 @@ class Pane(QWidget):
         self.gap_slider.setRange(2, 48)
         self.gap_slider.setValue(self.gap)
         self.gap_slider.setFixedWidth(64)
+        self.gap_slider.setToolTip("Space between items — all the way left for a tight grid")
+        self.gap_slider.setAccessibleName("Spacing")
         self.gap_slider.valueChanged.connect(self.set_gap)
         self.size_icon = QLabel()
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(48, 320)
         self.slider.setValue(self.icon_px)
         self.slider.setFixedWidth(90)
-        self.slider.setToolTip("Thumbnail size")
+        self.slider.setToolTip("Thumbnail size (⌘+ and ⌘−)")
+        self.slider.setAccessibleName("Thumbnail size")
         self.slider.valueChanged.connect(self.set_icon_size)
         self.view_controls = [self.gap_icon, self.gap_slider, self.size_icon, self.slider]
         sl.addStretch(1)
@@ -3796,6 +3907,10 @@ class Pane(QWidget):
             hdr.moveSection(hdr.visualIndex(3), 1)          # Name, Date Modified, Size, Kind — Finder's order
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hdr.setStretchLastSection(False)
+        hdr.setMinimumSectionSize(60)                      # the Name column never squeezed away in a narrow pane
+        if getattr(self, "_columns_set", False):
+            return                                         # widths dragged by hand (or remembered) are kept
+        self._columns_set = True
         hdr.resizeSection(1, 90)
         hdr.resizeSection(2, 120)
         hdr.resizeSection(3, 150)
@@ -3805,7 +3920,12 @@ class Pane(QWidget):
         b.setIcon(glyph(icon, THEME.secondary if name == "Nav" else THEME.text, 16))
         b.setIconSize(QSize(16, 16))
         b.setToolTip(tip)
+        b.setAccessibleName(re.split(r" \(| — ", tip)[0])       # an icon alone says nothing to VoiceOver
         b.setAutoRaise(True)
+        # Not a Tab stop: Tab goes from the search field to the files (each of these is a menu command with a
+        # key of its own), and a click doesn't take the keyboard away from the list.
+        b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        b.setMinimumSize(28, 28)
         if slot is not None:
             b.clicked.connect(slot)
         b.setProperty("glyph", icon)
@@ -4121,13 +4241,26 @@ class Pane(QWidget):
         self._slider_icons()
         self.update_pathbar()
         self.grid.viewport().update()
+        self.toast.restyle(THEME)
+        self.empty_note.hide()
+        self._update_empty()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """A narrow pane (Split View on a small window) keeps its name and search field: New Folder and Tags —
+        both in the menus and the right-click menu — step aside first."""
+        super().resizeEvent(event)
+        w = self.width()
+        for buttons, at_least in (((self.new_folder_btn, self.tags_btn), 560),
+                                  ((self.grid_btn, self.list_btn, self.photos_btn), 480)):   # ⌘1 ⌘2 ⌘3, View menu
+            for b in buttons:
+                if b.isVisibleTo(self) != (w >= at_least):
+                    b.setVisible(w >= at_least)
 
     def _slider_icons(self) -> None:
         dpr = self.devicePixelRatioF() or 1.0
         for label, name in ((self.gap_icon, "spacing"), (self.size_icon, "size")):
             label.setPixmap(glyph(name, THEME.tertiary, 14).pixmap(QSize(14, 14), dpr))
-            if name == "size":
-                label.setToolTip("Thumbnail size")
+            label.setToolTip("Thumbnail size" if name == "size" else "Space between items")
 
     def _shortcuts(self) -> None:
         ctx = Qt.ShortcutContext.WidgetWithChildrenShortcut
@@ -4147,6 +4280,10 @@ class Pane(QWidget):
                 self.search.clear()                  # and, if a search is up, back to the folder
                 self.view().setFocus()
                 return True
+        if event.type() == event.Type.MouseButtonPress and event.button() in (Qt.MouseButton.BackButton,
+                                                                              Qt.MouseButton.ForwardButton):
+            (self.go_back if event.button() == Qt.MouseButton.BackButton else self.go_forward)()   # a mouse's side buttons
+            return True
         if event.type() in (event.Type.FocusIn, event.Type.MouseButtonPress):
             self.activated.emit(self)
         return False
@@ -4503,6 +4640,40 @@ class Pane(QWidget):
             self.history.append(self.location)
             self.go(self.future.pop(), record=False)
 
+    def refresh(self) -> None:
+        """View ▸ Refresh (⌘R): the folder read again — or the search, the tag, the collection run again."""
+        if not self.location:
+            return
+        if self.is_virtual:
+            self.go(self.location, record=False)
+            return
+        search_query.NAMES.forget()
+        root = self.fs.rootPath()
+        self.fs.setRootPath("")                            # QFileSystemModel re-reads a folder it's pointed at afresh
+        self.fs.setRootPath(root)
+        self.update_status()
+        self.note("Refreshed.")
+
+    def go_to_folder(self) -> None:
+        """Go ▸ Go to Folder… (⇧⌘G): a path typed or pasted — "~" and a file's path (its folder) both work."""
+        start = self.location if not self.is_virtual else str(Path.home())
+        text, ok = QInputDialog.getText(self.window(), "Go to Folder", "Go to the folder:", text=start)
+        if not ok or not text.strip():
+            return
+        path = os.path.abspath(os.path.expanduser(text.strip().strip("'\"")))
+        if os.path.isdir(path):
+            self.go(path)
+        elif os.path.exists(path):
+            self.go(os.path.dirname(path))
+            QTimer.singleShot(300, lambda: self.reveal(path))
+        else:
+            self.note(f"There's no folder at “{text.strip()}”.")
+
+    def set_hidden(self, on: bool) -> None:
+        """Dot files and folders shown or not (View ▸ Show Hidden Files)."""
+        flags = QDir.Filter.AllDirs | QDir.Filter.Files | QDir.Filter.NoDotAndDotDot
+        self.fs.setFilter(flags | QDir.Filter.Hidden if on else flags)
+
     def go_up(self) -> None:
         if self.is_virtual:
             return
@@ -4799,7 +4970,7 @@ class Pane(QWidget):
         if self.is_virtual:
             b = QToolButton(objectName="Crumb")
             text, icon = {VIDEOS: ("All Videos", "film"), EMPTY: ("Empty Folders", "trash")}.get(
-                self.location, ("Search results", "search"))
+                self.location, ("Search Results", "search"))
             if self.location.startswith(TAG):
                 text, icon = f"Tag “{self.location[len(TAG):]}”", "tag"
             elif self.location.startswith(LABEL):
@@ -4838,6 +5009,7 @@ class Pane(QWidget):
         self.path_layout.addStretch(1)
 
     def update_status(self) -> None:
+        self._update_empty()
         if not self.location or time.monotonic() - self._note_at < 1.5:
             return
         picked = self.selection()
@@ -5330,10 +5502,67 @@ class Pane(QWidget):
 
     def _airdrop_noted(self, line: str) -> None:
         """A transient note on the status line (an AirDrop step, a Trash result): it holds against
-        the automatic refreshes for a moment, then the status comes back on its own."""
+        the automatic refreshes for a moment, then the status comes back on its own. A line that ends in "…"
+        is a step still under way and stays on the status line; anything else is a result, and is also said in
+        the toast over the files, where it's seen."""
         self.status.setText(line)
         self._note_at = time.monotonic()
         QTimer.singleShot(15000, self.update_status)
+        if line and not line.rstrip().endswith("…"):
+            self.toast.show_message(line)
+
+    def note(self, text: str, action_label: str = "", action=None) -> None:
+        """What just happened, said where it's seen — the toast — with one thing to do about it when there is
+        one ("Undo", "Show"). Also on the status line, for as long as that holds it."""
+        self.status.setText(text)
+        self._note_at = time.monotonic()
+        QTimer.singleShot(15000, self.update_status)
+        self.toast.show_message(text, action_label, action)
+
+    # -- what an empty view says
+    def _dir_loaded(self, path: str) -> None:
+        if path == self.location:
+            self._loaded_dir = path
+            self._update_empty()
+
+    def _update_empty(self) -> None:
+        """A view with nothing in it says why, and what to do — never just a blank pane."""
+        title = detail = ""
+        if not self.location:
+            pass
+        elif self.is_virtual:
+            if self.model.rowCount() == 0:
+                n = self.results.rowCount()
+                run = self.searches.get(self.location)
+                if self.scanner is not None:
+                    title, detail = "Looking…", "Results appear here as they're found."
+                elif n and self.any_filter():
+                    title, detail = "Nothing Matches the Filter", (f"{n:,} item{'s' if n != 1 else ''} hidden by "
+                                                                    f"{self.filter_summary()}. Filter ▸ Show Everything brings them back.")
+                elif self.location == VIDEOS:
+                    title, detail = "No Videos", "Videos on the drives and in your folders are gathered here."
+                elif self.location == EMPTY:
+                    title, detail = "No Empty Folders", "Every folder has something in it."
+                elif self.location.startswith(TAG):
+                    title, detail = "Nothing Has This Tag", "Select files and press ⌘T to tag them."
+                elif self.location == LABEL + "favorite":
+                    title, detail = "No Favorites Yet", "Select photos or videos and press ⇧⌘F — they show up here and in Favorites on the iPhone."
+                elif self.location.startswith(LABEL):
+                    title, detail = "Nothing in To AI", "Select photos and press ⇧⌘A — the iPhone app's To AI list."
+                elif run is not None:
+                    title = "No Results"
+                    detail = ("Nothing matches that here. Try fewer words, or search the whole drive or This Mac "
+                              "in the bar above.")
+        elif self._loaded_dir == self.location and os.path.isdir(self.location):
+            root = self.fs.index(self.location)
+            n = self.fs.rowCount(root)
+            shown = self.model.rowCount(self.model.mapFromSource(root))
+            if n == 0:
+                title, detail = "This Folder Is Empty", "Drop files here, or press ⇧⌘N for a new folder."
+            elif shown == 0 and self.any_filter():
+                title, detail = "Nothing Matches the Filter", (f"{n:,} item{'s' if n != 1 else ''} hidden by "
+                                                                f"{self.filter_summary()}. Filter ▸ Show Everything brings them back.")
+        self.empty_note.say(title, detail, THEME)
 
     def _confirm(self, title: str, text: str, detail: str) -> bool:
         box = QMessageBox(self.window())
@@ -5389,8 +5618,9 @@ class Pane(QWidget):
         if not ok or not name.strip():
             return
         target = Path(self.location) / safe_name(name.strip())
-        if target.exists():
-            QMessageBox.information(self, "New Folder", f"“{target.name}” already exists here.")
+        if target.exists():                                # nothing went wrong: it's there — show it
+            self.note(f"“{target.name}” is already here.")
+            QTimer.singleShot(0, lambda: self.reveal(str(target)))
             return
         try:
             # From a spare folder when the drive has one, so it opens on the iPhone (see spare_folders.py).
@@ -5445,7 +5675,32 @@ class Pane(QWidget):
             QMessageBox.warning(self.window(), "Rename", f"Couldn't rename “{old}”: {res.failed[0][1]}")
             return
         self._names_changed(res)
+        self._renamed(res, f"Renamed to “{os.path.basename(res.done[0].new)}”.", "Rename")
         QTimer.singleShot(300, lambda: self.reveal(res.done[0].new) if os.path.dirname(res.done[0].new) == self.location else None)
+
+    def _renamed(self, res, line: str, title: str) -> None:
+        """Says what was renamed (with Undo), and keeps the way back: the same renames the other way round,
+        through the same engine — so tags, labels and the note for the iPhone follow back too."""
+        import rename_tools
+        done = list(res.done)
+        if not done:
+            self.note(line)
+            return
+
+        def undo() -> str:
+            back = [rename_tools.Rename(r.new, r.old, r.is_dir) for r in reversed(done)]
+            got = rename_tools.apply_bulk(back, tag_store())
+            self._names_changed(got)
+            n = len(got.done)
+            return (f"Put {n:,} name{'s' if n != 1 else ''} back." if n else "The names couldn't be put back.") + \
+                (f" {len(got.failed):,} couldn't be." if got.failed and n else "")
+
+        win = self.window()
+        if isinstance(win, MainWindow):
+            win.undo.push(title if len(done) == 1 else f"{title} of {len(done):,} Items", undo)
+            self.note(line, "Undo", win.undo_last)
+        else:
+            self.note(line)
 
     def duplicate_items(self, paths: list[str]) -> None:
         """Duplicate (⌘D): a copy of each selected file beside it ("name copy.ext"), with its tags, Favorites
@@ -5453,8 +5708,7 @@ class Pane(QWidget):
         import rename_tools
         files = [p for p in paths if os.path.isfile(p)]
         if not files:
-            QMessageBox.information(self.window(), "Duplicate", "Select files to duplicate (folders are copied "
-                                    "with Copy in Split View).")
+            self.note("Select files to duplicate — folders are copied with Copy in Split View.")
             return
         made: list[tuple[str, str]] = []
         failed: list[str] = []
@@ -5535,7 +5789,7 @@ class Pane(QWidget):
                 QMessageBox.warning(self.window(), "Rename Files", f"Couldn't read the folder: {e}")
                 return
         if not items:
-            QMessageBox.information(self.window(), "Rename Files", "There are no files here to rename.")
+            self.note("There are no files here to rename.")
             return
 
         def done(res) -> None:
@@ -5547,7 +5801,7 @@ class Pane(QWidget):
                 QMessageBox.warning(self.window(), "Rename Files",
                                     line + "\n\n" + "\n".join(f"{os.path.basename(r.old)}: {why}"
                                                                  for r, why in res.failed[:12]))
-            self._airdrop_noted(line)
+            self._renamed(res, line, "Rename")
 
         dlg = rename_window.BulkRenameDialog(self.window(), items, tag_store(), done, self.settings)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -5591,91 +5845,10 @@ class Pane(QWidget):
                                          | view.selectionModel().SelectionFlag.Rows)
         paths = self.selected_paths() if idx.isValid() else []
         menu = QMenu(self)
+        menu.setToolTipsVisible(True)
         if paths:
-            menu.addAction("Open", self.open_selected)
-            if any(kind_of(p) != "other" or p.lower().endswith(".pdf") for p in paths):
-                menu.addAction("Open With Default App", self.open_external)
-            if IS_MAC:
-                menu.addAction("Quick Look", self.quick_look)
-                menu.addAction("Show in Finder", lambda: subprocess.Popen(["open", "-R", paths[0]]))
-            menu.addAction("Show in Photo Browser", lambda: self.reveal(paths[0]))
-            if IS_MAC:
-                menu.addAction("AirDrop to iPhone…", lambda: self.airdrop(paths))
-            if len(paths) == 1:
-                menu.addAction("Rename…", lambda: self.rename_item(paths[0])).setShortcut(QKeySequence("F2"))
-            else:
-                menu.addAction(f"Rename {len(paths)} Items…", lambda: self.rename_many(paths)).setShortcut(QKeySequence("F2"))
-            if any(os.path.isfile(p) for p in paths):
-                menu.addAction("Duplicate", lambda: self.duplicate_items(paths)).setShortcut(QKeySequence("Ctrl+D"))
-            if any(batch_crop.can_crop(p) or kind_of(p) == "video" for p in paths if not os.path.isdir(p)):
-                turn = menu.addMenu("Rotate")
-                turn.addAction("Left", lambda: self.rotate_items(paths, 3))
-                turn.addAction("Right", lambda: self.rotate_items(paths, 1))
-                turn.addAction("180°", lambda: self.rotate_items(paths, 2))
-            self._cover_menu(menu, paths)
-            if len(paths) == 1 and os.path.isdir(paths[0]):
-                self._folder_tools(menu, paths[0], "Find Duplicates…")
-            elif len(paths) > 1 and all(os.path.isdir(p) for p in paths):
-                menu.addAction(f"Find Duplicates in These {len(paths)} Folders…", lambda: self.find_duplicates(paths))
-            menu.addSeparator()
-            win = self.window()
-            if isinstance(win, MainWindow) and self is win.src:
-                if win.split:
-                    menu.addAction(win.copy_btn.text(), lambda: win.transfer_selection(False))
-                    menu.addAction(win.move_btn.text(), lambda: win.transfer_selection(True))
-                else:
-                    menu.addAction("Move or Copy in Split View…", lambda: win.set_split(True))
-            self._tags_menu(menu, paths)
-            self._labels_menu(menu, paths)
-            editable = [p for p in paths if os.path.isdir(p) or metadata_edit.can_edit(p)]
-            if editable:
-                label = "Edit Metadata…" if len(editable) == 1 and not os.path.isdir(editable[0]) else \
-                    "Edit Metadata of Everything Inside…" if len(editable) == 1 else \
-                    f"Edit Metadata of {len(editable)} Items…"
-                menu.addAction(label, lambda: self.edit_metadata(editable)).setShortcut(QKeySequence("Ctrl+I"))
-            videos = [p for p in paths if kind_of(p) == "video"]
-            sendable = [p for p in paths if os.path.isdir(p) or capcut.is_clip(p)]
-            if sendable and not (len(paths) == 1 and os.path.isdir(paths[0])):      # (a folder: its CapCut menu)
-                menu.addAction("Send to CapCut" if len(sendable) == 1 else f"Send {len(sendable)} Items to CapCut",
-                               lambda: self.send_to_capcut(sendable)).setShortcut(QKeySequence("Ctrl+Shift+K"))
-            if videos:
-                menu.addAction("Export All Frames…" if len(videos) == 1 else f"Export All Frames of {len(videos)} Videos…",
-                               lambda: self.export_frames(videos))
-                menu.addAction("Upscale Video…" if len(videos) == 1 else f"Upscale {len(videos)} Videos…",
-                               lambda: self.upscale_videos(videos))
-            photos = [p for p in paths if os.path.splitext(p)[1].lower() in batch_crop.CROPPABLE]
-            if photos:
-                menu.addAction("Crop…" if len(photos) == 1 else f"Crop {len(photos)} Photos…",
-                               lambda: self.crop_photos(photos))
-                menu.addAction("AI Upscale 2×…" if len(photos) == 1 else f"AI Upscale {len(photos)} Photos 2×…",
-                               lambda: self.ai_upscale(photos))
-                menu.addAction("Erase Area…" if len(photos) == 1 else f"Erase Area on {len(photos)} Photos…",
-                               lambda: self.erase_area(photos))
-                menu.addAction("Remove Watermark…" if len(photos) == 1 else f"Remove Watermark from {len(photos)} Photos…",
-                               lambda: self.remove_watermark(photos))
-                if len(photos) == 1:
-                    menu.addAction("Remove Objects…", lambda: self.remove_objects(photos[0]))
-                menu.addAction("Edit with AI…" if len(photos) == 1 else f"Edit {len(photos)} Photos with AI…",
-                               lambda: self.ai_edit(photos))
-                if len(photos) >= 5:
-                    menu.addAction(f"Make AI Model from {len(photos)} Photos…", lambda: self.make_ai_model(photos))
-            folders = [p for p in paths if os.path.isdir(p)]
-            if folders:
-                menu.addAction("Remove Watermark from Photos Inside…", lambda: self.remove_watermark(folders))
-            webps = [p for p in paths if webp_convert.is_webp(p) and not os.path.isdir(p)]
-            if webps:
-                menu.addAction("Convert to JPEG…" if len(webps) == 1 else f"Convert {len(webps)} WebPs to JPEG…",
-                               lambda: self.convert_webp(webps))
-            elif folders:
-                menu.addAction("Convert WebP Photos Inside to JPEG…", lambda: self.convert_webp(folders))
-            texts = [p for p in paths if os.path.splitext(p)[1].lower() in (".txt", ".text", ".md", ".markdown", ".rtf")
-                     and not os.path.isdir(p)]
-            if texts:
-                menu.addAction("Make Book PDF…" if len(texts) == 1 else f"Make Book PDFs of {len(texts)} Files…",
-                               lambda: self.make_book(texts))
-            menu.addAction("Move to Trash", self.delete_selection).setShortcut(QKeySequence("Ctrl+Backspace"))
-            menu.addSeparator()
-        if self.location == VIDEOS:
+            self._item_menu(menu, paths)
+        elif self.location == VIDEOS:
             menu.addAction("Look for Videos Again", lambda: self.go(VIDEOS))
         elif self.location == EMPTY:
             menu.addAction("Look for Empty Folders Again", lambda: self.go(EMPTY))
@@ -5684,22 +5857,151 @@ class Pane(QWidget):
         elif self.location.startswith(TAG) or self.location.startswith(LABEL):
             menu.addAction("Look Again", lambda: self.go(self.location))
         else:
-            menu.addAction("New Folder", self.new_folder)
-            if not paths and os.path.isdir(self.location):
+            menu.addAction("New Folder", self.new_folder).setShortcut(QKeySequence("Ctrl+Shift+N"))
+            if os.path.isdir(self.location):
+                menu.addSeparator()
                 menu.addAction("Edit Metadata of Everything Here…", lambda: self.edit_metadata([self.location]))
                 menu.addAction("Convert WebP Photos Here to JPEG…", lambda: self.convert_webp([self.location]))
-                menu.addAction("Rename Files Here…", lambda: self.rename_many([self.location]))
-                menu.addAction("Remove Leading Spaces from Names Here…", lambda: self.remove_leading_spaces(self.location))
-                self._folder_tools(menu, self.location, "Find Duplicates in This Folder…")
+                self._folder_tools(menu, self.location, here=True)
         menu.exec(view.viewport().mapToGlobal(pos))
         menu.deleteLater()                                 # a new menu each right-click: don't keep them all
 
-    def _folder_tools(self, menu: QMenu, folder: str, dups_label: str) -> None:
+    def _item_menu(self, menu: QMenu, paths: list[str]) -> None:
+        """The right-click menu of what's selected, in the order things are reached for: open it · file it
+        (move, rename, tag, label, its metadata) · change it (one "Edit Photo ▸" for the picture tools — they
+        were ten loose items) · send it somewhere · where it is · the Trash, last and on its own."""
+        one = len(paths) == 1
+        folder = paths[0] if one and os.path.isdir(paths[0]) else None
+        photos = [p for p in paths if os.path.splitext(p)[1].lower() in batch_crop.CROPPABLE]
+        videos = [p for p in paths if kind_of(p) == "video"]
+        folders = [p for p in paths if os.path.isdir(p)]
+
+        # -- open
+        menu.addAction("Open", self.open_selected)
+        if any(kind_of(p) != "other" or p.lower().endswith(".pdf") for p in paths):
+            menu.addAction("Open With Default App", self.open_external)
+        if IS_MAC:
+            menu.addAction("Quick Look", self.quick_look)
+        menu.addSeparator()
+
+        # -- file it
+        win = self.window()
+        if isinstance(win, MainWindow) and self is win.src:
+            if win.split:
+                menu.addAction(win.copy_btn.text(), lambda: win.transfer_selection(False))
+                menu.addAction(win.move_btn.text(), lambda: win.transfer_selection(True))
+            else:
+                menu.addAction("Move or Copy in Split View…", lambda: win.set_split(True))
+        if one:
+            menu.addAction("Rename…", lambda: self.rename_item(paths[0])).setShortcut(QKeySequence("F2"))
+        else:
+            menu.addAction(f"Rename {len(paths)} Items…", lambda: self.rename_many(paths)).setShortcut(QKeySequence("F2"))
+        if any(os.path.isfile(p) for p in paths):
+            menu.addAction("Duplicate", lambda: self.duplicate_items(paths)).setShortcut(QKeySequence("Ctrl+D"))
+        self._tags_menu(menu, paths)
+        self._labels_menu(menu, paths)
+        editable = [p for p in paths if os.path.isdir(p) or metadata_edit.can_edit(p)]
+        if editable:
+            label = "Edit Metadata…" if len(editable) == 1 and not os.path.isdir(editable[0]) else \
+                "Edit Metadata of Everything Inside…" if len(editable) == 1 else \
+                f"Edit Metadata of {len(editable)} Items…"
+            menu.addAction(label, lambda: self.edit_metadata(editable)).setShortcut(QKeySequence("Ctrl+I"))
+        self._cover_menu(menu, paths)
+        menu.addSeparator()
+
+        # -- change it
+        turnable = any(batch_crop.can_crop(p) or kind_of(p) == "video" for p in paths if not os.path.isdir(p))
+        webps = [p for p in paths if webp_convert.is_webp(p) and not os.path.isdir(p)]
+        if photos or videos or turnable or webps:
+            n = len(photos) + len(videos)
+            title = ("Edit Photo" if photos and not videos and len(photos) == 1 else
+                     "Edit Video" if videos and not photos and len(videos) == 1 else
+                     f"Edit {len(photos)} Photos" if photos and not videos else
+                     f"Edit {len(videos)} Videos" if videos and not photos else f"Edit {n} Items" if n else "Edit")
+            edit = menu.addMenu(title)
+            if photos:
+                edit.addAction("Crop…", lambda: self.crop_photos(photos))
+            if turnable:
+                turn = edit.addMenu("Rotate")
+                turn.addAction("Left", lambda: self.rotate_items(paths, 3))
+                turn.addAction("Right", lambda: self.rotate_items(paths, 1))
+                turn.addAction("180°", lambda: self.rotate_items(paths, 2))
+            if photos:
+                edit.addSeparator()
+                edit.addAction("AI Upscale 2×…", lambda: self.ai_upscale(photos))
+                edit.addAction("Erase Area…", lambda: self.erase_area(photos))
+                edit.addAction("Remove Watermark…", lambda: self.remove_watermark(photos))
+                if len(photos) == 1:
+                    edit.addAction("Remove Objects…", lambda: self.remove_objects(photos[0]))
+            if webps:
+                edit.addSeparator()
+                edit.addAction("Convert to JPEG…" if len(webps) == 1 else f"Convert {len(webps)} WebPs to JPEG…",
+                               lambda: self.convert_webp(webps))
+            if videos:
+                edit.addSeparator()
+                edit.addAction("Export All Frames…", lambda: self.export_frames(videos))
+                edit.addAction("Upscale Video…" if len(videos) == 1 else f"Upscale {len(videos)} Videos…",
+                               lambda: self.upscale_videos(videos))
+        if photos:
+            menu.addAction("Edit with AI…" if len(photos) == 1 else f"Edit {len(photos)} Photos with AI…",
+                           lambda: self.ai_edit(photos))
+            if len(photos) >= 5:
+                menu.addAction(f"Make AI Model from {len(photos)} Photos…", lambda: self.make_ai_model(photos))
+        if folder is not None:
+            self._folder_tools(menu, folder)
+        elif len(paths) > 1 and len(folders) == len(paths):
+            menu.addAction(f"Find Duplicates in These {len(paths)} Folders…", lambda: self.find_duplicates(paths))
+        if folders:
+            inside = menu.addMenu("Photos Inside")
+            inside.addAction("Remove Watermark…", lambda: self.remove_watermark(folders))
+            inside.addAction("Convert WebP to JPEG…", lambda: self.convert_webp(folders))
+        texts = [p for p in paths if os.path.splitext(p)[1].lower() in (".txt", ".text", ".md", ".markdown", ".rtf")
+                 and not os.path.isdir(p)]
+        if texts:
+            menu.addAction("Make Book PDF…" if len(texts) == 1 else f"Make Book PDFs of {len(texts)} Files…",
+                           lambda: self.make_book(texts))
+        menu.addSeparator()
+
+        # -- send it somewhere
+        sent = False
+        if IS_MAC:
+            menu.addAction("AirDrop to iPhone…", lambda: self.airdrop(paths))
+            sent = True
+        sendable = [p for p in paths if os.path.isdir(p) or capcut.is_clip(p)]
+        if sendable and folder is None:                                          # (a folder: its CapCut menu)
+            menu.addAction("Send to CapCut" if len(sendable) == 1 else f"Send {len(sendable)} Items to CapCut",
+                           lambda: self.send_to_capcut(sendable)).setShortcut(QKeySequence("Ctrl+Shift+K"))
+            sent = True
+        if sent:
+            menu.addSeparator()
+
+        # -- where it is
+        if IS_MAC:
+            menu.addAction("Show in Finder", lambda: subprocess.Popen(["open", "-R", paths[0]]))
+        if self.is_virtual:                                 # results, a tag, Favorites: the folder it's really in
+            menu.addAction("Show in Enclosing Folder", lambda: self.reveal(paths[0]))
+        menu.addAction("Copy Name" if one else f"Copy {len(paths)} Names", lambda: self.copy_names(paths))
+        menu.addAction("Copy Path" if one else f"Copy {len(paths)} Paths", lambda: self.copy_names(paths, full=True))
+        menu.addSeparator()
+        menu.addAction("Move to Trash", self.delete_selection).setShortcut(QKeySequence("Ctrl+Backspace"))
+
+    def copy_names(self, paths: list[str], full: bool = False) -> None:
+        """Edit ▸ Copy Name / Copy Path: the selection's names (or whole paths) on the clipboard, one a line."""
+        if not paths:
+            return
+        QApplication.clipboard().setText("\n".join(p if full else os.path.basename(p) for p in paths))
+        what = "path" if full else "name"
+        self.note(f"Copied the {what}." if len(paths) == 1 else f"Copied {len(paths):,} {what}s.")
+
+    def _folder_tools(self, menu: QMenu, folder: str, here: bool = False) -> None:
         """A folder's tools in the right-click menu: Find Duplicates, then the downloaders and the AI grouped
-        (the menu had grown past a screenful)."""
-        menu.addAction(dups_label, lambda: self.find_duplicates(folder))
-        menu.addAction("Rename Files Inside…", lambda: self.rename_many([folder]))
-        menu.addAction("Remove Leading Spaces from Names…", lambda: self.remove_leading_spaces(folder))
+        (the menu had grown past a screenful). `here`: it's the folder being shown (right-click on empty space),
+        so the commands say "Here" rather than "Inside"."""
+        menu.addAction("Find Duplicates in This Folder…" if here else "Find Duplicates…",
+                       lambda: self.find_duplicates(folder))
+        menu.addAction("Rename Files Here…" if here else "Rename Files Inside…", lambda: self.rename_many([folder]))
+        menu.addAction("Remove Leading Spaces from Names Here…" if here else "Remove Leading Spaces from Names…",
+                       lambda: self.remove_leading_spaces(folder))
         dl = menu.addMenu("Download")
         dl.addAction("Download from SimpCity…", lambda: open_simpcity(folder, self.window()))
         if (scored := simpcity_scores_folder(folder)) is not None:
@@ -5905,8 +6207,8 @@ class Pane(QWidget):
         try:
             import watermark
         except ImportError:                      # numpy, not in an older mac/.venv yet
-            QMessageBox.information(self.window(), "Remove Watermark", "Remove Watermark needs numpy. Quit Safe "
-                                    "Finder and open “Photo Browser for Mac.command” again — it installs it — or run: "
+            QMessageBox.information(self.window(), "Remove Watermark", "Remove Watermark needs numpy. Quit Photo Browser for "
+                                    "Mac and open “Photo Browser for Mac.command” again — it installs it — or run: "
                                     "mac/.venv/bin/pip install numpy")
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -6125,6 +6427,7 @@ class Pane(QWidget):
 
     def set_label(self, paths: list[str], label: str, on: bool) -> int:
         """Favorites / unfavorites (or To AI) the items; the iPhone app picks it up from the drive."""
+        changing = [p for p in paths if (label in labels_of(p)) != on]      # the ones this changes: Undo's list
         try:
             n = tag_store().set_label(paths, label, on)
         except OSError as e:
@@ -6135,9 +6438,26 @@ class Pane(QWidget):
             tags_changed()
             name = "favorite" if label == "favorite" else "To AI"
             what = f"{n:,} item{'s' if n != 1 else ''}"
-            self._airdrop_noted(f"{'Favorited' if on else 'Unfavorited'} {what}." if label == "favorite" else
-                                f"{'Added' if on else 'Removed'} {what} {'to' if on else 'from'} {name}.")
+            line = (f"{'Favorited' if on else 'Unfavorited'} {what}." if label == "favorite" else
+                    f"{'Added' if on else 'Removed'} {what} {'to' if on else 'from'} {name}.")
+
+            def undo() -> str:
+                tag_store().set_label(changing, label, not on)
+                tags_changed()
+                return f"{'Unfavorited' if on else 'Favorited'} {what} again." if label == "favorite" else \
+                    f"{'Removed' if on else 'Added'} {what} {'from' if on else 'to'} {name} again."
+            self._undoable(("Favorite" if on else "Unfavorite") if label == "favorite" else
+                           ("To AI" if on else "Remove To AI"), undo, line)
         return n
+
+    def _undoable(self, title: str, undo, line: str) -> None:
+        """Notes something that can be taken back (Edit ▸ Undo, ⌘Z) and says it, with an Undo button."""
+        win = self.window()
+        if isinstance(win, MainWindow):
+            win.undo.push(title, undo)
+            self.note(line, "Undo", win.undo_last)
+        else:
+            self.note(line)
 
     def toggle_label(self, label: str) -> None:
         """⇧⌘F / ⇧⌘A: on for the selection — off when every selected item already has it."""
@@ -6207,7 +6527,7 @@ class Pane(QWidget):
 
     def _open_tags(self, items: list[str], inside: list[str]) -> None:
         if not items:
-            QMessageBox.information(self.window(), "Tags", "There's nothing to tag in what's selected.")
+            self.note("There's nothing to tag in what's selected.")
             return
         TagDialog(self.window(), items + inside, describe_items(items, len(inside))).open()
         self.update_status()
@@ -6233,6 +6553,7 @@ class Pane(QWidget):
             targets = items + inside
             if not targets:
                 return
+            changing = [p for p in targets if has_tag(p, name) == remove]    # the ones this changes: Undo's list
             try:
                 n = tag_store().remove(targets, [name]) if remove else tag_store().add(targets, [name])
             except OSError as e:
@@ -6240,8 +6561,17 @@ class Pane(QWidget):
                 return
             tags_changed()
             what = f"{n:,} item{'s' if n != 1 else ''}"
-            self._airdrop_noted((f"Removed “{name}” from {what}." if remove else f"Tagged {what} “{name}”.") if n else
-                                (f"None of those have “{name}”." if remove else f"Those already have “{name}”."))
+            if not n:
+                self.note(f"None of those have “{name}”." if remove else f"Those already have “{name}”.")
+                return
+
+            def undo() -> str:
+                (tag_store().add if remove else tag_store().remove)(changing, [name])
+                tags_changed()
+                search_query.NAMES.forget()
+                return f"Put “{name}” back on {what}." if remove else f"Took “{name}” off {what} again."
+            self._undoable(f"Remove Tag “{name}”" if remove else f"Tag “{name}”", undo,
+                           f"Removed “{name}” from {what}." if remove else f"Tagged {what} “{name}”.")
         self._with_inside(paths, apply, ask)
 
     def toggle_tag(self, paths: list[str], name: str) -> None:
@@ -6743,7 +7073,7 @@ class Sidebar(QWidget):
         tag_store().forget_volumes()                   # a drive came or went: its tags with it
         selected = [i.data(0, PATH_ROLE) for i in self.tree.selectedItems()]
         self.tree.clear()
-        fav = self._section("Favorites")
+        fav = self._section("Places")                     # ("Favorites" is the hearted items, under Labels)
         self._collection(fav, "All Videos", VIDEOS, glyph("film", THEME.accent, 16),
                          "Every video in your home folder, newest first — shown on the From side")
         home = Path.home()
@@ -6795,7 +7125,9 @@ class Sidebar(QWidget):
             del child
         counts = sorted(tag_store().counts(), key=lambda x: x[0].casefold())
         if not counts:
-            it = QTreeWidgetItem(["Select files and press ⌘T"])
+            it = QTreeWidgetItem(["⌘T to tag files"])
+            it.setToolTip(0, "Select files or folders and press ⌘T to tag them — tags show up here, and in Photo "
+                             "Browser on the iPhone")
             it.setData(0, PATH_ROLE, "")
             it.setFlags(Qt.ItemFlag.ItemIsEnabled)
             it.setIcon(0, glyph("tag", THEME.tertiary, 16))
@@ -6923,7 +7255,8 @@ class ConfirmSheet(QDialog):
     def __init__(self, parent: QWidget, sources: list[str], dest: str, move: bool, verify: bool) -> None:
         super().__init__(parent, Qt.WindowType.Sheet if IS_MAC else Qt.WindowType.Dialog)
         self.setWindowModality(Qt.WindowModality.WindowModal)
-        self.setWindowTitle("Photo Browser for Mac")
+        n = len(sources)
+        self.setWindowTitle(f"{'Move' if move else 'Copy'} {n:,} Item{'s' if n != 1 else ''}")
         self.sources, self.dest = [Path(s) for s in sources], Path(dest)
         self.plan: engine.Plan | None = None
         self.setMinimumWidth(520)
@@ -7164,10 +7497,12 @@ class TransferPanel(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self, start_from: str | None, start_to: str | None) -> None:
         super().__init__()
-        self.setWindowTitle("Photo Browser for Mac")
+        self.setWindowTitle(app_identity.APP_NAME)
         self.settings = app_identity.settings()
+        self.undo = ui_extras.UndoStack()               # Edit ▸ Undo: renames, tags, Favorites / To AI
+        self.show_hidden = str(self.settings.value("showHidden", "false")) == "true"
         self.resize(1320, 820)
-        self.setMinimumSize(980, 600)
+        self.setMinimumSize(860, 600)
         self.queue: list[tuple[engine.Plan, bool, bool, str]] = []
         self.current: engine.Transfer | None = None
         self.caffeinate: subprocess.Popen | None = None
@@ -7185,6 +7520,8 @@ class MainWindow(QMainWindow):
         self.dst = Pane("To", self.settings, self.src.views)
         for pane in (self.src, self.dst):
             pane.activated.connect(self.set_active)
+            if self.show_hidden:
+                pane.set_hidden(True)
             pane.dropped.connect(lambda paths, dest: self.confirm_transfer(
                 paths, dest, self.settings.value("move", "true") == "true"))
             pane.location_changed.connect(lambda _p, pane=pane: self._location_changed(pane))
@@ -7268,6 +7605,7 @@ class MainWindow(QMainWindow):
         geo = self.settings.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
+        self._restore_layout()
         import menubar
         menubar.install(self, sys.modules[__name__])      # File, Edit, View, Go, Photos, Window, Help + shortcuts
         self.update_actions()
@@ -7288,6 +7626,7 @@ class MainWindow(QMainWindow):
                 or (str(ext[0]) if ext else home)
             self.dst.go(start if os.path.isdir(start) else (str(ext[0]) if ext else home))
         self.split = on
+        self.setMinimumSize(1060 if on else 860, 600)  # two panes each need room for a name and a search field
         if remember:
             self.settings.setValue("split", "true" if on else "false")
         self.dst.setVisible(on)
@@ -7323,6 +7662,7 @@ class MainWindow(QMainWindow):
         for p in (self.src, self.dst):
             p.set_active(p is pane)
         self.sidebar.select_path(pane.location)
+        self._title_for(pane)
 
     # -- tags
     def _tags_changed(self) -> None:
@@ -7347,7 +7687,88 @@ class MainWindow(QMainWindow):
     def _location_changed(self, pane: Pane) -> None:
         if pane.active:
             self.sidebar.select_path(pane.location)
+            self._title_for(pane)
         self.update_actions()
+
+    def _title_for(self, pane: Pane) -> None:
+        """The window is named for the folder it shows, as a Finder window is (and carries its path, so macOS
+        puts the folder's icon in the title bar)."""
+        loc = pane.location or ""
+        if loc and not pane.is_virtual and os.path.isdir(loc):
+            self.setWindowFilePath(loc)
+            self.setWindowTitle(os.path.basename(loc.rstrip("/")) or loc)
+        else:
+            self.setWindowFilePath("")
+            self.setWindowTitle(pane.title.text() or app_identity.APP_NAME)
+
+    # -- undo, the command palette, help
+    def undo_last(self) -> None:
+        said = self.undo.pop_and_undo()
+        if said:
+            self.active_pane.note(said)
+
+    def open_palette(self) -> None:
+        """Edit ▸ Find a Command… (⇧⌘P): every menu command in one searchable list."""
+        commands = [(label, a) for label, a in ui_extras.menu_commands(self.menuBar())
+                    if a.text() not in ("Find a Command…",)]
+        self._palette = ui_extras.CommandPalette(self, commands, THEME)
+        self._palette.open_over(self)
+
+    def open_help(self, tab: int = 0) -> None:
+        """Help: the guide and the keyboard shortcuts, in a window of its own."""
+        for w in _VIEWERS:
+            if isinstance(w, ui_extras.HelpWindow):
+                w.tabs.setCurrentIndex(tab)
+                w.show()
+                w.raise_()
+                w.activateWindow()
+                return
+        readme = Path(getattr(sys, "_MEIPASS", HERE)) / "README.md"       # beside the code, or inside the built app
+        extra = [("Open (in the file list)", "Return"), ("Quick Look (in the file list)", "Space"),
+                 ("Clear the search / back to the folder", "Esc"), ("Select a range", "⇧-click"),
+                 ("Add to the selection", "⌘-click"), ("Viewer: next / previous", "→ / ←"),
+                 ("Viewer: play or pause", "Space"), ("Viewer: close", "Esc")]
+        win = ui_extras.HelpWindow(self, readme, ui_extras.menu_commands(self.menuBar()), THEME, extra)
+        win.tabs.setCurrentIndex(tab)
+        _VIEWERS.append(win)
+        win.destroyed.connect(lambda _=None, w=win: _VIEWERS.remove(w) if w in _VIEWERS else None)
+        win.show()
+
+    def about(self) -> None:
+        box = QMessageBox(self)
+        box.setWindowTitle(f"About {app_identity.APP_NAME}")
+        icon = QPixmap(str(Path(getattr(sys, "_MEIPASS", HERE)) / "photo_browser_icon.png"))
+        if not icon.isNull():
+            box.setIconPixmap(icon.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio,
+                                          Qt.TransformationMode.SmoothTransformation))
+        box.setText(f"<b>{app_identity.APP_NAME}</b>")
+        box.setInformativeText("The Mac side of Photo Browser on the iPhone: the same drive, folders, tags, Favorites "
+                               "and covers — with safe transfers and the tools that are easier at a desk.\n\n"
+                               "Nothing is uploaded anywhere except by the tools that say so (the downloaders, "
+                               "Edit and Create with AI).")
+        box.exec()
+
+    def show_welcome(self, first: bool = False) -> None:
+        """The first launch's few lines (Help ▸ Welcome… shows them again)."""
+        ext = external_volumes()
+        dlg = ui_extras.WelcomeDialog(self, THEME, ext[0].name if ext else "")
+
+        def chosen(what: str) -> None:
+            if what == "drive" and ext:
+                self.src.go(str(ext[0]))
+            elif what == "split":
+                self.set_split(True)
+        dlg.chosen.connect(chosen)
+        dlg.finished.connect(lambda _r: self.settings.setValue("welcomed", "true"))
+        dlg.finished.connect(dlg.deleteLater)
+        dlg.open()
+
+    def set_show_hidden(self, on: bool) -> None:
+        self.show_hidden = bool(on)
+        self.settings.setValue("showHidden", "true" if on else "false")
+        for pane in (self.src, self.dst):
+            pane.set_hidden(self.show_hidden)
+        self.active_pane.note("Showing hidden files." if on else "Hidden files are hidden again.")
 
     def restyle(self) -> None:
         self.src.restyle()
@@ -7398,6 +7819,8 @@ class MainWindow(QMainWindow):
     def transfer_selection(self, move: bool) -> None:
         if not self.split:                             # never into a pane you can't see: show it first
             self.set_split(True)
+            self.src.note(f"Choose where they go in the pane on the right, then press {'Move' if move else 'Copy'} "
+                          "again.")
             return
         paths = self.src.selected_paths()
         if paths and self.dest:
@@ -7656,7 +8079,30 @@ class MainWindow(QMainWindow):
         if self.caffeinate is not None:
             self.caffeinate.terminate()
         self.settings.setValue("geometry", self.saveGeometry())
+        self._save_layout()
         event.accept()
+
+    def _layout_splitter(self) -> "QSplitter | None":
+        """The splitter between the sidebar and the panes."""
+        w = self.sidebar.parentWidget()
+        return w if isinstance(w, QSplitter) else None
+
+    def _save_layout(self) -> None:
+        """The sidebar's width and the list's column widths, for the next launch."""
+        sp = self._layout_splitter()
+        if sp is not None:
+            self.settings.setValue("layout/sidebar", sp.saveState())
+        self.settings.setValue("layout/columns", self.src.list.header().saveState())
+
+    def _restore_layout(self) -> None:
+        sp, state = self._layout_splitter(), self.settings.value("layout/sidebar")
+        if sp is not None and state is not None:
+            sp.restoreState(state)
+        cols = self.settings.value("layout/columns")
+        if cols is not None:
+            for pane in (self.src, self.dst):
+                pane.list.header().restoreState(cols)
+                pane._columns_set = True
 
 
 # ============================================================================ main
@@ -7768,8 +8214,8 @@ def open_themes(parent: QWidget | None = None) -> None:
     dlg = theme_window.ThemeDialog(parent, current_look(), set_look, theme_window.Extras(
         mine=my_themes, save=save_my_theme, remove=remove_my_theme, seasonal=seasonal_on, december=december_wears,
         set_seasonal=set_seasonal, surprise=surprise_look, chosen=chosen_look, today=_today))
-    dlg.exec()
-    dlg.deleteLater()
+    dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    dlg.open()                 # over its own window only (a sheet on the Mac) — the rest of the app stays usable
 
 
 def set_look(look: "themes.Look | None") -> None:
@@ -7812,7 +8258,12 @@ def main() -> None:
     season_timer = QTimer(app)                               # Follow the Seasons: a new day, a new theme
     season_timer.timeout.connect(_season_tick)
     season_timer.start(10 * 60 * 1000)
+    icon = Path(getattr(sys, "_MEIPASS", HERE)) / "photo_browser_icon.png"
+    if icon.is_file():
+        app.setWindowIcon(QIcon(str(icon)))                  # run from the code: the Dock shows the app's icon too
     win.show()
+    if str(win.settings.value("welcomed", "")) != "true":    # the first launch only
+        QTimer.singleShot(400, lambda: win.show_welcome(first=True))
     sys.exit(app.exec())
 
 

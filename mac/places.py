@@ -13,8 +13,8 @@ so its index works here as it is:
 - **The drive's** `.Photo Browser Metadata/places.json` — the iPhone's index, which every metadata backup to the
   drive carries: months of geocoding, read (never written) by Photo Browser for Mac. The nearest folder above holding
   `.Photo Browser Metadata` is used, as for shared tags.
-- **Photo Browser for Mac's own**, `~/Library/Application Support/Photo Browser for Mac/places.json` (the same shape): what Safe
-  Finder read and named itself — GPS from the files (`media_info`: EXIF for photos, QuickTime's ISO 6709 for
+- **Photo Browser for Mac's own**, `~/Library/Application Support/Photo Browser for Mac/places.json` (the same shape): what Photo Browser for
+  Mac read and named itself — GPS from the files (`media_info`: EXIF for photos, QuickTime's ISO 6709 for
   videos) and names from Apple's geocoder through `geocode_helper.swift` (CLGeocoder, the iPhone's labels, one
   request every 1.2 s, at most `NAME_LIMIT` a pass — a well-travelled folder names the rest next time). The
   helper is built once with `swiftc` like Photo Browser for Mac's others; a failed build leaves `geocode_helper.log`.

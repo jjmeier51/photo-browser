@@ -830,8 +830,8 @@ class FanfixWindow(QMainWindow):
 
     # ------------------------------------------------------------------ troubleshooting
     def save_troubleshooting(self) -> None:
-        """The last run — what the page loaded and showed, what was found, what failed — to ~/Library/Logs/Safe
-        Finder. It holds addresses from the person's own account: it stays on this Mac."""
+        """The last run — what the page loaded and showed, what was found, what failed — to ~/Library/Logs/Photo Browser for
+        Mac. It holds addresses from the person's own account: it stays on this Mac."""
         folder = app_identity.logs()
         try:
             folder.mkdir(parents=True, exist_ok=True)

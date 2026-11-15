@@ -11,8 +11,8 @@ import CryptoKit
 ///
 /// **One record, both apps.** `<person>/simpcity/.simpcity.json` lists every file downloaded from the
 /// person's threads (`goonbox:<id>` / `turbo:<id>` → file, post, post time) and each thread's address
-/// and last page read (and, under "failed", what didn't download — the next run tries it again). Safe
-/// Finder and this app read and write the same file, so whatever one of them
+/// and last page read (and, under "failed", what didn't download — the next run tries it again). Photo Browser for
+/// Mac and this app read and write the same file, so whatever one of them
 /// downloaded the other never fetches again. Files are named `<id>.<ext>`, so a file in the folder
 /// counts as done even when the record doesn't list it; a file deleted from the folder stays deleted.
 /// Every save re-reads the file and merges, and the JSON is handled as plain dictionaries so a field
@@ -34,8 +34,8 @@ import CryptoKit
 /// (XenForo's reactions bar: the names shown plus "and N others" — the post's own count, not the "Reaction
 /// score" beside a member's name, which is the member's lifetime total), kept by post under `reactions`
 /// (post id → score and when it was read; the newer reading wins a merge). A file takes its post's score
-/// (`Record.scores`), and the folder can be sorted by it (`SimpCityScores`, the Reaction Score sort). Safe
-/// Finder's "Get Reaction Scores" reads a folder's threads again for them alone.
+/// (`Record.scores`), and the folder can be sorted by it (`SimpCityScores`, the Reaction Score sort). Photo Browser for
+/// Mac's "Get Reaction Scores" reads a folder's threads again for them alone.
 ///
 /// **Videos on file hosts** (`SimpCityHosts`): a post's pixeldrain/gofile/cyberdrop/bunkr/filester/
 /// fileditch videos are keyed `<host>:<file id>` and named `<host>-<file id>.<ext>`; the links are kept

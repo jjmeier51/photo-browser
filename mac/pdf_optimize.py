@@ -556,8 +556,8 @@ class Result:
 
 def optimize(path: str, target: str, password: str = "", progress: Callable[[str], None] | None = None,
              stop: threading.Event | None = None, place: Callable[[str, str, str], str] | None = None) -> Result:
-    """Makes the new PDF beside `path` (module notes). `place(temp file, folder, name)` puts it there (Safe
-    Finder's drive-safe `simpcity.place`, which never writes over a file); returns where it went. Raises
+    """Makes the new PDF beside `path` (module notes). `place(temp file, folder, name)` puts it there (Photo Browser for
+    Mac's drive-safe `simpcity.place`, which never writes over a file); returns where it went. Raises
     ValueError with why when it can't be done, Stopped when stopped."""
     say = progress or (lambda _t: None)
     doc = open_document(path, password)

@@ -94,6 +94,10 @@ class MetadataDialog(QDialog):
 
         self.setWindowTitle("Edit Metadata")
         self.resize(860, 900)
+        screen = (parent.screen() if parent is not None else None) or self.screen()
+        if screen is not None:                             # never taller than the display (a 13-inch one is ~800)
+            room = screen.availableGeometry()
+            self.resize(min(860, room.width() - 40), min(900, room.height() - 60))
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 16, 20, 14)
         lay.setSpacing(10)
@@ -449,7 +453,7 @@ class MetadataDialog(QDialog):
         self.media, self.skipped = media, skipped
         self._title()
         if media and self.tool_path:
-            self.summary.setText(f"Reading what {len(media):,} file{'s' if len(media) != 1 else ''} hold now…")
+            self.summary.setText(f"Reading what {len(media):,} file{'s hold' if len(media) != 1 else ' holds'} now…")
             self.bar.setRange(0, len(media))
             self.bar.setValue(0)
             self.bar.show()

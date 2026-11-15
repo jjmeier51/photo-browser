@@ -322,8 +322,8 @@ Pillow, `resolveGeneration`'s single/stacked rules, `compatible` tunes, faceid r
 to 2K, Flux without `prompt[resolution]`, the nearest supported `aspect_ratio`, and the trigger phrase
 prepended after the prefix — so a Flux LoRA prompt reads "ohwx woman <lora:11:1> …" on both.
 - **Where things live**: the key in the Keychain (`security add-generic-password -s "Photo Browser for Mac Astria"`;
-  off a Mac a 0600 field in the store), everything else in `~/Library/Application Support/Safe
-  Finder/astria.json` (tune overrides, `run_edit`/`run_create`, history + favorites — not shared with the
+  off a Mac a 0600 field in the store), everything else in `~/Library/Application Support/Photo Browser for
+  Mac/astria.json` (tune overrides, `run_edit`/`run_create`, history + favorites — not shared with the
   iPhone's — reference tunes, saved browser images by URL, the last save folder, pending jobs).
 - **Saving** is `_encode` (Pillow): the result made upright (Astria can return an orientation-flagged JPEG),
   the source's EXIF/GPS carried (pointer tags, orientation, sizes and maker notes dropped), the capture date
@@ -1595,8 +1595,8 @@ what's saved). One worker thread per run, files one after another, each typeset 
 `simpcity.place`d beside its text ("<stem>.pdf" / "<stem> (for iPhone).pdf", never over a file); tags carried
 (`TagStore.carry`); Open → `Pane.view_pdf`. bookify is imported through a plain `import` in `_bookify()` (so
 PyInstaller takes it in — `importlib.import_module` would hide it); `--collect-all reportlab --collect-data pyphen`
-in the app build. **Dependencies**: `reportlab>=4.0`, `pyphen>=0.14` added to `requirements.txt`; `Safe
-Finder.command` installs them into an existing `.venv` quietly and non-fatally (Photo Browser for Mac must still open
+in the app build. **Dependencies**: `reportlab>=4.0`, `pyphen>=0.14` added to `requirements.txt`; `Photo Browser for
+Mac.command` installs them into an existing `.venv` quietly and non-fatally (Photo Browser for Mac must still open
 offline). **Bug found in use (Nov 4): "Make Book" greyed out** in the built app — `build_app.sh` only
 installed requirements into a *new* `.venv` (or one missing PySide6/numpy), so an existing one never got ReportLab,
 `--collect-all reportlab` collected nothing, and the window disabled the button with a grey line saying "build it
@@ -3256,8 +3256,8 @@ score" in the member sidebar (that member's lifetime total). `reactions(posts)` 
 link the downloader takes (a chatty thread's other posts would bloat the record); the record stores them by
 post under `reactions` (`{"score", "checked"}`; merge: newer `checked` wins per post), and
 `Record.scores()` gives file → score (a `same_as` copy's post counts for the kept file; the highest wins).
-Every page read (download runs on both apps) notes the scores it saw. **Get Reaction Scores** (Safe
-Finder's right-click on a person folder or its `simpcity` folder, shown only where a record is —
+Every page read (download runs on both apps) notes the scores it saw. **Get Reaction Scores** (Photo Browser for
+Mac's right-click on a person folder or its `simpcity` folder, shown only where a record is —
 `simpcity_scores_folder`) opens the window with `scores_only`: `_score_crawl` reads every page of every
 thread in the record through the same paced loop as a download (`_pages`, which `_crawl` now uses too),
 saves every 20 pages, and keeps a stopped thread's page in QSettings (`scores/<folder>|<thread id>`) to
@@ -3446,8 +3446,8 @@ by Files and every zip-capable app, so the phone would ask "which app?" each tim
   `swiftc` — stock Python can't reach AppKit) and falls back to `open -R` + "Share ▸ AirDrop" when
   swiftc is missing. Exit codes: 0 sent, 3 cancelled, 2 unavailable. The pornpics browser's
   "AirDrop to iPhone" button, the star downloader's `--airdrop` (the galleries that got new photos
-  this run + `pornstar.json`, as one archive of the star folder; `--airdrop-all` for all) and Safe
-  Finder's "AirDrop to iPhone…" context item all call `archive_items`/`archive_folder` + `send` on
+  this run + `pornstar.json`, as one archive of the star folder; `--airdrop-all` for all) and Photo Browser for
+  Mac's "AirDrop to iPhone…" context item all call `archive_items`/`archive_folder` + `send` on
   a thread. `build_app.sh` bundles the tool and the helper source.
 - `Config/Info.plist` declares the exported type `jayymei.PhotoBrowser.gallery-archive`
   (`.pbgallery`, conforms to `public.data`/`public.archive` — deliberately *not* `public.zip-archive`,
@@ -3879,8 +3879,8 @@ left it makes the folder the usual way and bumps `photoBrowser.foldersWithoutSpa
 Health ▸ New folders shows next to the spares left (orange under 10) with "I've Run the Fix on the
 Mac" to clear it. `DriveWriter.copyItem` of a folder onto the drive builds it folder by folder with
 `createDirectory`, and `DriveWriter.moveItem` (used by FileActions' move fallbacks) does cross-volume
-moves through that copy — `FileManager.moveItem` across volumes would make the folders anew. Safe
-Finder does the same through `mac/spare_folders.py`: New Folder and every folder of a copied tree
+moves through that copy — `FileManager.moveItem` across volumes would make the folders anew. Photo Browser for
+Mac does the same through `mac/spare_folders.py`: New Folder and every folder of a copied tree
 (including the hidden ".incoming" build folder, which is then renamed into place) take a spare; the
 confirmation says how many new folders a transfer makes and whether the spares cover them, and the
 result says how many were made without one plus the command that fixes them. Each spare costs one
