@@ -1103,6 +1103,7 @@ class EditorWindow(QDialog):
         for key, name, needs in pe.FACE_SLIDERS:
             r = SliderRow(name, 0, 100)
             r.setProperty("needs", needs)
+            r.setEnabled(not needs)                    # until the face finder has looked
             r.grabbed.connect(self.begin)
             r.moved.connect(lambda v, resting, key=key: self._face_moved(key, v, resting))
             self.face_rows[key] = r
@@ -1149,6 +1150,12 @@ class EditorWindow(QDialog):
         threading.Thread(target=work, daemon=True).start()
 
     def _faces(self, found, why: str) -> None:
+        if why == "downloaded":                        # the models are here now: look
+            self.face_get.hide()
+            self._faces_asked = False
+            self._look_for_faces()
+            return
+        self.face_get.setEnabled(True)
         ok = found is not None
         self.face_get.setVisible(why == "missing")
         if ok:
@@ -1181,23 +1188,10 @@ class EditorWindow(QDialog):
             try:
                 import faces
                 faces.download()
-                self._faces_asked = False
-                QTimer.singleShot(0, self._look_for_faces)
+                sig.faces.emit(None, "downloaded")
             except Exception as e:  # noqa: BLE001
-                sig.faces.emit(None, str(e))
+                sig.faces.emit(None, str(e) or type(e).__name__)
         threading.Thread(target=work, daemon=True).start()
-        self._poll = QTimer(self)
-        self._poll.setInterval(500)
-
-        def check() -> None:
-            import faces
-            if faces.installed():
-                self._poll.stop()
-                self.face_get.hide()
-                self._faces_asked = False
-                self._look_for_faces()
-        self._poll.timeout.connect(check)
-        self._poll.start()
 
     # -- Text
     def _text_tab(self) -> QWidget:

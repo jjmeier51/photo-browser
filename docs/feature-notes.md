@@ -2578,6 +2578,140 @@ real library** — `people.TUNING` is the one place to turn them, and "Same Pers
 a too-cautious setting shows up. Not done: faces in videos, Apple's Vision as a faster detector, the viewer
 drawing face boxes, undo for merges.
 
+## 6am. Mac: the photo editor, collages, Stitch Videos, Receive from iPhone, frame stepping (Nov 15, 2026)
+
+Five additions to Photo Browser for Mac. User-facing descriptions are in `mac/README.md` (which is also the
+in-app guide); this is how they're built and what must stay true.
+
+### The photo editor (`mac/photo_edit.py`, `mac/photo_text.py`, `mac/photo_editor_window.py`)
+
+Asked for: "advanced photo editing… what apps like Hypic and Facetune are able to do", HEIC handled properly,
+all metadata and tags passed on, three save choices, at least 40 filters, text overlays.
+
+- **One description, two sizes.** Everything is a `photo_edit.Edit` (plain dataclasses → dict, so an undo step
+  is a dict and equality is `==`): `Geometry` (quarter turns, flips, straighten, crop as fractions), a look and
+  its amount, `adjust` (−100…100 by key, plus `hsl` by band), `strokes`, `face`, `Focus`, `Frame`, `texts`.
+  The window renders it on a 1,280 px copy; saving runs the same functions on every pixel. **Radii are
+  fractions of the long side** so both look alike — keep it that way when adding an effect (a radius in pixels
+  would look different on screen and in the file). Sharpen and grain are finer than a preview can show.
+- **Fixed order**: strokes → face → geometry → look → adjustments → focus blur → frame → text. Strokes are
+  stored in the *original's* coordinates (`to_original` maps a canvas point back through the crop, straighten,
+  flips and turns), so cropping after retouching leaves the retouching where it was. Text is positioned in
+  fractions of the final (framed) picture.
+- **Filters are recipes** (`LOOKS`: 52 `Look(name, group, recipe)`), run through `apply_adjust` — a filter
+  can't do anything the sliders can't, plus a few recipe-only keys (`mono`, `mix`, `duo`, `tint_hue`,
+  `fade_rgb`, `chroma`, `scan`, `flash`). Add a look by adding a line.
+- **Arithmetic**: float32 RGB 0…1 in the photo's own colour space; exposure and white balance in linear light;
+  highlights/shadows by a blurred-luminance mask and a luminance ratio; clarity/texture/sharpen as luminance
+  differences added to all channels; vibrance weighted by (1 − saturation) and eased on skin hues; dehaze by
+  the dark-channel prior; noise reduction and skin smoothing by a guided filter (`guided`, Gaussian windows).
+  `gauss` blurs wide radii on a reduced copy (cost independent of radius). numpy and Pillow only — no OpenCV,
+  no SciPy. `max3` / `min3` exist because `arr.max(axis=2)` is ten times slower on a 3-long axis.
+- **Brushes** (`apply_stroke`): a soft mask drawn with Pillow along the stroke, then the effect under it. Heal
+  hands the mask to `inpaint.remove_region` (Remove Objects' fill). Reshape and the face warps build one
+  backward map (`_Warp`: `push`, `bulge`) and resample **once** — pushing pixels step by step would blur.
+- **Face** (`apply_face`): Smooth Skin uses a skin-colour mask (Cb/Cr), no model. The rest use
+  `faces.detect`'s five points (the People feature's YuNet — the editor offers the same download): eye bulge,
+  jaw / nose / mouth-corner pushes scaled by the distance between the eyes; eye and teeth masks from
+  saturation and brightness inside small ellipses (the teeth mask excludes "red well over green" — lips).
+  Five points can't give a real jawline; the sliders are deliberately small. No face data is stored.
+- **Text** (`photo_text.py`) is drawn with Qt, because the fonts are the Mac's: `paint(painter, layer, w, h)`
+  is the same call for the preview and for the file. The fill is drawn as *text*, not outlines, so **emoji
+  keep their colour** (stickers are emoji layers); outline, shadow and glow come from the text's path, blurred
+  with `photo_edit.gauss`. `onto_array` runs on the main thread at save.
+- **The window**: a worker thread (`_Renderer`) with a one-slot queue — only the newest request matters; each
+  stage's result is kept and keyed by its inputs, so moving a slider re-does only what follows it; a rough
+  520 px picture first while a slider is down. Retouch states are snapshotted per stroke (undo is instant).
+  The Crop tab shows the photo uncropped under the box; the brush tabs show it without the frame.
+- **Saving** = `batch_crop.open_upright` → `photo_edit.render` → text → `batch_crop.encode_like` →
+  `write_beside(path, data, "edited")` or `write_in_place`. That path is what keeps the format (HEIC → HEIC
+  via pillow-heif, quality 92), the ICC profile, EXIF (orientation set to 1, pixel size corrected), GPS, XMP,
+  file dates, permissions and xattrs — **don't write an edited photo any other way**. `Pane.edit_photo`'s
+  `done` carries the tags (`tag_store().carry`) and adds `edited` (+ `cropped`, `upscaled`).
+- **Save and Upscale**: `UpscaleChoice` asks (keep / overwrite, model from `ai_upscale.photo_models`, 2/3/4×,
+  texture), the edit is saved, then `upscale_window.UpscaleRun` runs on the saved file in place
+  (`UpscaleRun` and `ai_upscale.upscale` now take a `factor`).
+- **HDR**: a PQ/HLG photo (`thumb_color.curve_of`) is tone-mapped to standard range on opening and saved
+  without its HDR profile; the window says so. An iPhone HEIC's gain map is not carried (Pillow doesn't
+  read or write it) — the saved photo is its standard-range picture.
+- Tested here: every look and slider (finite, in range, changes the picture), the window through every tab
+  offscreen, JPEG save-as-new and HEIC overwrite with EXIF / GPS / ICC / dates compared by ExifTool, Save and
+  Upscale against a stand-in engine, the face tools on one public-domain portrait. **Not tested: on a Mac** —
+  the look of the Mac's fonts and emoji, pinch-zoom, a real Upscayl engine, memory on 48 MP photos (≈3 GB
+  while saving; float32 copies of the whole photo).
+
+### Collages (`mac/collage.py`, `mac/collage_window.py`)
+
+`layouts(n)` generates them: every composition of n into 1–4 bands of up to 4 (5 in a single strip) cells, as
+rows and as columns, plus weighted variants ("large" for a lone photo, "evened" for uneven bands) and the
+one-large-with-an-L for 6 and 8 — deduplicated, ranked most-balanced first, capped at `MOST_LAYOUTS` (40).
+Cells are unit-square rects, so a layout fits any of the 32 `SHAPES`. `render` cover-fits each photo
+(`crop_box`, with a per-cell `View` for slide and zoom — clamped inside the photo: a float that lands a hair
+outside makes Pillow refuse the box). Photos are converted to standard colours (`thumb_color.standard`) since
+they may differ in profile; the collage is sRGB. `oldest()` picks the earliest capture date (else file date)
+and the earliest photo that has a place; `save` writes them as EXIF and sets the file's dates
+(`clone_drive.set_dates` — creation and modification together, #6ac), through `net_fetch.put`.
+`Pane.make_collage` carries every source's tags and adds `collage`.
+
+### Stitch Videos (`mac/video_stitch.py`, `mac/stitch_window.py`, `mac/stitch_helper.swift`)
+
+Asked for: "The resulting video takes the oldest date of the combined videos… also inherited other metadata
+like places location and tags."
+
+- `probe` (ffprobe + `media_info.video_info` for the capture date and place) → `plan`: **stream copy** when
+  every clip's `kind()` matches (codec, shown size, turn, pixel format, frame rate, time base, audio codec /
+  rate / channels) and the codec is H.264 or HEVC — ffmpeg's concat demuxer, `-c copy`, `-tag:v hvc1` for
+  HEVC; otherwise a `filter_complex` (scale-to-fit + pad, `fps`, `setsar`, silence via `anullsrc` for clips
+  without sound, `concat`) into libx264 crf 17 (videotoolbox when ffmpeg has no libx264), or 10-bit libx265 /
+  hevc_videotoolbox when every clip is the same HDR curve. A copy join that ffmpeg rejects is retried
+  re-encoded. The result's length is checked against the clips' sum.
+- **Inheritance** (`inherit`, `_metadata_args`, `finish`): the oldest *dated* clip wins (a clip whose date is
+  only its file's doesn't beat one that knows when it was shot). ffmpeg itself writes `creation_time`,
+  `com.apple.quicktime.creationdate` and the ISO 6709 location (`use_metadata_tags`), so the date and place
+  don't depend on ExifTool; with ExifTool, the oldest clip's make / model / title / description / keywords are
+  copied and the date and place are written again in the tags the iPhone reads
+  (`metadata_edit.date_args` / `place_args`). xattrs from the oldest clip (not the tag marker, not on exFAT);
+  file dates by `set_dates`. `Pane.stitch_videos` carries every clip's tags and adds `stitched`.
+- Written to a hidden sibling and renamed when whole (straight to its name on exFAT); Stop or a failure
+  removes it. Never over an existing file ("name (stitched) 2.mp4").
+- `stitch_helper.swift` is the no-ffmpeg path (AVMutableComposition; passthrough when sizes and transforms
+  match, else a video composition fitting each clip to the first one's frame). **It has never been compiled**
+  — written in a Linux sandbox. It is a separate file from `video_helper.swift` on purpose: if it doesn't
+  build, only this fallback is lost. ffmpeg is tried first.
+- Tested here with ffmpeg on generated clips: copy join, mixed re-encode, date / place / make-model / tags,
+  ordering, stop. Not tested: real iPhone clips (rotation metadata through a copy join, HDR, spatial audio).
+
+### Receive from iPhone (`mac/airdrop_receive.py`, `mac/airdrop_window.py`)
+
+Asked for: "easily receive Airdropped photos/videos and add them to the existing "From iPhone" folder".
+
+- macOS gives an app no AirDrop hook and no choice of folder: files land in `~/Downloads`. What marks them is
+  `com.apple.quarantine`, whose third field is the receiving agent — **`sharingd`** for AirDrop. `find()`
+  lists the photos/videos in Downloads with that agent (or all of them, when asked), skipping anything that
+  changed in the last two seconds.
+- "From iPhone" appears nowhere in the code before this — it's a folder on the person's drive.
+  `find_destination` takes the remembered path, else a folder of that name (case- and space-blind) at or above
+  the pane's folder, else at the drive's top, then two levels down; it **never creates one** (the window
+  offers to, via `spare_folders.make_dir`). The Mac's own disk is never scanned for it.
+- `receive`: `net_fetch.put` → **read back, SHA-256 against the original** → `clone_drive.put_dates` → only
+  then the original to the Trash (`MainWindow.trash_item`) or left. Same name + same content = skipped
+  ("already there", and the original still goes); same name, different content = "name 2.ext".
+- `Watcher` (in `MainWindow`): a `QFileSystemWatcher` on Downloads plus a 30 s tick; announces each arrival
+  once (`Pane.airdrops_arrived` → a toast with "Move to “From iPhone”", or the move itself with
+  `airdrop/auto`).
+- Tested here with a stand-in Downloads folder and a faked agent (Linux has no quarantine notes).
+  **Unverified on a Mac**: that `sharingd` is the agent on the person's macOS, the Downloads permission
+  prompt, and the watcher's timing during a large AirDrop. If nothing is listed, "Show every photo and video
+  in Downloads" still works.
+
+### The viewer: frame by frame, Use as Album Cover (`mac/media_viewer.py`)
+
+`,` and `.` already stepped a frame; now there are buttons beside Play (auto-repeat), ⇧← / ⇧→, and the time
+shows to the millisecond after a step (`_exact_time`, cleared on play or a new item). `Hooks.set_cover(path,
+seconds)` → `Pane.cover_from_viewer`: a photo as it is, a video's current frame through
+`frame_export.frame_image`. The context menu's "Use as Cover of …" is now "Use as Album Cover" (the iPhone's
+words), and it's in the Photos menu.
+
 ## 6ab. Photo Browser for Mac Upscale Video (1080p / 4K) — `mac/video_tools.py`, `mac/video_upscale_window.py`, `mac/video_helper.swift` (Nov 10, 2026)
 
 The iPhone's video upscale (`MediaEditing.upscaleVideo`, §6f) on the Mac: right-click videos ▸ **Upscale Video…**

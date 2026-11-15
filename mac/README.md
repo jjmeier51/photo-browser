@@ -280,8 +280,8 @@ Everything Photo Browser for Mac does is in its menus, acting on the pane you're
 
 - **File** — New Folder ⇧⌘N, Open ⌘O (or ⌘↓), Open With Default App, Quick Look (Space in the list), Show in
   Finder, Rename… F2, Rename Files…, Duplicate ⌘D, Copy / Move to the Other Side ⇧⌘C / ⇧⌘M (in one window they
-  open Split View and say what to do next), AirDrop to iPhone, Make Book PDF, Clone Drive to a New SSD, Move to
-  Trash ⌘⌫, Close Window ⌘W, Quit ⌘Q.
+  open Split View and say what to do next), AirDrop to iPhone, **Receive from iPhone… ⇧⌘I**, Make Book PDF, Clone
+  Drive to a New SSD, Move to Trash ⌘⌫, Close Window ⌘W, Quit ⌘Q.
 - **Edit** — **Undo ⌘Z** (the last rename — one or many — tag, or Favorite / To AI change; the menu says which),
   Copy Name, Copy Path ⌥⌘C, Select All, Find ⌘F, **Find a Command… ⇧⌘P**, Tags… ⌘T.
 - **View** — as Icons / List / Photo Grid ⌘1–3, Tight Icons, Theme ▸, Folder Covers, Split View ⌘\\, Videos at
@@ -290,9 +290,9 @@ Everything Photo Browser for Mac does is in its menus, acting on the pane you're
 - **Go** — Back ⌘[, Forward ⌘] (a mouse's side buttons too), Enclosing Folder ⌘↑, **Go to Folder… ⇧⌘G**, Home,
   Desktop, Downloads, Pictures, All Videos, Empty Folders, Favorites, To AI, Drives ▸.
 - **Photos** — Edit Metadata ⌘I, Favorite ⇧⌘F, To AI ⇧⌘A (they read Unfavorite / Remove To AI when the selection
-  already is), Find Duplicates…, then the tools in groups: **Adjust ▸** (Crop, Rotate, Convert WebP to JPEG),
-  **Retouch ▸** (AI Upscale 2×, Erase Area, Remove Watermark, Remove Objects), **Video ▸** (Export All Frames,
-  Upscale Video), **CapCut ▸**, **AI ▸** (Edit / Create with AI, Astria.ai Browser, Make AI Model, AI Models),
+  already is), Use as Album Cover, Find People…, Find Duplicates…, **Edit Photo… ⌘E**, **Make Collage…**, then
+  the tools in groups: **Adjust ▸** (Crop, Rotate, Convert WebP to JPEG), **Retouch ▸** (AI Upscale 2×, Erase
+  Area, Remove Watermark, Remove Objects), **Video ▸** (**Stitch Videos**, Export All Frames, Upscale Video), **CapCut ▸**, **AI ▸** (Edit / Create with AI, Astria.ai Browser, Make AI Model, AI Models),
   **Download ▸** (SimpCity, Instagram, Facebook, TikTok, Fanfix, taylorpictures.net).
 - **Window** — Minimize, Zoom, Bring All to Front, and every viewer and tool window that's open.
 - **Help** — the guide and the keyboard shortcuts in a window with a search field, Find a Command…, Welcome…,
@@ -401,7 +401,8 @@ Folders remember how they were last shown, so a folder you looked at as loose ic
 **Folder covers** (`folder_covers.py`). A folder shows a picture instead of a plain folder icon: the cover
 chosen for it, else the first photo or video inside it (looking into its subfolders if it only holds
 folders). Right-click a folder ▸ **Choose Cover…** (or **Remove Cover**), or right-click any photo or video ▸
-**Use as Cover of “<its folder>”**. View ▸ Folder Covers turns the pictures off.
+**Use as Album Cover** (also Photos ▸ Use as Album Cover, and ⋯ in the viewer — where a video gives the
+frame that's on screen). View ▸ Folder Covers turns the pictures off.
 Covers are **shared with Photo Browser on the iPhone**: they're kept on the drive (in its hidden
 `.Photo Browser Metadata` folder), so a cover chosen here is the folder's cover in the app and the covers
 set in the app show here. When both have chosen one, the later choice wins. (The app picks a random photo
@@ -446,6 +447,11 @@ reaction score top left while sorting by it); a folder shows the first photo or 
 name across the bottom. The size slider sets how many columns. A selected tile lightens and gets the
 iPhone's blue check; dragging from a tile that isn't selected draws a selection box (from a selected one it
 drags the files, as everywhere else). Each folder remembers it, like icons and list.
+
+**One frame at a time**: in the viewer, the two buttons either side of Play step a video one frame back or
+forward (hold one down and it keeps going) — also **,** and **.**, or **⇧←** and **⇧→**. The time then shows to
+the millisecond, with the frame number when you point at it. **⋯ ▸ Use as Album Cover** makes the photo — or
+the video frame you've stopped on — the cover of its folder; **⋯ ▸ Edit Photo…** opens the photo editor.
 
 **Double-click a photo or video** (or press Return) — in any view — and it opens in the viewer instead of
 Preview: one item at a time on black, in the folder's order (or just the ones you picked, if you picked
@@ -1023,6 +1029,124 @@ takes a few seconds; the bar shows how far it's got. Everything happens on this 
 It works best when what's behind the object is like something else in the photo (sky, grass, water, a wall, a
 crowd); a unique thing hidden behind it can't be known, and gets the most plausible fill from around it. Draw
 the lasso a little outside the object, with its shadow if it has one.
+
+### The photo editor — filters, adjustments, retouch, text (`photo_editor_window.py`, `photo_edit.py`, `photo_text.py`)
+
+Right-click a photo ▸ **Edit ▸ Photo Editor…** (**⌘E**), Photos ▸ Edit Photo…, or ⋯ ▸ Edit Photo… in the viewer.
+What Hypic, Facetune, Snapseed and Lightroom do on a phone, done to the photo where it lives. The photo is on
+the left; seven tabs on the right:
+
+- **Filters** — 52 looks in ten groups (Film, Portrait, Black & White, Vivid, Moody, Warm, Cool, Vintage,
+  Pastel, Duotone), each shown on your photo, with a **Strength** slider. A filter is a recipe of the
+  adjustments below, so the adjustments go on top of it.
+- **Adjust** — **Auto**, then Exposure, Brightness, Contrast, Highlights, Shadows, Whites, Blacks; Saturation,
+  Vibrance, Warmth, Tint; Sharpen, Clarity, Texture, Dehaze, Noise Reduction; Fade, Grain, Vignette, Glow;
+  Split Tone (a colour for the shadows, one for the highlights); eight **Colour Bands** (red … magenta) with
+  Hue, Saturation and Lightness each; Black and White. Double-click a slider's name to put it back.
+- **Crop** — a box with twelve shapes (Freeform, Original, 1:1, 4:5, 5:4, 3:4, 4:3, 2:3, 3:2, 9:16, 16:9, 2:1),
+  turn left / right, flip either way, and **Straighten** (the photo is zoomed just enough to stay full).
+- **Retouch** — brushes you paint with: **Smooth** (skin, noise), **Heal** (paint over a spot, a wire, a stray
+  hair — it's filled from the photo, the same fill as Remove Objects), **Whiten** (teeth, eyes), **Details**,
+  **Blur**, **Lighten**, **Darken**, **Red Eye** (click the pupil), **Reshape** (drag an edge to where it
+  should be). Size, strength and soft edge are sliders; [ and ] change the size. Below them, **Background
+  Blur**: a round or a band of sharpness you place by dragging, the rest blurred.
+- **Face** — **Smooth Skin** works on all the skin in the photo. With the face finder the People feature uses
+  (downloaded once, 40 MB, kept on this Mac) there are also Brighten Face, Brighten Eyes, Whiten Teeth, Larger
+  Eyes, Slimmer Face, Narrower Nose and Smile, for every face in the photo. They're worked out from where the
+  eyes, nose and mouth are, so they're gentle on purpose; for more, use Reshape.
+- **Text** — **Add Text** (or double-click the photo), as many as you like. Drag text to move it; drag its
+  corner dot to size and turn it. Eighteen ready-made styles (Outline, Shadow, Neon, Label, Pill, Subtitle,
+  Banner, Poster, Sunset, Comic, Typewriter, Script, Stamp…), every font on the Mac grouped by kind, 28
+  colours and any other, a fade into a second colour, bold / italic / underline / capitals, alignment, letter
+  and line spacing, outline, shadow, glow, and a background (box, rounded, pill, or a bar across the photo).
+  **Sticker ▾** adds an emoji you can move and size the same way.
+- **Frame** — Border, Polaroid, Rounded Corners, Cinema Bars, and **Fit to Shape** (the whole photo in a
+  square, a story or any other shape without cropping — on a colour, or on itself blurred).
+
+**Undo** (⌘Z) and **Redo** (⇧⌘Z) step through everything; **Compare** — hold the button, or Space — shows the
+photo before; ⌘-scroll or pinch zooms. While a slider moves you see a quick rough picture, and the proper one
+when it rests.
+
+Three ways to save, bottom right:
+
+- **Save as New** (⌘S) — "name (edited).jpg" beside the photo; the original isn't touched.
+- **Overwrite Original** — in place (it asks first: this one can't be taken back).
+- **Save and Upscale…** — saves either of those ways, then enlarges the result with Real-ESRGAN — the engine
+  inside [Upscayl](https://upscayl.org), on this Mac. You choose the **model** (every photo model your
+  Upscayl has: Standard, High Fidelity, Remacri, UltraSharp…), **2×, 3× or 4×**, and how much of the photo's own
+  **texture** to keep.
+
+Whichever you choose, the saved photo is the same kind of file as the original — **a HEIC stays a HEIC**, with
+its colour profile (Display P3 stays Display P3) — and keeps its capture date, camera, GPS, XMP, the file's
+created and modified dates and its extended attributes. A new photo gets the original's **tags**; the result
+is tagged **edited** (and **cropped** / **upscaled** when it was). Two things to know: an HDR photo (PQ / HLG,
+like a frame saved from an HDR video) is edited and saved in standard range, and the editor says so; an
+iPhone photo's HDR gain map isn't carried into the edit. Saving works on every pixel at once — a 48 MP photo
+needs about 3 GB of memory for those few seconds.
+
+### Make Collage — two to nine photos on one picture (`collage_window.py`, `collage.py`)
+
+Select **two to nine photos** ▸ right-click ▸ **Make Collage of N Photos…** (or Photos ▸ Make Collage…).
+
+- **Layout** — every arrangement in rows and columns for that many photos, drawn small: even grids, strips,
+  one large with the rest small — up to forty for each number of photos.
+- **Shape** — 32 of them: square; portrait 4:5, 3:4, 2:3, 9:16, 1:2, 1:3; landscape 5:4, 4:3, 3:2, 16:9, 2:1,
+  21:9, 3:1; prints (4×6, 5×7, 8×10, A4, Letter, upright or sideways); screens (Instagram post and story,
+  Facebook cover, X header, YouTube thumbnail, Pinterest pin, Mac desktop, iPhone wallpaper).
+- **Size** — "as large as stays sharp" (no photo enlarged past its own pixels), or 1,080 to 8,192 px on the
+  long side.
+- **Spacing**, **Margin**, **Rounded Corners**; the **background** colour, or the first photo blurred.
+- **Format** — JPEG, HEIC or PNG.
+
+On the collage itself: **drag a photo onto another to swap them, drag inside its cell to slide it, scroll to
+zoom** (double-click puts it back). Shuffle reorders; Add Photos… takes it up to nine; right-click a photo to
+remove it.
+
+**Save** writes "Collage 2024-07-04.jpg" beside the first photo. It takes **the oldest photo's capture date**
+(in its metadata and as the file's dates) and that photo's place, and **every photo's tags**, plus
+**collage**. **Save and Edit…** then opens it in the photo editor, for text, filters and frames.
+
+### Stitch Videos — several clips into one (`stitch_window.py`, `video_stitch.py`)
+
+Select **two or more videos** ▸ right-click ▸ **Edit ▸ Stitch N Videos…** (or Photos ▸ Video ▸ Stitch Videos…).
+Drag the clips into the order they should play — or **Oldest First**, **Newest First**, **By Name** — and press
+**Stitch**.
+
+- Clips that are the same kind (two takes from the same iPhone, say) are **joined as they are**: no quality
+  lost, done in seconds.
+- Clips that differ in size, frame rate or format are **re-encoded** onto one canvas — each clip fitted inside
+  it, with bars where a clip is another shape — at one frame rate. You choose the size (the first clip's, the
+  largest clip's, 1080p, 4K) and the frame rate. HDR clips stay HDR (10-bit HEVC); a clip without sound gets
+  silence.
+
+The new video is saved beside the first clip as "name (stitched).mp4" and takes:
+
+- **the oldest date** of the clips — as its capture date and as the file's created and modified dates;
+- **the place** — the oldest clip's, or the first clip that has one;
+- the oldest clip's camera make and model, title, description and keywords (with ExifTool installed);
+- **every clip's tags**, plus **stitched**.
+
+The window says all of that before you start. It needs ffmpeg (`brew install ffmpeg`); without it, a built-in
+AVFoundation joiner is used. The clips themselves are never changed.
+
+### Receive from iPhone — AirDrop into "From iPhone" (`airdrop_window.py`, `airdrop_receive.py`)
+
+On the iPhone, select photos and videos in Photos ▸ Share ▸ AirDrop ▸ this Mac. macOS always puts them in
+**Downloads**. Then **File ▸ Receive from iPhone…** (**⇧⌘I**): they're listed, newest first, all ticked, and
+**Move to “From iPhone”** puts them on the drive.
+
+- The folder is the drive's **existing "From iPhone"** — found by name (near where you are, or at the top of
+  the drive) and remembered. **Change…** picks another; if the drive has none, the window offers to make it.
+- Each file is copied onto the drive, **read back and compared** with the original (SHA-256), and given the
+  original's dates. Only then does the original go to the Mac's Trash — or stay in Downloads, if you choose that.
+- The very same file already there is skipped. A different file with the same name is kept as "IMG_1234 2.HEIC".
+  Nothing on the drive is replaced. A Live Photo's two halves (HEIC + MOV) both come over.
+- Only AirDropped photos and videos are listed (macOS marks what AirDrop received); tick **Show every photo
+  and video in Downloads** to see the rest.
+
+**While the app is open it watches for AirDrops** and says so — "3 photos arrived by AirDrop" with a **Move to
+“From iPhone”** button. Tick **Move them without asking** in the window and they go straight to the drive.
+(The first time, macOS asks whether the app may read your Downloads folder.)
 
 ### Download an Instagram or Facebook profile (`social_downloader.py`, `instagram.py`, `facebook.py`)
 

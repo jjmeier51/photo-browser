@@ -922,10 +922,11 @@ def apply_face(img: np.ndarray, found: list[FaceBox], tune: dict) -> None:
         if t("teeth"):
             c = mouth_mid - off
             width = float(np.hypot(*(m2 - m1)))
-            m = _ellipse(region.shape[:2], c[0], c[1], 0.58 * width, 0.30 * width, tilt, 0.3)
+            m = _ellipse(region.shape[:2], c[0], c[1], 0.56 * width, 0.24 * width, tilt, 0.3)
             hue, sat = hue_sat(np.clip(region, 0, 1))
             y = luma(region)
-            teeth = (1.0 - smoothstep(0.22, 0.48, sat)) * smoothstep(0.30, 0.52, y) * m
+            lips = smoothstep(0.07, 0.16, region[..., 0] - region[..., 1])       # red well over green: not a tooth
+            teeth = (1.0 - smoothstep(0.14, 0.34, sat)) * smoothstep(0.34, 0.55, y) * (1.0 - lips) * m
             teeth = gauss(teeth, max(0.6, iod / 90.0))
             yy = y[..., None]
             new = yy + (region - yy) * 0.30

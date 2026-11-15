@@ -358,6 +358,28 @@ Python. (`SimpCityService`,
 - **Photo Browser for Mac Upscale Video** — right-click videos ▸ Upscale Video… : 1080p or 4K (never down), source / 30 / 60 fps,
   replace or save as new "name (1080p).mp4", tagged "upscaled" (`video_tools.upscale`, `mac/video_upscale_window.py`;
   the helper's AVFoundation code, else ffmpeg with HDR kept as 10-bit HEVC). §6ab.
+- **Photo Browser for Mac photo editor** (⌘E / right-click ▸ Edit ▸ Photo Editor… / viewer ⋯; `mac/photo_edit.py` the
+  arithmetic, `mac/photo_text.py` text layers drawn with Qt, `mac/photo_editor_window.py`): one `Edit` (dataclasses →
+  dict) rendered on a small copy by a worker thread and on every pixel at save — **radii are fractions of the long
+  side**, order fixed (strokes → face → geometry → look → adjust → blur → frame → text), strokes stored in the
+  original's coordinates. 52 filters are recipes of the sliders (`LOOKS`); brushes incl. Heal (`inpaint`) and Reshape
+  (`_Warp`, one resampling); face tools from `faces.detect`'s five points; numpy + Pillow only. **Saving goes through
+  `batch_crop.encode_like` + `write_beside` / `write_in_place`** (HEIC stays HEIC, profile, EXIF, GPS, dates, xattrs
+  kept) — never another way; tags carried, tagged "edited". Save as New / Overwrite Original / Save and Upscale
+  (`UpscaleChoice`: model, 2–4×, texture → `UpscaleRun(factor=…)`). HDR photos are saved in standard range. §6am.
+- **Photo Browser for Mac collages** (select 2–9 photos ▸ Make Collage…; `mac/collage.py`, `mac/collage_window.py`): generated
+  row/column layouts (≤40 per count), 32 shapes, sRGB out (JPEG/HEIC/PNG); takes the oldest photo's date and place
+  and every photo's tags + "collage". **Stitch Videos** (select ≥2 videos; `mac/video_stitch.py`,
+  `mac/stitch_window.py`): stream copy when the clips are the same kind, else re-encoded onto one canvas; the result
+  takes the **oldest dated clip's date** (metadata + file dates), the place, that clip's camera details, and every
+  clip's tags + "stitched"; ffmpeg first, `mac/stitch_helper.swift` (separate from `video_helper.swift` on purpose,
+  never compiled yet) without it. §6am.
+- **Receive from iPhone** (File menu ⇧⌘I; `mac/airdrop_receive.py`, `mac/airdrop_window.py`): AirDrops land in
+  ~/Downloads, recognised by the quarantine agent `sharingd`; moved into the drive's existing "From iPhone" folder
+  (`find_destination` — found, remembered, never created unasked) via `net_fetch.put`, **read back and SHA-256
+  compared before the original goes to the Trash**; `Watcher` in `MainWindow` offers new arrivals in a toast
+  (`airdrop/auto` moves them). The viewer steps frames with buttons / `,` `.` / ⇧←→ and has ⋯ ▸ Use as Album Cover
+  (a video's current frame, `Pane.cover_from_viewer`). §6am.
 - **Clone Drive to a New SSD** — File menu / `mac/clone_drive.py OLD NEW --apply`: the whole drive copied to a new
   (APFS) one, old drive read-only, every file read back and checksummed before it gets its name; creation dates
   (`setattrlist`), mtimes, xattrs, flags kept; dot-records (`.Photo Browser Metadata`, download records, `.Trash`)
