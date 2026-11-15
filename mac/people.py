@@ -512,6 +512,35 @@ class Store:
         except sqlite3.Error:
             pass
 
+    def note_drive(self, drive_id: str, root: str) -> int:
+        """A drive (known by the id in its shared tag file) is at `root` now. Faces are kept by path — so when a
+        drive known here comes back somewhere else (renamed in Finder, mounted as "SSD 1", or its clone on a new
+        SSD), its photos' faces go to the new paths rather than being lost and found again by a whole new scan.
+        Not while the old place is still there too (a clone beside its original: the faces stay with the
+        original). Returns how many photos were followed."""
+        root = root.rstrip("/")
+        if not drive_id or not root:
+            return 0
+        key = f"drive:{drive_id}"
+        with self.lock:
+            row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        was = ((row[0] if row else "") or "").rstrip("/")
+        if was == root:
+            return 0
+        followed = 0
+        if was:
+            if os.path.isdir(was):
+                return 0
+            with self.lock:
+                followed = self.db.execute("SELECT COUNT(*) FROM files WHERE path >= ? AND path < ?",
+                                           (was + "/", was + "0")).fetchone()[0]
+            if followed:
+                self.renamed([(was, root)])
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, root))
+            self.db.commit()
+        return followed
+
     def forget_files(self, paths: Iterable[str]) -> None:
         """Photos that are gone (to the Trash) — or whole folders of them: their faces with them, and what was
         said about those faces, and the window's pictures of them."""

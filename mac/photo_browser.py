@@ -3429,6 +3429,21 @@ COLLECTIONS[PLACE] = Collection(
                                               "Go ▸ Places… ▸ Read Locations reads the photos not read yet."))
 
 
+def _people_drives() -> None:
+    """Tells the People store where each connected drive is (people.Store.note_drive): a drive that comes back
+    under another name is the same photos."""
+    def follow(store) -> None:
+        for vol in external_volumes():
+            try:
+                table = tag_store().table_for(str(vol / "x"))
+                table.refresh()
+                if table.id and table.base is not None:
+                    store.note_drive(table.id, str(table.base))
+            except OSError:
+                pass
+    _people_do(follow)
+
+
 def _people_do(what) -> None:
     """Something for the People store to follow (a rename, a trip to the Trash) — only when there is one: the
     feature costs nothing until it's used."""
@@ -5791,6 +5806,7 @@ class Pane(QWidget):
 
         def trash(paths: list[str]) -> list[str]:
             moved = [p for p in paths if MainWindow.trash_item(Path(p))]
+            _people_do(lambda store: store.forget_files(moved))
             try:
                 if moved and tag_store().forget(moved):
                     tags_changed()
@@ -7900,6 +7916,7 @@ class Sidebar(QWidget):
         global MOUNTS
         MOUNTS = mounts()
         tag_store().forget_volumes()                   # a drive came or went: its tags with it
+        _people_drives()
         selected = [i.data(0, PATH_ROLE) for i in self.tree.selectedItems()]
         self.tree.clear()
         fav = self._section("Shortcuts")                  # (Favorites are the hearted items; Places are where photos were taken)
@@ -8876,8 +8893,11 @@ class MainWindow(QMainWindow):
                     path = os.path.dirname(path)
                 return False
             # Favorites and To AI follow a moved item (as the app's do); a copy leaves them with the original.
-            tag_store().carry_labels([(a, b) for a, b in placed if was_moved(a)])
+            went = [(a, b) for a, b in placed if was_moved(a)]
+            tag_store().carry_labels(went)
             tag_store().forget(gone)
+            # People's faces go with a moved photo too (a copy is a new photo: the next scan finds its faces).
+            _people_do(lambda store: (store.renamed(went), store.forget_files(gone)))
         except OSError as e:
             self.panel.log.appendPlainText(f"   couldn't carry the tags over: {e}")
             return
