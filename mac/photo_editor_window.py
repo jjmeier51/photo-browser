@@ -59,6 +59,16 @@ ACCENT = QColor(10, 132, 255)
 ASPECTS = [("Freeform", None), ("Original", None), ("1:1", 1.0), ("4:5", 4 / 5), ("5:4", 5 / 4), ("3:4", 3 / 4),
            ("4:3", 4 / 3), ("2:3", 2 / 3), ("3:2", 3 / 2), ("9:16", 9 / 16), ("16:9", 16 / 9), ("2:1", 2.0)]
 TABS = ["Filters", "Adjust", "Crop", "Retouch", "Face", "Text", "Frame"]
+COPIED_KEY, LOOKS_KEY = "editor/copied", "editor/my_looks"
+
+
+def copied_edit(settings) -> dict | None:
+    """What Copy Edits last kept (see `photo_edit.transferable`), or None."""
+    try:
+        got = json.loads(str(settings.value(COPIED_KEY, "") or ""))
+    except ValueError:
+        return None
+    return got if isinstance(got, dict) and not pe.is_empty(got) else None
 
 
 def qimage_rgb(arr: np.ndarray) -> QImage:
@@ -327,6 +337,44 @@ class SliderRow(QWidget):
         self.slider.blockSignals(False)
         self.blockSignals(False)
         self._show()
+
+
+class Histogram(QWidget):
+    """How the picture's tones are spread: the brightness in grey with red, green and blue over it; a mark at
+    either end when shadows or highlights are clipped."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.data: dict | None = None
+        self.setFixedHeight(64)
+        self.setToolTip("Tones, dark to light. A red mark at an end means detail is lost there (pure black or white).")
+
+    def show_picture(self, rgb8: np.ndarray) -> None:
+        self.data = pe.histogram(rgb8)
+        self.update()
+
+    def paintEvent(self, _e) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.fillRect(r, QColor(20, 20, 22))
+        if self.data is None:
+            return
+        for name, colour in (("l", QColor(200, 200, 205, 150)), ("r", QColor(255, 80, 70, 110)),
+                             ("g", QColor(70, 220, 110, 110)), ("b", QColor(80, 140, 255, 110))):
+            h = self.data[name]
+            path = QPainterPath(QPointF(r.left(), r.bottom()))
+            for i, v in enumerate(h):
+                path.lineTo(r.left() + r.width() * (i + 0.5) / len(h), r.bottom() - float(v) ** 0.6 * (r.height() - 4))
+            path.lineTo(r.right(), r.bottom())
+            p.fillPath(path, colour)
+        dark, light = (float(v) for v in self.data["clip"])
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 59, 48))
+        if dark > 0.01:
+            p.drawRect(QRectF(r.left(), r.top(), 4, 4))
+        if light > 0.01:
+            p.drawRect(QRectF(r.right() - 4, r.top(), 4, 4))
 
 
 class Swatches(QWidget):
@@ -705,7 +753,11 @@ class EditorWindow(QDialog):
         self.compare_btn = _plain("Compare", None, "Press and hold to see the photo before (or hold Space)")
         self.compare_btn.pressed.connect(lambda: self.compare(True))
         self.compare_btn.released.connect(lambda: self.compare(False))
-        for b in (self.undo_btn, self.redo_btn, self.reset_btn, self.compare_btn):
+        self.edits_btn = _plain("Edits ▾", None, "Copy this edit to use on other photos, paste one, or keep it as a look")
+        self.edits_menu = QMenu(self.edits_btn)
+        self.edits_menu.aboutToShow.connect(self._fill_edits_menu)
+        self.edits_btn.setMenu(self.edits_menu)
+        for b in (self.undo_btn, self.redo_btn, self.reset_btn, self.compare_btn, self.edits_btn):
             bar.addWidget(b)
         bar.addSpacing(8)
         self.note = QLabel("", objectName="SheetSub")
@@ -767,7 +819,8 @@ class EditorWindow(QDialog):
         self.tab_group.buttons()[int(self.settings.value("editor/tab", 0) or 0) % len(TABS)].setChecked(True)
         for keys, slot in (("Ctrl+Z", self.undo), ("Ctrl+Shift+Z", self.redo), ("Ctrl+0", self.canvas.fit),
                            ("Ctrl+=", lambda: self.canvas.zoom(1.25)), ("Ctrl+-", lambda: self.canvas.zoom(0.8)),
-                           ("Ctrl+S", lambda: self.save(True)),
+                           ("Ctrl+S", lambda: self.save(True)), ("Ctrl+Shift+C", self.copy_edits),
+                           ("Ctrl+Shift+V", self.paste_edits),
                            ("[", lambda: self.brush_size.slider.setValue(self.brush_size.value() - 2)),
                            ("]", lambda: self.brush_size.slider.setValue(self.brush_size.value() + 2))):
             QShortcut(QKeySequence(keys), self).activated.connect(slot)
@@ -853,6 +906,8 @@ class EditorWindow(QDialog):
         lay = QVBoxLayout(inner)
         lay.setContentsMargins(0, 0, 8, 0)
         lay.setSpacing(4)
+        self.histogram = Histogram()
+        lay.addWidget(self.histogram)
         row = QHBoxLayout()
         row.addWidget(_plain("Auto", self._auto, "Levels, mid-tones and colour cast set from the photo itself"))
         row.addWidget(_plain("Reset Adjustments", self._reset_adjust))
@@ -1611,6 +1666,66 @@ class EditorWindow(QDialog):
         self.fit_blur.setChecked(f.blur)
         self.fit_blur.setEnabled(f.kind == "fit")
 
+    # ------------------------------------------------------------------ an edit for other photos
+    def _looks(self) -> dict:
+        try:
+            got = json.loads(str(self.settings.value(LOOKS_KEY, "{}") or "{}"))
+            return got if isinstance(got, dict) else {}
+        except ValueError:
+            return {}
+
+    def _fill_edits_menu(self) -> None:
+        m = self.edits_menu
+        m.clear()
+        have = not pe.is_empty(pe.transferable(self.edit))
+        m.addAction("Copy Edits", self.copy_edits).setEnabled(have)
+        m.addAction("Paste Edits", self.paste_edits).setEnabled(copied_edit(self.settings) is not None)
+        m.addSeparator()
+        m.addAction("Save as My Look…", self.save_look).setEnabled(have)
+        looks = self._looks()
+        if looks:
+            m.addSeparator()
+            for name in sorted(looks, key=str.casefold):
+                m.addAction(name, lambda name=name: self.apply_carried(looks[name]))
+            gone = m.addMenu("Remove a Look")
+            for name in sorted(looks, key=str.casefold):
+                gone.addAction(name, lambda name=name: self.remove_look(name))
+
+    def copy_edits(self) -> None:
+        """The filter, adjustments, face sliders, blur and frame — not the crop, brush strokes or text — kept
+        for Paste Edits, here or (from the main window) onto many photos at once."""
+        carried = pe.transferable(self.edit)
+        if pe.is_empty(carried):
+            return
+        self.settings.setValue(COPIED_KEY, json.dumps(carried))
+        self.note.setText("Edits copied — Paste Edits here, or right-click photos ▸ Edit ▸ Paste Edits.")
+
+    def paste_edits(self) -> None:
+        carried = copied_edit(self.settings)
+        if carried is not None:
+            self.apply_carried(carried)
+
+    def apply_carried(self, carried: dict) -> None:
+        self.begin()
+        self.edit = pe.with_pasted(self.edit, carried)
+        self._sync()
+        self.request()
+
+    def save_look(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "Save as My Look", "A name for this look:")
+        name = name.strip()[:40]
+        if ok and name:
+            looks = self._looks()
+            looks[name] = pe.transferable(self.edit)
+            self.settings.setValue(LOOKS_KEY, json.dumps(looks))
+            self.note.setText(f"Saved “{name}” — it's under Edits ▾ in every photo.")
+
+    def remove_look(self, name: str) -> None:
+        looks = self._looks()
+        if looks.pop(name, None) is not None:
+            self.settings.setValue(LOOKS_KEY, json.dumps(looks))
+
     # ------------------------------------------------------------------ state
     def begin(self) -> None:
         """Call before changing the edit: what it is now becomes an undo step."""
@@ -1771,6 +1886,8 @@ class EditorWindow(QDialog):
         self.canvas.set_pixmap(QPixmap.fromImage(qimage_rgb(arr)))
         if not rough and not self.saving and self.note.text() == "Healing…":
             self.note.setText("")
+        if not rough and stage != "before" and TABS[self._tab()] == "Adjust":
+            self.histogram.show_picture(arr)
         if TABS[self._tab()] == "Filters" and not rough:
             self._ask_thumbs()
 
@@ -2261,3 +2378,92 @@ class EditorWindow(QDialog):
 
 def can_edit(path: str) -> bool:
     return batch_crop.can_crop(path)
+
+
+# ----------------------------------------------------------------------------- a copied edit, onto many photos
+
+class _PasteSignals(QObject):
+    step = Signal(int, str)
+    done = Signal()
+
+
+class PasteRun(QDialog):
+    """Paste Edits onto several photos: each rendered and saved in turn on a worker thread, a bar showing how
+    far it's got, Stop between photos. `on_done(done, failed, not_hdr)` runs on the UI thread at the end:
+    (photo, where its edit went) for each one done, (photo, why) for the others, and how many HDR photos had
+    to be saved in standard range."""
+
+    def __init__(self, parent: QWidget | None, photos: list[str], carried: dict, as_new: bool,
+                 on_done: Callable[[list[tuple[str, str]], list[tuple[str, str]], int], None]) -> None:
+        super().__init__(parent)
+        self.photos, self.carried, self.as_new, self.on_done = photos, carried, as_new, on_done
+        self.running = True
+        self._stop = threading.Event()
+        self._done: list[tuple[str, str]] = []
+        self._failed: list[tuple[str, str]] = []
+        self._not_hdr = 0
+        self._sig = _PasteSignals()
+        self._sig.step.connect(self._step)
+        self._sig.done.connect(self._finished)
+        self.setWindowTitle("Paste Edits")
+        self.setMinimumWidth(440)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 16)
+        n = len(photos)
+        lay.addWidget(QLabel(f"Pasting the edit onto {n:,} photo{'s' if n != 1 else ''}", objectName="SheetTitle"))
+        self.detail = QLabel("Starting…", objectName="SheetSub")
+        lay.addWidget(self.detail)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, n)
+        self.bar.setTextVisible(False)
+        lay.addWidget(self.bar)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.stop_btn = _plain("Stop", self.reject)
+        row.addWidget(self.stop_btn)
+        lay.addLayout(row)
+        threading.Thread(target=self._work, daemon=True).start()
+
+    def _work(self) -> None:
+        try:
+            import gainmap
+            for i, path in enumerate(self.photos):
+                if self._stop.is_set():
+                    break
+                self._sig.step.emit(i, os.path.basename(path))
+                try:
+                    had_gain = bool(gainmap.sniff(path))
+                    written, kept = pe.apply_to_file(path, self.carried, self.as_new, self._stop.is_set)
+                    self._done.append((path, written))
+                    self._not_hdr += 1 if had_gain and not kept else 0
+                except Exception as e:  # noqa: BLE001 — one photo that can't be done never stops the rest
+                    if not self._stop.is_set():
+                        self._failed.append((path, str(e) or type(e).__name__))
+        finally:
+            self._sig.done.emit()
+
+    def _step(self, i: int, name: str) -> None:
+        self.bar.setValue(i)
+        self.detail.setText(f"{i + 1:,} of {len(self.photos):,} — {name}")
+
+    def _finished(self) -> None:
+        self.running = False
+        try:
+            self.on_done(self._done, self._failed, self._not_hdr)
+        finally:
+            self.accept()
+
+    def reject(self) -> None:
+        if self.running:
+            self._stop.set()
+            self.detail.setText("Stopping after this photo…")
+            self.stop_btn.setEnabled(False)
+            return
+        super().reject()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self.running:
+            self._stop.set()
+            event.ignore()
+            return
+        event.accept()

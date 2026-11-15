@@ -6502,6 +6502,8 @@ class Pane(QWidget):
                 edit.addAction("Photo Editor…", lambda: self.edit_photo(photos[0])).setShortcut(QKeySequence("Ctrl+E"))
                 edit.addSeparator()
             if photos:
+                edit.addAction("Paste Edits" if len(photos) == 1 else f"Paste Edits onto {len(photos)} Photos…",
+                               lambda: self.paste_edits(photos))
                 edit.addAction("Crop…", lambda: self.crop_photos(photos))
             if turnable:
                 turn = edit.addMenu("Rotate")
@@ -6924,6 +6926,60 @@ class Pane(QWidget):
         dlg = photo_editor_window.EditorWindow(QApplication.activeWindow() or self.window(), path, self.settings, done)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.show()
+
+    def paste_edits(self, paths: list[str]) -> None:
+        """Right-click photos ▸ Edit ▸ Paste Edits onto N Photos…: the edit copied in the photo editor (Edits ▾
+        ▸ Copy Edits — its filter, adjustments, face sliders, blur and frame) put on every selected photo,
+        saved as new photos beside them or over the originals; tags carried, tagged "edited"."""
+        import photo_edit
+        import photo_editor_window
+        carried = photo_editor_window.copied_edit(self.settings)
+        if carried is None:
+            self.note("Nothing's been copied yet — open a photo in the editor (⌘E), then Edits ▾ ▸ Copy Edits.")
+            return
+        photos = [p for p in paths if not os.path.isdir(p) and photo_editor_window.can_edit(p)]
+        if not photos:
+            return
+        n = len(photos)
+        box = QMessageBox(self.window())
+        box.setWindowTitle("Paste Edits")
+        box.setText(f"Paste the copied edit onto {n:,} photo{'s' if n != 1 else ''}?")
+        box.setInformativeText("Its filter, adjustments, face sliders, blur and frame — not its crop, brush strokes "
+                               "or text. Save as New leaves the originals as they are.")
+        new_btn = box.addButton("Save as New", QMessageBox.ButtonRole.AcceptRole)
+        over_btn = box.addButton("Overwrite Originals", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(new_btn)
+        box.exec()
+        if box.clickedButton() not in (new_btn, over_btn):
+            return
+        as_new = box.clickedButton() is new_btn
+
+        def done(made: list[tuple[str, str]], failed: list[tuple[str, str]], not_hdr: int) -> None:
+            written = [w for _p, w in made]
+            try:
+                if as_new:
+                    tag_store().carry(made)
+                if written:
+                    tag_store().add(written, [photo_edit.EDITED_TAG])
+            except OSError as e:
+                QMessageBox.warning(self.window(), "Paste Edits", f"Couldn't save the tags: {e}")
+            tags_changed()
+            if THUMBS is not None and not as_new:
+                THUMBS.forget(written)
+            media_info.forget(written)
+            self.refresh()
+            line = f"Edited {len(made):,} photo{'s' if len(made) != 1 else ''}" + \
+                (" — saved beside the originals" if as_new and made else "")
+            if not_hdr:
+                line += f"; {not_hdr:,} HDR photo{'s' if not_hdr != 1 else ''} saved in standard range"
+            if failed:
+                line += f"; {len(failed):,} couldn't be ({failed[0][1]})"
+            self.note(line + ".")
+
+        run = photo_editor_window.PasteRun(self.window(), photos, carried, as_new, done)
+        run.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        run.open()
 
     # -- collage (collage_window.py / collage.py)
     def make_collage(self, paths: list[str]) -> None:

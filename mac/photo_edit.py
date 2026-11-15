@@ -1209,3 +1209,83 @@ def render(img: np.ndarray, e: Edit, found: list[FaceBox] | None = None, alpha: 
             alpha = None
     report(1.0)
     return np.clip(out, 0.0, 1.0), alpha
+
+
+# ----------------------------------------------------------------------------- an edit, carried to other photos
+
+CARRIED = ("look", "look_amount", "adjust", "face", "focus", "frame")
+
+
+def transferable(e: Edit) -> dict:
+    """The part of an edit that makes sense on another photo — its filter, adjustments, face sliders, blur and
+    frame. Not the crop or the turns (another photo is another shape), not brush strokes (they were painted on
+    this one), not text."""
+    d = to_dict(e)
+    return {k: d[k] for k in CARRIED}
+
+
+def with_pasted(e: Edit, carried: dict) -> Edit:
+    """`e` with a copied edit put on it: what was copied replaces the same parts; the crop, strokes and text of
+    `e` stay."""
+    d = to_dict(e)
+    d.update({k: carried[k] for k in CARRIED if k in carried})
+    return from_dict(d)
+
+
+def is_empty(carried: dict) -> bool:
+    return not from_dict({k: carried[k] for k in CARRIED if k in carried}).changed()
+
+
+def apply_to_file(path: str, carried: dict, as_new: bool, cancelled: Callable[[], bool] | None = None) -> tuple[str, bool]:
+    """A copied edit applied to the photo at `path` and saved — as "name (edited).ext" beside it, or in place.
+    Returns (where it went, whether its HDR gain map was kept). The format, metadata and dates are the
+    original's (batch_crop's saving). Raises batch_crop.CropError / OSError and leaves the photo as it was."""
+    import batch_crop
+    src = batch_crop.open_upright(path)
+    try:
+        import thumb_color
+        curve = thumb_color.curve_of(path, src.info.get("icc_profile"))
+        if curve is not None:                               # PQ / HLG: worked on, and saved, in standard range
+            src.image = thumb_color.tone_mapped(src.image, *curve)
+            src.info.pop("icc_profile", None)
+    except Exception:  # noqa: BLE001
+        pass
+    if src.image.mode == "CMYK":
+        src.image = src.image.convert("RGB")
+        src.info.pop("icc_profile", None)
+    edit = with_pasted(Edit(), carried)
+    found: list[FaceBox] = []
+    if any(v for k, v in edit.face.items() if k != "smooth"):
+        try:
+            found = find_faces(src.image)
+        except Exception:  # noqa: BLE001 — no face finder here: the sliders that need one do nothing
+            found = []
+    img, alpha = to_float(src.image)
+    rgb, alpha = render(img, edit, found, alpha, cancelled=cancelled)
+    if cancelled and cancelled():
+        raise batch_crop.CropError("stopped")
+    im = to_image(rgb, alpha if alpha is not None and alpha.shape == rgb.shape[:2] else None)
+    if src.image.mode in ("L", "LA"):
+        if float(np.abs(rgb - rgb.mean(axis=2, keepdims=True)).max()) < 0.01:
+            im = im.convert("LA" if im.mode == "RGBA" else "L")
+        else:
+            src.info.pop("icc_profile", None)
+    data = batch_crop.encode_like(src, im, gain=lambda g: gain_through(g, edit, found))
+    if as_new:
+        return batch_crop.write_beside(path, data, NEW_LABEL), src.gain_kept
+    batch_crop.write_in_place(path, data)
+    return path, src.gain_kept
+
+
+def histogram(rgb8: np.ndarray, bins: int = 64) -> dict[str, np.ndarray]:
+    """How the picture's tones are spread — {"l", "r", "g", "b"}: `bins` counts each, scaled so the tallest
+    (ends aside) is 1 — and "clip": the share of pixels at pure black and at pure white."""
+    small = rgb8[::max(1, rgb8.shape[0] // 256), ::max(1, rgb8.shape[1] // 256)].reshape(-1, 3)
+    lum = (small @ np.array([0.2126, 0.7152, 0.0722])).astype(np.float32)
+    out: dict[str, np.ndarray] = {}
+    for name, values in (("l", lum), ("r", small[:, 0]), ("g", small[:, 1]), ("b", small[:, 2])):
+        h = np.histogram(values, bins=bins, range=(0, 255))[0].astype(np.float32)
+        top = float(h[1:-1].max()) if bins > 2 else float(h.max())
+        out[name] = np.minimum(h / max(top, 1.0), 1.0)
+    out["clip"] = np.array([float((lum <= 1).mean()), float((lum >= 254).mean())], dtype=np.float32)
+    return out
