@@ -10,6 +10,15 @@ The bars sit above and below the picture, never over it (they used to be translu
 top and bottom of every photo — and Qt draws a video above any widget laid over it, so a video's controls were
 never seen at all). A click still hides them (the iPhone's tap), and the window re-fits.
 
+**Nothing but the picture** (`_Chrome`). The bars are the same black as the stage — no strips, no lines — and
+what's on them is see-through: at rest the controls are dimmed, the one the mouse is over is at full strength,
+and when the mouse has rested a few seconds **everything fades away** (the pointer too), leaving the picture alone
+on black; moving the mouse brings the controls back. Nothing moves when they fade — the picture keeps its place —
+and flipping through with ←/→ doesn't bring them back. They stay while the mouse is over a bar, a menu is open or
+the scrubber is being dragged, and ⋯ ▸ Keep Controls Visible turns the fading off. The scrubber is a hairline
+whose knob appears under the mouse; the resolution and HDR marks are plain small text. On a Mac the title bar
+has no background of its own (`NoTitleBarBackgroundHint`), so it's black with the rest.
+
 **HDR as QuickTime Player and Preview show it** (`viewer_surface`): Qt Multimedia decodes with FFmpeg and maps HDR
 to standard range with its own shaders (an HDR video came out brighter and harsher than in QuickTime), and Qt
 reads only an HDR photo's standard-range picture. So on a Mac, macOS draws the picture itself into a native view
@@ -54,10 +63,12 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Callable
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage, QImageReader,
+from PySide6.QtCore import (QEvent, QObject, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QSize, QSizeF, Qt,
+                            QTimer, QUrl, Signal)
+from PySide6.QtGui import (QAction, QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage, QImageReader,
                            QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut)
-from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsOpacityEffect, QGraphicsPixmapItem, QGraphicsScene,
+                               QGraphicsView, QHBoxLayout,
                                QLabel, QMenu, QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedLayout,
                                QStackedWidget, QStyle, QStyleOptionSlider, QToolButton, QToolTip, QVBoxLayout,
                                QWidget)
@@ -71,7 +82,9 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif"
               ".dng", ".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".rw2"}
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".mts", ".m2ts", ".ts", ".wmv", ".flv"}
 SLIDE_SECONDS = 3.0
-CHROME_BG = "rgba(20,20,22,0.78)"
+CHROME_BG = "#000000"                    # the bars are the stage's own black: no strip above or below the picture
+REST, FULL = 0.62, 1.0                   # how strong the controls are: at rest, and under the mouse
+IDLE_SECONDS = 2.6                       # the mouse still this long: the controls fade away
 
 
 def is_media(path: str) -> bool:
@@ -1223,44 +1236,136 @@ def _bar_button(text: str, tip: str, slot, glyph: str = "") -> QToolButton:
 
 
 VIEWER_STYLE = f"""
-#ViewerTop, #ViewerBottom {{ background: {CHROME_BG}; }}
-#ViewerTop {{ border-bottom: 1px solid #2C2C2E; }}
-#ViewerBottom {{ border-top: 1px solid #2C2C2E; }}
-#ViewerTop QLabel, #ViewerBottom QLabel {{ color: #F2F2F7; }}
-#ViewerTitle {{ font-size: 14px; font-weight: 600; }}
-#ViewerCount {{ color: #A1A1A6; font-size: 12px; }}
-#ViewerBottom QLabel#ViewerTime {{ color: #C7C7CC; font-size: 12px; }}
-QLabel#ViewerRes {{ color: #A1A1A6; font-size: 11px; font-weight: 600; border: 1px solid rgba(255,255,255,0.22);
-                    border-radius: 4px; padding: 1px 5px; }}
-QLabel#ViewerHDR {{ color: #E8C46A; font-size: 11px; font-weight: 700; border: 1px solid rgba(232,196,106,0.45);
-                    border-radius: 4px; padding: 1px 5px; }}
+#ViewerTop, #ViewerBottom {{ background: {CHROME_BG}; border: none; }}
+#ViewerTop QLabel, #ViewerBottom QLabel {{ color: #F2F2F7; background: transparent; }}
+#ViewerTitle {{ font-size: 13px; font-weight: 600; }}
+#ViewerCount {{ color: #A1A1A6; font-size: 11px; }}
+#ViewerBottom QLabel#ViewerTime {{ color: #C7C7CC; font-size: 11px; }}
+QLabel#ViewerRes {{ color: #A1A1A6; font-size: 11px; font-weight: 600; padding: 1px 3px; }}
+QLabel#ViewerHDR {{ color: #E8C46A; font-size: 11px; font-weight: 700; padding: 1px 3px; }}
 QToolButton#ViewerButton {{ color: #F2F2F7; background: transparent; border: none; border-radius: 7px;
                             padding: 4px 7px; font-size: 13px; }}
-QToolButton#ViewerButton:hover {{ background: rgba(255,255,255,0.12); }}
-QToolButton#ViewerButton:checked {{ background: rgba(255,255,255,0.14); }}
+QToolButton#ViewerButton:hover {{ background: rgba(255,255,255,0.14); }}
+QToolButton#ViewerButton:checked {{ background: rgba(255,255,255,0.16); }}
 QToolButton#ViewerButton:disabled {{ color: #636366; }}
 QToolButton#ViewerButton::menu-indicator {{ image: none; width: 0; }}
 QToolButton#ZoomLabel {{ color: #C7C7CC; background: transparent; border: none; border-radius: 6px;
                          padding: 3px 6px; font-size: 12px; min-width: 38px; }}
-QToolButton#ZoomLabel:hover {{ background: rgba(255,255,255,0.12); }}
-#ViewerInfo {{ background: #1C1C1E; border-left: 1px solid #2C2C2E; }}
-#ViewerInfo QLabel {{ color: #EBEBF0; }}
+QToolButton#ZoomLabel:hover {{ background: rgba(255,255,255,0.14); }}
+#ViewerInfo {{ background: #0C0C0D; border: none; border-left: 1px solid rgba(255,255,255,0.07); }}
+#ViewerInfo QLabel {{ color: #EBEBF0; background: transparent; }}
 #InfoHead {{ color: #8E8E93; font-size: 11px; font-weight: 600; letter-spacing: 0.5px; }}
 #InfoValue {{ font-size: 13px; }}
-#InfoTag {{ background: #2C2C2E; border-radius: 9px; padding: 2px 9px; font-size: 12px; }}
-#ViewerInfo QPushButton {{ color: #F2F2F7; background: #2C2C2E; border: 1px solid #3A3A3C; border-radius: 7px;
+#InfoTag {{ background: rgba(255,255,255,0.10); border-radius: 9px; padding: 2px 9px; font-size: 12px; }}
+#ViewerInfo QPushButton {{ color: #F2F2F7; background: rgba(255,255,255,0.09); border: none; border-radius: 7px;
                           padding: 5px 12px; font-size: 13px; }}
-#ViewerInfo QPushButton:hover {{ background: #3A3A3C; }}
-QSlider#Scrubber {{ min-height: 18px; }}
-QSlider#Scrubber::groove:horizontal {{ height: 4px; background: rgba(255,255,255,0.25); border-radius: 2px; }}
-QSlider#Scrubber::sub-page:horizontal {{ background: #F2F2F7; border-radius: 2px; }}
-QSlider#Scrubber::handle:horizontal {{ background: #FFFFFF; width: 13px; height: 13px; margin: -5px 0; border-radius: 6px; }}
-QSlider#Volume {{ min-height: 22px; }}
-QSlider#Volume::groove:horizontal {{ height: 3px; background: rgba(255,255,255,0.25); border-radius: 1px; }}
-QSlider#Volume::sub-page:horizontal {{ background: #F2F2F7; border-radius: 1px; }}
-QSlider#Volume::handle:horizontal {{ background: #FFFFFF; width: 11px; height: 11px; margin: -4px 0; border-radius: 5px; }}
-#ViewerToast {{ background: rgba(44,44,46,0.95); color: #F2F2F7; border-radius: 10px; padding: 6px 14px; }}
+#ViewerInfo QPushButton:hover {{ background: rgba(255,255,255,0.16); }}
+QSlider#Scrubber {{ min-height: 16px; }}
+QSlider#Scrubber::groove:horizontal {{ height: 3px; background: rgba(255,255,255,0.22); border-radius: 1px; }}
+QSlider#Scrubber::sub-page:horizontal {{ background: rgba(255,255,255,0.92); border-radius: 1px; }}
+QSlider#Scrubber::handle:horizontal {{ background: transparent; width: 11px; height: 11px; margin: -4px 0;
+                                       border-radius: 5px; }}
+QSlider#Scrubber::handle:horizontal:hover, QSlider#Scrubber::handle:horizontal:pressed {{ background: #FFFFFF; }}
+QSlider#Volume {{ min-height: 20px; }}
+QSlider#Volume::groove:horizontal {{ height: 3px; background: rgba(255,255,255,0.22); border-radius: 1px; }}
+QSlider#Volume::sub-page:horizontal {{ background: rgba(255,255,255,0.85); border-radius: 1px; }}
+QSlider#Volume::handle:horizontal {{ background: #FFFFFF; width: 9px; height: 9px; margin: -3px 0; border-radius: 4px; }}
+#ViewerToast {{ background: rgba(30,30,32,0.72); color: #F2F2F7; border-radius: 10px; padding: 6px 14px; }}
+QMenu {{ background: rgba(28,28,30,0.96); color: #F2F2F7; border: 1px solid rgba(255,255,255,0.10);
+         border-radius: 8px; padding: 4px; }}
+QMenu::item {{ padding: 4px 18px; border-radius: 4px; }}
+QMenu::item:selected {{ background: rgba(255,255,255,0.16); }}
+QMenu::item:disabled {{ color: #6C6C70; }}
+QMenu::separator {{ height: 1px; background: rgba(255,255,255,0.10); margin: 4px 6px; }}
 """
+
+
+class _Chrome(QObject):
+    """The controls' strength (module notes): each bar wears an opacity that follows the mouse — full under it,
+    dimmed while it's elsewhere on the window, gone once it has rested. The mouse is *asked* where it is a few
+    times a second rather than listened for: on a Mac the picture is drawn in a view of macOS's own, which
+    doesn't pass hovering on."""
+
+    def __init__(self, viewer: "MediaViewer", bars: list[QWidget]) -> None:
+        super().__init__(viewer)
+        self.viewer = viewer
+        self.bars = bars
+        self.keep = str(app_identity.settings().value("viewer/keep_controls", "false")) == "true"
+        self.effects: dict[QWidget, QGraphicsOpacityEffect] = {}
+        self.anims: dict[QWidget, QPropertyAnimation] = {}
+        self.targets: dict[QWidget, float] = {}
+        for bar in bars:
+            fx = QGraphicsOpacityEffect(bar)
+            fx.setOpacity(FULL)
+            bar.setGraphicsEffect(fx)
+            anim = QPropertyAnimation(fx, b"opacity", self)
+            self.effects[bar], self.anims[bar], self.targets[bar] = fx, anim, FULL
+        self.last_pos: QPoint | None = None
+        self.moved_at = time.monotonic()
+        self.held_until = 0.0                          # a note is showing: the bars stay for it
+        self.hidden = False
+        self.timer = QTimer(self)
+        self.timer.setInterval(200)
+        self.timer.timeout.connect(self.tick)
+        self.timer.start()
+
+    def set_keep(self, on: bool) -> None:
+        self.keep = bool(on)
+        app_identity.settings().setValue("viewer/keep_controls", "true" if on else "false")
+        self.wake()
+
+    def wake(self, seconds: float = 0.0) -> None:
+        """The controls come back now (and stay at least `seconds`)."""
+        self.moved_at = time.monotonic()
+        if seconds:
+            self.held_until = max(self.held_until, self.moved_at + seconds)
+        self.tick()
+
+    def _busy(self) -> bool:
+        """Something's being done with the controls: they don't fade from under it."""
+        v = self.viewer
+        return (QApplication.activePopupWidget() is not None or v.scrub.isSliderDown() or v.volume.isSliderDown()
+                or bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton))
+
+    def tick(self, pos: QPoint | None = None, now: float | None = None) -> None:
+        v = self.viewer
+        now = time.monotonic() if now is None else now
+        pos = QCursor.pos() if pos is None else pos
+        inside = v.isVisible() and v.frameGeometry().contains(pos)
+        if pos != self.last_pos:
+            if self.last_pos is not None and inside:
+                self.moved_at = now
+            self.last_pos = QPoint(pos)
+        over = {bar: bar.isVisible() and QRect(bar.mapToGlobal(QPoint(0, 0)), bar.size()).contains(pos)
+                for bar in self.bars}
+        resting = now - self.moved_at > IDLE_SECONDS and now > self.held_until
+        gone = (resting and not self.keep and not any(over.values()) and not self._busy()
+                and v.isActiveWindow() and inside)
+        for bar in self.bars:
+            self._to(bar, 0.0 if gone else FULL if (over[bar] or now <= self.held_until) else REST)
+        if gone != self.hidden:
+            self.hidden = gone
+            # the pointer goes with the controls while it's over the picture, and comes back with them
+            if gone:
+                v.stack.setCursor(Qt.CursorShape.BlankCursor)
+            else:
+                v.stack.unsetCursor()
+
+    def _to(self, bar: QWidget, target: float) -> None:
+        if self.targets[bar] == target:
+            return
+        self.targets[bar] = target
+        fx, anim = self.effects[bar], self.anims[bar]
+        anim.stop()
+        anim.setStartValue(fx.opacity())
+        anim.setEndValue(target)
+        anim.setDuration(650 if target == 0.0 else 140)     # away slowly, back at once
+        anim.start()
+
+    def strength(self, bar: QWidget) -> float:
+        return self.targets[bar]
+
+
 FAVORITE_RED = "#FF375F"
 
 
@@ -1314,6 +1419,11 @@ class MediaViewer(QWidget):
         self._was_playing = False
         self.setWindowTitle("Viewer")
         self.setStyleSheet(VIEWER_STYLE)
+        # The title bar without a background of its own: black with the rest of the window, as QuickTime's is.
+        # (Qt 6.9+, a request the system may ignore; PHOTO_BROWSER_VIEWER_TITLEBAR=plain keeps the usual one.)
+        hint = getattr(Qt.WindowType, "NoTitleBarBackgroundHint", None)
+        if IS_MAC and hint is not None and app_identity.env("VIEWER_TITLEBAR") != "plain":
+            self.setWindowFlag(hint, True)
         self.setMinimumSize(380, 260)
         pal = self.palette()
         pal.setColor(self.backgroundRole(), QColor("black"))
@@ -1372,6 +1482,8 @@ class MediaViewer(QWidget):
             (f"Saved “{os.path.basename(out)}” in “{os.path.basename(os.path.dirname(out))}”" +
              (f" — {note}." if note else ".")) if out else "Couldn't save the frame."))
         self._hdr_read.connect(self._hdr_ready)
+        self.fade = _Chrome(self, [self.top, self.bottom])     # the controls dim, and fade when the mouse rests
+        self.keep_act.setChecked(self.fade.keep)
         self._shortcuts()
         self.resize(self._room(available_geometry(self), TITLE_BAR))   # until the first item says its shape
         self.show_current()
@@ -1381,7 +1493,7 @@ class MediaViewer(QWidget):
         bar = QFrame(self)
         bar.setObjectName("ViewerTop")
         h = QHBoxLayout(bar)
-        h.setContentsMargins(8, 5, 10, 5)
+        h.setContentsMargins(8, 3, 10, 2)
         h.setSpacing(2)
         h.addWidget(_bar_button("", "Close (Esc)", self.close, "close"))
         titles = QVBoxLayout()
@@ -1434,6 +1546,10 @@ class MediaViewer(QWidget):
         self.slide_act.setCheckable(True)
         self.slide_act.setShortcutVisibleInContextMenu(True)
         menu.addAction("Full Screen", self.toggle_full)
+        self.keep_act = menu.addAction("Keep Controls Visible", lambda: self.fade.set_keep(self.keep_act.isChecked()))
+        self.keep_act.setCheckable(True)
+        self.keep_act.setToolTip("Off: the controls fade away when the mouse rests, and come back when it moves")
+        menu.setToolTipsVisible(True)
         menu.addSeparator()
         self.remove_act = menu.addAction("Remove Objects…", self.remove_objects)
         self.remove_act.setToolTip("Draw round anything in the photo and it's gone")
@@ -1460,7 +1576,7 @@ class MediaViewer(QWidget):
         bar = QFrame(self)
         bar.setObjectName("ViewerBottom")
         col = QVBoxLayout(bar)
-        col.setContentsMargins(10, 4, 10, 5)
+        col.setContentsMargins(10, 2, 10, 4)
         col.setSpacing(0)
         # the timeline: the time, the scrubber, the length
         self.video_row = QWidget()
@@ -1873,6 +1989,8 @@ class MediaViewer(QWidget):
         self.chrome = not self.chrome
         self.top.setVisible(self.chrome)
         self.bottom.setVisible(self.chrome)
+        if self.chrome:
+            self.fade.wake()
         QTimer.singleShot(0, self.refit)
 
     def toggle_info(self) -> None:
@@ -1920,6 +2038,7 @@ class MediaViewer(QWidget):
         self.count.setStyleSheet("color: #F2F2F7; font-weight: 600;")
         self.count.setToolTip(text)
         self._toast_timer.start(3500)
+        self.fade.wake(3.5)                         # the line it's written on is there to be read
 
     def _end_note(self) -> None:
         self.count.setStyleSheet("")
@@ -2108,6 +2227,7 @@ class MediaViewer(QWidget):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._slide.stop()
+        self.fade.timer.stop()
         self.video.release()
         if self.hdr is not None:
             self.hdr.release()
