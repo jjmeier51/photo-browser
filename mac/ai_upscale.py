@@ -483,7 +483,7 @@ def upscale(engine: Engine, path: str, factor: int = FACTOR, *, as_new: bool = F
     if mode in ("L", "LA") and big.mode not in ("L", "LA"):
         big = big.convert("LA" if alpha else "L")              # a greyscale photo stays greyscale
     try:
-        data = batch_crop.encode_like(src, big)
+        data = batch_crop.encode_like(src, big, gain="same")
     except batch_crop.CropError as e:
         raise UpscaleError(str(e)) from e
     report("save", (ENGINE_DONE + 1) / 2)

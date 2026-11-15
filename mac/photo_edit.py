@@ -833,6 +833,65 @@ def _ellipse(shape: tuple[int, int], cx: float, cy: float, rx: float, ry: float,
     return 1.0 - smoothstep(1.0 - feather, 1.0 + feather, np.sqrt(u * u + v * v))
 
 
+def _face_points(f: FaceBox, w: int, h: int):
+    """A face's five points in pixels and what's worked out from them — None for one too small to work on."""
+    e1 = np.array([f.points[0][0] * w, f.points[0][1] * h])
+    e2 = np.array([f.points[1][0] * w, f.points[1][1] * h])
+    nose = np.array([f.points[2][0] * w, f.points[2][1] * h])
+    m1 = np.array([f.points[3][0] * w, f.points[3][1] * h])
+    m2 = np.array([f.points[4][0] * w, f.points[4][1] * h])
+    iod = float(np.hypot(*(e2 - e1)))
+    if iod < 6:
+        return None
+    eyes_mid, mouth_mid = (e1 + e2) / 2, (m1 + m2) / 2
+    across = (e2 - e1) / iod                                       # along the eyes
+    down = mouth_mid - eyes_mid
+    down = down / max(float(np.hypot(*down)), 1.0)
+    tilt = math.atan2(across[1], across[0])
+    x0, y0 = int(max(0, eyes_mid[0] - 2.2 * iod)), int(max(0, eyes_mid[1] - 2.0 * iod))
+    x1, y1 = int(min(w, eyes_mid[0] + 2.2 * iod)), int(min(h, eyes_mid[1] + 3.0 * iod))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    return e1, e2, nose, m1, m2, iod, eyes_mid, mouth_mid, across, down, tilt, (x0, y0, x1, y1)
+
+
+def face_warp(img: np.ndarray, found: list[FaceBox], tune: dict) -> None:
+    """The Face sliders that move things — larger eyes, slimmer face, narrower nose, smile — done to `img`
+    in place. Works on (h, w) too: the photo's HDR gain map is reshaped with it."""
+    def t(key: str) -> float:
+        return float(tune.get(key, 0) or 0) / 100.0
+
+    if not (t("eye_size") or t("slim") or t("nose") or t("smile")):
+        return
+    h, w = img.shape[:2]
+    for f in found:
+        pts = _face_points(f, w, h)
+        if pts is None:
+            continue
+        e1, e2, nose, m1, m2, iod, eyes_mid, _mouth_mid, across, down, _tilt, box = pts
+        warp = _Warp(box)
+        if t("eye_size"):
+            for e in (e1, e2):
+                warp.bulge(float(e[0]), float(e[1]), 0.46 * iod, 0.30 * t("eye_size"))
+        if t("slim"):
+            centre = eyes_mid + down * 0.95 * iod
+            for side in (-1.0, 1.0):
+                for along, reach in ((0.55, 1.0), (1.05, 0.8), (1.5, 0.55)):
+                    c = eyes_mid + down * along * iod + across * side * (1.02 - 0.18 * along) * iod
+                    pull = (centre - c) / max(float(np.hypot(*(centre - c))), 1.0) * (0.075 * iod * t("slim") * reach)
+                    warp.push(float(c[0]), float(c[1]), 0.75 * iod, float(pull[0]), float(pull[1]))
+        if t("nose"):
+            for side in (-1.0, 1.0):
+                c = nose + across * side * 0.24 * iod
+                pull = -across * side * (0.05 * iod * t("nose"))
+                warp.push(float(c[0]), float(c[1]), 0.32 * iod, float(pull[0]), float(pull[1]))
+        if t("smile"):
+            for corner, side in ((m1, -1.0), (m2, 1.0)):
+                pull = (across * side * 0.6 - down) * (0.055 * iod * t("smile"))
+                warp.push(float(corner[0]), float(corner[1]), 0.34 * iod, float(pull[0]), float(pull[1]))
+        warp.apply(img)
+
+
 def apply_face(img: np.ndarray, found: list[FaceBox], tune: dict) -> None:
     """The Face sliders (0…100 each), done to `img` in place. "smooth" works on every skin-coloured part of
     the photo, faces found or not; the rest need `found`."""
@@ -859,48 +918,14 @@ def apply_face(img: np.ndarray, found: list[FaceBox], tune: dict) -> None:
         else:
             m = gauss(skin_mask(img), max(1.0, 2.0 * scale))
             _smooth_skin(img, m, t("smooth"), scale)
+    face_warp(img, found, tune)
     for f in found:
-        e1 = np.array([f.points[0][0] * w, f.points[0][1] * h])
-        e2 = np.array([f.points[1][0] * w, f.points[1][1] * h])
-        nose = np.array([f.points[2][0] * w, f.points[2][1] * h])
-        m1 = np.array([f.points[3][0] * w, f.points[3][1] * h])
-        m2 = np.array([f.points[4][0] * w, f.points[4][1] * h])
-        iod = float(np.hypot(*(e2 - e1)))
-        if iod < 12:
+        pts = _face_points(f, w, h)
+        if pts is None:
             continue
-        eyes_mid, mouth_mid = (e1 + e2) / 2, (m1 + m2) / 2
-        across = (e2 - e1) / iod                                       # along the eyes
-        down = mouth_mid - eyes_mid
-        down = down / max(float(np.hypot(*down)), 1.0)
-        tilt = math.atan2(across[1], across[0])
-        x0, y0 = int(max(0, eyes_mid[0] - 2.2 * iod)), int(max(0, eyes_mid[1] - 2.0 * iod))
-        x1, y1 = int(min(w, eyes_mid[0] + 2.2 * iod)), int(min(h, eyes_mid[1] + 3.0 * iod))
-        if x1 - x0 < 8 or y1 - y0 < 8:
-            continue
-        box = (x0, y0, x1, y1)
+        e1, e2, nose, m1, m2, iod, eyes_mid, mouth_mid, across, down, tilt, box = pts
+        x0, y0, x1, y1 = box
         off = np.array([x0, y0])
-        if t("eye_size") or t("slim") or t("nose") or t("smile"):
-            warp = _Warp(box)
-            if t("eye_size"):
-                for e in (e1, e2):
-                    warp.bulge(float(e[0]), float(e[1]), 0.46 * iod, 0.30 * t("eye_size"))
-            if t("slim"):
-                centre = eyes_mid + down * 0.95 * iod
-                for side in (-1.0, 1.0):
-                    for along, reach in ((0.55, 1.0), (1.05, 0.8), (1.5, 0.55)):
-                        c = eyes_mid + down * along * iod + across * side * (1.02 - 0.18 * along) * iod
-                        pull = (centre - c) / max(float(np.hypot(*(centre - c))), 1.0) * (0.075 * iod * t("slim") * reach)
-                        warp.push(float(c[0]), float(c[1]), 0.75 * iod, float(pull[0]), float(pull[1]))
-            if t("nose"):
-                for side in (-1.0, 1.0):
-                    c = nose + across * side * 0.24 * iod
-                    pull = -across * side * (0.05 * iod * t("nose"))
-                    warp.push(float(c[0]), float(c[1]), 0.32 * iod, float(pull[0]), float(pull[1]))
-            if t("smile"):
-                for corner, side in ((m1, -1.0), (m2, 1.0)):
-                    pull = (across * side * 0.6 - down) * (0.055 * iod * t("smile"))
-                    warp.push(float(corner[0]), float(corner[1]), 0.34 * iod, float(pull[0]), float(pull[1]))
-            warp.apply(img)
         region = img[y0:y1, x0:x1]
         if t("light"):
             c = eyes_mid + down * 0.55 * iod - off
@@ -1133,3 +1158,32 @@ def render(img: np.ndarray, e: Edit, found: list[FaceBox] | None = None, alpha: 
             alpha = None
     report(1.0)
     return np.clip(out, 0.0, 1.0), alpha
+
+
+def gain_through(g: np.ndarray, e: Edit, found: list[FaceBox] | None = None) -> np.ndarray:
+    """A photo's HDR gain map (gainmap.py: an upright (h, w) array, 0…255) taken through the edit, so it still
+    lies on the picture: reshaped where the picture was reshaped, filled in where something was healed away,
+    turned, straightened and cropped with it, and given the frame's margins (no extra brightness there).
+    Filters and adjustments don't touch it — it says how much brighter, not what colour."""
+    out = np.ascontiguousarray(g, dtype=F32) / 255.0
+    h, w = out.shape[:2]
+    for s in e.strokes:
+        if s.tool == "reshape":
+            apply_stroke(out, s)
+        elif s.tool == "heal" and s.points:
+            pts = np.array([(u * w, v * h) for u, v in s.points], dtype=np.float64)
+            r = max(1.0, s.size * max(h, w))
+            box = _window(pts, r, w, h)
+            if box is not None:
+                import gainmap
+                hole = np.zeros((h, w), dtype=F32)
+                hole[box[1]:box[3], box[0]:box[2]] = stroke_mask(pts, r, box, 0.0) > 0.35
+                out = gainmap.filled(out * 255.0, hole) / 255.0
+    if any(e.face.values()) and found:
+        face_warp(out, found, e.face)
+    if not e.geometry.plain():
+        out = apply_geometry(out, e.geometry)
+    if e.frame.kind:
+        solid = np.repeat(out[..., None], 3, axis=2)
+        out = apply_frame(solid, Frame(e.frame.kind, e.frame.width, (0, 0, 0), e.frame.shape, False))[..., 0]
+    return np.clip(out * 255.0, 0.0, 255.0)

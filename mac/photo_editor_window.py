@@ -602,6 +602,8 @@ class EditorWindow(QDialog):
         self.comparing = False
         self.saving = False
         self.hdr = False
+        self.gain = ""                              # "" no gain map | "kept" | why it can't be kept here
+        self.said = ""                              # a word for the app's toast after saving ("HDR kept")
         self.sel = -1                               # the selected text layer
         self.wait_text = "Reading the photo…"
         self._typing_at = 0.0
@@ -1633,6 +1635,10 @@ class EditorWindow(QDialog):
             bits = [f"{w:,} × {h:,}"]
             if self.hdr:
                 bits.append("HDR photo — edited and saved in standard range")
+            elif self.gain == "kept":
+                bits.append("HDR photo — it stays HDR when saved")
+            elif self.gain:
+                bits.append(f"HDR photo — saved in standard range ({self.gain})")
             self.save_note.setText(" · ".join(bits))
 
     # ------------------------------------------------------------------ what's on screen
@@ -1965,7 +1971,14 @@ class EditorWindow(QDialog):
                         hdr = True
                 except Exception:  # noqa: BLE001 — colour handling is best effort; the photo still opens
                     pass
-                sig.loaded.emit((src, hdr), "")
+                gain = ""
+                try:
+                    import gainmap
+                    if gainmap.sniff(path):                  # an iPhone HDR photo: can its gain map be kept here?
+                        gain = "kept" if gainmap.available() else (gainmap.problem or "not kept")
+                except Exception:  # noqa: BLE001
+                    pass
+                sig.loaded.emit((src, hdr, gain), "")
             except Exception as e:  # noqa: BLE001 — shown, never a crash
                 sig.loaded.emit(None, str(e))
         threading.Thread(target=work, daemon=True).start()
@@ -1975,7 +1988,7 @@ class EditorWindow(QDialog):
             QMessageBox.warning(self, "Edit Photo", f"Couldn't read “{os.path.basename(self.path)}”: {why}")
             self.reject()
             return
-        self.src, self.hdr = got
+        self.src, self.hdr, self.gain = got
         self.size_px = self.src.image.size
         self.renderer.set_photo(self.src.image)
         self.wait_text = "Drawing…"
@@ -2032,7 +2045,8 @@ class EditorWindow(QDialog):
                 im = pe.to_image(rgb, alpha if alpha is not None and alpha.shape == rgb.shape[:2] else None)
                 if src.image.mode in ("L", "LA") and float(np.abs(rgb - rgb.mean(axis=2, keepdims=True)).max()) < 0.01:
                     im = im.convert("LA" if im.mode == "RGBA" else "L")       # a grey photo stays grey
-                data = batch_crop.encode_like(src, im)
+                edit, found = pending["edit"], list(self.renderer.found)
+                data = batch_crop.encode_like(src, im, gain=lambda g: pe.gain_through(g, edit, found))
                 sig.progress.emit(0.95)
                 if pending["as_new"]:
                     written = batch_crop.write_beside(path, data, pe.NEW_LABEL)
@@ -2060,6 +2074,9 @@ class EditorWindow(QDialog):
         pending = self._pending or {}
         edit: pe.Edit = pending.get("edit") or self.edit
         tags = ([pe.EDITED_TAG] if edit.changed() else []) + ([batch_crop.CROPPED_TAG] if edit.cropped() else [])
+        if self.gain:
+            self.said = "It's still an HDR photo." if self.src is not None and self.src.gain_kept else \
+                "It was saved in standard range — its HDR brightness couldn't be kept here."
         as_new = bool(pending.get("as_new"))
         upscale = pending.get("upscale")
         self.bar.hide()

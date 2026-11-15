@@ -589,7 +589,7 @@ class RemoveWindow(QDialog):
                     im = im.convert("L")
                 elif mode == "LA":
                     im = im.convert("LA")
-                data = batch_crop.encode_like(src, im)
+                data = batch_crop.encode_like(src, im, gain="local")
                 if as_new:
                     out = batch_crop.write_beside(path, data, retouch.NEW_LABEL)
                 else:

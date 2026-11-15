@@ -248,6 +248,8 @@ class Source:
     sampling: int                   # a JPEG's chroma subsampling, else -1
     text: dict                      # a PNG's text chunks
     tiff_tags: dict                 # a TIFF's descriptive tags
+    path: str = ""                  # where it was read from (its HDR gain map is read from there — gainmap.py)
+    gain_kept: bool = False         # the last encode_like wrote the gain map back
 
 
 def open_upright(path: str) -> Source:
@@ -266,7 +268,7 @@ def open_upright(path: str) -> Source:
     text = {k: v for k, v in info.items() if isinstance(v, str)} if fmt == "PNG" else {}
     tags = getattr(src, "tag_v2", {}) if fmt == "TIFF" else {}
     tiff_tags = {t: tags[t] for t in _TIFF_KEPT if t in tags}
-    return Source(ImageOps.exif_transpose(src) or src, fmt, info, exif, sampling, text, tiff_tags)
+    return Source(ImageOps.exif_transpose(src) or src, fmt, info, exif, sampling, text, tiff_tags, path)
 
 
 def render(spec: CropSpec, path: str) -> bytes:
@@ -280,13 +282,55 @@ def render(spec: CropSpec, path: str) -> bytes:
     box = pixel_box(spec.rect_for(w, h), w, h)
     if box != (0, 0, w, h):
         im = im.crop(box)
-    return encode_like(src, im)
+
+    def gain(g):                                   # the HDR gain map, turned and cropped like the photo
+        import gainmap
+        return gainmap.cropped(gainmap.turned(g, q), (box[0] / w, box[1] / h, (box[2] - box[0]) / w, (box[3] - box[1]) / h))
+    return encode_like(src, im, gain=gain)
 
 
-def encode_like(src: Source, im: "Image.Image") -> bytes:
+def _with_gain(src: Source, im: "Image.Image", gain) -> bytes | None:
+    """`im` saved with the photo's HDR gain map (gainmap.py), or None when it has none or it can't be kept.
+    `gain`: "same" — the picture is the same shape and nothing in it moved; "local" — the same, but things
+    were taken out of it (the map is filled in there); or a function that does to the map (an upright
+    (h, w) array) what was done to the picture."""
+    if gain is None or not src.path or src.fmt not in ("HEIF", "JPEG") or im.mode not in ("RGB", "L"):
+        return None
+    try:
+        import gainmap
+        if not gainmap.can_keep(src.path):
+            return None
+        g = gainmap.read(src.path)
+        if g is None:
+            return None
+        data = g.data
+        if callable(gain):
+            data = gain(data)
+        elif gain == "local":
+            data = gainmap.filled(data, gainmap.changed_mask(src.image, im, data.shape))
+        if data is None or min(data.shape[:2]) < 2:
+            return None
+        carried = im
+        if src.info.get("icc_profile") and not im.info.get("icc_profile"):
+            carried = im.copy()
+            carried.info["icc_profile"] = src.info["icc_profile"]
+        return gainmap.encode(src.path, carried, g.like(data), src.fmt)
+    except Exception:  # noqa: BLE001 — never a reason to lose the edit: it's saved the plain way
+        return None
+
+
+def encode_like(src: Source, im: "Image.Image", gain=None) -> bytes:
     """New pixels for `src`'s photo, saved in its format with its metadata — EXIF (orientation 1, the
     new pixel size), ICC profile, XMP, a PNG's text, a TIFF's tags — and checked by decoding them again.
-    Raises CropError."""
+    Raises CropError.
+
+    `gain` says what became of the picture, so an iPhone photo's **HDR gain map** can go with it (see
+    `_with_gain`); None leaves it out. `src.gain_kept` says afterwards whether it went in."""
+    src.gain_kept = False
+    kept = _with_gain(src, im, gain)
+    if kept is not None:
+        src.gain_kept = True
+        return kept
     fmt, info, exif, sampling, text = src.fmt, src.info, src.exif, src.sampling, src.text
     w, h = im.size
     if _ORIENTATION in exif:

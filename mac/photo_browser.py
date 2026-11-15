@@ -6893,7 +6893,9 @@ class Pane(QWidget):
                 if hasattr(w, "reload"):
                     w.reload(written)
             self.refresh()
-            self.note(f"Saved “{os.path.basename(written)}”" + (" beside the original." if as_new else "."),
+            said = getattr(dlg, "said", "")
+            self.note(f"Saved “{os.path.basename(written)}”" + (" beside the original." if as_new else ".")
+                      + (" " + said if said else ""),
                       "Show" if as_new else "", (lambda: self.reveal(written)) if as_new else None)
 
         dlg = photo_editor_window.EditorWindow(QApplication.activeWindow() or self.window(), path, self.settings, done)

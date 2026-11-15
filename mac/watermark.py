@@ -1843,7 +1843,7 @@ def clean(path: str, result: Result, factor: float = 1.0, *, as_new: bool = Fals
     picture = Image.fromarray(np.rint(out).astype(np.uint8), work.mode)
     if mode in ("L", "LA", "I;16", "I", "1"):
         picture = picture.convert("LA" if has_alpha else "L")
-    data = batch_crop.encode_like(src, picture)
+    data = batch_crop.encode_like(src, picture, gain="same")
     if as_new:
         return batch_crop.write_beside(path, data, NEW_LABEL)
     batch_crop.write_in_place(path, data)

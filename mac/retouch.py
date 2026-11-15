@@ -291,7 +291,7 @@ def erase(spec: EraseSpec, path: str, *, as_new: bool = False) -> str:
         raise NothingToErase("no mark found in the boxes — draw them over it, or turn the sensitivity up")
     if mode == "LA":
         out = out.convert("LA")
-    data = batch_crop.encode_like(src, out)
+    data = batch_crop.encode_like(src, out, gain="local")
     if as_new:
         return batch_crop.write_beside(path, data, NEW_LABEL)
     batch_crop.write_in_place(path, data)
