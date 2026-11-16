@@ -796,6 +796,7 @@ def open_social(kind: str, folder: str, parent: QWidget | None = None) -> None:
 
 
 _TIKTOK_WINDOWS: list = []
+_DEPOP_WINDOWS: list = []
 
 
 def app_windows() -> list[QWidget]:
@@ -903,6 +904,35 @@ def open_tiktok(folder: str, parent: QWidget | None = None) -> None:
                                               tag_events().scores.emit()))
     win.destroyed.connect(lambda _=None, w=win: _TIKTOK_WINDOWS.remove(w) if w in _TIKTOK_WINDOWS else None)
     _TIKTOK_WINDOWS.append(win)
+    win.show()
+
+
+def depop_label(folder: str) -> str:
+    """The menu line: "Get More from <shop> on Depop…" on a folder a shop's photos were downloaded into."""
+    try:
+        import depop
+        shop = depop.shop_of_folder(folder)
+        return f"Get More from {shop} on Depop…" if shop else "Download from Depop…"
+    except Exception:  # noqa: BLE001 — a folder that can't be read still gets its menu
+        return "Download from Depop…"
+
+
+def open_depop(folder: str, parent: QWidget | None = None) -> None:
+    """Right-click a folder ▸ Download ▸ "Download from Depop…": a Depop shop in a browser, every photo of its
+    listings to pick from, and the ones picked downloaded at their largest — upscaled 2× too, if asked
+    (depop_downloader.py)."""
+    try:
+        import depop_downloader
+    except ImportError as e:
+        QMessageBox.information(parent, "Download from Depop", f"This needs Qt WebEngine, which isn't installed here ({e}). "
+                                f"Quit {app_identity.APP_NAME} and open “{app_identity.APP_NAME}.command” again — it "
+                                "installs it.")
+        return
+    win = depop_downloader.DepopWindow(folder, tags=tag_store())
+    win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    win.finished.connect(lambda _dest, files: files and tags_changed())
+    win.destroyed.connect(lambda _=None, w=win: _DEPOP_WINDOWS.remove(w) if w in _DEPOP_WINDOWS else None)
+    _DEPOP_WINDOWS.append(win)
     win.show()
 
 
@@ -6715,6 +6745,7 @@ class Pane(QWidget):
             dl.addAction(social_label(folder, kind), lambda _=False, kind=kind: open_social(kind, folder, self.window()))
         dl.addAction(tiktok_label(folder), lambda: open_tiktok(folder, self.window()))
         dl.addAction(fanfix_label(folder), lambda: open_fanfix(folder, self.window()))
+        dl.addAction(depop_label(folder), lambda: open_depop(folder, self.window()))
         dl.addSeparator()
         dl.addAction("Browse taylorpictures.net…", lambda: self.open_taylor(folder))
         ai = menu.addMenu("AI")

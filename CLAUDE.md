@@ -431,6 +431,15 @@ Python. (`SimpCityService`,
   chat-list `imageUrl`, `/@` links, `_thumbnail`) are never media, and the earlier version's avatar files are offered
   for the Trash. **Bought pay-per-view is delivered only as FairPlay/Widevine DRM (photos too): counted, never
   downloaded — DRM is never worked around** (also DRM playlists and `encv`/`pssh` MP4s). §7.4f.
+- **Depop shops in Photo Browser for Mac** (Mac only) — right-click a folder ▸ Download ▸ Download from Depop…
+  (`mac/depop_downloader.py`, `mac/depop.py`): the shop's page in a browser, every listing photo as a tile to select
+  (double-click = the listing), **Download** takes each at its largest — `depop.fetch_best` fetches `P0` and
+  *measures* it, and takes the widest version the data names only if that claims more — optionally **upscaled 2×**
+  (`social.settle`; Real-ESRGAN when installed, else Lanczos). **It asks Depop nothing itself**: `fanfix.HOOK_JS`
+  keeps what the page loads and `depop.Shop` looks for anything shaped like a listing (a `slug` + pictures) — don't
+  hard-code Depop's API addresses; a listing's other photos come from its own page, fetched by the page, one every
+  1.6 s. Other sellers' listings (slug doesn't start with the shop) and `U<n>` avatars are left out. Into
+  `<folder>/Depop/<shop>/<slug>_<n>.jpg`, tagged "depop", record `.depop.json`. Never run against depop.com. §7.4g.
 - **Receive from the Mac (AirDrop / Share sheet)** — the app opens `.pbgallery` archives (its own
   type, made by `mac/airdrop_to_iphone.py`; also offered by the pornpics browser, the star
   downloader's `--airdrop`, and Photo Browser for Mac's context menu) and, as an Alternate handler, **any

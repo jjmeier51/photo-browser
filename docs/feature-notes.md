@@ -3434,6 +3434,51 @@ reported ("will come next time") rather than read by scrolling the profile page,
 against a stand-in of that log (lookups 429, a search 400 to direct asks, the page's feed asks told to log in): no
 switch, every feed direct, all 10 files; with the number already in the record, the lookup stops after its throttled call and goes straight to the feeds.
 
+### 7.4g Depop shops in Photo Browser for Mac — `mac/depop.py`, `mac/depop_downloader.py` (Nov 16, 2026)
+
+"Add the ability to download photos from Depop stores. The user should be able to select one or more photos, and
+then it downloads the highest quality version of that. The user is also given the option to upscale all of the
+photos." Mac only (it needs a real browser; the iPhone has no Depop screen). Right-click a folder ▸ **Download ▸
+Download from Depop…** (the menu bar's Download menu too; "Get More from <shop> on Depop…" on a folder a shop
+was downloaded into).
+
+- **The window**: the shop's own page in a browser on the left (a lasting profile, "depop"); every photo found,
+  as a grid of tiles, on the right. Type a shop's name / paste its link (a listing's link opens its seller's
+  shop), or browse to a shop in the page — the URL names the shop. Click / ⌘-click / ⇧-click / drag tiles,
+  double-click = the whole listing, Select All. **Download N Photos** fetches the ones picked.
+- **Reading a shop asks Depop nothing itself.** `fanfix.HOOK_JS` (the watcher written for Fanfix) is injected at
+  document creation and keeps every data answer the page receives; `depop.Shop.read_text` looks through them for
+  *anything shaped like a listing* — a dict with a `slug` and pictures — instead of expecting one answer from
+  one address. Depop's private web API has changed version more than once; this doesn't care which is live. The
+  page's picture tags are read too (`DOM_JS` → `read_shown`: an `<img>` inside a link to `/products/<slug>/`).
+  **Load Whole Shop** scrolls the page so the site loads the rest itself. With "Get each listing's other photos
+  too" ticked, the page `fetch()`es each listing's own page — one every `PAGE_GAP` (1.6 s), once — and its data
+  (or, failing that, its picture tags up to the first other listing) fills in what the tile didn't show.
+- **Whose listing**: a slug starts with its seller's name, so "likes", "similar items" and other sellers'
+  listings are left out (`Shop._ours`); `…/U<n>.jpg` (a seller's own picture) is never a listing photo.
+- **The highest quality version** (`depop.fetch_best`): a photo lives at `…/<photo>/P<n>.jpg`; the data names
+  some versions by width. P0 is fetched and **measured**; the widest named version is fetched only if it claims
+  more width than P0 turned out to have; whichever has more pixels is kept. No P0 → P8 → whatever was seen.
+  Usually one request per photo. The log says which version each file is.
+- **Upscale every photo 2×** (remembered): `social.settle` with `Options(photos_2x=True, ai=…)` — Real-ESRGAN
+  through the engine AI Upscale uses (`ai_upscale.find_engine`) when there is one, else Lanczos + a light
+  sharpen; one at a time (`heavy`). Upscaled files get the "upscaled" tag as well as "depop".
+- **Where**: `<folder>/Depop/<shop>/<listing slug>_<n>.jpg` (the folder itself when it's already that shop's);
+  the listing's words and date into the file (ExifTool) and on its dates; `.depop.json` (`social.Record`,
+  `photobrowser-depop`) keeps the shop and the photos in, so they're ticked in the grid and never fetched twice.
+- **Pictures** come by plain request (`net_fetch`, no cookies); if the picture server turns that away, the same
+  address is downloaded by the window's Chromium (`fanfix_downloader._Job` / `_on_download`, reused) and from
+  then on everything is.
+- Depop's terms forbid scraping. This is a person looking through a shop in a browser and saving the photos they
+  pick: nothing is asked that the page doesn't ask, bot checks are answered by the person in the page, listing
+  pages are read slowly, and only public listing photos are taken.
+
+Tested against a stand-in shop (`PHOTO_BROWSER_DEPOP_TEST` points the module at it — inline data, scrolled data
+requests, listing pages, a photo with no P0, one whose P0 is the smaller, a guarded picture host): 27 of 27
+photos found in order, six picked and saved at the right sizes, with and without upscaling. **Not run against
+depop.com** — its real pages may hold listings in a shape this doesn't recognise; the picture tags are the
+fallback, and the window says "nothing found yet" rather than guessing.
+
 ### 7.4f Fanfix in Photo Browser for Mac — `mac/fanfix.py`, `mac/fanfix_downloader.py` (Nov 7, 2026; reworked the same day)
 
 The person's own purchased content from Fanfix creators (subscriptions, bought posts and messages), for a

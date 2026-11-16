@@ -294,7 +294,7 @@ Everything Photo Browser for Mac does is in its menus, acting on the pane you're
   Duplicates…, **Edit Photo… ⌘E**, **Paste Edits…**, **Make Collage…**, then
   the tools in groups: **Adjust ▸** (Crop, Rotate, Convert WebP to JPEG), **Retouch ▸** (AI Upscale 2×, Erase
   Area, Remove Watermark, Remove Objects), **Video ▸** (**Stitch Videos**, Export All Frames, Upscale Video), **CapCut ▸**, **AI ▸** (Edit / Create with AI, Astria.ai Browser, Make AI Model, AI Models),
-  **Download ▸** (SimpCity, Instagram, Facebook, TikTok, Fanfix, taylorpictures.net).
+  **Download ▸** (SimpCity, Instagram, Facebook, TikTok, Fanfix, Depop, taylorpictures.net).
 - **Window** — Minimize, Zoom, Bring All to Front, and every viewer and tool window that's open.
 - **Help** — the guide and the keyboard shortcuts in a window with a search field, Find a Command…, Welcome…,
   About.
@@ -1235,6 +1235,30 @@ Videos are put together and upscaled with AVFoundation — a small helper Photo 
 (it needs Xcode's Command Line Tools: `xcode-select --install`), the iPhone app's own code — or with ffmpeg
 when that's installed instead (`brew install ffmpeg`). Neither: videos come in their one-file version, not
 upscaled (the log says so). The browser needs Qt WebEngine (part of PySide6, set up by `run.sh`).
+
+### Download photos from a Depop shop (`depop_downloader.py`, `depop.py`)
+
+Right-click a folder ▸ **Download ▸ Download from Depop…** (or the Download menu in the menu bar).
+
+1. Type the shop's name or paste its link and press **Open** — or find the shop in the page on the left; it's a
+   real browser. If Depop shows a "checking your browser" box, answer it there.
+2. The shop's photos appear on the right as the page loads them. **Load Whole Shop** scrolls to the end for you.
+   With **Get each listing's other photos too** ticked, every photo of each listing shows up, not just the first
+   (each listing's page is read for them, one every couple of seconds).
+3. **Click the photos you want** — ⌘-click or ⇧-click for several, drag across them, double-click one to take
+   its whole listing, or Select All.
+4. Tick **Upscale every photo 2×** if you want them enlarged as they arrive (with the AI upscaler when one is
+   installed — the one AI Upscale 2× uses — otherwise a plain enlargement).
+5. Press **Download N Photos**.
+
+Each photo comes down in the largest version the shop has of it — the window checks rather than assumes, and the
+log says which it took — as `<listing>_<n>.jpg` in `<your folder>/Depop/<shop>`, with the listing's description
+and date in the file and the "depop" tag ("upscaled" too, when it was). Photos already downloaded show a green
+tick and aren't fetched again, in this window or the next time.
+
+Depop's terms don't allow automated collecting; this saves photos you pick while you look through a shop, at a
+person's pace. It hasn't been tried on depop.com itself yet (only on a stand-in shop): if a shop shows nothing on
+the right, the status line says so rather than guessing.
 
 ### Download what you've bought on Fanfix (`fanfix_downloader.py`, `fanfix.py`)
 
