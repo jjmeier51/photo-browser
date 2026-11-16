@@ -34,6 +34,13 @@ the browser's own cookies, so it's what Facebook's site gets. The run is a gener
 `("page", url)` and gets back `(status, html, final_url)`; `("sleep", s)` spaces the reads; `("emit",
 items)` hands found items to the downloads while the walks go on; `("note", text)` is a line for the log.
 
+**Exclusive (subscriber-only) content** (Nov 16; the iPhone's `collectSubscriberHub`): after the rest, the creator's
+Subscriber Hub — tried at the addresses the iPhone app tries (`hub_urls`; one that asks for a login is skipped, not
+taken for a login wall) — every set on it walked whole, the photos and videos on its first page read one by one.
+Elsewhere a photo whose page says it's for subscribers (`social.exclusive_in_text`, near its own id) counts too.
+All of it is tagged "exclusive" — and files downloaded before are tagged when a run meets them again
+(`("tag", paths, tags)`). A non-subscriber finds nothing, and the log says so.
+
 **Names** (the dedup contract with the iPhone): `FB_<media id>.<ext>`, the extension the file has (jpg,
 png, webp, gif; mp4). The profile lives in `<person>/<its name>` (or wherever its record says, or the
 folder itself when that is it). What's done = the record's ids (`.facebook.json`, shared with the iPhone —
@@ -288,6 +295,31 @@ def ids_on_disk(folder: str | Path) -> set[str]:
     return out
 
 
+def done_files(folder: str | Path, media_id: str) -> list[str]:
+    """The files already downloaded for a photo or video (`FB_<id>.<ext>`)."""
+    try:
+        return [str(p) for p in Path(folder).glob(f"FB_{media_id}.*") if p.is_file()]
+    except OSError:
+        return []
+
+
+def media_markers(s: str) -> bool:
+    """A page with photos, sets or videos on it — a real feed, not an empty shell or a wrong address's redirect."""
+    return bool(first_media_id(s) or re.search(r"set=[a-z]+\.[0-9A-Za-z]", s) or re.search(r"watch/\?v=\d", s)
+                or re.search(r'"video_?id":"\d', s))
+
+
+def hub_urls(profile: "Profile") -> list[str]:
+    """Where a creator's Subscriber Hub (Facebook Subscriptions' subscriber-only posts) may be — Facebook gives it no
+    published address; these are the forms the iPhone app tries."""
+    out = []
+    if profile.vanity:
+        out += [f"{HOST}{profile.vanity}/subscriber_hub", f"{HOST}{profile.vanity}?sk=subscriber_hub"]
+    if profile.id.isdigit():
+        out += [f"{HOST}profile.php?id={profile.id}&sk=subscriber_hub", f"{HOST}subscriber_hub/?creator_id={profile.id}"]
+    return out
+
+
 def record(folder: str | Path) -> social.Record:
     return social.Record.load(folder, RECORD, FORMAT)
 
@@ -457,7 +489,7 @@ class _Reader:
 
 def _walk(reader: _Reader, token: str, first_id: str | None, skip: set[str], seen: set[str], folder: Path,
           poster_from_page: bool, early_stop: bool, label: str, name: str, keys: set[str] | None = None,
-          resume: dict | None = None, ends: dict | None = None):
+          resume: dict | None = None, ends: dict | None = None, all_exclusive: bool = False):
     """yield from: one media set, photo by photo (module notes); emits what's new (their ids into `keys`).
     Returns (how many, whether the walk got to the end of the set — or caught up, when `early_stop`).
 
@@ -525,6 +557,11 @@ def _walk(reader: _Reader, token: str, first_id: str | None, skip: set[str], see
                            "(the next run reads the whole set again)")
             break
         last = nid
+        excl = all_exclusive or social.exclusive_in_text(page, nid)
+        if excl and (nid in skip) and nid not in seen:
+            retag = done_files(folder, nid)               # downloaded before, untagged: tagged now
+            if retag:
+                yield ("tag", retag, [social.EXCLUSIVE_TAG])
         if nid in skip or nid in seen:
             known += 1
             if early_stop and known >= KNOWN_RUN:
@@ -546,7 +583,7 @@ def _walk(reader: _Reader, token: str, first_id: str | None, skip: set[str], see
                         when = created(alt, nid)
                 item = social.Item(nid, folder, f"FB_{nid}", bool(vid), img or vid,
                                    ext="mp4" if vid else image_ext(img), date=when,
-                                   caption=caption(page), poster=who)
+                                   caption=caption(page), poster=who, exclusive=excl)
                 yield ("emit", [item])
                 emitted += 1
                 if keys is not None:
@@ -667,6 +704,95 @@ def run(link: str, person: Path, already_for, opts: social.Options):
                 count[0] += 1
                 yield ("emit", [social.Item(vid, folder, f"FB_{vid}", True, url, ext="mp4", date=created(watch, vid),
                                             caption=caption(watch), poster=profile.name)])
+    # Subscriber-only ("Exclusive") content: the creator's Subscriber Hub, when the login subscribes (the iPhone's
+    # `collectSubscriberHub`). Every set on it walked whole, the photos and videos on its first page read one by
+    # one; all of it tagged "exclusive". A non-subscriber, or a profile without Subscriptions, finds nothing.
+    if not reader.wall:
+        yield ("note", "Finding subscriber-only (Exclusive) content…")
+        hub, used = None, ""
+        for url in hub_urls(profile):
+            page_h, final_h = yield from reader.read(url)
+            if reader.wall:                    # a wrong hub address can send to the login page: not a real wall
+                reader.wall = False
+                yield ("note", "   (one of the Subscriber Hub's addresses asked for a login — trying the next)")
+                continue
+            if page_h and media_markers(page_h):
+                hub, used = page_h, url
+                break
+        if hub is None:
+            yield ("note", "   no Subscriber Hub to read — you may not be subscribed, or this profile has no Subscriptions")
+        else:
+            hub_tokens = []
+            for t in every(hub, r"set=([a-z]+\.[0-9A-Za-z%.\-]+)"):
+                t = decode(t)
+                if t not in hub_tokens and t not in tokens:
+                    hub_tokens.append(t)
+            photo_ids: list[str] = []
+            for pattern in (r"fbid=(\d{6,})", r'"__typename":"Photo","id":"(\d{6,})"'):
+                for pid in every(hub, pattern):
+                    if pid not in photo_ids:
+                        photo_ids.append(pid)
+            video_ids: list[str] = []
+            for pattern in (r'"video_?id":"(\d{8,})"', r"watch/\?v=(\d{8,})"):
+                for v in every(hub, pattern):
+                    if v not in video_ids:
+                        video_ids.append(v)
+            yield ("note", f"   Subscriber Hub ({used.replace(HOST, '')}): {len(hub_tokens)} set(s), "
+                           f"{len(photo_ids[:80])} photo(s), {len(video_ids)} video(s)")
+            before = count[0]
+            for token in hub_tokens:
+                if reader.wall:
+                    break
+                yield from counting(_walk(reader, token, None, skip, seen, folder, False, False,
+                                          f"exclusive {token}", profile.name, all_exclusive=True))
+            for pid in photo_ids[:80]:
+                if reader.wall:
+                    break
+                if pid in seen:
+                    continue
+                if pid in skip:
+                    retag = done_files(folder, pid)
+                    if retag:
+                        yield ("tag", retag, [social.EXCLUSIVE_TAG])
+                    continue
+                page_p = None
+                for form in (f"photo/?fbid={pid}", f"photo.php?fbid={pid}"):
+                    got, _f = yield from reader.read(HOST + form)
+                    if got:
+                        page_p = got
+                        if complete(got) or reader.wall:
+                            break
+                if not page_p or reader.wall:
+                    continue
+                img = image_url(page_p)
+                vid = None if img else video_url(page_p)
+                if img or vid:
+                    seen.add(pid)
+                    count[0] += 1
+                    yield ("emit", [social.Item(pid, folder, f"FB_{pid}", bool(vid), img or vid,
+                                                ext="mp4" if vid else image_ext(img), date=created(page_p, pid),
+                                                caption=caption(page_p), poster=owner(page_p) or profile.name,
+                                                exclusive=True)])
+            for vid in video_ids:
+                if reader.wall:
+                    break
+                if vid in seen:
+                    continue
+                if vid in skip:
+                    retag = done_files(folder, vid)
+                    if retag:
+                        yield ("tag", retag, [social.EXCLUSIVE_TAG])
+                    continue
+                watch, _f = yield from reader.read(f"{HOST}watch/?v={vid}")
+                if not watch or reader.wall:
+                    continue
+                url = video_url(watch)
+                if url:
+                    seen.add(vid)
+                    count[0] += 1
+                    yield ("emit", [social.Item(vid, folder, f"FB_{vid}", True, url, ext="mp4", date=created(watch, vid),
+                                                caption=caption(watch), poster=profile.name, exclusive=True)])
+            yield ("note", f"   {count[0] - before} new from the Subscriber Hub")
     out.found = count[0]
     out.reads = reader.reads
     out.login_wall = reader.wall

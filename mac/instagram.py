@@ -55,6 +55,13 @@ app_id)` and gets back `(status, text)`; `("sleep", s)` spaces the calls out (an
 says to slow down); `("emit", items)` hands found items to the downloads while the crawl goes on; and
 `("note", text)` is a line for the log.
 
+**Exclusive (subscriber-only) content** (Nov 16): posts, reels and stories only a creator's subscribers see come with
+the rest when the login subscribes — a post that arrives without a shortcode (Instagram gives Exclusive posts none),
+or one whose own keys say "subscribers" (`social.is_exclusive`; no single key is trusted, Instagram doesn't document
+them), and every item of a subscriber-only story reel (`subscriber_reels`). They're tagged "exclusive" as well —
+and so are ones downloaded before this was noticed, whenever a run meets them again (`("tag", paths, tags)`). One
+the login can't see (`social.is_locked`: a blurred preview) is never taken for the post; the log counts them.
+
 **Media.** The best progressive video, or — when the post's DASH manifest has a taller H.264/HEVC
 rendition — that one with its audio (put together on the Mac, `video_tools.mux`); the largest image
 candidate. The post's time, place, caption and poster go into each file, plus the "Instagram" keyword, as
@@ -479,8 +486,27 @@ def _tagged(m: dict, user: tuple[str, str]) -> bool:
     return False
 
 
-def items_for(item: dict, key: str, folder: Path, poster: str, tagged: tuple[str, str] | None = None) -> list[social.Item]:
-    """A post's photos/videos as downloads: `<key>`, or `<key>_1`, `_2`… for several."""
+def exclusive(item: dict, from_feed: bool = False) -> bool:
+    """A subscriber-only ("Exclusive") post: one its own keys say so (`social.is_exclusive`) — or, read from the
+    API's post / reel feeds (`from_feed`), one that came without a shortcode: an Exclusive post has none (what the
+    iPhone app found, and why a post's key falls back to its pk)."""
+    if social.is_exclusive(item):
+        return True
+    return from_feed and not item.get("code") and bool(id_string(item.get("pk")) or id_string(item.get("id"))) \
+        and item.get("media_type") in (1, 2, 8) and item.get("product_type") not in ("story",)
+
+
+def done_files(item: dict, key: str, folder: Path, poster: str, tagged: tuple[str, str] | None = None) -> list[str]:
+    """The files of a post that's already downloaded, as they are on the drive (for tagging it afresh)."""
+    return [str(folder / it.filename) for it in items_for(item, key, folder, poster, tagged)
+            if (folder / it.filename).is_file()]
+
+
+def items_for(item: dict, key: str, folder: Path, poster: str, tagged: tuple[str, str] | None = None,
+              is_exclusive: bool | None = None) -> list[social.Item]:
+    """A post's photos/videos as downloads: `<key>`, or `<key>_1`, `_2`… for several. `is_exclusive` None: read
+    from the post (`exclusive`)."""
+    excl = exclusive(item) if is_exclusive is None else is_exclusive
     when = float(item.get("taken_at") or 0)
     caption = ((item.get("caption") or {}).get("text") or "") if isinstance(item.get("caption"), dict) else ""
     loc = item.get("location") if isinstance(item.get("location"), dict) else {}
@@ -498,7 +524,8 @@ def items_for(item: dict, key: str, folder: Path, poster: str, tagged: tuple[str
                                audio=m.audio, fallback=m.fallback, date=when,
                                lat=lat if isinstance(lat, (int, float)) else None,
                                lng=lng if isinstance(lng, (int, float)) else None,
-                               caption=caption, poster=f"@{who}" if who else "", keyword=KEYWORD))
+                               caption=caption, poster=f"@{who}" if who else "", keyword=KEYWORD,
+                               exclusive=excl))
     return out
 
 
@@ -552,12 +579,26 @@ def subscriber_reels(doc: dict, user_id: str) -> list[str]:
     return out
 
 
-def reel_downloads(items: list[dict], folder: Path, already: set[str], poster: str) -> list[social.Item]:
+def reel_downloads(items: list[dict], folder: Path, already: set[str], poster: str,
+                   exclusive_keys: set[str] | None = None) -> list[social.Item]:
+    """Story / highlight items as downloads. `exclusive_keys`: the ones that came from a subscriber-only reel."""
     out = []
     for it in items:
         key = item_id(it)
-        if key and key not in already:
-            out += items_for(it, key, folder, poster)
+        if key and key not in already and not (social.is_exclusive(it) and social.is_locked(it)):
+            out += items_for(it, key, folder, poster,
+                             is_exclusive=True if exclusive_keys and key in exclusive_keys else None)
+    return out
+
+
+def exclusive_done(items: list[dict], folder: Path, already: set[str], poster: str,
+                   exclusive_keys: set[str] | None = None) -> list[str]:
+    """Files of subscriber-only stories downloaded before (by an earlier version, untagged): to tag now."""
+    out = []
+    for it in items:
+        key = item_id(it)
+        if key and key in already and ((exclusive_keys and key in exclusive_keys) or social.is_exclusive(it)):
+            out += done_files(it, key, folder, poster)
     return out
 
 
@@ -776,11 +817,12 @@ class _Calls:
 
 
 def _crawl(calls: _Calls, kind: str, profile: Profile, folder: Path, already: set[str], since: float,
-           seen_keys: set[str]):
+           seen_keys: set[str], locked: list[int] | None = None):
     """yield from: the new downloads of one feed (posts / tagged / reels), emitted page by page, and
     the failure if it couldn't be read. Newest first, stopping as the iPhone does (module notes)."""
     floor = since - FLOOR if since > 0 else float("inf")
     tagged = (profile.user_id, profile.handle) if kind == "tagged" else None
+    locked = locked if locked is not None else [0]
     max_id = None
     seen = 0
     failure = ""
@@ -799,6 +841,7 @@ def _crawl(calls: _Calls, kind: str, profile: Profile, folder: Path, already: se
             break
         failure = ""
         batch: list[social.Item] = []
+        retag: list[str] = []
         items = doc.get("items") if isinstance(doc.get("items"), list) else []
         stop = False
         for wrapper in items:
@@ -808,6 +851,12 @@ def _crawl(calls: _Calls, kind: str, profile: Profile, folder: Path, already: se
             key = item_id(item)
             if not key:
                 continue
+            excl = exclusive(item, from_feed=True)
+            if excl and social.is_locked(item):
+                locked[0] += 1                           # not subscribed: only a preview — never taken as the post
+                continue
+            if excl and key in already and key not in seen_keys:
+                retag += done_files(item, key, folder, profile.handle, tagged)   # downloaded before, untagged
             if key in already or key in seen_keys:
                 seen += 1
                 if seen >= SEEN_RUN and float(item.get("taken_at") or 0) < floor:
@@ -816,9 +865,11 @@ def _crawl(calls: _Calls, kind: str, profile: Profile, folder: Path, already: se
                 continue
             seen = 0
             seen_keys.add(key)
-            batch += items_for(item, key, folder, profile.handle, tagged)
+            batch += items_for(item, key, folder, profile.handle, tagged, is_exclusive=excl)
         if batch:
             yield ("emit", batch)
+        if retag:
+            yield ("tag", retag, [social.EXCLUSIVE_TAG])
         if stop:
             break
         paging = doc.get("paging_info") if isinstance(doc.get("paging_info"), dict) else {}
@@ -956,6 +1007,8 @@ def _watch(kind: str, profile: Profile, folder: Path, already: set[str], seen_ke
             key = item_id(item)
             if not key or key in already or key in seen_keys or (kind != "tagged" and not _owned(item, profile)):
                 continue
+            if social.is_exclusive(item) and social.is_locked(item):
+                continue                                 # a subscriber-only post's preview: not the post
             seen_keys.add(key)
             batch += items_for(item, key, folder, profile.handle, tagged)
     if batch:
@@ -993,6 +1046,7 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
     yield ("profile", profile)
     seen_keys: set[str] = set()
     found = [0]
+    locked = [0]
 
     def counting(gen):
         result = None
@@ -1012,7 +1066,7 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
         yield ("note", f"Finding {label}…")
         before = found[0]
         if profile.user_id:
-            failure = yield from counting(_crawl(calls, kind, profile, folder, already, since, seen_keys))
+            failure = yield from counting(_crawl(calls, kind, profile, folder, already, since, seen_keys, locked))
             if not failure:
                 return ""
             if "limiting requests" in failure:
@@ -1045,10 +1099,14 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
         tray = None
         if profile.user_id:
             _s, tray, _t = yield from calls.call(API + "feed/reels_tray/")
-        for rid in subscriber_reels(tray or {}, profile.user_id):
+        exclusive_keys: set[str] = set()
+        for rid in subscriber_reels(tray or {}, profile.user_id):      # a creator's subscriber-only story reel
             _s, doc, _t = yield from calls.call(f"{API}feed/reels_media/?reel_ids={rid.replace(':', '%3A')}")
             for it in reel_items(doc or {}, every=True):
-                stories.setdefault(id_string(it.get("pk")) or id_string(it.get("id")) or str(len(stories)), it)
+                k = id_string(it.get("pk")) or id_string(it.get("id")) or str(len(stories))
+                stories.setdefault(k, it)
+                if item_id(it):
+                    exclusive_keys.add(item_id(it))
         if len(refused) == 2:
             yield ("note", "   opening the stories page" if not profile.user_id else
                    f"   Instagram didn't answer for the stories ({', '.join(refused)}) — opening them on the page instead")
@@ -1056,10 +1114,17 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
             for doc in page_docs(seen or {}):
                 for it in reel_items_in(doc, profile.user_id, handle=profile.handle):
                     stories.setdefault(id_string(it.get("pk")) or id_string(it.get("id")) or str(len(stories)), it)
-        batch = reel_downloads(list(stories.values()), folder / STORIES, already | seen_keys, profile.handle)
+        batch = reel_downloads(list(stories.values()), folder / STORIES, already | seen_keys, profile.handle,
+                               exclusive_keys)
         if batch:
             found[0] += len(batch)
             yield ("emit", batch)
+        retag = exclusive_done(list(stories.values()), folder / STORIES, already, profile.handle, exclusive_keys)
+        if retag:
+            yield ("tag", retag, [social.EXCLUSIVE_TAG])
+        n_ex = sum(1 for it in batch if it.exclusive)
+        if n_ex:
+            yield ("note", f"   {n_ex} of them from the subscriber-only (Exclusive) stories")
         yield ("note", "Finding highlights…")
         st, tray = 0, None
         if profile.user_id:
@@ -1085,6 +1150,9 @@ def run(handle: str, folder: Path, already: set[str], opts: social.Options, sinc
                 found[0] += len(batch)
                 yield ("emit", batch)
     out.found = found[0]
+    if locked[0]:
+        yield ("note", f"{locked[0]} subscriber-only (Exclusive) post(s) are locked for this login — only their previews "
+                       "came, so they were left. Subscribed? Check you're logged in as that account in the window above.")
     if feed_failure:
         out.problem = f"Couldn’t check for new posts — {feed_failure}"
     return out

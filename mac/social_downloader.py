@@ -327,6 +327,9 @@ class SocialWindow(QMainWindow):
         self.written: list[str] = []
         self.to_tag: list[str] = []
         self.to_upscale_tag: list[str] = []
+        self.to_exclusive_tag: list[str] = []
+        self.exclusive_n = 0                               # subscriber-only files downloaded this run
+        self.retagged: set[str] = set()                    # earlier downloads tagged "exclusive" this run
         self.done_keys: set[str] = set()
         self.failed_keys: set[str] = set()
         self.key_left: dict[str, int] = {}            # a post's files still downloading (a carousel has several)
@@ -474,6 +477,9 @@ class SocialWindow(QMainWindow):
             cb(None)
         elif kind == "profile":
             self._profile(req[1])
+            cb(None)
+        elif kind == "tag":                               # files already here, to be tagged (e.g. "exclusive")
+            self._tag_existing(list(req[1]), list(req[2]))
             cb(None)
         else:
             raise ValueError(kind)
@@ -745,11 +751,15 @@ class SocialWindow(QMainWindow):
                         self.photos += 1
                     if s.upscaled:
                         self.to_upscale_tag.append(s.path)
+                    if s.item.exclusive:
+                        self.exclusive_n += 1
                     if s.small:
                         self.small_n += 1
                     if not s.item.date:
                         self.undated += 1
                 self.to_tag.append(s.path)
+                if s.item.exclusive:
+                    self.to_exclusive_tag.append(s.path)
                 self.done_keys.add(s.item.key)
             else:
                 self.failed += 1
@@ -772,9 +782,11 @@ class SocialWindow(QMainWindow):
                 self.tags.add(self.to_tag, [self.mod.TAG])
                 if self.to_upscale_tag:
                     self.tags.add(self.to_upscale_tag, [social.UPSCALED_TAG])
+                if self.to_exclusive_tag:
+                    self.tags.add(self.to_exclusive_tag, [social.EXCLUSIVE_TAG])
             except OSError as e:
                 self._log(f"Couldn't save the tags: {e}")
-        self.to_tag, self.to_upscale_tag = [], []
+        self.to_tag, self.to_upscale_tag, self.to_exclusive_tag = [], [], []
         if self.record is not None and (self.done_keys or self.info):
             # A post is done once every file of it is in (a carousel's last item may still be downloading).
             done = {k for k in self.done_keys if self.key_left.get(k, 0) <= 0} - self.failed_keys
@@ -784,6 +796,17 @@ class SocialWindow(QMainWindow):
                 self._saved_counts = (self.photos, self.videos)
             except OSError as e:
                 self._log(f"Couldn't save the record: {e}")
+
+    def _tag_existing(self, paths: list[str], tags: list[str]) -> None:
+        """Files downloaded on an earlier run that turn out to be subscriber-only: tagged now."""
+        fresh = [p for p in paths if p not in self.retagged and os.path.isfile(p)]
+        if not fresh or self.tags is None:
+            return
+        try:
+            self.tags.add(fresh, tags)
+            self.retagged.update(fresh)
+        except OSError as e:
+            self._log(f"Couldn't save the tags: {e}")
 
     def _crawled(self, error, outcome) -> None:
         self.crawl_done = True
@@ -823,6 +846,8 @@ class SocialWindow(QMainWindow):
         else:
             line = f"{name}: downloaded {self.photos} photo{'s' if self.photos != 1 else ''} and {self.videos} " \
                    f"video{'s' if self.videos != 1 else ''}" + (f" · {self.failed} couldn't be" if self.failed else "") + "."
+            if self.exclusive_n:
+                line += f" {self.exclusive_n} of them subscriber-only (tagged “{social.EXCLUSIVE_TAG}”)."
             if self.small_n:
                 line += f" {self.small_n} small photo{'s' if self.small_n != 1 else ''} (under 200 KB) upscaled 2×."
             if self.undated:
@@ -833,6 +858,9 @@ class SocialWindow(QMainWindow):
             mins = (time.monotonic() - self.started) / 60
             self._log(f"   {reads:,} Facebook pages read in {mins:.0f} min" if mins >= 1 else
                       f"   {reads:,} Facebook pages read")
+        if self.retagged:
+            line += f" {len(self.retagged)} earlier download{'s' if len(self.retagged) != 1 else ''} tagged " \
+                    f"“{social.EXCLUSIVE_TAG}” (subscriber-only)."
         self._log(line)
         self._say(line)
         for w in (self.go_btn, self.tagged, self.stories, self.full, self.photos_2x, self.videos_1080, self.field):

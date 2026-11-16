@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -32,6 +33,7 @@ from pathlib import Path
 import simpcity as sc
 
 UPSCALED_TAG = "upscaled"
+EXCLUSIVE_TAG = "exclusive"           # subscriber-only ("Exclusive") posts, stories and photos — both sites
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/122.0.0.0 Safari/537.36")
 MIN_BYTES = 512                       # anything smaller is an error page, not a photo or a video
@@ -56,6 +58,7 @@ class Item:
     caption: str = ""
     poster: str = ""                  # who posted it ("@handle" for Instagram, a name for Facebook)
     keyword: str = ""                 # an IPTC keyword ("Instagram"), as the iPhone writes
+    exclusive: bool = False           # subscriber-only content: tagged "exclusive" as well
 
     @property
     def filename(self) -> str:
@@ -138,6 +141,106 @@ class Record:
         sc.write_file(self.file, json.dumps(out, ensure_ascii=False, indent=1).encode("utf-8"))
         self.fields = {k: v for k, v in out.items() if k != "downloaded"}
         self.downloaded = ids
+
+
+# ----------------------------------------------------------------------------- subscriber-only ("Exclusive") content
+
+# What Instagram and Facebook call a post only subscribers may see isn't documented, and changes. So no one key is
+# trusted: a key on the post's *own* object (never on a nested person — "is_subscribed" there says whether the
+# viewer subscribes, which is true of every post by that creator) whose name says the content is for subscribers,
+# set to true or to a value naming them. Keys that describe the viewer or a button are not such a name.
+_EXCLUSIVE_KEY = re.compile(r"(subscribers?_?only|subscriber_?content|subscription_?(?:only|content|post|media)|"
+                            r"exclusive|fan_?club_?(?:only|content|post|media)|for_?subscribers|supporters?_?only|"
+                            r"paid_?content|is_?subscriber_?post)", re.I)
+_VIEWER_KEY = re.compile(r"(^|_)(viewer|can_|has_|is_subscribed|subscribe_|cta|button|eligib|upsell|count|status$)", re.I)
+_AUDIENCE_KEY = re.compile(r"^(audience|visibility|privacy|privacy_?scope|access|content_?access)$", re.I)
+_AUDIENCE_VALUE = re.compile(r"^(subscribers?(?:[ _-]?only)?|exclusive|fan_?club|supporters?(?:[ _-]?only)?|"
+                             r"subscription|paid)$", re.I)
+_LOCK_KEY = re.compile(r"^(is_?locked|locked|is_?blurred|is_?paywalled|requires_?subscription|is_?gated|gated|"
+                       r"needs_?subscription)$", re.I)
+_CAN_SEE_KEY = re.compile(r"^(can_?viewer_?see|viewer_?can_?see|can_?view|has_?access|is_?accessible|"
+                          r"viewer_?has_?access|is_?unlocked)$", re.I)
+_PERSON_KEYS = {"user", "owner", "author", "creator", "caption", "usertags", "coauthor_producers", "invited_coauthor_producers",
+                "location", "music_metadata", "clips_metadata", "comments", "preview_comments", "likers", "facepile_top_likers"}
+
+
+def _says_subscribers(key: str, value) -> bool:
+    if value is True:
+        return bool(_EXCLUSIVE_KEY.search(key)) and not _VIEWER_KEY.search(key)
+    if isinstance(value, str) and value.strip():
+        v = value.strip()
+        if _AUDIENCE_KEY.match(key):
+            return bool(_AUDIENCE_VALUE.match(v))
+        if _EXCLUSIVE_KEY.search(key) and not _VIEWER_KEY.search(key):
+            return v.lower() not in ("false", "0", "none", "public", "everyone", "all", "null")
+    if isinstance(value, dict) and _AUDIENCE_KEY.match(key):              # {"privacy_scope": {"label": "Subscribers"}}
+        return any(isinstance(x, str) and _AUDIENCE_VALUE.match(x.strip()) for x in value.values())
+    return False
+
+
+def is_exclusive(post: dict, depth: int = 0) -> bool:
+    """Whether a post object (Instagram media, or any site's) is subscriber-only — by its own keys, its
+    carousel's items' keys, never a nested person's."""
+    if not isinstance(post, dict) or depth > 2:
+        return False
+    for k, v in post.items():
+        if not isinstance(k, str) or k in _PERSON_KEYS:
+            continue
+        if _says_subscribers(k, v):
+            return True
+    for child in post.get("carousel_media") or []:
+        if isinstance(child, dict) and is_exclusive(child, depth + 1):
+            return True
+    return False
+
+
+def is_locked(post: dict) -> bool:
+    """Whether the viewer may *not* see it: what comes is a blurred or cropped preview, never to be downloaded as
+    the post (the person isn't subscribed)."""
+    if not isinstance(post, dict):
+        return False
+    for k, v in post.items():
+        if not isinstance(k, str) or k in _PERSON_KEYS:
+            continue
+        if _LOCK_KEY.match(k) and v is True:
+            return True
+        if _CAN_SEE_KEY.match(k) and v is False:
+            return True
+    return False
+
+
+_TEXT_FLAG = re.compile(r'"([A-Za-z_]{4,60})"\s*:\s*(true|"[^"]{1,40}")')
+_TEXT_LABEL = re.compile(r'"(?:label|text|title|description|audience_?label|privacy_?label)"\s*:\s*'
+                         r'"(Subscribers?(?: only)?|Subscriber[- ]only|Exclusive|Exclusive for subscribers|'
+                         r'For subscribers(?: only)?|Supporters(?: only)?)"', re.I)
+
+
+def exclusive_in_text(page: str, media_id: str | None = None, near: int = 6000) -> bool:
+    """A page's data (Facebook's photo pages embed their JSON in the HTML) says the media is subscriber-only — a
+    flag as `is_exclusive` reads them, or a privacy label "Subscribers" — within `near` characters of the media's
+    own id when one is given (a page also holds other posts)."""
+    if not page:
+        return False
+    spans = []
+    if media_id:
+        for m in re.finditer(re.escape(media_id), page):
+            spans.append((max(0, m.start() - near), m.end() + near))
+            if len(spans) >= 12:
+                break
+        if not spans:
+            return False
+    else:
+        spans = [(0, len(page))]
+    for a, b in spans:
+        part = page[a:b]
+        for m in _TEXT_FLAG.finditer(part):
+            key, raw = m.group(1), m.group(2)
+            value = True if raw == "true" else raw.strip('"')
+            if _says_subscribers(key, value):
+                return True
+        if _TEXT_LABEL.search(part):
+            return True
+    return False
 
 
 # ----------------------------------------------------------------------------- fetching
