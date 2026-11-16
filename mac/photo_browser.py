@@ -4931,6 +4931,10 @@ class Pane(QWidget):
             return
         path = paths[0]
         if os.path.isdir(path):
+            import birthdays
+            born = birthdays.default(self.settings).own(path)
+            menu.addAction(f"Birthday: {time.strftime('%-d %b %Y', time.localtime(born))}…" if born else "Set Birthday…",
+                           lambda: self.set_birthday(path))
             menu.addAction("Choose Cover…", lambda: self.choose_cover(path))
             if folder_covers.default(self.settings).cover(path) is not None:
                 menu.addAction("Remove Cover", lambda: self.remove_cover(path))
@@ -5654,6 +5658,7 @@ class Pane(QWidget):
             save_frame=frame_export.save_frame, labels_of=lambda p: tag_store().labels(p, fresh=False),
             set_label=lambda p, label, on: self.set_label([p], label, on), remove_objects=self.remove_objects,
             set_to_delete=lambda p, on: self.set_to_delete([p], on, quiet=True),
+            age_of=self._age_of,
             set_cover=self.cover_from_viewer, edit_photo=self.edit_photo,
             extra={"frame_note": frame_export.engine_note})
         # Opens over Photo Browser for Mac's window, as tall as its display, and takes each item's shape within that.
@@ -5967,6 +5972,77 @@ class Pane(QWidget):
             folder=folder, create_with_ai=lambda where, settings: self.ai_create(where, settings),
             view=lambda paths, start: self.view_media(start, among=paths), reveal=self._reveal_from_viewer,
             trash=lambda path: MainWindow.trash_item(Path(path)))
+
+    # -- folder birthdays (birthday_window.py / birthdays.py — the iPhone app's Age, shared through the drive)
+    def _age_of(self, path: str, taken: float | None) -> str:
+        """The viewer's Info ▸ Age: "27" (and whose birthday it's counted from), or ""."""
+        try:
+            import birthdays
+            store = birthdays.default(self.settings)
+            years = store.age(path, taken)
+            if years is None:
+                return ""
+            found = store.for_file(path)
+            return f"{years}" + (f"  ·  born {time.strftime('%-d %b %Y', time.localtime(found[0]))}" if found else "")
+        except Exception:  # noqa: BLE001 — an Age is a nicety
+            return ""
+
+    def set_birthday(self, folder: str) -> None:
+        """Right-click a folder ▸ Set Birthday…: its photos and videos (and those in its folders) show an Age —
+        here and in the iPhone app."""
+        import birthday_window
+        import birthdays
+        store = birthdays.default(self.settings)
+        before = store.own(folder)
+        name = os.path.basename(folder.rstrip("/")) or folder
+
+        def save(where: str, born: float | None) -> None:
+            if born == before:
+                return
+            try:
+                store.set(where, born)
+            except OSError as e:
+                QMessageBox.warning(self.window(), "Folder Birthday", f"Couldn't save it to the drive: {e.strerror or e}")
+                return
+            self._birthdays_changed()
+
+            def undo() -> str:
+                store.set(where, before)
+                self._birthdays_changed()
+                return f"“{name}”'s birthday is as it was."
+            self._undoable("Set Birthday" if born else "Remove Birthday", undo,
+                           f"“{name}” has a birthday: {birthday_window.pretty(born)} — its photos show an Age." if born
+                           else f"Removed “{name}”'s birthday.")
+
+        dlg = birthday_window.BirthdayDialog(self.window(), folder, before, save)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.open()
+
+    def _birthdays_changed(self) -> None:
+        for w in list(_VIEWERS):                                   # an open viewer's Info shows the Age afresh
+            if hasattr(w, "fill_info") and getattr(w, "info_btn", None) is not None and w.info_btn.isChecked():
+                w.fill_info()
+
+    def open_birthdays(self) -> None:
+        """Go ▸ Folder Birthdays…: every folder with a birthday on the connected drives, to change or remove."""
+        import birthday_window
+        import birthdays
+        store = birthdays.default(self.settings)
+
+        def remove(folder: str) -> None:
+            try:
+                store.set(folder, None)
+                self._birthdays_changed()
+            except OSError as e:
+                QMessageBox.warning(self.window(), "Folder Birthdays", f"Couldn't save it to the drive: {e.strerror or e}")
+
+        def show(folder: str) -> None:
+            if os.path.isdir(folder):
+                self.go(folder)
+        roots = lambda: [str(v) for v in external_volumes()] + ([self.location] if os.path.isdir(self.location or "") else [])   # noqa: E731
+        win = birthday_window.BirthdaysWindow(self.window(), store, roots, self.set_birthday, remove, show)
+        win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        win.show()
 
     def open_places(self) -> None:
         """Go ▸ Places… (places_window.py): where the photos were taken — a list by country and town, and a map."""

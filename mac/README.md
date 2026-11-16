@@ -1236,6 +1236,14 @@ Videos are put together and upscaled with AVFoundation — a small helper Photo 
 when that's installed instead (`brew install ffmpeg`). Neither: videos come in their one-file version, not
 upscaled (the log says so). The browser needs Qt WebEngine (part of PySide6, set up by `run.sh`).
 
+### Folder birthdays and Age
+
+Right-click a person's folder ▸ **Set Birthday…** and pick the date. Every photo and video in that folder (and its
+folders) then shows an **Age** in the viewer's Info — how old they were when it was taken. **Go ▸ Folder
+Birthdays…** lists every folder with a birthday, to change or remove one. The birthdays are the iPhone app's own:
+they're kept on the drive, so one set on the Mac shows up on the iPhone the next time it opens the drive (or comes
+back to the front), and the iPhone's show up here — including the ones you set on the iPhone before this existed.
+
 ### Dates from file names
 
 Right-click photos, videos or folders ▸ **Dates ▸ Set Dates from File Names…** (or the Photos menu). Every photo and

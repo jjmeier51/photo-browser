@@ -3472,6 +3472,38 @@ Tested on Linux with ExifTool 12.76 (both example names, the usual camera names,
 WebM, embedding, Restore from the date inside, Undo) and the window offscreen; creation dates (`setattrlist`)
 are macOS-only and weren't exercised.
 
+### 6ap. Folder birthdays (Age) in Photo Browser for Mac, shared with the iPhone — `mac/birthdays.py`, `mac/birthday_window.py`, `PhotoBrowser/SharedBirthdays.swift` (Nov 16, 2026)
+
+"Add the birth date feature to the Mac app and have it synchronized with the iOS app." Until now a folder's
+birthday lived only on the phone (`Library.folderBirthdays`, `FilePrefs`, by absolute path).
+
+- **The shared file**: `<drive>/.Photo Browser Metadata/birthdays.json` —
+  `{"format": "photobrowser-birthdays", "birthdays": {"<folder, drive-relative>": {"date": <Unix time | null>,
+  "at": <when set>}}}`. `null` = removed (kept, with its time, so the other side's older copy can't bring it back).
+  For each folder the entry set later wins; a tie keeps the side merging. Same shape as `folder-options.json`.
+- **iPhone** (`SharedBirthdays.swift`): `Library.birthdayStamps` (path → when set/removed, `FilePrefs`
+  `photoBrowser.birthdayStamps`) is stamped by `setBirthdays` (removals too), re-keyed with the birthdays
+  (`applyRemap`, `migrateMetadata`, pruned with them) and saved in `persistAllPathKeyed`; `syncBirthdays()` runs in
+  `syncDriveTags` after `syncFolderOptions` — drive opened or back, foreground, and a second after a change
+  (`scheduleTagSync(after: 1)`). Birthdays set before this have no stamp and count as time 0, so the first sync
+  puts them all on the drive and anything set since, on either side, wins over them. (Written, not compiled.)
+- **Mac** (`birthdays.py`): reads the shared file — and, until the phone has written it, the birthdays in the
+  phone's metadata backup on the drive (`metadata.json` → `folderBirthdays`, as time 0), so existing birthdays
+  show at once; folders not on such a drive are kept in the Mac's settings. A birthday chosen on the Mac is noon of
+  that day (no zone moves it a day back). Age = whole calendar years from the nearest birthday above the file to
+  when it was taken (the iPhone's `birthdayForFile` + `ageBetween`); none before the birthday.
+- **Where on the Mac**: right-click a folder ▸ **Set Birthday…** (or "Birthday: 4 Jun 1998…" when it has one) — a
+  calendar, Save, Remove Birthday; undoable. The viewer's **Info ▸ Age** ("25 · born 4 Jun 1998"). **Go ▸ Folder
+  Birthdays…** — every folder with one on the connected drives, its age today; Show, Change…, Remove. A rename made
+  on the Mac carries the birthday (`rename_tools._folder_choices` → `Birthdays.renamed`, which also writes the old
+  name as removed so the phone's copy follows).
+- Not brought over from the iPhone: its Age sort/filter and the Folder Birthdays *mapping* screen (matching
+  folders to people from Access Kardashian).
+
+Tested on Linux: the store (backup fallback, nearest birthday, ages around the day, removals, merge, rename,
+off-drive folders), the window offscreen, and the iPhone's merge simulated step for step in Python against the
+Mac's store on one drive (old birthdays out, Mac change and removal in, phone change out, no needless rewrite).
+
 ### 7.4h Exclusive (subscriber-only) content in the Mac's Instagram and Facebook downloaders (Nov 16, 2026)
 
 "Ensure the Facebook and Instagram downloaders are able to download 'Exclusive' posts/content that the user is

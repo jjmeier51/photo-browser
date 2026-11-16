@@ -117,6 +117,7 @@ class Hooks:
     remove_objects: Callable[[str], None] | None = None       # the photo → Remove Objects (remove_window.py)
     set_label: Callable[[str, str, bool], None] | None = None  # (path, label, on)
     set_to_delete: Callable[[str, bool], None] | None = None   # (path, on): the "to-delete" tag (TO_DELETE_TAG)
+    age_of: Callable[[str, float | None], str] | None = None   # (path, when taken) → "27 · born …" (folder birthdays)
     set_cover: Callable[[str, float | None], str] | None = None   # (path, a video's seconds) → what to say
     edit_photo: Callable[[str], None] | None = None           # the photo → the photo editor
     extra: dict = field(default_factory=dict)
@@ -2218,6 +2219,8 @@ class MediaViewer(QWidget):
         when = meta.get("taken") or meta.get("created")
         if when:
             row("Recorded" if video else "Taken", time.strftime("%A, %B %d, %Y at %H:%M", time.localtime(when)))
+        if self.hooks.age_of is not None:
+            row("Age", self.hooks.age_of(path, meta.get("taken") or (st.st_mtime if st else None)))
         elif st:
             row("Modified", time.strftime("%B %d, %Y at %H:%M", time.localtime(st.st_mtime)))
         dims = f"{meta['width']:,} × {meta['height']:,}" if meta.get("width") else ""

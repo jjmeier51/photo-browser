@@ -673,6 +673,9 @@ final class Library {
     /// Folder path → birthday (stored as a Unix timestamp). Files in the folder and
     /// its subfolders get an "Age" computed from this and their EXIF capture date.
     var folderBirthdays: [String: Double] = (FilePrefs.shared.dictionary(forKey: "photoBrowser.birthdays") as? [String: Double]) ?? [:]
+    /// When each folder's birthday was last set or removed (path → Unix time) — what decides, folder by folder,
+    /// between this phone and Photo Browser for Mac (`SharedBirthdays.swift`). None = set before sharing (time 0).
+    var birthdayStamps: [String: Double] = (FilePrefs.shared.dictionary(forKey: SharedBirthdays.stampsKey) as? [String: Double]) ?? [:]
     /// Full recursive index of everything under the root — built once for fast
     /// search and the Library view.
     var index: [Entry] = []
@@ -830,13 +833,17 @@ final class Library {
     /// once per row.
     func setBirthdays(_ changes: [URL: Date?]) {
         guard !changes.isEmpty else { return }
+        let now = Date().timeIntervalSince1970
         for (folder, date) in changes {
             if let date { folderBirthdays[folder.path] = date.timeIntervalSince1970 }
             else { folderBirthdays.removeValue(forKey: folder.path) }
+            birthdayStamps[folder.path] = now           // removals too: Photo Browser for Mac's copy follows
         }
         FilePrefs.shared.set(folderBirthdays, forKey: "photoBrowser.birthdays")
+        FilePrefs.shared.set(birthdayStamps, forKey: SharedBirthdays.stampsKey)
         labelsVersion += 1
         changeToken += 1
+        scheduleTagSync(after: 1)                       // `syncDriveTags` runs `syncBirthdays`
     }
 
     /// The nearest birthday on `file`'s folder or any ancestor folder.
@@ -3312,6 +3319,11 @@ final class Library {
         igLastHandle = remapKeys(igLastHandle, remap)
         storyLinks = Dictionary(storyLinks.map { (remap($0.key), remap($0.value)) }, uniquingKeysWith: { a, _ in a })
         folderBirthdays = remapKeys(folderBirthdays, remap)
+        let movedBirthdayStamps = remapKeys(birthdayStamps, remap)
+        if movedBirthdayStamps != birthdayStamps {      // a renamed folder's birthday keeps when it was set
+            birthdayStamps = movedBirthdayStamps
+            FilePrefs.shared.set(birthdayStamps, forKey: SharedBirthdays.stampsKey)
+        }
         instagramFolders = remapKeys(instagramFolders, remap)
         facebookFolders = remapKeys(facebookFolders, remap)
         tiktokFolders = remapKeys(tiktokFolders, remap)
@@ -3385,6 +3397,7 @@ final class Library {
         let itemThumbnails = self.itemThumbnails, tags = self.tags
         let igPostedBy = self.igPostedBy, igLastHandle = self.igLastHandle, storyLinks = self.storyLinks
         let folderBirthdays = self.folderBirthdays, bubbleOrders = self.bubbleOrders
+        let birthdayStamps = self.birthdayStamps
         let lastTikTokHandleByFolder = self.lastTikTokHandleByFolder
         let instagramFolders = self.instagramFolders, facebookFolders = self.facebookFolders
         let tiktokFolders = self.tiktokFolders, tiktokLikes = self.tiktokLikes
@@ -3418,6 +3431,7 @@ final class Library {
             ud.set(igLastHandle, forKey: "photoBrowser.igLastHandle")
             ud.set(storyLinks, forKey: "photoBrowser.storyLinks")
             ud.set(folderBirthdays, forKey: "photoBrowser.birthdays")
+            ud.set(birthdayStamps, forKey: SharedBirthdays.stampsKey)
             ud.set(bubbleOrders, forKey: "photoBrowser.bubbleOrder")
             ud.set(lastTikTokHandleByFolder, forKey: "photoBrowser.lastTikTokHandle")
             ud.set(tiktokLikes, forKey: "photoBrowser.tiktokLikes")
@@ -3533,6 +3547,7 @@ final class Library {
         customLabels = customLabels.mapValues { paths in var s = paths; moveSet(&s); return s }
         moveDict(&captions); moveDict(&tags); moveDict(&photoOrigins); moveDict(&igPostedBy); moveDict(&igLastHandle)
         moveDict(&lastTikTokHandleByFolder); moveDict(&tiktokLikes); moveDict(&folderBirthdays)
+        moveDict(&birthdayStamps)
         moveDict(&instagramFolders); moveDict(&facebookFolders); moveDict(&tiktokFolders)
         moveDict(&vscoFolders); moveDict(&lastVSCOUsernameByFolder)
         moveDict(&ofFolders); moveDict(&lastOFUsernameByFolder); moveDict(&lastFacebookURLByFolder)
@@ -3637,6 +3652,7 @@ final class Library {
         customLabels = customLabels.mapValues { paths in var s = paths; prune(&s); return s }
         pruneKeys(&captions); pruneKeys(&tags); pruneKeys(&photoOrigins); pruneKeys(&igPostedBy); pruneKeys(&igLastHandle)
         pruneKeys(&lastTikTokHandleByFolder); pruneKeys(&tiktokLikes); pruneKeys(&folderBirthdays)
+        pruneKeys(&birthdayStamps)
         pruneKeys(&instagramFolders); pruneKeys(&facebookFolders); pruneKeys(&tiktokFolders)
         pruneKeys(&vscoFolders); pruneKeys(&lastVSCOUsernameByFolder)
         pruneKeys(&ofFolders); pruneKeys(&lastOFUsernameByFolder); pruneKeys(&lastFacebookURLByFolder)

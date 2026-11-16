@@ -378,6 +378,7 @@ extension Library {
         guard rootURL?.path == root.path, !waitingForDrive else { tagSyncRunning = false; return }
         // Each folder's own choices ("Videos at the Top"), shared with Photo Browser for Mac the same way.
         await syncFolderOptions()
+        await syncBirthdays()
         guard rootURL?.path == root.path, !waitingForDrive else { tagSyncRunning = false; return }
         // Folder covers, likewise: Photo Browser for Mac's choices in, this phone's out (`FolderCovers.swift`).
         await syncFolderCovers()

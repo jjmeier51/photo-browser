@@ -675,6 +675,11 @@ def _folder_choices(pairs: list[tuple[str, str]]) -> None:
     except Exception:  # noqa: BLE001 — best effort: a choice lost is set again with a click
         pass
     try:
+        import birthdays
+        birthdays.default().renamed(pairs)
+    except Exception:  # noqa: BLE001 — best effort: a birthday lost is set again
+        pass
+    try:
         import folder_covers
         folder_covers.default().renamed(pairs)
     except Exception:  # noqa: BLE001 — best effort: a cover lost is chosen again

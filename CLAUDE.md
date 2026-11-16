@@ -446,6 +446,13 @@ Python. (`SimpCityService`,
   the date inside). Undoable (file dates). The iPhone's `dateFromFilename` keeps a date followed by an id now.
   **`simpcity.ExifSession` numbers each command** (`-execute<N>`): with `-q`, a bare `-execute` gets no
   `{ready}` and every call waited out its timeout. §6ao.
+- **Folder birthdays shared (Nov 16)** — the iPhone's birthdays/Age are on the Mac too and synced through the drive's
+  `.Photo Browser Metadata/birthdays.json` (`{"birthdays": {rel: {"date": ts | null, "at": stamp}}}`, later `at`
+  wins, null = removed). iPhone: `SharedBirthdays.swift`, `Library.birthdayStamps` (stamped in `setBirthdays`,
+  re-keyed/pruned/persisted with `folderBirthdays`), `syncBirthdays()` in `syncDriveTags`. Mac: `mac/birthdays.py`
+  (falls back to the phone's `metadata.json` backup), right-click a folder ▸ Set Birthday…, viewer Info ▸ Age,
+  Go ▸ Folder Birthdays…; renames carry them. **Any new birthday setter on the iPhone must stamp
+  `birthdayStamps`.** §6ap.
 - **Depop shops in Photo Browser for Mac** (Mac only) — right-click a folder ▸ Download ▸ Download from Depop…
   (`mac/depop_downloader.py`, `mac/depop.py`): the shop's page in a browser, every listing photo as a tile to select
   (double-click = the listing), **Download** takes each at its largest — `depop.fetch_best` fetches `P0` and
